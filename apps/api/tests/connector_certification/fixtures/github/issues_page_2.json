@@ -1,0 +1,20 @@
+[
+  {
+    "id": 9003,
+    "number": 3,
+    "state": "open",
+    "title": "Synthetic issue three",
+    "updated_at": "2026-01-03T00:00:00Z",
+    "created_at": "2026-01-02T00:00:00Z",
+    "body": "Synthetic issue body"
+  },
+  {
+    "id": 9004,
+    "number": 4,
+    "state": "closed",
+    "title": "Synthetic issue four",
+    "updated_at": "2026-01-04T00:00:00Z",
+    "created_at": "2026-01-03T00:00:00Z",
+    "body": "Synthetic issue body"
+  }
+]

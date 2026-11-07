@@ -59,6 +59,116 @@ def test_email_to_varchar_snowflake_is_pii_note_not_type_defect():
     assert not any("non-string" in n for n in notes)
 
 
+def test_auto_ambiguous_grouped_numbers_are_not_numeric_like():
+    """1,234 is US thousands or EU decimal — name must not invent likely_numeric."""
+    profile = analyze_column_profile("amount", ["1,234", "5,678"])
+    assert profile["likely_numeric"] is False
+    _, notes = score_mapping_pair(
+        {
+            "source": "amount",
+            "target": "amount",
+            "target_type": "DECIMAL",
+            "confidence": 0.9,
+        },
+        source_profile=profile,
+    )
+    assert not any("numeric samples" in n for n in notes)
+
+
+def test_bindable_currency_still_scores_as_numeric_like():
+    us = analyze_column_profile("amount", ["$1,000.00", "$2,500.50"])
+    assert us["likely_numeric"] is True
+    euro = analyze_column_profile("price", ["€1.000,89", "€2.500,00"])
+    assert euro["likely_numeric"] is True
+    _, notes = score_mapping_pair(
+        {
+            "source": "amount",
+            "target": "amount",
+            "target_type": "DECIMAL",
+            "confidence": 0.9,
+        },
+        source_profile=us,
+    )
+    assert any("numeric samples on numeric target" in n for n in notes)
+
+
+def test_auto_ambiguous_slash_dates_are_not_date_like():
+    """01/02/2024 is Jan 2 or Feb 1 — name must not invent likely_date."""
+    profile = analyze_column_profile("event_date", ["01/02/2024", "03/04/2024"])
+    assert profile["likely_date"] is False
+    delta, notes = score_mapping_pair(
+        {
+            "source": "event_date",
+            "target": "event_date",
+            "target_type": "DATE",
+            "confidence": 0.9,
+        },
+        source_profile=profile,
+    )
+    assert not any("date-like" in n for n in notes)
+    _, varchar_notes = score_mapping_pair(
+        {
+            "source": "event_date",
+            "target": "event_date",
+            "target_type": "VARCHAR",
+            "confidence": 0.9,
+        },
+        source_profile=profile,
+    )
+    assert not any("non-temporal" in n for n in varchar_notes)
+
+
+def test_name_alone_does_not_invent_email_phone_or_uuid():
+    """contact_email / phone / uuid with plain-text samples must not invent a type."""
+    email = analyze_column_profile("contact_email", ["alice", "bob"])
+    assert email["likely_email"] is False
+    phone = analyze_column_profile("phone_number", ["alice", "bob"])
+    assert phone["likely_phone"] is False
+    uuid = analyze_column_profile("user_uuid", ["alice", "bob"])
+    assert uuid["likely_uuid"] is False
+    identifier = analyze_column_profile("identifier", ["alice", "bob"])
+    assert identifier["likely_uuid"] is False
+    _, notes = score_mapping_pair(
+        {
+            "source": "contact_email",
+            "target": "amount",
+            "target_type": "DECIMAL",
+            "confidence": 0.8,
+        },
+        source_profile=email,
+    )
+    assert not any("email-like" in n for n in notes)
+
+
+def test_bindable_email_phone_uuid_still_score():
+    email = analyze_column_profile(
+        "notes",
+        ["alice@example.com", "bob@corp.io", "carol@test.org", "dave@x.io"],
+    )
+    assert email["likely_email"] is True
+    phone = analyze_column_profile("notes", ["555-123-4567", "+1 555 000 1212"])
+    assert phone["likely_phone"] is True
+    mid = analyze_column_profile("contact_email", ["a@b.com", "not-an-email"])
+    assert mid["likely_email"] is True
+
+
+def test_unambiguous_and_iso_dates_still_score_as_date_like():
+    dmy = analyze_column_profile("event_date", ["31/12/2024", "30/11/2024"])
+    assert dmy["likely_date"] is True
+    iso = analyze_column_profile("event_date", ["2024-03-05", "2024-03-06"])
+    assert iso["likely_date"] is True
+    _, notes = score_mapping_pair(
+        {
+            "source": "event_date",
+            "target": "event_date",
+            "target_type": "DATE",
+            "confidence": 0.9,
+        },
+        source_profile=iso,
+    )
+    assert any("date-like source aligned to temporal target" in n for n in notes)
+
+
 def test_timestamp_to_timestamp_no_non_temporal_warning():
     mapping = {
         "source": "last_login",
@@ -154,6 +264,69 @@ def test_refine_mappings_with_quality():
     refined = refine_mappings_with_quality(mappings, source_schemas=schemas)
     assert refined[0]["confidence"] >= 0.8
     assert "column_profile" in refined[0]
+
+
+def test_column_profile_stamps_observed_decimal_for_map_strip():
+    from services.mapping_quality import analyze_column_profile, refine_mappings_with_quality
+
+    samples = ["85.5", "92.0", "78.25", "100", "66.75"]
+    profile = analyze_column_profile("credit_score", samples)
+    assert profile.get("numeric_kind") == "fixed_decimal"
+    assert profile.get("observed_precision") is not None
+    assert profile.get("min") is not None
+    assert profile.get("max") is not None
+
+    schemas = [
+        {
+            "name": "credit_score",
+            "inferred_type": "DECIMAL",
+            "samples": samples,
+            "null_rate": 0.0,
+            "statistics": {
+                "observed_precision": profile["observed_precision"],
+                "observed_scale": profile["observed_scale"],
+                "numeric_kind": "fixed_decimal",
+                "min": profile["min"],
+                "max": profile["max"],
+            },
+        }
+    ]
+    refined = refine_mappings_with_quality(
+        [{"source": "credit_score", "target": "score", "confidence": 0.9, "reasoning": "identity"}],
+        source_schemas=schemas,
+    )
+    cp = refined[0]["column_profile"]
+    assert cp.get("null_rate") == 0.0
+    assert cp.get("observed_precision") is not None
+    assert cp.get("observed_scale") is not None
+    assert cp.get("numeric_kind") == "fixed_decimal"
+    assert "min" in cp and "max" in cp
+
+
+def test_pipeline_attaches_profiler_stats_to_schemas():
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    result = run_mapping_pipeline(
+        source_columns=["amount", "note"],
+        target_columns=[],
+        source_samples={
+            "amount": ["12.50", "99.99", "0.01", "", "1500.00"],
+            "note": ["a", "b", "c", "d", "e"],
+        },
+        destination_db_type="postgresql",
+        destination_table_exists=False,
+        use_llm=False,
+    )
+    mappings = result.get("mappings") or []
+    amt = next(m for m in mappings if m["source"] == "amount")
+    cp = amt.get("column_profile") or {}
+    assert "null_rate" in cp
+    assert cp.get("null_rate") == 0.2 or cp.get("null_rate") is not None
+    assert cp.get("observed_precision") is not None or cp.get("numeric_kind") in {
+        "fixed_decimal",
+        "integer",
+        "ieee_float",
+    }
 
 
 def test_detect_duplicate_identifier_targets():

@@ -53,6 +53,47 @@ def test_force_release_fences_zombie_renew() -> None:
     assert renew_lease("ck-zombie", holder_id="old", generation=lease.generation) is None
 
 
+def test_list_lease_views_gets_from_a_conflict_to_its_cursor_key() -> None:
+    """The conflict names a resource; breaking it needs the key behind it."""
+    from services.cdc_lease import list_lease_views
+
+    store = configure_store(backend="memory")
+    store.clear()
+    acquire_lease(
+        "cdc:mine→dst",
+        resource="mysql_server_id:90269",
+        holder_id="host:jobmine01:aaaaaaaaaa",
+        ttl_sec=60.0,
+    )
+    acquire_lease(
+        "cdc:other→dst",
+        resource="pg_slot:other",
+        holder_id="host:jobother1:bbbbbbbbbb",
+        ttl_sec=60.0,
+    )
+
+    everything = list_lease_views()
+    assert {v["cursor_key"] for v in everything} == {"cdc:mine→dst", "cdc:other→dst"}
+
+    by_resource = list_lease_views(resource="mysql_server_id:90269")
+    assert [v["cursor_key"] for v in by_resource] == ["cdc:mine→dst"]
+    assert by_resource[0]["holder_job_id"] == "jobmine01"
+    assert by_resource[0]["stale"] is False
+
+    assert [v["cursor_key"] for v in list_lease_views(job_id="jobother1")] == [
+        "cdc:other→dst"
+    ]
+    assert list_lease_views(stale_only=True) == []
+
+    store.debug_set_heartbeat("cdc:mine→dst", 0.0)
+    assert [v["cursor_key"] for v in list_lease_views(stale_only=True)] == [
+        "cdc:mine→dst"
+    ]
+
+    assert force_release_lease(by_resource[0]["cursor_key"])["released"] is True
+    assert [v["cursor_key"] for v in list_lease_views()] == ["cdc:other→dst"]
+
+
 def test_humanize_cdc_lease_conflict() -> None:
     exc = CdcLeaseConflict(
         "held",

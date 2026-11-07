@@ -56,6 +56,34 @@ def test_dry_run_status_as_boolean_blocks():
     assert any("Invalid boolean" in e for e in errors)
 
 
+def test_mapping_quality_does_not_score_informal_yes_as_boolean():
+    """Informal yes/no must not boost BOOLEAN dest — writer cannot bind them."""
+    profile = analyze_column_profile("email_verified", ["yes", "no", "YES"])
+    assert profile["likely_boolean"] is False
+    delta, notes = score_mapping_pair(
+        {
+            "source": "email_verified",
+            "target": "email_verified",
+            "target_type": "BOOLEAN",
+            "confidence": 0.9,
+        },
+        source_profile=profile,
+    )
+    assert delta < 0
+    assert any("string enum" in n for n in notes)
+
+    issues = detect_cross_field_issues(
+        [{"source": "email_verified", "target": "email_verified", "target_type": "BOOLEAN"}],
+        source_schemas=[{"name": "email_verified", "samples": ["yes", "no"]}],
+    )
+    assert any("string enum" in i for i in issues)
+
+
+def test_mapping_quality_scores_canonical_true_false_as_boolean():
+    profile = analyze_column_profile("deviceVerified", ["true", "false", "true"])
+    assert profile["likely_boolean"] is True
+
+
 def test_mapping_quality_flags_enum_to_boolean():
     profile = analyze_column_profile("status", ["active", "invalidated", "pending"])
     assert profile["likely_boolean"] is False

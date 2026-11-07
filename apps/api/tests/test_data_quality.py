@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -12,9 +13,10 @@ if str(_API_ROOT) not in sys.path:
 from services.data_quality import (  # noqa: E402
     BatchDriftDetector,
     _parse_iso_date,
-    _to_float,
+    _to_decimal,
     run_integrity_audit,
 )
+from services.value_serializer import SQL_NULL_SENTINEL  # noqa: E402
 
 
 def test_detects_duplicate_primary_keys():
@@ -26,6 +28,76 @@ def test_detects_duplicate_primary_keys():
     )
     assert not report.passed
     assert "Duplicate primary key" in report.issues[0]
+
+
+def test_full_append_warns_not_blocks_duplicate_identity_sql():
+    """Validate↔Run parity: Full append on Postgres must not invent a uniqueness hard-block.
+
+    MySQL→Postgres users tables often repeat business ``id`` values. Sync mode
+    full_refresh_append intentionally writes every row; G9 already skips the
+    uniqueness hard gate — write-batch audit must match.
+    """
+    report = run_integrity_audit(
+        headers=["id", "email"],
+        rows=[
+            ["691f815fbc81b00a4a960383", "a@x.com"],
+            ["691fa7187180823283edb31d", "b@x.com"],
+            ["691f815fbc81b00a4a960383", "a2@x.com"],
+        ],
+        column_types={"id": "VARCHAR", "email": "VARCHAR"},
+        dest_kind="postgresql",
+        validation_mode="strict",
+        sync_mode="full_refresh_append",
+        primary_key="id",
+    )
+    assert report.passed, report.issues
+    assert not report.issues
+    assert any("does not require unique identity" in w for w in report.warnings)
+    assert report.stats.get("require_unique_identity") is False
+
+
+def test_upsert_sync_collapses_in_file_duplicates_once():
+    """Upsert keeps the last copy. The extra row is a warning, not a block.
+
+    The previous contract hard-blocked before dedup, so the job never ran.
+    """
+    report = run_integrity_audit(
+        headers=["id", "email"],
+        rows=[["1", "a@x.com"], ["1", "b@x.com"]],
+        dest_kind="postgresql",
+        sync_mode="incremental_deduped",
+        primary_key="id",
+    )
+    assert report.passed, report.issues
+    assert report.stats.get("collapsed_duplicate_rows") == 1
+    assert any("Counted once" in w for w in report.warnings)
+
+
+def test_key_addressed_append_still_hard_blocks_duplicates():
+    """Redis/ES/Dynamo/Mongo: every write is keyed — append still collides."""
+    for kind in ("redis", "mongodb"):
+        report = run_integrity_audit(
+            headers=["_id", "name"],
+            rows=[["oid1", "a"], ["oid1", "b"]],
+            dest_kind=kind,
+            sync_mode="full_refresh_append",
+            primary_key="_id",
+        )
+        assert not report.passed, kind
+        assert any("Duplicate primary key" in i for i in report.issues), kind
+
+
+def test_resume_upsert_posture_collapses_in_file_duplicates():
+    """When write_mode upgraded to upsert, in-file copies collapse instead of blocking."""
+    report = run_integrity_audit(
+        headers=["id", "email"],
+        rows=[["1", "a@x.com"], ["1", "b@x.com"]],
+        dest_kind="postgresql",
+        sync_mode="upsert",
+        primary_key="id",
+    )
+    assert report.passed, report.issues
+    assert report.stats.get("collapsed_duplicate_rows") == 1
 
 
 def test_schemaless_uses_underscore_id_not_business_id():
@@ -80,7 +152,7 @@ def test_never_falls_back_to_first_header_as_pk():
 def test_detects_required_nulls():
     report = run_integrity_audit(
         headers=["id", "email"],
-        rows=[["1", "a@b.com"], ["2", ""]],
+        rows=[["1", "a@b.com"], ["2", SQL_NULL_SENTINEL]],
         column_types={"id": "INTEGER", "email": "STRING"},
         required_targets=["email"],
     )
@@ -88,12 +160,33 @@ def test_detects_required_nulls():
     assert "email" in report.issues[0]
 
 
-def test_parses_locale_and_currency_floats():
-    assert _to_float("$1,234.56") == 1234.56
-    assert _to_float("€1.234,56") == 1234.56
-    assert _to_float("1 000 000.89") == 1000000.89
-    assert _to_float("USD 1 000 000.89") == 1000000.89
-    assert _to_float("not a number") is None
+def test_required_empty_string_is_a_value_except_where_destination_stores_null():
+    """A stored '' satisfies NOT NULL on Postgres/MySQL/SQLite/SQL Server;
+    Oracle stores '' as NULL, so there it is a required-null violation."""
+    rows = [["1", "a@b.com"], ["2", ""]]
+    kept = run_integrity_audit(
+        headers=["id", "email"], rows=rows,
+        column_types={"id": "INTEGER", "email": "STRING"},
+        required_targets=["email"], dest_kind="postgresql",
+    )
+    assert not any("Required column 'email'" in i for i in kept.issues), kept.issues
+
+    oracle = run_integrity_audit(
+        headers=["id", "email"], rows=rows,
+        column_types={"id": "INTEGER", "email": "STRING"},
+        required_targets=["email"], dest_kind="oracle",
+    )
+    assert not oracle.passed
+    assert any("Required column 'email'" in i and "empty strings" in i for i in oracle.issues)
+
+
+def test_parses_locale_and_currency_as_decimals():
+    assert _to_decimal("$1,234.56") == Decimal("1234.56")
+    assert _to_decimal("€1.234,56") == Decimal("1234.56")
+    assert _to_decimal("1 000 000.89") == Decimal("1000000.89")
+    assert _to_decimal("USD 1 000 000.89") == Decimal("1000000.89")
+    assert _to_decimal("not a number") is None
+    assert _to_decimal("1,234") is None
 
 
 def test_parses_dayfirst_dates():
@@ -111,6 +204,42 @@ def test_detects_precision_loss_for_amount_integer():
     )
     assert not report.passed
     assert "precision loss" in report.issues[0]
+
+
+def test_precision_loss_sees_locale_currency_the_write_path_binds():
+    """$1,234.56 / €1.234,56 are fractional; Auto 1,234 and $1,234 are not."""
+    assert _to_decimal("$1,234.56") == Decimal("1234.56")
+    assert _to_decimal("€1.234,56") == Decimal("1234.56")
+    assert _to_decimal("1,234") is None
+    us = run_integrity_audit(
+        headers=["amount"],
+        rows=[["$1,234.56"], ["$2,000.00"]],
+        column_types={"amount": "INTEGER"},
+        mappings=[{"source": "amount", "target": "amount"}],
+    )
+    assert not us.passed
+    assert any("precision loss" in i for i in us.issues)
+    euro = run_integrity_audit(
+        headers=["amount"],
+        rows=[["€1.234,56"]],
+        column_types={"amount": "INTEGER"},
+        mappings=[{"source": "amount", "target": "amount"}],
+    )
+    assert not euro.passed
+    whole = run_integrity_audit(
+        headers=["amount"],
+        rows=[["$1,234"], ["2000.00"]],
+        column_types={"amount": "INTEGER"},
+        mappings=[{"source": "amount", "target": "amount"}],
+    )
+    assert whole.passed, whole.issues
+    auto = run_integrity_audit(
+        headers=["amount"],
+        rows=[["1,234"], ["5,678"]],
+        column_types={"amount": "INTEGER"},
+        mappings=[{"source": "amount", "target": "amount"}],
+    )
+    assert auto.passed, auto.issues
 
 
 def test_row_level_anomaly_count():
@@ -140,6 +269,31 @@ def test_batch_drift_detector_warns_on_mean_shift():
     detector.update(baseline)
     warnings = detector.check(current)
     assert any("mean drift" in w for w in warnings)
+
+
+def test_records_audit_matches_matrix_without_retaining_rows():
+    """File-stream dict rows must hard-block the same duplicates as the matrix."""
+    rows = [["1", "100"], ["2", "200"], ["1", "300"]]
+    records = [
+        {"id": "1", "amount": "100"},
+        {"id": "2", "amount": "200"},
+        {"id": "1", "amount": "300"},
+    ]
+    matrix = run_integrity_audit(
+        headers=["id", "amount"],
+        rows=rows,
+        column_types={"id": "INTEGER", "amount": "DECIMAL"},
+        dest_kind="postgresql",
+    )
+    from_records = run_integrity_audit(
+        headers=["id", "amount"],
+        records=records,
+        column_types={"id": "INTEGER", "amount": "DECIMAL"},
+        dest_kind="postgresql",
+    )
+    assert not matrix.passed
+    assert not from_records.passed
+    assert matrix.issues[0] == from_records.issues[0]
 
 
 def test_maximum_mode_escalates_warnings_to_blockers():

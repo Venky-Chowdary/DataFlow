@@ -1,0 +1,132 @@
+logging {
+  level  = coalesce(sys.env("ALLOY_LOG_LEVEL"), "info")
+  format = "logfmt"
+}
+
+otelcol.auth.basic "grafana_cloud" {
+  // Alloy 1.19.2's client_auth block rejects environment-backed credentials
+  // during graph construction. Keep the pinned-version-compatible arguments
+  // until that upstream behavior is fixed and the image is deliberately bumped.
+  username = sys.env("GRAFANA_CLOUD_INSTANCE_ID")
+  password = sys.env("GRAFANA_CLOUD_API_KEY")
+}
+
+otelcol.exporter.otlphttp "grafana_cloud" {
+  client {
+    endpoint    = sys.env("GRAFANA_CLOUD_OTLP_ENDPOINT")
+    auth        = otelcol.auth.basic.grafana_cloud.handler
+    compression = "gzip"
+    timeout     = "30s"
+  }
+
+  retry_on_failure {
+    enabled          = true
+    initial_interval = "5s"
+    max_interval     = "30s"
+    max_elapsed_time = "5m"
+  }
+
+  sending_queue {
+    enabled       = true
+    num_consumers = 4
+    queue_size    = 5000
+  }
+}
+
+otelcol.processor.batch "default" {
+  timeout             = "1s"
+  send_batch_size     = 1024
+  send_batch_max_size = 2048
+
+  output {
+    metrics = [otelcol.exporter.otlphttp.grafana_cloud.input]
+    logs    = [otelcol.exporter.otlphttp.grafana_cloud.input]
+    traces  = [otelcol.exporter.otlphttp.grafana_cloud.input]
+  }
+}
+
+otelcol.processor.attributes "redact" {
+  action {
+    pattern = `(?i)^(authorization|cookie|set-cookie|password|passwd|secret|token|api[_-]?key|private[_-]?key|credential)$`
+    action  = "delete"
+  }
+
+  output {
+    metrics = [otelcol.processor.batch.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+    traces  = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.resourcedetection "environment" {
+  detectors = ["env", "system"]
+  override  = false
+
+  output {
+    metrics = [otelcol.processor.attributes.redact.input]
+    logs    = [otelcol.processor.attributes.redact.input]
+    traces  = [otelcol.processor.attributes.redact.input]
+  }
+}
+
+otelcol.processor.memory_limiter "default" {
+  check_interval = "1s"
+  limit          = "384MiB"
+  spike_limit    = "96MiB"
+
+  output {
+    metrics = [otelcol.processor.resourcedetection.environment.input]
+    logs    = [otelcol.processor.resourcedetection.environment.input]
+    traces  = [otelcol.processor.resourcedetection.environment.input]
+  }
+}
+
+otelcol.receiver.otlp "dataflow" {
+  grpc {
+    endpoint = "[::]:4317"
+  }
+
+  http {
+    endpoint = "[::]:4318"
+  }
+
+  output {
+    metrics = [otelcol.processor.memory_limiter.default.input]
+    logs    = [otelcol.processor.memory_limiter.default.input]
+    traces  = [otelcol.processor.memory_limiter.default.input]
+  }
+}
+
+prometheus.scrape "dataflow_api" {
+  targets = [{
+    "__address__"      = sys.env("DATAFLOW_METRICS_HOST"),
+    "__scheme__"       = "https",
+    "__metrics_path__" = "/metrics",
+    "service"          = "dataflow-api-production",
+    "environment"      = "production",
+  }]
+
+  authorization {
+    type        = "Bearer"
+    credentials = sys.env("DATAFLOW_METRICS_BEARER_TOKEN")
+  }
+
+  scrape_interval = "30s"
+  scrape_timeout  = "15s"
+  forward_to      = [otelcol.receiver.prometheus.dataflow_api.receiver]
+}
+
+otelcol.receiver.prometheus "dataflow_api" {
+  output {
+    metrics = [otelcol.processor.memory_limiter.default.input]
+  }
+}
+
+prometheus.exporter.self "alloy" {}
+
+prometheus.scrape "alloy_self" {
+  targets         = prometheus.exporter.self.alloy.targets
+  job_name        = "dataflow-alloy"
+  scrape_interval = "60s"
+  forward_to      = [otelcol.receiver.prometheus.dataflow_api.receiver]
+}

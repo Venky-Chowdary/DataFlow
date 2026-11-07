@@ -34,6 +34,12 @@ class _FakeMongo:
         self.jobs[job_id]["status"] = status
         return True
 
+    def update_job_fields(self, job_id: str, fields: dict) -> bool:
+        if not fields:
+            return False
+        self.jobs.setdefault(job_id, {}).update(fields)
+        return True
+
 
 @pytest.fixture(autouse=True)
 def _patch_mongodb_service(monkeypatch):
@@ -63,7 +69,9 @@ def test_currency_csv_to_sqlite_preserves_value():
             source_content=content,
             source_filename="payments.csv",
             sync_mode="full_refresh_overwrite",
-            skip_preflight=True,  # rank-56: currency symbols trip G9 between checks without strip/quarantine fixtures
+            skip_preflight=True,
+            # balanced → quarantine on cell reject (strict maps to fail).
+            validation_mode="balanced",
         )
         engine = UniversalTransferEngine()
         result = engine.execute_tracked(request, "0" * 24)

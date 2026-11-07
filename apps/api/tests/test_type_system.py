@@ -29,8 +29,11 @@ def test_oracle_sdo_geometry_normalizes_to_geography():
 
 
 def test_type_system_redshift_ddl():
-    # Width-preserving invent — INTEGER stays INTEGER, not invent-widen BIGINT.
-    assert ddl_type("redshift", "integer") == "INTEGER"
+    # Bare / ambiguous integer invents 64-bit (DDL_TYPES / never-narrower).
+    # Unambiguous INT4 stays width-preserving.
+    assert ddl_type("redshift", "integer") == "BIGINT"
+    assert ddl_type("redshift", "INTEGER") == "BIGINT"
+    assert ddl_type("redshift", "INT4") == "INTEGER"
     assert ddl_type("redshift", "json") == "SUPER"
     assert ddl_type("postgresql", "JSON") == "JSONB"
     assert ddl_type("snowflake", "ARRAY") == "VARIANT"
@@ -40,10 +43,15 @@ def test_type_system_redshift_ddl():
 
 
 def test_type_system_lakehouse_ddl():
-    assert ddl_type("databricks", "integer") == "INT"
+    # Bare / ambiguous → 64-bit; unambiguous INT4 stays INT/int.
+    assert ddl_type("databricks", "integer") == "BIGINT"
+    assert ddl_type("databricks", "INTEGER") == "BIGINT"
+    assert ddl_type("databricks", "INT4") == "INT"
     assert ddl_type("databricks", "json") == "STRING"
-    assert ddl_type("delta", "TIMESTAMP") == "TIMESTAMP"
-    assert ddl_type("iceberg", "integer") == "int"
+    assert ddl_type("delta", "TIMESTAMP") == "TIMESTAMP_NTZ"
+    assert ddl_type("iceberg", "integer") == "long"
+    assert ddl_type("iceberg", "INTEGER") == "long"
+    assert ddl_type("iceberg", "INT4") == "int"
     assert ddl_type("apache_iceberg", "json") == "string"
     assert ddl_type("iceberg", "UUID") == "uuid"
     assert ddl_type("unity_catalog", "DECIMAL") == "DECIMAL(38,10)"
@@ -73,10 +81,30 @@ def test_decimal_precision_propagated_not_truncated():
     assert ddl_carrier_type("HALFVEC(3)") == "HALFVEC(3)"
     assert ddl_carrier_type("SPARSEVEC(16)") == "SPARSEVEC(16)"
     assert ddl_carrier_type("VECTOR(768)") == "VECTOR(768)"
+    assert ddl_carrier_type("INTEGER[]") == "INTEGER[]"
+    assert ddl_carrier_type("INT[]") == "INT[]"
+    assert ddl_carrier_type("ARRAY<INTEGER>") == "ARRAY<INTEGER>"
+    assert ddl_carrier_type("ARRAY") == "ARRAY"
     # Scale beyond MySQL cap (30) → lossless TEXT, never silent truncate
     assert ddl_type("mysql", "NUMBER(38,31)") == "TEXT"
     assert decimal_scale_would_truncate("NUMBER(38,31)", "mysql") is True
     assert decimal_scale_would_truncate("NUMBER(38,18)", "mysql") is False
+
+
+def test_studio_file_export_formats_keep_the_source_class():
+    """``json`` / ``csv`` are Studio dest ids, not unknown dialects that invent TEXT."""
+    from services.type_system import destination_is_file_export
+
+    for dest in ("json", "csv", "parquet", "file_export", "jsonl", "xlsx", "s3"):
+        assert destination_is_file_export(dest) is True, dest
+        # Ambiguous INTEGER invents 64-bit on every dest — file export included.
+        assert ddl_type(dest, "INTEGER") == "BIGINT", dest
+        assert ddl_type(dest, "BIGINT") == "BIGINT", dest
+        assert ddl_type(dest, "DATE") == "DATE", dest
+        assert ddl_type(dest, "DECIMAL(10,2)") == "DECIMAL(38,2)", dest
+        assert ddl_type(dest, "VARCHAR(50)") == "VARCHAR", dest
+    assert destination_is_file_export("mysql") is False
+    assert destination_is_file_export("postgresql") is False
 
 
 def test_vector_dimension_propagated_never_invented():

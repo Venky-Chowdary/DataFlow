@@ -1,22 +1,152 @@
-"""CSV profiling — delimiter and encoding detection per plan Part 2."""
+"""CSV profiling — delimiter and encoding detection per plan Part 2.
+
+Dest-engine CSV/TSV COUNT (``count_csv_rows``) is RFC 4180 ``csv.reader``
+records, not ``wc -l``. Quoted embedded newlines are one row. Header is
+not a record. ``is_blank_row`` lines (empty / ``,,,,``) are not records.
+Path inputs stream from disk; encoding and delimiter are sniffed from a
+prefix, not from a slurp of the whole export. A one-shot gzip / GET
+stream is prefix-then-rest — COUNT does not ``seek(0)`` the HTTP body.
+"""
 
 from __future__ import annotations
 
 import csv
 import io
 from collections import Counter
+from pathlib import Path
+from typing import Any
+
+from services.read_options import ReadOptions
+from services.tabular_rows import is_blank_row
+from services.tabular_window import header_and_rows, row_to_record
+
+_ENCODING_PREFIX = 65536
+_DELIMITER_PREFIX = 8192
+
+
+class _PrefixedRaw(io.RawIOBase):
+    """Replay an already-read prefix, then the rest of a binary source.
+
+    CSV encoding sniff consumes up to 64 KiB. Hadoop / Spark CSV readers
+    keep that sample and continue the parse; they do not rewind a
+    non-splittable gzip GET. ``seek(0)`` on ``GzipFile`` over ``BytesIO``
+    works only because the GET already materialized. Prefix-then-rest is
+    the same COUNT on a one-shot stream.
+    """
+
+    def __init__(self, prefix: bytes, rest: Any) -> None:
+        super().__init__()
+        self._prefix = prefix
+        self._rest = rest
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        mv = memoryview(b)
+        n = len(mv)
+        if n == 0:
+            return 0
+        if self._prefix:
+            take = min(n, len(self._prefix))
+            mv[:take] = self._prefix[:take]
+            self._prefix = self._prefix[take:]
+            return take
+        chunk = self._rest.read(n)
+        if not chunk:
+            return 0
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise TypeError("CSV COUNT stream must yield bytes")
+        mv[: len(chunk)] = chunk
+        return len(chunk)
+
+
+#: Byte-order marks, longest first — UTF-32 LE starts with the UTF-16 LE mark.
+_BOM_ENCODINGS: tuple[tuple[bytes, str], ...] = (
+    (b"\x00\x00\xfe\xff", "utf-32"),
+    (b"\xff\xfe\x00\x00", "utf-32"),
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xfe\xff", "utf-16"),
+    (b"\xff\xfe", "utf-16"),
+)
 
 
 def detect_encoding(content: bytes) -> str:
-    """Return encoding without loading the whole file into a decoded string."""
-    if content.startswith(b"\xef\xbb\xbf"):
-        return "utf-8-sig"
-    sample = content[:65536]
+    """Return encoding without loading the whole file into a decoded string.
+
+    A declared BOM is authoritative. Without it, UTF-16/32 text would fail the
+    UTF-8 probe and fall through to latin-1, decoding every second byte as a NUL
+    character — the reader then dies on ``line contains NUL`` instead of reading
+    a file whose encoding the bytes state outright.
+    """
+    for bom, encoding in _BOM_ENCODINGS:
+        if content.startswith(bom):
+            return encoding
+    sample = content[:_ENCODING_PREFIX]
+    utf16 = _bomless_utf16(sample)
+    if utf16:
+        return utf16
     try:
         sample.decode("utf-8")
         return "utf-8"
+    except UnicodeDecodeError as exc:
+        if exc.start >= len(sample) - 3 and len(content) > len(sample):
+            # The prefix cut a multi-byte character in two; the text is UTF-8.
+            return "utf-8"
+    # Not UTF-8: a single-byte export. Windows-1252 is the code page Excel and
+    # Windows tools write ("ANSI"), and it is latin-1 plus the printable
+    # 0x80-0x9F row (€ ‚ „ … ‘ ’ “ ” – —). Decoding that row as latin-1 turned
+    # '€' into the C1 control U+0080. Bytes Windows-1252 leaves undefined keep
+    # the latin-1 reading (round 10).
+    try:
+        sample.decode("cp1252")
+        return "cp1252"
     except UnicodeDecodeError:
         return "latin-1"
+
+
+def _bomless_utf16(sample: bytes) -> str:
+    """``utf-16-le`` / ``utf-16-be`` for UTF-16 text written without a BOM.
+
+    Tabular text is mostly ASCII, and ASCII in UTF-16 puts a NUL beside every
+    character: on the odd byte (little endian) or the even byte (big endian).
+    UTF-8 and single-byte text carry no NULs, so the pattern is unambiguous.
+    """
+    probe = sample[: min(len(sample), 4096) // 2 * 2]
+    if len(probe) < 4:
+        return ""
+    even_nul = probe[0::2].count(0)
+    odd_nul = probe[1::2].count(0)
+    half = len(probe) // 2
+    if odd_nul >= half * 0.3 and even_nul <= half * 0.05:
+        return "utf-16-le"
+    if even_nul >= half * 0.3 and odd_nul <= half * 0.05:
+        return "utf-16-be"
+    return ""
+
+
+def _csv_prefix_bytes(content: bytes | str) -> bytes:
+    """BOM / utf-8 / latin-1 sniff from in-RAM CSV. Path/stream sniff in COUNT."""
+    if isinstance(content, bytes):
+        return content[:_ENCODING_PREFIX]
+    return content.encode("utf-8")[:_ENCODING_PREFIX]
+
+
+def _csv_text_from_binary(source: Any, prefix: bytes, encoding: str) -> io.TextIOBase:
+    """RFC 4180 reader over prefix + remainder. Never seeks ``source``."""
+    chained = io.BufferedReader(_PrefixedRaw(prefix, source))
+    return io.TextIOWrapper(
+        chained, encoding=encoding, errors="replace", newline=""
+    )
+
+
+def _csv_count_open(content: bytes | str, encoding: str) -> io.TextIOBase:
+    """Text stream for in-RAM CSV. ``newline=''`` keeps quoted newlines one row."""
+    if isinstance(content, bytes):
+        return io.TextIOWrapper(
+            io.BytesIO(content), encoding=encoding, errors="replace", newline=""
+        )
+    return io.StringIO(content)
 
 
 def detect_delimiter(sample: str) -> str:
@@ -45,51 +175,156 @@ def _text_reader(content: bytes, encoding: str | None = None):
     return io.TextIOWrapper(io.BytesIO(content), encoding=enc, errors="replace", newline="")
 
 
-def parse_csv_preview(content: bytes, encoding: str | None = None, preview_rows: int = 100) -> tuple[list[str], list[list[str]], str, str]:
-    """Parse header + preview rows without loading the whole file into memory."""
-    enc = encoding or detect_encoding(content)
-    sample = content[:8192].decode(enc, errors="replace")
-    delim = detect_delimiter(sample)
+def csv_header_names(row: Any) -> list[str]:
+    """Header names exactly as the file spells them, blanks and duplicates kept."""
+    return [str(c) for c in row]
+
+
+def parse_csv_preview(
+    content: bytes,
+    encoding: str | None = None,
+    preview_rows: int = 100,
+    options: ReadOptions | None = None,
+) -> tuple[list[str], list[list[str]], str, str]:
+    """Parse header + preview rows without loading the whole file into memory.
+
+    ``options`` narrows the read window and pins encoding/delimiter; it must be
+    the same window ``count_csv_rows``/``iter_csv_dicts`` receive, or the preview
+    describes rows the writer never sends.
+    """
+    opts = options or ReadOptions()
+    enc = opts.encoding or encoding or detect_encoding(content)
+    sample = content[:_DELIMITER_PREFIX].decode(enc, errors="replace")
+    delim = opts.delimiter or detect_delimiter(sample)
     with _text_reader(content, enc) as reader_file:
-        reader = csv.reader(reader_file, delimiter=delim)
-        try:
-            headers = next(reader)
-        except StopIteration:
+        # ``header_and_rows`` drops preamble, blank/``,,,,`` lines and the
+        # declared head/tail — the same rows COUNT drops.
+        headers, rows = header_and_rows(
+            csv.reader(reader_file, delimiter=delim),
+            opts,
+            header_names=csv_header_names,
+            source_label="CSV",
+        )
+        if not headers:
             return [], [], enc, delim
         preview: list[list[str]] = []
-        for i, row in enumerate(reader):
-            if i >= preview_rows:
+        for row in rows:
+            if len(preview) >= preview_rows:
                 break
-            preview.append(row)
+            preview.append(list(row))
     return headers, preview, enc, delim
 
 
-def count_csv_rows(content: bytes, encoding: str | None = None) -> int:
-    """Stream-count data rows without loading all cells into memory."""
-    enc = encoding or detect_encoding(content)
-    sample = content[:8192].decode(enc, errors="replace")
-    delim = detect_delimiter(sample)
-    with _text_reader(content, enc) as reader_file:
-        reader = csv.reader(reader_file, delimiter=delim)
-        count = 0
-        for i, _row in enumerate(reader):
-            if i == 0:
-                continue
-            count += 1
-    return count
+def _csv_iter_dicts_from_reader(
+    reader_file: io.TextIOBase, delim: str, options: ReadOptions | None = None
+) -> Any:
+    # Dest-engine read-back must keep the C04 quoting distinction: a plain
+    # csv.reader lands an unquoted empty cell (SQL NULL) as '' — Gate-8 then
+    # compared source NULL to dest '' and failed+deleted a correct file (D115).
+    # iter_csv_records yields None for unquoted empty, '' for quoted "".
+    from services.csv_codec import iter_csv_records
+
+    header, rows = header_and_rows(
+        iter_csv_records(reader_file, delim),
+        options or ReadOptions(),
+        header_names=csv_header_names,
+        source_label="CSV",
+    )
+    if not header:
+        return
+    for row in rows:
+        yield row_to_record(header, row, source_label="CSV row")
+
+
+def _csv_open_text(
+    content: bytes | str | Path,
+    encoding: str | None = None,
+    delimiter: str | None = None,
+) -> tuple[io.TextIOBase, str, Any]:
+    """Text reader + delimiter + optional Path closer. Same sniff as COUNT."""
+    if isinstance(content, (bytes, str)):
+        prefix = _csv_prefix_bytes(content)
+        enc = encoding or detect_encoding(prefix)
+        sample = prefix[:_DELIMITER_PREFIX].decode(enc, errors="replace")
+        delim = delimiter or detect_delimiter(sample)
+        return _csv_count_open(content, enc), delim, None
+    closer = None
+    if isinstance(content, Path):
+        from services.dest_precount import open_artifact_binary
+
+        source, closer = open_artifact_binary(content)
+    elif hasattr(content, "read"):
+        source = content
+    else:
+        raise TypeError("CSV COUNT expects bytes, str, Path, or a readable stream")
+    prefix = source.read(_ENCODING_PREFIX)
+    if not isinstance(prefix, (bytes, bytearray)):
+        raise TypeError("CSV COUNT stream must yield bytes")
+    prefix_b = bytes(prefix)
+    enc = encoding or detect_encoding(prefix_b)
+    sample = prefix_b[:_DELIMITER_PREFIX].decode(enc, errors="replace")
+    delim = delimiter or detect_delimiter(sample)
+    return _csv_text_from_binary(source, prefix_b, enc), delim, closer
+
+
+def iter_csv_dicts(
+    content: bytes | str | Path,
+    encoding: str | None = None,
+    options: ReadOptions | None = None,
+) -> Any:
+    """Same RFC 4180 population as ``count_csv_rows``, as dicts for Gate-8."""
+    opts = options or ReadOptions()
+    reader_file, delim, closer = _csv_open_text(
+        content, opts.encoding or encoding, opts.field_delimiter
+    )
+    try:
+        yield from _csv_iter_dicts_from_reader(reader_file, delim, opts)
+    finally:
+        try:
+            reader_file.close()
+        except Exception:
+            pass
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def count_csv_rows(
+    content: bytes | str | Path,
+    encoding: str | None = None,
+    options: ReadOptions | None = None,
+) -> int:
+    """Dest-engine record COUNT of CSV/TSV. Never ``wc -l``. Never ingest parse.
+
+    Population is RFC 4180 ``csv.reader`` rows after the header.
+    ``is_blank_row`` lines are not dest rows (spreadsheet ``,,,,`` export).
+    A quoted field that contains a newline is one record, not N physical
+    lines. Header-only / empty is 0. Encoding and delimiter are sniffed
+    from a prefix (BOM → utf-8-sig, else utf-8 else latin-1) so a GB
+    export is not decoded twice. In-RAM bytes/str keep a second view of
+    the same buffer. Path gzip is one ``gzip.open``, not a prefix open
+    plus a COUNT open. A one-shot stream (object-store GET gzip that is
+    not rewindable) is prefix-then-rest — COUNT does not ``seek(0)``.
+    Gate-8 cell checksum walks the same records via ``iter_csv_dicts``.
+    ``options`` is the declared read window and must be the one the preview and
+    the writer received, or this COUNT measures a population nobody moved.
+    """
+    return sum(1 for _ in iter_csv_dicts(content, encoding, options))
 
 
 def parse_csv_full(content: bytes, encoding: str | None = None) -> tuple[list[str], list[list[str]], str, str]:
     """Full parse for transfer execution."""
     enc = encoding or detect_encoding(content)
-    sample = content[:8192].decode(enc, errors="replace")
+    sample = content[:_DELIMITER_PREFIX].decode(enc, errors="replace")
     delim = detect_delimiter(sample)
     with _text_reader(content, enc) as reader_file:
         reader = csv.reader(reader_file, delimiter=delim)
         rows = list(reader)
     if not rows:
         return [], [], enc, delim
-    return rows[0], rows[1:], enc, delim
+    return rows[0], [r for r in rows[1:] if not is_blank_row(r)], enc, delim
 
 
 def parse_csv(content: bytes, encoding: str | None = None) -> tuple[list[str], list[list[str]], str, str]:

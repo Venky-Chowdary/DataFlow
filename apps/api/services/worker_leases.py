@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 from services.brand_env import getenv_brand
+from services.ops_events import emit_event
 import socket
 import threading
 import uuid
@@ -57,9 +58,16 @@ def active_fence(job_id: str) -> int | None:
         return _active_fences.get(job_id)
 
 
-def clear_active_fence(job_id: str) -> None:
+def clear_active_fence(job_id: str, fence: int | None = None) -> None:
+    """Forget this process's fence for ``job_id``.
+
+    With ``fence``, only when it is still the current one: a run that has
+    been superseded by a newer run of the same job in this process must not
+    wipe the newer run's fence on its way out (QA D213).
+    """
     with _active_lock:
-        _active_fences.pop(job_id, None)
+        if fence is None or _active_fences.get(job_id) == fence:
+            _active_fences.pop(job_id, None)
 
 
 class WorkerLeaseStore:
@@ -94,6 +102,26 @@ class WorkerLeaseStore:
         with _active_lock:
             _active_fences[job_id] = fence
 
+    @staticmethod
+    def _job_fence_floor(job_id: str) -> int:
+        """Highest fence the job document has accepted.
+
+        ``release`` deletes the lease and a restart empties the memory store,
+        so the lease alone would hand the next run fence 1 while the job
+        still holds the dead run's fence. Every status write of the new run
+        would then be refused and the job would freeze at the old progress.
+        """
+        try:
+            from services.mongodb_service import get_mongodb_service
+
+            job = get_mongodb_service().get_job(job_id) or {}
+            return max(0, int(job.get("lease_fence") or 0))
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).debug(
+                "job fence floor unread for %s: %s", job_id, exc
+            )
+            return 0
+
     def acquire(self, job_id: str, ttl_seconds: int = 60) -> bool:
         """Try to acquire a lease for ``job_id`` for this worker.
 
@@ -107,7 +135,13 @@ class WorkerLeaseStore:
         if coll is not None:
             try:
                 existing = coll.find_one({"_id": job_id})
-                next_fence = int((existing or {}).get("fence") or 0) + 1
+                next_fence = (
+                    max(
+                        int((existing or {}).get("fence") or 0),
+                        self._job_fence_floor(job_id),
+                    )
+                    + 1
+                )
                 # CAS: only steal when expired / unowned / already ours. No upsert
                 # against a live foreign lease (avoids DuplicateKey → false own).
                 result = coll.find_one_and_update(
@@ -135,53 +169,94 @@ class WorkerLeaseStore:
                 if result is not None and result.get("worker_id") == self.worker_id:
                     fence = int(result.get("fence") or next_fence)
                     self._remember_fence(job_id, fence)
+                    emit_event(
+                        _logger, "job.lease.acquire", outcome="succeeded",
+                        job_id=job_id, worker_id=self.worker_id,
+                    )
                     return True
+                emit_event(
+                    _logger, "job.lease.acquire", outcome="skipped",
+                    job_id=job_id, worker_id=self.worker_id,
+                    reason_code="held_by_other",
+                )
                 return False
             except Exception as exc:
                 # DuplicateKey on concurrent upsert = lost race, not ownership.
                 name = type(exc).__name__
                 if "DuplicateKey" in name or "duplicate key" in str(exc).lower():
                     _logger.info("Lease race for job %s (DuplicateKey); not acquired", job_id)
-                    return False
-                if requires_distributed_backend():
-                    _logger.error(
-                        "Mongo lease acquire failed for job %s; fail-closed (no memory fallback): %s",
-                        job_id,
-                        exc,
+                    emit_event(
+                        _logger, "job.lease.acquire", outcome="skipped",
+                        job_id=job_id, worker_id=self.worker_id,
+                        reason_code="race",
                     )
                     return False
-                _logger.warning(
-                    "Mongo lease acquire failed for job %s; single-instance memory fallback: %s",
-                    job_id,
-                    exc,
-                )
+                if requires_distributed_backend():
+                    emit_event(
+                        _logger, "job.lease.acquire", outcome="errored",
+                        job_id=job_id, worker_id=self.worker_id,
+                        reason_code="backend_error", error=exc,
+                    )
+                    return False
+                _logger.warning("Mongo lease acquire failed; using single-instance memory fallback")
 
         if requires_distributed_backend():
             _logger.error(
                 "Distributed coordination required but Mongo lease store unavailable; refuse job %s",
                 job_id,
             )
+            emit_event(
+                _logger, "job.lease.acquire", outcome="errored",
+                job_id=job_id, worker_id=self.worker_id,
+                reason_code="backend_unavailable",
+            )
             return False
 
+        floor = self._job_fence_floor(job_id)
         with self._lock:
             existing = self._memory.get(job_id)
             if existing is None or existing.get("expires_at", now) < now:
-                fence = int((existing or {}).get("fence") or 0) + 1
+                fence = max(int((existing or {}).get("fence") or 0), floor) + 1
                 self._memory[job_id] = {
                     "worker_id": self.worker_id,
                     "expires_at": expires,
                     "fence": fence,
                 }
                 self._remember_fence(job_id, fence)
+                emit_event(
+                    _logger, "job.lease.acquire", outcome="succeeded",
+                    job_id=job_id, worker_id=self.worker_id,
+                )
                 return True
             if existing.get("worker_id") == self.worker_id:
-                self._remember_fence(job_id, int(existing.get("fence") or 1))
+                # Same process, new run (a resume while the cancelled run is
+                # still stopping): a fresh fence, as the Mongo path issues, so
+                # the old run's release and heartbeat cannot act on this one.
+                fence = max(int(existing.get("fence") or 0), floor) + 1
+                existing["fence"] = fence
+                existing["expires_at"] = expires
+                self._remember_fence(job_id, fence)
+                emit_event(
+                    _logger, "job.lease.acquire", outcome="succeeded",
+                    job_id=job_id, worker_id=self.worker_id,
+                )
                 return True
+            emit_event(
+                _logger, "job.lease.acquire", outcome="skipped",
+                job_id=job_id, worker_id=self.worker_id,
+                reason_code="held_by_other",
+            )
             return False
 
-    def release(self, job_id: str) -> None:
-        """Release the lease if this worker owns it."""
-        fence = active_fence(job_id)
+    def release(self, job_id: str, fence: int | None = None) -> None:
+        """Release the lease if this worker owns it.
+
+        ``fence`` is the fence the releasing run acquired. Without it the
+        process's current fence is used, which after a same-process takeover
+        is the newer run's, and the old run would delete the lease the newer
+        run holds (QA D213).
+        """
+        fence = fence if fence is not None else active_fence(job_id)
         coll = self._mongo_collection()
         if coll is not None:
             try:
@@ -189,18 +264,22 @@ class WorkerLeaseStore:
                 if fence is not None:
                     filt["fence"] = fence
                 coll.delete_one(filt)
-                clear_active_fence(job_id)
+                clear_active_fence(job_id, fence)
                 return
             except Exception:
                 if requires_distributed_backend():
-                    clear_active_fence(job_id)
+                    clear_active_fence(job_id, fence)
                     return
 
         with self._lock:
             existing = self._memory.get(job_id)
-            if existing and existing.get("worker_id") == self.worker_id:
+            if (
+                existing
+                and existing.get("worker_id") == self.worker_id
+                and (fence is None or int(existing.get("fence") or 0) == fence)
+            ):
                 del self._memory[job_id]
-        clear_active_fence(job_id)
+        clear_active_fence(job_id, fence)
 
     def is_held(self, job_id: str) -> bool:
         """Return True if ``job_id`` is currently leased by any active worker."""
@@ -218,11 +297,13 @@ class WorkerLeaseStore:
             existing = self._memory.get(job_id)
             return existing is not None and existing.get("expires_at", now) >= now
 
-    def heartbeat(self, job_id: str, ttl_seconds: int = 60) -> bool:
+    def heartbeat(
+        self, job_id: str, ttl_seconds: int = 60, fence: int | None = None
+    ) -> bool:
         """Extend the lease if this worker still owns it (same fence)."""
         now = self._now()
         expires = now + timedelta(seconds=ttl_seconds)
-        fence = active_fence(job_id)
+        fence = fence if fence is not None else active_fence(job_id)
         coll = self._mongo_collection()
         if coll is not None:
             try:

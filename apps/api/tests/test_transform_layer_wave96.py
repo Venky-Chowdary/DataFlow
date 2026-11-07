@@ -8,9 +8,7 @@ most likely to be wrong.
 
 from __future__ import annotations
 
-import os
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -450,6 +448,21 @@ class TestDataTestSql:
         for test in model.tests:
             assert self._runner().build_test_sql(model, test).startswith("SELECT COUNT(*)")
 
+    def test_violation_select_and_delete_share_not_null_predicate(self):
+        model = _model("m", "SELECT 1 AS x", tests=[DataTest(test_type="not_null", column="x")])
+        runner = self._runner()
+        pred = runner.build_violation_predicate(model, model.tests[0])
+        assert pred == '"x" IS NULL'
+        assert '"x" IS NULL' in runner.build_violation_select_sql(model, model.tests[0])
+        assert runner.build_holdout_delete_sql(model, model.tests[0]).startswith("DELETE FROM")
+
+    def test_unique_holdout_sql_deletes_duplicate_group_members(self):
+        model = _model("m", "SELECT 1 AS x", tests=[DataTest(test_type="unique", column="x")])
+        sql = self._runner().build_holdout_delete_sql(model, model.tests[0])
+        assert sql.startswith("DELETE FROM")
+        assert "HAVING COUNT(*) > 1" in sql
+        assert "AS _df_dupes" in sql
+
 
 # ----------------------------------------------------------------- execution
 
@@ -540,6 +553,10 @@ class TestRealExecution:
         assert failing["passed"] is False
         assert failing["failing_rows"] == 1
         assert "violate unique" in failing["message"]
+        con = sqlite3.connect(warehouse)
+        dest_count = con.execute("SELECT COUNT(*) FROM dupes").fetchone()[0]
+        con.close()
+        assert dest_count == 4, "no project_id → fail-closed, unique groups stay in the mart"
 
     def test_a_warn_severity_test_does_not_downgrade_the_run(self, warehouse):
         models = [
@@ -674,6 +691,169 @@ class TestRealExecution:
         assert "rev_report" not in names
 
 
+class TestIncrementalColumnAlignment:
+    """An incremental load must match columns by name, never by position.
+
+    The target of an incremental model outlives the model definition: an
+    operator pre-creates the mart, an earlier revision of the SELECT built it,
+    or someone adds a column. A positional `INSERT INTO t SELECT *` is only
+    correct while the two orders happen to agree — when they diverge it writes
+    `region` into `city`, the row count reconciles, and the run reports success.
+    Live proof: transform_live_results.json (30 cases, PG/MySQL/SQL Server).
+    """
+
+    def _runner(self, warehouse: str) -> TransformRunner:
+        return TransformRunner({"type": "sqlite", "database": warehouse}, dialect="sqlite")
+
+    def _target(self, warehouse: str, ddl: str, table: str = "mart") -> None:
+        con = sqlite3.connect(warehouse)
+        con.execute(ddl)
+        con.commit()
+        con.close()
+
+    def _model(self, sql: str, **kw) -> TransformModel:
+        kw.setdefault("materialization", "incremental")
+        kw.setdefault("incremental_strategy", "append")
+        return _model("mart", sql, **kw)
+
+    def test_reordered_target_receives_each_value_in_its_own_column(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT, region TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'EMEA' AS region, 'Berlin' AS city")]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        row = con.execute("SELECT id, city, region FROM mart").fetchone()
+        con.close()
+        assert row == (1, "Berlin", "EMEA")
+
+    def test_executed_sql_names_its_columns(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT, region TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'EMEA' AS region, 'Berlin' AS city")]
+        )
+        sql = result.models[0].sql
+        assert 'INSERT INTO "mart" ("id", "region", "city")' in sql
+        assert "INSERT INTO \"mart\" SELECT" not in sql
+        assert result.models[0].column_alignment == {
+            "id": "id",
+            "region": "region",
+            "city": "city",
+        }
+
+    def test_a_column_the_model_omits_is_left_to_the_target(self, warehouse):
+        # Positionally this shifts every value one column to the left.
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, tenant TEXT, city TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city")]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        row = con.execute("SELECT id, tenant, city FROM mart").fetchone()
+        con.close()
+        assert row == (1, None, "Berlin")
+
+    def test_a_column_the_target_lacks_is_refused_by_name(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city, 'EMEA' AS region")]
+        )
+        assert result.models[0].status == "failed"
+        assert "region" in result.models[0].error
+        assert _count(warehouse, "mart") == 0
+
+    def test_a_required_target_column_nothing_fills_is_refused(self, warehouse):
+        self._target(
+            warehouse,
+            "CREATE TABLE mart (id INTEGER, city TEXT, tenant TEXT NOT NULL)",
+        )
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city")]
+        )
+        assert result.models[0].status == "failed"
+        assert "tenant" in result.models[0].error
+        assert _count(warehouse, "mart") == 0
+
+    def test_a_required_target_column_with_a_default_still_loads(self, warehouse):
+        # Fail-closed must not become fail-always: the destination fills this.
+        self._target(
+            warehouse,
+            "CREATE TABLE mart (id INTEGER, city TEXT, "
+            "tenant TEXT NOT NULL DEFAULT 'acme')",
+        )
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city")]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        row = con.execute("SELECT id, city, tenant FROM mart").fetchone()
+        con.close()
+        assert row == (1, "Berlin", "acme")
+
+    def test_delete_insert_onto_a_reordered_target_is_aligned(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT, region TEXT)")
+        self._target(warehouse, "INSERT INTO mart VALUES (1, 'Old', 'OLD')")
+        result = self._runner(warehouse).run(
+            [
+                self._model(
+                    "SELECT 1 AS id, 'EMEA' AS region, 'Berlin' AS city",
+                    incremental_strategy="merge",
+                    unique_key="id",
+                )
+            ]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        rows = con.execute("SELECT id, city, region FROM mart").fetchall()
+        con.close()
+        assert rows == [(1, "Berlin", "EMEA")]
+
+    def test_a_unique_key_the_model_does_not_select_is_refused(self, warehouse):
+        # The DELETE would match nothing, so delete+insert would duplicate.
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT)")
+        result = self._runner(warehouse).run(
+            [
+                self._model(
+                    "SELECT 'Berlin' AS city, 1 AS id",
+                    incremental_strategy="merge",
+                    unique_key="order_id",
+                )
+            ]
+        )
+        assert result.models[0].status == "failed"
+        assert "order_id" in result.models[0].error
+        assert _count(warehouse, "mart") == 0
+
+    def test_alignment_ignores_column_case(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT, region TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model('SELECT 1 AS "ID", \'EMEA\' AS "Region", \'Berlin\' AS "City"')]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        row = con.execute("SELECT id, city, region FROM mart").fetchone()
+        con.close()
+        assert row == (1, "Berlin", "EMEA")
+
+    def test_first_run_creates_the_target_and_loads_it(self, warehouse):
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city")]
+        )
+        assert result.status == "success", result.error
+        assert _count(warehouse, "mart") == 1
+
+    def test_first_append_run_loads_each_row_once(self, warehouse):
+        # The seed used to be `CREATE TABLE ... AS <body>`, which materialized
+        # the rows, and the INSERT then wrote them a second time. Only the first
+        # run of a brand-new model was affected, so every later run looked right.
+        runner = self._runner(warehouse)
+        model = self._model("SELECT id FROM orders")
+        runner.run([model])
+        assert _count(warehouse, "mart") == 4
+        runner.run([model])
+        assert _count(warehouse, "mart") == 8, "append is at-least-once by design"
+
+
 def _count(db: str, table: str) -> int:
     con = sqlite3.connect(db)
     try:
@@ -790,7 +970,7 @@ class TestPostLoadHook:
         # operator could not tell which happened.
         source = Path(__file__).resolve().parents[1] / "src" / "transfer" / "engine.py"
         text = source.read_text(encoding="utf-8")
-        assert text.count("_apply_post_load_transforms(request, dest_summary)") == 3
+        assert text.count("apply_post_load_transforms(request, dest_summary)") == 3
 
     def test_missing_store_is_reported_not_raised(self, monkeypatch):
         from services import post_load_transform
@@ -910,19 +1090,19 @@ class TestPostLoadHook:
         assert "different destination connector" in out["message"]
 
         # The engine helper must surface this, not drop it as a quiet no-op.
-        from src.transfer.engine import _apply_post_load_transforms
+        from services.post_load_transform import apply_post_load_transforms
 
         class Request:
             destination = Dest()
             workspace_id = ""
 
         dest_summary: dict = {}
-        _apply_post_load_transforms(Request(), dest_summary)
+        apply_post_load_transforms(Request(), dest_summary)
         assert "transformations" in dest_summary
         assert dest_summary["transformations"]["status"] == "skipped"
 
     def test_engine_records_an_unexpected_hook_exception(self, monkeypatch):
-        from src.transfer import engine as engine_mod
+        from services.post_load_transform import apply_post_load_transforms
 
         def boom(**_k):
             raise RuntimeError("unexpected")
@@ -939,7 +1119,7 @@ class TestPostLoadHook:
             workspace_id = ""
 
         dest_summary: dict = {}
-        engine_mod._apply_post_load_transforms(Request(), dest_summary)
+        apply_post_load_transforms(Request(), dest_summary)
         assert dest_summary["transformations"]["status"] == "failed"
         assert "unexpected" in dest_summary["transformations"]["message"]
 

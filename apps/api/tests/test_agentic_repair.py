@@ -41,6 +41,37 @@ def test_reject_proposal() -> None:
     assert decided.status == "rejected"
 
 
+def test_live_ddl_change_target_type_does_not_mutate_mappings() -> None:
+    out = apply_actions_to_mappings(
+        [{"source": "DEP_TIME", "destination": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        [
+            {
+                "kind": "change_target_type",
+                "column": "DEP_TIME",
+                "to_type": "NUMBER(12,9)",
+                "requires_ddl": True,
+            }
+        ],
+    )
+    assert out[0].get("target_type") == "NUMBER(9,6)"
+    assert out[0].get("destType") is None
+
+
+def test_unproven_change_target_type_does_not_mutate_mappings() -> None:
+    out = apply_actions_to_mappings(
+        [{"source": "DEP_TIME", "destination": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        [
+            {
+                "kind": "change_target_type",
+                "column": "DEP_TIME",
+                "to_type": "NUMBER(11,8)",
+                "apply_proven": False,
+            }
+        ],
+    )
+    assert out[0].get("target_type") == "NUMBER(9,6)"
+
+
 def test_apply_actions_to_mappings_transform() -> None:
     out = apply_actions_to_mappings(
         [{"source": "ts", "destination": "ts"}],
@@ -153,3 +184,31 @@ def test_non_mutative_approve_does_not_fake_applied() -> None:
     assert decided.status == "approved"
     assert decided.apply_result.get("applied") is False
     assert decided.apply_result.get("reason") == "no_mutative_actions"
+
+
+def test_decide_route_records_authenticated_actor_not_body_actor() -> None:
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    from src.routers.repair_router import router
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _auth(request: Request, call_next):
+        request.state.user_email = "mallory@corp.com"
+        return await call_next(request)
+
+    app.include_router(router, prefix="/api/v1")
+    client = TestClient(app)
+
+    p = propose_from_quarantine(
+        [{"column": "amount", "reason": "Invalid decimal: 'abc'", "value": "abc"}],
+        job_id="job-actor",
+    )
+    res = client.post(
+        f"/api/v1/repair/proposals/{p.id}/decide",
+        json={"approve": False, "actor": "victim@corp.com"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["decided_by"] == "mallory@corp.com"

@@ -1,0 +1,106 @@
+{
+  "name": "slack",
+  "docs": "https://api.slack.com/methods",
+  "base_url": "https://slack.com/api",
+  "auth": {
+    "type": "bearer"
+  },
+  "defaults": {
+    "page_size": 200,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "users",
+      "path": "users.list",
+      "records_path": "members",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 200
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "cursor",
+        "cursor_path": "response_metadata.next_cursor",
+        "page_size": 200,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "real_name": {"type": ["string", "null"]},
+          "is_bot": {"type": "boolean"},
+          "deleted": {"type": "boolean"},
+          "updated": {"type": "number"}
+        }
+      }
+    },
+    {
+      "name": "channels",
+      "path": "conversations.list",
+      "records_path": "channels",
+      "primary_key": ["id"],
+      "request_params": {
+        "types": "public_channel,private_channel",
+        "exclude_archived": true,
+        "limit": 200
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "cursor",
+        "cursor_path": "response_metadata.next_cursor",
+        "page_size": 200,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "is_channel": {"type": "boolean"},
+          "is_private": {"type": "boolean"},
+          "is_archived": {"type": "boolean"},
+          "created": {"type": "number"}
+        }
+      }
+    },
+    {
+      "name": "messages",
+      "path": "conversations.history",
+      "records_path": "messages",
+      "primary_key": ["ts"],
+      "request_params": {
+        "channel": "{channel}",
+        "limit": 200
+      },
+      "cursor": {
+        "field": "ts",
+        "request_param": "oldest",
+        "format": "epoch_s",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "cursor",
+        "cursor_path": "response_metadata.next_cursor",
+        "page_size": 200,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "ts": {"type": "string"},
+          "type": {"type": "string"},
+          "user": {"type": ["string", "null"]},
+          "text": {"type": ["string", "null"]}
+        }
+      }
+    }
+  ]
+}

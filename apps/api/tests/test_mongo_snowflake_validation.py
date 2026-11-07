@@ -36,8 +36,8 @@ from services.validation_assistant import explain_validation
 # ─────────────────────────────────────────────────────────────────────────────
 # Unit: value-aware coercion probe mirrors the write path
 # ─────────────────────────────────────────────────────────────────────────────
-def test_probe_clean_numeric_text_to_number_does_not_block():
-    """All sampled values are valid numbers → no failure, no false block."""
+def test_probe_clean_numeric_text_to_number_blocks_declared_collapse():
+    """Samples coerce, but TEXT→NUMBER is still a declared fidelity collapse (fail-closed)."""
     report = analyze_coercion(
         sample_rows=[{"score": "10"}, {"score": "3.14"}, {"score": "42"}],
         mappings=[{"source": "score", "target": "score"}],
@@ -47,12 +47,38 @@ def test_probe_clean_numeric_text_to_number_does_not_block():
     )
     col = report["by_source"]["score"]
     assert col["failed"] == 0
-    assert col["severity"] == "ok"
-    assert report["has_blocking_failures"] is False
+    assert col["severity"] == "block"
+    assert report["has_blocking_failures"] is True
+
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="score",
+        source_type="TEXT",
+        destination_type="NUMBER(38,10)",
+        approved_by="admin@dataflow.app",
+        reason="clean numeric TEXT→NUMBER accepted",
+        execution_policy="CAST_AND_CONTINUE",
+    )
+    cleared = analyze_coercion(
+        sample_rows=[{"score": "10"}, {"score": "3.14"}, {"score": "42"}],
+        mappings=[
+            {
+                "source": "score",
+                "target": "score",
+                "risk_contract": contract.to_dict(),
+            }
+        ],
+        source_types={"score": "TEXT"},
+        dest_types={"score": "NUMBER(38,10)"},
+        dest_db_type="snowflake",
+    )
+    assert cleared["by_source"]["score"]["severity"] == "warn"
+    assert cleared["has_blocking_failures"] is False
 
 
 def test_probe_placeholder_values_become_null_and_block_under_strict():
-    """Non-empty placeholders (N/A) coerce to NULL — block under strict (data loss)."""
+    """N/A is sentinel→NULL loss — strict blocks (not a bind/format failure)."""
     report = analyze_coercion(
         sample_rows=[{"score": "10"}, {"score": "N/A"}, {"score": "20"}],
         mappings=[{"source": "score", "target": "score"}],
@@ -62,14 +88,15 @@ def test_probe_placeholder_values_become_null_and_block_under_strict():
         validation_mode="strict",
     )
     col = report["by_source"]["score"]
-    assert col["failed"] == 0
     assert col["sentinel_nulls"] == 1
+    assert col["failed"] == 0
     assert col["severity"] == "block"
     assert report["has_blocking_failures"] is True
+    assert any("N/A" in str(f.get("value") or "") for f in col.get("sample_failures") or [])
 
 
 def test_probe_placeholder_values_warn_under_balanced():
-    """Balanced mode keeps sentinel-null as warn so operators can proceed after review."""
+    """Balanced counts N/A as sentinel_nulls; TEXT→NUMBER still blocks without Risk Contract."""
     report = analyze_coercion(
         sample_rows=[{"score": "10"}, {"score": "N/A"}, {"score": "20"}],
         mappings=[{"source": "score", "target": "score"}],
@@ -80,8 +107,10 @@ def test_probe_placeholder_values_warn_under_balanced():
     )
     col = report["by_source"]["score"]
     assert col["sentinel_nulls"] == 1
-    assert col["severity"] == "warn"
-    assert report["has_blocking_failures"] is False
+    assert col["failed"] == 0
+    # Declared TEXT→NUMBER is fidelity_collapse — B10 requires Risk Contract to soft-warn.
+    assert col["severity"] == "block"
+    assert report["has_blocking_failures"] is True
 
 
 def test_probe_hard_failure_reports_row_value_reason():
@@ -103,34 +132,61 @@ def test_probe_hard_failure_reports_row_value_reason():
 
 
 def test_probe_bare_scalar_into_variant_wraps_losslessly():
-    """MongoDB field that is an array in one doc and a scalar in another:
-    the scalar is losslessly wrapped as JSON so it loads into VARIANT — no
-    false hard-block, but warn (domain change) so operators Accept risk."""
+    """TEXT→VARIANT invents document domain — block without Risk Contract.
+
+    Scalars wrap as JSON string literals (domain change). Empty cells refuse
+    silent NULL invent. Signed CAST_AND_CONTINUE softens to warn.
+    """
+    from services.migration_risk_contract import create_migration_risk_contract
+
     report = analyze_coercion(
-        sample_rows=[{"tags": '["a","b"]'}, {"tags": "single"}, {"tags": ""}],
+        sample_rows=[{"tags": '["a","b"]'}, {"tags": "single"}],
         mappings=[{"source": "tags", "target": "tags"}],
         source_types={"tags": "TEXT"},
         dest_types={"tags": "VARIANT"},
         dest_db_type="snowflake",
     )
     col = report["by_source"].get("tags")
-    # Column is analyzed (TEXT→VARIANT coercion) but every value now coerces.
     assert col is not None
     assert col["failed"] == 0
     assert col.get("json_scalar_wraps", 0) >= 1
-    assert col["severity"] == "warn"
-    assert report["has_blocking_failures"] is False
+    assert col["severity"] == "block"
+    assert report["has_blocking_failures"] is True
+
+    contract = create_migration_risk_contract(
+        column="tags",
+        source_type="TEXT",
+        destination_type="VARIANT",
+        approved_by="admin@dataflow.app",
+        reason="Mongo schemaless field → Snowflake VARIANT",
+        execution_policy="CAST_AND_CONTINUE",
+    )
+    cleared = analyze_coercion(
+        sample_rows=[{"tags": '["a","b"]'}, {"tags": "single"}],
+        mappings=[
+            {
+                "source": "tags",
+                "target": "tags",
+                "risk_contract": contract.to_dict(),
+            }
+        ],
+        source_types={"tags": "TEXT"},
+        dest_types={"tags": "VARIANT"},
+        dest_db_type="snowflake",
+    )
+    assert cleared["by_source"]["tags"]["severity"] == "warn"
+    assert cleared["has_blocking_failures"] is False
 
 
 def test_probe_valid_json_into_variant_passes():
+    """Declared JSON→VARIANT keeps document polarity — not TEXT invent."""
     report = analyze_coercion(
         sample_rows=[{"profile": '{"age":30}'}, {"profile": '{"age":"x"}'}],
         mappings=[{"source": "profile", "target": "profile"}],
-        source_types={"profile": "TEXT"},
+        source_types={"profile": "JSON"},
         dest_types={"profile": "VARIANT"},
         dest_db_type="snowflake",
     )
-    # profile is always valid JSON → no entry / no block
     assert report["has_blocking_failures"] is False
 
 
@@ -142,8 +198,10 @@ def test_probe_text_target_is_never_a_risk():
         dest_types={"name": "VARCHAR"},
         dest_db_type="snowflake",
     )
-    assert report["checked"] == 0
+    # TEXT↔VARCHAR may be scored as a checked pair with severity ok — never block.
     assert report["has_blocking_failures"] is False
+    if report.get("checked"):
+        assert report["by_source"]["name"]["severity"] == "ok"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,16 +276,73 @@ def test_preflight_reports_structured_coercion_failures():
 
 
 def test_preflight_variant_target_no_longer_false_blocks():
-    """Mixed Mongo field into VARIANT must not block — scalars are wrapped."""
+    """TEXT→VARIANT document invent blocks until Risk Contract; samples still wrap."""
+    from services.migration_risk_contract import create_migration_risk_contract
+
     pf = _run_preflight(
         sample_rows=[{"id": "1", "tags": '["a"]'}, {"id": "2", "tags": "single"}],
         dest_types={"id": "NUMBER(38,0)", "tags": "VARIANT"},
     )
     g3 = _gate(pf, "g3_schema_contract")
-    assert g3["status"] == "pass"
-    g5 = _gate(pf, "g5_dry_run")
-    assert g5 is None or g5["status"] == "pass"
-    assert pf["coercion_report"]["has_blocking_failures"] is False
+    assert g3["status"] == "block"
+    assert pf["coercion_report"]["has_blocking_failures"] is True
+
+    contract = create_migration_risk_contract(
+        column="tags",
+        source_type="TEXT",
+        destination_type="VARIANT",
+        approved_by="admin@dataflow.app",
+        reason="Mongo tags → Snowflake VARIANT",
+        execution_policy="CAST_AND_CONTINUE",
+    )
+    headers = ["id", "tags"]
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {
+            "source": "tags",
+            "target": "tags",
+            "confidence": 0.99,
+            "risk_contract": contract.to_dict(),
+        },
+    ]
+    result = run_file_preflight(
+        columns=headers,
+        column_types={h: "TEXT" for h in headers},
+        row_count=2,
+        mappings=mappings,
+        destination_connected=True,
+        source_connected=True,
+        source_kind="database",
+        source_format="mongodb",
+        sync_mode="full_refresh_overwrite",
+        sample_rows=[{"id": "1", "tags": '["a"]'}, {"id": "2", "tags": "single"}],
+        confidence_threshold=confidence_threshold_for_mode("strict"),
+        destination_column_types={"id": "NUMBER(38,0)", "tags": "VARIANT"},
+        destination_table_exists=True,
+        destination_can_create=False,
+        destination_db_type="snowflake",
+    )
+    cleared = apply_policy_gates(
+        result,
+        run_transfer_policy_gates(
+            sync_mode="full_refresh_overwrite",
+            schema_policy="manual_review",
+            validation_mode="strict",
+            stream_contracts=[
+                {
+                    "name": "s",
+                    "primary_key": "id",
+                    "selected": True,
+                    "sync_mode": "full_refresh_overwrite",
+                }
+            ],
+            backfill_new_fields=False,
+        ),
+        validation_mode="strict",
+    )
+    g3c = _gate(cleared, "g3_schema_contract")
+    assert g3c["status"] == "pass"
+    assert cleared["coercion_report"]["has_blocking_failures"] is False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,3 +542,24 @@ def test_objectid_does_not_map_onto_number_id_without_samples():
     )
     assert mapped[0].get("create_new") is True
     assert mapped[0]["target"].lower() != "id"
+
+
+def test_gate_block_is_visible_in_the_report_every_surface_reads():
+    """A blocked run must not sit above a report that says nothing is blocking.
+
+    The coercion probe judges values; G3 judges the declared conversion. When
+    the cells cast cleanly but the conversion changes the domain, the report the
+    UI, the assistant and the proof bundle read used to say
+    ``has_blocking_failures: false`` under a blocked Validate.
+    """
+    pf = _run_preflight(
+        sample_rows=[{"id": "1", "tags": '["a"]'}, {"id": "2", "tags": "single"}],
+        dest_types={"id": "NUMBER(38,0)", "tags": "VARIANT"},
+    )
+    report = pf["coercion_report"]
+    assert _gate(pf, "g3_schema_contract")["status"] == "block"
+    assert report["has_blocking_failures"] is True
+    assert [b["source"] for b in report["declared_type_blocks"]] == ["tags"]
+    # The value-level verdict stays honest: those cells really did cast.
+    assert report["by_source"]["tags"]["severity"] != "block"
+    assert report["by_source"]["tags"]["blocked_by"] == "g3_schema_contract"

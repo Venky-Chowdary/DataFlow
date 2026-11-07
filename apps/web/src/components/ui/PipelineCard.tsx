@@ -2,8 +2,10 @@ import { ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule } from "../../lib/types";
-import { breakerBadgeClass, breakerWarnLabel } from "../../lib/contractBreakerUi";
-import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
+import { breakerBadgeClass, breakerWarnLabel, campaignBadgeClass, campaignWarnLabel } from "../../lib/contractBreakerUi";
+import { formatSyncModeLabel } from "../../lib/transferConstants";
+import { scheduleCadenceLabel } from "../../lib/scheduleCadence";
+import { scheduleStatusBadge, skippedBeatNote } from "../../lib/scheduleRunStatus";
 import { Button } from "./Button";
 import { CopyIdChip } from "./CopyIdChip";
 
@@ -25,6 +27,7 @@ interface PipelineCardProps {
   onSelect?: () => void;
   onToggle?: () => void;
   onRun?: () => void;
+  onSync?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
   onToggleHistory?: () => void;
@@ -38,24 +41,6 @@ function formatWhen(iso: string | null): string {
   } catch {
     return iso;
   }
-}
-
-const INTERVAL_LABEL: Record<string, string> = {
-  hourly: "Every hour",
-  daily: "Daily",
-  weekly: "Weekly",
-};
-
-const SYNC_MODE_LABEL: Record<string, string> = {
-  full_refresh_overwrite: "Full overwrite",
-  full_refresh_append: "Full append",
-  incremental: "Incremental",
-  cdc: "CDC",
-};
-
-function cadenceLabel(sched: PipelineSchedule): string {
-  if (sched.cron) return `Cron ${sched.cron}`;
-  return INTERVAL_LABEL[sched.interval] ?? sched.interval;
 }
 
 export function PipelineCard({
@@ -73,16 +58,21 @@ export function PipelineCard({
   onSelect,
   onToggle,
   onRun,
+  onSync,
   onEdit,
   onDelete,
   onToggleHistory,
   children,
 }: PipelineCardProps) {
   const isRunning = running || sched.running;
-  const syncLabel = SYNC_MODE_LABEL[sched.sync_mode] ?? sched.sync_mode;
+  // Derived from the latest run record (with its reason), not a stored copy.
+  const statusBadge = scheduleStatusBadge(sched);
+  const skipNote = skippedBeatNote(sched);
+  const syncLabel = formatSyncModeLabel(sched.sync_mode);
   const routeLabel = `${source?.name ?? "Source"} → ${dest?.name ?? "Destination"}`;
   const tableLabel = `${sched.source_table} → ${sched.dest_table}`;
   const breakerText = breakerWarnLabel(breakerState);
+  const campaignText = campaignWarnLabel(sched.fidelity_campaign?.verdict);
   const freshnessText =
     freshnessLagSeconds != null && Number.isFinite(freshnessLagSeconds)
       ? `Lag ${freshnessLagSeconds.toFixed(0)}s`
@@ -131,7 +121,7 @@ export function PipelineCard({
           </span>
         </div>
         <span className="df2-pipeline-row-cadence" title="Schedule cadence">
-          {cadenceLabel(sched)}
+          {scheduleCadenceLabel(sched)}
         </span>
         <span className="df2-pipeline-row-sync" title={sched.contract_id ? `Sync mode · contract ${sched.contract_id}` : "Sync mode"}>
           {syncLabel}
@@ -142,6 +132,13 @@ export function PipelineCard({
             <span className={`df2-badge ${breakerBadgeClass(breakerState)}`} title="Data contract circuit breaker">
               {breakerText}
             </span>
+          ) : campaignText ? (
+            <span
+              className={`df2-badge ${campaignBadgeClass(sched.fidelity_campaign?.verdict)}`}
+              title={sched.fidelity_campaign?.next_action || "Parallel-run campaign"}
+            >
+              {campaignText}
+            </span>
           ) : freshnessText ? (
             <span
               className={`df2-badge ${freshnessSeverity === "critical" ? "df2-badge-warn" : "df2-badge-warn"}`}
@@ -151,9 +148,9 @@ export function PipelineCard({
             </span>
           ) : isRunning ? (
             <span className="df2-badge df2-badge-run">Running</span>
-          ) : sched.last_status ? (
-            <span className={jobStatusBadgeClass(sched.last_status)}>
-              {jobStatusLabel(sched.last_status)}
+          ) : statusBadge ? (
+            <span className={statusBadge.className} title={skipNote ? `${statusBadge.title}\n${skipNote}` : statusBadge.title}>
+              {statusBadge.label}
             </span>
           ) : (
             <span className="df2-badge df2-badge-muted">No runs</span>
@@ -162,7 +159,33 @@ export function PipelineCard({
         <span className={`df2-badge ${sched.enabled ? "df2-badge-live" : "df2-badge-muted"}`}>
           {sched.enabled ? "Active" : "Paused"}
         </span>
-        <div className="df2-pipeline-row-quick" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="df2-pipeline-row-quick"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          {onSync && (
+            <Button
+              variant="primary"
+              size="sm"
+              className="df2-pipeline-row-sync-label"
+              onClick={onSync}
+            >
+              Sync now
+            </Button>
+          )}
+          {onSync && (
+            <details className="df2-pipeline-row-menu">
+              <summary className="df2-pipeline-row-menu-summary" aria-label={`More actions for ${sched.name}`}>
+                <DtIcon name="menu" size={16} />
+              </summary>
+              <div className="df2-pipeline-row-menu-panel" role="menu">
+                <button type="button" role="menuitem" className="df2-pipeline-row-menu-item" onClick={onSync}>
+                  Sync now
+                </button>
+              </div>
+            </details>
+          )}
           <button
             type="button"
             className="df2-pipeline-row-open"
@@ -218,9 +241,17 @@ export function PipelineCard({
               {breakerText}
             </span>
           )}
-          {sched.last_status && (
-            <span className={jobStatusBadgeClass(sched.last_status)} title={`Last run: ${jobStatusLabel(sched.last_status)}`}>
-              {jobStatusLabel(sched.last_status)}
+          {!breakerText && campaignText && (
+            <span
+              className={`df2-badge ${campaignBadgeClass(sched.fidelity_campaign?.verdict)}`}
+              title={sched.fidelity_campaign?.next_action || "Parallel-run campaign"}
+            >
+              {campaignText}
+            </span>
+          )}
+          {statusBadge && (
+            <span className={statusBadge.className} title={skipNote ? `${statusBadge.title}\n${skipNote}` : statusBadge.title}>
+              {statusBadge.label}
             </span>
           )}
           <span className={`df2-badge ${sched.enabled ? "df2-badge-live" : "df2-badge-muted"}`}>
@@ -246,7 +277,7 @@ export function PipelineCard({
       </div>
 
       <div className="df2-pipe-card-meta">
-        <span><DtIcon name="clock" size={12} /> {cadenceLabel(sched)}</span>
+        <span><DtIcon name="clock" size={12} /> {scheduleCadenceLabel(sched)}</span>
         <span title="Sync mode"><DtIcon name="transfer" size={12} /> {syncLabel}</span>
         <span>Next {formatWhen(sched.next_run_at)}</span>
         <span>{sched.run_count} runs</span>
@@ -261,6 +292,11 @@ export function PipelineCard({
               loading={running}
               loadingLabel="Running…"
               disabled={isRunning}
+              title={
+                sched.enabled
+                  ? undefined
+                  : "Runs once now. Does not activate the cadence — the schedule stays paused."
+              }
               onClick={onRun}
               leadingIcon={<DtIcon name="activity" size={14} />}
             >

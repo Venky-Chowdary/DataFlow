@@ -11,9 +11,13 @@ from __future__ import annotations
 SYNONYM_DICTIONARY: dict[str, list[str]] = {
     # Identifiers
     "id": ["id", "pk", "key", "uid", "uuid", "guid", "identifier", "record_id", "row_id", "seq", "sequence"],
-    "customer_id": ["customer_id", "cust_id", "custid", "client_id", "clientid", "account_id", "acct_id", "user_id", "userid", "member_id", "memberid", "buyer_id", "subscriber_id"],
-    "order_id": ["order_id", "orderid", "order_no", "order_number", "ordernumber", "order_num", "purchase_id", "transaction_id", "txn_id", "trans_id", "invoice_id", "receipt_id"],
-    "product_id": ["product_id", "productid", "prod_id", "prodid", "item_id", "itemid", "sku", "upc", "ean", "asin", "part_number", "part_no", "material_id"],
+    "customer_id": ["customer_id", "cust_id", "custid", "customerid"],
+    "client_id": ["client_id", "clientid"],
+    "user_id": ["user_id", "userid", "uid"],
+    "member_id": ["member_id", "memberid"],
+    "order_id": ["order_id", "orderid", "order_no", "order_number", "ordernumber", "order_num", "purchase_id"],
+    "product_id": ["product_id", "productid", "prod_id", "prodid", "item_id", "itemid"],
+    "product_sku": ["product_sku", "sku", "upc", "ean", "asin", "part_number", "part_no"],
     "employee_id": ["employee_id", "emp_id", "empid", "staff_id", "worker_id", "personnel_id", "badge_id", "badge_number"],
     "vendor_id": ["vendor_id", "vendorid", "supplier_id", "supplierid", "seller_id", "merchant_id"],
     "shipment_id": ["shipment_id", "ship_id", "tracking_id", "tracking_number", "tracking_no", "consignment_id", "waybill", "bol_number"],
@@ -49,7 +53,13 @@ SYNONYM_DICTIONARY: dict[str, list[str]] = {
     "line_amount": ["line_amount", "line_amt", "line_total", "line_item_amount", "lineitem_amount"],
     "net_amount": ["net_amount", "net_amt", "net_total", "net"],
     "gross_amount": ["gross_amount", "gross_amt", "gross_total", "gross"],
-    "salary_amount": ["salary_amount", "salary_amt", "salary", "compensation_amount", "pay_amount", "wage_amount"],
+    # "compensation" belongs here beside "salary": the two groups overlap, and
+    # whichever claims a term first owns its canonical form. With only
+    # "compensation_amount" listed, "salary" resolved to salary_amount while bare
+    # "compensation" fell through to the HR "salary" group and resolved to
+    # "salary" — two declared synonyms that could never match each other, so
+    # mapping a salary column onto a compensation column invented a new field.
+    "salary_amount": ["salary_amount", "salary_amt", "salary", "compensation", "compensation_amount", "pay_amount", "wage_amount"],
     "commission_amount": ["commission_amount", "commission_amt", "commission", "comm"],
     "bonus_amount": ["bonus_amount", "bonus_amt", "bonus"],
     "order_number": ["order_number", "order_no", "order_num", "purchase_order", "po_number"],
@@ -160,9 +170,9 @@ SYNONYM_DICTIONARY: dict[str, list[str]] = {
 # Common abbreviation tokens used as column name parts
 TOKEN_ABBREVIATIONS: dict[str, str] = {
     "amt": "amount", "amnt": "amount", "val": "amount", "valu": "value",
-    "cust": "customer", "client": "customer", "buyer": "customer",
+    "cust": "customer",
     "qty": "quantity", "quant": "quantity", "cnt": "count",
-    "prod": "product", "item": "product", "sku": "product",
+    "prod": "product", "item": "product",
     "emp": "employee", "staff": "employee",
     "dept": "department", "div": "division",
     "addr": "address", "loc": "location",

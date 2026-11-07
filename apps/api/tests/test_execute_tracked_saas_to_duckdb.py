@@ -65,11 +65,53 @@ def _run_transfer(
         skip_preflight=True,
     )
 
-    with mock.patch("requests.request", side_effect=_respond):
+    # SDK sources go through a requests.Session; legacy readers call requests.request.
+    with mock.patch("requests.request", side_effect=_respond), mock.patch(
+        "requests.Session.request", side_effect=_respond
+    ):
         engine = UniversalTransferEngine()
         result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
     return result, db_path
+
+
+def _row_count(path: str) -> int:
+    import duckdb
+
+    conn = duckdb.connect(path)
+    try:
+        tables = conn.execute("SHOW TABLES").fetchall()
+        return sum(
+            conn.execute(f'SELECT COUNT(*) FROM "{t[0]}"').fetchone()[0] for t in tables
+        )
+    finally:
+        conn.close()
+
+
+def _refused_as_planned(brand: str, result: Any, path: str) -> bool:
+    """True when the engine honestly refused an uncertified brand.
+
+    A mocked HTTP payload is not live SKU proof, so a brand whose capability row
+    is not ``transfer_ready`` must refuse the run rather than report a green
+    transfer built on a mock. The refusal is the assertion here: it names the
+    brand and its tier, and it writes nothing.
+    """
+    from src.transfer.connector_capabilities import _DRIVER_CAPS, transfer_ready
+
+    if transfer_ready(_DRIVER_CAPS[brand]):
+        return False
+    from connectors.sdk import get_sdk_connector
+
+    if get_sdk_connector(brand) is not None:
+        # Source-only beta: wired into the engine on synthetic-fixture evidence,
+        # labeled beta in the catalog rather than refused as Planned.
+        return False
+    assert result.success is False
+    assert result.records_transferred == 0
+    assert "Planned" in (result.error or "")
+    assert brand in (result.error or "")
+    assert not os.path.exists(path) or _row_count(path) == 0
+    return True
 
 
 def _cleanup(path: str) -> None:
@@ -99,6 +141,9 @@ def test_stripe_customers_to_duckdb(tmp_path: Path):
         table,
         tmp_path,
     )
+    if _refused_as_planned("stripe", result, path):
+        _cleanup(path)
+        return
     try:
         assert result.success, result.error
         assert result.records_transferred == 2
@@ -136,6 +181,9 @@ def test_shopify_products_to_duckdb(tmp_path: Path):
         table,
         tmp_path,
     )
+    if _refused_as_planned("shopify", result, path):
+        _cleanup(path)
+        return
     try:
         assert result.success, result.error
         assert result.records_transferred == 2
@@ -244,6 +292,9 @@ def test_airtable_records_to_duckdb(tmp_path: Path):
         table,
         tmp_path,
     )
+    if _refused_as_planned("airtable", result, path):
+        _cleanup(path)
+        return
     try:
         assert result.success, result.error
         assert result.records_transferred == 2

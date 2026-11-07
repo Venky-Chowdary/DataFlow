@@ -27,12 +27,24 @@ _OBJECT_LIST_CAP = 2000
 
 
 def list_objects(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[str]:
+    return [row["name"] for row in list_object_stats(cfg, bucket, prefix=prefix)]
+
+
+def list_object_stats(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[dict[str, Any]]:
+    """Keys plus size, etag, and mtime — the pickup manifest identity."""
     client = boto3_client("s3", cfg)
-    keys: list[str] = []
+    rows: list[dict[str, Any]] = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix or ""):
         for item in page.get("Contents") or []:
-            keys.append(item["Key"])
-            if len(keys) >= _OBJECT_LIST_CAP:
-                return keys
-    return keys
+            rows.append(
+                {
+                    "name": item["Key"],
+                    "size": int(item.get("Size") or 0),
+                    "checksum": str(item.get("ETag") or "").strip('"'),
+                    "mtime": str(item.get("LastModified") or ""),
+                }
+            )
+            if len(rows) >= _OBJECT_LIST_CAP:
+                return rows
+    return rows

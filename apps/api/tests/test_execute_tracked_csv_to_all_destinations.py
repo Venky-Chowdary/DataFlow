@@ -38,6 +38,10 @@ def test_csv_to_all_destinations(dest: EndpointConfig):
         pytest.importorskip("fakesnow")
     elif not _is_reachable(dest.host, dest.port):
         pytest.skip(f"{dest.format} emulator not reachable on {dest.host}:{dest.port}")
+    if dest.format == "pgvector":
+        from tests.host_facts import require_pgvector
+
+        require_pgvector()
 
     dest = _prepare_destination(dest)
 

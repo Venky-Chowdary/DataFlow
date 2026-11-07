@@ -44,3 +44,63 @@ def test_pipeline_explanation_includes_sync_behavior():
     assert "id (integer) → product_id" in explanation
     assert "transform: integer" in explanation
     assert "checksums matched" in explanation
+
+
+def test_multi_table_explanation_names_every_contract_not_the_last_table():
+    request = TransferRequest(
+        source=EndpointConfig(kind="database", format="postgresql", table="orders"),
+        destination=EndpointConfig(
+            kind="database", format="postgresql", database="dataflow", table="orders"
+        ),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="warn",
+        stream_contracts=[
+            {
+                "name": "customers",
+                "selected": True,
+                "mappings": [
+                    {"source": "id", "target": "id", "source_type": "INTEGER", "confidence": 0.99},
+                    {"source": "email", "target": "email", "source_type": "TEXT", "confidence": 0.9},
+                ],
+            },
+            {
+                "name": "orders",
+                "selected": True,
+                "mappings": [
+                    {
+                        "source": "amount",
+                        "target": "amount",
+                        "source_type": "DECIMAL",
+                        "transform": "decimal",
+                        "confidence": 0.95,
+                    }
+                ],
+            },
+        ],
+    )
+    explanation = build_pipeline_explanation(
+        request=request,
+        columns=["id", "customer_id", "amount", "updated_at"],
+        source_schema={"id": "INT4", "amount": "DECIMAL"},
+        mappings=[{"source": "amount", "target": "amount", "transform": "decimal", "confidence": 0.95}],
+        reconciliation={
+            "passed": True,
+            "message": "Checksum matches orders (2 rows). This digest is not the whole job.",
+        },
+        destination_summary={
+            "multi_stream": True,
+            "table": "orders",
+            "rows_written": 4,
+            "streams": [{"name": "customers"}, {"name": "orders"}],
+        },
+        rows_written=4,
+    )
+    first = explanation.splitlines()[0]
+    assert first == "Transfer: database/postgresql (customers, orders) → database/postgresql (customers, orders) — 2 tables"
+    assert "Each selected table is cleared" in explanation
+    assert "customers: 2 columns (id, email)" in explanation
+    assert "orders: 1 column (amount)" in explanation
+    assert "email (TEXT) → email" in explanation
+    assert "Source inferred 4 columns" not in explanation
+    assert "not the whole job" in explanation
+    assert "Rows written: 4" in explanation

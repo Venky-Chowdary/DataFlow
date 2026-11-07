@@ -1,38 +1,35 @@
 /**
- * Datawrap mark — source · wrap gate · destination
+ * Datawrap mark — the canonical wrap lattice.
+ *
+ * Geometry comes from `brand/mark`, the same definition the favicon, manifest
+ * icons and social exports are generated from, so no surface can drift onto an
+ * older logo.
  */
+import { BRAND_COLORS, BRAND_MARK_GEOMETRY, BRAND_MARK_VIEWBOX } from "../brand/mark";
 
 export function IconFlowMark({ size = 32 }: { size?: number }) {
-  const gradId = `dw-bg-${size}`;
+  const g = BRAND_MARK_GEOMETRY;
   return (
-    <svg width={size} height={size} viewBox="0 0 512 512" fill="none" aria-hidden role="img">
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${BRAND_MARK_VIEWBOX} ${BRAND_MARK_VIEWBOX}`}
+      fill="none"
+      role="img"
+      shapeRendering="geometricPrecision"
+    >
       <title>Datawrap</title>
-      <defs>
-        <linearGradient id={gradId} x1="72" y1="48" x2="440" y2="464" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#0F766E" />
-          <stop offset="0.55" stopColor="#134E4A" />
-          <stop offset="1" stopColor="#0B1220" />
-        </linearGradient>
-      </defs>
-      <rect width="512" height="512" rx="112" fill={`url(#${gradId})`} />
+      <rect {...g.tile} fill={BRAND_COLORS.tile} />
+      <rect {...g.horizontalStrap} fill={BRAND_COLORS.strap} />
+      <rect {...g.verticalStrap} fill={BRAND_COLORS.strapOnTile} />
       <path
-        d="M128 256 L176 176 H336 L384 256 L336 336 H176 Z"
-        stroke="#FFFFFF"
-        strokeWidth="28"
-        strokeLinejoin="round"
-        fill="none"
+        d={g.diagonal.d}
+        stroke={BRAND_COLORS.arrow}
+        strokeWidth={g.diagonal.strokeWidth}
+        strokeLinecap="round"
       />
-      <path
-        d="M256 198 L314 256 L256 314 L198 256 Z"
-        stroke="#FFFFFF"
-        strokeWidth="26"
-        strokeLinejoin="round"
-        fill="none"
-      />
-      <path d="M72 256 H128" stroke="#FFFFFF" strokeWidth="28" strokeLinecap="round" />
-      <path d="M384 256 H440" stroke="#FFFFFF" strokeWidth="28" strokeLinecap="round" />
-      <circle cx="72" cy="256" r="34" fill="#F59E0B" />
-      <circle cx="440" cy="256" r="34" fill="#2DD4BF" />
+      <path d={g.arrowHead.d} fill={BRAND_COLORS.arrow} />
+      <rect {...g.seal} fill={BRAND_COLORS.tile} />
     </svg>
   );
 }

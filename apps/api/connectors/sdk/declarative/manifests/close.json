@@ -1,0 +1,103 @@
+{
+  "name": "close",
+  "docs": "https://developer.close.com/",
+  "base_url": "https://api.close.com/api/v1",
+  "auth": {
+    "type": "basic",
+    "password": "X"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "leads",
+      "path": "lead/",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_params": {
+        "_limit": 100,
+        "_order_by": "date_updated"
+      },
+      "cursor": {
+        "field": "date_updated",
+        "request_param": "date_updated__gte",
+        "format": "iso8601",
+        "lookback_s": 60
+      },
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "_limit",
+        "offset_param": "_skip"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "display_name": {"type": ["string", "null"]},
+          "status_label": {"type": ["string", "null"]},
+          "date_created": {"type": ["string", "null"], "format": "date-time"},
+          "date_updated": {"type": ["string", "null"], "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "opportunities",
+      "path": "opportunity/",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_params": {
+        "_limit": 100
+      },
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "_limit",
+        "offset_param": "_skip"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "lead_id": {"type": ["string", "null"]},
+          "status_label": {"type": ["string", "null"]},
+          "value": {"type": ["number", "null"]},
+          "date_created": {"type": ["string", "null"], "format": "date-time"},
+          "date_updated": {"type": ["string", "null"], "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "tasks",
+      "path": "task/",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_params": {
+        "_limit": 100
+      },
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "_limit",
+        "offset_param": "_skip"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "lead_id": {"type": ["string", "null"]},
+          "text": {"type": ["string", "null"]},
+          "is_complete": {"type": ["boolean", "null"]},
+          "due_date": {"type": ["string", "null"], "format": "date-time"},
+          "date_created": {"type": ["string", "null"], "format": "date-time"}
+        }
+      }
+    }
+  ]
+}

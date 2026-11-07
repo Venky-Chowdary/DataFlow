@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from services.quarantine_from_preflight import merge_job_quarantine, quarantine_rows_from_preflight
+from services.quarantine_from_preflight import (
+    merge_job_quarantine,
+    quarantine_evidence_source,
+    quarantine_rows_from_preflight,
+)
 
 
 def test_encoding_findings_become_quarantine_rows():
@@ -69,6 +73,7 @@ def test_merge_falls_back_to_preflight():
         "preflight": {
             "gates": [
                 {
+                    "status": "block",
                     "details": {
                         "encoding_issues": [
                             {"column": "description", "row": 1, "message": "format-control", "sample": "a\u200bb"},
@@ -81,6 +86,55 @@ def test_merge_falls_back_to_preflight():
     merged = merge_job_quarantine(job)
     assert len(merged) == 1
     assert merged[0]["column"] == "description"
+
+
+def test_signed_risk_contract_warn_not_quarantined():
+    """Continue-policy fidelity notes must not look like write rejects."""
+    pf = {
+        "passed": False,
+        "gates": [
+            {
+                "id": "g3_schema_contract",
+                "status": "pass",
+                "details": {
+                    "issues_detail": [
+                        {
+                            "source": "country_auto_detected",
+                            "target": "country_auto_detected",
+                            "severity": "warn",
+                            "message": (
+                                "Column 'country_auto_detected' → INTEGER: declared "
+                                "fidelity collapse (TEXT → INTEGER) — continue-policy "
+                                "Risk Contract signed."
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "details": {
+                    "issues": [
+                        "id: duplicate key values from source probe (a×2)",
+                    ],
+                },
+            },
+        ],
+        "blockers": [
+            {
+                "id": "g9_data_integrity",
+                "message": "Duplicate identity keys",
+                "details": {
+                    "issues": ["id: duplicate key values from source probe (a×2)"],
+                },
+            }
+        ],
+    }
+    rows = quarantine_rows_from_preflight(pf)
+    assert len(rows) == 1
+    assert "duplicate" in rows[0]["reason"].lower()
+    assert "country_auto_detected" not in (rows[0].get("column") or "")
 
 
 def test_schema_policy_finding_does_not_suggest_strip_controls():
@@ -150,3 +204,151 @@ def test_objectid_lossy_string_fills_column_and_dedupes_integrity():
     assert rows[0]["target"] == "user_id"
     assert "specialty polarity" in rows[0]["reason"].lower()
     assert rows[0]["suggested_transform"] is None
+
+
+def test_gate8_phone_blank_lines_keep_row_column_and_blank_cell():
+    """The live Theater rows: reason text was the only place phone appeared."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    pf = {
+        "passed": False,
+        "gates": [{
+            "id": "g8_reconciliation",
+            "status": "block",
+            "message": "Dry-run reconciliation failed — transform errors",
+            "details": {
+                "errors": [
+                    "row 1 phone→phone: Empty value cannot coerce to integer",
+                    "row 5 phone→phone: Empty value cannot coerce to integer",
+                    "row 8 phone→phone: Empty value cannot coerce to integer",
+                ],
+            },
+        }],
+        "blockers": [{
+            "id": "g8_reconciliation",
+            "message": "Dry-run reconciliation failed — transform errors",
+            "details": {
+                "errors": [
+                    "row 1 phone→phone: Empty value cannot coerce to integer",
+                ],
+            },
+        }],
+    }
+    rows = quarantine_rows_from_preflight(pf)
+    assert [r["row"] for r in rows] == [1, 5, 8]
+    for row in rows:
+        assert row["column"] == "phone"
+        assert row["target"] == "phone"
+        assert row["value"] == ""
+        assert row["value"] != SQL_NULL_SENTINEL
+        assert row["values"]["phone"] == ""
+        assert row["reason"] == "Empty value cannot coerce to integer"
+        assert row["policy"] == "preflight_quarantine"
+
+
+def test_preflight_rows_are_not_labeled_write_rejects():
+    job = {
+        "rejected_details": [
+            {
+                "row": 1,
+                "column": "phone",
+                "value": "",
+                "policy": "preflight_quarantine",
+                "reason": "Empty value cannot coerce to integer",
+            }
+        ],
+        "rejected_rows": 1,
+        "phase": "failed",
+    }
+    assert quarantine_evidence_source(job, job["rejected_details"]) == "preflight"
+    write_job = {
+        "rejected_details": [{"row": 1, "column": "phone", "value": "x", "policy": "quarantine"}],
+        "destination_summary": {"rejected_details": [{"row": 1, "column": "phone"}]},
+    }
+    assert quarantine_evidence_source(write_job, write_job["rejected_details"]) == "write"
+
+
+def test_preflight_quarantine_preserves_sql_null_not_empty():
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    pf = {
+        "passed": False,
+        "gates": [
+            {
+                "id": "g5_dry_run",
+                "status": "block",
+                "details": {
+                    "encoding_issues": [
+                        {
+                            "column": "note",
+                            "row": 1,
+                            "message": "null sample integrity",
+                            "sample": None,
+                        }
+                    ],
+                },
+            }
+        ],
+        "blockers": [],
+    }
+    rows = quarantine_rows_from_preflight(pf)
+    assert rows
+    assert rows[0]["value"] == SQL_NULL_SENTINEL
+    assert rows[0]["values"]["note"] == SQL_NULL_SENTINEL
+
+
+def test_root_cause_identity_sentence_is_not_a_null_quarantine_row():
+    """DEF-B-022: a Validate root with no cell must not become __DF_SQL_NULL__."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    pf = {
+        "passed": True,
+        "gates": [],
+        "blockers": [
+            {
+                "id": "rc-duplicate-identity",
+                "message": (
+                    "Duplicate identity keys: Identity / uniqueness checks failed "
+                    "on the Validate sample — impacts 2 gate check(s)"
+                ),
+                "details": {
+                    "root_cause": True,
+                    "kind": "duplicate_identity",
+                    "quarantine_policy": "n/a — identity must be fixed, not quarantined away",
+                },
+            }
+        ],
+    }
+    rows = quarantine_rows_from_preflight(pf)
+    assert rows == []
+    assert SQL_NULL_SENTINEL not in str(rows)
+
+
+def test_completed_job_does_not_report_the_validate_root_as_rejected():
+    """DEF-B-022 / DEF-C-041: a finished load with every row at rest has no reject."""
+    job = {
+        "status": "completed",
+        "records_processed": 50,
+        "rejected_rows": 1,
+        "rejected_details": [
+            {
+                "row": None,
+                "column": None,
+                "value": "__DF_SQL_NULL__",
+                "reason": (
+                    "Duplicate identity keys: Identity / uniqueness checks failed "
+                    "on the Validate sample — impacts 2 gate check(s)"
+                ),
+            }
+        ],
+        "preflight": {
+            "passed": True,
+            "blockers": [
+                {
+                    "message": "Duplicate identity keys: Identity / uniqueness checks failed on the Validate sample",
+                    "details": {"root_cause": True},
+                }
+            ],
+        },
+    }
+    assert merge_job_quarantine(job) == []

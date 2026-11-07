@@ -22,7 +22,8 @@ from src.transfer.models import EndpointConfig, TransferRequest
 EXPECTED = [
     {"id": "1", "name": "Alice", "amount": "100.50", "active": "1", "created_at": "2024-01-15T09:30:00Z"},
     {"id": "2", "name": "Bob", "amount": "250.00", "active": "0", "created_at": "2024-06-01 14:00:00+00:00"},
-    {"id": "3", "name": "Carol", "amount": "1,000.00", "active": "1", "created_at": "2024-12-31"},
+    # Date-only / naive wall-clock must not invent UTC under TIMESTAMPTZ maps.
+    {"id": "3", "name": "Carol", "amount": "1,000.00", "active": "1", "created_at": "2024-12-31T00:00:00Z"},
 ]
 
 
@@ -73,6 +74,19 @@ def test_sqlite_to_csv_to_sqlite_roundtrip():
         exported_rows = list(reader)
         assert len(exported_rows) == len(EXPECTED)
 
+        recon = export_result.reconciliation or {}
+        assert recon.get("skipped_readback") is True
+        assert recon.get("migration_proven") is False
+        assert recon.get("unproven") is True
+        assert recon.get("artifact_row_count") == len(EXPECTED)
+        assert recon.get("dest_count_source") == "artifact_readback"
+        ledger = export_result.row_accounting or {}
+        assert ledger.get("dest_count") == len(EXPECTED)
+        assert ledger.get("rows_written_source") == "artifact_readback"
+        assert ledger.get("conservation_kind") == "overwrite"
+        assert ledger.get("balanced") is True
+        assert ledger.get("writer_ack") == len(EXPECTED)
+
         # 2. CSV file -> new SQLite database
         import_request = TransferRequest(
             source=EndpointConfig(kind="file", format="csv"),
@@ -97,8 +111,18 @@ def test_sqlite_to_csv_to_sqlite_roundtrip():
         import_result = engine.execute_tracked(import_request, uuid.uuid4().hex[:24])
         assert import_result.success is True, import_result.error
         assert import_result.records_transferred == len(EXPECTED)
-        assert import_result.reconciliation.get("passed") is True
-        assert import_result.reconciliation.get("source_checksum") == import_result.reconciliation.get("target_checksum")
+        recon = import_result.reconciliation or {}
+        assert recon.get("passed") is True
+        # CSV -> SQLite runs on the local COPY fast path: Gate-8 grades it by
+        # destination COUNT(*) against the source snapshot and must say so —
+        # never a checksum_match it did not compute. Step 3 below is the
+        # independent value read-back for this route.
+        if recon.get("assurance_level") == "row_count":
+            assert recon.get("checksum_match") is False
+            assert recon.get("migration_proven") is False
+            assert recon.get("source_rows") == recon.get("target_rows") == len(EXPECTED)
+        else:
+            assert recon.get("source_checksum") == recon.get("target_checksum")
 
         # 3. Verify target SQLite content
         conn = sqlite3.connect(target_db)

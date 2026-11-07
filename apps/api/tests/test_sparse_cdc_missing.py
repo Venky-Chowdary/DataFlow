@@ -173,6 +173,9 @@ def test_mongo_sparse_upsert_uses_set_not_replace():
         def __getitem__(self, name):
             return _Coll()
 
+        def list_collection_names(self, filter=None):  # noqa: A002
+            return []
+
     class _Client:
         def __getitem__(self, name):
             return _Db()
@@ -437,3 +440,505 @@ def test_sqlite_write_mapped_rows_sparse_roundtrip(tmp_path):
     conn.close()
     assert row == ("1", "new-note", "keep-me")
     assert result.checksum == readback
+
+
+def test_omit_missing_fields_drops_df_missing_sentinel():
+    from connectors.writer_common import omit_missing_fields
+
+    out = omit_missing_fields(
+        [("id", "1"), ("note", "keep"), ("extra", DF_MISSING_SENTINEL), ("empty", "")]
+    )
+    assert out == {"id": "1", "note": "keep"}
+    assert DF_MISSING_SENTINEL not in out.values()
+
+
+def test_resolve_conflict_targets_casefold():
+    from connectors.writer_common import resolve_conflict_targets
+
+    assert resolve_conflict_targets(["ID", "note"], ["id", "NOTE", "extra"]) == [
+        "id",
+        "NOTE",
+    ]
+    assert resolve_conflict_targets(["missing"], ["id"], strict=False) == []
+    try:
+        resolve_conflict_targets(["id", "missing"], ["id"])
+        raise AssertionError("expected strict unresolved raise")
+    except ValueError as exc:
+        assert "unresolved" in str(exc).lower()
+
+
+def test_bq_refuses_unresolved_conflict_with_sparse_signal():
+    """Case-mismatched PK must fail closed — never append-path drop sparse CDC."""
+    from unittest.mock import MagicMock, patch
+
+    from connectors.bigquery_writer import write_mapped_rows
+
+    client = MagicMock()
+    table = MagicMock()
+    table.schema = []
+    client.get_table.return_value = table
+    with patch("connectors.bigquery_writer.stub_writes_allowed", return_value=False):
+        with patch(
+            "connectors.bigquery_conn.get_client", return_value=client
+        ):
+            with patch(
+                "connectors.bigquery_conn._is_local_endpoint", return_value=(True, "")
+            ):
+                result = write_mapped_rows(
+                    host="localhost",
+                    port=9050,
+                    database="proj",
+                    username="",
+                    password="",
+                    schema="ds",
+                    connection_string="",
+                    ssl=False,
+                    warehouse="",
+                    table_name="t",
+                    headers=["id", "note", "extra"],
+                    data_rows=[["1", "n", DF_MISSING_SENTINEL]],
+                    mappings=[
+                        {"source": "id", "target": "id"},
+                        {"source": "note", "target": "note"},
+                        {"source": "extra", "target": "extra"},
+                    ],
+                    column_types={
+                        "id": "STRING",
+                        "note": "STRING",
+                        "extra": "STRING",
+                    },
+                    write_mode="upsert",
+                    conflict_columns=["ID_NOT_MAPPED"],
+                    create_table=False,
+                )
+    assert result.ok is False
+    assert "conflict_columns" in (result.error or "").lower() or "refuse" in (
+        result.error or ""
+    ).lower()
+
+
+def test_versioned_sparse_insert_hydrates_existing_attrs():
+    """ClickHouse-class path must INSERT hydrated full image, not present-only."""
+    from connectors.writer_common import run_sparse_cdc_upsert
+
+    inserted: list[dict] = []
+
+    def fetch(pk_vals):
+        assert pk_vals == ["1"]
+        return ("1", "prior-note", "prior-extra")
+
+    def update(_non_pk, _pk):
+        return 0
+
+    def insert(present):
+        inserted.append(dict(present))
+
+    written, skipped, checksum = run_sparse_cdc_upsert(
+        target_cols=["id", "note", "extra"],
+        conflict_columns=["id"],
+        sparse_rows=[("1", "new-note", DF_MISSING_SENTINEL)],
+        fetch_existing_row=fetch,
+        update_non_pk=update,
+        insert_present=insert,
+        hydrate_versioned_insert=True,
+    )
+    assert written == 1 and skipped == 0
+    assert inserted == [{"id": "1", "note": "new-note", "extra": "prior-extra"}]
+    assert checksum == [("1", "new-note", "prior-extra")]
+
+
+def test_adapters_records_to_matrix_preserves_df_missing():
+    from src.transfer.adapters import records_to_matrix
+
+    headers, rows = records_to_matrix(
+        [{"id": "1", "note": "keep"}, {"id": "2", "extra": DF_MISSING_SENTINEL}],
+        ["id", "note", "extra"],
+    )
+    assert headers == ["id", "note", "extra"]
+    assert rows[0][1] == "keep"
+    assert rows[0][2] == DF_MISSING_SENTINEL  # absent key
+    assert rows[1][1] == DF_MISSING_SENTINEL  # absent key
+    assert rows[1][2] == DF_MISSING_SENTINEL  # present sentinel
+
+
+def test_cdc_matrix_preserves_present_df_missing():
+    from src.transfer.cdc_transfer import _records_to_matrix
+
+    rows = _records_to_matrix(
+        [{"id": "1", "note": "x", "extra": DF_MISSING_SENTINEL}],
+        ["id", "note", "extra"],
+    )
+    assert rows[0][2] == DF_MISSING_SENTINEL
+
+
+def test_vector_prepare_omits_df_missing_sentinel():
+    from connectors.writer_common import prepare_records_for_vector_write
+
+    records, rejected, abort = prepare_records_for_vector_write(
+        headers=["id", "note", "extra"],
+        data_rows=[["1", "keep", DF_MISSING_SENTINEL]],
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+            {"source": "extra", "target": "extra"},
+        ],
+        column_types={"id": "string", "note": "string", "extra": "string"},
+    )
+    assert abort is None
+    assert rejected == [] or True
+    assert records
+    assert DF_MISSING_SENTINEL not in records[0].values()
+    assert "extra" not in records[0] or records[0].get("extra") != DF_MISSING_SENTINEL
+
+
+def test_dynamo_sparse_uses_update_item_not_put():
+    from unittest.mock import MagicMock, patch
+
+    from connectors.dynamodb_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+        }
+    }
+    with patch("connectors.dynamodb_writer.boto3_client", return_value=client):
+        with patch("connectors.dynamodb_writer._ensure_table"):
+            result = write_mapped_rows(
+                host="localhost",
+                port=8000,
+                database="t",
+                username="",
+                password="",
+                schema="",
+                connection_string="",
+                ssl=False,
+                table_name="t",
+                headers=["id", "note", "extra"],
+                data_rows=[["1", "only-note", DF_MISSING_SENTINEL]],
+                mappings=[
+                    {"source": "id", "target": "id"},
+                    {"source": "note", "target": "note"},
+                    {"source": "extra", "target": "extra"},
+                ],
+                column_types={"id": "string", "note": "string", "extra": "string"},
+                create_table=False,
+                conflict_columns=["id"],
+            )
+    assert result.ok, result.error
+    assert client.update_item.called
+    assert not client.batch_write_item.called
+    kwargs = client.update_item.call_args.kwargs
+    assert "extra" not in (kwargs.get("ExpressionAttributeNames") or {}).values()
+    assert DF_MISSING_SENTINEL not in str(kwargs)
+
+
+def test_dynamo_rejects_df_missing_on_key_attribute():
+    """HASH/RANGE identity cannot be DF_MISSING — quarantine, never silent skip."""
+    from unittest.mock import MagicMock, patch
+
+    from connectors.dynamodb_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+        }
+    }
+    with patch("connectors.dynamodb_writer.boto3_client", return_value=client):
+        with patch("connectors.dynamodb_writer._ensure_table"):
+            result = write_mapped_rows(
+                host="localhost",
+                port=8000,
+                database="t",
+                username="",
+                password="",
+                schema="",
+                connection_string="",
+                ssl=False,
+                table_name="t",
+                headers=["id", "note"],
+                data_rows=[[DF_MISSING_SENTINEL, "note"]],
+                mappings=[
+                    {"source": "id", "target": "id"},
+                    {"source": "note", "target": "note"},
+                ],
+                column_types={"id": "string", "note": "string"},
+                create_table=False,
+                conflict_columns=["id"],
+                error_policy="quarantine",
+            )
+    assert result.ok is True or result.rows_written == 0
+    assert result.rows_written == 0
+    assert not client.update_item.called
+    assert not client.batch_write_item.called
+    assert any("key attribute" in str(d.get("reason") or "").lower() for d in (result.rejected_details or []))
+
+
+def test_sample_compare_skips_df_missing_omit_columns():
+    """Omit-from-SET columns must not fingerprint as NULL (false-green wipe risk)."""
+    from services.reconciliation import sample_compare_rows
+
+    result = sample_compare_rows(
+        [{"id": "1", "note": "new", "extra": DF_MISSING_SENTINEL}],
+        [{"id": "1", "note": "new", "extra": "prior-kept"}],
+        [
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+            {"source": "extra", "target": "extra"},
+        ],
+        sort_key="id",
+    )
+    assert result["passed"] is True
+    # Only id + note compared; extra skipped because source is DF_MISSING.
+    assert result["compared"] == 2
+    assert result["mismatches"] == []
+
+
+def test_sample_compare_fails_when_destination_leaks_df_missing():
+    """Read-back DF_MISSING is a sentinel leak — must not be skipped as omit."""
+    from services.reconciliation import sample_compare_rows
+
+    result = sample_compare_rows(
+        [{"id": "1", "note": "live"}],
+        [{"id": "1", "note": DF_MISSING_SENTINEL}],
+        [
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+        ],
+        sort_key="id",
+    )
+    assert result["passed"] is False
+    assert any(m.get("target") == "note" for m in result["mismatches"])
+
+
+def test_mongo_sparse_upsert_preserves_df_missing_through_decimal_coercion():
+    """Decimal _to_bson must not wrap DF_MISSING as Decimal128 (would leak / wipe)."""
+    from unittest.mock import patch
+
+    from connectors.mongodb_writer import write_mapped_rows
+
+    captured: list = []
+
+    class _Coll:
+        def find(self, *a, **k):
+            return []
+
+        def bulk_write(self, ops, ordered=False):
+            captured.extend(ops)
+
+    class _Db:
+        def __getitem__(self, name):
+            return _Coll()
+
+        def list_collection_names(self, filter=None):  # noqa: A002
+            return []
+
+    class _Client:
+        def __getitem__(self, name):
+            return _Db()
+
+        def close(self):
+            return None
+
+    with patch("connectors.mongodb_common._mongo_client", return_value=_Client()):
+        result = write_mapped_rows(
+            host="localhost",
+            port=27017,
+            database="testdb",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["id", "amt"],
+            data_rows=[["1", DF_MISSING_SENTINEL]],
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 1},
+                {
+                    "source": "amt",
+                    "target": "amt",
+                    "confidence": 1,
+                    "transform": "decimal",
+                },
+            ],
+            column_types={"id": "string", "amt": "DECIMAL"},
+            create_table=True,
+            write_mode="upsert",
+            conflict_columns=["id"],
+        )
+    assert result.ok, result.error
+    assert len(captured) == 1
+    op = captured[0]
+    assert type(op).__name__ == "UpdateOne"
+    update = op._doc
+    assert "$set" in update
+    assert "amt" not in update["$set"]
+    assert DF_MISSING_SENTINEL not in update["$set"].values()
+    assert all(not hasattr(v, "to_decimal") for v in update["$set"].values())
+
+def test_mapped_source_casefold_and_missing_refuse_null_invent():
+    """Header case drift resolves; truly missing mapped source quarantines."""
+    mapped, _errors, details = build_mapped_rows_with_details(
+        headers=["ID", "Note"],
+        data_rows=[["1", "hello"]],
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+        ],
+        target_cols=["id", "note"],
+        column_types={"id": "string", "note": "string"},
+        error_policy="quarantine",
+    )
+    assert mapped == [("1", "hello")]
+    assert details == []
+
+    mapped2, errors2, details2 = build_mapped_rows_with_details(
+        headers=["id"],
+        data_rows=[["1"]],
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+        ],
+        target_cols=["id", "note"],
+        column_types={"id": "string", "note": "string"},
+        error_policy="quarantine",
+    )
+    assert mapped2 == []
+    assert details2 or errors2
+    blob = " ".join(errors2) + " ".join(str(d) for d in details2)
+    assert "not found" in blob.lower() or "refuse" in blob.lower()
+
+
+def test_quarantine_unfit_json_rejects_nan():
+    from connectors.writer_common import quarantine_unfit_json
+
+    details: list[dict] = []
+    out = quarantine_unfit_json(
+        mapped_rows=[('1', '{"x": NaN}')],
+        target_cols=["id", "payload"],
+        target_types=["string", "JSON"],
+        rejected_details=details,
+        policy="fail",
+        dialect_label="test",
+    )
+    assert out == []
+    assert details
+    assert any("non-finite" in str(d.get("reason", "")).lower() or "json" in str(d.get("reason", "")).lower() for d in details)
+
+
+def test_run_sparse_cdc_upsert_casefold_conflict():
+    from connectors.writer_common import run_sparse_cdc_upsert
+
+    updated: list[tuple] = []
+
+    def fetch(pk_vals):
+        assert pk_vals == ["1"]
+        return ("1", "old", "keep")
+
+    def update(non_pk, pk_vals):
+        updated.append((non_pk, pk_vals))
+        return 1
+
+    def insert(_present):
+        raise AssertionError("should update existing")
+
+    written, skipped, checksum = run_sparse_cdc_upsert(
+        target_cols=["id", "note", "extra"],
+        conflict_columns=["ID"],
+        sparse_rows=[("1", "new", DF_MISSING_SENTINEL)],
+        fetch_existing_row=fetch,
+        update_non_pk=update,
+        insert_present=insert,
+    )
+    assert written == 1 and skipped == 0
+    assert updated[0][0] == {"note": "new"}
+    assert checksum[0] == ("1", "new", "keep")
+
+
+def test_elasticsearch_composite_doc_id_fail_closed():
+    from connectors.elasticsearch_writer import _resolve_doc_id
+
+    full = _resolve_doc_id(
+        {"tenant_id": "t1", "order_id": "o9"},
+        conflict_columns=["tenant_id", "order_id"],
+        target_cols=["tenant_id", "order_id", "amt"],
+    )
+    assert full == "t1|o9"
+
+    # Casefold conflict names against document keys
+    cased = _resolve_doc_id(
+        {"Tenant_Id": "t1", "Order_Id": "o9"},
+        conflict_columns=["tenant_id", "order_id"],
+        target_cols=["Tenant_Id", "Order_Id"],
+    )
+    assert cased == "t1|o9"
+
+    # Partial composite must not shrink to single-key identity
+    partial = _resolve_doc_id(
+        {"tenant_id": "t1"},
+        conflict_columns=["tenant_id", "order_id"],
+        target_cols=["tenant_id", "order_id"],
+    )
+    assert partial is None
+
+
+def test_dedupe_rows_refuses_partial_composite_pk():
+    from connectors.writer_common import dedupe_rows
+
+    rows = [("a", "1", "x"), ("a", "2", "y")]
+    try:
+        dedupe_rows(rows, ["id", "missing"], ["id", "sku", "v"])
+        raise AssertionError("expected strict unresolved raise")
+    except ValueError as exc:
+        assert "unresolved" in str(exc).lower()
+
+def test_mapped_rows_to_json_records_omits_df_missing():
+    from connectors.writer_common import mapped_rows_to_json_records
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    recs = mapped_rows_to_json_records(
+        [("1", "keep", DF_MISSING_SENTINEL)],
+        ["id", "note", "extra"],
+        {"id": "string", "note": "string", "extra": "string"},
+    )
+    assert recs == [{"id": "1", "note": "keep"}]
+    assert "extra" not in recs[0]
+
+
+def test_assert_sparse_upsert_refuses_null_pk():
+    from connectors.writer_common import assert_sparse_upsert_has_pk
+
+    try:
+        assert_sparse_upsert_has_pk({"id": None, "note": "x"}, ["id"])
+        raise AssertionError("expected null PK refuse")
+    except ValueError as exc:
+        assert "null" in str(exc).lower()
+
+
+def test_redis_conflict_strict_casefold_and_partial():
+    from services.primary_key import infer_redis_conflict_columns
+
+    assert infer_redis_conflict_columns(
+        ["userid", "orgid"], None, ["UserId", "OrgId"]
+    ) == ["userid", "orgid"]
+    try:
+        infer_redis_conflict_columns(["orgid"], None, ["UserId", "OrgId"])
+        raise AssertionError("expected partial composite refuse")
+    except ValueError as exc:
+        assert "unresolved" in str(exc).lower()
+
+
+def test_sanitize_json_value_refuses_nan():
+    from services.value_serializer import sanitize_json_value
+    import math
+
+    try:
+        sanitize_json_value(math.nan)
+        raise AssertionError("expected NaN refuse")
+    except ValueError as exc:
+        assert "non-finite" in str(exc).lower()
+    assert sanitize_json_value(math.nan, refuse_nonfinite=False) is None

@@ -43,6 +43,33 @@ def example_connector_name(
     return fallback
 
 
+def example_table_name(
+    ctx: dict[str, Any] | None = None,
+    *,
+    fallback: str = "your_table",
+) -> str:
+    """A table name the operator will recognise, for phrasing examples.
+
+    The clarify text used to name a fixture table, which told operators to ask
+    about something their workspace does not contain. Prefer a table this chat
+    has actually touched, then a neutral placeholder — never a made-up name.
+    """
+    for key in ("table", "tables", "objects"):
+        value = (ctx or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, list):
+            for item in value:
+                name = (
+                    str(item).strip()
+                    if not isinstance(item, dict)
+                    else str(item.get("name") or item.get("table") or "").strip()
+                )
+                if name:
+                    return name
+    return fallback
+
+
 def example_dest_connector_name(
     ctx: dict[str, Any] | None = None,
     *,

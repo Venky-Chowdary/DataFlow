@@ -31,13 +31,16 @@ EDGE_SOURCE_SCHEMA = {
     "rec_id": "INTEGER",
     "compensation": "DECIMAL",
     "active": "BOOLEAN",
-    "recorded_at": "DATETIME",
+    # TZ-aware samples (+05:30 / Z) must land TIMESTAMPTZ — DATETIME/NTZ
+    # fail-closes (refuse silent offset strip).
+    "recorded_at": "TIMESTAMPTZ",
     "payload": "JSON",
     "comment": "TEXT",
 }
 
 # Values exercise high precision, scientific notation, timezones, JSON objects/
-# arrays, empty arrays, and an unambiguous day-first date string.
+# arrays, and empty arrays. All timestamps carry offset/Z — TIMESTAMPTZ refuse
+# naive wall-clock invent (date-only / day-first covered in transform_locale).
 EDGE_RECORDS = [
     {
         "rec_id": "1",
@@ -59,17 +62,17 @@ EDGE_RECORDS = [
         "rec_id": "3",
         "compensation": "-9999.99",
         "active": "true",
-        "recorded_at": "2024-07-14",
+        "recorded_at": "2024-07-14T00:00:00Z",
         "payload": "{}",
-        "comment": "date only",
+        "comment": "date as UTC midnight",
     },
     {
         "rec_id": "4",
         "compensation": "3.14159",
         "active": "0",
-        "recorded_at": "31/12/2024 10:00:00",
+        "recorded_at": "2024-12-31T10:00:00+00:00",
         "payload": "[]",
-        "comment": "dayfirst",
+        "comment": "explicit offset",
     },
 ]
 
@@ -89,10 +92,33 @@ def _seed_postgresql_source(tmp_path: Path) -> EndpointConfig:
     if not _endpoint_reachable(source):
         pytest.skip("PostgreSQL source not reachable")
 
-    identity = [{"source": c, "target": c} for c in EDGE_COLUMNS]
-    rows, _, summary = write_destination_database(
-        source, EDGE_RECORDS, EDGE_COLUMNS, EDGE_SOURCE_SCHEMA, identity
-    )
+    identity = [
+        {
+            "source": c,
+            "target": c,
+            "target_type": EDGE_SOURCE_SCHEMA[c],
+        }
+        for c in EDGE_COLUMNS
+    ]
+    try:
+        rows, _, summary = write_destination_database(
+            source, EDGE_RECORDS, EDGE_COLUMNS, EDGE_SOURCE_SCHEMA, identity
+        )
+    except Exception as exc:
+        err = str(exc).lower()
+        if any(
+            s in err
+            for s in (
+                "password authentication",
+                "could not connect",
+                "connection refused",
+                "timeout",
+                "role",
+                "access denied",
+            )
+        ):
+            pytest.skip(f"PostgreSQL source not usable: {exc}")
+        raise
     if rows != len(EDGE_RECORDS):
         pytest.skip(f"source seed wrote {rows} rows: {summary}")
     return source
@@ -116,7 +142,17 @@ def test_edge_type_cross_schema_transfer(dest_driver: str, tmp_path: Path) -> No
         sync_mode="full_refresh_overwrite",
         skip_preflight=True,
         validation_mode="strict",
-        mappings=EDGE_MANUAL_MAPPINGS,
+        mappings=[
+            {
+                **m,
+                **(
+                    {"target_type": "TIMESTAMPTZ"}
+                    if m.get("source") == "recorded_at"
+                    else {}
+                ),
+            }
+            for m in EDGE_MANUAL_MAPPINGS
+        ],
     )
 
     engine = UniversalTransferEngine()

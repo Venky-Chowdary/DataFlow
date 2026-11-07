@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
+import sqlalchemy as sa
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -22,13 +22,15 @@ def test_teradata_merge_uses_volatile_stage_and_pi_equality_on():
         def execute(self, stmt, params=None):  # noqa: ANN001
             executed.append(str(getattr(stmt, "text", stmt)).upper())
 
-    class _Table:
-        name = "ORDERS"
-        schema = "APP"
+    table = sa.Table(
+        "ORDERS", sa.MetaData(),
+        sa.Column("id", sa.Integer), sa.Column("amt", sa.Integer),
+        schema="APP",
+    )
 
     n = _teradata_merge_upsert(
         _Conn(),
-        _Table(),
+        table,
         [{"id": 1, "amt": 10}, {"id": 2, "amt": 20}],
         ["id"],
         ["id", "amt"],

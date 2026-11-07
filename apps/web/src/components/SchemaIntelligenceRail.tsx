@@ -10,6 +10,8 @@ import {
 } from "../lib/schemaIntelligence";
 import type { EditableMapping } from "../lib/mapping";
 import type { EnhancedAnalysis, PreflightResult, TransferPlan, TransferResult } from "../lib/types";
+import { destHeadline, destMetricToneClass, writerHeadline } from "../lib/conservationLedger";
+import { STEP_DESTINATION, STEP_MAP, STEP_SOURCE } from "../pages/transfer/studioConstants";
 
 interface SchemaIntelligenceRailProps {
   step: number;
@@ -64,6 +66,8 @@ export function SchemaIntelligenceRail({
   const blockers = typeRisks.filter((r) => r.severity === "block");
   const warnings = typeRisks.filter((r) => r.severity === "warn");
   const formatLabel = inferSourceFormatLabel(analysis, sourceFormat);
+  const destMetric = result ? destHeadline(result) : null;
+  const writerMetric = result ? writerHeadline(result) : null;
   const advantages = buildCompetitiveAdvantages({
     sourceKind,
     destType,
@@ -115,7 +119,7 @@ export function SchemaIntelligenceRail({
         </ul>
       </div>
 
-      {step === 1 && !analysis && (
+      {step === STEP_SOURCE && !analysis && (
         <div className="df2-rail-panel">
           <p className="df2-intelligence-empty">
             Upload JSON/CSV, connect MongoDB, or point at S3 — we profile schema, detect nested documents,
@@ -190,7 +194,7 @@ export function SchemaIntelligenceRail({
               </li>
             ))}
           </ul>
-          {(blockers.length > 0 || warnings.length > 0) && onGoToMapping && step >= 2 && (
+          {(blockers.length > 0 || warnings.length > 0) && onGoToMapping && step >= STEP_DESTINATION && (
             <button type="button" className="df2-btn df2-btn-sm df2-rail-action-btn" onClick={onGoToMapping}>
               <DtIcon name="sparkle" size={14} /> Fix in mapping
             </button>
@@ -219,7 +223,7 @@ export function SchemaIntelligenceRail({
         </div>
       )}
 
-      {(syncModeLabel || schemaPolicyLabel) && step >= 3 && (
+      {(syncModeLabel || schemaPolicyLabel) && step >= STEP_MAP && (
         <div className="df2-rail-panel">
           <div className="df2-rail-kicker">Run settings</div>
           {syncModeLabel && (
@@ -234,12 +238,16 @@ export function SchemaIntelligenceRail({
         </div>
       )}
 
-      {result?.success && (
+      {result?.success && destMetric && writerMetric && (
         <div className="df2-rail-panel">
-          <div className="df2-rail-kicker">Reconciliation</div>
+          <div className="df2-rail-kicker">Conservation</div>
+          <div className={`df2-rail-split ${destMetricToneClass(destMetric)}`}>
+            <span>{destMetric.label}</span>
+            <strong title={destMetric.title}>{destMetric.value}</strong>
+          </div>
           <div className="df2-rail-split">
-            <span>Rows written</span>
-            <strong>{result.records_transferred?.toLocaleString() ?? "0"}</strong>
+            <span>{writerMetric.label}</span>
+            <strong title={writerMetric.title}>{writerMetric.value}</strong>
           </div>
           {result.reconciliation?.message && (
             <p className="df2-rail-note">{result.reconciliation.message}</p>

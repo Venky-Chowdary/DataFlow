@@ -6,6 +6,7 @@ import os
 import socket
 import sqlite3
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -26,7 +27,7 @@ def test_sqlite_to_bigquery():
     except OSError:
         pytest.skip("BigQuery emulator not reachable on localhost:9050")
 
-    path = f"/tmp/sqlite_to_bq_{uuid.uuid4().hex[:8]}.db"
+    path = f"{tempfile.gettempdir()}/sqlite_to_bq_{uuid.uuid4().hex[:8]}.db"
     table_name = "sqlite_to_bq_" + uuid.uuid4().hex[:8]
 
     conn = sqlite3.connect(path)

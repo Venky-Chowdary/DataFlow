@@ -26,6 +26,7 @@ def test_catalog_summary():
     assert data.get("unique_drivers", data.get("transfer_live", 0)) >= 8
     assert data.get("unique_drivers", 999) < 80
     assert data["categories"] >= 8
+    assert data.get("catalog_tiles_are_not_transfer_live") is True
 
 
 def test_search_database_category():
@@ -82,6 +83,12 @@ def test_catalog_summary_survives_broken_module_spec(monkeypatch):
             raise ModuleNotFoundError(f"No module named {name!r}")
         return original(name, *args, **kwargs)
 
+    from src.transfer.connector_capabilities import _module_is_installed
+
     monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
-    data = _catalog.catalog_summary()
+    _module_is_installed.cache_clear()
+    try:
+        data = _catalog.catalog_summary()
+    finally:
+        _module_is_installed.cache_clear()
     assert data["total"] >= 600

@@ -83,9 +83,17 @@ class DataTransferRAGPipeline:
         source_type: str,
         target_type: str,
         semantic_type: str | None = None,
+        source_column: str = "",
+        target_column: str = "",
     ) -> RAGResponse:
-        """Suggest data transformations."""
-        return self.generator.suggest_transformations(source_type, target_type, semantic_type)
+        """Suggest transforms the write path would stamp."""
+        return self.generator.suggest_transformations(
+            source_type,
+            target_type,
+            semantic_type,
+            source_column=source_column,
+            target_column=target_column,
+        )
 
     def learn_correction(
         self,
@@ -119,6 +127,11 @@ class DataTransferRAGPipeline:
                 "natural_language_query",
                 "self_learning",
             ],
+            "mapping_authority": "semantic_mapper.map_columns",
+            "honesty": (
+                "RAG retrieves evidence and explains. Assignment and confidence "
+                "come from map_columns — RAG must not auto-approve false-friends."
+            ),
         }
 
 

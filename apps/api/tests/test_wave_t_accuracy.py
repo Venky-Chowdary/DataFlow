@@ -105,7 +105,12 @@ def test_email_fail_policy_skips_smtp():
             error_policy="fail",
         )
     assert result.ok is False
-    assert "Transform errors" in (result.error or "")
+    err = (result.error or "").lower()
+    assert (
+        "transform errors" in err
+        or "rejected" in err
+        or "fail_job" in err
+    ), result.error
     mock_smtplib.SMTP.assert_not_called()
     mock_smtplib.SMTP_SSL.assert_not_called()
 

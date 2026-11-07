@@ -8,6 +8,11 @@ export interface GateCatalogEntry {
   label: string;
   icon: string;
   rule: string;
+  /**
+   * Operator code. Set when the id's leading number collides with another gate
+   * (g9_data_integrity and g9_sync_contract must not both render as G9).
+   */
+  code?: string;
   /** Older UI / local-preflight ids that still appear in stored results. */
   aliases?: string[];
 }
@@ -56,15 +61,87 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     icon: "activity",
     rule: "Pre-write sample: identity mappings keep values; identity-key uniqueness holds. Post-load checksum runs after Execute.",
   },
-  { id: "g9_sync_contract", label: "Sync contract", icon: "transfer", rule: "Cursor and primary-key contract satisfy the sync mode." },
+  { id: "g9_sync_contract", code: "G12", label: "Sync contract", icon: "transfer", rule: "Cursor and primary-key contract satisfy the sync mode." },
   { id: "g10_schema_policy", label: "Schema change policy", icon: "gate", rule: "Detected drift is allowed by the schema policy." },
   { id: "g11_validation_posture", label: "Validation posture", icon: "lock", rule: "Overall posture meets the selected validation mode." },
   { id: "schema_drift", label: "Schema drift", icon: "alert", rule: "Live source/destination schema no longer matches the saved mapping contract." },
+  {
+    id: "g13_source_coverage",
+    label: "Source column coverage",
+    icon: "layers",
+    rule: "Every source column is mapped to a destination column or declared an intentional omission — unaccounted columns block instead of being dropped.",
+  },
+  {
+    id: "g14_destination_requirements",
+    label: "Destination required columns",
+    icon: "layers",
+    rule: "Every NOT NULL destination column is filled by a mapping, a DEFAULT, or an identity/generated value — otherwise the write is refused before it starts.",
+  },
+  {
+    id: "g15_dest_exists_shape",
+    label: "Dest-exists shape",
+    icon: "layers",
+    rule: "Existing-table shape is classified once (equal / source-superset / dest-superset / overlap). Writes are name-addressed — never source-positional. Dest-only columns stay off SET.",
+  },
+  {
+    id: "g16_field_reduction",
+    label: "Field reduction governance",
+    icon: "layers",
+    rule: "Every source column not carried to the destination holds a typed reduction reason. A reason that claims a fact about the data (empty / constant) is checked against the Validate sample and blocks when the sample disproves it; archive_only must name the archive. Sample evidence — never population proof.",
+  },
+  {
+    id: "g19_dest_schema_replacement",
+    label: "Destination schema replacement",
+    icon: "layers",
+    rule: "A full refresh drops and recreates the destination from the source shape. Where an existing column declares a carrier the source would overflow, the replacement is named and blocks — a signed Migration Risk Contract records it instead of hiding it.",
+  },
+  {
+    id: "g18_cdc_snapshot_mode",
+    label: "CDC snapshot mode",
+    icon: "transfer",
+    rule: "snapshot_mode=never without a stored watermark blocks at Validate (same kernel Execute uses). initial / when_needed snapshot. CDC remains at-least-once upsert.",
+  },
+  {
+    id: "g24_append_continuity",
+    label: "Append continuity",
+    icon: "shield",
+    rule: "An append lands on top of a previously verified table. Validate checks the table still exists with the row count the last verified run left; Execute re-verifies the full value digest before writing. A dropped or edited destination blocks until the operator accepts it (audited) or rebuilds with full refresh.",
+  },
+  {
+    id: "g3f_population_fit",
+    label: "Population fit",
+    icon: "scan",
+    rule: "Bounded destination carriers (DECIMAL(p,s) / VARCHAR(n) / sized INTEGER) are decided on the rows this run actually holds, with the write path's own fit predicates. A finding proves those values cannot be written; a clean scan is population proof only when every source row was scanned.",
+  },
+  {
+    id: "g20_code_crosswalk",
+    label: "Code crosswalk coverage",
+    icon: "layers",
+    rule: "A declared source→target code map must cover every distinct source value in the population, not a sample. One unmapped code blocks. The write path never passes an unmapped code through as identity.",
+  },
   {
     id: "constraint_fk",
     label: "Foreign key coverage",
     icon: "shield",
     rule: "Destination FK columns must be mapped (or FK risk acknowledged). Schema metadata coverage only — not population orphan proof.",
+  },
+  {
+    id: "g21_control_totals",
+    label: "Control totals",
+    icon: "activity",
+    rule: "Declared monetary columns get an independent source SUM compared to the destination SUM after write. A row count is not a ledger balance. Browser sample SUM is not that proof.",
+  },
+  {
+    id: "g23_stream_procedures",
+    label: "Stream procedures",
+    icon: "gate",
+    rule: "Each selected table has its own read and write. One CALL is not replayed onto every table. CDC, SCD2, and mirror refuse a destination CALL or INSERT; before/after hooks on a table write stay allowed.",
+  },
+  {
+    id: "g22_dest_referential_integrity",
+    label: "Destination referential integrity",
+    icon: "shield",
+    rule: "After write, every source relationship is dest-enforced or anti-join scanned with zero orphans. Schema FK coverage and a sample orphan probe are not dest population proof.",
   },
 ];
 
@@ -79,6 +156,32 @@ export const CORE_ENGINE_GATE_IDS = [
   "g7_capacity",
   "g8_reconciliation",
 ] as const;
+
+/**
+ * What the engine is *doing* in each core stage, in the order it runs them.
+ *
+ * "Engine running G1–G9" told an operator nothing: a client watching a million
+ * rows migrate could not tell which internal id was inspecting their data, or
+ * that the wait was work rather than a hang. These remain the stage *names*.
+ * The running ticker must not walk them on a timer — that looped 1/9…9/9
+ * during a long 1M scan. Live progress is rows scanned + wall clock.
+ */
+export const ENGINE_STAGES: { id: string; stage: string; running: string }[] = [
+  { id: "g1_source", stage: "Source acquisition", running: "Reading source catalog and sample" },
+  { id: "g2_destination", stage: "Destination probe", running: "Probing destination privileges" },
+  { id: "g3_schema_contract", stage: "Schema contract diff", running: "Diffing source and destination schemas" },
+  { id: "g4_mapping_confidence", stage: "Semantic mapping", running: "Assigning columns by semantic score" },
+  { id: "g5_dry_run", stage: "Transform dry-run", running: "Running writer transforms on sample rows" },
+  { id: "g9_data_integrity", stage: "Integrity scan", running: "Scanning encoding, nulls, identity and precision" },
+  { id: "g6_target_ddl", stage: "DDL compilation", running: "Compiling destination CREATE / ALTER plan" },
+  { id: "g7_capacity", stage: "Capacity estimate", running: "Estimating destination headroom and runtime" },
+  { id: "g8_reconciliation", stage: "Reconciliation contract", running: "Binding the post-load checksum contract" },
+];
+
+export function engineStageLabel(id: string): string {
+  const canonical = canonicalizeGateId(id);
+  return ENGINE_STAGES.find((s) => s.id === canonical)?.stage ?? gateLabel(id);
+}
 
 const ALIAS_TO_CANONICAL: Record<string, string> = {};
 for (const entry of GATE_CATALOG) {
@@ -105,4 +208,95 @@ export function gateCatalogEntry(id: string): GateCatalogEntry {
 
 export function gateLabel(id: string): string {
   return gateCatalogEntry(id).label;
+}
+
+/**
+ * Title for one blocker card / rail line.
+ *
+ * Proof-bundle blockers are positionally numbered (`proof_0`), not gates, so the
+ * gate catalog can only spell their internal id back at the operator. Name the
+ * cause from its own message instead — an operator must never be told the reason
+ * they cannot execute is "proof 0".
+ */
+export function isInternalGateId(id: string): boolean {
+  return /^proof_\d+$/i.test(String(id || ""));
+}
+
+export function blockerTitle(id: string, message?: string): string {
+  if (!isInternalGateId(id)) return gateLabel(id);
+  const text = String(message || "").trim();
+  if (!text) return "Transfer proof blocker";
+  const clause = text.split(/[.;\n]|\s—\s/)[0].trim() || text;
+  return clause.length > 72 ? `${clause.slice(0, 69).trimEnd()}…` : clause;
+}
+
+/** Catalog id → operator code. g9_data_integrity is G9; sync contract is G12. */
+export function gateDisplayCode(id: string): string {
+  const entry = gateCatalogEntry(id);
+  if (entry.code) return entry.code;
+  const match = entry.id.match(/^g(\d+[a-z]?)/i);
+  if (match) return `G${match[1].toUpperCase()}`;
+  return entry.id.replace(/_/g, " ").slice(0, 8).toUpperCase();
+}
+
+/**
+ * G3 then G3F then G4. Numbered codes sort numerically; a letter suffix stays
+ * with its number. Gates without a G-code follow, in catalog order.
+ */
+export function compareGateDisplayOrder(leftId: string, rightId: string): number {
+  const rank = (id: string): [number, string, number] => {
+    const code = gateDisplayCode(id);
+    const match = /^G(\d+)([A-Z]*)$/.exec(code);
+    const catalogAt = GATE_CATALOG.findIndex((entry) => entry.id === canonicalizeGateId(id));
+    if (!match) return [100000, code, catalogAt < 0 ? 999 : catalogAt];
+    return [Number(match[1]), match[2], catalogAt < 0 ? 999 : catalogAt];
+  };
+  const left = rank(leftId);
+  const right = rank(rightId);
+  if (left[0] !== right[0]) return left[0] - right[0];
+  if (left[1] !== right[1]) return left[1] < right[1] ? -1 : 1;
+  return left[2] - right[2];
+}
+
+export interface GateStatusCounts {
+  total: number;
+  passed: number;
+  blocked: number;
+  skipped: number;
+  review: number;
+  pending: number;
+}
+
+/** One bucket per gate so passed + blocked + skipped + review + pending = total. */
+export function countGateStatuses(
+  gates: Array<{ status?: string | null }> | null | undefined,
+): GateStatusCounts {
+  const counts: GateStatusCounts = {
+    total: 0,
+    passed: 0,
+    blocked: 0,
+    skipped: 0,
+    review: 0,
+    pending: 0,
+  };
+  for (const gate of gates || []) {
+    counts.total += 1;
+    const status = String(gate?.status || "").toLowerCase();
+    if (status === "pass") counts.passed += 1;
+    else if (status === "block") counts.blocked += 1;
+    else if (status === "skip") counts.skipped += 1;
+    else if (status === "warn" || status === "review") counts.review += 1;
+    else counts.pending += 1;
+  }
+  return counts;
+}
+
+export function isSchemaDriftEcho(message?: string | null): boolean {
+  const text = String(message || "").trim().toLowerCase();
+  return (
+    text.startsWith("schema change detected")
+    || text.startsWith("schema drift")
+    || text.startsWith("schema change acknowledged")
+    || text.startsWith("breaking schema change")
+  );
 }

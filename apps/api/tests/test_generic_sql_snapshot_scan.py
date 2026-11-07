@@ -1,0 +1,302 @@
+"""generic_sql / BigQuery snapshot extract is one SELECT, not OFFSET pages."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from connectors.generic_sql import read_table_scan_batch
+from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES, fetch_scan_page
+
+
+def test_snapshot_scan_sources_cover_warehouse_matrix():
+    for src in (
+        "snowflake",
+        "mysql",
+        "postgresql",
+        "redshift",
+        "bigquery",
+        "generic_sql",
+        "sqlserver",
+        "oracle",
+        "databricks",
+        "sqlite",
+        "mongodb",
+    ):
+        assert src in SNAPSHOT_SCAN_SOURCES
+
+
+def test_fetch_scan_page_falls_back_to_fetchall_for_test_doubles():
+    cur = MagicMock()
+    cur.fetchmany.return_value = MagicMock()
+    cur.fetchall.return_value = [(1,), (2,)]
+    assert fetch_scan_page(cur, 10) == [(1,), (2,)]
+    cur.fetchmany.return_value = [(3,)]
+    assert fetch_scan_page(cur, 10) == [(3,)]
+
+
+def test_generic_sql_scan_never_offsets():
+    pytest.importorskip("sqlalchemy")
+    import sqlalchemy as sa
+
+    result = MagicMock()
+    result.fetchmany.side_effect = [
+        [("1", "A"), ("2", "B")],
+        [],
+    ]
+    conn = MagicMock()
+    conn.execute.return_value = result
+    engine = MagicMock()
+    engine.connect.return_value = conn
+    col = sa.column("id")
+    table_obj = MagicMock()
+    table_obj.c = {"id": col}
+    table_obj.primary_key = None
+
+    call_order: list[str] = []
+
+    def _count(*_a, **_k):
+        call_order.append("count")
+        return 2
+
+    def _execute(*_a, **_k):
+        call_order.append("execute")
+        return result
+
+    conn.execute.side_effect = _execute
+
+    state: dict = {}
+    with (
+        patch("connectors.generic_sql.SQLALCHEMY_AVAILABLE", True),
+        patch("connectors.generic_sql._engine", return_value=engine),
+        patch("connectors.generic_sql._schema_name", return_value="dbo"),
+        patch("connectors.generic_sql._dialect_key", return_value="mssql"),
+        patch("connectors.generic_sql._reflect_table", return_value=table_obj),
+        patch("connectors.generic_sql._tz_safe_projection", return_value=[col]),
+        patch(
+            "connectors.generic_sql._serialize_source_row",
+            side_effect=lambda row, cols, dialect: list(row),
+        ),
+        patch("connectors.generic_sql._count_table_raw", side_effect=_count),
+    ):
+        first = read_table_scan_batch(
+            host="h",
+            port=1433,
+            database="db",
+            username="u",
+            password="p",
+            schema="dbo",
+            connection_string="",
+            ssl=False,
+            table="T",
+            type="sqlserver",
+            columns=["id"],
+            offset=0,
+            limit=2,
+            scan_state=state,
+        )
+        second = read_table_scan_batch(
+            host="h",
+            port=1433,
+            database="db",
+            username="u",
+            password="p",
+            schema="dbo",
+            connection_string="",
+            ssl=False,
+            table="T",
+            type="sqlserver",
+            columns=["id"],
+            offset=2,
+            limit=2,
+            scan_state=state,
+        )
+
+    assert first.rows == [["1", "A"], ["2", "B"]]
+    assert second.rows == []
+    assert call_order == ["count", "execute"]
+    conn.execute.assert_called_once()
+    stmt = conn.execute.call_args[0][0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "OFFSET" not in compiled.upper()
+    # Streaming is asked for on the statement, not the connection: setting it on
+    # the connection leaks into every later statement, and a following DDL then
+    # compiles as DECLARE CURSOR FOR <ddl>.
+    conn.execution_options.assert_not_called()
+    assert stmt.get_execution_options().get("stream_results") is True
+
+
+def test_bigquery_scan_sql_has_no_offset():
+    pytest.importorskip("google.cloud.bigquery")
+    from connectors.bigquery_reader import read_table_scan_batch
+
+    job = MagicMock()
+    job.schema = [MagicMock(name="id")]
+    job.schema[0].name = "id"
+    row = MagicMock()
+    row.values.return_value = (1,)
+    job.result.return_value = [row]
+    client = MagicMock()
+    client.query.return_value = job
+    client.get_table.return_value.schema = [MagicMock(name="id")]
+    client.get_table.return_value.schema[0].name = "id"
+    count_row = {"cnt": 1}
+    client.query.return_value.result.return_value = [count_row]
+
+    # First query is COUNT, second is the scan. Side-effect the two jobs.
+    count_job = MagicMock()
+    count_job.result.return_value = [{"cnt": 1}]
+    scan_job = MagicMock()
+    scan_job.schema = [MagicMock()]
+    scan_job.schema[0].name = "id"
+    scan_row = MagicMock()
+    scan_row.values.return_value = (1,)
+    scan_job.result.return_value = [scan_row]
+    client.query.side_effect = [count_job, scan_job]
+
+    state: dict = {}
+    with (
+        patch("connectors.bigquery_conn.get_client", return_value=client),
+        patch("connectors.bigquery_conn._is_local_endpoint", return_value=(False, "")),
+    ):
+        batch = read_table_scan_batch(
+            host="proj",
+            port=443,
+            database="proj",
+            username="",
+            password="",
+            schema="ds",
+            connection_string="",
+            ssl=False,
+            table="T",
+            columns=["id"],
+            offset=0,
+            limit=10,
+            scan_state=state,
+        )
+
+    assert batch.rows == [["1"]]
+    scan_sql = client.query.call_args_list[-1].args[0]
+    assert "OFFSET" not in scan_sql.upper()
+    assert "LIMIT" not in scan_sql.upper()
+
+
+def test_sqlite_two_row_snapshot_without_pk_stops_after_empty_page(tmp_path):
+    """Full-refresh snapshot with no keyset must not reopen the scan forever.
+
+    SQL Server compose has no PK on the SKU seed table, so Execute falls back
+    to snapshot scan. An empty fetchmany used to look like a live ReadBatch
+    and the next read reopened SELECT from row 0 — checkpoint-loop, no finish.
+    """
+    import sqlite3
+
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    src_path = tmp_path / "snap_src.db"
+    dst_path = tmp_path / "snap_dst.db"
+    conn = sqlite3.connect(src_path)
+    conn.execute("CREATE TABLE src (id TEXT, amount TEXT)")
+    conn.executemany(
+        "INSERT INTO src VALUES (?, ?)",
+        [("1", "1000.00"), ("2", "2000.50")],
+    )
+    conn.commit()
+    conn.close()
+
+    result = UniversalTransferEngine().execute_tracked(
+        TransferRequest(
+            source=EndpointConfig(
+                kind="database",
+                format="sqlite",
+                database=str(src_path),
+                table="src",
+            ),
+            destination=EndpointConfig(
+                kind="database",
+                format="sqlite",
+                database=str(dst_path),
+                table="dst",
+            ),
+            sync_mode="full_refresh_overwrite",
+            skip_preflight=True,
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 0.99},
+                {"source": "amount", "target": "amount", "confidence": 0.99},
+            ],
+        ),
+        "snap-empty-page",
+    )
+    assert result.success is True, result.error
+    assert result.records_transferred == 2
+
+    conn = sqlite3.connect(dst_path)
+    try:
+        n = conn.execute("SELECT count(*) FROM dst").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 2
+
+
+def test_duckdb_file_path_strips_sqlalchemy_url(tmp_path):
+    from connectors.sqlite_common import duckdb_file_path
+
+    abs_path = tmp_path / "lab.duckdb"
+    assert duckdb_file_path(str(abs_path), "") == str(abs_path)
+    assert duckdb_file_path("", f"duckdb:///{abs_path}") == str(abs_path)
+    assert duckdb_file_path("", "duckdb:///:memory:") == ":memory:"
+    assert duckdb_file_path("", "md:my_db") == "md:my_db"
+
+
+def test_duckdb_generic_sql_url_scan_pages_every_row(tmp_path):
+    """Desktop lab binds DuckDB as generic_sql + duckdb:///abs.
+
+    COUNT(*) on the same connection after a streaming SELECT used to clobber
+    DuckDB's single active result: page 1 returned 1 of 2 rows, page 2 empty.
+    """
+    duckdb = pytest.importorskip("duckdb")
+    pytest.importorskip("sqlalchemy")
+    from services.reconciliation import verify_duckdb_table
+
+    path = tmp_path / "scan.duckdb"
+    table = "orders"
+    conn = duckdb.connect(str(path))
+    conn.execute(f'CREATE TABLE "{table}" (id INTEGER PRIMARY KEY, note VARCHAR)')
+    conn.executemany(f'INSERT INTO "{table}" VALUES (?, ?)', [(1, "a"), (2, "b")])
+    conn.close()
+
+    url = f"duckdb:///{path}"
+    state: dict = {}
+    kwargs = dict(
+        host="",
+        port=0,
+        database=str(path),
+        username="",
+        password="",
+        schema="",
+        connection_string=url,
+        ssl=False,
+        table=table,
+        type="duckdb",
+        columns=["id", "note"],
+        limit=1,
+        scan_state=state,
+    )
+    first = read_table_scan_batch(**kwargs, offset=0)
+    second = read_table_scan_batch(**kwargs, offset=len(first.rows))
+    landed = list(first.rows) + list(second.rows)
+    assert len(landed) == 2, (first.rows, second.rows)
+    ids = sorted(int(row[0]) for row in landed)
+    assert ids == [1, 2]
+
+    from connectors.sql_snapshot_scan import close_table_scan
+
+    close_table_scan(state)
+    count, checksum = verify_duckdb_table(
+        connection_string=url,
+        database="",
+        table_name=table,
+    )
+    assert count == 2
+    assert checksum

@@ -1,0 +1,735 @@
+"""Per-source batch read dispatch for the streaming transfer engine.
+
+Split out of ``stream.py`` (a god module over its size budget). This is the
+single place that knows how each source driver paginates a read: keyset cursor,
+numeric offset, opaque continuation token (DynamoDB / Elasticsearch search_after
+/ Redis SCAN / Kafka offsets), or SaaS cursor. Connector imports stay lazy so
+optional driver dependencies are only required for routes that use them.
+
+``stream._read_batch`` wraps this with retry/telemetry; callers should use that.
+"""
+
+from __future__ import annotations
+
+from services.brand import bigquery_dataset_of
+from typing import Any
+
+from .connector_capabilities import resolve_driver_type, source_read_driver
+
+# Sources whose pages are addressed by an opaque continuation token instead of a
+# row offset. The token a page returns must be handed to the next read: these
+# readers ignore ``offset`` entirely, so a caller that pages them by offset
+# re-reads page one forever — the same rows counted twice and the tail never
+# read. Keyed by driver type (``resolve_driver_type``).
+CONTINUATION_KWARG: dict[str, str] = {
+    "dynamodb": "dynamodb_cursor",
+    "elasticsearch": "es_search_after",
+    "redis": "redis_scan_state",
+    "kafka": "kafka_cursor",
+    "qdrant": "qdrant_offset",
+}
+
+
+def _read_batch_impl(src_type: str, cfg: dict[str, Any], *args: Any, **kwargs: Any):
+    """Read one batch under the connector egress policy (pre-dial + DNS pin)."""
+    from services.egress_guard import connector_dial_scope
+
+    with connector_dial_scope(
+        cfg, db_type=str((cfg or {}).get("type") or src_type or ""), point="transfer"
+    ):
+        return _read_batch_unscoped(src_type, cfg, *args, **kwargs)
+
+
+def _read_batch_unscoped(
+    src_type: str,
+    cfg: dict[str, Any],
+    table: str,
+    columns: list[str] | None,
+    offset: int,
+    limit: int,
+    database: str = "",
+    dynamodb_cursor: dict | None = None,
+    dynamodb_total: int | None = None,
+    *,
+    cursor_column: str = "",
+    cursor_after: str | None = None,
+    cursor_inclusive: bool = False,
+    cursor_type: str | None = None,
+    known_total_rows: int | None = None,
+    es_search_after: list | None = None,
+    redis_scan_state=None,
+    kafka_cursor: dict | None = None,
+    qdrant_offset: Any = None,
+    cursor_primary_key: str | None = None,
+    cursor_key_columns: list[str] | None = None,
+    scan_state: dict[str, Any] | None = None,
+    scan_filter: tuple[str, str | None] | None = None,
+    sdk_state: str | None = None,
+):
+    from connectors.generic_sql import connection_options
+
+    src_type = source_read_driver(src_type)
+    from services.procedure_source import is_callable_source, read_callable_batch
+
+    # Procedure / custom-SQL extract — one CALL, then page the spool. The first
+    # branch, before any registry or per-dialect table reader: a leftover table
+    # name must not hijack the read, and a query source has no table to require.
+    if is_callable_source(cfg):
+        return read_callable_batch(
+            cfg,
+            offset=offset,
+            limit=limit,
+            peek=False,
+            columns=columns,
+            cursor_column=cursor_column or None,
+            cursor_after=cursor_after,
+        )
+    from connectors.sdk import get_descriptor
+
+    descriptor = get_descriptor(src_type)
+    if descriptor and "source" in descriptor.roles and descriptor.catalog_ids:
+        from .connector_dispatch import read_via_registry
+
+        return read_via_registry(
+            src_type,
+            cfg=cfg,
+            table=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            sdk_state=sdk_state,
+        )
+
+    from connectors.sql_snapshot_scan import FILTERED_SCAN_SOURCES
+
+    # Incremental read on a source with no unique tie-break: one held snapshot
+    # scan bounded by ``WHERE cursor > watermark``. Never falls back to an
+    # unfiltered scan or a cursor-only seek — both lose rows silently.
+    _scan_filter_kw: dict[str, Any] = {}
+    if scan_filter is not None:
+        if scan_state is None or cursor_column or cursor_key_columns:
+            raise ValueError(
+                "scan_filter requires a held scan_state and no keyset cursor arguments"
+            )
+        if src_type not in FILTERED_SCAN_SOURCES:
+            raise ValueError(
+                f"{src_type} cannot page an incremental read on cursor "
+                f"{scan_filter[0]!r} without a unique tie-break: declare a primary "
+                "key or a non-nullable unique column on the stream contract."
+            )
+        _scan_filter_kw = {
+            "filter_column": scan_filter[0],
+            "filter_after": scan_filter[1],
+        }
+
+    # Phase F2 — N-col composite keyset (≥3) on SQLAlchemy dialects goes through
+    # generic_sql so PG/MySQL/Snowflake share the portable OR/AND builder.
+    _key_cols = [c for c in (cursor_key_columns or []) if c]
+    if (
+        cursor_column
+        and len(_key_cols) >= 3
+        and src_type
+        in ("postgresql", "redshift", "mysql", "snowflake", "sqlite", "generic_sql")
+    ):
+        from connectors.generic_sql import read_table_cursor_batch as _gs_cursor
+
+        return _gs_cursor(
+            host=cfg.get("host", ""),
+            port=int(cfg.get("port") or 5432),
+            database=cfg.get("database", "") or database,
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", "public"),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl", False)),
+            table=table,
+            cursor_column=cursor_column,
+            cursor_after=cursor_after,
+            cursor_inclusive=cursor_inclusive,
+            type=src_type if src_type != "redshift" else "postgresql",
+            columns=columns,
+            limit=limit,
+            cursor_primary_key=cursor_primary_key,
+            cursor_key_columns=_key_cols,
+            **connection_options(cfg),
+        )
+
+    if src_type == "postgresql" or src_type == "redshift":
+        from connectors.postgresql_reader import (
+            read_table_batch,
+            read_table_cursor_batch,
+        )
+
+        pg_port = int(cfg.get("port") or (5439 if src_type == "redshift" else 5432))
+        if scan_state is not None and not cursor_column:
+            from connectors.postgresql_reader import read_table_scan_batch
+
+            return read_table_scan_batch(
+                host=cfg["host"],
+                port=pg_port,
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", "public"),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=cfg.get("ssl", False),
+                table=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                scan_state=scan_state,
+                **_scan_filter_kw,
+                **connection_options(cfg),
+            )
+        if cursor_column:
+            return read_table_cursor_batch(
+                host=cfg["host"],
+                port=pg_port,
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", "public"),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=cfg.get("ssl", False),
+                table=table,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+                cursor_inclusive=cursor_inclusive,
+                columns=columns,
+                limit=limit,
+                cursor_primary_key=cursor_primary_key,
+            )
+        return read_table_batch(
+            host=cfg["host"],
+            port=pg_port,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", "public"),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+            table=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
+        )
+    if src_type == "mysql":
+        from connectors.mysql_reader import read_table_batch, read_table_cursor_batch
+
+        if scan_state is not None and not cursor_column:
+            from connectors.mysql_reader import read_table_scan_batch
+
+            return read_table_scan_batch(
+                host=cfg["host"],
+                port=int(cfg.get("port") or 3306),
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=cfg.get("ssl", False),
+                table=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                scan_state=scan_state,
+                **_scan_filter_kw,
+            )
+        if cursor_column:
+            return read_table_cursor_batch(
+                host=cfg["host"],
+                port=int(cfg.get("port") or 3306),
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=cfg.get("ssl", False),
+                table=table,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+                cursor_inclusive=cursor_inclusive,
+                columns=columns,
+                limit=limit,
+                cursor_primary_key=cursor_primary_key,
+            )
+        return read_table_batch(
+            host=cfg["host"],
+            port=int(cfg.get("port") or 3306),
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+            table=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
+        )
+    if src_type == "mongodb":
+        from connectors.mongodb_reader import (
+            read_collection_batch,
+            read_collection_cursor_batch,
+            read_collection_scan_batch,
+        )
+
+        if scan_state is not None and not cursor_column:
+            return read_collection_scan_batch(
+                cfg=cfg,
+                database=database or cfg.get("database", "test"),
+                collection=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                scan_state=scan_state,
+            )
+        if cursor_column:
+            return read_collection_cursor_batch(
+                cfg=cfg,
+                database=database or cfg.get("database", "test"),
+                collection=table,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+                cursor_type=cursor_type,
+                columns=columns,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                cursor_primary_key=cursor_primary_key,
+            )
+        return read_collection_batch(
+            cfg=cfg,
+            database=database or cfg.get("database", "test"),
+            collection=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
+        )
+    if src_type == "snowflake":
+        from connectors.snowflake_reader import (
+            read_table_batch,
+            read_table_cursor_batch,
+        )
+        from services.connector_auth import snowflake_session_kwargs
+
+        session = snowflake_session_kwargs(cfg)
+        if scan_state is not None and not cursor_column:
+            from connectors.snowflake_reader import read_table_scan_batch
+
+            return read_table_scan_batch(
+                host=cfg["host"],
+                port=int(cfg.get("port") or 443),
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", "PUBLIC"),
+                connection_string=cfg.get("connection_string", ""),
+                warehouse=cfg.get("warehouse", ""),
+                table=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                cursor_primary_key=cursor_primary_key,
+                scan_state=scan_state,
+                **session,
+            )
+        if cursor_column:
+            return read_table_cursor_batch(
+                host=cfg["host"],
+                port=int(cfg.get("port") or 443),
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", "PUBLIC"),
+                connection_string=cfg.get("connection_string", ""),
+                warehouse=cfg.get("warehouse", ""),
+                table=table,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+                cursor_inclusive=cursor_inclusive,
+                columns=columns,
+                limit=limit,
+                cursor_primary_key=cursor_primary_key,
+                **session,
+            )
+        return read_table_batch(
+            host=cfg["host"],
+            port=int(cfg.get("port") or 443),
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", "PUBLIC"),
+            connection_string=cfg.get("connection_string", ""),
+            warehouse=cfg.get("warehouse", ""),
+            table=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
+            cursor_primary_key=cursor_primary_key,
+            **session,
+        )
+    if src_type == "bigquery":
+        from connectors.bigquery_reader import read_table_batch, read_table_cursor_batch
+
+        if scan_state is not None and not cursor_column:
+            from connectors.bigquery_reader import read_table_scan_batch
+
+            return read_table_scan_batch(
+                host=cfg["host"],
+                port=int(cfg.get("port") or 443),
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=bigquery_dataset_of(cfg),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=cfg.get("ssl", False),
+                warehouse=cfg.get("warehouse", ""),
+                table=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                service_account=cfg.get("service_account", ""),
+                scan_state=scan_state,
+            )
+        if cursor_column:
+            return read_table_cursor_batch(
+                host=cfg["host"],
+                port=int(cfg.get("port") or 443),
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=bigquery_dataset_of(cfg),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=cfg.get("ssl", False),
+                warehouse=cfg.get("warehouse", ""),
+                table=table,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+                cursor_inclusive=cursor_inclusive,
+                columns=columns,
+                limit=limit,
+                service_account=cfg.get("service_account", ""),
+                cursor_primary_key=cursor_primary_key,
+            )
+        return read_table_batch(
+            host=cfg["host"],
+            port=int(cfg.get("port") or 443),
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=bigquery_dataset_of(cfg),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+            warehouse=cfg.get("warehouse", ""),
+            table=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
+            service_account=cfg.get("service_account", ""),
+        )
+    if src_type == "gcs":
+        from connectors.gcs_reader import read_object
+
+        return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
+    if src_type == "s3":
+        from connectors.s3_reader import read_object
+
+        return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
+    if src_type == "adls":
+        from connectors.adls_reader import read_object
+
+        return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
+    if src_type == "sftp":
+        from connectors.sftp_reader import read_object
+
+        return read_object(cfg=cfg, bucket=cfg.get("database", ""), key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
+    if src_type == "dynamodb":
+        from connectors.dynamodb_reader import read_table_batch
+
+        batch, _next = read_table_batch(
+            cfg=cfg,
+            table=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            exclusive_start_key=dynamodb_cursor,
+            total_rows=dynamodb_total,
+        )
+        return batch, _next
+    if src_type == "elasticsearch":
+        from connectors.elasticsearch_reader import read_index_batch
+
+        return read_index_batch(
+            cfg=cfg, index=table, columns=columns, limit=limit,
+            known_total_rows=known_total_rows, search_after=es_search_after,
+        )
+    if src_type == "redis":
+        from connectors.redis_reader import read_keys_batch
+
+        pattern = table or "*"
+        if pattern != "*" and "*" not in pattern and "?" not in pattern:
+            pattern = f"{pattern}:*"
+        return read_keys_batch(
+            cfg=cfg, pattern=pattern, limit=limit,
+            known_total_rows=known_total_rows, scan_state=redis_scan_state,
+        )
+    if src_type == "kafka":
+        from connectors.kafka_reader import read_topic_batch
+
+        return read_topic_batch(
+            cfg=cfg,
+            topic=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
+            kafka_cursor=kafka_cursor,
+        )
+    if src_type == "qdrant":
+        from connectors.qdrant_reader import read_points_batch
+
+        return read_points_batch(
+            cfg=cfg,
+            collection=table,
+            columns=columns,
+            limit=limit,
+            known_total_rows=known_total_rows,
+            qdrant_offset=qdrant_offset,
+        )
+    if src_type == "sqlite":
+        if cursor_column or cursor_key_columns:
+            from connectors.generic_sql import read_table_cursor_batch as _gs_cursor
+
+            return _gs_cursor(
+                host=cfg.get("host", ""),
+                port=0,
+                database=cfg.get("database", "") or database,
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=False,
+                table=table,
+                cursor_column=cursor_column
+                or (cursor_key_columns[0] if cursor_key_columns else ""),
+                cursor_after=cursor_after,
+                cursor_inclusive=cursor_inclusive,
+                type="sqlite",
+                columns=columns,
+                limit=limit,
+                cursor_primary_key=cursor_primary_key,
+                cursor_key_columns=cursor_key_columns,
+            )
+        if scan_state is not None and not cursor_column:
+            from connectors.sqlite_reader import read_table_scan_batch
+
+            return read_table_scan_batch(
+                host=cfg["host"],
+                port=0,
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=False,
+                table=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                scan_state=scan_state,
+                **_scan_filter_kw,
+            )
+        from connectors.sqlite_reader import read_table_batch
+
+        return read_table_batch(
+            host=cfg["host"],
+            port=0,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            table=table,
+            limit=limit,
+            offset=offset,
+            known_total_rows=known_total_rows,
+        )
+    if resolve_driver_type(src_type) == "generic_sql":
+        from connectors.generic_sql import read_table_batch, read_table_cursor_batch
+
+        type_name = cfg.get("type", "") or src_type
+        if scan_state is not None and not cursor_column and not cursor_key_columns:
+            from connectors.generic_sql import read_table_scan_batch
+
+            return read_table_scan_batch(
+                host=cfg["host"],
+                port=cfg["port"],
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=False,
+                type=type_name,
+                table=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                scan_state=scan_state,
+                **_scan_filter_kw,
+                **connection_options(cfg),
+            )
+        if cursor_column or cursor_key_columns:
+            return read_table_cursor_batch(
+                host=cfg["host"],
+                port=cfg["port"],
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=False,
+                type=type_name,
+                table=table,
+                cursor_column=cursor_column
+                or (cursor_key_columns[0] if cursor_key_columns else ""),
+                cursor_after=cursor_after,
+                cursor_inclusive=cursor_inclusive,
+                columns=columns,
+                limit=limit,
+                cursor_primary_key=cursor_primary_key,
+                cursor_key_columns=cursor_key_columns,
+            )
+        return read_table_batch(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            type=type_name,
+            table=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
+        )
+    if src_type in ("sqlserver", "oracle"):
+        # Phase F2 — keyset when cursor columns are provided; else one-SELECT scan.
+        if scan_state is not None and not cursor_column and not cursor_key_columns:
+            if src_type == "sqlserver":
+                from connectors.sqlserver_reader import read_table_scan_batch
+            else:
+                from connectors.oracle_reader import read_table_scan_batch
+
+            return read_table_scan_batch(
+                host=cfg.get("host", ""),
+                port=int(cfg.get("port") or (1433 if src_type == "sqlserver" else 1521)),
+                database=cfg.get("database", ""),
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", "dbo" if src_type == "sqlserver" else ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=bool(cfg.get("ssl", False)),
+                table=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                type=src_type,
+                scan_state=scan_state,
+                **_scan_filter_kw,
+                **connection_options(cfg),
+            )
+        if cursor_column or cursor_key_columns:
+            if src_type == "sqlserver":
+                from connectors.sqlserver_reader import read_table_cursor_batch
+            else:
+                from connectors.oracle_reader import read_table_cursor_batch
+
+            return read_table_cursor_batch(
+                host=cfg.get("host", ""),
+                port=int(cfg.get("port") or (1433 if src_type == "sqlserver" else 1521)),
+                database=cfg.get("database", ""),
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", "dbo" if src_type == "sqlserver" else ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=bool(cfg.get("ssl", False)),
+                table=table,
+                cursor_column=cursor_column or (cursor_key_columns[0] if cursor_key_columns else ""),
+                cursor_after=cursor_after,
+                cursor_inclusive=cursor_inclusive,
+                columns=columns,
+                limit=limit,
+                cursor_primary_key=cursor_primary_key,
+                cursor_key_columns=cursor_key_columns,
+                type=src_type,
+                **connection_options(cfg),
+            )
+        from .connector_dispatch import read_via_registry
+
+        return read_via_registry(
+            src_type,
+            cfg=cfg,
+            table=table,
+            limit=limit,
+            offset=offset,
+            columns=columns,
+        )
+    if src_type in ("salesforce", "hubspot", "stripe", "rest_api", "rest"):
+        from .connector_dispatch import read_via_registry
+
+        if src_type == "salesforce" and cursor_column:
+            # SOQL OFFSET is capped at 2000 rows, so any object larger than that
+            # can only be walked by seeking on the cursor (normally Id).
+            return read_via_registry(
+                src_type,
+                cfg=cfg,
+                table=table,
+                limit=limit,
+                offset=0,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+            )
+        if src_type == "stripe" and cursor_column:
+            # Stripe incremental is created[gte], not OFFSET. starting_after is
+            # pagination inside the filtered window.
+            return read_via_registry(
+                src_type,
+                cfg=cfg,
+                table=table,
+                limit=limit,
+                offset=0,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+            )
+        return read_via_registry(src_type, cfg=cfg, table=table, limit=limit, offset=offset)
+    if src_type == "iceberg":
+        from .connector_dispatch import read_via_registry
+
+        return read_via_registry(
+            "iceberg", cfg=cfg, table=table, limit=limit, offset=offset, columns=columns
+        )
+    if src_type == "neo4j":
+        # HTTP Cypher pages by elementId order. Offset is the resume point;
+        # a short page ends the stream the same way a SQL fetchmany does.
+        from connectors.neo4j import read_object
+
+        return read_object(cfg=cfg, object=table or "", limit=limit, offset=offset)
+    raise ValueError(f"Streaming read not supported for source type '{src_type}'")

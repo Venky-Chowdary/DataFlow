@@ -68,6 +68,9 @@ def test_currency_csv_to_mongodb_preserves_decimal():
             source_filename="payments.csv",
             sync_mode="full_refresh_overwrite",
             skip_preflight=True,
+            # Locale currency (€2.000,50) needs balanced→quarantine — strict
+            # fail-closed must not invent a green partial write.
+            validation_mode="balanced",
         )
         engine = UniversalTransferEngine()
         result = engine.execute_tracked(request, "0" * 24)

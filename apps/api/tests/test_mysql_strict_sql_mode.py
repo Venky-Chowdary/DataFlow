@@ -54,6 +54,39 @@ def test_apply_mysql_session_guards_sets_timeouts_and_strict():
     executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list if c.args)
     assert "wait_timeout" in executed
     assert "innodb_lock_wait_timeout" in executed
+    assert "time_zone" in executed
     assert any(
         "sql_mode =" in str(c.args[0]) for c in cur.execute.call_args_list if c.args
     )
+
+
+def test_apply_mysql_session_guards_raises_when_strict_mode_unavailable():
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cur.fetchone.return_value = ("",)
+
+    def _execute(sql, *args):
+        if "sql_mode" in str(sql).lower() and "SELECT" not in str(sql).upper():
+            raise RuntimeError("Access denied for SET sql_mode")
+
+    cur.execute.side_effect = _execute
+    try:
+        apply_mysql_session_guards(conn, require_strict_sql_mode=True)
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "STRICT" in str(exc) or "sql_mode" in str(exc).lower()
+
+
+def test_apply_mssql_session_guards_raises_when_ansi_unavailable():
+    from connectors.write_resilience import apply_mssql_session_guards
+
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cur.execute.side_effect = RuntimeError("SET ANSI_WARNINGS denied")
+    try:
+        apply_mssql_session_guards(conn, require_ansi_warnings=True)
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "ANSI" in str(exc) or "truncate" in str(exc).lower()

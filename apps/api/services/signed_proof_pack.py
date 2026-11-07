@@ -19,7 +19,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from services.value_serializer import json_default
+from services.value_serializer import json_default, sanitize_json_value
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,197 @@ PROOF_PACK_VERSION = 1
 
 class ProofClaimError(RuntimeError):
     """Raised when a pack is asked to claim migration proven without post-write proof."""
+
+
+class FidelityVeto:
+    """A write that landed but is not full-fidelity.
+
+    One decision procedure. Gate-8 stamping, ladder attach, and the proof pack
+    all consult this — they must not grow parallel if-trees for the same
+    evidence (a failed column profile, a value coerced to NULL).
+    """
+
+    __slots__ = ("claim_level", "phase", "operational_passed", "assurance_level", "coverage", "note")
+
+    def __init__(
+        self,
+        *,
+        claim_level: str,
+        phase: str,
+        operational_passed: bool,
+        assurance_level: str,
+        coverage: str,
+        note: str,
+    ) -> None:
+        self.claim_level = claim_level
+        self.phase = phase
+        self.operational_passed = operational_passed
+        self.assurance_level = assurance_level
+        self.coverage = coverage
+        self.note = note
+
+    def as_claim(self, checksum_match: bool) -> dict[str, Any]:
+        return {
+            "claim_level": self.claim_level,
+            "post_write_verified": False,
+            "migration_proven": False,
+            "population_proof": False,
+            "referential_integrity_proven": False,
+            "checksum_match": checksum_match,
+            "note": self.note,
+        }
+
+
+def _append_delta_scope(recon: dict[str, Any]) -> bool:
+    """True when Gate-8 already judged incomparable whole-table hashes via dest-before."""
+    from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+
+    scope = str(recon.get("checksum_scope") or "")
+    coverage = str(recon.get("coverage") or recon.get("assurance_level") or "").lower()
+    phase = str(recon.get("phase") or "").lower()
+    return (
+        scope == WHOLE_TABLE_NOT_COMPARABLE
+        or coverage == "row_count"
+        or phase.endswith("row_count")
+        or "post_write_row_count" in phase
+    )
+
+
+def _ladder_fail_veto(ladder: dict[str, Any]) -> FidelityVeto:
+    loc = str(ladder.get("localization_summary") or "").strip()
+    layers = ladder.get("layers") if isinstance(ladder.get("layers"), dict) else {}
+    l1 = layers.get("L1") if isinstance(layers.get("L1"), dict) else {}
+    if l1.get("passed") is False:
+        eq = str((l1.get("details") or {}).get("equation") or "L1 row balance")
+        note = (
+            f"L1 cardinality failed ({eq}). Matching cell checksums are not "
+            "dest COUNT(*) proof."
+        )
+    else:
+        note = "Column-profile / verification ladder failed — migration not proven."
+    if loc:
+        note = f"{note} {loc}"
+    return FidelityVeto(
+        claim_level="failed",
+        phase="post_write_failed",
+        operational_passed=False,
+        assurance_level="none",
+        coverage="none",
+        note=note,
+    )
+
+
+def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
+    """Return a veto when the destination does not hold the source values.
+
+    Operational ``passed`` (rows landed) is a different question — a coerced
+    write can complete and still be forbidden from claiming ``migration_proven``.
+    """
+    from services.reconcile_coverage import (
+        CDC_SOURCE_IMAGE_COUNT,
+        CDC_SOURCE_IMAGE_VALUES,
+        WRITTEN_BATCH_KEYS,
+    )
+
+    ladder = recon.get("verification_ladder") if isinstance(recon.get("verification_ladder"), dict) else {}
+    if ladder and not ladder.get("skipped") and ladder.get("passed") is False:
+        skip_veto = False
+        if bool(recon.get("passed")):
+            layers = ladder.get("layers") or {}
+            l1_ok = (layers.get("L1") or {}).get("passed") is not False
+            l3_ok = (layers.get("L3") or {}).get("passed") is not False
+            l4_ok = (layers.get("L4") or {}).get("passed") is not False
+            l5_ok = (layers.get("L5") or {}).get("passed") is not False
+            # Dest-before already closed; whole-table hashes are not a cell
+            # failure — but a keyed cell mismatch (L4/L5) still is, even on a
+            # row_count-assurance route. An engine-copy count proof
+            # (dest_count:N, assurance=row_count) used to pass this exemption
+            # and keep "verified" on tampered cells (X-22 live).
+            if _append_delta_scope(recon) and l1_ok and l4_ok and l5_ok:
+                skip_veto = True
+            # Keyed-batch cells matched; extra dest rows sit outside that proof.
+            elif (
+                str(recon.get("checksum_scope") or "") == WRITTEN_BATCH_KEYS
+                and recon.get("checksum_match") is True
+                and l3_ok
+            ):
+                skip_veto = True
+            # CDC COUNT-only: leftover dest keys sit outside the source-image
+            # COUNT proof. Changelog is not S; leftover MERGE is a hard no-op.
+            # checksum_match is False by design — do not claim full_checksum.
+            elif str(recon.get("checksum_scope") or "") in {
+                CDC_SOURCE_IMAGE_COUNT,
+                CDC_SOURCE_IMAGE_VALUES,
+            }:
+                skip_veto = True
+            # Landed cells matched. The digest gap is the quarantined rows,
+            # which L2 still hashes. That is not a cell failure (R5-003).
+            elif (
+                str(recon.get("assurance_level") or "") == "quarantine_excluded"
+                and l1_ok
+                and l3_ok
+            ):
+                skip_veto = True
+        if not skip_veto:
+            return _ladder_fail_veto(ladder)
+    coverage = str(recon.get("coverage") or "").lower()
+    phase = str(recon.get("phase") or "").lower()
+    # Only veto a write that operationally completed. A failed run with
+    # coerced_null_rows is still a failure, not a "partial success".
+    if bool(recon.get("passed", True)) and (
+        int(recon.get("coerced_null_rows") or 0) > 0
+        or coverage == "coerced"
+        or phase.endswith("partial")
+    ):
+        return FidelityVeto(
+            claim_level="coerced",
+            phase="post_write_partial",
+            operational_passed=True,
+            assurance_level="coerced",
+            coverage="coerced",
+            note=(
+                "Values were coerced to NULL to land the write — checksums can "
+                "still match because the same coercion is applied on the source "
+                "re-read. That is not full fidelity."
+            ),
+        )
+    return None
+
+
+def apply_fidelity_veto(report: dict[str, Any]) -> dict[str, Any]:
+    """Stamp a veto onto a Gate-8 report, or return it unchanged."""
+    out = dict(report or {})
+    veto = fidelity_veto(out)
+    if veto is None:
+        return out
+    out["phase"] = veto.phase
+    out["passed"] = veto.operational_passed
+    out["assurance_level"] = veto.assurance_level
+    out["coverage"] = veto.coverage
+    out["migration_proven"] = False
+    out["post_write_pending"] = False
+    out["preview"] = False
+    if not veto.operational_passed:
+        loc = ""
+        ladder = out.get("verification_ladder") if isinstance(out.get("verification_ladder"), dict) else {}
+        loc = str(ladder.get("localization_summary") or "").strip()
+        base = str(out.get("message") or "").rstrip()
+        lowered = base.lower()
+        claims_verified = (
+            "row fidelity verified" in lowered
+            or "checksums match" in lowered
+            or "transfer verified" in lowered
+        )
+        if claims_verified or not base:
+            # Never leave a success sentence as the job error. That is the
+            # operator lie: checksums matched, L1 used the wrong identity,
+            # Failed still said "Row fidelity verified".
+            out["message"] = veto.note
+        elif loc and loc not in base:
+            # Failure-first (X-44): the localized culprit is the cause and
+            # must lead; the "Row count verified …" fact trails as context.
+            out["message"] = f"{loc} — {base}"
+    return out
 
 
 def _platform_secret() -> bytes:
@@ -44,9 +235,63 @@ def _platform_secret() -> bytes:
         return (getenv_brand("AUTH_SECRET", "") or "dev-only-not-for-production").encode("utf-8")
 
 
+def _canonical_numbers(value: Any) -> Any:
+    """Render a number the way it comes back from a JSON round trip.
+
+    JSON has one number type. Python keeps two, and writes ``100.0`` for a float
+    that happens to be integral; every JSON reader between here and the operator
+    — the browser that downloads the pack, the editor that pretty-prints it, the
+    client that uploads it back to Verify — reads that as the number 100 and
+    writes it back as ``100``. Hashing the Python spelling therefore signed a
+    document nobody else can reproduce: a pack that had crossed the wire once
+    failed its own verify control with ``content_sha256 mismatch``, which reads
+    to a reviewer as tamper detection firing on the product's own evidence.
+
+    Both spellings are folded to the integer they denote, so signer and verifier
+    agree whichever side of the wire they sit on. Money is unaffected: exact
+    decimals travel as strings, not as floats.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _canonical_numbers(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_numbers(v) for v in value]
+    return value
+
+
 def canonical_json(payload: dict[str, Any]) -> str:
     """Stable JSON for hashing (sorted keys, no insignificant whitespace)."""
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=json_default)
+    return json.dumps(
+        _canonical_numbers(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=json_default,
+    )
+
+
+def json_ready_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite ``body`` into the types a signed document can be shipped as.
+
+    A signature is only worth anything if the recipient hashes the same bytes
+    the signer did. A body straight off a job carries ``Decimal`` totals,
+    ``datetime`` stamps and ``ObjectId`` keys; the response serializer rewrites
+    all three on the way out (and turns a ``Decimal`` into a lossy float), so a
+    pack signed over the Python objects verified in-process and failed the
+    moment it came back over HTTP. Normalizing before hashing means the exported
+    document *is* the signed document, and money keeps every digit as exact
+    decimal text rather than becoming binary64.
+
+    Idempotent: a body that is already JSON-native is returned unchanged.
+
+    A non-finite number in evidence becomes JSON null rather than raising: an
+    export is a read of what already happened, and refusing to describe a
+    finished run leaves the operator with no evidence at all.
+    """
+    ready = sanitize_json_value(body, refuse_nonfinite=False)
+    return ready if isinstance(ready, dict) else {}
 
 
 def sha256_hex(text: str) -> str:
@@ -55,6 +300,40 @@ def sha256_hex(text: str) -> str:
 
 def hmac_sha256_hex(secret: bytes, text: str) -> str:
     return hmac.new(secret, text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def sign_body(body: dict[str, Any], *, subject: str) -> dict[str, Any]:
+    """Return ``body`` plus its content hash and HMAC over ``hash:subject``.
+
+    The subject binds a signature to the thing it describes, so a pack signed
+    for one job cannot be replayed as evidence for another.
+    """
+    body = json_ready_body(body)
+    content_sha256 = sha256_hex(canonical_json(body))
+    return {
+        **body,
+        "content_sha256": content_sha256,
+        "signature": {
+            "alg": "HMAC-SHA256",
+            "key_id": "platform_auth_secret",
+            "value": hmac_sha256_hex(_platform_secret(), f"{content_sha256}:{subject}"),
+        },
+    }
+
+
+def verify_body(payload: dict[str, Any], *, subject: str) -> tuple[str, list[str]]:
+    """Recompute hash + HMAC for a signed body. Returns (actual_hash, errors)."""
+    errors: list[str] = []
+    body = {k: v for k, v in payload.items() if k not in ("content_sha256", "signature")}
+    actual_hash = sha256_hex(canonical_json(body))
+    if str(payload.get("content_sha256") or "") != actual_hash:
+        errors.append("content_sha256 mismatch")
+    sig = payload.get("signature") if isinstance(payload.get("signature"), dict) else {}
+    claimed = str(sig.get("value") or "")
+    expected = hmac_sha256_hex(_platform_secret(), f"{actual_hash}:{subject}")
+    if not claimed or not hmac.compare_digest(claimed, expected):
+        errors.append("HMAC signature invalid")
+    return actual_hash, errors
 
 
 def classify_post_write_assurance(
@@ -94,6 +373,18 @@ def classify_post_write_assurance(
     elif recon.get("checksum_match") is True:
         checksum_match = True
 
+    from services.destination_ri_probe import referential_integrity_proven as _ri_proven
+
+    phys = recon.get("physical_state") if isinstance(recon.get("physical_state"), dict) else {}
+    ri_evidence = recon.get("referential_integrity")
+    if not isinstance(ri_evidence, dict):
+        ri_evidence = phys.get("referential_integrity") if isinstance(phys, dict) else None
+    ri_proven = _ri_proven(ri_evidence if isinstance(ri_evidence, dict) else None)
+
+    veto = fidelity_veto(recon)
+    if veto is not None:
+        return veto.as_claim(checksum_match)
+
     if preview or phase.startswith("pre_write") or "simulation" in phase:
         return {
             "claim_level": "pre_write_only",
@@ -116,7 +407,7 @@ def classify_post_write_assurance(
             "post_write_verified": False,
             "migration_proven": False,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": checksum_match,
             "note": "Gate-8 failed or incomplete — migration not proven.",
         }
@@ -131,11 +422,75 @@ def classify_post_write_assurance(
             "post_write_verified": False,
             "migration_proven": False,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": False,
             "note": (
                 "Writer acknowledgement is not independent post-write verification — "
                 "migration not proven."
+            ),
+        }
+
+    if _append_delta_scope(recon) and passed:
+        return {
+            "claim_level": "row_count",
+            "post_write_verified": True,
+            "migration_proven": False,
+            "population_proof": False,
+            "referential_integrity_proven": ri_proven,
+            "checksum_match": False,
+            "note": (
+                "Append/upsert dest-before delta verified — whole-table digests "
+                "are not comparable. Per-cell / population fidelity is not proven."
+            ),
+        }
+
+    from services.reconcile_coverage import (
+        CDC_SOURCE_IMAGE_COUNT,
+        CDC_SOURCE_IMAGE_VALUES,
+        LAST_STREAM_CHECKSUM,
+    )
+
+    if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_VALUES and passed:
+        return {
+            "claim_level": CDC_SOURCE_IMAGE_VALUES,
+            "post_write_verified": True,
+            "migration_proven": False,
+            "population_proof": bool(checksum_match),
+            "referential_integrity_proven": ri_proven,
+            "checksum_match": bool(checksum_match),
+            "note": (
+                "CDC source-image value fingerprints are present on the destination. "
+                "Dest extras are not a failure. Not full_checksum. "
+                "At-least-once upsert. Not platform exactly-once."
+            ),
+        }
+
+    if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
+        return {
+            "claim_level": "failed",
+            "post_write_verified": False,
+            "migration_proven": False,
+            "population_proof": False,
+            "referential_integrity_proven": ri_proven,
+            "checksum_match": False,
+            "note": (
+                "CDC dest COUNT vs live source-table COUNT is not a cell proof. "
+                "A matching count does not complete the job. Leftover MERGE is a "
+                "no-op. At-least-once upsert — not platform exactly-once."
+            ),
+        }
+
+    if str(recon.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM and passed:
+        return {
+            "claim_level": "per_stream_checksum",
+            "post_write_verified": True,
+            "migration_proven": False,
+            "population_proof": False,
+            "referential_integrity_proven": ri_proven,
+            "checksum_match": checksum_match,
+            "note": (
+                "Checksum covers the last stream only, not the multi-table job. "
+                "Not migration_proven."
             ),
         }
 
@@ -150,7 +505,7 @@ def classify_post_write_assurance(
             "post_write_verified": True,
             "migration_proven": False,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": checksum_match,
             "note": (
                 "Post-write sample assurance only — not population / full-checksum "
@@ -159,16 +514,21 @@ def classify_post_write_assurance(
         }
 
     if coverage == "full_checksum" or (passed and checksum_match and not preview):
+        ri_note = (
+            " Destination referential integrity proven (enforced FK or anti-join scan)."
+            if ri_proven
+            else " Does not prove referential integrity or population orphan absence."
+        )
         return {
             "claim_level": "full_checksum",
             "post_write_verified": True,
             "migration_proven": True,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": True,
             "note": (
-                "Post-write row-count + checksum match for selected transfer. "
-                "Does not prove referential integrity or population orphan absence."
+                "Post-write row-count + checksum match for selected transfer."
+                + ri_note
             ),
         }
 
@@ -177,7 +537,7 @@ def classify_post_write_assurance(
         "post_write_verified": False,
         "migration_proven": False,
         "population_proof": False,
-        "referential_integrity_proven": False,
+        "referential_integrity_proven": ri_proven,
         "checksum_match": checksum_match,
         "note": "Unrecognized Gate-8 posture — refuse migration proven claim.",
     }
@@ -197,6 +557,23 @@ def assert_pack_may_claim_migration_proven(pack: dict[str, Any]) -> None:
             f"migration_proven requires claim_level=full_checksum, got "
             f"{assurance.get('claim_level')!r}"
         )
+
+
+def _governance_operations_for_pack(raw: dict[str, Any] | None) -> dict[str, Any]:
+    from services.governance_ops import (
+        empty_governance_operations,
+        normalize_governance_operations,
+    )
+
+    if raw is None:
+        return empty_governance_operations()
+    return normalize_governance_operations(raw)
+
+
+def _collect_governance_for_pack(job: dict[str, Any]) -> dict[str, Any]:
+    from services.governance_ops import collect_governance_operations
+
+    return collect_governance_operations(job)
 
 
 def collect_accepted_risks_from_job(job: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -351,6 +728,34 @@ def proof_pack_evidence_completeness_errors(
     versions = connector_versions if isinstance(connector_versions, dict) else {}
     if claim_migration_proven and not versions:
         errors.append("migration_proven refused: connector_versions absent")
+    elif claim_migration_proven:
+        from services.connector_versions import versions_include_release
+
+        if not versions_include_release(versions):
+            errors.append(
+                "migration_proven refused: connector_versions lack a captured "
+                "release (format or kind is not a version)"
+            )
+    if claim_migration_proven:
+        recon = reconciliation if isinstance(reconciliation, dict) else {}
+        from services.reconcile_coverage import LAST_STREAM_CHECKSUM
+
+        if str(recon.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM:
+            errors.append(
+                "migration_proven refused: checksum covers the last stream only, "
+                "not the multi-table job"
+            )
+        provenance = str(recon.get("source_checksum_provenance") or "")
+        independent_reread = (
+            provenance == "independent_source_reread"
+            or recon.get("source_independently_reread") is True
+            or str(recon.get("checksum_mode") or "") == "source_reread"
+        )
+        if independent_reread and recon.get("identity_hash_aligned") is not True:
+            errors.append(
+                "migration_proven refused: source re-read identity/hash "
+                "alignment is required"
+            )
     return errors
 
 
@@ -374,11 +779,19 @@ def build_signed_proof_pack(
     expected_risks_from_mappings: list[dict[str, Any]] | None = None,
     job_success: bool = False,
     require_risk_completeness: bool | None = None,
+    anchor_in_chain: bool = False,
+    governance_operations: dict[str, Any] | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
     Always stamps ``assurance`` from Gate-8. Incomplete packs are still signed
     for audit chain integrity — they must not set ``migration_proven``.
+
+    ``anchor_in_chain`` files the pack's content digest into the append-only
+    evidence chain and embeds the record it occupies, which is what turns
+    ``prev_audit_hash`` from a pointer at the chain into a position in it. Off by
+    default so building a pack stays a pure function; the export path turns it on.
     """
     assurance = classify_post_write_assurance(reconciliation)
     risks = list(accepted_risks or risk_contracts or [])
@@ -460,30 +873,66 @@ def build_signed_proof_pack(
             else None,
         },
         "prev_audit_hash": prev_audit_hash,
+        "timing": timing if isinstance(timing, dict) else {},
         "delivery_semantics": {
-            "cdc_default": "at_least_once",
+            "cdc_default": "auto",
             "exactly_once": False,
             "at_least_once": True,
             "at_most_once": False,
             "note": (
-                "Destinations must upsert with PK/LSN guards under at-least-once capture; "
-                "exactly-once and at-most-once are not claimed."
+                "auto selects dest-owned exactly-once when the route can commit "
+                "apply and the watermark together. exactly_once here is the "
+                "platform-wide claim and stays false. A run's resolved guarantee "
+                "is on the job. At-most-once is not offered."
             ),
         },
+        "governance_operations": _governance_operations_for_pack(governance_operations),
         "documentation": "docs/PROOF_POST_WRITE_CONTRACT.md",
+        "control_totals": (
+            (reconciliation or {}).get("control_totals")
+            if isinstance(reconciliation, dict)
+            else {}
+        )
+        or (preflight_summary or {}).get("control_totals")
+        or {},
     }
-    canon = canonical_json(body)
-    content_sha256 = sha256_hex(canon)
-    signature = hmac_sha256_hex(_platform_secret(), f"{content_sha256}:{job_id}")
-    return {
-        **body,
-        "content_sha256": content_sha256,
-        "signature": {
-            "alg": "HMAC-SHA256",
-            "key_id": "platform_auth_secret",
-            "value": signature,
-        },
+    from services.ai_egress import proof_pack_ai_egress
+
+    body["ai_egress"] = proof_pack_ai_egress(job_id)
+    # Normalize before anchoring: the anchor commits to the digest of the body,
+    # and that has to be the digest of the body as exported.
+    body = json_ready_body(body)
+    if anchor_in_chain:
+        from services.evidence_chain import anchor_evidence
+
+        # The chain commits to the digest of the body as it stands here; the
+        # anchor itself is then part of what gets signed, so neither the pack nor
+        # its chain record can be swapped for the other's content.
+        body["chain_anchor"] = anchor_evidence(
+            evidence_kind="signed_proof_pack",
+            evidence_sha256=sha256_hex(canonical_json(body)),
+            job_id=job_id,
+            actor=actor,
+            summary={
+                "claim_level": assurance.get("claim_level"),
+                "migration_proven": bool(assurance.get("migration_proven")),
+            },
+        )
+    return sign_body(body, subject=job_id)
+
+
+def pack_body_digest_excluding_anchor(pack: dict[str, Any]) -> str:
+    """The digest the chain record for ``pack`` commits to.
+
+    Excludes the signature envelope and the anchor, because the anchor is what
+    carries this digest — including it would make the pack commit to itself.
+    """
+    body = {
+        k: v
+        for k, v in pack.items()
+        if k not in ("content_sha256", "signature", "chain_anchor")
     }
+    return sha256_hex(canonical_json(body))
 
 
 def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
@@ -491,18 +940,8 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     if not isinstance(pack, dict):
         return {"ok": False, "errors": ["pack must be an object"]}
-    sig = pack.get("signature") if isinstance(pack.get("signature"), dict) else {}
-    claimed_hash = str(pack.get("content_sha256") or "")
-    claimed_sig = str(sig.get("value") or "")
-    job_id = str(pack.get("job_id") or "")
-    body = {k: v for k, v in pack.items() if k not in ("content_sha256", "signature")}
-    canon = canonical_json(body)
-    actual_hash = sha256_hex(canon)
-    if not claimed_hash or claimed_hash != actual_hash:
-        errors.append("content_sha256 mismatch")
-    expected_sig = hmac_sha256_hex(_platform_secret(), f"{actual_hash}:{job_id}")
-    if not claimed_sig or not hmac.compare_digest(claimed_sig, expected_sig):
-        errors.append("HMAC signature invalid")
+    actual_hash, sig_errors = verify_body(pack, subject=str(pack.get("job_id") or ""))
+    errors.extend(sig_errors)
     assurance = pack.get("assurance") if isinstance(pack.get("assurance"), dict) else {}
     if assurance.get("migration_proven") and assurance.get("claim_level") != "full_checksum":
         errors.append("migration_proven claimed without full_checksum assurance")
@@ -518,12 +957,39 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
         if pack.get("require_risk_completeness") is True:
             for reason in incomplete:
                 errors.append(str(reason))
+    anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
+    if anchor.get("anchored"):
+        # Offline check: does the pack still hold the content the chain record was
+        # filed for? Whether that record is still in the store is a separate
+        # question, answered by evidence_chain.find_anchor.
+        if str(anchor.get("evidence_sha256") or "") != pack_body_digest_excluding_anchor(pack):
+            errors.append(
+                "chain_anchor digest does not match this pack's content — the pack "
+                "was altered after it was sealed, or the anchor belongs to another pack"
+            )
     return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
+
+
+def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
+    """Elapsed and phase split from the run. Empty when the engine did not measure."""
+    summary = dest if isinstance(dest, dict) else {}
+    timing: dict[str, Any] = {}
+    elapsed = summary.get("elapsed_seconds")
+    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+        timing["elapsed_seconds"] = elapsed
+    rate = summary.get("records_per_second")
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool):
+        timing["records_per_second"] = rate
+    profile = summary.get("phase_profile")
+    if isinstance(profile, dict) and profile.get("phases"):
+        timing["phase_profile"] = profile
+    return timing
 
 
 def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> dict[str, Any]:
     """Convenience: pull Gate-8 + mapping proof + risk contracts off a job document."""
     from services.audit_log import latest_event_hash
+    from services.code_crosswalk import proof_pack_code_crosswalk
 
     prev = None
     try:
@@ -541,10 +1007,28 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
     rollback = dest.get("rollback_plan") if isinstance(dest.get("rollback_plan"), dict) else {}
     if not rollback and isinstance(job.get("rollback_plan"), dict):
         rollback = job["rollback_plan"]
-    connector_versions = {}
-    if isinstance(job.get("connector_versions"), dict):
-        connector_versions = dict(job["connector_versions"])
-    else:
+    from services.connector_versions import versions_include_release
+
+    connector_versions: dict[str, Any] = {}
+    candidates: list[Any] = [
+        job.get("connector_versions"),
+        dest.get("connector_versions"),
+        (job.get("reconciliation") or {}).get("connector_versions")
+        if isinstance(job.get("reconciliation"), dict)
+        else None,
+    ]
+    fallback: dict[str, Any] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        if versions_include_release(candidate):
+            connector_versions = dict(candidate)
+            break
+        if not fallback:
+            fallback = dict(candidate)
+    if not connector_versions:
+        connector_versions = fallback
+    if not connector_versions:
         for key in ("source_connector_version", "destination_connector_version"):
             if job.get(key):
                 connector_versions[key] = job[key]
@@ -572,9 +1056,29 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         "success",
         "succeeded",
     }
+    reconciliation = (
+        dict(job["reconciliation"]) if isinstance(job.get("reconciliation"), dict) else None
+    )
+    if reconciliation is not None and dest:
+        from services.reconcile_coverage import qualify_multi_stream_reconciliation
+
+        reconciliation = qualify_multi_stream_reconciliation(reconciliation, dest)
+    if reconciliation is not None:
+        if (
+            "identity_hash_aligned" not in reconciliation
+            and "identity_hash_aligned" in dest
+        ):
+            reconciliation["identity_hash_aligned"] = bool(dest.get("identity_hash_aligned"))
+        if dest.get("source_independently_reread") is True:
+            reconciliation.setdefault("source_independently_reread", True)
+        if (
+            not reconciliation.get("source_checksum_provenance")
+            and str(dest.get("checksum_mode") or "") == "source_reread"
+        ):
+            reconciliation["source_checksum_provenance"] = "independent_source_reread"
     return build_signed_proof_pack(
         job_id=str(job.get("_id") or job.get("id") or ""),
-        reconciliation=job.get("reconciliation") if isinstance(job.get("reconciliation"), dict) else None,
+        reconciliation=reconciliation,
         mapping_proof=mapping_proof or None,
         preflight_summary=(
             {
@@ -584,6 +1088,30 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
                 "passed_count": pf.get("passed_count"),
                 "total_gates": pf.get("total_gates"),
                 "readiness_score": pf.get("readiness_score"),
+                # Which source columns the operator chose not to carry. Without
+                # it the pack cannot distinguish a declared omission from a drop.
+                "source_coverage": (
+                    pf.get("source_coverage")
+                    or (pf.get("proof_bundle") or {}).get("source_coverage")
+                    or {}
+                ),
+                # Why each source field was not carried, per field. Omitted
+                # names alone cannot distinguish a governed reduction from an
+                # unexplained one.
+                "field_reduction_ledger": (
+                    pf.get("field_reduction_ledger")
+                    or (pf.get("proof_bundle") or {}).get("field_reduction_ledger")
+                    or {}
+                ),
+                "code_crosswalk": proof_pack_code_crosswalk(
+                    pf.get("code_crosswalk")
+                    or (pf.get("proof_bundle") or {}).get("code_crosswalk")
+                ),
+                "control_totals": (
+                    pf.get("control_totals")
+                    or (pf.get("proof_bundle") or {}).get("control_totals")
+                    or {}
+                ),
             }
             if pf
             else None
@@ -602,4 +1130,7 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         job_success=job_success,
         require_risk_completeness=bool(job_success and expected_risks)
         or bool(job_success and not accepted and expected_risks),
+        anchor_in_chain=True,
+        governance_operations=_collect_governance_for_pack(job),
+        timing=_timing_for_pack(dest),
     )

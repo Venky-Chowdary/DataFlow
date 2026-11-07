@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.cdc_lease_store import resolve_backend_name
 from services.platform_config import data_dir, upload_dir
 
 
@@ -22,6 +23,7 @@ def check_mongodb() -> dict[str, Any]:
 
 def check_storage() -> dict[str, Any]:
     try:
+        lease_backend = resolve_backend_name()
         d = data_dir()
         u = upload_dir()
         test = d / ".health_probe"
@@ -39,7 +41,9 @@ def check_storage() -> dict[str, Any]:
             "mcp_log": (d / "mcp_invocations.jsonl").exists(),
             "transfer_plans": (d / "transfer_plans.json").exists(),
             "schedules": (d / "schedules.json").exists(),
-            "workspace": (d / "workspace.json").exists(),
+            # The settings document lives in the shared store when one is
+            # configured (services.workspace_store); the file only without one.
+            "workspace": _workspace_settings_readable(d),
             "integrations": (d / "integrations.json").exists(),
             "upload_registry": (d / "upload_registry.json").exists(),
         }
@@ -50,6 +54,8 @@ def check_storage() -> dict[str, Any]:
             "writable": True,
             "stores": stores,
             "connector_backend": connector_status.get("backend"),
+            "cdc_lease_backend": lease_backend,
+            "cdc_lease_distributed": lease_backend == "redis",
             "connector_store": connector_status,
         }
     except Exception as exc:
@@ -90,3 +96,19 @@ def aggregate_health() -> dict[str, Any]:
         "mongodb": mongo,
         "storage": storage,
     }
+
+
+def _workspace_settings_readable(d) -> bool:
+    """Whether the general settings document can be read where it lives."""
+    try:
+        from services.workspace_store import SettingsUnavailable, _shared
+
+        try:
+            coll = _shared()
+        except SettingsUnavailable:
+            return False
+        if coll is not None:
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+    return (d / "workspace.json").exists()

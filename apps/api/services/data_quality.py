@@ -11,16 +11,18 @@ import logging
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 try:
-    from services.pii_guard import detect_pii, is_sensitive_name
-    from services.transform_engine import apply_transform
+    from services.pii_guard import is_sensitive_name, pii_findings
+    from services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
+    from services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell, present_cell_text
 except ImportError:  # pragma: no cover - compatibility for tests
-    from src.services.pii_guard import detect_pii, is_sensitive_name
-    from src.services.transform_engine import apply_transform
+    from src.services.pii_guard import is_sensitive_name, pii_findings
+    from src.services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
+    from src.services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell, present_cell_text
 
 _UTC = timezone.utc
 
@@ -43,48 +45,107 @@ class DataQualityReport:
 
 
 def _is_null(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str) and value.strip() == "":
-        return True
-    return False
+    """Absence, not a customer token.
+
+    Reader-wired ``SQL_NULL_SENTINEL`` used to look like a present string, so
+    required-null gates missed it and two NULL PKs were a duplicate-key hit
+    on the sentinel spelling.
+    """
+    return is_null_evidence(value)
 
 
 def _to_decimal(value: Any) -> Decimal | None:
+    """Write-path decimal bind — locale/currency money, Auto 1,234 refuses.
+
+    ``apply_transform(str(True), 'decimal')`` invented ``1``. Reader-wired
+    ``true`` / ``t`` did the same. ``decimal_wire_value`` is the one binder.
+    """
     if _is_null(value):
         return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
+    return decimal_wire_value(value)
+
+
+def _as_decimal_stat(value: Any) -> Decimal | None:
+    """Bind stored batch stats for relative-drift compare.
+
+    Integrity already stores write-path Decimals. IEEE ``float(cur) - float(base)``
+    collapses scale-20 money and invents drift on values that are exact as Decimal.
+    Bool is refused (it is an ``int`` subclass, not a magnitude).
+    """
+    if value is None or isinstance(value, bool):
         return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, OverflowError):
+            return None
+    return None
 
 
-def _to_float(value: Any) -> float | None:
+def _relative_numeric_drift(cur: Any, base: Any, threshold: float) -> bool:
+    cur_d = _as_decimal_stat(cur)
+    base_d = _as_decimal_stat(base)
+    if cur_d is None or base_d is None or base_d == 0:
+        return False
+    return abs(cur_d - base_d) / abs(base_d) > Decimal(str(threshold))
+
+
+def _is_fractional_decimal(value: Any) -> bool:
+    from services.transform_engine import is_fractional_wire_value
+
+    return is_fractional_wire_value(value)
+
+
+def _temporal_kind(col_type: str) -> str:
+    """DATE refuses epoch; TIMESTAMP / DATETIME bind epoch as an instant."""
+    text = (col_type or "").upper()
+    if "DATE" in text and "TIME" not in text:
+        return "date"
+    if any(tok in text for tok in ("TIMESTAMP", "DATETIME", "TIMESTAMPTZ")):
+        return "datetime"
+    return "date"
+
+
+def _parse_iso_date(value: Any, *, temporal: str = "datetime") -> datetime | None:
+    """Write-path temporal bind, then a datetime for the future-date fence.
+
+    ``apply_transform(str(value), 'datetime')`` invented a calendar from
+    DATE epoch seconds and from ``str(datetime)`` space form. DATE uses
+    ``_parse_date`` (epoch refuses, YYYYMMDD still binds). TIMESTAMP uses
+    ``_parse_datetime``. Auto ``01/02/2024`` still refuses.
+    """
     if _is_null(value):
         return None
-    # Reuse the engine's locale/currency/scientific-aware decimal parser.
-    parsed, _ = apply_transform(str(value).strip(), "decimal")
-    if parsed is None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    text = value if isinstance(value, str) else cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
         return None
-    try:
-        return float(Decimal(str(parsed)))
-    except (InvalidOperation, ValueError, TypeError, OverflowError):
-        return None
-
-
-def _parse_iso_date(value: Any) -> datetime | None:
-    if _is_null(value):
-        return None
-    # Reuse the engine's full date/datetime parser (handles ISO, day-first,
-    # epoch, and many locale formats) and convert the canonical result back.
-    parsed, _ = apply_transform(str(value).strip(), "datetime")
+    kind = (temporal or "datetime").strip().lower()
+    if kind == "date":
+        parsed = _parse_date(text, with_time=True)
+        if parsed is None:
+            return None
+        try:
+            return datetime.fromisoformat(parsed)
+        except ValueError:
+            return None
+    parsed = _parse_datetime(text)
     if not parsed:
         return None
-    text = str(parsed).strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
+    instant = str(parsed).strip()
+    if instant.endswith("Z"):
+        instant = instant[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        return datetime.fromisoformat(instant)
     except ValueError:
         return None
 
@@ -114,7 +175,8 @@ def _is_date_column(name: str) -> bool:
     )
 
 
-def _iqr_outliers(values: list[float]) -> list[float]:
+def _iqr_outliers(values: list[Decimal]) -> list[Decimal]:
+    """IQR fences on write-path Decimals. ``float`` invented a second magnitude."""
     if len(values) < 4:
         return []
     sorted_vals = sorted(values)
@@ -122,8 +184,8 @@ def _iqr_outliers(values: list[float]) -> list[float]:
     q1 = sorted_vals[n // 4] if n >= 4 else sorted_vals[0]
     q3 = sorted_vals[(3 * n) // 4] if n >= 4 else sorted_vals[-1]
     iqr = q3 - q1
-    lower = q1 - 1.5 * iqr
-    upper = q3 + 1.5 * iqr
+    lower = q1 - Decimal("1.5") * iqr
+    upper = q3 + Decimal("1.5") * iqr
     return [v for v in values if v < lower or v > upper]
 
 
@@ -196,50 +258,26 @@ class BatchDriftDetector:
 
             base_mean = base.get("mean")
             cur_mean = cur.get("mean")
-            if (
-                base_mean is not None
-                and cur_mean is not None
-                and isinstance(base_mean, (int, float, Decimal))
-                and isinstance(cur_mean, (int, float, Decimal))
-                and float(base_mean) != 0.0
-            ):
-                rel = abs(float(cur_mean) - float(base_mean)) / abs(float(base_mean))
-                if rel > self.numeric_threshold:
-                    warnings.append(
-                        f"Column '{col}' mean drift: {base_mean:.4g} → {cur_mean:.4g}"
-                    )
+            if _relative_numeric_drift(cur_mean, base_mean, self.numeric_threshold):
+                warnings.append(
+                    f"Column '{col}' mean drift: {base_mean:.4g} → {cur_mean:.4g}"
+                )
 
             base_stdev = base.get("stdev")
             cur_stdev = cur.get("stdev")
-            if (
-                base_stdev is not None
-                and cur_stdev is not None
-                and isinstance(base_stdev, (int, float, Decimal))
-                and isinstance(cur_stdev, (int, float, Decimal))
-                and float(base_stdev) != 0.0
-            ):
-                rel = abs(float(cur_stdev) - float(base_stdev)) / abs(float(base_stdev))
-                if rel > self.numeric_threshold:
-                    warnings.append(
-                        f"Column '{col}' stdev drift: {base_stdev:.4g} → {cur_stdev:.4g}"
-                    )
+            if _relative_numeric_drift(cur_stdev, base_stdev, self.numeric_threshold):
+                warnings.append(
+                    f"Column '{col}' stdev drift: {base_stdev:.4g} → {cur_stdev:.4g}"
+                )
 
             # Range drift for numeric / date-like columns
             for stat in ("min", "max"):
                 base_val = base.get(stat)
                 cur_val = cur.get(stat)
-                if (
-                    base_val is not None
-                    and cur_val is not None
-                    and isinstance(base_val, (int, float, Decimal))
-                    and isinstance(cur_val, (int, float, Decimal))
-                    and float(base_val) != 0.0
-                ):
-                    rel = abs(float(cur_val) - float(base_val)) / abs(float(base_val))
-                    if rel > self.numeric_threshold:
-                        warnings.append(
-                            f"Column '{col}' {stat} drift: {base_val:.4g} → {cur_val:.4g}"
-                        )
+                if _relative_numeric_drift(cur_val, base_val, self.numeric_threshold):
+                    warnings.append(
+                        f"Column '{col}' {stat} drift: {base_val:.4g} → {cur_val:.4g}"
+                    )
 
         for col in current_cols:
             if col not in self.baseline:
@@ -253,9 +291,55 @@ class BatchDriftDetector:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class _RecordAuditRow:
+    """One source record viewed as a matrix row — no retained list-of-lists."""
+
+    __slots__ = ("_record", "_headers")
+
+    def __init__(self, record: dict[str, Any], headers: list[str]) -> None:
+        self._record = record
+        self._headers = headers
+
+    def __len__(self) -> int:
+        return len(self._headers)
+
+    def __getitem__(self, idx: int) -> Any:
+        if idx >= len(self._headers):
+            return ""
+        from connectors.source_row_spool import matrix_cell_from_record
+
+        return matrix_cell_from_record(self._record, self._headers[idx])
+
+    def __iter__(self):
+        from connectors.source_row_spool import matrix_cell_from_record
+
+        for header in self._headers:
+            yield matrix_cell_from_record(self._record, header)
+
+
+class _RecordAuditRows:
+    """Sequence adapter so the audit algorithm stays one implementation."""
+
+    __slots__ = ("_records", "_headers")
+
+    def __init__(self, records: list[dict[str, Any]], headers: list[str]) -> None:
+        self._records = records
+        self._headers = headers
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def __iter__(self):
+        for record in self._records:
+            yield _RecordAuditRow(record, self._headers)
+
+    def __getitem__(self, idx: int) -> _RecordAuditRow:
+        return _RecordAuditRow(self._records[idx], self._headers)
+
+
 def run_integrity_audit(
     headers: list[str],
-    rows: list[list[str]],
+    rows: list[list[str]] | None = None,
     column_types: dict[str, str] | None = None,
     mappings: list[dict[str, Any]] | None = None,
     required_targets: list[str] | None = None,
@@ -263,12 +347,30 @@ def run_integrity_audit(
     validation_mode: str = "strict",
     *,
     dest_kind: str = "",
+    sync_mode: str | None = None,
+    records: list[dict[str, Any]] | None = None,
+    primary_key_columns: list[str] | None = None,
 ) -> DataQualityReport:
     """Run a sample-based integrity and anomaly audit over raw source rows.
 
-    Hard checks always block: duplicate primary keys, required-null values, and
-    financial precision loss.  Soft checks (null spikes, outliers, future dates,
-    low cardinality, encoding anomalies) produce warnings.  Warnings become
+    ``primary_key_columns`` names a composite identity. Duplicates are then
+    the whole tuple repeating — one component repeating across tuples is the
+    normal shape of a composite key (QA ACC-03: ``(region, id)`` blocked every
+    upsert at Execute on ``id`` alone). A tuple with an absent component is not
+    a key (MATCH SIMPLE) and cannot collide.
+
+    ``records`` is the file-stream / engine dict form. Cells are read through
+    ``matrix_cell_from_record`` (same DF_MISSING / NULL / string rules as the
+    write spool) so the audit does not retain a full ``list[list]``.
+
+    Hard checks always block: required-null values and financial precision loss.
+    Duplicate identity keys hard-block only when the sync mode (or key-addressed
+    destination) requires unique identity — matching Validate G6/G8/G9 via
+    ``sync_requires_unique_identity``. Full append / overwrite on SQL must not
+    invent a write failure after Validate unlocked Execute.
+
+    Soft checks (null spikes, outliers, future dates, low cardinality, encoding
+    anomalies, append-mode identity duplicates) produce warnings. Warnings become
     blockers only in ``maximum`` validation mode; in ``strict`` / ``balanced``
     they are surfaced but do not stop the transfer.
 
@@ -276,8 +378,14 @@ def run_integrity_audit(
     ``services.primary_key.resolve_identity_key``. Never invent a PK from
     ``headers[0]`` — that falsely blocks Mongo business ``id`` fields when
     ``_id`` is the real document key.
+
+    ``sync_mode=None`` keeps legacy fail-closed duplicate behavior (callers that
+    do not know the sync contract). Stream / file_stream must pass the effective
+    sync mode so Full append matches Validate.
     """
     report = DataQualityReport()
+    if records is not None:
+        rows = _RecordAuditRows(records, headers)
     if not rows or not headers:
         report.passed = False
         report.issues.append("No sample rows available for integrity audit")
@@ -293,6 +401,20 @@ def run_integrity_audit(
     header_index = {h: i for i, h in enumerate(headers)}
     stats: dict[str, Any] = {"total_rows": total, "columns": {}}
     anomalous_rows: set[int] = set()
+
+    # Unique-identity posture — same SSOT as Validate. None sync_mode = legacy hard.
+    require_unique_identity = True
+    if sync_mode is not None:
+        try:
+            from services.primary_key import sync_requires_unique_identity
+
+            require_unique_identity = sync_requires_unique_identity(
+                sync_mode, dest_kind=dest_kind
+            )
+        except Exception:
+            require_unique_identity = True
+    stats["require_unique_identity"] = require_unique_identity
+    stats["sync_mode"] = sync_mode
 
     # ── Identify primary-key source column (same contract as Validate) ────────
     pk_source = primary_key if primary_key and primary_key in header_index else None
@@ -340,8 +462,49 @@ def run_integrity_audit(
         report.warnings.append(msg)
         report.checks_warned += 1
 
-    # 1. Duplicate primary keys (hard) — skip when no identity key is known
-    if not pk_source:
+    from services.column_case import header_index as _folded_index
+
+    composite_cols = [
+        str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()
+    ]
+    composite_idx = [_folded_index(headers, c) for c in composite_cols]
+    use_composite = len(composite_cols) > 1 and all(i is not None for i in composite_idx)
+
+    # 1. Duplicate primary keys — hard only when sync/dest requires unique identity
+    if use_composite:
+        label = " + ".join(composite_cols)
+        stats["primary_key"] = label
+        stats["primary_key_columns"] = composite_cols
+        tuples: list[tuple[str, ...]] = []
+        for row in rows:
+            cells = tuple(
+                present_cell_text(row[i] if i < len(row) else "")  # type: ignore[operator]
+                for i in composite_idx
+            )
+            if any(c is None for c in cells):
+                continue
+            tuples.append(cells)  # type: ignore[arg-type]
+        dup_tuples = {t: c for t, c in Counter(tuples).items() if c > 1}
+        if dup_tuples:
+            examples = ", ".join("(" + ", ".join(t) + ")" for t in list(dup_tuples)[:3])
+            from services.primary_key import sync_collapses_in_file_duplicates
+
+            if require_unique_identity and not sync_collapses_in_file_duplicates(sync_mode):
+                _hard(
+                    f"Duplicate composite key values in '{label}': "
+                    f"{len(dup_tuples)} key tuple(s) repeat (e.g. {examples})"
+                )
+            else:
+                _warn(
+                    f"Duplicate composite key values in '{label}': "
+                    f"{len(dup_tuples)} key tuple(s) repeat (e.g. {examples}). "
+                    f"Sync mode '{sync_mode or 'append'}' does not require unique "
+                    "identity — all rows will be written."
+                )
+                report.checks_passed += 1
+        else:
+            report.checks_passed += 1
+    elif not pk_source:
         _warn(
             "No identity key resolved for duplicate check "
             "(schemaless needs _id; SQL needs id/_id or a stream-contract primary_key)"
@@ -349,29 +512,79 @@ def run_integrity_audit(
         report.checks_passed += 1
         stats["primary_key"] = None
     else:
-        pk_idx = header_index.get(pk_source, 0)
-        pk_values = [row[pk_idx] if pk_idx < len(row) else "" for row in rows]
-        stats["primary_key"] = pk_source
+        from services.column_case import header_index as folded_header_index
 
-        dup_counts = Counter(pk_values)
-        duplicates = {v: c for v, c in dup_counts.items() if c > 1 and str(v).strip()}
-        if duplicates:
-            _hard(
-                f"Duplicate primary key values in '{pk_source}': "
-                f"{len(duplicates)} keys repeat (e.g. {', '.join(str(v) for v in list(duplicates)[:3])})"
+        pk_idx = folded_header_index(headers, pk_source)
+        if pk_idx is None:
+            # Never audit column 0 in place of a missing identity column.
+            # That reported duplicate keys for a unique primary key.
+            _warn(
+                f"Identity column '{pk_source}' is not in this batch — "
+                "duplicate check skipped"
             )
-        else:
             report.checks_passed += 1
+            stats["primary_key"] = pk_source
+        else:
+            pk_values = [
+                present_cell_text(row[pk_idx] if pk_idx < len(row) else "")
+                for row in rows
+            ]
+            stats["primary_key"] = pk_source
+
+            dup_counts = Counter(pk_values)
+            duplicates = {v: c for v, c in dup_counts.items() if v is not None and c > 1}
+            if duplicates:
+                examples = ", ".join(list(duplicates)[:3])
+                from services.primary_key import sync_collapses_in_file_duplicates
+
+                if require_unique_identity and not sync_collapses_in_file_duplicates(sync_mode):
+                    _hard(
+                        f"Duplicate primary key values in '{pk_source}': "
+                        f"{len(duplicates)} keys repeat (e.g. {examples})"
+                    )
+                elif sync_collapses_in_file_duplicates(sync_mode):
+                    extra = sum(count - 1 for count in duplicates.values())
+                    stats["collapsed_duplicate_rows"] = extra
+                    _warn(
+                        f"In-file duplicate primary key values in '{pk_source}' "
+                        f"collapsed to one row per key: {extra} extra row(s) "
+                        f"(e.g. {examples}). Counted once. Not quarantined and not skipped."
+                    )
+                    report.checks_passed += 1
+                else:
+                    # Full append / overwrite on SQL: Validate already unlocked Execute.
+                    # Writing every row is intentional; inventing a PK uniqueness hard
+                    # block here is Validate→Run parity failure (client-deploy blocker).
+                    mode_label = sync_mode or "append"
+                    _warn(
+                        f"Duplicate values in identity column '{pk_source}': "
+                        f"{len(duplicates)} keys repeat (e.g. {examples}). "
+                        f"Sync mode '{mode_label}' does not require unique identity — "
+                        "all rows will be written. Prefer overwrite/upsert with a unique "
+                        "key, or dedupe upstream, if that is not intended."
+                    )
+                    report.checks_passed += 1
+            else:
+                report.checks_passed += 1
 
     # 2. Per-column checks
     null_spike_threshold = 0.90
     low_cardinality_threshold = 0.01
+    # A stored '' is a value a NOT NULL column accepts — except where the
+    # destination itself stores '' as NULL (Oracle VARCHAR2), so there it is a
+    # required-null violation the write would hit anyway.
+    from services.reconciliation import destination_empty_string_is_null
+
+    empty_is_null = destination_empty_string_is_null(dest_kind)
 
     for h in headers:
         idx = header_index[h]
         col_type = (column_types.get(h) or "string").upper()
         values = [row[idx] if idx < len(row) else "" for row in rows]
-        non_null = [v for v in values if not _is_null(v)]
+        # Real absence only for the rate: a stored '' is a value, not NULL —
+        # on engines where '' round-trips (SQLite keeps it, unlike Oracle)
+        # counting it as NULL inflated the reported rate (D81: 25.6% vs 11.6%).
+        non_null = [v for v in values if not is_reader_null_cell(v)]
         null_rate = (total - len(non_null)) / total if total else 0.0
         unique = set(non_null)
         cardinality = len(unique)
@@ -387,9 +600,17 @@ def run_integrity_audit(
         is_required = target.lower() in required_targets or _is_required_target(target)
 
         # Required nulls (hard)
-        if is_required and null_rate > 0.0:
+        null_cells = total - len(non_null)
+        empty_cells = sum(1 for v in non_null if v == "") if empty_is_null else 0
+        if is_required and (null_cells or empty_cells):
+            stored_as_null = (
+                f" ({empty_cells} empty strings the destination stores as NULL)"
+                if empty_cells
+                else ""
+            )
             _hard(
-                f"Required column '{h}' (target '{target}') has {int(null_rate * total)} null/empty values"
+                f"Required column '{h}' (target '{target}') has "
+                f"{null_cells + empty_cells} null/empty values{stored_as_null}"
             )
         else:
             report.checks_passed += 1
@@ -404,7 +625,7 @@ def run_integrity_audit(
         if col_type in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL"} or (
             col_type == "STRING" and _is_amount_column(h)
         ):
-            nums = [_to_float(v) for v in non_null]
+            nums = [_to_decimal(v) for v in non_null]
             nums = [n for n in nums if n is not None]
             if nums:
                 col_stats["min"] = min(nums)
@@ -418,10 +639,7 @@ def run_integrity_audit(
 
                 # Financial precision loss: integer target with fractional source (hard)
                 if col_type == "INTEGER" and _is_amount_column(h):
-                    fractional = any(
-                        ("." in str(v) or "," in str(v)) and _to_decimal(v) is not None
-                        for v in non_null
-                    )
+                    fractional = any(_is_fractional_decimal(v) for v in non_null)
                     if fractional:
                         _hard(
                             f"Financial column '{h}' has fractional values but target type is INTEGER — precision loss risk"
@@ -449,7 +667,7 @@ def run_integrity_audit(
                     stdev = col_stats["stdev"]
                     if stdev:
                         for offset, v in enumerate(values):
-                            f = _to_float(v)
+                            f = _to_decimal(v)
                             if f is None:
                                 continue
                             z = abs(f - mean) / stdev
@@ -466,7 +684,8 @@ def run_integrity_audit(
 
         # Date validity / future dates (soft)
         if col_type in {"DATE", "TIMESTAMP", "DATETIME"} or _is_date_column(h):
-            dates = [_parse_iso_date(v) for v in non_null]
+            kind = _temporal_kind(col_type)
+            dates = [_parse_iso_date(v, temporal=kind) for v in non_null]
             valid_dates = [d for d in dates if d is not None]
             if valid_dates:
                 now = datetime.now(_UTC)
@@ -510,14 +729,14 @@ def run_integrity_audit(
     stats["anomalous_rows"] = len(anomalous_rows)
 
     # 4. PII / sensitive-data scan (soft warnings)
-    protected_transforms = {"hash_pii", "mask_pii"}
+    protected_transforms = {"hash_pii", "mask_pii", "redact"}
     protected_sources = {
         m["source"]
         for m in (mappings or [])
         if m.get("transform") in protected_transforms
         or (m.get("target") in {m2.get("target") for m2 in (mappings or []) if m2.get("transform") in protected_transforms})
     }
-    pii_findings: dict[str, dict[str, int]] = {}
+    pii_by_column: dict[str, dict[str, int]] = {}
     for h in headers:
         idx = header_index[h]
         values = [row[idx] if idx < len(row) else "" for row in rows]
@@ -525,12 +744,10 @@ def run_integrity_audit(
         for v in values:
             if _is_null(v):
                 continue
-            res = detect_pii(v)
-            if res["has_pii"]:
-                for label, count in res["findings"].items():
-                    col_findings[label] = col_findings.get(label, 0) + count
+            for label, count in pii_findings(v).items():
+                col_findings[label] = col_findings.get(label, 0) + count
         if col_findings:
-            pii_findings[h] = col_findings
+            pii_by_column[h] = col_findings
             if h not in protected_sources:
                 _warn(
                     f"Column '{h}' contains potential PII/PHI ({col_findings}); "
@@ -539,7 +756,7 @@ def run_integrity_audit(
         elif is_sensitive_name(h) and h not in protected_sources:
             _warn(f"Column '{h}' has a sensitive name but no PII transform")
 
-    stats["pii_findings"] = pii_findings
+    stats["pii_findings"] = pii_by_column
 
     report.stats = stats
 

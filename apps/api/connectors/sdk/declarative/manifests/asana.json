@@ -1,0 +1,130 @@
+{
+  "name": "asana",
+  "docs": "https://developers.asana.com/reference/rest-api-reference",
+  "base_url": "https://app.asana.com/api/1.0",
+  "auth": {
+    "type": "bearer"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "workspaces",
+      "path": "workspaces",
+      "records_path": "data",
+      "primary_key": ["gid"],
+      "request_params": {
+        "limit": 100
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "offset",
+        "cursor_path": "next_page.offset",
+        "page_size": 100,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "gid": {"type": "string"},
+          "name": {"type": "string"},
+          "is_organization": {"type": "boolean"},
+          "resource_type": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "users",
+      "path": "users",
+      "records_path": "data",
+      "primary_key": ["gid"],
+      "request_params": {
+        "workspace": "{workspace}",
+        "limit": 100
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "offset",
+        "cursor_path": "next_page.offset",
+        "page_size": 100,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "gid": {"type": "string"},
+          "name": {"type": "string"},
+          "email": {"type": ["string", "null"]},
+          "resource_type": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "projects",
+      "path": "projects",
+      "records_path": "data",
+      "primary_key": ["gid"],
+      "request_params": {
+        "workspace": "{workspace}",
+        "limit": 100
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "offset",
+        "cursor_path": "next_page.offset",
+        "page_size": 100,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "gid": {"type": "string"},
+          "name": {"type": "string"},
+          "archived": {"type": "boolean"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "modified_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "tasks",
+      "path": "tasks",
+      "records_path": "data",
+      "primary_key": ["gid"],
+      "request_params": {
+        "workspace": "{workspace}",
+        "limit": 100
+      },
+      "cursor": {
+        "field": "modified_at",
+        "request_param": "modified_since",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "offset",
+        "cursor_path": "next_page.offset",
+        "page_size": 100,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "gid": {"type": "string"},
+          "name": {"type": "string"},
+          "completed": {"type": "boolean"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "modified_at": {"type": "string", "format": "date-time"},
+          "due_on": {"type": ["string", "null"]}
+        }
+      }
+    }
+  ]
+}

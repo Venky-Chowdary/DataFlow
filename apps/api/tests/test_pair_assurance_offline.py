@@ -62,8 +62,8 @@ def test_value_fixtures_use_real_transforms():
 
 def test_assess_pair_proof_honesty_stamps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
-        "services.pair_assurance.PROOF_DIR",
-        tmp_path / "pair_assurance",
+        "services.pair_assurance._proof_dir",
+        lambda: tmp_path / "pair_assurance",
     )
     proof = assess_pair("postgresql", "mysql", write_proof=True)
     assert proof["mode"] == "offline"
@@ -103,8 +103,8 @@ def test_mongodb_to_postgresql_objectid_cell():
 
 def test_run_committed_pair_assurance_all_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
-        "services.pair_assurance.PROOF_DIR",
-        tmp_path / "pair_assurance",
+        "services.pair_assurance._proof_dir",
+        lambda: tmp_path / "pair_assurance",
     )
     # Full SKU set — this is the enterprise gate (offline, real engines).
     summary = run_committed_pair_assurance(write_proof=True)
@@ -118,9 +118,20 @@ def test_run_committed_pair_assurance_all_pass(tmp_path: Path, monkeypatch: pyte
 
 
 def test_silent_green_detector_flags_hypothetical_gap(monkeypatch: pytest.MonkeyPatch):
-    """Property: if lossy and empty risks+issues, cell must fail closed."""
+    """Property: if lossy and empty risks+issues, cell must fail closed.
+
+    The lossiness is forced on the symbol ``evaluate_type_cell`` actually reads
+    (``services.decision_kernel``). Patching the ``services.type_system``
+    re-export left the real verdict in play, so the property silently rode on
+    ``TIMESTAMPTZ → mysql`` happening to be lossy — and stopped being tested at
+    all once that pair became a faithful instant-to-instant mapping.
+    """
     import services.pair_assurance as pa
 
+    monkeypatch.setattr(
+        "services.decision_kernel.is_lossy_coercion",
+        lambda *a, **k: True,
+    )
     monkeypatch.setattr(
         "services.type_system.is_lossy_coercion",
         lambda *a, **k: True,

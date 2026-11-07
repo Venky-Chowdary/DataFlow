@@ -1,0 +1,114 @@
+{
+  "name": "linear",
+  "docs": "https://developers.linear.app/docs/graphql/working-with-the-graphql-api",
+  "base_url": "https://api.linear.app/graphql",
+  "auth": {
+    "type": "api_key",
+    "location": "header",
+    "name": "Authorization"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "issues",
+      "path": ".",
+      "method": "POST",
+      "records_path": "data.issues.nodes",
+      "primary_key": ["id"],
+      "request_body_template": {
+        "query": "query($after: String) { issues(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id identifier title state { name } assignee { email } priority createdAt updatedAt } } }",
+        "variables": {"after": null}
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "variables.after",
+        "cursor_location": "body",
+        "cursor_path": "data.issues.pageInfo.endCursor",
+        "has_more_path": "data.issues.pageInfo.hasNextPage",
+        "page_size": 100,
+        "page_size_param": ""
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "identifier": {"type": "string"},
+          "title": {"type": "string"},
+          "state": {"type": "object"},
+          "assignee": {"type": "object"},
+          "priority": {"type": "integer"},
+          "createdAt": {"type": "string"},
+          "updatedAt": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "projects",
+      "path": ".",
+      "method": "POST",
+      "records_path": "data.projects.nodes",
+      "primary_key": ["id"],
+      "request_body_template": {
+        "query": "query($after: String) { projects(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id name state progress createdAt updatedAt } } }",
+        "variables": {"after": null}
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "variables.after",
+        "cursor_location": "body",
+        "cursor_path": "data.projects.pageInfo.endCursor",
+        "has_more_path": "data.projects.pageInfo.hasNextPage",
+        "page_size": 100,
+        "page_size_param": ""
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "state": {"type": "string"},
+          "progress": {"type": "number"},
+          "createdAt": {"type": "string"},
+          "updatedAt": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "teams",
+      "path": ".",
+      "method": "POST",
+      "records_path": "data.teams.nodes",
+      "primary_key": ["id"],
+      "request_body_template": {
+        "query": "query($after: String) { teams(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id key name createdAt updatedAt } } }",
+        "variables": {"after": null}
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "variables.after",
+        "cursor_location": "body",
+        "cursor_path": "data.teams.pageInfo.endCursor",
+        "has_more_path": "data.teams.pageInfo.hasNextPage",
+        "page_size": 100,
+        "page_size_param": ""
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "key": {"type": "string"},
+          "name": {"type": "string"},
+          "createdAt": {"type": "string"},
+          "updatedAt": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

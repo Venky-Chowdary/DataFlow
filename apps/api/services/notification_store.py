@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from services.brand_env import getenv_brand
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -43,6 +42,13 @@ class NotificationChannel:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        # The webhook signing secret is shown once (create / rotate), never in
+        # a read: only whether one is set. Custom header values are masked.
+        config = dict(d.get("config") or {})
+        d["signing_secret_set"] = bool(config.pop("signing_secret", ""))
+        if "headers" in config:
+            config["headers"] = _masked_headers(config["headers"])
+        d["config"] = config
         return d
 
     @classmethod
@@ -85,10 +91,73 @@ def _channels(data: dict[str, Any]) -> list[NotificationChannel]:
     return [NotificationChannel.from_dict(c) for c in data.get("channels", []) if isinstance(c, dict)]
 
 
-def _encrypt_config(config: dict[str, Any]) -> dict[str, Any]:
+#: What a read shows for a set header value. A client that sends it back
+#: (an edit form round-trips what it read) keeps the stored value.
+HEADER_MASK = "********"
+_CIPHER_PREFIXES = ("enc:v1:", "enc:v0:", "sm:", "byok:")
+
+
+def _header_map(raw: Any) -> dict[str, Any]:
+    """``config.headers`` as a dict; older clients sent it as JSON text."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else {}
+        except ValueError:
+            return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _masked_headers(raw: Any) -> dict[str, str]:
+    return {
+        str(name): (HEADER_MASK if str(value or "").strip() else str(value or ""))
+        for name, value in _header_map(raw).items()
+    }
+
+
+def _encrypt_headers(incoming: Any, stored: Any = None) -> dict[str, str]:
+    """Encrypt each header value at rest; a masked value keeps the stored one.
+
+    Custom headers carry receivers' credentials (``Authorization``, API tokens),
+    so they are secrets like ``token`` or ``webhook_url``. Blank values stay
+    blank (nothing to protect). Values already encrypted are kept as they are.
+    """
+    previous = _header_map(stored)
+    out: dict[str, str] = {}
+    for name, value in _header_map(incoming).items():
+        text = "" if value is None else str(value)
+        if text == HEADER_MASK:
+            kept = previous.get(name)
+            if kept is None:
+                continue  # masked value for a header that is not stored: drop it
+            text = str(kept)
+        out[str(name)] = encrypt_secret(text) if text.strip() else text
+    return out
+
+
+def _decrypt_headers(stored: Any) -> dict[str, str]:
+    """Plaintext headers for delivery. Values stored in clear before headers were
+    encrypted are passed through as they are (backward compatible)."""
+    out: dict[str, str] = {}
+    for name, value in _header_map(stored).items():
+        text = "" if value is None else str(value)
+        out[str(name)] = decrypt_secret(text) if text.startswith(_CIPHER_PREFIXES) else text
+    return out
+
+
+def _encrypt_config(config: dict[str, Any], stored: dict[str, Any] | None = None) -> dict[str, Any]:
     """Encrypt sensitive string values in a channel config."""
     out = dict(config)
-    for key in ("token", "password", "api_key", "client_secret", "webhook_url"):
+    if "headers" in out:
+        out["headers"] = _encrypt_headers(out["headers"], (stored or {}).get("headers"))
+    for key in (
+        "token",
+        "password",
+        "smtp_password",
+        "api_key",
+        "client_secret",
+        "webhook_url",
+        "signing_secret",
+    ):
         if key in out and isinstance(out[key], str) and out[key]:
             out[key] = encrypt_secret(out[key])
     return out
@@ -96,7 +165,17 @@ def _encrypt_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def _decrypt_config(config: dict[str, Any]) -> dict[str, Any]:
     out = dict(config)
-    for key in ("token", "password", "api_key", "client_secret", "webhook_url"):
+    if "headers" in out:
+        out["headers"] = _decrypt_headers(out["headers"])
+    for key in (
+        "token",
+        "password",
+        "smtp_password",
+        "api_key",
+        "client_secret",
+        "webhook_url",
+        "signing_secret",
+    ):
         if key in out and isinstance(out[key], str) and out[key]:
             out[key] = decrypt_secret(out[key])
     return out
@@ -114,6 +193,13 @@ def create_channel(
     kind = kind.lower().strip()
     if kind not in _ALLOWED_KINDS:
         raise ValueError(f"Unsupported notification kind: {kind}")
+    from services.webhook_signing import SECRET_CONFIG_KEY, new_signing_secret
+
+    config = {k: v for k, v in (config or {}).items() if k != SECRET_CONFIG_KEY}
+    signing_secret = ""
+    if kind == "webhook":
+        signing_secret = new_signing_secret()
+        config[SECRET_CONFIG_KEY] = signing_secret
     data = _load_raw()
     channel = NotificationChannel(
         id=str(uuid.uuid4()),
@@ -121,13 +207,15 @@ def create_channel(
         kind=kind,
         label=label.strip()[:128] or kind,
         enabled=enabled,
-        config=_encrypt_config(config or {}),
+        config=_encrypt_config(config),
         created_at=_now(),
         updated_at=_now(),
         created_by=created_by,
     )
-    data["channels"].append(channel.to_dict())
+    data["channels"].append(asdict(channel))
     _save(data)
+    # Plaintext for the create response only (never persisted in clear).
+    channel.created_signing_secret = signing_secret  # type: ignore[attr-defined]
     return channel
 
 
@@ -159,7 +247,13 @@ def update_channel(channel_id: str, *, updates: dict[str, Any]) -> NotificationC
     for i, raw in enumerate(data.get("channels", [])):
         if raw.get("id") == channel_id:
             if "config" in updates and isinstance(updates["config"], dict):
-                raw["config"] = _encrypt_config(updates["config"])
+                from services.webhook_signing import SECRET_CONFIG_KEY
+
+                kept = (raw.get("config") or {}).get(SECRET_CONFIG_KEY, "")
+                incoming = {k: v for k, v in updates["config"].items() if k != SECRET_CONFIG_KEY}
+                raw["config"] = _encrypt_config(incoming, raw.get("config") or {})
+                if kept:  # already ciphertext; a config edit never drops or sets it
+                    raw["config"][SECRET_CONFIG_KEY] = kept
             for key in ("label", "enabled", "kind"):
                 if key in updates:
                     raw[key] = updates[key]
@@ -177,3 +271,23 @@ def delete_channel(channel_id: str) -> bool:
         return False
     _save(data)
     return True
+
+
+def rotate_signing_secret(channel_id: str) -> tuple[NotificationChannel, str] | None:
+    """Replace a webhook channel's signing secret; returns the new plaintext once."""
+    from services.webhook_signing import SECRET_CONFIG_KEY, new_signing_secret
+
+    data = _load_raw()
+    for raw in data.get("channels", []):
+        if raw.get("id") != channel_id:
+            continue
+        if raw.get("kind") != "webhook":
+            raise ValueError("Only webhook channels are signed")
+        secret = new_signing_secret()
+        config = dict(raw.get("config") or {})
+        config[SECRET_CONFIG_KEY] = encrypt_secret(secret)
+        raw["config"] = config
+        raw["updated_at"] = _now()
+        _save(data)
+        return NotificationChannel.from_dict(raw), secret
+    return None

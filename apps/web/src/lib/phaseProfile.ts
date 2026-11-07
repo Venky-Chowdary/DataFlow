@@ -113,13 +113,13 @@ export function buildPhaseProfileView(
     elapsedSeconds: elapsed,
     dominantLabel: lead?.label ?? "",
     headline: lead
-      ? `${lead.label} took ${lead.secondsLabel}, ${lead.percent}% of engine time.`
+      ? `${lead.label} took ${lead.secondsLabel}, ${lead.percent}% of measured phase time.`
       : "",
     overlapNote:
       overlap > 1.15
-        ? `Phases ran concurrently (${overlap.toFixed(1)}× overlap), so shares are of engine time, not of the ${formatSeconds(
+        ? `Phases ran concurrently (${overlap.toFixed(1)}× overlap), so shares are of measured phase time, not of the ${formatSeconds(
             elapsed
-          )} wall clock.`
+          )} profile span.`
         : "",
   };
 }

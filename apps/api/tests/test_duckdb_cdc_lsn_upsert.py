@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -22,7 +23,7 @@ def _mapping(source: str, target: str) -> dict:
 
 def test_duckdb_upsert_rejects_older_lsn():
     duckdb = pytest.importorskip("duckdb")
-    path = f"/tmp/duckdb_cdc_lsn_{uuid.uuid4().hex[:8]}.duck"
+    path = f"{tempfile.gettempdir()}/duckdb_cdc_lsn_{uuid.uuid4().hex[:8]}.duck"
     table_name = f"cdc_lsn_{uuid.uuid4().hex[:8]}"
 
     common = {

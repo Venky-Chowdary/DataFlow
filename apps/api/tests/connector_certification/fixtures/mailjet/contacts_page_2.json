@@ -1,0 +1,13 @@
+{
+  "Count": 1,
+  "Total": 101,
+  "Data": [
+    {
+      "ID": 9001,
+      "Email": "fixture.pagetwo@example.com",
+      "Name": "Fixture Page Two",
+      "CreatedAt": "2024-01-02T00:00:00Z",
+      "IsExcludedFromCampaigns": false
+    }
+  ]
+}

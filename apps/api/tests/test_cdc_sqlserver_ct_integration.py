@@ -8,8 +8,9 @@ Requires:
 """
 
 from __future__ import annotations
-
 import os
+
+import ipaddress
 from services.brand_env import getenv_brand
 import socket
 import sys
@@ -28,16 +29,38 @@ from connectors.sqlserver_change_stream import (  # noqa: E402
 )
 
 
+def _loopback_sqlserver(host: str) -> bool:
+    """True only for a dial target that is this machine.
+
+    ODBC Driver 18 verifies the certificate chain. The lab SQL Server presents
+    a self-signed certificate, so the live tests declare
+    ``trust_server_certificate`` for loopback and nowhere else.
+    """
+    name = str(host or "").strip().lower()
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1]
+    if name in {"localhost", "localhost."}:
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
 def _sqlserver_cfg() -> dict:
-    return {
-        "host": getenv_brand("SQLSERVER_HOST", "localhost"),
+    host = getenv_brand("SQLSERVER_HOST", "localhost")
+    cfg = {
+        "host": host,
         "port": int(getenv_brand("SQLSERVER_PORT", "1433") or 1433),
         "database": getenv_brand("SQLSERVER_DATABASE", "dataflow"),
         "username": getenv_brand("SQLSERVER_USER", "sa"),
-        "password": getenv_brand("SQLSERVER_PASSWORD", "Datawrap_CDC_2022!"),
+        "password": getenv_brand("SQLSERVER_PASSWORD", os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", "")),
         "connection_string": "",
         "ssl": False,
     }
+    if _loopback_sqlserver(host):
+        cfg["trust_server_certificate"] = True
+    return cfg
 
 
 CFG = _sqlserver_cfg()

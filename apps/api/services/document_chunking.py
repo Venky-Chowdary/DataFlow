@@ -60,7 +60,7 @@ def detect_document_type(filename: str, content: bytes | None = None) -> str | N
 
 
 def _chunk_id(source_id: str, chunk_index: int, text: str) -> str:
-    digest = hashlib.sha256(f"{source_id}:{chunk_index}:{text[:200]}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{source_id}:{chunk_index}".encode("utf-8")).hexdigest()
     return digest[:24]
 
 

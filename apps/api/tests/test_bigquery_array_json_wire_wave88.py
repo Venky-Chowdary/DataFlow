@@ -89,21 +89,25 @@ def test_binary_uuid_and_float_carriers_are_json_safe():
 
 
 def test_whole_typed_record_serializes_with_json_dumps():
+    from datetime import timezone
+
     cols = ["id", "amt", "big", "blob", "guid", "ts"]
     types = ["INT64", "BIGNUMERIC", "INT64", "BYTES", "STRING", "TIMESTAMP"]
+    # TIMESTAMP requires offset/Z — naive wall-clock is refuse (no UTC invent).
     row = (
         1,
         Decimal("10.5000"),
         9223372036854775807,
         b"\x00\xff",
         uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
-        datetime(2024, 3, 10, 12, 34, 56, 123456),
+        datetime(2024, 3, 10, 12, 34, 56, 123456, tzinfo=timezone.utc),
     )
     rec = records_for_bigquery([row], cols, types)[0]
 
     # allow_nan=False mirrors what the transport actually accepts.
     assert json.dumps(rec, allow_nan=False)
     assert rec["amt"] == "10.5000", "trailing scale carries the declared precision"
+    assert isinstance(rec["ts"], str) and rec["ts"].endswith("Z")
 
 
 # --------------------------------------------------------------------------
@@ -204,15 +208,42 @@ def test_writers_with_native_array_types_run_the_array_gate(writer):
     assert "quarantine_unfit_json" in called
 
 
-@pytest.mark.parametrize(
-    "writer", ["bigquery_writer", "snowflake_writer", "postgresql_writer", "mysql_writer"]
-)
-def test_writers_that_gate_scalars_also_gate_json_documents(writer):
+@pytest.mark.parametrize("writer", ["bigquery_writer", "snowflake_writer"])
+def test_api_writers_that_gate_scalars_also_gate_json_documents(writer):
+    """These build request payloads directly, so each runs the gate itself."""
     called = _called_functions(writer)
     assert "quarantine_unfit_strings" in called, "precondition: scalar gates present"
     assert "quarantine_unfit_json" in called, (
         f"{writer} would let a malformed document degrade into JSON text"
     )
+
+
+@pytest.mark.parametrize("engine", ["postgresql", "mysql"])
+def test_sql_bind_quarantines_a_truncated_json_document(engine):
+    """SQL writers inherit the document gate from the shared bind path.
+
+    A truncated payload binds without raising — ``coerce_json_wire`` wraps it as
+    a JSON string — so JSONB would hold text, and row count and checksum would
+    both still agree. It must be held out, and a bare scalar must not be.
+    """
+    from connectors.writer_common import bind_rows_keeping_numbers
+
+    rejected: list[dict] = []
+    bound, kept = bind_rows_keeping_numbers(
+        [("1", '{"k": 1'), ("2", '{"k": 1}'), ("3", "plain text")],
+        ["id", "doc"],
+        ["VARCHAR(10)", "JSON" if engine == "mysql" else "JSONB"],
+        rejected,
+        "quarantine",
+        engine=engine,
+        dialect_label=engine,
+        row_numbers=[11, 12, 13],
+    )
+
+    assert kept == [12, 13], bound
+    assert len(rejected) == 1
+    assert rejected[0]["row"] == 11
+    assert rejected[0]["column"] == "doc"
 
 
 def test_bigquery_null_array_element_is_quarantined_not_written():

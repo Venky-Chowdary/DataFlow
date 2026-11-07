@@ -7,6 +7,7 @@ from typing import Literal
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from services.audit_coverage import record_security_event
 from services.resource_acl import (
     ACL_ROLES,
     RESOURCE_TYPES,
@@ -14,7 +15,7 @@ from services.resource_acl import (
     revoke_grant,
     upsert_grant,
 )
-from services.team_store import can_write_workspace
+from services.effective_principal import request_principal
 
 router = APIRouter(prefix="/resource-acls", tags=["Resource ACLs"])
 
@@ -28,14 +29,15 @@ def _actor_email(request: Request) -> str:
 
 def _require_admin_or_workspace_write(request: Request, workspace_id: str) -> str:
     ws = (workspace_id or "").strip()
-    user = getattr(request.state, "user", None) or {}
-    role = str(user.get("role") or "").lower()
-    if role == "admin":
+    # One resolver for every route: a key's own role capped at its creator's,
+    # never the role label on the token alone (services.effective_principal).
+    principal = request_principal(request, ws)
+    if principal.platform_admin:
         return ws
-    if ws and not can_write_workspace(ws, _actor_email(request)):
-        raise HTTPException(status_code=403, detail="Workspace write access required to manage ACLs")
     if not ws:
         raise HTTPException(status_code=400, detail="X-Workspace-Id required")
+    if principal.member_role not in ("editor", "admin"):
+        raise HTTPException(status_code=403, detail="Workspace write access required to manage ACLs")
     return ws
 
 
@@ -94,6 +96,19 @@ def upsert_resource_acl(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_security_event(
+        "acl.grant.create",
+        outcome="succeeded",
+        request=request,
+        resource=f"acl:{grant.id}",
+        status=200,
+        details={
+            "resource_type": grant.resource_type,
+            "resource_id": grant.resource_id,
+            "principal": grant.principal,
+            "role": grant.role,
+        },
+    )
     return grant.to_dict()
 
 
@@ -104,6 +119,24 @@ def delete_resource_acl(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     ws = _require_admin_or_workspace_write(request, workspace_id)
+    grant = next(
+        (item for item in list_grants(tenant_id=ws) if item.id == grant_id),
+        None,
+    )
     if not revoke_grant(grant_id, tenant_id=ws):
         raise HTTPException(status_code=404, detail="Grant not found")
+    if grant is not None:
+        record_security_event(
+            "acl.grant.revoke",
+            outcome="succeeded",
+            request=request,
+            resource=f"acl:{grant_id}",
+            status=200,
+            details={
+                "resource_type": grant.resource_type,
+                "resource_id": grant.resource_id,
+                "principal": grant.principal,
+                "role": grant.role,
+            },
+        )
     return {"ok": True, "id": grant_id}

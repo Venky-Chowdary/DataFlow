@@ -233,17 +233,17 @@
 .df2-pilot-workspace.df2-pilot-v2 .df2-pilot-aside {
   width: auto;
   border: none !important;
-  border-right: 1px solid #eef2f6 !important;
+  border-right: 1px solid var(--df-border) !important;
   border-radius: 0 !important;
   box-shadow: none !important;
-  background: #fafbfc;
+  background: var(--df-surface-muted);
   padding: 10px 8px;
 }
 
 .df2-content-flush .df2-pilot-v2 .df2-pilot-aside.is-collapsed,
 .df2-pilot-workspace.df2-pilot-v2 .df2-pilot-aside.is-collapsed {
   padding: 8px 0;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pilot-aside-scroll {
@@ -261,9 +261,9 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-content-flush .df2-pilot-v2 .df2-pilot-main,
@@ -380,7 +380,7 @@
    Stacking at 1440px was the density killer on 13–14" screens — the preview
    dropped below the form and forced page scroll. Only stack when the pane
    truly cannot hold two columns (~1100px). */
-@media (max-width: 1440px) {
+@media (max-width: 1439px) {
   .df2-page-transfer-studio {
     --df-studio-rail-w: clamp(180px, 16vw, 220px);
     --df-studio-panel-min-h: clamp(240px, 40vh, 440px);
@@ -440,7 +440,7 @@
 }
 
 /* Narrow laptop / small window — only then stack primary over secondary */
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-transfer-step-split {
     grid-template-columns: 1fr;
   }
@@ -480,7 +480,7 @@
   display: inline;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-pilot-status-bar .df2-pilot-status-message {
     display: none;
   }
@@ -490,7 +490,7 @@
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-pilot-status-metrics {
     width: 100%;
   }
@@ -506,7 +506,7 @@
 }
 
 /* --- Global workspace density: no clipped action bars / overflow --- */
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-page-actionbar,
   .df2-wizard-footer,
   .df2-theater-v3-footer,

@@ -1,21 +1,57 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { introspectTransferEndpoints } from "../../lib/api";
+import { ObjectNameCombobox } from "../transfer/ObjectNameCombobox";
+import { sourceTableMissingFromCatalog } from "../../lib/sourceObjectPick";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { ConnectorSelect } from "../ui/ConnectorSelect";
+import { SqlEditor } from "../ui/SqlEditor";
 import { CadenceTiles } from "../ui/CadenceTiles";
-import { fetchContracts, type DataContractSummary } from "../../lib/api";
+import { ContractBindField } from "../contracts/ContractBindField";
+import { CURSOR_SEMANTICS, CURSOR_SEMANTICS_LABELS } from "../../lib/cursorSemantics";
 import {
+  DATE_LOCALES,
   DEFAULT_SYNC_MODE_IDS,
+  NUMBER_LOCALES,
   SCHEMA_POLICIES,
   SYNC_MODE_META,
   VALIDATION_MODES,
+  availableSyncModes,
+  schemaPolicyHonestyLine,
+  type DateLocaleId,
+  type NumberLocaleId,
 } from "../../lib/transferConstants";
+import {
+  isSqlServerCdcSource,
+  namedCdcRowFilter,
+  namedStudioDateLocale,
+  namedStudioNumberLocale,
+  schemaPolicyBackfills,
+  scheduleCreateMustPauseWithoutMappings,
+  studioScheduleCdcExtras,
+  studioSchedulePolicies,
+  writeViaStagingSupported,
+  type CdcRowFilterId,
+} from "../../lib/studioDataRules";
 import type {
   Connector,
   PipelineSchedule,
   ScheduleInput,
   ScheduleIntervals,
 } from "../../lib/types";
+import { storedSchedulePreset } from "../../lib/scheduleCadence";
+import { contractsDeleteMode, mirrorDeleteText } from "../../lib/mirrorDeleteMode";
+import {
+  CDC_DELIVERY_AT_LEAST_ONCE,
+  exactlyOnceWiredDest,
+  namedCdcDeliveryGuarantee,
+  studioDeliveryGuarantee,
+  type CdcDeliveryGuarantee,
+} from "../../lib/cdcExactlyOnce";
+import {
+  formatValidateIdentitySummary,
+  shortHash,
+} from "../../lib/studioValidateIdentity";
 
 interface ScheduleFormProps {
   connectors: Connector[];
@@ -25,6 +61,7 @@ interface ScheduleFormProps {
   saving?: boolean;
   onSubmit: (input: Partial<ScheduleInput>) => void;
   onCancel: () => void;
+  onOpenStudio?: () => void;
 }
 
 const COMMON_TIMEZONES = [
@@ -58,8 +95,10 @@ function formatWhen(iso: string | null | undefined): string {
   }
 }
 
-export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit, onCancel }: ScheduleFormProps) {
+export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit, onCancel, onOpenStudio }: ScheduleFormProps) {
   const isEdit = Boolean(initial);
+  const mappingCount = initial?.mapping_count ?? (Array.isArray(initial?.mappings) ? initial.mappings.length : 0);
+  const missingValidateMappings = scheduleCreateMustPauseWithoutMappings(mappingCount);
   const [name, setName] = useState(initial?.name ?? "");
   const [sourceId, setSourceId] = useState(initial?.source_connector_id ?? connectors[0]?.id ?? "");
   const [sourceTable, setSourceTable] = useState(initial?.source_table ?? "");
@@ -69,7 +108,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   // Cadence
   const [cadenceMode, setCadenceMode] = useState<"preset" | "cron">(initial?.cron ? "cron" : "preset");
   const [interval, setIntervalValue] = useState<"hourly" | "daily" | "weekly">(
-    (initial?.interval as "hourly" | "daily" | "weekly") ?? "daily",
+    storedSchedulePreset(initial),
   );
   const [cron, setCron] = useState(initial?.cron ?? "");
   const [timezone, setTimezone] = useState(initial?.timezone ?? "UTC");
@@ -77,10 +116,50 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   // Sync
   const [syncMode, setSyncMode] = useState(initial?.sync_mode ?? "full_refresh_overwrite");
   const [cursorColumn, setCursorColumn] = useState(initial?.cursor_column ?? "");
+  const [cursorSemantics, setCursorSemantics] = useState(initial?.cursor_semantics ?? "");
   const [primaryKey, setPrimaryKey] = useState(initial?.primary_key ?? "");
+  const storedPolicy = (initial?.duplicate_policy || "").replace(/-/g, "_");
+  const [duplicatePolicy, setDuplicatePolicy] = useState(
+    storedPolicy === "append"
+      ? "append"
+      : storedPolicy === "skip_duplicates" || storedPolicy === "dedupe_skip"
+        ? "skip_duplicates"
+        : "upsert",
+  );
+  const [inFileDedupe, setInFileDedupe] = useState(
+    (initial?.in_file_dedupe || "block").replace(/-/g, "_") === "keep_last" ? "keep_last" : "block",
+  );
+  const [fileWaitSeconds, setFileWaitSeconds] = useState(
+    Math.max(0, Number(initial?.file_wait_seconds || 0) || 0),
+  );
+  const [sourceReadMode, setSourceReadMode] = useState(initial?.source_read_mode || "table");
+  const [procedureText, setProcedureText] = useState(
+    initial?.procedure_call || initial?.source_query || "",
+  );
   const [validationMode, setValidationMode] = useState(initial?.validation_mode ?? "balanced");
-  const [schemaPolicy, setSchemaPolicy] = useState(initial?.schema_policy ?? "manual_review");
+  const [schemaPolicy, setSchemaPolicy] = useState(initial?.schema_policy ?? "propagate_columns");
   const [backfill, setBackfill] = useState(initial?.backfill_new_fields ?? false);
+  const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
+    namedCdcDeliveryGuarantee(initial?.delivery_guarantee),
+  );
+  const [snapshotMode, setSnapshotMode] = useState(initial?.snapshot_mode || "initial");
+  const [allowAppendOnly, setAllowAppendOnly] = useState(Boolean(initial?.allow_append_only));
+  const [cdcRowFilter, setCdcRowFilter] = useState<CdcRowFilterId>(
+    namedCdcRowFilter(initial?.cdc_row_filter),
+  );
+  const [multiSubnetFailover, setMultiSubnetFailover] = useState(
+    Boolean(initial?.multi_subnet_failover),
+  );
+  const [writeViaStaging, setWriteViaStaging] = useState(Boolean(initial?.write_via_staging));
+  const [priorityColumn, setPriorityColumn] = useState(initial?.priority_column ?? "");
+  const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">(
+    initial?.priority_direction === "asc" ? "asc" : "desc",
+  );
+  const [rowLimit, setRowLimit] = useState(Math.max(0, Number(initial?.row_limit || 0) || 0));
+  const [dateLocale, setDateLocale] = useState<DateLocaleId>(namedStudioDateLocale(initial?.date_locale));
+  const [numberLocale, setNumberLocale] = useState<NumberLocaleId>(
+    namedStudioNumberLocale(initial?.number_locale),
+  );
 
   // Retry & notifications
   const [maxRetries, setMaxRetries] = useState(initial?.max_retries ?? 2);
@@ -89,14 +168,35 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const [notifySuccess, setNotifySuccess] = useState(initial?.notify_on_success ?? false);
 
   // Data contract (governance)
-  const [contracts, setContracts] = useState<DataContractSummary[]>([]);
-  const [contractsLoading, setContractsLoading] = useState(false);
   const [contractId, setContractId] = useState(initial?.contract_id ?? "");
   const [requireSigned, setRequireSigned] = useState(
     initial?.require_signed_contract ?? Boolean(initial?.contract_id),
   );
 
-  const syncModes = intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODE_IDS;
+  const [sourceObjectNames, setSourceObjectNames] = useState<string[]>([]);
+  const [destObjectNames, setDestObjectNames] = useState<string[]>([]);
+  const [listingSourceObjects, setListingSourceObjects] = useState(false);
+
+  const sourceConnector = connectors.find((c) => c.id === sourceId);
+  const destConnector = connectors.find((c) => c.id === destId);
+  const stagingSupported = writeViaStagingSupported(destConnector?.type);
+  const callable = sourceReadMode === "procedure" || sourceReadMode === "query";
+  const syncModes = useMemo(() => {
+    const offered = availableSyncModes({
+      destDriver: destConnector?.type || "",
+      sourceDriver: sourceConnector?.type || "",
+      sourceKind: "database",
+      isMultiStream: false,
+      sourceReadMode,
+    });
+    const offeredIds = new Set<string>(offered.map((m) => m.id));
+    return (intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODE_IDS).filter((mode) => {
+      if (mode === "incremental") {
+        return offeredIds.has("incremental_append") || offeredIds.has("incremental_deduped");
+      }
+      return offeredIds.has(mode);
+    });
+  }, [destConnector?.type, intervals?.sync_modes, sourceConnector?.type, sourceReadMode]);
   const showCursor =
     syncMode === "incremental_append" ||
     syncMode === "incremental_deduped" ||
@@ -106,43 +206,89 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     showCursor ||
     syncMode === "incremental_deduped" ||
     syncMode === "scd2" ||
-    syncMode === "mirror";
+    syncMode === "mirror" ||
+    duplicatePolicy === "upsert" ||
+    duplicatePolicy === "skip_duplicates";
 
   useEffect(() => {
+    if (!syncModes.includes(syncMode as typeof syncModes[number])) {
+      setSyncMode("full_refresh_overwrite");
+    }
+  }, [syncMode, syncModes]);
+
+  useEffect(() => {
+    if (!stagingSupported && writeViaStaging) {
+      setWriteViaStaging(false);
+    }
+  }, [stagingSupported, writeViaStaging]);
+
+  useEffect(() => {
+    if (!sourceId || !sourceConnector || callable) {
+      setSourceObjectNames([]);
+      return;
+    }
     let cancelled = false;
-    setContractsLoading(true);
-    void fetchContracts()
-      .then((list) => {
-        if (!cancelled) setContracts(list);
+    setListingSourceObjects(true);
+    void introspectTransferEndpoints({
+      source: {
+        kind: "database",
+        format: sourceConnector.type,
+        connector_id: sourceId,
+        database: sourceConnector.database,
+      },
+      destination: { kind: "file_export", format: "json" },
+    })
+      .then(({ source: intro }) => {
+        if (cancelled) return;
+        setSourceObjectNames(
+          (intro.objects ?? []).map((o) => (o.name || "").trim()).filter(Boolean),
+        );
       })
       .catch(() => {
-        if (!cancelled) setContracts([]);
+        if (!cancelled) setSourceObjectNames([]);
       })
       .finally(() => {
-        if (!cancelled) setContractsLoading(false);
+        if (!cancelled) setListingSourceObjects(false);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [sourceId, sourceConnector, callable]);
 
-  const signedContracts = useMemo(
-    () => contracts.filter((c) => String(c.status || "").toUpperCase() === "SIGNED"),
-    [contracts],
-  );
-  const selectedContract = useMemo(
-    () => contracts.find((c) => c.id === contractId) || null,
-    [contracts, contractId],
-  );
-  const contractUnsigned =
-    Boolean(contractId)
-    && selectedContract
-    && String(selectedContract.status || "").toUpperCase() !== "SIGNED"
-    && requireSigned;
+  useEffect(() => {
+    if (!destId || !destConnector) {
+      setDestObjectNames([]);
+      return;
+    }
+    let cancelled = false;
+    void introspectTransferEndpoints({
+      source: { kind: "file_export", format: "json" },
+      destination: {
+        kind: "database",
+        format: destConnector.type,
+        connector_id: destId,
+        database: destConnector.database,
+      },
+    })
+      .then(({ destination: intro }) => {
+        if (cancelled) return;
+        setDestObjectNames(
+          (intro.objects ?? []).map((o) => (o.name || "").trim()).filter(Boolean),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setDestObjectNames([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [destId, destConnector]);
 
-  const sourceConnector = connectors.find((c) => c.id === sourceId);
-  const destConnector = connectors.find((c) => c.id === destId);
-  const sourceStreamLabel = sourceConnector?.type === "mongodb" ? "collection" : "table";
+  const [contractBlock, setContractBlock] = useState("");
+
+  const sourceStreamLabel = callable
+    ? (sourceReadMode === "procedure" ? "procedure stream" : "query stream")
+    : sourceConnector?.type === "mongodb" ? "collection" : "table";
   const destStreamLabel = destConnector?.type === "mongodb" ? "collection" : "table";
 
   const timezoneOptions = useMemo(() => {
@@ -164,14 +310,28 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     && destId
     && sourceTable.trim()
     && destTable.trim()
+    && (!callable || procedureText.trim())
     && (cadenceMode === "preset" || cron.trim())
-    && !contractUnsigned
-    && !(requireSigned && !contractId.trim()),
+    && (duplicatePolicy === "append" || primaryKey.trim())
+    && !contractBlock,
   );
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
+    const writeKnobs = studioSchedulePolicies({
+      validationMode,
+      schemaPolicy,
+      backfillNewFields: backfill,
+      writeViaStaging: writeViaStaging && stagingSupported,
+      priorityColumn,
+      priorityDirection,
+      rowLimit,
+      dateLocale,
+      numberLocale,
+      syncMode,
+      snapshotMode,
+    });
     onSubmit({
       name: name.trim(),
       source_connector_id: sourceId,
@@ -179,29 +339,97 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       dest_connector_id: destId,
       dest_table: destTable.trim(),
       interval,
+      interval_preset: interval,
       cron: cadenceMode === "cron" ? cron.trim() : "",
       timezone,
       sync_mode: syncMode,
-      validation_mode: validationMode,
-      schema_policy: schemaPolicy,
-      backfill_new_fields: backfill,
+      validation_mode: writeKnobs.validation_mode || validationMode,
+      schema_policy: writeKnobs.schema_policy || schemaPolicy,
+      backfill_new_fields: writeKnobs.backfill_new_fields,
+      write_via_staging: writeKnobs.write_via_staging,
+      priority_column: writeKnobs.priority_column,
+      priority_direction: writeKnobs.priority_direction,
+      row_limit: writeKnobs.row_limit,
+      date_locale: writeKnobs.date_locale,
+      number_locale: writeKnobs.number_locale,
+      delivery_guarantee: studioDeliveryGuarantee({
+        syncMode,
+        deliveryGuarantee,
+        callableSource: callable,
+      }),
+      snapshot_mode: writeKnobs.snapshot_mode ?? "",
+      ...studioScheduleCdcExtras({
+        syncMode,
+        allowAppendOnly,
+        cdcRowFilter,
+        multiSubnetFailover,
+      }),
       cursor_column: showCursor ? cursorColumn.trim() : "",
+      cursor_semantics: showCursor ? cursorSemantics : "",
       primary_key: showPrimaryKey ? primaryKey.trim() : "",
+      duplicate_policy: duplicatePolicy,
+      in_file_dedupe: inFileDedupe,
+      file_wait_seconds: Math.max(0, Math.floor(fileWaitSeconds) || 0),
+      source_read_mode: sourceReadMode,
+      procedure_call: sourceReadMode === "procedure" ? procedureText.trim() : "",
+      source_query: sourceReadMode === "query" ? procedureText.trim() : "",
+      procedure_params: initial?.procedure_params || {},
       max_retries: maxRetries,
       retry_backoff_seconds: retryBackoff,
       notify_on_failure: notifyFailure,
       notify_on_success: notifySuccess,
       contract_id: contractId.trim(),
       require_signed_contract: requireSigned && Boolean(contractId.trim()),
+      ...(isEdit || !missingValidateMappings ? {} : { enabled: false }),
+      // Never PATCH empty Validate hashes — "" is not None and wipes Studio stamps.
     });
   };
+
+  const validateIdentity = formatValidateIdentitySummary(initial);
 
   return (
     <form className="df2-sched-form" onSubmit={submit}>
       <div className="df2-field">
-        <label className="df2-label" htmlFor="sched-name">Pipeline name</label>
+        <label className="df2-label" htmlFor="sched-name">Schedule name</label>
         <input id="sched-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Nightly orders sync" required />
       </div>
+      {missingValidateMappings && (
+        <div className="df2-sched-mapping-gap" role="status">
+          <p className="df2-field-hint">
+            {isEdit
+              ? "This pipeline has no persisted Validate mappings. Activate stays blocked — the hourly beat will not invent an auto-map."
+              : "This form does not store a mapping contract. Save creates a paused draft, then opens Transfer Studio. The beat will not invent an auto-map. This is a recurring sync, not a DAG."}
+          </p>
+          {onOpenStudio && (
+            <Button type="button" size="sm" variant="primary" onClick={onOpenStudio}>
+              Open Transfer Studio
+            </Button>
+          )}
+        </div>
+      )}
+      {isEdit && (
+        <p className="df2-field-hint df2-sched-validate-identity" role="status">
+          Validate identity{" "}
+          {validateIdentity.pinned ? (
+            <>
+              <code title={validateIdentity.shapeHash || undefined}>
+                shape {validateIdentity.shapeHash ? shortHash(validateIdentity.shapeHash) : "—"}
+              </code>
+              {" · "}
+              <code title={validateIdentity.decisionHash || undefined}>
+                decision {validateIdentity.decisionHash ? shortHash(validateIdentity.decisionHash) : "—"}
+              </code>
+              {" · "}
+              <code title={validateIdentity.ddlHash || undefined}>
+                ddl {validateIdentity.ddlHash ? shortHash(validateIdentity.ddlHash) : "—"}
+              </code>
+              . Save does not resubmit these hashes.
+            </>
+          ) : (
+            <>not stamped — create from Transfer Studio after Validate. Save does not invent hashes.</>
+          )}
+        </p>
+      )}
 
       <div className="df2-form-row">
         <ConnectorSelect
@@ -215,8 +443,39 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           disabled={connectors.length === 0}
         />
         <div className="df2-field">
-          <label className="df2-label" htmlFor="sched-src-table">Source {sourceStreamLabel}</label>
-          <input id="sched-src-table" className="df2-input" value={sourceTable} onChange={(e) => setSourceTable(e.target.value)} placeholder="orders" required />
+          <ObjectNameCombobox
+            id="sched-src-table"
+            label={`Source ${sourceStreamLabel}`}
+            value={sourceTable}
+            onChange={setSourceTable}
+            options={sourceObjectNames}
+            loading={listingSourceObjects}
+            allowCreate={false}
+            objectNoun={sourceStreamLabel}
+            placeholder="Pick a table that exists"
+            emptyHint="Studio will not map a table that does not exist."
+          />
+          {sourceTableMissingFromCatalog(sourceTable, sourceObjectNames) && (
+            <p className="df2-field-hint" role="status">
+              <code>{sourceTable}</code> is not in the discovered catalog. Save still
+              creates a paused draft — Transfer Studio will refuse Map until you pick
+              a table that exists.
+            </p>
+          )}
+          <div className="df2-sched-seg" role="radiogroup" aria-label="Source read mode">
+            {(["table", "query", "procedure"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={sourceReadMode === mode}
+                className={sourceReadMode === mode ? "active" : ""}
+                onClick={() => setSourceReadMode(mode)}
+              >
+                {mode === "table" ? "Table" : mode === "query" ? "SQL query" : "Procedure"}
+              </button>
+            ))}
+          </div>
         </div>
         <ConnectorSelect
           id="sched-dst"
@@ -229,10 +488,32 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           disabled={connectors.length === 0}
         />
         <div className="df2-field">
-          <label className="df2-label" htmlFor="sched-dst-table">Destination {destStreamLabel}</label>
-          <input id="sched-dst-table" className="df2-input" value={destTable} onChange={(e) => setDestTable(e.target.value)} placeholder="orders_warehouse" required />
+          <ObjectNameCombobox
+            id="sched-dst-table"
+            label={`Destination ${destStreamLabel}`}
+            value={destTable}
+            onChange={setDestTable}
+            options={destObjectNames}
+            objectNoun={destStreamLabel}
+            placeholder="Pick existing or type a new name"
+          />
         </div>
       </div>
+
+      {callable && (
+        <SqlEditor
+          id="sched-callable-sql"
+          label={sourceReadMode === "procedure" ? "CALL / EXEC" : "Read-only SELECT"}
+          value={procedureText}
+          onChange={setProcedureText}
+          mode={sourceReadMode === "procedure" ? "procedure" : "query"}
+          dialect={sourceConnector?.type}
+          placeholder={sourceReadMode === "procedure" ? "CALL get_orders(:since)" : "SELECT id, updated_at FROM orders"}
+          hint="Result-set snapshot — one CALL/SELECT, then page the spool. CDC, SCD2, and mirror are refused. Incremental filters cursor > watermark (at-least-once)."
+          rows={6}
+          required
+        />
+      )}
 
       {/* Panel: Cadence */}
       <section className="df2-sched-panel">
@@ -240,7 +521,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           <DtIcon name="clock" size={15} />
           <div>
             <strong>Cadence</strong>
-            <span>How often this pipeline runs. Use a preset or a cron expression.</span>
+            <span>How often this schedule runs. Use a preset or a cron expression.</span>
           </div>
           <div className="df2-sched-toggle" role="tablist" aria-label="Cadence type">
             <button type="button" role="tab" aria-selected={cadenceMode === "preset"} className={cadenceMode === "preset" ? "active" : ""} onClick={() => setCadenceMode("preset")}>Preset</button>
@@ -285,7 +566,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           <DtIcon name="activity" size={13} />
           {initial?.next_run_at
             ? <>Next run: <strong>{formatWhen(initial.next_run_at)}</strong>{cadenceMode === "cron" ? ` (${timezone})` : " · rolling interval"}</>
-            : "Next run is computed once the pipeline is saved."}
+            : "Next run is computed once the schedule is saved."}
         </p>
       </section>
 
@@ -325,6 +606,26 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                 <span className="df2-field-hint">Watermark column tracked between runs for incremental / CDC sync.</span>
               </div>
             )}
+            {showCursor && (
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="sched-cursor-semantics">Cursor meaning</label>
+                <select
+                  id="sched-cursor-semantics"
+                  className="df2-input"
+                  value={cursorSemantics}
+                  onChange={(e) => setCursorSemantics(e.target.value)}
+                >
+                  <option value="">Not declared</option>
+                  {CURSOR_SEMANTICS.map((value) => (
+                    <option key={value} value={value}>{CURSOR_SEMANTICS_LABELS[value]}</option>
+                  ))}
+                </select>
+                <span className="df2-field-hint">
+                  What the source does to this column. Strict validation refuses an undeclared cursor on
+                  a mode that promises update capture, so an unattended run cannot silently miss changed rows.
+                </span>
+              </div>
+            )}
             {showPrimaryKey && (
               <div className="df2-field">
                 <label className="df2-label" htmlFor="sched-pk">Primary key{syncMode === "scd2" || syncMode === "mirror" ? " (required)" : ""}</label>
@@ -334,16 +635,155 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                   value={primaryKey}
                   onChange={(e) => setPrimaryKey(e.target.value)}
                   placeholder="id"
-                  required={syncMode === "scd2" || syncMode === "mirror"}
+                  required={
+                    syncMode === "scd2"
+                    || syncMode === "mirror"
+                    || duplicatePolicy === "upsert"
+                    || duplicatePolicy === "skip_duplicates"
+                  }
                 />
                 <span className="df2-field-hint">
                   {syncMode === "scd2"
                     ? "Required for SCD2 versioning — identifies which business key to expire and reopen."
                     : syncMode === "mirror"
-                      ? "Required for mirror sync — identifies rows to soft-delete when missing from source."
+                      ? `Required for mirror sync. ${mirrorDeleteText(contractsDeleteMode(initial?.stream_contracts))}`
                       : "Enables dedupe / upsert into the destination."}
                 </span>
               </div>
+            )}
+          </div>
+        )}
+
+        <div className="df2-form-row">
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="sched-duplicate-policy">Duplicate policy</label>
+            <select
+              id="sched-duplicate-policy"
+              className="df2-input"
+              value={duplicatePolicy}
+              onChange={(e) => setDuplicatePolicy(e.target.value)}
+            >
+              <option value="upsert">Upsert — update existing keys</option>
+              <option value="skip_duplicates">Skip duplicates — insert only new keys</option>
+              <option value="append">Append — keep duplicate rows</option>
+            </select>
+            <span className="df2-field-hint">
+              Upsert is the default and does not need a cursor on file schedules. Append is explicit.
+            </span>
+          </div>
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="sched-in-file-dedupe">In-file duplicates</label>
+            <select
+              id="sched-in-file-dedupe"
+              className="df2-input"
+              value={inFileDedupe}
+              onChange={(e) => setInFileDedupe(e.target.value)}
+            >
+              <option value="block">Block the file</option>
+              <option value="keep_last">Keep the last row for each key</option>
+            </select>
+          </div>
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="sched-file-wait">Wait for file (seconds)</label>
+            <input
+              id="sched-file-wait"
+              className="df2-input"
+              type="number"
+              min={0}
+              max={86400}
+              value={fileWaitSeconds}
+              onChange={(e) => setFileWaitSeconds(Number(e.target.value) || 0)}
+            />
+            <span className="df2-field-hint">
+              How long a glob pickup waits before expected file not arrived.
+            </span>
+          </div>
+        </div>
+
+        {syncMode === "cdc" && (
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="sched-delivery">CDC delivery guarantee</label>
+            <select
+              id="sched-delivery"
+              className="df2-input"
+              value={deliveryGuarantee}
+              onChange={(e) => setDeliveryGuarantee(
+                e.target.value === "exactly_once" && exactlyOnceWiredDest(destConnector?.type) && !callable
+                  ? "exactly_once"
+                  : CDC_DELIVERY_AT_LEAST_ONCE,
+              )}
+            >
+              <option value="at_least_once">at_least_once — default PK upsert</option>
+              <option value="exactly_once" disabled={callable || !exactlyOnceWiredDest(destConnector?.type)}>
+                {exactlyOnceWiredDest(destConnector?.type) && !callable
+                  ? "exactly_once — dest-owned watermark transaction"
+                  : "exactly_once — not available (this destination is not transactional)"}
+              </option>
+            </select>
+            <span className="df2-field-hint">
+              {callable
+                ? "Procedure/query sources stay at-least-once — CALL is not a dest-owned watermark log."
+                : exactlyOnceWiredDest(destConnector?.type)
+                  ? "Default stays at-least-once. Exactly-once commits apply and a dest watermark in one transaction."
+                  : "Default stays at-least-once. Exactly-once fails closed on this destination."}
+            </span>
+            <label className="df2-label" htmlFor="sched-snapshot" style={{ marginTop: "0.75rem" }}>
+              CDC snapshot mode
+            </label>
+            <select
+              id="sched-snapshot"
+              className="df2-input"
+              value={snapshotMode}
+              onChange={(e) => setSnapshotMode(e.target.value)}
+            >
+              <option value="initial">initial — snapshot if no watermark (Debezium default)</option>
+              <option value="always">always — snapshot every run, then stream</option>
+              <option value="never">never — stream only (requires existing watermark)</option>
+              <option value="initial_only">initial_only — snapshot then stop</option>
+              <option value="when_needed">when_needed — snapshot if resume missing/broken</option>
+            </select>
+            <span className="df2-field-hint">
+              Same Debezium modes as Destination Advanced. The hourly beat replays this —
+              it does not silently fall back to initial.
+            </span>
+            <label className="df2-sched-check" style={{ marginTop: "0.75rem" }}>
+              <input
+                type="checkbox"
+                checked={allowAppendOnly && deliveryGuarantee !== "exactly_once"}
+                disabled={deliveryGuarantee === "exactly_once"}
+                onChange={(e) => setAllowAppendOnly(e.target.checked)}
+              />
+              Allow append-only CDC
+            </label>
+            <span className="df2-field-hint">
+              Same as Destination Advanced. Redelivery will duplicate rows — not idempotent.
+              Prefer a PK upsert sink. The hourly beat must replay this or CDC refuses.
+            </span>
+            {isSqlServerCdcSource(sourceConnector?.type) && (
+              <>
+                <label className="df2-sched-check">
+                  <input
+                    type="checkbox"
+                    checked={multiSubnetFailover}
+                    onChange={(e) => setMultiSubnetFailover(e.target.checked)}
+                  />
+                  SQL Server MultiSubnetFailover
+                </label>
+                <span className="df2-field-hint">
+                  Always On AG listener reconnect. Does not invent continuous CDC across a retention gap.
+                </span>
+                <label className="df2-label" htmlFor="sched-cdc-filter">SQL Server CDC row filter</label>
+                <select
+                  id="sched-cdc-filter"
+                  className="df2-input"
+                  value={cdcRowFilter}
+                  onChange={(e) => setCdcRowFilter(namedCdcRowFilter(e.target.value))}
+                >
+                  <option value="all">all — every change row</option>
+                  <option value="all update old">all update old — pair before-image on updates</option>
+                  <option value="net">net — net changes TVF</option>
+                </select>
+              </>
             )}
           </div>
         )}
@@ -371,10 +811,111 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
             <select id="sched-schema" className="df2-input" value={schemaPolicy} onChange={(e) => setSchemaPolicy(e.target.value)}>
               {SCHEMA_POLICIES.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
             </select>
+            <span className="df2-field-hint">{schemaPolicyHonestyLine(schemaPolicy)}</span>
             <label className="df2-sched-check">
-              <input type="checkbox" checked={backfill} onChange={(e) => setBackfill(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={backfill && schemaPolicyBackfills(schemaPolicy)}
+                disabled={!schemaPolicyBackfills(schemaPolicy)}
+                onChange={(e) => setBackfill(e.target.checked)}
+              />
               Backfill new fields on schema change
             </label>
+            <label className={`df2-sched-check${stagingSupported ? "" : " is-disabled"}`}>
+              <input
+                type="checkbox"
+                checked={writeViaStaging && stagingSupported}
+                disabled={!stagingSupported}
+                onChange={(e) => setWriteViaStaging(e.target.checked)}
+              />
+              Write via staging
+            </label>
+            <span className="df2-field-hint">
+              {stagingSupported
+                ? "Load into a staging table next to the destination first, then promote only clean rows. Same as Destination Advanced. Promote is at-least-once."
+                : "Unavailable for this destination — SQL table engines only (PostgreSQL, MySQL, Snowflake, BigQuery, …)."}
+            </span>
+          </div>
+        </div>
+
+        <div className="df2-adv-load-controls">
+          <h4 className="df2-adv-section-title">Load controls</h4>
+          <p className="df2-field-hint">
+            Same knobs as Destination Advanced. The hourly beat replays them — an edit must send them or they vanish.
+          </p>
+          <div className="df2-adv-load-grid">
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-priority-col">Priority column</label>
+              <input
+                id="sched-priority-col"
+                className="df2-input"
+                value={priorityColumn}
+                onChange={(e) => setPriorityColumn(e.target.value)}
+                placeholder="updated_at"
+              />
+              <span className="df2-field-hint">Sort source rows by this column before write. Empty = source order.</span>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-priority-dir">Direction</label>
+              <select
+                id="sched-priority-dir"
+                className="df2-input"
+                value={priorityDirection}
+                disabled={!priorityColumn.trim()}
+                onChange={(e) => setPriorityDirection(e.target.value === "asc" ? "asc" : "desc")}
+              >
+                <option value="desc">Highest first</option>
+                <option value="asc">Lowest first</option>
+              </select>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-row-limit">Row limit</label>
+              <input
+                id="sched-row-limit"
+                className="df2-input"
+                type="number"
+                min={0}
+                step={1000}
+                value={rowLimit || ""}
+                placeholder="0 = no limit"
+                onChange={(e) => setRowLimit(Math.max(0, Number(e.target.value) || 0))}
+              />
+              <span className="df2-field-hint">0 means all rows. Validate names this cap as G17 — it is not silent truncation.</span>
+            </div>
+          </div>
+          <div className="df2-form-row">
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-date-locale">Date locale</label>
+              <select
+                id="sched-date-locale"
+                className="df2-input"
+                value={dateLocale}
+                onChange={(e) => setDateLocale(namedStudioDateLocale(e.target.value))}
+              >
+                {DATE_LOCALES.map((loc) => (
+                  <option key={loc.id || "auto"} value={loc.id}>{loc.label}</option>
+                ))}
+              </select>
+              <span className="df2-field-hint">
+                Same as Destination Advanced. Auto infers from unambiguous rows. Set DMY or MDY when 5/8/1967 is all-ambiguous.
+              </span>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-number-locale">Number locale</label>
+              <select
+                id="sched-number-locale"
+                className="df2-input"
+                value={numberLocale}
+                onChange={(e) => setNumberLocale(namedStudioNumberLocale(e.target.value))}
+              >
+                {NUMBER_LOCALES.map((loc) => (
+                  <option key={loc.id || "auto"} value={loc.id}>{loc.label}</option>
+                ))}
+              </select>
+              <span className="df2-field-hint">
+                Auto will not guess a lone 1,234. Set US or EU so the hourly beat parses the same way as Validate.
+              </span>
+            </div>
           </div>
         </div>
       </section>
@@ -388,65 +929,14 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
             <span>Bind a signed schema agreement so unattended runs stay fail-closed.</span>
           </div>
         </div>
-        <div className="df2-field">
-          <label className="df2-label" htmlFor="sched-contract">Contract</label>
-          <select
-            id="sched-contract"
-            className="df2-input"
-            value={contractId}
-            onChange={(e) => {
-              const next = e.target.value;
-              setContractId(next);
-              if (next) setRequireSigned(true);
-            }}
-            disabled={contractsLoading}
-          >
-            <option value="">None — no contract enforcement</option>
-            {signedContracts.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name} · v{c.version} · SIGNED
-              </option>
-            ))}
-            {/* Keep a previously selected non-signed contract visible so the operator can clear or fix it */}
-            {selectedContract
-              && String(selectedContract.status || "").toUpperCase() !== "SIGNED"
-              && (
-                <option value={selectedContract.id}>
-                  {selectedContract.name} · v{selectedContract.version} · {selectedContract.status} (sign required)
-                </option>
-              )}
-            {!selectedContract && contractId && (
-              <option value={contractId}>{contractId} (not in catalog)</option>
-            )}
-          </select>
-          <span className="df2-field-hint">
-            {contractsLoading
-              ? "Loading contracts…"
-              : signedContracts.length === 0
-                ? "No signed contracts yet — save + sign one from Transfer Validate → Contracts."
-                : "Only SIGNED contracts appear here. Drafts must be signed on the Contracts page first."}
-          </span>
-        </div>
-        {contractId && (
-          <label className="df2-sched-check">
-            <input
-              type="checkbox"
-              checked={requireSigned}
-              onChange={(e) => setRequireSigned(e.target.checked)}
-            />
-            Require signed contract before each run (fail-closed)
-          </label>
-        )}
-        {contractUnsigned && (
-          <p className="df2-label-hint df2-dest-sync-warning" role="alert">
-            Contract is not SIGNED. Open <strong>Contracts</strong>, sign it, then return — or clear the selection.
-          </p>
-        )}
-        {requireSigned && !contractId.trim() && (
-          <p className="df2-label-hint df2-dest-sync-warning" role="alert">
-            Require signed is on but no contract is selected.
-          </p>
-        )}
+        <ContractBindField
+          idPrefix="sched"
+          contractId={contractId}
+          requireSigned={requireSigned}
+          onContractIdChange={setContractId}
+          onRequireSignedChange={setRequireSigned}
+          onBlockReasonChange={setContractBlock}
+        />
       </section>
 
       {/* Panel: Retry & notifications */}
@@ -517,7 +1007,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           loadingLabel="Saving…"
           disabled={saving || !canSubmit || connectors.length < 2}
         >
-          {isEdit ? "Save changes" : "Save pipeline"}
+          {isEdit ? "Save changes" : "Save schedule"}
         </Button>
       </div>
     </form>

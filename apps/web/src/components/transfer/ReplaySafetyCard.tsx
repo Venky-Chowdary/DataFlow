@@ -9,7 +9,14 @@ import type { ReplaySafetyReport } from "../../lib/types";
  * verdict comes from the engine's own classification of the write mode and the
  * destination's durable chunk ledger (or upsert keys).
  */
-export function ReplaySafetyCard({ report }: { report?: ReplaySafetyReport | null }) {
+export function ReplaySafetyCard({
+  report,
+  scopeNote,
+}: {
+  report?: ReplaySafetyReport | null;
+  /** Set when the verdict was classified on the last stream, not every table. */
+  scopeNote?: string | null;
+}) {
   if (!report || !report.mechanism) return null;
 
   const safe = Boolean(report.safe);
@@ -27,6 +34,7 @@ export function ReplaySafetyCard({ report }: { report?: ReplaySafetyReport | nul
         <span>{mechanismLabel}</span>
       </header>
       <p>{report.reason}</p>
+      {scopeNote ? <p>{scopeNote}</p> : null}
       {!safe && (
         <footer>
           Resume from the last committed chunk, or switch the sync mode to upsert

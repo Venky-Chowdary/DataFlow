@@ -125,13 +125,31 @@ def test_iceberg_create_table_false_does_not_mkdir(tmp_path: Path):
     assert not (warehouse / "ns" / "events" / "metadata").exists()
 
 
+# Describe now runs before the write, and an unpatched Describe reaches the
+# network: the writer refuses (correctly) on a describe failure, which would
+# retire the ack-completeness assertions below. These fixtures answer Describe
+# so the acknowledgement path is the one under test.
+SF_DESCRIBE = [
+    {"name": "External_Id__c", "type": "string", "length": 255, "externalId": True,
+     "createable": True, "updateable": True},
+    {"name": "Name", "type": "string", "length": 255, "createable": True,
+     "updateable": True},
+]
+HUBSPOT_DESCRIBE = [
+    {"name": "email", "type": "string", "fieldType": "text"},
+    {"name": "firstname", "type": "string", "fieldType": "text"},
+]
+
+
 def test_salesforce_incomplete_ack_fails_closed():
     from connectors.salesforce_writer import write_mapped_rows
 
     mock_resp = MagicMock()
     mock_resp.content = b"[]"
     mock_resp.json.return_value = {"done": True}  # not a per-record list
-    with patch("connectors.salesforce_writer.request", return_value=mock_resp):
+    with patch(
+        "connectors.salesforce.describe_sobject", return_value=SF_DESCRIBE
+    ), patch("connectors.salesforce_writer.request", return_value=mock_resp):
         result = write_mapped_rows(
             host="example.my.salesforce.com",
             api_key="token",
@@ -164,7 +182,9 @@ def test_salesforce_short_ack_fails_closed():
     mock_resp = MagicMock()
     mock_resp.content = b"[]"
     mock_resp.json.return_value = [{"success": True, "id": "001"}]
-    with patch("connectors.salesforce_writer.request", return_value=mock_resp):
+    with patch(
+        "connectors.salesforce.describe_sobject", return_value=SF_DESCRIBE
+    ), patch("connectors.salesforce_writer.request", return_value=mock_resp):
         result = write_mapped_rows(
             host="example.my.salesforce.com",
             api_key="token",
@@ -196,7 +216,9 @@ def test_hubspot_incomplete_ack_fails_closed():
     mock_resp = MagicMock()
     mock_resp.content = b"{}"
     mock_resp.json.return_value = {"results": [{"id": "1"}], "errors": []}
-    with patch("connectors.hubspot_writer.request", return_value=mock_resp):
+    with patch(
+        "connectors.hubspot.describe_properties", return_value=HUBSPOT_DESCRIBE
+    ), patch("connectors.hubspot_writer.request", return_value=mock_resp):
         result = write_mapped_rows(
             host="",
             api_key="pat-xxx",

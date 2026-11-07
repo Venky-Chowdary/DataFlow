@@ -1,0 +1,204 @@
+[
+  {
+    "where": "source-empty",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "source-loaded",
+    "overlaps": [
+      "button.df2-btn.df2-btn-primary \"Continue to Destination →\" ∩ td.df2-type-string \"sam@example.com\" (1152px)",
+      "button.df2-btn.df2-btn-primary \"Continue to Destination →\" ∩ td.df2-type-decimal \"45.00\" (1280px)",
+      "button.df2-btn.df2-btn-primary \"Continue to Destination →\" ∩ td.df2-type-temporal \"2026-01-18\" (1280px)",
+      "button.df2-btn.df2-btn-primary \"Continue to Destination →\" ∩ td.df2-type-string \"completed\" (1280px)",
+      "td.df2-type-int \"1004\" ∩ span.df2-label-hint \"Source profiled — choose where data should land \" (562px)"
+    ],
+    "overlapCount": 5,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "dialog-structure",
+    "overlaps": [
+      "button.df2-btn.df2-btn-primary \"Continue to Destination →\" ∩ td.df2-type-string \"sam@example.com\" (1152px)",
+      "button.df2-btn.df2-btn-primary \"Continue to Destination →\" ∩ td.df2-type-decimal \"45.00\" (1280px)",
+      "button.df2-btn.df2-btn-primary \"Continue to Destination →\" ∩ td.df2-type-temporal \"2026-01-18\" (1280px)",
+      "button.df2-btn.df2-btn-primary \"Continue to Destination →\" ∩ td.df2-type-string \"completed\" (1280px)",
+      "td.df2-type-int \"1004\" ∩ span.df2-label-hint \"Source profiled — choose where data should land \" (562px)"
+    ],
+    "overlapCount": 5,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "destination",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "transform-default",
+    "overlaps": [
+      "button.df2-btn.df2-btn-ghost \"Auto-arrange\" ∩ p.df2-label-hint \"Loading the canvas…\" (210px)",
+      "button.df2-btn.df2-btn-ghost \"Delete\" ∩ p.df2-label-hint \"Loading the canvas…\" (210px)",
+      "button.df2-btn.df2-btn-ghost \"Undo\" ∩ p.df2-label-hint \"Loading the canvas…\" (210px)",
+      "button.df2-btn.df2-btn-ghost \"Redo\" ∩ p.df2-label-hint \"Loading the canvas…\" (210px)",
+      "button.df2-btn.df2-btn-ghost \"Zoom out\" ∩ p.df2-label-hint \"Loading the canvas…\" (210px)",
+      "button.df2-btn.df2-btn-ghost \"Zoom in\" ∩ p.df2-label-hint \"Loading the canvas…\" (210px)",
+      "select \"Zoom percent\" ∩ p.df2-label-hint \"Loading the canvas…\" (250px)",
+      "button.df2-btn.df2-btn-ghost \"100%\" ∩ p.df2-label-hint \"Loading the canvas…\" (406px)",
+      "button.df2-btn.df2-btn-ghost \"Fit\" ∩ p.df2-label-hint \"Loading the canvas…\" (210px)",
+      "button \"Step\" ∩ p \"5 sampled row(s). Validate checks the population\" (2127px)",
+      "button \"Preview\" ∩ button.df2-btn.df2-btn-ghost \"Back to Destination\" (576px)"
+    ],
+    "overlapCount": 11,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "transform-palette",
+    "overlaps": [
+      "button.df2-canvas-op \"Drop digits beyond N places\" ∩ button.df2-btn.df2-btn-ghost \"Canvas only\" (1963px)",
+      "button.df2-canvas-op \"Drop digits beyond N places\" ∩ button.df2-btn.df2-btn-ghost \"Split\" (1256px)",
+      "button.df2-canvas-op \"Drop digits beyond N places\" ∩ button.df2-btn.df2-btn-ghost \"Properties only\" (1301px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ button.df2-btn.df2-btn-ghost \"Canvas only\" (445px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ button.df2-btn.df2-btn-ghost \"Split\" (284px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ button.df2-btn.df2-btn-ghost \"Properties only\" (295px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ button \"General\" (3025px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ h4 \"Properties\" (1250px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ p.df2-label-hint \"Choose an operation, or select a step.\" (187px)",
+      "button.df2-canvas-op \"Hold a number between two bounds\" ∩ button \"Incoming Fields\" (3332px)",
+      "button.df2-canvas-op \"Hold a number between two bounds\" ∩ button \"Step\" (954px)",
+      "button.df2-canvas-op \"Hold a number between two bounds\" ∩ p.df2-label-hint \"Choose an operation, or select a step.\" (815px)"
+    ],
+    "overlapCount": 38,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "transform-node",
+    "overlaps": [
+      "button.df2-canvas-op \"Drop digits beyond N places\" ∩ button.df2-btn.df2-btn-ghost \"Canvas only\" (1963px)",
+      "button.df2-canvas-op \"Drop digits beyond N places\" ∩ button.df2-btn.df2-btn-ghost \"Split\" (1256px)",
+      "button.df2-canvas-op \"Drop digits beyond N places\" ∩ button.df2-btn.df2-btn-ghost \"Properties only\" (1301px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ button.df2-btn.df2-btn-ghost \"Canvas only\" (445px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ button.df2-btn.df2-btn-ghost \"Split\" (284px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ button.df2-btn.df2-btn-ghost \"Properties only\" (295px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ button \"General\" (3025px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ h4 \"Edit step\" (1250px)",
+      "button.df2-canvas-op \"Absolute value\" ∩ p.df2-label-hint \"Remove leading and trailing whitespace\" (187px)",
+      "button.df2-canvas-op \"Hold a number between two bounds\" ∩ button \"Incoming Fields\" (3332px)",
+      "button.df2-canvas-op \"Hold a number between two bounds\" ∩ button \"Trim\" (954px)",
+      "button.df2-canvas-op \"Hold a number between two bounds\" ∩ button.df2-studio-picker-trigger \"order_id\" (302px)"
+    ],
+    "overlapCount": 61,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "map",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "validate",
+    "overlaps": [
+      "button.df2-vd-assist-toggle \"Explain & fix with AI Why did Validate pass uniq\" ∩ select.df2-input \"None — no contract enforcement csv-to-json-162ba\" (27620px)",
+      "button.df2-vd-assist-toggle \"Explain & fix with AI Why did Validate pass uniq\" ∩ span.df2-field-hint \"Only SIGNED contracts appear here. Drafts must b\" (14566px)",
+      "button.df2-btn.df2-btn-secondary \"Run analysis\" ∩ select.df2-input \"None — no contract enforcement csv-to-json-162ba\" (2404px)",
+      "button.df2-btn.df2-btn-secondary \"Run analysis\" ∩ span.df2-field-hint \"Only SIGNED contracts appear here. Drafts must b\" (872px)",
+      "button.df2-vd-run-id-copy \"Copy run ID\" ∩ button.df2-btn.df2-btn-ghost \"Save contract\" (1885px)",
+      "select.df2-input \"None — no contract enforcement csv-to-json-162ba\" ∩ strong \"Explain & fix with AI\" (16496px)",
+      "select.df2-input \"None — no contract enforcement csv-to-json-162ba\" ∩ span \"Why did Validate pass uniqueness on a sample but\" (3189px)",
+      "button.df2-btn \"Back\" ∩ span \"Validation run\" (414px)",
+      "span \"Why did Validate pass uniqueness on a sample but\" ∩ span.df2-field-hint \"Only SIGNED contracts appear here. Drafts must b\" (9623px)",
+      "span \"Validation run\" ∩ strong \"Validate\" (444px)",
+      "span \"Validation run\" ∩ span.is-ok \"Validate Ready\" (405px)",
+      "code \"pf_e672837ab277\" ∩ span.is-ok \"Validate Ready\" (548px)"
+    ],
+    "overlapCount": 13,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "run",
+    "overlaps": [
+      "button.df2-btn \"← Back\" ∩ span \"Reconcile\" (1034px)",
+      "button.df2-btn \"← Back\" ∩ span \"Freshness\" (195px)",
+      "button.df2-btn \"← Back\" ∩ div.df2-live-log-line.is-ok \"12:23:14 — All rows written — reconciling destin\" (1347px)",
+      "button.df2-btn \"← Back\" ∩ div.df2-live-log-line.is-ok \"12:23:14 — Entered completed phase\" (477px)",
+      "button.df2-btn \"Validate\" ∩ em \"Gate-8 cell fidelity unproven (file/object expor\" (1911px)",
+      "button.df2-btn \"Validate\" ∩ em \"No proven CDC lag on this job (batch or unknown)\" (361px)",
+      "button.df2-btn \"Validate\" ∩ div.df2-live-log-line.is-ok \"12:23:14 — All rows written — reconciling destin\" (2315px)",
+      "button.df2-btn \"Validate\" ∩ div.df2-live-log-line.is-ok \"12:23:14 — Entered completed phase\" (821px)",
+      "button.df2-btn.df2-btn-primary \"New transfer\" ∩ em \"Gate-8 cell fidelity unproven (file/object expor\" (605px)",
+      "button.df2-btn.df2-btn-primary \"New transfer\" ∩ em \"No proven CDC lag on this job (batch or unknown)\" (114px)",
+      "button.df2-btn.df2-btn-primary \"New transfer\" ∩ div.df2-live-log-line.is-ok \"12:23:14 — All rows written — reconciling destin\" (827px)",
+      "button.df2-btn.df2-btn-primary \"New transfer\" ∩ div.df2-live-log-line.is-ok \"12:23:14 — Entered completed phase\" (293px)"
+    ],
+    "overlapCount": 52,
+    "hScroll": false,
+    "title": "Transfer Studio"
+  },
+  {
+    "where": "overview",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Overview"
+  },
+  {
+    "where": "connectors",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Overview"
+  },
+  {
+    "where": "contracts",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Overview"
+  },
+  {
+    "where": "jobs",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Overview"
+  },
+  {
+    "where": "schedules",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Overview"
+  },
+  {
+    "where": "transforms",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Overview"
+  },
+  {
+    "where": "query",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Overview"
+  },
+  {
+    "where": "settings",
+    "overlaps": [],
+    "overlapCount": 0,
+    "hScroll": false,
+    "title": "Overview"
+  }
+]

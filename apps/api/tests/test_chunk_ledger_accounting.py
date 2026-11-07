@@ -222,11 +222,12 @@ class TestRawLedgerRoundTrip:
                 return None
 
         ensure_raw_write_ledger(RecordingCursor(), dialect=dialect, schema=None)
-        assert len(statements) == 1
+        assert statements, "expected ledger DDL"
         ddl = statements[0]
         assert "CREATE TABLE IF NOT EXISTS" in ddl
         assert "PRIMARY KEY (job_id, batch_key, chunk_idx)" in ddl
         assert LEDGER_TABLE in ddl
+        assert "row_start" in ddl and "row_end" in ddl and "attempt" in ddl
 
     def test_unknown_dialect_is_refused_rather_than_guessed(self) -> None:
         with pytest.raises(ValueError, match="No raw chunk ledger"):

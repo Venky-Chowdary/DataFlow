@@ -1,0 +1,14 @@
+{
+  "count": 101,
+  "next": null,
+  "previous": "PREVIOUS",
+  "results": [
+    {
+      "id": "018d3c06-fixture-person-p2",
+      "name": "fixture.pagetwo@example.com",
+      "distinct_ids": ["fixture.pagetwo@example.com"],
+      "properties": { "email": "fixture.pagetwo@example.com" },
+      "created_at": "2024-01-02T00:00:00.000000Z"
+    }
+  ]
+}

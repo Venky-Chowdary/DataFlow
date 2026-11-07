@@ -29,7 +29,12 @@ class PreflightEngine:
                 if self.fail_fast:
                     break
 
-        passed = len(blockers) == 0 and all(
-            r.status in (GateStatus.PASS, GateStatus.SKIP) for r in results
+        # SKIP means unmeasured / not applicable — never unlock Execute by itself.
+        # Require at least one PASS and zero BLOCKs so an all-SKIP run cannot
+        # greenlight a transfer that never proved a load-bearing gate.
+        passed = (
+            len(blockers) == 0
+            and any(r.status == GateStatus.PASS for r in results)
+            and all(r.status != GateStatus.BLOCK for r in results)
         )
         return PreflightResult(passed=passed, gates=results, blockers=blockers)

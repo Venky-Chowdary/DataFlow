@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { DtIcon } from "./DtIcon";
 import { PilotConfirmCard } from "./pilot/PilotConfirmCard";
+import { PilotSources } from "./pilot/PilotSources";
 import { useToast } from "./Toast";
 import { useConfirm } from "./ui/ConfirmDialog";
 import {
@@ -15,9 +16,11 @@ import { useActiveData } from "../lib/DataContext";
 import {
   applyPilotSafeActions,
   buildPilotDataContext,
+  isNavigableScreen,
   nextPilotResultId,
   pilotActionChipLabel,
   runPilotConfirm,
+  uniquePilotPrompts,
 } from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
@@ -73,7 +76,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
 
   useEffect(() => {
     if ((open || variant === "rail") && prompts.length === 0) {
-      fetchCopilotPrompts().then(setPrompts).catch(() => {});
+      fetchCopilotPrompts().then((list) => setPrompts(uniquePilotPrompts(list))).catch(() => {});
     }
   }, [open, variant, prompts.length]);
 
@@ -88,8 +91,11 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  const applyActions = (actions?: CopilotAction[]) => {
-    applyPilotSafeActions(actions, onNavigate);
+  const applyActions = (
+    actions?: CopilotAction[],
+    toolsUsed?: { name: string; success: boolean }[],
+  ) => {
+    applyPilotSafeActions(actions, onNavigate, toolsUsed);
   };
 
   const clearPending = (msgIndex: number, actionId: string) => {
@@ -158,14 +164,15 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
           dataInsight: res.data_insight,
           tools_used: res.tools_used,
           suggested_prompts: res.suggested_prompts,
+          sources: res.sources,
         },
       ]);
       // Stay on the Confirm card — never auto-navigate away from an approval.
       if (!(res.pending_actions && res.pending_actions.length > 0)) {
-        applyActions(res.suggested_actions);
+        applyActions(res.suggested_actions, res.tools_used);
       }
       if (res.suggested_prompts?.length) {
-        setPrompts(res.suggested_prompts);
+        setPrompts(uniquePilotPrompts(res.suggested_prompts));
       }
     } catch (error) {
       const detail = formatPilotReachError(error, API_BASE);
@@ -192,7 +199,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         </div>
         <button
           type="button"
-          className="df2-btn df2-btn-ghost df2-btn-sm"
+          className="df2-close-btn"
           onClick={() => (variant === "rail" ? onClose?.() : setOpen(false))}
           aria-label="Close"
         >
@@ -223,6 +230,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         {messages.map((msg, i) => (
           <div key={i} className={`df2-copilot-msg ${msg.role}`}>
             <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.text) }} />
+            <PilotSources sources={msg.sources} />
             {msg.pending_actions && msg.pending_actions.length > 0 && (
               <div className="df2-pilot-pending">
                 {msg.pending_actions.map((pa) => (
@@ -241,16 +249,16 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
                 {msg.actions.map((action, j) => {
                   const screen = action.screen || action.route;
                   const label = pilotActionChipLabel(action);
-                  return (
+                  return isNavigableScreen(screen) ? (
                     <button
                       key={j}
                       type="button"
                       className="df2-btn df2-btn-sm"
-                      onClick={() => screen && onNavigate?.(screen as Screen)}
+                      onClick={() => onNavigate?.(screen)}
                     >
                       {label}
                     </button>
-                  );
+                  ) : null;
                 })}
               </div>
             )}
@@ -259,7 +267,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
               && !(msg.pending_actions && msg.pending_actions.length > 0)
               && (msg.suggested_prompts?.length || (prompts.length > 0 && messages.length > 2)) && (
               <div className="df2-copilot-suggestions" style={{ marginTop: 8 }}>
-                {(msg.suggested_prompts?.length ? msg.suggested_prompts : prompts).slice(0, 3).map((p) => (
+                {uniquePilotPrompts(msg.suggested_prompts?.length ? msg.suggested_prompts : prompts).slice(0, 3).map((p) => (
                   <button key={p} type="button" onClick={() => send(p)}>{p}</button>
                 ))}
               </div>
@@ -315,7 +323,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         <DtIcon name="sparkle" size={22} />
       </button>
       {open && (
-        <div style={{ position: "fixed", bottom: 88, right: 24, width: 380, maxHeight: 560, zIndex: 50, boxShadow: "0 12px 32px rgba(15,23,42,0.15)", borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0" }}>
+        <div style={{ position: "fixed", bottom: 88, right: 24, width: 380, maxHeight: 560, zIndex: "var(--df-z-elevated)", boxShadow: "0 12px 32px rgba(15,23,42,0.15)", borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0" }}>
           {panel}
         </div>
       )}

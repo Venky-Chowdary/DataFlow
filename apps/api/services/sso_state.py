@@ -1,109 +1,113 @@
-"""SSO state store — move the transient OAuth state parameter off the router.
+"""SSO state store: transient OAuth/SAML state and one-time replay claims.
 
-When MongoDB is available the state tokens are persisted to a collection so
-multi-instance API deployments can validate callbacks.  Otherwise they fall back
-to a JSON file in ``data_dir``.
+Mongo is the multi-host backend.
+
+The flocked file backend is safe across workers on one host only and is not shared
+across hosts.
 """
 
 from __future__ import annotations
 
-import json
+import hashlib
+import logging
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from services.platform_config import data_dir
-from services.value_serializer import json_default
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
-try:
-    from src.services.mongodb_service import get_mongodb_service
-except ImportError:
-    from services.mongodb_service import get_mongodb_service
+from services.metadata_backend import json_doc_transaction, mongo_database
+from services.platform_config import data_dir
+
+logger = logging.getLogger(__name__)
 
 STATE_PATH = data_dir() / "sso_state.json"
 STATE_TTL_MINUTES = 10
+_REPLAY_INDEX_LOCK = threading.Lock()
+_REPLAY_INDEX_READY = False
 
 
-def _mongo_backend():
-    try:
-        svc = get_mongodb_service()
-    except Exception:
-        return None
-    if type(svc).__name__ == "MemoryMongoDBService":
-        return None
-    return svc if getattr(svc, "client", None) is not None else None
+class SsoStoreUnavailable(RuntimeError):
+    """The configured MongoDB SSO state or replay store could not be used."""
 
 
 def _is_expired(timestamp: str) -> bool:
     try:
         created = datetime.fromisoformat(timestamp)
-        return datetime.now(timezone.utc) - created > timedelta(minutes=STATE_TTL_MINUTES)
-    except Exception:
+    except (TypeError, ValueError):
         return True
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - created > timedelta(minutes=STATE_TTL_MINUTES)
 
 
-def _load_file() -> dict[str, Any]:
-    if not STATE_PATH.exists():
-        return {}
-    try:
-        raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            return {}
-        return raw
-    except Exception:
-        return {}
-
-
-def _save_file(data: dict[str, Any]) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_PATH.with_suffix(STATE_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
-    tmp.replace(STATE_PATH)
+def _state_doc_is_live(info: Any) -> bool:
+    return isinstance(info, dict) and not _is_expired(info.get("created_at", ""))
 
 
 def _cleanup(states: dict[str, Any]) -> dict[str, Any]:
-    return {state: info for state, info in states.items() if not _is_expired(info.get("created_at", ""))}
+    return {state: info for state, info in states.items() if _state_doc_is_live(info)}
+
+
+def _mongo_error(operation: str, sso_type: str) -> SsoStoreUnavailable:
+    logger.error(
+        "SSO state store unavailable (sso_type=%s reason=%s)",
+        sso_type,
+        operation,
+    )
+    return SsoStoreUnavailable(f"SSO state store unavailable ({operation})")
 
 
 def set_state(state: str, sso_type: str, extra: dict[str, Any] | None = None) -> str:
     """Store an SSO state token and return it."""
-    svc = _mongo_backend()
     payload = {
         "sso_type": sso_type,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     if extra:
         payload["extra"] = extra
-    if svc:
-        db = svc.get_database()
-        db["sso_states"].replace_one(
-            {"_id": state},
-            {"_id": state, **payload},
-            upsert=True,
-        )
-        return state
-    states = _cleanup(_load_file())
-    states[state] = payload
-    _save_file(states)
+    try:
+        db = mongo_database()
+        if db is not None:
+            db["sso_states"].replace_one(
+                {"_id": state},
+                {"_id": state, **payload},
+                upsert=True,
+            )
+            return state
+    except PyMongoError as exc:
+        raise _mongo_error("mongo_write_failed", sso_type) from exc
+
+    with json_doc_transaction(STATE_PATH, {}) as states:
+        live_states = _cleanup(states)
+        states.clear()
+        states.update(live_states)
+        states[state] = payload
     return state
 
 
 def get_state(state: str, sso_type: str) -> dict[str, Any] | None:
-    """Validate a state token, return its metadata, and consume it."""
+    """Validate an SSO state token, return its metadata, and consume it."""
     if not state:
         return None
-    svc = _mongo_backend()
-    if svc:
-        db = svc.get_database()
-        doc = db["sso_states"].find_one_and_delete({"_id": state})
-        if not doc:
-            return None
-        if doc.get("sso_type") != sso_type or _is_expired(doc.get("created_at", "")):
-            return None
-        return doc
-    states = _cleanup(_load_file())
-    info = states.pop(state, None)
-    _save_file(states)
+    try:
+        db = mongo_database()
+        if db is not None:
+            doc = db["sso_states"].find_one_and_delete({"_id": state})
+            if not doc:
+                return None
+            if doc.get("sso_type") != sso_type or _is_expired(doc.get("created_at", "")):
+                return None
+            return doc
+    except PyMongoError as exc:
+        raise _mongo_error("mongo_read_failed", sso_type) from exc
+
+    with json_doc_transaction(STATE_PATH, {}) as states:
+        live_states = _cleanup(states)
+        states.clear()
+        states.update(live_states)
+        info = states.pop(state, None)
     if not info:
         return None
     if info.get("sso_type") != sso_type or _is_expired(info.get("created_at", "")):
@@ -112,9 +116,82 @@ def get_state(state: str, sso_type: str) -> dict[str, Any] | None:
 
 
 def get_and_pop(state: str, sso_type: str) -> bool:
-    """Validate a state token, require the expected SSO type, and consume it."""
+    """Validate the expected SSO type and consume the state token."""
     return get_state(state, sso_type) is not None
 
 
 def generate_state(sso_type: str, extra: dict[str, Any] | None = None) -> str:
+    """Generate and store a high-entropy state token."""
     return set_state(secrets.token_urlsafe(16), sso_type, extra=extra)
+
+
+def _ensure_replay_ttl_index(db: Any) -> None:
+    global _REPLAY_INDEX_READY
+    if _REPLAY_INDEX_READY:
+        return
+    with _REPLAY_INDEX_LOCK:
+        if _REPLAY_INDEX_READY:
+            return
+        db["sso_replay"].create_index(
+            "expires_at",
+            expireAfterSeconds=0,
+            name="sso_replay_expires_at_ttl",
+        )
+        _REPLAY_INDEX_READY = True
+
+
+def _replay_key(namespace: str, token_id: str) -> str:
+    digest = hashlib.sha256(token_id.encode("utf-8")).hexdigest()
+    return f"{namespace}:{digest}"
+
+
+def _expiry_from_entry(entry: Any) -> datetime | None:
+    if not isinstance(entry, dict):
+        return None
+    raw = entry.get("expires_at")
+    if isinstance(raw, datetime):
+        expiry = raw
+    elif isinstance(raw, str):
+        try:
+            expiry = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return expiry
+
+
+def claim_once(namespace: str, token_id: str, expires_at: datetime) -> bool:
+    """Atomically claim a namespaced identifier until its expiration time."""
+    if not token_id:
+        raise ValueError("token_id must not be empty")
+    key = _replay_key(namespace, token_id)
+    try:
+        db = mongo_database()
+        if db is not None:
+            collection = db["sso_replay"]
+            try:
+                _ensure_replay_ttl_index(db)
+                collection.insert_one({"_id": key, "expires_at": expires_at})
+            except DuplicateKeyError:
+                return False
+            return True
+    except PyMongoError as exc:
+        raise _mongo_error("mongo_replay_failed", namespace) from exc
+
+    path = data_dir() / "sso_replay.json"
+    now = datetime.now(timezone.utc)
+    with json_doc_transaction(path, {}) as replay:
+        expired: list[str] = []
+        for existing_key, entry in replay.items():
+            expiry = _expiry_from_entry(entry)
+            if expiry is None or expiry <= now:
+                expired.append(existing_key)
+        for existing_key in expired:
+            replay.pop(existing_key, None)
+        if key in replay:
+            return False
+        replay[key] = {"expires_at": expires_at.isoformat()}
+    return True

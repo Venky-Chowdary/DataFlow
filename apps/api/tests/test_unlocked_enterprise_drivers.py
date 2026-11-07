@@ -16,7 +16,19 @@ def test_unlocked_enterprise_drivers_available_when_packages_present():
         if not driver_available(driver):
             continue
         caps = get_capabilities(driver)
-        assert transfer_ready(caps) or caps.get("source_only"), driver
+        if caps.get("source_only"):
+            # Validate-class preflight gates destinations, so a read-only driver
+            # is live on the source path without declaring one.
+            assert caps.get("read"), driver
+            assert driver in live, f"{driver} should be in package-aware live set"
+            continue
+        if caps.get("preflight") is False:
+            # Installing the package does not unlock a destination that Validate
+            # cannot gate — it must stay out of the live set.
+            assert not transfer_ready(caps), driver
+            assert driver not in live, f"{driver} has no preflight and must not be live"
+            continue
+        assert transfer_ready(caps), driver
         assert driver in live, f"{driver} should be in package-aware live set"
 
 

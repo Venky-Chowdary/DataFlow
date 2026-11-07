@@ -14,7 +14,15 @@ import { PageToolbar } from "../components/ui/PageToolbar";
 import { LoadingBlock } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { testSavedConnector, type CatalogConnector } from "../lib/api";
+import {
+  connectorLooksHealthy,
+  connectorNeedsAttention,
+  statusFromLastTest,
+} from "../lib/connectorHealth";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
+import { catalogTileSelectable } from "../lib/catalogTileEligibility";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { PermissionNotice } from "../components/PermissionNotice";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { buildConnectionWorkbenchContext, lastUsedAtForConnector } from "../lib/connectionWorkbench";
 
@@ -28,6 +36,8 @@ interface ConnectorsPageProps {
   onEdit: (connector: Connector) => void;
   onDelete: (id: string) => void;
   onRefresh?: () => void | Promise<void>;
+  /** Immediate list patch after a probe so badges match the toast (no sticky fail). */
+  onConnectorPatch?: (id: string, patch: Partial<Connector>) => void;
   onOpenTransfer?: (connectorId?: string) => void;
   onOpenJob?: (jobId: string) => void;
   showConnectionsTab?: number;
@@ -49,6 +59,7 @@ export function ConnectorsPage({
   onEdit,
   onDelete,
   onRefresh,
+  onConnectorPatch,
   onOpenTransfer,
   onOpenJob,
   showConnectionsTab,
@@ -56,11 +67,13 @@ export function ConnectorsPage({
   connectorEditorOpen = false,
 }: ConnectorsPageProps) {
   const { toast } = useToast();
+  const connectorWrite = useWriteGate(PERMISSIONS.connectorWrite);
   const [tab, setTab] = useState<"connections" | "catalog">("connections");
   const [role, setRole] = useState<"all" | "source" | "destination">("all");
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testingAll, setTestingAll] = useState(false);
   const [query, setQuery] = useState("");
+  const [catalogQuery, setCatalogQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "error">("all");
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -116,7 +129,9 @@ export function ConnectorsPage({
     const q = query.trim().toLowerCase();
     return connectors.filter((c) => {
       const statusOk = statusFilter === "all"
-        || (statusFilter === "error" ? c.status === "error" : c.status !== "error");
+        || (statusFilter === "error"
+          ? connectorNeedsAttention(c)
+          : connectorLooksHealthy(c));
       if (!statusOk) return false;
       if (!q) return true;
       return [c.name, c.type, c.host, c.database]
@@ -124,18 +139,32 @@ export function ConnectorsPage({
         .some((value) => String(value).toLowerCase().includes(q));
     });
   }, [connectors, query, statusFilter]);
-  const healthyCount = connectors.filter((c) => c.status !== "error" && c.last_test_ok !== false).length;
-  const errorCount = connectors.filter((c) => c.status === "error" || c.last_test_ok === false).length;
+  const healthyCount = connectors.filter((c) => connectorLooksHealthy(c)).length;
+  const errorCount = connectors.filter((c) => connectorNeedsAttention(c)).length;
   const selectedConnection = connectors.find((c) => c.id === selectedConnectionId) ?? null;
   const workbench = useMemo(
     () => (selectedConnection ? buildConnectionWorkbenchContext(selectedConnection, jobs, schedules) : null),
     [selectedConnection, jobs, schedules],
   );
 
+  const applyProbeResult = (id: string, lastTestOk: boolean) => {
+    onConnectorPatch?.(id, {
+      last_test_ok: lastTestOk,
+      status: statusFromLastTest(lastTestOk),
+    });
+  };
+
   const handleTest = async (id: string) => {
+    // A probe is a POST, so the API gate treats it as a connector write; refuse in
+    // words instead of letting a viewer collect a 403 per connector.
+    if (!connectorWrite.allowed) {
+      toast({ title: "No write permission", message: connectorWrite.reason, tone: "warning" });
+      return;
+    }
     setTestingId(id);
     try {
       const result = await testSavedConnector(id);
+      applyProbeResult(id, result.last_test_ok);
       toast({
         title: result.success ? "Connection OK" : "Connection failed",
         message: result.message,
@@ -143,6 +172,7 @@ export function ConnectorsPage({
       });
       await onRefresh?.();
     } catch (e) {
+      applyProbeResult(id, false);
       toast({
         title: "Test failed",
         message: e instanceof Error && e.message ? e.message : "Could not reach the connector probe.",
@@ -154,13 +184,19 @@ export function ConnectorsPage({
 
   const handleTestAll = async () => {
     if (!connectors.length) return;
+    if (!connectorWrite.allowed) {
+      toast({ title: "No write permission", message: connectorWrite.reason, tone: "warning" });
+      return;
+    }
     setTestingAll(true);
     let passed = 0;
     let failed = 0;
     const failures: string[] = [];
     for (const c of connectors) {
+      setTestingId(c.id);
       try {
         const result = await testSavedConnector(c.id);
+        applyProbeResult(c.id, result.last_test_ok);
         if (result.success) {
           passed += 1;
         } else {
@@ -171,12 +207,14 @@ export function ConnectorsPage({
         }
       } catch (e) {
         failed += 1;
+        applyProbeResult(c.id, false);
         if (failures.length < 3) {
           const detail = e instanceof Error && e.message ? e.message : "probe error";
           failures.push(`${c.name}: ${detail}`);
         }
       }
     }
+    setTestingId(null);
     toast({
       title: "Connection tests finished",
       message: [
@@ -191,15 +229,7 @@ export function ConnectorsPage({
   };
 
   const handleCatalogSelect = (item: CatalogConnector) => {
-    const tier = item.certification_tier || "";
-    const isPlanned =
-      tier === "planned" ||
-      item.effective_status === "planned" ||
-      (!item.transfer_ready &&
-        !item.connect_only &&
-        tier !== "source_only" &&
-        item.effective_status !== "live");
-    if (isPlanned) {
+    if (!catalogTileSelectable(item, false)) {
       toast({
         title: "Connector not available yet",
         message: `${item.name} is on the roadmap. Choose a Certified or Source-only connector.`,
@@ -207,12 +237,31 @@ export function ConnectorsPage({
       });
       return;
     }
-    if (item.connect_only || tier === "source_only" || (!item.transfer_ready && item.effective_status === "live")) {
+    const tier = item.certification_tier || "";
+    if (item.environment_gap) {
       toast({
-        title: "Source only",
-        message: `${item.name} can be saved and tested as a source — full R/W transfer may be limited.`,
+        title: "Driver not installed here",
+        message:
+          item.environment_gap_reason ||
+          `${item.name} is Certified but its driver package is not loadable on this host.`,
         tone: "warning",
       });
+    } else if (item.connect_only) {
+      toast({
+        title: "Connection test only",
+        message: `${item.name} can be saved and tested, but no transfer driver is registered — it cannot move data yet.`,
+        tone: "warning",
+      });
+    } else if (tier === "source_only") {
+      toast({
+        title: "Source only",
+        message: `${item.name} is certified as a source only — it cannot be used as a transfer destination.`,
+        tone: "warning",
+      });
+    }
+    if (!connectorWrite.allowed) {
+      toast({ title: "No write permission", message: connectorWrite.reason, tone: "warning" });
+      return;
     }
     onAdd(catalogType(item.id));
   };
@@ -222,13 +271,20 @@ export function ConnectorsPage({
       wide
       className="df2-page-connectors"
       title="Connectors"
-      description="Saved connections and the transfer-ready catalog."
+      description="Saved logins for Transfer Studio. Open a row for status and last test, or start a new connection."
     >
       <PageFrame className="df2-connectors-page">
+        <PermissionNotice
+          allowed={connectorWrite.allowed}
+          reason={connectorWrite.reason}
+          what="Connections are read-only for you."
+        />
+        {/* The toolbar owns search on both tabs — the catalog used to carry its
+            own box a row lower while this zone sat empty. */}
         <PageToolbar
-          searchValue={tab === "connections" && connectors.length > 0 ? query : undefined}
-          onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
-          searchPlaceholder="Search saved connections…"
+          searchValue={tab === "catalog" ? catalogQuery : connectors.length > 0 ? query : undefined}
+          onSearchChange={tab === "catalog" ? setCatalogQuery : connectors.length > 0 ? setQuery : undefined}
+          searchPlaceholder={tab === "catalog" ? "Search connectors…" : "Search saved connections…"}
           filters={
             <FilterBar variant="inline" ariaLabel="Connector page filters">
               <FilterTabs
@@ -273,7 +329,8 @@ export function ConnectorsPage({
                   size="sm"
                   loading={testingAll}
                   loadingLabel="Testing…"
-                  disabled={testingAll}
+                  disabled={testingAll || !connectorWrite.allowed}
+                  title={connectorWrite.reason || undefined}
                   onClick={() => void handleTestAll()}
                   leadingIcon={<DtIcon name="activity" size={14} />}
                 >
@@ -283,6 +340,8 @@ export function ConnectorsPage({
               <Button
                 size="sm"
                 variant="primary"
+                disabled={!connectorWrite.allowed}
+                title={connectorWrite.reason || undefined}
                 onClick={() => onAdd()}
               >
                 New connection
@@ -310,12 +369,16 @@ export function ConnectorsPage({
                   description="Browse the catalog, enter credentials once, and reuse connections across Transfer Studio, Pipelines, and Datawrap Pilot."
                   action={
                     <div className="df2-empty-actions-row">
-                      <button type="button" className="df2-btn df2-btn-primary" onClick={() => setTab("catalog")}>
-                        <DtIcon name="search" size={14} /> Browse catalog
-                      </button>
-                      <button type="button" className="df2-btn df2-btn-ghost" onClick={() => onAdd()}>
+                      <Button
+                        variant="primary"
+                        onClick={() => setTab("catalog")}
+                        leadingIcon={<DtIcon name="search" size={14} />}
+                      >
+                        Browse catalog
+                      </Button>
+                      <Button variant="ghost" onClick={() => onAdd()}>
                         Add connection
-                      </button>
+                      </Button>
                     </div>
                   }
                 />
@@ -386,6 +449,8 @@ export function ConnectorsPage({
                 initialStatus="live"
                 requireAvailable={false}
                 limit={200}
+                query={catalogQuery}
+                onQueryChange={setCatalogQuery}
               />
             </div>
           )}

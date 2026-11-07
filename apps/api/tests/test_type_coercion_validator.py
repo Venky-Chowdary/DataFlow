@@ -38,8 +38,8 @@ def test_lossy_coercion_blocks_when_high_confidence():
     assert coerce_blocks_transfer(issues) is True
 
 
-def test_lossy_coercion_warns_under_balanced():
-    """Balanced Map-time declared lossy pairs warn — mirrors G3; value probe still fail-fast on Validate."""
+def test_lossy_coercion_blocks_under_balanced_without_risk_contract():
+    """Balanced must not soft-green VARCHAR→NUMBER — Risk Contract required (data-rule matrix)."""
     issues = validate_mapping_coercions(
         [{"source": "note", "target": "amount", "confidence": 0.95}],
         source_types={"note": "VARCHAR"},
@@ -47,8 +47,8 @@ def test_lossy_coercion_warns_under_balanced():
         validation_mode="balanced",
     )
     assert issues
-    assert issues[0]["severity"] == "warn"
-    assert coerce_blocks_transfer(issues) is False
+    assert issues[0]["severity"] == "block"
+    assert coerce_blocks_transfer(issues) is True
 
 
 def test_strict_boolean_ack_alone_still_blocks_lossy():
@@ -114,3 +114,22 @@ def test_type_locked_allows_same_logical_type():
         schema_policy="type_locked",
     )
     assert issues == []
+
+
+def test_folded_oracle_source_type_is_not_defaulted_to_varchar():
+    issues = validate_mapping_coercions(
+        [
+            {"source": "id", "target": "id", "confidence": 0.99, "transform": "integer"},
+            {
+                "source": "amount",
+                "target": "amount",
+                "confidence": 0.99,
+                "transform": "decimal",
+            },
+        ],
+        source_types={"ID": "DECIMAL(38,0)", "AMOUNT": "DECIMAL(18,2)"},
+        target_types={"id": "NUMERIC(38,0)", "amount": "NUMERIC(18,2)"},
+        dest_db_type="postgresql",
+        dest_table_exists=False,
+    )
+    assert issues == [], issues

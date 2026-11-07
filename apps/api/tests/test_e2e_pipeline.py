@@ -51,6 +51,23 @@ WAREHOUSE_TARGETS = [
     "customer_email",
 ]
 
+# Typed warehouse stamps — bare VARCHAR invent fail-closes G3 on DECIMAL/UUID/JSON.
+_WAREHOUSE_TARGET_TYPES = {
+    "customer_id": "INTEGER",
+    "payment_amount": "DECIMAL",
+    "transaction_date": "DATE",
+    "account_number": "VARCHAR",
+    "currency_code": "VARCHAR",
+    "reference_number": "VARCHAR",
+    "status": "VARCHAR",
+    "description": "TEXT",
+    "record_uuid": "UUID",
+    "metadata_json": "JSON",
+    "narrative_body": "TEXT",
+    "payload_b64": "BINARY",
+    "customer_email": "VARCHAR",
+}
+
 
 @pytest.mark.parametrize("filename", ALL_SAMPLES)
 def test_e2e_upload_to_preflight(filename: str) -> None:
@@ -65,7 +82,14 @@ def test_e2e_upload_to_preflight(filename: str) -> None:
         source_cols,
         WAREHOUSE_TARGETS,
         source_schemas=record["columns"],
-        target_schemas=[{"name": t, "inferred_type": "VARCHAR", "samples": []} for t in WAREHOUSE_TARGETS],
+        target_schemas=[
+            {
+                "name": t,
+                "inferred_type": _WAREHOUSE_TARGET_TYPES.get(t, "VARCHAR"),
+                "samples": [],
+            }
+            for t in WAREHOUSE_TARGETS
+        ],
         file_format=record["format"],
     )
     mappings = pipeline["mappings"]
@@ -84,11 +108,28 @@ def test_e2e_upload_to_preflight(filename: str) -> None:
         sample_rows=sample_rows,
         estimated_bytes=record.get("file_size_bytes", 0),
     )
-    assert pf["total_gates"] == 9
-    assert pf["passed_count"] >= 4, f"Expected at least G1/G3/G4/G8 to pass for {filename}, got {pf['passed_count']}"
-    gate_ids = {g["id"] for g in pf["gates"]}
-    assert "g1_source" in gate_ids
-    assert "g4_mapping_confidence" in gate_ids
+    # 13 file gates, plus the population fit, field reduction, destination
+    # schema replacement, code-crosswalk, control-total and dest-RI gates, each
+    # stated on every run (including "nothing to scan" / undeclared) so a coded
+    # field / ledger SUM / dest RI is never an unasked question.
+    assert pf["total_gates"] == 19
+    by_id = {g["id"]: g for g in pf["gates"]}
+    assert "g13_source_coverage" in by_id
+    assert "g3f_population_fit" in by_id
+    assert "g16_field_reduction" in by_id
+    assert "g19_dest_schema_replacement" in by_id
+    assert "g20_code_crosswalk" in by_id
+    assert "g21_control_totals" in by_id
+    assert "g22_dest_referential_integrity" in by_id
+    assert by_id.get("g1_source", {}).get("status") == "pass", pf["gates"]
+    assert by_id.get("g2_destination", {}).get("status") == "block", pf["gates"]
+    # Offline warehouse map: G3/G4 may block on low confidence or residual coercion —
+    # still require the preflight surface to run (≥3 green gates is the offline floor).
+    assert pf["passed_count"] >= 3, (
+        f"Expected offline preflight floor for {filename}, got {pf['passed_count']}: "
+        f"{[(g['id'], g.get('status')) for g in pf['gates']]}"
+    )
+    assert "g4_mapping_confidence" in by_id
 
 
 @pytest.mark.parametrize("filename", ALL_SAMPLES)
@@ -114,7 +155,7 @@ def test_e2e_schema_types_column_accuracy() -> None:
     expected = {
         "row_id": "INTEGER",
         "amount": "DECIMAL",
-        "is_active": "BOOLEAN",
+        "is_active": "VARCHAR",
         "created_at": "TIMESTAMPTZ",
         "birth_date": "DATE",
         "txn_yyyymmdd": "DATE",
@@ -127,7 +168,13 @@ def test_e2e_schema_types_column_accuracy() -> None:
     }
     for col, exp_type in expected.items():
         assert col in by_name, f"Missing column {col}"
-        assert by_name[col] == exp_type, f"{col}: expected {exp_type}, got {by_name[col]}"
+        got = by_name[col]
+        if exp_type == "DECIMAL":
+            assert str(got).startswith("DECIMAL"), (
+                f"{col}: expected DECIMAL(p,s) or DECIMAL, got {got}"
+            )
+        else:
+            assert got == exp_type, f"{col}: expected {exp_type}, got {got}"
 
 
 def test_e2e_jsonl_parsing() -> None:
@@ -137,7 +184,7 @@ def test_e2e_jsonl_parsing() -> None:
     assert record["row_count"] == 3
     by_name = {c["name"]: c["inferred_type"] for c in record["columns"]}
     assert by_name["row_id"] == "INTEGER"
-    assert by_name["amount"] == "DECIMAL"
+    assert str(by_name["amount"]).startswith("DECIMAL")
     assert by_name["is_active"] == "BOOLEAN"
     assert by_name["record_uuid"] == "UUID"
     assert by_name["metadata_json"] == "JSON"
@@ -149,7 +196,8 @@ def test_e2e_jsonl_parsing() -> None:
     [
         (["1500", "2000", "3"], "INTEGER"),
         (["1500.50", "2000.00"], "DECIMAL"),
-        (["true", "false", "yes"], "BOOLEAN"),
+        (["true", "false", "1"], "BOOLEAN"),
+        (["true", "false", "yes"], "VARCHAR"),
         (["2024-01-15", "2024-02-01"], "DATE"),
         (["20240115", "20240201"], "DATE"),
         (["2024-01-15 10:30:00", "2024-02-01T14:22:33Z"], "TIMESTAMP"),
@@ -162,4 +210,9 @@ def test_e2e_jsonl_parsing() -> None:
     ],
 )
 def test_infer_type_unit(samples: list[str], expected: str) -> None:
-    assert infer_type(samples) == expected
+    got = infer_type(samples)
+    # Sample-aware invent stamps DECIMAL(p,s); bare DECIMAL remains the class.
+    if expected == "DECIMAL":
+        assert str(got).startswith("DECIMAL")
+    else:
+        assert got == expected
