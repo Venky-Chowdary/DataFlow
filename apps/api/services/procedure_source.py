@@ -288,6 +288,10 @@ class _ResultSpool:
     resume_key: str = ""
     resume_line: int = 0
     resume_pos: int = 0
+    # Rows each cursor filter keeps, counted once to the end of the spool. A
+    # page that stops early still reports the filtered population, not the
+    # rows seen so far (page 0 said 1 and page 1 said 2 of 3).
+    filter_totals: dict[str, int] = field(default_factory=dict)
 
 
 _SPOOL_LOCK = threading.Lock()
@@ -1552,6 +1556,11 @@ def _read_spool_page(
         start_pos = spool.resume_pos
         if apply_filter:
             matched = spool.resume_line
+    # A filtered page may stop at its last row only once this filter's total is
+    # known; until then it counts on to the end so ``total_rows`` is the whole
+    # filtered population. That costs one full scan per filter, not per page.
+    filter_total = spool.filter_totals.get(resume_key) if apply_filter else None
+    resume_set = False
     with spool.path.open("r", encoding="utf-8") as fh:
         if start_pos:
             fh.seek(start_pos)
@@ -1559,7 +1568,10 @@ def _read_spool_page(
             pos = fh.tell()
             line = fh.readline()
             if not line:
-                spool.resume_key = ""
+                if apply_filter:
+                    spool.filter_totals[resume_key] = matched
+                if not resume_set:
+                    spool.resume_key = ""
                 break
             # A long scan must not freeze the reconcile heartbeat on the GIL.
             if line_no and line_no % 2000 == 0:
@@ -1585,13 +1597,17 @@ def _read_spool_page(
             if start <= matched < end:
                 rows.append(row)
             matched += 1
-            if matched >= end:
+            if matched >= end and not resume_set:
+                # The next page of this filter resumes after this row.
                 spool.resume_key = resume_key
                 spool.resume_line = matched
                 spool.resume_pos = fh.tell()
-                break
+                resume_set = True
+                if filter_total is not None:
+                    break
     if apply_filter:
-        return list(spool.headers), rows, matched
+        total = spool.filter_totals.get(resume_key)
+        return list(spool.headers), rows, matched if total is None else total
     if cursor_col:
         return list(spool.headers), rows, spool.total
     return list(spool.headers), rows, spool.total

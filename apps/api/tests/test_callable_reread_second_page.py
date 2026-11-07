@@ -99,9 +99,18 @@ def test_page_max_cursor_parses_the_whole_spool_offset_does_not(tmp_path: Path, 
     monkeypatch.setattr(ps, "json_loads_exact", _count)
     calls["n"] = 0
     t0 = time.perf_counter()
-    _read_spool_page(spool, offset=0, limit=page, cursor_column="id", cursor_after=str(page))
+    _h, _rows, filtered_total = _read_spool_page(
+        spool, offset=0, limit=page, cursor_column="id", cursor_after=str(page),
+    )
     filtered_s = time.perf_counter() - t0
     filtered_parses = calls["n"]
+    # The next page of the same filter resumes after the last row it returned
+    # and stops at its own end: the filter's total is already known.
+    calls["n"] = 0
+    _h, next_rows, next_total = _read_spool_page(
+        spool, offset=page, limit=page, cursor_column="id", cursor_after=str(page),
+    )
+    next_parses = calls["n"]
     calls["n"] = 0
     fresh = _spool(tmp_path / "wide2.jsonl", [_row(i) for i in range(1, n + 1)])
     t1 = time.perf_counter()
@@ -109,9 +118,15 @@ def test_page_max_cursor_parses_the_whole_spool_offset_does_not(tmp_path: Path, 
         fresh, offset=page, limit=page, cursor_column="id", cursor_after=None,
     )
     offset_s = time.perf_counter() - t1
-    # Sorted ids: a page-max filter still parses the skipped prefix plus the
-    # page. Offset parses only the page. The re-read no longer uses the filter.
-    assert filtered_parses == page * 2
+    # A cursor filter parses the whole spool once: every row's cursor has to be
+    # read to know how many rows the filter keeps, and ``total_rows`` is that
+    # filtered population on every page (test_procedure_source). Its next page
+    # parses only its own rows. Offset paging parses only the page. The
+    # re-read no longer uses the filter.
+    assert filtered_parses == n
+    assert next_parses == page
+    assert filtered_total == next_total == n - page
+    assert [row[0] for row in next_rows] == [str(i) for i in range(page * 2 + 1, page * 3 + 1)]
     assert calls["n"] == page
     assert [row[0] for row in got] == [str(i) for i in range(page + 1, page * 2 + 1)]
     assert filtered_s >= offset_s
