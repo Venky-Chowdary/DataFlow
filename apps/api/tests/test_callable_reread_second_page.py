@@ -144,6 +144,54 @@ def test_typed_cursors_are_not_lexical_and_null_is_not_a_value():
     assert compare_cursor_values(composite_lo, composite_hi) < 0
 
 
+def test_chunk_5000_reread_parses_each_line_once_not_once_per_page(tmp_path: Path, monkeypatch):
+    """Production chunk was 5,000 (200 pages). The old filter parsed the whole
+    spool on every page, so each tenth of a million rows was ~20 full scans.
+
+    The offset re-read parses each line once across the whole pass.
+    """
+    n, page = 20_000, 5_000
+    path = tmp_path / "chunk.jsonl"
+    path.write_text("".join(json.dumps(_row(i)) + "\n" for i in range(1, n + 1)), encoding="utf-8")
+    import services.procedure_source as ps
+
+    calls = {"n": 0}
+    real = ps.json_loads_exact
+
+    def _count(line):
+        calls["n"] += 1
+        return real(line)
+
+    monkeypatch.setattr(ps, "json_loads_exact", _count)
+    spool = _spool(path, [_row(i) for i in range(1, n + 1)])
+    seen: list[str] = []
+    for start in range(0, n, page):
+        _headers, got, _total = _read_spool_page(
+            spool, offset=start, limit=page, cursor_column="id", cursor_after=None,
+        )
+        seen.extend(row[0] for row in got)
+    assert seen == [str(i) for i in range(1, n + 1)]
+    assert calls["n"] == n
+
+    # The pre-fix page: cursor_after = page max and offset = page, no early stop.
+    # One such page parses every line. Two pages parse the file twice.
+    calls["n"] = 0
+
+    def _old_page(offset: int) -> None:
+        matched = 0
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                _count(line)
+                matched += 1
+                if matched >= offset + page:
+                    # The deployed reader did not stop here. Count the rest.
+                    continue
+
+    _old_page(0)
+    _old_page(page)
+    assert calls["n"] == n * 2
+
+
 def test_a_blocked_reread_page_updates_elapsed_without_inventing_rows():
     class _Store:
         def __init__(self):
