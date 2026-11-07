@@ -322,6 +322,18 @@ def blocking_step(message: str, *, phase: str = "reading") -> Iterator[None]:
         yield
 
 
+def active_job_store() -> tuple[Any, str] | None:
+    """``(job store, job id)`` of the run this context belongs to, or ``None``.
+
+    The engine binds one meter per run; a long step deep in a writer (the
+    source re-read after the last batch) reports through the same store.
+    """
+    meter = _meter.get()
+    if meter is None or not meter._job_id:
+        return None
+    return meter._mongo, meter._job_id
+
+
 def set_progress_meter(meter: "ProgressMeter | None") -> None:
     _meter.set(meter)
     _last_written.set(0)

@@ -9,6 +9,7 @@ from services.brand_env import getenv_brand
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,6 +91,12 @@ from services.phase_profile import (  # noqa: E402
     PhaseProfile,
 )
 from services.connector_telemetry import log_retry
+from services.cancel_check import active_job_store, cancel_checkpoint
+from services.reconcile_progress import ReconcileScan
+from src.transfer.reconcile_heartbeat import source_reread_heartbeat
+
+#: Seconds between progress lines while Gate-8 re-reads the source.
+SOURCE_REREAD_PULSE_SECONDS = 5.0
 
 logger = logging.getLogger(__name__)
 
@@ -3089,170 +3096,189 @@ def _stream_database_transfer_impl(
             and sync_collapses_in_file_duplicates(run.cfg.effective_sync)
             else None
         )
+        # The re-read runs after the last batch and before Gate-8's heartbeat:
+        # on 1,000,000 rows it took minutes with no message and no cancel
+        # point (QA 2026-11-06, job 6aee763d). It reports and stops per page.
+        _reread_store = active_job_store()
+        _reread_report = (
+            source_reread_heartbeat(
+                _reread_store[0],
+                _reread_store[1],
+                written=int(run.tally.written or 0),
+                expected=int(_expected_population or run.tally.written or 0),
+                interval_s=SOURCE_REREAD_PULSE_SECONDS,
+            )
+            if _reread_store is not None
+            else nullcontext(ReconcileScan())
+        )
         try:
-            while True:
-                read_limit = _batch_limit(run,
-                    read_offset if use_reread_offset else checksum_rows_read,
-                    default=run.cfg.chunk_size,
-                )
-                if read_limit <= 0:
-                    break
-                run.cfg._scan_kw = {"scan_state": reread_scan} if reread_scan is not None else {}
-                batch, _ = _unwrap_read(
-                    _read_batch(
-                        run.cfg.src_read_type,
-                        run.cfg.src_cfg,
-                        run.cfg.table,
-                        run.cfg.columns,
-                        read_offset if use_reread_offset else 0,
-                        read_limit,
-                        database=run.cfg.src_db,
-                        cursor_column=checksum_cursor_col,
-                        cursor_after=checksum_cursor_after,
-                        cursor_inclusive=checksum_seed_read,
-                        cursor_type=cursor_type_for_read,
-                        # A tie-broken incremental watermark is composite
-                        # (cursor + pk). Every read of this run has to name
-                        # the same primary key or the bookmark decodes as
-                        # one part and the page dies on arity — this re-read
-                        # is bound by the same contract as the write pass.
-                        cursor_primary_key=run.cfg.cursor_pk_source or None,
-                        known_total_rows=run.cfg.total_rows,
-                        **run.cfg._scan_kw,
+            with _reread_report as _reread_progress:
+                while True:
+                    read_limit = _batch_limit(run,
+                        read_offset if use_reread_offset else checksum_rows_read,
+                        default=run.cfg.chunk_size,
                     )
-                )
-                if not batch or not batch.rows:
-                    break
-                # A keyed upsert hard-DELETEs tombstoned keys, so the destination
-                # does not hold those rows: hashing them here would compare N
-                # source rows against N-deletes destination rows and fail Gate-8
-                # on a correct run. Same owner the write pass strips with.
-                # ``batch.rows`` stays intact — the keyset cursor advances on the
-                # last row actually read, not on the digest scope.
-                digest_rows = batch.rows
-                if (
-                    run.cfg.incremental
-                    and use_checksum_keyset
-                    and header_column_index(batch.headers or [], checksum_cursor_col)
-                    is not None
-                ):
-                    # M3 — bound the digest to the [watermark, max_seen]
-                    # window this run covered. The upper bound drops rows
-                    # that arrived after the run started; the lower bound is
-                    # the write pass's own watermark predicate — a snapshot
-                    # or OFFSET scan does not seek, so below-watermark rows
-                    # would otherwise hash against a destination population
-                    # this run never wrote.
-                    _win_rows = []
-                    for _r in digest_rows:
-                        _rc = max_cursor_value(
-                            [_r], batch.headers, checksum_cursor_col,
+                    if read_limit <= 0:
+                        break
+                    run.cfg._scan_kw = {"scan_state": reread_scan} if reread_scan is not None else {}
+                    batch, _ = _unwrap_read(
+                        _read_batch(
+                            run.cfg.src_read_type,
+                            run.cfg.src_cfg,
+                            run.cfg.table,
+                            run.cfg.columns,
+                            read_offset if use_reread_offset else 0,
+                            read_limit,
+                            database=run.cfg.src_db,
+                            cursor_column=checksum_cursor_col,
+                            cursor_after=checksum_cursor_after,
+                            cursor_inclusive=checksum_seed_read,
+                            cursor_type=cursor_type_for_read,
+                            # A tie-broken incremental watermark is composite
+                            # (cursor + pk). Every read of this run has to name
+                            # the same primary key or the bookmark decodes as
+                            # one part and the page dies on arity — this re-read
+                            # is bound by the same contract as the write pass.
+                            cursor_primary_key=run.cfg.cursor_pk_source or None,
+                            known_total_rows=run.cfg.total_rows,
+                            **run.cfg._scan_kw,
+                        )
+                    )
+                    if not batch or not batch.rows:
+                        break
+                    # A keyed upsert hard-DELETEs tombstoned keys, so the destination
+                    # does not hold those rows: hashing them here would compare N
+                    # source rows against N-deletes destination rows and fail Gate-8
+                    # on a correct run. Same owner the write pass strips with.
+                    # ``batch.rows`` stays intact — the keyset cursor advances on the
+                    # last row actually read, not on the digest scope.
+                    digest_rows = batch.rows
+                    if (
+                        run.cfg.incremental
+                        and use_checksum_keyset
+                        and header_column_index(batch.headers or [], checksum_cursor_col)
+                        is not None
+                    ):
+                        # M3 — bound the digest to the [watermark, max_seen]
+                        # window this run covered. The upper bound drops rows
+                        # that arrived after the run started; the lower bound is
+                        # the write pass's own watermark predicate — a snapshot
+                        # or OFFSET scan does not seek, so below-watermark rows
+                        # would otherwise hash against a destination population
+                        # this run never wrote.
+                        _win_rows = []
+                        for _r in digest_rows:
+                            _rc = max_cursor_value(
+                                [_r], batch.headers, checksum_cursor_col,
+                                run.cfg.cursor_pk_source or None,
+                            )
+                            if _seed_cursor_part is not None:
+                                # Lower bound: the whole tie group at the seed —
+                                # same inclusive ``cursor >= seed`` semantics the
+                                # write pass used, so compare cursor parts only.
+                                _rc_part, _rc_pk = _split_bm(
+                                    str(_rc or ""), has_tiebreak=_seed_tiebreak
+                                )
+                                if compare_cursor_values(_rc_part, _seed_cursor_part) < 0:
+                                    continue
+                            if compare_cursor_values(_rc, checksum_cursor_max) <= 0:
+                                _win_rows.append(_r)
+                        # No early break: OFFSET pages do not guarantee cursor
+                        # ordering, so a straddling page does not end the window.
+                        digest_rows = _win_rows
+                    if run.cur._boundary_fps_state["fps"] is not None and digest_rows:
+                        # The write pass dropped these tie peers as already at the
+                        # destination (judged against its pre-run rows, cached):
+                        # the digest covers what was written, not re-delivered.
+                        _landed = _boundary_rows_already_landed(run, batch.headers, digest_rows)
+                        if _landed:
+                            digest_rows = [
+                                r for i, r in enumerate(digest_rows) if i not in _landed
+                            ]
+                    if keyed_upsert_scope:
+                        digest_rows, _excluded_now = live_rows_for_digest(
+                            batch.headers,
+                            digest_rows,
+                            key_columns=run.cfg.pk_target_cols,
+                            mappings=run.cfg.mappings,
+                        )
+                        reread_tombstones_excluded += _excluded_now
+                    digest_headers = batch.headers
+                    if run.cfg.source_filter and digest_rows:
+                        # The write pass only wrote the rows the filter kept, so the
+                        # digest has to cover the same population — hashing the rows
+                        # it removed would fail Gate-8 on a correct run.
+                        digest_rows = apply_row_filter_to_matrix(
+                            batch.headers, digest_rows, run.cfg.source_filter
+                        )
+                    if run.cfg.fk_orphan_guard is not None and digest_rows:
+                        # Orphans were quarantined, not written: the digest covers
+                        # the rows the write pass let through, in the same order of
+                        # owners (filter → FK guard → recipe).
+                        digest_rows, _orphans_now = run.cfg.fk_orphan_guard.partition(
+                            list(digest_headers or []), list(digest_rows)
+                        )
+                    if reread_shaper is not None:
+                        # Shaped for the digest only: pagination and the keyset
+                        # cursor still advance on the page the source handed over.
+                        digest_headers, digest_rows = reread_shaper.matrix(
+                            list(batch.headers or []), digest_rows
+                        )
+                    mapped, reread_rejected = map_rows_for_fingerprint(
+                        headers=digest_headers,
+                        data_rows=digest_rows,
+                        mappings=run.cfg.mappings,
+                        target_cols=run.cfg.target_cols,
+                        column_types=run.cfg.column_types,
+                        error_policy=run.cfg.stream_error_policy,
+                        dest_types=run.cfg.fingerprint_dest_types,
+                        preserve_case=True,
+                        dest_kind=run.cfg.dest_bind_dialect,
+                        destination_pk_columns=list(run.cfg.pk_target_cols or []) or None,
+                    )
+                    reread_holdouts.extend(reread_rejected or [])
+                    if mapped:
+                        _fps = row_fingerprints(
+                            mapped,
+                            run.cfg.target_cols,
+                            dest_db_type=run.cfg.dest_bind_dialect,
+                            dest_types=run.cfg.digest_dest_types,
+                        )
+                        if reread_versions is not None:
+                            # One row per key lands (D89/E2-023); the read is in
+                            # cursor order, so the last copy is the survivor.
+                            reread_versions.extend(
+                                {"key": tuple(_row[i] for i in reread_pk_idx), "fp": _fp}
+                                for _row, _fp in zip(mapped, _fps)
+                            )
+                        else:
+                            fp_accumulator.add_many(_fps)
+                    checksum_rows_read += len(batch.rows)
+                    # Each page is progress, and a page boundary is where a cancel lands.
+                    _reread_progress.rows_hashed = checksum_rows_read
+                    cancel_checkpoint(int(run.tally.written or 0))
+                    if run.cfg.limit > 0 and checksum_rows_read >= run.cfg.limit:
+                        break
+                    if len(batch.rows) < read_limit:
+                        break
+                    if (
+                        use_checksum_keyset
+                        and header_column_index(batch.headers or [], checksum_cursor_col)
+                        is not None
+                    ):
+                        # Advance on the composite (cursor, pk) max — the same
+                        # bookmark shape the write pass seeds and the reader
+                        # seeks with. A bare cursor value would drop tie rows on
+                        # the next page and undercount the window.
+                        checksum_cursor_after = max_cursor_value(
+                            batch.rows,
+                            batch.headers,
+                            checksum_cursor_col,
                             run.cfg.cursor_pk_source or None,
                         )
-                        if _seed_cursor_part is not None:
-                            # Lower bound: the whole tie group at the seed —
-                            # same inclusive ``cursor >= seed`` semantics the
-                            # write pass used, so compare cursor parts only.
-                            _rc_part, _rc_pk = _split_bm(
-                                str(_rc or ""), has_tiebreak=_seed_tiebreak
-                            )
-                            if compare_cursor_values(_rc_part, _seed_cursor_part) < 0:
-                                continue
-                        if compare_cursor_values(_rc, checksum_cursor_max) <= 0:
-                            _win_rows.append(_r)
-                    # No early break: OFFSET pages do not guarantee cursor
-                    # ordering, so a straddling page does not end the window.
-                    digest_rows = _win_rows
-                if run.cur._boundary_fps_state["fps"] is not None and digest_rows:
-                    # The write pass dropped these tie peers as already at the
-                    # destination (judged against its pre-run rows, cached):
-                    # the digest covers what was written, not re-delivered.
-                    _landed = _boundary_rows_already_landed(run, batch.headers, digest_rows)
-                    if _landed:
-                        digest_rows = [
-                            r for i, r in enumerate(digest_rows) if i not in _landed
-                        ]
-                if keyed_upsert_scope:
-                    digest_rows, _excluded_now = live_rows_for_digest(
-                        batch.headers,
-                        digest_rows,
-                        key_columns=run.cfg.pk_target_cols,
-                        mappings=run.cfg.mappings,
-                    )
-                    reread_tombstones_excluded += _excluded_now
-                digest_headers = batch.headers
-                if run.cfg.source_filter and digest_rows:
-                    # The write pass only wrote the rows the filter kept, so the
-                    # digest has to cover the same population — hashing the rows
-                    # it removed would fail Gate-8 on a correct run.
-                    digest_rows = apply_row_filter_to_matrix(
-                        batch.headers, digest_rows, run.cfg.source_filter
-                    )
-                if run.cfg.fk_orphan_guard is not None and digest_rows:
-                    # Orphans were quarantined, not written: the digest covers
-                    # the rows the write pass let through, in the same order of
-                    # owners (filter → FK guard → recipe).
-                    digest_rows, _orphans_now = run.cfg.fk_orphan_guard.partition(
-                        list(digest_headers or []), list(digest_rows)
-                    )
-                if reread_shaper is not None:
-                    # Shaped for the digest only: pagination and the keyset
-                    # cursor still advance on the page the source handed over.
-                    digest_headers, digest_rows = reread_shaper.matrix(
-                        list(batch.headers or []), digest_rows
-                    )
-                mapped, reread_rejected = map_rows_for_fingerprint(
-                    headers=digest_headers,
-                    data_rows=digest_rows,
-                    mappings=run.cfg.mappings,
-                    target_cols=run.cfg.target_cols,
-                    column_types=run.cfg.column_types,
-                    error_policy=run.cfg.stream_error_policy,
-                    dest_types=run.cfg.fingerprint_dest_types,
-                    preserve_case=True,
-                    dest_kind=run.cfg.dest_bind_dialect,
-                    destination_pk_columns=list(run.cfg.pk_target_cols or []) or None,
-                )
-                reread_holdouts.extend(reread_rejected or [])
-                if mapped:
-                    _fps = row_fingerprints(
-                        mapped,
-                        run.cfg.target_cols,
-                        dest_db_type=run.cfg.dest_bind_dialect,
-                        dest_types=run.cfg.digest_dest_types,
-                    )
-                    if reread_versions is not None:
-                        # One row per key lands (D89/E2-023); the read is in
-                        # cursor order, so the last copy is the survivor.
-                        reread_versions.extend(
-                            {"key": tuple(_row[i] for i in reread_pk_idx), "fp": _fp}
-                            for _row, _fp in zip(mapped, _fps)
-                        )
-                    else:
-                        fp_accumulator.add_many(_fps)
-                checksum_rows_read += len(batch.rows)
-                if run.cfg.limit > 0 and checksum_rows_read >= run.cfg.limit:
-                    break
-                if len(batch.rows) < read_limit:
-                    break
-                if (
-                    use_checksum_keyset
-                    and header_column_index(batch.headers or [], checksum_cursor_col)
-                    is not None
-                ):
-                    # Advance on the composite (cursor, pk) max — the same
-                    # bookmark shape the write pass seeds and the reader
-                    # seeks with. A bare cursor value would drop tie rows on
-                    # the next page and undercount the window.
-                    checksum_cursor_after = max_cursor_value(
-                        batch.rows,
-                        batch.headers,
-                        checksum_cursor_col,
-                        run.cfg.cursor_pk_source or None,
-                    )
-                    checksum_seed_read = False
-                elif use_reread_offset:
-                    read_offset += len(batch.rows)
+                        checksum_seed_read = False
+                    elif use_reread_offset:
+                        read_offset += len(batch.rows)
         finally:
             if reread_scan is not None:
                 close_table_scan(reread_scan)
