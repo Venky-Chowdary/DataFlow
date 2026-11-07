@@ -36,6 +36,7 @@ def run_transfer_policy_gates(
     source_table: str = "",
     source_config: dict[str, Any] | None = None,
     resume: bool = False,
+    destination_table: str = "",
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
 
@@ -423,5 +424,53 @@ def run_transfer_policy_gates(
     )
     if procedure_gate:
         gates.append(procedure_gate)
+    name_gate = destination_name_gate(
+        dest, destination_table or _endpoint_table(destination_endpoint)
+    )
+    if name_gate:
+        gates.append(name_gate)
 
     return gates
+
+
+def _endpoint_table(endpoint: Any) -> str:
+    """The table/collection an endpoint (dict or EndpointConfig) names, or ""."""
+    if endpoint is None:
+        return ""
+    if isinstance(endpoint, dict):
+        return str(endpoint.get("table") or endpoint.get("collection") or "").strip()
+    return str(
+        getattr(endpoint, "table", None) or getattr(endpoint, "collection", None) or ""
+    ).strip()
+
+
+def destination_name_gate(dest_type: str, destination_table: str) -> dict[str, Any] | None:
+    """Refuse at Validate a destination name the writer would silently rename.
+
+    Execute already refuses it (engine, connectors_router, schedules, Pilot) with
+    ``unsafe_destination_identifier_reason``; Validate did not, so a run passed
+    Validate and then failed in 3 seconds on "1M Records" (QA 2026-11-07). Same
+    rule, same sentence, so Validate and Execute agree. ``None`` when the name
+    is plain, absent, or the destination is not a SQL catalog.
+    """
+    from connectors.sql_identifiers import (
+        sanitize_identifier,
+        unsafe_destination_identifier_reason,
+    )
+
+    name = (destination_table or "").strip()
+    if not dest_type or not name:
+        return None
+    reason = unsafe_destination_identifier_reason(dest_type, name)
+    if not reason:
+        return None
+    return {
+        "id": "g23_destination_name",
+        "status": GateStatus.BLOCK.value,
+        "message": reason,
+        "duration_ms": 0,
+        "details": {
+            "destination_table": name,
+            "suggested_name": sanitize_identifier(name.replace(".", "_")),
+        },
+    }

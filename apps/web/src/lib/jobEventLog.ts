@@ -33,6 +33,36 @@ export function keepEventLogStartAndTail(lines: string[], max = JOB_EVENT_LOG_MA
   ];
 }
 
+/** The server's own stamp: ``HH:MM:SS`` in UTC (services/mongodb_service event_log). */
+const SERVER_STAMP = /^(\d{2}):(\d{2}):(\d{2}) — /;
+
+/**
+ * Show a server event-log line in the viewer's local time, as the theater's own
+ * lines are. The API stamps ``event_log`` lines ``HH:MM:SS`` in UTC; next to the
+ * theater's ``7:00:03 AM`` lines a "12:00:04 — Error: …" line read as a
+ * different moment (QA 2026-11-07). Only call this on lines that came from the
+ * server: a 24-hour browser locale stamps its own lines the same way.
+ *
+ * The stamp carries no date, so the line is placed on the UTC day that puts it
+ * at or before ``now`` (a line from just before UTC midnight stays yesterday).
+ */
+export function localizeServerEventLine(line: string, now: Date = new Date()): string {
+  const m = SERVER_STAMP.exec(line);
+  if (!m) return line;
+  const [h, min, sec] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (h > 23 || min > 59 || sec > 59) return line;
+  const at = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, min, sec,
+  ));
+  if (at.getTime() - now.getTime() > 60 * 60 * 1000) at.setUTCDate(at.getUTCDate() - 1);
+  return `${at.toLocaleTimeString()} — ${line.slice(m[0].length)}`;
+}
+
+/** :func:`localizeServerEventLine` over a server ``event_log``. */
+export function localizeServerEventLog(lines: readonly string[] | null | undefined, now: Date = new Date()): string[] {
+  return Array.isArray(lines) ? lines.map((line) => localizeServerEventLine(String(line), now)) : [];
+}
+
 export function mergeEventLogLines(local: string[], incoming: string[]): string[] {
   if (!incoming.length) return local;
   if (!local.length) return incoming;

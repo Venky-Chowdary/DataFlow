@@ -72,7 +72,7 @@ import type {
 } from "../lib/types";
 import { inferTransferFailureHint } from "../lib/transferFailure";
 import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
-import { readJobEventLog } from "../lib/jobEventLog";
+import { localizeServerEventLog, readJobEventLog } from "../lib/jobEventLog";
 import { MappingProofDrawer, type MappingProof } from "../components/MappingProofDrawer";
 import { Drawer } from "../components/ui/Drawer";
 import {
@@ -799,7 +799,8 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const ddlLog = liveJob?.ddl_executed ?? liveJob?.ddl_log ?? [];
   const sessionEvents = selectedId ? readJobEventLog(selectedId) : [];
   const eventLog = presentStoredEventLog(
-    (liveJob?.event_log?.length ? liveJob.event_log : sessionEvents) ?? [],
+    // Server lines are stamped in UTC; the session copy is already local.
+    (liveJob?.event_log?.length ? localizeServerEventLog(liveJob.event_log) : sessionEvents) ?? [],
     liveJob,
   );
   const logLineCount = eventLog.length + ddlLog.length;

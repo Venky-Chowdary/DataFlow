@@ -520,6 +520,7 @@ def run_plan_preflight(
             mappings=plan_mappings,
             catalog_primary_key_columns=list(contract_pk_cols or []) or None,
             destination_endpoint=dest,
+            destination_table=dest_table,
         ),
         validation_mode=validation_mode,
         destination_db_type=dest_db_type,
