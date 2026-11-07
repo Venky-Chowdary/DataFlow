@@ -91,6 +91,19 @@ def cancel_checkpoint(rows_written: int | None = None) -> None:
         meter.beat()
 
 
+def poll_cancel(rows_written: int | None = None) -> None:
+    """Raise ``TransferCancelled`` when the run was cancelled; count nothing.
+
+    For a loop that writes nothing (the post-write source re-read). Unlike
+    :func:`cancel_checkpoint` it never feeds the progress meter: the meter reads
+    its argument as cumulative within one writer call, so a job total there
+    would be added again as new rows. ``rows_written`` only labels the cancel.
+    """
+    fn = _probe.get()
+    if fn is not None:
+        fn(rows_written)
+
+
 # --- per-batch progress (D168) ----------------------------------------------
 # The engine's on_checkpoint fires once per *chunk* (thousands of rows) and
 # COPY paths report nothing until they finish, so a job read 0 rows / 5% with a
@@ -320,6 +333,18 @@ def blocking_step(message: str, *, phase: str = "reading") -> Iterator[None]:
         bound_seconds=_blocking_step_bound_seconds(),
     ):
         yield
+
+
+def active_job_store() -> tuple[Any, str] | None:
+    """``(job store, job id)`` of the run this context belongs to, or ``None``.
+
+    The engine binds one meter per run; a long step deep in a writer (the
+    source re-read after the last batch) reports through the same store.
+    """
+    meter = _meter.get()
+    if meter is None or not meter._job_id:
+        return None
+    return meter._mongo, meter._job_id
 
 
 def set_progress_meter(meter: "ProgressMeter | None") -> None:

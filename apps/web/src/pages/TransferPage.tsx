@@ -2421,6 +2421,11 @@ export function TransferPage({
     setSourceTable("");
     setSourceCollection("");
     setDestOutputPath("");
+    // The destination too: a job whose record names no saved destination left
+    // the previous route's connector and table in place (QA 2026-11-06).
+    setConnectorId("");
+    setTargetCollection("");
+    setTargetDb("");
     if (plan.syncMode) setSyncMode(plan.syncMode as SyncMode);
 
     const dst = plan.destination;
@@ -2548,6 +2553,9 @@ export function TransferPage({
   useEffect(() => {
     if (!seedStudioIntent?.token) return;
     if (appliedStudioIntentTokenRef.current === seedStudioIntent.token) return;
+    // A job's route is matched against the saved connectors: applying it before
+    // they load matched nothing and left the previous route in place.
+    if (connectorsLoading) return;
     if (!studioIntentConnectorsReady(seedStudioIntent, connectors.map((c) => c.id))) return;
     appliedStudioIntentTokenRef.current = seedStudioIntent.token;
 
@@ -2683,7 +2691,7 @@ export function TransferPage({
             : `Continue remediation${jobHint}. Job gates load when available; otherwise Re-run Validate.`,
       tone: "info",
     });
-  }, [seedStudioIntent, toast, connectors]);
+  }, [seedStudioIntent, toast, connectors, connectorsLoading]);
 
   useEffect(() => {
     const content = document.querySelector(".df2-content");

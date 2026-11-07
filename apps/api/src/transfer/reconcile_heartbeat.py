@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -13,6 +14,8 @@ from services.reconcile_progress import (
     bind_reconcile_scan,
     reset_reconcile_scan,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def reconcile_heartbeat_scope(dest_summary: Any) -> dict[str, Any]:
@@ -235,6 +238,115 @@ def _stamp_heartbeat(mongo: Any, job_id: str, fields: dict[str, Any]) -> None:
     except TypeError:
         # A store without the flag (tests' doubles): the stamp still lands.
         mongo.update_job_fields(job_id, fields)
+
+
+def _source_reread_message(read: int, expected: int, elapsed: int, bound: int) -> str:
+    """One sentence for the source re-read: rows done of rows expected."""
+    head = "Verifying, step 1 of 2 — re-reading the source to fingerprint it"
+    if read <= 0:
+        if elapsed > bound:
+            return (
+                f"{head}: no source row re-read after {elapsed}s, longer than the "
+                f"{bound}s wait bound. The source has not answered the re-read; "
+                "check it, or cancel the job."
+            )
+        return f"{head} ({elapsed}s): waiting for the first source page…"
+    tail = "Step 2 checksums the destination."
+    if expected <= 0:
+        # No known population: count what was read, never "of 0 rows".
+        return f"{head}: {read:,} rows so far ({elapsed}s). {tail}"
+    if read > expected:
+        # The scan also reads rows outside this run's window (they arrived
+        # later) and leaves them out of the digest: say so, not "120%".
+        return (
+            f"{head}: {read:,} rows read, {expected:,} of them in this run's "
+            f"window ({elapsed}s). {tail}"
+        )
+    pct = int(read * 100 / expected)
+    return f"{head}: {read:,} of {expected:,} rows ({pct}%, {elapsed}s). {tail}"
+
+
+@contextmanager
+def source_reread_heartbeat(
+    mongo: Any,
+    job_id: str,
+    *,
+    written: int,
+    expected: int,
+    interval_s: float = 5.0,
+) -> Iterator[Any]:
+    """Report Gate-8's source re-read, which runs after the last batch.
+
+    Warehouse-to-warehouse runs read the source a second time and fingerprint
+    every row before :func:`reconcile_phase_heartbeat` starts. On 1,000,000 rows
+    that took minutes with no message: the job sat at 99% on "Writing batch
+    200/200" and looked stuck (QA 2026-11-06, job 6aee763d). Yields a
+    :class:`ReconcileScan` whose ``rows_hashed`` the caller sets to the rows
+    re-read so far. A page that moved it is real progress (``updated_at``
+    moves); a pulse with nothing new only stamps ``heartbeat_at`` (D280).
+    The phase is ``reconcile`` at the band's first step, so Gate-8's own
+    heartbeat, which follows, never moves the bar backwards.
+    """
+    from connectors.write_resilience import destination_lock_wait_seconds
+    from services.tracing import thread_in_context
+
+    progress = ReconcileScan()
+    fixed = {
+        "phase": "reconcile",
+        "progress_pct": reconcile_display_pct(0, max(int(written), 1)),
+        "reconcile_pct": 0,
+        "records_processed": int(written),
+    }
+    bound = int(destination_lock_wait_seconds())
+    started = time.monotonic()
+    mongo.update_job_status(
+        job_id, "running", **fixed,
+        message=_source_reread_message(0, expected, 0, bound),
+    )
+    stop = threading.Event()
+    shown = [0]
+    logged_step = [-1]
+
+    def _report(final: bool = False) -> None:
+        read = int(progress.rows_hashed)
+        message = _source_reread_message(
+            read, expected, int(time.monotonic() - started), bound
+        )
+        if read <= shown[0]:
+            # Alive, nothing new: the stall signal (updated_at) stays put.
+            _stamp_heartbeat(mongo, job_id, {**fixed, "message": message})
+            return
+        shown[0] = read
+        step = min(10, read * 10 // expected) if expected > 0 else 0
+        if final or step > logged_step[0]:
+            # One event-log line per tenth (and the last count), through the
+            # status fence: a cancelled job is never set back to running.
+            logged_step[0] = step
+            mongo.update_job_status(job_id, "running", **fixed, message=message)
+        else:
+            # Real progress between tenths: the live message and updated_at
+            # move without a log line every pulse.
+            mongo.update_job_fields(job_id, {**fixed, "message": message})
+
+    def _pulse() -> None:
+        while not stop.wait(interval_s):
+            try:
+                _report()
+            except Exception as exc:  # noqa: BLE001 - a status line must never fail the run
+                logger.debug("source re-read pulse stopped for %s: %s", job_id, exc)
+                return
+
+    thread = thread_in_context(_pulse, name=f"reread-heartbeat-{job_id[:8]}")
+    thread.start()
+    try:
+        yield progress
+        try:
+            _report(final=True)  # the final count, so the last line says every row
+        except Exception as exc:  # noqa: BLE001 - a status line must never fail the run
+            logger.debug("source re-read final count not posted for %s: %s", job_id, exc)
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
 
 
 def _phase_pulse_message(
