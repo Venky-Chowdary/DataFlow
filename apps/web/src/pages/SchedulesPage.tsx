@@ -48,6 +48,7 @@ import { formatSyncModeLabel } from "../lib/transferConstants";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
 import { scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
+import { getActiveWorkspaceId } from "../lib/workspace";
 import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 import {
   Connector,
@@ -259,7 +260,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const openStudioFromSchedule = (id: string) => {
     const sched = schedules.find((s) => s.id === id);
     if (!sched || !onStartTransfer) return;
-    onStartTransfer(studioIntentFromSchedule(sched));
+    const intent = studioIntentFromSchedule(sched, getActiveWorkspaceId());
+    if (intent.refused) {
+      toast({
+        title: "Schedule is in another workspace",
+        message: "Switch workspace before opening this pipeline in Transfer Studio.",
+        tone: "warning",
+      });
+      return;
+    }
+    onStartTransfer(intent);
   };
 
   const enabledCount = schedules.filter((s) => s.enabled).length;
@@ -327,7 +337,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       await load();
       void onSchedulesChange?.();
       if (created && scheduleCreateOpensStudio(created) && onStartTransfer) {
-        onStartTransfer(studioIntentFromSchedule(created));
+        const intent = studioIntentFromSchedule(created, getActiveWorkspaceId());
+        if (!intent.refused) onStartTransfer(intent);
       }
     } catch (err) {
       toast({

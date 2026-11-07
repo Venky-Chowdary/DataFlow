@@ -1,6 +1,6 @@
 import { useMemo, type CSSProperties } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
-import { HubEdge } from "../../lib/topologyUtils";
+import { HubEdge, summarizeDataPlane } from "../../lib/topologyUtils";
 import { DtLogo } from "../DtLogo";
 import type { HubNode } from "../ConnectionHub";
 
@@ -36,8 +36,9 @@ export function DataPlaneFlow({ nodes, edges, connectionCount, onOpenConnectors 
     [nodes],
   );
   const liveCount = edges.filter((e) => e.active).length;
-  const connectedCount = nodes.filter((n) => n.linked && !n.isVirtual).length;
-  const disconnectedCount = Math.max(0, connectionCount - connectedCount);
+  const summary = summarizeDataPlane({ nodes, edges }, connectionCount);
+  const virtualSources = nodes.filter((n) => n.isVirtual && n.role !== "destination").length;
+  const virtualDestinations = nodes.filter((n) => n.isVirtual && (n.role === "destination" || n.role === "both")).length;
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
   const routes = useMemo(
@@ -79,22 +80,22 @@ export function DataPlaneFlow({ nodes, edges, connectionCount, onOpenConnectors 
         <FlowCanvas
           sourceTypes={sourceTypes}
           destTypes={destTypes}
-          sourceCount={sources.length || connectionCount}
-          destCount={destinations.length || connectionCount}
+          sourceCount={summary.sourceCount || virtualSources}
+          destCount={summary.destinationCount || virtualDestinations}
           animated={liveCount > 0}
         />
       </div>
 
       <div className="df2-flow-meta">
-        <span>{connectionCount} connection{connectionCount === 1 ? "" : "s"}</span>
+        <span>{summary.connectionCount} connection{summary.connectionCount === 1 ? "" : "s"}</span>
         <span className="df2-flow-meta-dot" aria-hidden>·</span>
-        <span>{edges.length} route{edges.length === 1 ? "" : "s"}</span>
+        <span>{summary.routeCount} route{summary.routeCount === 1 ? "" : "s"}</span>
         <span className="df2-flow-meta-dot" aria-hidden>·</span>
-        <span className="df2-flow-meta-connected">{connectedCount} connected</span>
-        {disconnectedCount > 0 && (
+        <span className="df2-flow-meta-connected">{summary.inRouteCount} in a route</span>
+        {summary.notInRouteCount > 0 && (
           <>
             <span className="df2-flow-meta-dot" aria-hidden>·</span>
-            <span className="df2-flow-meta-disconnected">{disconnectedCount} disconnected</span>
+            <span className="df2-flow-meta-disconnected">{summary.notInRouteCount} not in a route</span>
           </>
         )}
         {liveCount > 0 && (

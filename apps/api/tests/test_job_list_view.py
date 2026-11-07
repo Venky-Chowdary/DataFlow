@@ -204,6 +204,30 @@ def test_stalled_job_without_destination_summary_does_not_crash_the_list():
     assert out["stalled"] is True and out["stall_seconds"] > 0
 
 
+def test_slim_job_lifts_schedule_id_and_still_drops_the_request():
+    """Open Validate needs the schedule id. The list must not ship the request."""
+    job = {
+        "_id": "sched-job",
+        "status": "failed",
+        "source_connector_id": "shop",
+        "dest_connector_id": "inv",
+        "transfer_request": {
+            "source": {
+                "connector_id": "shop",
+                "password": "secret",
+                "extra": {"schedule_id": "sched-1902", "source_query": "SELECT * FROM qa_my_seed LIMIT 3"},
+            },
+            "destination": {"connector_id": "inv", "extra": {"schedule_id": "sched-1902"}},
+            "mappings": [{"source": "id", "target": "id"}],
+        },
+    }
+    slim = slim_job_for_list(job)
+    assert slim["schedule_id"] == "sched-1902"
+    assert "transfer_request" not in slim
+    assert "secret" not in str(slim)
+    assert "source_query" not in str(slim)
+
+
 def test_healthy_job_keeps_coerced_null_count_from_summary():
     job = {
         "_id": "j-ok",

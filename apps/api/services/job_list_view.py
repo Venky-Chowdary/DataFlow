@@ -62,6 +62,35 @@ _LIST_KEEP_KEYS = frozenset({
 })
 
 
+def schedule_id_from_job(job: dict[str, Any] | None) -> str:
+    """Schedule id for list rows. The list drops ``transfer_request``.
+
+    Without this, Open Validate on a schedule-fired job that is still the
+    list snapshot cannot name the schedule, and Studio keeps the route it
+    already had.
+    """
+    if not job:
+        return ""
+    direct = str(job.get("schedule_id") or "").strip()
+    if direct:
+        return direct
+    req = job.get("transfer_request")
+    if not isinstance(req, dict):
+        return ""
+    top = str(req.get("schedule_id") or "").strip()
+    if top:
+        return top
+    for key in ("source", "destination"):
+        ep = req.get(key)
+        if not isinstance(ep, dict):
+            continue
+        extra = ep.get("extra") if isinstance(ep.get("extra"), dict) else {}
+        sid = str(extra.get("schedule_id") or ep.get("schedule_id") or "").strip()
+        if sid:
+            return sid
+    return ""
+
+
 def connector_ids_from_job(job: dict[str, Any] | None) -> tuple[str | None, str | None]:
     """Return source/dest saved-connector ids, recovering them from old job docs.
 
@@ -136,6 +165,9 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
         out["source_connector_id"] = src_id
     if dst_id:
         out["dest_connector_id"] = dst_id
+    schedule_id = schedule_id_from_job(job)
+    if schedule_id:
+        out["schedule_id"] = schedule_id
     # Names only. The list must not ship per-stream ledgers, and a job whose
     # stored source_name is the last table must still show the other tables.
     stream_names = _stream_names_for_list(job)

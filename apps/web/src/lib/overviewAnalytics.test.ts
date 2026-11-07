@@ -78,6 +78,34 @@ describe("Overview throughput uses conservation identity, not dest after", () =>
     assert.equal(series[0]?.rows, 1);
   });
 
+  it("a canceled million-row writer ack with unmeasured dest adds nothing", () => {
+    const canceled = job({
+      _id: "scale-1m",
+      status: "completed",
+      records_processed: 1_000_000,
+      row_accounting: {
+        rows_read: 1_000_000,
+        rows_written: null,
+        rows_quarantined: 0,
+        rows_skipped: 0,
+        rows_coerced_null: 0,
+        writer_ack: 1_000_000,
+        dest_count: null,
+        dest_count_before: null,
+        dest_delta: null,
+        unaccounted: null,
+        balanced: false,
+        rows_read_source: "unmeasured",
+        rows_written_source: "unmeasured",
+        conservation_kind: "unmeasured",
+        note: "writer ack is not destination proof",
+      },
+    });
+    assert.equal(destProvenCount(canceled), null);
+    const series = buildThroughputSeries([canceled as never], 1);
+    assert.equal(series.reduce((sum, day) => sum + day.rows, 0), 0);
+  });
+
   it("omits keyed dest after when dest Δ was not stamped", () => {
     const keyed = job({
       records_processed: 10,

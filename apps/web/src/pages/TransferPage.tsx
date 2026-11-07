@@ -303,6 +303,8 @@ import {
 } from "../lib/businessRules";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
 import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
+import { applyRecoveryIntent, applyStudioRecovery, decideStudioRecovery, type StudioRouteSnapshot } from "../lib/studioRecovery";
+import { getActiveWorkspaceId } from "../lib/workspace";
 import {
   analysisFromPipeline,
   destinationCatalogLoadsOnStep,
@@ -2368,13 +2370,20 @@ export function TransferPage({
   }, [sourceKind]);
 
   useEffect(() => {
-    if (sourceReadMode === "procedure" && !dialectOffersProcedures(sourceConnector?.type)) {
-      setSourceReadMode(dialectOffersQuery(sourceConnector?.type) ? "query" : "table");
+    // No connector yet: keep a recovered query/procedure. Resetting here dropped
+    // the schedule's SQL while its connector id was still resolving, and a
+    // deleted connector would fall through to the previous route's table mode.
+    if (!sourceConnector) {
+      if (sourceKind === "file" && sourceReadMode !== "table") setSourceReadMode("table");
+      return;
     }
-    if (sourceReadMode === "query" && !dialectOffersQuery(sourceConnector?.type)) {
+    if (sourceReadMode === "procedure" && !dialectOffersProcedures(sourceConnector.type)) {
+      setSourceReadMode(dialectOffersQuery(sourceConnector.type) ? "query" : "table");
+    }
+    if (sourceReadMode === "query" && !dialectOffersQuery(sourceConnector.type)) {
       setSourceReadMode("table");
     }
-  }, [sourceConnector?.type, sourceReadMode]);
+  }, [sourceConnector, sourceKind, sourceReadMode]);
 
   // Carry selected connection from Connectors drawer into Transfer Studio source step.
   // Apply once per seed token — do not re-run on connectors list refresh (that would
@@ -2556,8 +2565,12 @@ export function TransferPage({
     // A job's route is matched against the saved connectors: applying it before
     // they load matched nothing and left the previous route in place.
     if (connectorsLoading) return;
-    if (!studioIntentConnectorsReady(seedStudioIntent, connectors.map((c) => c.id))) return;
+    const replacing = Boolean(seedStudioIntent.replaceRoute);
+    // A recovery replaces the mounted route even when the named connector was
+    // deleted. Waiting for a non-empty list left the previous route on screen.
+    if (!replacing && !studioIntentConnectorsReady(seedStudioIntent, connectors.map((c) => c.id))) return;
     appliedStudioIntentTokenRef.current = seedStudioIntent.token;
+    const intentToken = seedStudioIntent.token;
 
     setCellPreview(null);
     setMappingProof(null);
@@ -2641,24 +2654,150 @@ export function TransferPage({
     const seededSource = seedStudioIntent.sourceConnectorId
       ? connectors.find((c) => c.id === seedStudioIntent.sourceConnectorId)
       : undefined;
-    if (seededSource) {
-      if (CLOUD_SOURCE_TYPES.has(seededSource.type)) setSourceKind("cloud");
-      else if (!FILE_FORMAT_SOURCE_TYPES.has(seededSource.type)) setSourceKind("database");
-      setSourceConnectorId(seededSource.id);
-      setFile(null);
-      setParsed(null);
+    if (replacing) {
+      const blank = {
+        sourceConnectorId: "",
+        destConnectorId: "",
+        sourceTable: "",
+        destDatabase: "",
+        destTable: "",
+        syncMode: "full_refresh_append",
+        sourceReadMode: "table" as const,
+        sourceSql: "",
+        primaryKey: "",
+        cursorColumn: "",
+        rowLimit: 0,
+        mappings: [],
+        scheduleId: "",
+      };
+      const recoveryOpts = {
+        activeWorkspaceId: getActiveWorkspaceId(),
+        knownConnectorIds: connectors.map((c) => c.id),
+        connectorsLoaded: true,
+        authenticated: Boolean(readSession()),
+      };
+      const paintRecovery = (state: StudioRouteSnapshot) => {
+        // Block the auto-pick effect from putting the previous source back.
+        autoSelectedSourceConnector.current = true;
+        setFile(null);
+        setParsed(null);
+        setReplayJournal(null);
+        setRestoredFileName(null);
+        setSourceTable(state.sourceTable);
+        setSourceCollection("");
+        setProcedureCall(state.sourceSql);
+        setSourceReadMode(state.sourceReadMode);
+        setPrimaryKeyField(state.primaryKey);
+        setCursorField(state.cursorColumn);
+        setRowLimit(state.rowLimit);
+        const syncModes = new Set([
+          "full_refresh_overwrite",
+          "full_refresh_append",
+          "incremental_append",
+          "incremental_deduped",
+          "cdc",
+          "scd2",
+          "mirror",
+        ]);
+        if (syncModes.has(state.syncMode)) setSyncMode(state.syncMode as SyncMode);
+        const seededMaps: EditableMapping[] = state.mappings.map((m) => ({
+          source: m.source,
+          target: m.destination || m.source,
+          confidence: 1,
+          destType: m.destination_type || m.target_type || "",
+          approved: false,
+          requiresReview: true,
+          transform: m.transform && m.transform !== "none" ? m.transform as EditableMapping["transform"] : undefined,
+          reason: seedStudioIntent.jobId
+            ? `Seeded from job ${seedStudioIntent.jobId.slice(0, 8)}…`
+            : "Seeded from the schedule route",
+        })).filter((m) => m.source);
+        jobSeedMappingsRef.current = seededMaps.length ? seededMaps : null;
+        setColumnMappings(seededMaps);
+        if (state.sourceConnectorId) {
+          const seeded = connectors.find((c) => c.id === state.sourceConnectorId);
+          if (seeded) {
+            if (CLOUD_SOURCE_TYPES.has(seeded.type)) setSourceKind("cloud");
+            else if (!FILE_FORMAT_SOURCE_TYPES.has(seeded.type)) setSourceKind("database");
+            setSourceConnectorId(seeded.id);
+          } else {
+            setSourceConnectorId("");
+            setSourceKind("database");
+          }
+        } else {
+          setSourceConnectorId("");
+          if (state.sourceTable || state.sourceSql) setSourceKind("database");
+        }
+        if (state.destConnectorId) applyConnectorSelection(state.destConnectorId);
+        else setConnectorId("");
+        setTargetCollection(state.destTable);
+        if (state.destDatabase) setTargetDb(state.destDatabase);
+      };
+      const applied = applyRecoveryIntent(blank, seedStudioIntent, recoveryOpts);
+      paintRecovery(applied.state);
+      if (applied.refused) {
+        toast({
+          title: applied.refused === "unauthenticated" ? "Sign in required" : "Route is in another workspace",
+          message: applied.refused === "wrong_workspace"
+            ? "The previous route was cleared. This job or schedule belongs to a different workspace."
+            : "Sign in before opening this route in Transfer Studio.",
+          tone: "warning",
+        });
+        return;
+      }
+      if (seedStudioIntent.jobId && !seedStudioIntent.journalId) {
+        void fetchJob(seedStudioIntent.jobId).then((job) => {
+          if (appliedStudioIntentTokenRef.current !== intentToken) return;
+          const decision = decideStudioRecovery({
+            job,
+            activeWorkspaceId: getActiveWorkspaceId(),
+            knownConnectorIds: connectors.map((c) => c.id),
+            connectorsLoaded: true,
+            authenticated: Boolean(readSession()),
+          });
+          paintRecovery(applyStudioRecovery(blank, decision));
+          if (decision.action === "refuse") {
+            toast({
+              title: "Job is in another workspace",
+              message: "The route was cleared. Switch workspace to open that job.",
+              tone: "warning",
+            });
+            return;
+          }
+          const plan = planJobStudioRoute(job, connectors);
+          if (plan.source.kind !== "connector") {
+            void restoreRouteFromJob(job);
+          }
+        }).catch(() => {
+          if (appliedStudioIntentTokenRef.current !== intentToken) return;
+          toast({
+            title: "Job route not fully loaded",
+            message: "Tables were taken from the job list. Re-open the job to load its SQL, keys, and mappings. Execute stays locked until Validate.",
+            tone: "warning",
+          });
+        });
+      }
+    } else {
+      if (seededSource) {
+        if (CLOUD_SOURCE_TYPES.has(seededSource.type)) setSourceKind("cloud");
+        else if (!FILE_FORMAT_SOURCE_TYPES.has(seededSource.type)) setSourceKind("database");
+        setSourceConnectorId(seededSource.id);
+        setFile(null);
+        setParsed(null);
+      }
+      if (seedStudioIntent.sourceTable) setSourceTable(seedStudioIntent.sourceTable);
+      if (seedStudioIntent.destConnectorId) {
+        applyConnectorSelection(seedStudioIntent.destConnectorId);
+      }
+      if (seedStudioIntent.destTable) setTargetCollection(seedStudioIntent.destTable);
     }
-    if (seedStudioIntent.sourceTable) setSourceTable(seedStudioIntent.sourceTable);
-    if (seedStudioIntent.destConnectorId) {
-      applyConnectorSelection(seedStudioIntent.destConnectorId);
-    }
-    if (seedStudioIntent.destTable) setTargetCollection(seedStudioIntent.destTable);
 
     if (seedStudioIntent.journalId) {
       void openJournalAsSource(seedStudioIntent.journalId, seedStudioIntent.journalStream || "");
     }
     if (
-      seedStudioIntent.jobId
+      !replacing
+      && seedStudioIntent.jobId
       && !seedStudioIntent.journalId
       && !seedStudioIntent.sourceConnectorId
     ) {

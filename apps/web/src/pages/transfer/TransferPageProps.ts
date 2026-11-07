@@ -38,6 +38,19 @@ export interface TransferPageProps {
     destTable?: string;
     /** Persist mappings onto this parked draft when the footer Schedules. */
     scheduleId?: string;
+    /**
+     * Replace the mounted route. Empty SQL, keys, and tables clear the
+     * previous route instead of leaving it on screen.
+     */
+    replaceRoute?: boolean;
+    sourceReadMode?: string;
+    sourceSql?: string;
+    primaryKey?: string;
+    cursorColumn?: string;
+    rowLimit?: number;
+    destDatabase?: string;
+    workspaceId?: string;
+    syncMode?: string;
     /** Replay a capture-once journal stream as the Source. */
     journalId?: string;
     journalStream?: string;
