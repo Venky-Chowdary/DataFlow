@@ -2,9 +2,8 @@
 
 The source is a PostgreSQL ``generate_series`` query, spooled to JSONL, not a
 table with a primary-key index. The re-read then passed the previous page's
-max ``id`` as ``cursor_after``. The spool reader parses every line on that
-path and does not stop early, and that loop holds the GIL so the reconcile
-message stays on the first page's "31s".
+max ``id`` as ``cursor_after``. The spool reader parsed every line on that
+path and did not stop early.
 
 These tests use the spool and the seek the re-read now calls. They do not
 open a production database.
@@ -19,7 +18,13 @@ from pathlib import Path
 
 from services.cdc_engine import WatermarkType, compare_watermarks
 from services.keyset_pagination import KEYSET_SEP
-from services.procedure_source import _ResultSpool, _read_spool_page
+from services.procedure_source import (
+    _ResultSpool,
+    _cursor_header_index,
+    _read_spool_page,
+    _row_after_cursor,
+    _row_from_spool_line,
+)
 from services.source_reread import callable_reread_seek
 from services.sync_cursor import compare_cursor_values
 from src.transfer.reconcile_heartbeat import source_reread_heartbeat
@@ -144,13 +149,63 @@ def test_typed_cursors_are_not_lexical_and_null_is_not_a_value():
     assert compare_cursor_values(composite_lo, composite_hi) < 0
 
 
-def test_chunk_5000_reread_parses_each_line_once_not_once_per_page(tmp_path: Path, monkeypatch):
-    """Production chunk was 5,000 (200 pages). The old filter parsed the whole
-    spool on every page, so each tenth of a million rows was ~20 full scans.
+def _pinned_prerefix_read_spool_page(
+    spool: _ResultSpool,
+    *,
+    offset: int,
+    limit: int,
+    cursor_column: str | None = None,
+    cursor_after: str | None = None,
+):
+    """``_read_spool_page`` as of ``f736a768e`` (the commit before the offset re-read).
 
-    The offset re-read parses each line once across the whole pass.
+    Copied verbatim, including the filter path that parses every line and does
+    not stop early. Wall-clock cost is not asserted here.
     """
-    n, page = 20_000, 5_000
+    cursor_col = str(cursor_column or "").strip()
+    cursor_idx: int | None = None
+    apply_filter = False
+    if cursor_col:
+        cursor_idx = _cursor_header_index(spool.headers, cursor_col)
+        apply_filter = cursor_after not in (None, "")
+    rows: list[list[str]] = []
+    start = max(0, int(offset))
+    end = start + max(0, int(limit))
+    matched = 0
+    # The pre-fix function looked up json_loads_exact in procedure_source.
+    import services.procedure_source as _ps
+
+    with spool.path.open("r", encoding="utf-8") as fh:
+        for i, line in enumerate(fh):
+            if not apply_filter:
+                if i < start:
+                    continue
+                if i >= end:
+                    break
+                obj = _ps.json_loads_exact(line)
+                rows.append(_row_from_spool_line(obj, spool.headers))
+                continue
+            obj = _ps.json_loads_exact(line)
+            row = _row_from_spool_line(obj, spool.headers)
+            if cursor_idx is None or not _row_after_cursor(row, cursor_idx, cursor_after):
+                continue
+            if start <= matched < end:
+                rows.append(row)
+            matched += 1
+    if apply_filter:
+        return list(spool.headers), rows, matched
+    if cursor_col:
+        return list(spool.headers), rows, spool.total
+    return list(spool.headers), rows, spool.total
+
+
+def test_chunk_5000_reread_parses_each_line_once_not_once_per_page(tmp_path: Path, monkeypatch):
+    """Offset paging parses each spool line once. The pinned pre-fix reader does not.
+
+    One filtered page (offset = page, cursor_after = page max) parses every line
+    and skips a page of ids. This does not time a 1,000,000-row run.
+    """
+    n, page = 8_000, 2_000
     path = tmp_path / "chunk.jsonl"
     path.write_text("".join(json.dumps(_row(i)) + "\n" for i in range(1, n + 1)), encoding="utf-8")
     import services.procedure_source as ps
@@ -173,23 +228,14 @@ def test_chunk_5000_reread_parses_each_line_once_not_once_per_page(tmp_path: Pat
     assert seen == [str(i) for i in range(1, n + 1)]
     assert calls["n"] == n
 
-    # The pre-fix page: cursor_after = page max and offset = page, no early stop.
-    # One such page parses every line. Two pages parse the file twice.
     calls["n"] = 0
-
-    def _old_page(offset: int) -> None:
-        matched = 0
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                _count(line)
-                matched += 1
-                if matched >= offset + page:
-                    # The deployed reader did not stop here. Count the rest.
-                    continue
-
-    _old_page(0)
-    _old_page(page)
-    assert calls["n"] == n * 2
+    _headers, old_rows, old_matched = _pinned_prerefix_read_spool_page(
+        spool, offset=page, limit=page, cursor_column="id", cursor_after=str(page),
+    )
+    assert calls["n"] == n
+    assert old_matched == n - page
+    assert old_rows[0][0] == str(page * 2 + 1)
+    assert old_rows[-1][0] == str(page * 3)
 
 
 def test_a_blocked_reread_page_updates_elapsed_without_inventing_rows():
