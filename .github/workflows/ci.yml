@@ -1,15 +1,30 @@
-name: CI
+name: PR Workflow
 
 on:
   push:
-    branches: [main, feature/fix-qa-bug-fixes, feature/studio-ui-upgrade]
+    branches: ["feature/**"]
   pull_request:
     branches: [main, "feature/**"]
+  workflow_call:
+    secrets:
+      DATAFLOW_ORACLE_HOST:
+        required: false
+      DATAFLOW_ORACLE_PORT:
+        required: false
+      DATAFLOW_ORACLE_SERVICE:
+        required: false
+      DATAFLOW_ORACLE_USER:
+        required: false
+      DATAFLOW_ORACLE_PASSWORD:
+        required: false
+      DATAFLOW_ORACLE_SCHEMA:
+        required: false
 
-# A new push on the same ref supersedes the runs still queued/in flight —
-# keep the latest run, cancel the rest.
+permissions:
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -252,49 +267,6 @@ jobs:
           mkdir -p "$DATAFLOW_DATA_DIR"
           cd apps/api
           python -m pytest tests/test_gitops_plan_apply.py tests/test_dataflow_cli.py tests/test_enterprise_p0_p2.py::test_gitops_manifest_shape -q --tb=short
-
-  # Optional CD apply to a staging API — only when repo variable is set.
-  # Apply itself requires DATAFLOW_STAGING_APPLY=1 (variable) on main.
-  gitops-cd-staging:
-    runs-on: ubuntu-latest
-    needs: [gitops]
-    # Job always runs so a missing staging config is a visible skip, not an
-    # absent job. The plan/apply steps gate on the repo variable.
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install API deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r apps/api/requirements.txt
-
-      - name: Plan against staging API
-        if: ${{ vars.DATAFLOW_STAGING_API_BASE != '' }}
-        env:
-          DATAFLOW_API_BASE: ${{ vars.DATAFLOW_STAGING_API_BASE }}
-          DATAFLOW_API_TOKEN: ${{ secrets.DATAFLOW_STAGING_API_TOKEN }}
-        run: |
-          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli validate -f examples/gitops/dataflow.staging.yaml
-          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli plan -f examples/gitops/dataflow.staging.yaml --api "$DATAFLOW_API_BASE" --token "$DATAFLOW_API_TOKEN"
-
-      - name: Apply with signed-contract gate
-        if: ${{ github.ref == 'refs/heads/main' && vars.DATAFLOW_STAGING_APPLY == '1' }}
-        env:
-          DATAFLOW_API_BASE: ${{ vars.DATAFLOW_STAGING_API_BASE }}
-          DATAFLOW_API_TOKEN: ${{ secrets.DATAFLOW_STAGING_API_TOKEN }}
-        run: |
-          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli apply \
-            -f examples/gitops/dataflow.staging.yaml \
-            --api "$DATAFLOW_API_BASE" \
-            --token "$DATAFLOW_API_TOKEN" \
-            --yes \
-            --require-signed-contracts
 
   # The API suite (~2,400 files) in parallel shards: one job ran past GitHub's
   # 6-hour job limit. A file's shard is a stable hash of its path
@@ -874,3 +846,56 @@ jobs:
           playwright_project: studio-next
           production_smoke: "false"
           artifact_name: studio-ui-next
+
+  required-checks:
+    name: Required PR gate
+    if: ${{ always() && !cancelled() }}
+    needs:
+      - mapping-evidence
+      - ai-offline-correctness
+      - pilot-answer-quality
+      - no-config-transfer
+      - gitops
+      - api-tests
+      - api-and-web
+      - cdc-sqlserver
+      - cdc-oracle
+      - security
+      - studio-ui
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every mandatory check to pass
+        env:
+          MAPPING_EVIDENCE: ${{ needs.mapping-evidence.result }}
+          AI_OFFLINE: ${{ needs.ai-offline-correctness.result }}
+          PILOT_QUALITY: ${{ needs.pilot-answer-quality.result }}
+          NO_CONFIG_TRANSFER: ${{ needs.no-config-transfer.result }}
+          GITOPS: ${{ needs.gitops.result }}
+          API_TESTS: ${{ needs.api-tests.result }}
+          API_AND_WEB: ${{ needs.api-and-web.result }}
+          CDC_SQLSERVER: ${{ needs.cdc-sqlserver.result }}
+          CDC_ORACLE: ${{ needs.cdc-oracle.result }}
+          SECURITY: ${{ needs.security.result }}
+          STUDIO_UI: ${{ needs.studio-ui.result }}
+        run: |
+          failed=0
+          for check in \
+            "mapping-evidence:$MAPPING_EVIDENCE" \
+            "ai-offline-correctness:$AI_OFFLINE" \
+            "pilot-answer-quality:$PILOT_QUALITY" \
+            "no-config-transfer:$NO_CONFIG_TRANSFER" \
+            "gitops:$GITOPS" \
+            "api-tests:$API_TESTS" \
+            "api-and-web:$API_AND_WEB" \
+            "cdc-sqlserver:$CDC_SQLSERVER" \
+            "cdc-oracle:$CDC_ORACLE" \
+            "security:$SECURITY" \
+            "studio-ui:$STUDIO_UI"; do
+            name="${check%%:*}"
+            result="${check##*:}"
+            echo "$name: $result"
+            if [ "$result" != "success" ]; then
+              failed=1
+            fi
+          done
+          exit "$failed"
