@@ -19,7 +19,7 @@ def test_build_and_verify_roundtrip():
     )
     assert pack["content_sha256"]
     assert pack["signature"]["alg"] == "HMAC-SHA256"
-    assert pack["delivery_semantics"]["cdc_default"] == "at_least_once"
+    assert pack["delivery_semantics"]["cdc_default"] == "auto"
     assert pack["delivery_semantics"]["exactly_once"] is False
     assert pack["delivery_semantics"]["at_least_once"] is True
     assert pack["delivery_semantics"]["at_most_once"] is False
@@ -112,4 +112,143 @@ def test_export_includes_accepted_risks_policies_and_rollback():
     assert pack["hashes"]["ddl_hash"] == "ddl-h1"
     assert pack["hashes"]["mapping_hash"] == "map-h1"
     assert pack["connector_versions"]["source"] == "postgresql"
+    assert verify_signed_proof_pack(pack)["ok"] is True
+
+
+def test_cdc_count_scope_does_not_ladder_veto_leftover_extras():
+    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT
+    from services.signed_proof_pack import (
+        apply_fidelity_veto,
+        classify_post_write_assurance,
+        fidelity_veto,
+    )
+
+    recon = {
+        "passed": True,
+        "checksum_scope": CDC_SOURCE_IMAGE_COUNT,
+        "checksum_match": False,
+        "source_rows": 2,
+        "target_rows": 3,
+        "verification_ladder": {
+            "passed": False,
+            "localization_summary": "L4/L5 localized: row id='99'",
+            "layers": {
+                "L1": {"passed": True},
+                "L3": {"passed": True},
+                "L4": {"passed": False},
+            },
+        },
+    }
+    assert fidelity_veto(recon) is None
+    out = apply_fidelity_veto(recon)
+    assert out["passed"] is True
+    assurance = classify_post_write_assurance(out)
+    assert assurance["migration_proven"] is False
+    assert assurance["post_write_verified"] is False
+    assert assurance["claim_level"] == "failed"
+
+
+def test_overwrite_ladder_fail_still_vetoes_when_not_cdc_count_scope():
+    from services.signed_proof_pack import apply_fidelity_veto, fidelity_veto
+
+    recon = {
+        "passed": True,
+        "checksum_scope": "",
+        "checksum_match": False,
+        "verification_ladder": {
+            "passed": False,
+            "localization_summary": "L4 extra dest key",
+            "layers": {"L1": {"passed": True}, "L4": {"passed": False}},
+        },
+    }
+    veto = fidelity_veto(recon)
+    assert veto is not None
+    assert veto.operational_passed is False
+    out = apply_fidelity_veto(recon)
+    assert out["passed"] is False
+    assert out.get("migration_proven") is False
+
+
+def _isolated_chain(tmp_path, monkeypatch):
+    """File-backed audit chain scoped to one test."""
+    from services import audit_log, evidence_chain
+
+    monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+    monkeypatch.setattr(
+        evidence_chain, "truncation_store_path", lambda: tmp_path / "truncations.jsonl"
+    )
+
+
+def test_building_a_pack_stays_pure_unless_anchoring_is_asked_for(tmp_path, monkeypatch):
+    _isolated_chain(tmp_path, monkeypatch)
+    from services.evidence_chain import read_chain
+
+    pack = build_signed_proof_pack(job_id="job-a", reconciliation={"passed": True})
+
+    assert "chain_anchor" not in pack
+    assert read_chain() == []
+
+
+def test_an_exported_pack_occupies_the_chain_position_it_claims(tmp_path, monkeypatch):
+    _isolated_chain(tmp_path, monkeypatch)
+    from services.evidence_chain import find_anchor, verify_chain
+    from services.signed_proof_pack import pack_body_digest_excluding_anchor
+
+    pack = export_proof_pack_for_job(
+        {"_id": "job-anchored", "reconciliation": {"passed": True, "phase": "sample_verified"}},
+        actor="ops@example.com",
+    )
+
+    anchor = pack["chain_anchor"]
+    assert anchor["anchored"] is True
+    assert anchor["evidence_sha256"] == pack_body_digest_excluding_anchor(pack)
+    record = find_anchor(anchor["evidence_sha256"])
+    assert record is not None
+    assert record["event_hash"] == anchor["event_hash"]
+    assert verify_signed_proof_pack(pack)["ok"] is True
+    assert verify_chain()["verified"] is True
+
+
+def test_an_altered_anchored_pack_no_longer_matches_its_chain_record(tmp_path, monkeypatch):
+    _isolated_chain(tmp_path, monkeypatch)
+
+    pack = export_proof_pack_for_job(
+        {"_id": "job-altered", "reconciliation": {"passed": True}}, actor="ops@example.com"
+    )
+    pack["gate8"] = {"passed": True, "source_rows": 999}
+
+    result = verify_signed_proof_pack(pack)
+
+    assert result["ok"] is False
+    assert any("chain_anchor digest does not match" in e for e in result["errors"])
+
+
+def test_an_anchor_lifted_from_another_pack_is_rejected(tmp_path, monkeypatch):
+    _isolated_chain(tmp_path, monkeypatch)
+
+    first = export_proof_pack_for_job({"_id": "job-1", "reconciliation": {"passed": True}})
+    second = export_proof_pack_for_job({"_id": "job-2", "reconciliation": {"passed": True}})
+    second["chain_anchor"] = first["chain_anchor"]
+
+    assert any(
+        "chain_anchor digest does not match" in e
+        for e in verify_signed_proof_pack(second)["errors"]
+    )
+
+
+def test_export_survives_an_unavailable_audit_store_without_claiming_an_anchor(
+    tmp_path, monkeypatch
+):
+    _isolated_chain(tmp_path, monkeypatch)
+    from services import audit_log
+
+    def boom(**_kwargs):
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(audit_log, "append_audit_event", boom)
+
+    pack = export_proof_pack_for_job({"_id": "job-3", "reconciliation": {"passed": True}})
+
+    assert pack["chain_anchor"]["anchored"] is False
     assert verify_signed_proof_pack(pack)["ok"] is True

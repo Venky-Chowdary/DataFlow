@@ -1,0 +1,15 @@
+# Optional Databricks SQL driver. Do not install this into the default API
+# environment.
+#
+# databricks-sql-connector 4.5 and 4.6 require oauthlib>=3.1.0,<4. The default
+# requirements pin oauthlib>=4.0.0,<5 because 3.3.1 is PYSEC-2026-4114 and
+# PYSEC-2026-4113. pip cannot satisfy both. Upstream has not shipped a release
+# that allows oauthlib 4: https://github.com/databricks/databricks-sql-python/issues/964
+#
+# The connector's OAuth client (WebApplicationClient.prepare_authorization_request,
+# parse_request_uri_response, prepare_request_body, prepare_refresh_body) was
+# exercised against oauthlib 4.0.0 and still returns the same shapes. When a
+# connector release accepts oauthlib 4, move these lines back into
+# requirements.txt and delete this file.
+databricks-sqlalchemy>=2.0.0
+databricks-sql-connector>=4.3.0,<4.6

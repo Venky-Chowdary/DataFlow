@@ -51,6 +51,8 @@ def test_array_wire_parses_json_and_pg_literals():
     assert parse_array_wire_elements('["a","b"]') == (["a", "b"], None)
     assert parse_array_wire_elements("[1,2,3]") == ([1, 2, 3], None)
     assert parse_array_wire_elements("[]") == ([], None)
+    # Postgres empty array `{}` is also valid JSON `{}` — keep the array.
+    assert parse_array_wire_elements("{}") == ([], None)
 
     # Postgres literal: unquoted NULL is a real NULL, quoted stays text.
     elements, err = parse_array_wire_elements("{a,b,NULL}")

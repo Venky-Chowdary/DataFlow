@@ -100,6 +100,10 @@ def test_create_new_stamp_uses_national_carrier_for_unicode_source() -> None:
     assert stamped.upper().startswith("NVARCHAR")
 
 
-def test_create_new_stamp_without_source_db_is_unchanged() -> None:
-    """Default (unknown source) keeps today's polarity — no silent invent."""
-    assert create_new_mapping_target_type("VARCHAR(64)", "sqlserver") == "VARCHAR(64)"
+def test_create_new_stamp_without_source_db_is_national() -> None:
+    """D212: an unknown source can hold non-ASCII text — never a code page."""
+    assert create_new_mapping_target_type("VARCHAR(64)", "sqlserver") == "NVARCHAR(64)"
+    # A declared single-byte source keeps its code page.
+    assert create_new_mapping_target_type(
+        "VARCHAR(64)", "sqlserver", source_db="sqlserver"
+    ).startswith("VARCHAR(64)")

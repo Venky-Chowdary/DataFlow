@@ -14,7 +14,8 @@ from services.lineage_telemetry import (
     emit_run_started,
     emit_stage_duration,
     get_events,
+    persist_event_on_job,
     to_ndjson,
 )
 
-__all__ = ['_now', '_emit', 'emit_run_started', 'emit_preflight_completed', 'emit_stage_duration', 'emit_reconciliation', 'emit_quarantine', 'emit_lineage', 'emit_run_completed', 'emit_run_failed', 'get_events', 'clear_events', 'to_ndjson']
+__all__ = ['_now', '_emit', 'emit_run_started', 'emit_preflight_completed', 'emit_stage_duration', 'emit_reconciliation', 'emit_quarantine', 'emit_lineage', 'emit_run_completed', 'emit_run_failed', 'persist_event_on_job', 'get_events', 'clear_events', 'to_ndjson']

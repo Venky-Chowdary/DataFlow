@@ -8,6 +8,11 @@ import {
   breakerBlocksRuns,
   breakerLabel,
   breakerWarnLabel,
+  campaignLabel,
+  campaignWarnLabel,
+  contractBreakerBlocksRun,
+  contractIdFromBreakerFailure,
+  isCircuitBreakerFailureText,
 } from "./contractBreakerUi.js";
 
 describe("contractBreakerUi", () => {
@@ -27,5 +32,32 @@ describe("contractBreakerUi", () => {
   it("warn label only for blocking states", () => {
     assert.equal(breakerWarnLabel("closed"), "");
     assert.equal(breakerWarnLabel("open"), "Breaker open");
+  });
+
+  it("Dual Run list signal only warns when diverging", () => {
+    assert.equal(campaignWarnLabel("cutover_ready"), "");
+    assert.equal(campaignWarnLabel("in_progress"), "");
+    assert.equal(campaignWarnLabel("diverging"), "Parallel run diverging");
+    assert.equal(campaignLabel("cutover_ready"), "Parallel run ready");
+  });
+
+  it("blocks Studio Execute with a reset CTA reason", () => {
+    assert.equal(contractBreakerBlocksRun("closed"), "");
+    assert.match(contractBreakerBlocksRun("open"), /Reset it after you fix/);
+    assert.equal(isCircuitBreakerFailureText("Circuit breaker for contract dfc-1 is OPEN"), true);
+    assert.equal(
+      contractIdFromBreakerFailure({
+        error: "Circuit breaker for contract dfc-1 is OPEN; transfer blocked until recovery",
+      }),
+      "dfc-1",
+    );
+    assert.equal(
+      contractIdFromBreakerFailure({
+        errorDetails: {
+          violations: [{ rule: "circuit_breaker_open", contract_id: "dfc-2" }],
+        },
+      }),
+      "dfc-2",
+    );
   });
 });

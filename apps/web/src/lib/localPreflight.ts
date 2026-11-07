@@ -1,6 +1,9 @@
 import type { EditableMapping } from "./mapping";
 import { mappingRequiresRiskAck } from "./mapping";
+import { applyLocalTransform, requiresServerPreview } from "./localTransform";
 import { GATE_CATALOG } from "./preflightGates";
+import type { NumberLocale } from "./numberLocale";
+import { ambiguousDateColumns, type DateLocale } from "./dateLocale";
 import type { PreflightGate, PreflightResult } from "./types";
 
 /** Canonical local gate order — matches GATE_CATALOG (unique IDs). */
@@ -8,41 +11,6 @@ const GATE_IDS = GATE_CATALOG
   .map((g) => g.id)
   .filter((id) => id !== "schema_drift") as string[];
 
-function applyTransform(value: unknown, transform?: string): unknown {
-  if (value == null || value === "") return value;
-  const s = String(value);
-  switch (transform) {
-    case "trim":
-      return s.trim();
-    case "upper":
-      return s.toUpperCase();
-    case "lower":
-      return s.toLowerCase();
-    case "hash_pii": {
-      let h = 5381;
-      for (let i = 0; i < s.length; i += 1) h = (h * 33) ^ s.charCodeAt(i);
-      return `sha256:${(h >>> 0).toString(16).padStart(8, "0")}`;
-    }
-    case "datetime":
-    case "date_iso":
-      return s;
-    case "decimal":
-    case "cast_number": {
-      const n = Number(s.replace(/,/g, ""));
-      return Number.isFinite(n) ? n : value;
-    }
-    case "boolean":
-    case "cast_boolean": {
-      // Strict wire only — match transform_engine._STRICT_BOOL_* (no yes/y invent).
-      const t = s.toLowerCase();
-      if (["true", "t", "1"].includes(t)) return true;
-      if (["false", "f", "0"].includes(t)) return false;
-      return value;
-    }
-    default:
-      return value;
-  }
-}
 
 export interface LocalPreflightInput {
   columns: string[];
@@ -51,11 +19,28 @@ export interface LocalPreflightInput {
   sampleRows?: Record<string, unknown>[];
   confidenceThreshold?: number;
   destKind?: "database" | "file_export";
+  sourceReadMode?: string;
+  destWriteMode?: string;
+  syncMode?: string;
+  numberLocale?: NumberLocale | string;
+  dateLocale?: DateLocale | string;
 }
 
 /** True when this preflight was produced entirely in the browser (no API gates). */
 export function isLocalPreflight(preflight: { run_id?: string } | null | undefined): boolean {
   return Boolean(preflight?.run_id?.startsWith("pf_local_"));
+}
+
+/**
+ * True only for a result the API identified with a run id.
+ *
+ * `!isLocalPreflight(pf)` is not the same test: a result with no run id at all
+ * passes it vacuously, so an unidentifiable verdict would unlock Execute. An
+ * unknown run is not an API run.
+ */
+export function isApiPreflight(preflight: { run_id?: string } | null | undefined): boolean {
+  const runId = String(preflight?.run_id || "").trim();
+  return runId.length > 0 && !runId.startsWith("pf_local_");
 }
 
 /** Client-side preflight for file → file export when the API is unavailable. */
@@ -187,26 +172,42 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     });
   }
 
-  let transformOk = true;
-  for (const m of input.mappings) {
-    for (const row of rows.slice(0, 20)) {
-      try {
-        applyTransform(row[m.source], m.transform === "none" ? undefined : m.transform);
-      } catch {
-        transformOk = false;
-        break;
-      }
-    }
-    if (!transformOk) break;
-  }
-  if (!transformOk) {
-    block("g5_dry_run", "A transform failed on sample rows.", {
-      kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
-    });
+  const serverPreview = input.mappings.some((mapping) =>
+    requiresServerPreview(mapping.transform === "none" ? undefined : mapping.transform),
+  );
+  if (serverPreview) {
+    // A local pass would invent the digest or the cast. The server owns this sample.
+    skip(
+      "g5_dry_run",
+      "Hash, IBAN, time, boolean, and the other server-only casts are computed by POST /shape/preview. This browser does not preview them.",
+      { kind: "dry_run", coverage: "server", note: "POST /shape/preview" },
+    );
   } else {
-    pass("g5_dry_run", `Dry-run transforms passed on ${Math.min(rows.length, 20)} sample row(s).`, {
-      kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
-    });
+    let transformOk = true;
+    for (const m of input.mappings) {
+      for (const row of rows.slice(0, 20)) {
+        try {
+          applyLocalTransform(
+            row[m.source],
+            m.transform === "none" ? undefined : m.transform,
+            input.numberLocale,
+          );
+        } catch {
+          transformOk = false;
+          break;
+        }
+      }
+      if (!transformOk) break;
+    }
+    if (!transformOk) {
+      block("g5_dry_run", "A transform failed on sample rows.", {
+        kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
+      });
+    } else {
+      pass("g5_dry_run", `Dry-run transforms passed on ${Math.min(rows.length, 20)} sample row(s).`, {
+        kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
+      });
+    }
   }
 
   if (isFileExport) {
@@ -238,14 +239,52 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     note: "Not a full-table integrity probe — do not treat as gate-pass evidence",
   });
 
-  skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.", {
-    kind: "sync_contract", coverage: "n/a",
+  const callable = input.sourceReadMode === "procedure" || input.sourceReadMode === "query"
+    || input.destWriteMode === "procedure" || input.destWriteMode === "query";
+  const sync = (input.syncMode || "").toLowerCase();
+  if (callable && (sync === "cdc" || sync === "scd2" || sync === "mirror" || sync === "full_refresh_mirror")) {
+    block("g9_sync_contract", "Stored-procedure / SQL extract or dest CALL/query cannot drive CDC, SCD2, or mirror — use Full refresh or incremental.", {
+      kind: "sync_contract", coverage: "n/a",
+    });
+  } else {
+    skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.", {
+      kind: "sync_contract", coverage: "n/a",
+    });
+  }
+  skip("g13_source_coverage", "Browser-only — source coverage requires API dest-exists shape.", {
+    kind: "source_coverage", coverage: "n/a",
+  });
+  skip("g14_destination_requirements", "Browser-only — dest NOT NULL coverage requires API introspect.", {
+    kind: "destination_requirements", coverage: "n/a",
+  });
+  skip("constraint_fk", "Browser-only — FK coverage requires API catalog metadata.", {
+    kind: "foreign_key", coverage: "n/a",
   });
   skip("g10_schema_policy", "Browser-only — schema policy gate skipped; requires API.", {
     kind: "schema_policy", coverage: "n/a",
   });
   skip("g11_validation_posture", "Browser-only — validation posture skipped; requires API.", {
     kind: "validation_posture", coverage: "n/a",
+  });
+  skip("g15_dest_exists_shape", "Browser-only — dest-exists shape requires API table introspect.", {
+    kind: "dest_exists_shape", coverage: "n/a",
+    note: "Writes stay name-addressed on the API path — not a local invent",
+  });
+  skip("g18_cdc_snapshot_mode", "Browser-only — CDC snapshot_mode=never requires API watermark.", {
+    kind: "cdc_snapshot_mode", coverage: "n/a",
+    note: "Execute uses the same should_run_snapshot kernel — at-least-once upsert",
+  });
+  skip("g20_code_crosswalk", "Browser-only — population code-crosswalk coverage requires API Validate.", {
+    kind: "code_crosswalk", coverage: "n/a",
+    note: "A covered sample is not population proof. Unmapped codes fail closed on the API path.",
+  });
+  skip("g21_control_totals", "Browser-only — population control totals are a post-write Gate-8 SUM, not a sample SUM.", {
+    kind: "control_totals", coverage: "n/a",
+    note: "Independent source/dest SUM runs after Execute",
+  });
+  skip("g22_dest_referential_integrity", "Browser-only — destination RI is a post-write Gate-8 anti-join, not a sample orphan probe.", {
+    kind: "dest_referential_integrity", coverage: "n/a",
+    note: "Dest enforced FK or anti-join scan runs after Execute",
   });
 
   const passedCount = gates.filter((g) => g.status === "pass").length;
@@ -277,11 +316,20 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       ]
     : ["Database destinations require API preflight — local checks cannot approve remote writes."];
 
+  const dateFindings = ambiguousDateColumns(rows, input.columns, input.dateLocale);
+  const dateLocaleReport = {
+    date_locale: String(input.dateLocale || ""),
+    ambiguous_columns: dateFindings,
+    decision: dateFindings.length ? "set_locale" as const : "ok" as const,
+  };
+
   return {
     passed,
     passed_count: passedCount,
     total_gates: totalGates,
     readiness_score: readinessScore,
+    date_locale: String(input.dateLocale || ""),
+    date_locale_report: dateLocaleReport,
     run_id: `pf_local_${Math.random().toString(16).slice(2, 10)}`,
     gates,
     blockers,

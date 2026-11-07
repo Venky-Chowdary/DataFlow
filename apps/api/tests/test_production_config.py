@@ -14,6 +14,7 @@ def test_secret_vault_roundtrip(monkeypatch):
 
 
 def test_production_validation_fails_without_secrets(monkeypatch):
+    monkeypatch.delenv("DATAWRAP_ENV", raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.delenv("DATAFLOW_AUTH_SECRET", raising=False)
     monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "0")
@@ -35,13 +36,31 @@ def test_mongodb_uri_from_railway_mongo_url(monkeypatch):
 
 
 def test_railway_is_production_by_default(monkeypatch):
-    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    # Deploy-time marker only — RAILWAY_ENVIRONMENT alone is a linked-shell var.
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
+    monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("RAILWAY_SERVICE_ID", raising=False)
+    monkeypatch.delenv("DATAWRAP_ENV", raising=False)
     monkeypatch.delenv("DATAFLOW_ENV", raising=False)
     from importlib import reload
 
     import services.platform_config as pc
     reload(pc)
     assert pc.is_production() is True
+
+
+def test_liveness_paths_are_only_the_deploy_probes():
+    from services.platform_config import is_liveness_path
+
+    assert is_liveness_path("/health")
+    assert is_liveness_path("/health/")
+    assert is_liveness_path("/health/ready")
+    assert is_liveness_path("/api/v1/health")
+    assert is_liveness_path("/health/ready?probe=1")
+    assert is_liveness_path("/health/debug") is False
+    assert is_liveness_path("/healthcare") is False
+    assert is_liveness_path("/api/v1/transfer") is False
+    assert is_liveness_path("/api/v1/auth/login") is False
 
 
 def test_dev_mode_skips_production_validation(monkeypatch):
@@ -55,6 +74,7 @@ def test_dev_mode_skips_production_validation(monkeypatch):
 
 
 def test_stub_writes_blocked_in_production(monkeypatch):
+    monkeypatch.delenv("DATAWRAP_ENV", raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.setenv("DATAFLOW_ALLOW_STUB_WRITES", "1")
     from importlib import reload

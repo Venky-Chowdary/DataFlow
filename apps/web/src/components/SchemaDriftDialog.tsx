@@ -20,8 +20,13 @@ export function SchemaDriftDialog({
   onClose,
 }: SchemaDriftDialogProps) {
   if (!open || !report) return null;
+  const hasHard = (report.hard_breaking || report.schema_evolution?.hard_breaking || []).length > 0
+    || report.schema_evolution?.should_pause === true
+    || report.compatibility === "none";
   const hasBreaking = (report.breaking || []).length > 0;
   const hasAdditive = (report.additive || []).length > 0;
+  const compatibility = report.compatibility || report.schema_evolution?.compatibility;
+  const compatibilityNote = report.compatibility_note || report.schema_evolution?.compatibility_note;
 
   return (
     <div className="df2-modal-overlay" role="presentation" onClick={onClose}>
@@ -35,16 +40,20 @@ export function SchemaDriftDialog({
         <header className="df2-modal-head">
           <h2 id="df2-drift-title">Schema drift detected</h2>
           <p className="df2-muted">
-            Severity: <strong>{report.severity || (hasBreaking ? "breaking" : "additive")}</strong>
+            Severity: <strong>{report.severity || (hasHard ? "breaking" : "additive")}</strong>
+            {compatibility ? ` · compatibility ${compatibility}` : ""}
             {report.summary ? ` — ${report.summary}` : ""}
           </p>
           <p className="df2-muted">
-            {hasBreaking
-              ? "Next: open remapping or Reject — do not approve until types and keys are safe."
+            {hasHard
+              ? "Next: open remapping — Acknowledge cannot green a hard-breaking change."
               : hasAdditive
                 ? "Next: Approve additive to extend the contract, or open remapping if names should change."
-                : "Next: Reject to keep the previous contract, or open remapping to redefine fields."}
+                : hasBreaking
+                  ? "Next: Reject to keep the previous contract, or open remapping to redefine fields."
+                  : "Next: Reject to keep the previous contract, or open remapping to redefine fields."}
           </p>
+          {compatibilityNote ? <p className="df2-muted">{compatibilityNote}</p> : null}
         </header>
         <div className="df2-modal-body">
           {hasAdditive && (
@@ -87,7 +96,7 @@ export function SchemaDriftDialog({
           <Button variant="secondary" onClick={onRemap}>
             Open remapping
           </Button>
-          {hasAdditive && !hasBreaking && (
+          {hasAdditive && !hasHard && (
             <Button variant="primary" onClick={onApproveAdditive}>
               Approve additive
             </Button>

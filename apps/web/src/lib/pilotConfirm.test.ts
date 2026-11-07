@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { isDestructiveTransfer, transferOverwriteMessage } from "./pilotConfirm.js";
+import { destructiveActionButtonLabel, isDestructiveLifecycle, isDestructiveTransfer, isLifecycleOp, lifecycleConfirmPrompt, transferOverwriteMessage } from "./pilotConfirm.js";
 
 function transfer(syncMode: string, destructive = false) {
   return {
@@ -33,6 +33,61 @@ describe("pilotConfirm", () => {
 
   it("honours the explicit destructive flag from the backend", () => {
     assert.equal(isDestructiveTransfer(transfer("incremental_upsert", true)), true);
+  });
+
+  it("treats a cadence change as a schedule lifecycle confirm", () => {
+    assert.equal(isLifecycleOp("update_schedule"), true);
+    assert.equal(
+      isDestructiveLifecycle({
+        id: "s1",
+        type: "update_schedule",
+        destructive: false,
+        payload: { ack_id: "ack_1", preview: { name: "Nightly" } },
+      }),
+      false,
+    );
+  });
+
+  it("treats confirmed CDC drift repair as a lifecycle action", () => {
+    assert.equal(isLifecycleOp("repair_cdc_drift"), true);
+    assert.equal(
+      isDestructiveLifecycle({
+        id: "d1",
+        type: "repair_cdc_drift",
+        destructive: true,
+        payload: { ack_id: "ack_1", preview: { table: "orders_copy" } },
+      }),
+      true,
+    );
+  });
+
+  it("uses a repair-specific confirmation prompt with the agreed semantics", () => {
+    const prompt = lifecycleConfirmPrompt({
+      id: "d1",
+      type: "repair_cdc_drift",
+      destructive: true,
+      payload: {
+        ack_id: "ack_1",
+        preview: { table: "orders_copy", key_count: 2, committed_position: "0/100" },
+      },
+    });
+
+    assert.equal(prompt.confirmLabel, "Re-copy and reconcile");
+    assert.ok(prompt.message.includes("orders_copy"));
+    assert.ok(prompt.message.includes("0/100"));
+    assert.ok(prompt.message.includes("state convergence / reconciliation, not log replay"));
+    assert.ok(!prompt.title.toLowerCase().includes("retry"));
+  });
+
+  it("labels the destructive CDC drift repair action by its selected rows", () => {
+    assert.equal(
+      destructiveActionButtonLabel("repair_cdc_drift"),
+      "Repair selected rows",
+    );
+    assert.equal(
+      destructiveActionButtonLabel("retry_job"),
+      "Overwrite & run",
+    );
   });
 
   it("names the destination in the overwrite warning", () => {

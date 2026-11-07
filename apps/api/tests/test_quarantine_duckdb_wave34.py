@@ -108,6 +108,9 @@ def test_upsert_batch_duckdb_prefers_merge_then_delete_insert():
         def execute(self, stmt, params=None):  # noqa: ANN001
             text = str(getattr(stmt, "text", stmt))
             calls.append(text)
+            if "_deleted" in text:
+                # Plain destination: no mirror soft-delete lattice to probe.
+                raise sa.exc.SQLAlchemyError("no such column: _deleted")
             if "MERGE" in text.upper():
                 raise sa.exc.SQLAlchemyError("merge unavailable")
             result = MagicMock()

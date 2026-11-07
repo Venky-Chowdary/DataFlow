@@ -1,0 +1,206 @@
+{
+ "name": "freshservice",
+ "docs": "https://api.freshservice.com/",
+ "base_url": "https://{domain}.freshservice.com/api/v2",
+ "auth": {
+  "type": "basic",
+  "password": "X"
+ },
+ "defaults": {
+  "page_size": 100,
+  "retry": {
+   "max_attempts": 3,
+   "base_delay": 1,
+   "max_delay": 30
+  }
+ },
+ "streams": [
+  {
+   "name": "tickets",
+   "path": "tickets",
+   "records_path": "tickets",
+   "primary_key": [
+    "id"
+   ],
+   "request_params": {
+    "order_by": "updated_at",
+    "order_type": "asc",
+    "per_page": 100
+   },
+   "cursor": {
+    "field": "updated_at",
+    "request_param": "updated_since",
+    "format": "iso8601",
+    "lookback_s": 60
+   },
+   "paginator": {
+    "type": "page",
+    "page_size": 100,
+    "page_size_param": "per_page",
+    "page_param": "page",
+    "start_index": 1
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "subject": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "status": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "priority": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "requester_id": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "created_at": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "updated_at": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
+    }
+   }
+  },
+  {
+   "name": "requesters",
+   "path": "requesters",
+   "records_path": "requesters",
+   "primary_key": [
+    "id"
+   ],
+   "request_params": {
+    "per_page": 100
+   },
+   "paginator": {
+    "type": "page",
+    "page_size": 100,
+    "page_size_param": "per_page",
+    "page_param": "page",
+    "start_index": 1
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "first_name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "last_name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "primary_email": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "created_at": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "updated_at": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
+    }
+   },
+   "cursor": {
+    "field": "updated_at",
+    "request_param": "updated_since",
+    "format": "iso8601"
+   }
+  },
+  {
+   "name": "groups",
+   "path": "groups",
+   "records_path": "groups",
+   "primary_key": [
+    "id"
+   ],
+   "request_params": {
+    "per_page": 100
+   },
+   "paginator": {
+    "type": "page",
+    "page_size": 100,
+    "page_size_param": "per_page",
+    "page_param": "page",
+    "start_index": 1
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "description": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "created_at": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "updated_at": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
+    }
+   }
+  }
+ ]
+}

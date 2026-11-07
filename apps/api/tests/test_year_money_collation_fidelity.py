@@ -160,8 +160,10 @@ def test_integrity_duplicate_keys_respect_ci_collation():
         sync_mode="upsert",
         target_types={"email": "CITEXT"},
     )
-    assert result["passed"] is False
-    assert result["blocks_transfer"] is True
+    warning = " ".join(str(item) for item in (result.get("warnings") or []))
+    assert result["blocks_transfer"] is False
+    assert "collapsed" in warning.lower()
+    assert "counted once" in warning.lower()
 
 
 def test_boolean_and_temporal_write_quarantine():

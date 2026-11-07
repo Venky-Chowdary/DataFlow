@@ -104,7 +104,7 @@ def test_mysql_snapshot_captures_binlog_position():
 
     cdc = MySqlChangeStreamCdc({"host": "localhost", "database": "db"}, table="t", primary_key="id")
     with patch.object(cdc, "_current_binlog_position", return_value={"file": "bin.0001", "pos": 42, "table": "t"}):
-        with patch("connectors.mysql_change_stream.read_table_batch") as read:
+        with patch("connectors.mysql_change_stream.read_table_scan_batch") as read:
             class Batch:
                 headers = ["id"]
                 rows = [["1"]]
@@ -187,14 +187,79 @@ def test_strict_g8_fails_without_verifier_non_dest_only():
     assert "read-back" in report["message"].lower() or "verifier" in report["message"].lower()
 
 
-def test_strict_g8_writer_ack_for_dest_only():
-    """dest_only sinks have no SQL read-back — strict accepts matched writer-ack.
+def test_balanced_g8_warehouse_without_verifier_is_unproven():
+    """Postgres-class dests must not green-pass on writer-ack when COUNT failed."""
+    from src.transfer.models import EndpointConfig
+    from src.transfer.reconcile_step import run_reconciliation
 
-    The pass is labelled ``writer_ack`` rather than verified: it proves the
-    writer acknowledged as many rows as the reader counted, never that the
-    destination cells match.
+    endpoint = EndpointConfig(kind="database", format="postgresql", database="db", table="t")
+    with patch("src.transfer.reconcile_step.verify_target", return_value=(-1, "")):
+        with patch("src.transfer.reconcile_step.resolve_connector_config", return_value={}):
+            report = run_reconciliation(
+                endpoint=endpoint,
+                records=[],
+                columns=["id"],
+                rows_written=5,
+                writer_checksum="abc",
+                dest_summary=dict(_MEASURED_SOURCE),
+                validation_mode="balanced",
+            )
+    assert report["passed"] is False
+    assert report.get("unproven") is True
+    assert report.get("migration_proven") is False
+    assert "read-back" in report["message"].lower() or "not migration_proven" in report["message"].lower()
+
+
+def test_strict_g8_writer_ack_for_dest_only():
+    """dest_only sinks without dest-engine DISTINCT still accept matched writer-ack.
+
+    Email has no COUNT(DISTINCT source_id). The pass is labelled ``writer_ack``
+    rather than verified: it proves the writer acknowledged as many rows as
+    the reader counted, never that the destination cells match. Pinecone /
+    Weaviate / Milvus / Qdrant no longer take this path.
     """
-    report = _strict_reconcile("qdrant", dict(_MEASURED_SOURCE))
+    report = _strict_reconcile("email", dict(_MEASURED_SOURCE))
     assert report["passed"] is True
     assert report.get("assurance_level") == "writer_ack"
     assert "writer" in report["message"].lower() or "read-back" in report["message"].lower()
+
+
+def test_strict_g8_qdrant_does_not_close_on_writer_ack(monkeypatch):
+    """Qdrant identity is COUNT(DISTINCT source_id), never upsert ack as dest."""
+    monkeypatch.setattr(
+        "connectors.qdrant_writer.scan_source_ids",
+        lambda cfg, *, table_name, max_entities: ("unmeasured", []),
+    )
+    report = _strict_reconcile("qdrant", dict(_MEASURED_SOURCE))
+    assert report.get("assurance_level") != "writer_ack"
+    assert report.get("skipped_readback") is True
+    assert report.get("migration_proven") is False
+    assert "source_id" in str(report.get("message") or "").lower()
+    assert report.get("dest_count_source") == "skipped_identity_readback"
+    assert "identity_rows" not in report
+
+
+def test_strict_g8_pinecone_does_not_close_on_writer_ack(monkeypatch):
+    monkeypatch.setattr(
+        "connectors.pinecone_writer.scan_source_ids",
+        lambda cfg, *, table_name, max_entities: ("unmeasured", []),
+    )
+    report = _strict_reconcile("pinecone", dict(_MEASURED_SOURCE))
+    assert report.get("assurance_level") != "writer_ack"
+    assert report.get("skipped_readback") is True
+    assert report.get("migration_proven") is False
+    assert "source_id" in str(report.get("message") or "").lower()
+    assert report.get("dest_count_source") == "skipped_identity_readback"
+    assert "identity_rows" not in report
+
+
+def test_strict_g8_weaviate_does_not_close_on_writer_ack(monkeypatch):
+    monkeypatch.setattr(
+        "connectors.weaviate_writer.scan_source_ids",
+        lambda cfg, *, table_name, max_entities: ("unmeasured", []),
+    )
+    report = _strict_reconcile("weaviate", dict(_MEASURED_SOURCE))
+    assert report.get("assurance_level") != "writer_ack"
+    assert report.get("skipped_readback") is True
+    assert report.get("migration_proven") is False
+    assert report.get("dest_count_source") == "skipped_identity_readback"

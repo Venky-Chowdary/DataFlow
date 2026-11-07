@@ -27,6 +27,7 @@ from services.catalog_service import catalog_summary, search_catalog  # noqa: E4
 from src.transfer.connector_capabilities import (  # noqa: E402
     dest_live_driver_types,
     enrich_catalog_entry,
+    get_capabilities,
     source_live_driver_types,
 )
 
@@ -56,9 +57,12 @@ def test_destination_picker_never_offers_a_read_only_feed():
     assert unusable == [], f"offered as destinations but cannot be written: {unusable}"
 
 
-@pytest.mark.parametrize("connector_id", ["pinecone", "weaviate", "milvus", "qdrant"])
+@pytest.mark.parametrize("connector_id", ["pinecone", "weaviate", "milvus"])
 def test_vector_stores_are_destinations_only(connector_id: str):
-    """The specific tiles the source picker used to offer."""
+    """The specific tiles the source picker used to offer.
+
+    Qdrant is no longer in this list: its payload-scroll reader makes it duplex.
+    """
     row = enrich_catalog_entry({"id": connector_id, "status": "live"})
     assert row["dest_ready"] is True
     assert row["source_ready"] is False
@@ -84,15 +88,16 @@ def test_suggestions_obey_the_same_role_rule():
 
 def test_per_side_counts_describe_the_list_they_label():
     """The number shown next to a role-scoped list must count that list."""
-    for role, key in (("source", "source_live"), ("destination", "dest_live")):
+    sides = (("source", "source_live", "source_beta"), ("destination", "dest_live", "dest_beta"))
+    for role, key, beta_key in sides:
         result = search_catalog(role=role, transfer_only=True, limit=1000)
         offered_drivers = {
             c.get("driver_type") for c in result["connectors"] if c.get("driver_type")
         }
         assert result["role_live"] == result[key]
-        assert result["role_live"] == len(offered_drivers), (
-            f"{role}: labelled {result['role_live']} but the list holds "
-            f"{len(offered_drivers)} distinct engines"
+        assert result[key] + result[beta_key] == len(offered_drivers), (
+            f"{role}: labelled {result[key]} live + {result[beta_key]} beta but the "
+            f"list holds {len(offered_drivers)} distinct engines"
         )
 
 
@@ -100,15 +105,16 @@ def test_side_counts_differ_from_the_transfer_total():
     """One number cannot answer both questions; the catalog now says so.
 
     ``transfer_live`` counts engines usable in *a* transfer — the union of both
-    sides — so it necessarily exceeds at least one of them whenever any
-    connector is single-sided.
+    sides — so it strictly exceeds the smaller side whenever any connector is
+    single-sided (the two sides may still tie, e.g. 3 source-only vs 3 dest-only).
     """
     summary = catalog_summary()
     assert summary["source_live"] > 0
     assert summary["dest_live"] > 0
-    assert summary["source_live"] != summary["dest_live"], (
-        "single-sided connectors exist, so the two sides cannot have equal counts"
+    assert summary["transfer_live"] > min(summary["source_live"], summary["dest_live"]), (
+        "single-sided connectors exist, so the union must exceed the smaller side"
     )
+    assert summary["transfer_live"] >= max(summary["source_live"], summary["dest_live"])
     unscoped = search_catalog(role="all", transfer_only=True, limit=1000)
     assert unscoped["role_live"] == unscoped["transfer_live"]
 
@@ -157,9 +163,15 @@ def test_transfer_capabilities_splits_the_two_sides():
     destinations = set(caps["destination_databases"])
 
     # Write-only stores are destinations, never sources.
-    for write_only in ("pinecone", "weaviate", "qdrant", "milvus", "pgvector"):
+    for write_only in ("pinecone", "weaviate", "milvus"):
         assert write_only not in sources, f"{write_only} cannot be read"
         assert write_only in destinations, f"{write_only} should be offered as a destination"
+
+    # pgvector is PostgreSQL + the vector type: it reads via the PG reader (MX2-12).
+    assert "pgvector" in sources and "pgvector" in destinations
+
+    # Qdrant reads point payloads (scroll), so it sits on both sides.
+    assert "qdrant" in sources and "qdrant" in destinations
 
     # Read-only connectors are sources, never destinations.
     for read_only in ("couchbase", "neo4j", "influxdb"):
@@ -168,6 +180,10 @@ def test_transfer_capabilities_splits_the_two_sides():
 
     # A duplex engine belongs on both sides.
     assert "postgresql" in sources and "postgresql" in destinations
+
+    # Stripe earned a source SKU, not reverse-ETL dest SKU.
+    assert "stripe" in sources
+    assert "stripe" not in destinations
 
 
 def test_planned_tiles_are_ready_for_neither_side():
@@ -180,3 +196,12 @@ def test_planned_tiles_are_ready_for_neither_side():
             or c.get("effective_status") == "planned"
         ]
         assert planned == [], f"{role} offers planned tiles: {planned[:5]}"
+
+
+def test_fixture_beta_sources_are_counted_apart_from_live():
+    """Fixture-proven SDK betas are pickable but are not live engines."""
+    summary = catalog_summary()
+    assert summary["source_beta"] >= 1
+    zendesk = get_capabilities("zendesk")
+    assert zendesk.get("evidence") == "synthetic-fixture"
+    assert summary["transfer_live"] >= summary["source_live"]

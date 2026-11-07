@@ -65,7 +65,7 @@ def test_mongo_insert_refuses_null_id_invent():
     coll.insert_many.assert_not_called()
 
 
-def test_dynamo_empty_key_types_fail_closed(monkeypatch):
+def test_dynamo_empty_key_types_use_canonical_live_description(monkeypatch):
     monkeypatch.delenv("DATAFLOW_ALLOW_STUB_WRITES", raising=False)
     monkeypatch.setenv("DATAFLOW_ALLOW_STUB_WRITES", "0")
 
@@ -80,6 +80,7 @@ def test_dynamo_empty_key_types_fail_closed(monkeypatch):
         }
     }
     client.scan.return_value = {"Items": []}
+    client.batch_write_item.return_value = {"UnprocessedItems": {}}
     with patch("connectors.dynamodb_writer.boto3_client", return_value=client), patch(
         "connectors.dynamodb_writer._ensure_table"
     ), patch(
@@ -109,8 +110,8 @@ def test_dynamo_empty_key_types_fail_closed(monkeypatch):
             conflict_columns=["id"],
             error_policy="quarantine",
         )
-    assert result.ok is False
-    assert "key schema" in (result.error or "").lower()
+    assert result.ok is True, result.error
+    assert result.rows_written == 1
 
 
 def test_dynamo_key_encode_prefers_keyschema_s_over_live_integer():

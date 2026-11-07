@@ -60,8 +60,9 @@ def test_snowflake_cursor_sql_uses_composite_tiebreak():
     params = cur.execute.call_args[0][1]
     assert "(UPDATED_AT" in sql.upper().replace('"', "") or "UPDATED_AT" in sql
     assert ">" in sql
-    assert params[0] == "2024-01-01"
-    assert params[1] == "a"
+    # Expanded seek ``c > x OR (c = x AND pk > y)``: both sides bind alike (QA r12 Snowflake D4).
+    assert " OR " in sql.upper()
+    assert tuple(params) == ("2024-01-01", "2024-01-01", "a", 10)
     assert batch.rows
 
 

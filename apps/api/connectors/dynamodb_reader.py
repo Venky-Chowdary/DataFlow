@@ -18,7 +18,7 @@ import logging
 import sys
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from connectors.aws_common import boto3_client
 from connectors.base import ReadBatch
@@ -30,10 +30,11 @@ logger = logging.getLogger(__name__)
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from services.value_serializer import cell_to_string
+from services.value_serializer import EXPLICIT_NULL, cell_to_string
 
 # Explicit DynamoDB NULL AttributeValue — not the same as a missing attribute.
-DDB_EXPLICIT_NULL = object()
+# One object shared with the verifiers (services.value_serializer).
+DDB_EXPLICIT_NULL = EXPLICIT_NULL
 DDB_NULL_SENTINEL = "__DF_DDB_NULL__"
 # Typed set envelopes so SS/NS/BS are not silently equated with L.
 _SET_KIND_KEY = "_df_ddb_set"
@@ -225,32 +226,45 @@ def estimate_item_count(cfg: dict[str, Any], table: str) -> int:
 
 
 def describe_key_schema(cfg: dict[str, Any], table: str) -> list[dict[str, str]]:
-    """Return Dynamo HASH/RANGE keys as ``[{name, key_type, attr_type}, ...]``.
+    """Return Dynamo HASH/RANGE keys with logical and native scalar types."""
+    return describe_table_key_contract(cfg, table)[0]
 
-    Map/Validate need the identity contract — without it operators invent a PK
-    and Dynamo create-table / upsert demos fail mid-walkthrough.
-    """
+
+def describe_table_key_contract(
+    cfg: dict[str, Any], table: str
+) -> tuple[list[dict[str, str]], dict[str, str]]:
+    """Return parsed table keys and secondary-index scalar constraints."""
     client = boto3_client("dynamodb", cfg)
     resp = client.describe_table(TableName=table)
     table_info = resp.get("Table") or {}
-    attr_defs = {
-        a.get("AttributeName"): a.get("AttributeType", "S")
-        for a in (table_info.get("AttributeDefinitions") or [])
-        if a.get("AttributeName")
-    }
-    keys: list[dict[str, str]] = []
-    for key in table_info.get("KeySchema") or []:
-        name = str(key.get("AttributeName") or "")
-        if not name:
-            continue
-        keys.append(
-            {
-                "name": name,
-                "key_type": str(key.get("KeyType") or "HASH"),
-                "attr_type": _ddb_attr_type(attr_defs.get(name, "S")),
-            }
+    from connectors.dynamodb_schema import parse_table_description
+
+    schema = parse_table_description(table_info)
+    keys = [
+        {
+            "name": key.name,
+            "key_type": key.key_type,
+            "attr_type": _ddb_attr_type(key.attr_type),
+            "scalar": key.attr_type,
+        }
+        for key in schema.keys
+    ]
+    return keys, dict(schema.index_attributes)
+
+
+def describe_table_key_contract_or_empty(
+    cfg: dict[str, Any], table: str
+) -> tuple[list[dict[str, str]], dict[str, str]]:
+    """Describe HASH/RANGE and index contracts, failing closed when unavailable."""
+    try:
+        return describe_table_key_contract(cfg, table)
+    except Exception:
+        logger.warning(
+            "DynamoDB key contract describe failed for table %s",
+            table,
+            exc_info=True,
         )
-    return keys
+        return [], {}
 
 
 def describe_table_schema(cfg: dict[str, Any], table: str) -> tuple[list[str], dict[str, str]]:
@@ -321,7 +335,17 @@ def read_table_batch(
     )
 
     client = boto3_client("dynamodb", cfg)
-    scan_kwargs: dict[str, Any] = {"TableName": table, "Limit": limit}
+    # Snapshot accuracy: AWS documents ConsistentRead=true for backup /
+    # replication Scans. Eventual reads can omit a just-written item and
+    # silently under-count. CDC is a separate Streams path (at-least-once).
+    consistent = cfg.get("consistent_read")
+    if consistent is None:
+        consistent = True
+    scan_kwargs: dict[str, Any] = {
+        "TableName": table,
+        "Limit": limit,
+        "ConsistentRead": bool(consistent),
+    }
     if exclusive_start_key:
         scan_kwargs["ExclusiveStartKey"] = exclusive_start_key
 

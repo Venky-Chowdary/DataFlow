@@ -43,6 +43,28 @@ Artifact: `apps/api/data/proofs/module_size_budgets.json`
 | `services/reconciliation.py` | 5900 | 5920 | Gate-8 upsert keyed checksum + Mongo keyed fingerprint (product correctness) |
 | `connectors/writer_common.py` | 5100 | 5120 | `gate8_writer_meta` / written_ids stamping for upsert reconcile |
 
+## ADR — re-baseline 2026-09-13
+
+The `mapping-evidence` job had been red since mid-August: 263 commits on
+`feature/Venkat-Analysis` landed in the frozen modules (timezone contracts,
+UUID wire, dest-shape profiles, Elasticsearch reread, …) without the gate being
+consulted, so the freeze stopped measuring anything. The ceilings are re-set to
+the current size plus a ≤1% margin so growth is caught again from this commit;
+this is a bump, not an extraction — the extraction order above is unchanged and
+each row here still owes the split it names.
+
+| Module | Was | Now | Lines | Owes |
+|--------|-----|-----|-------|------|
+| `services/type_system.py` | 7450 | 8100 | 8061 | `type_system/ddl.py`, `width.py`, `coercion.py` |
+| `services/reconciliation.py` | 4700 | 5100 | 5069 | per-engine `verify_*.py` |
+| `connectors/generic_sql.py` | 5600 | 6420 | 6390 | `connectors/merge/<dialect>.py` |
+| `connectors/writer_common.py` | 5120 | 5520 | 5491 | `cdc_lsn.py`, `quarantine_wire.py`, `write_result.py` |
+| `src/transfer/engine.py` | 5200 | 5620 | 5583 | orchestration shell only |
+| `services/schema_introspect.py` | 4800 | 4900 | 4858 | per-engine introspectors |
+| `src/transfer/stream.py` | 3350 | 3900 | 3863 | reader/writer loop split |
+| `src/transfer/adapters.py` | 2450 | 2520 | 2500 | per-family adapters |
+| `services/preflight_service.py` | 2500 | 3040 | 3004 | `decision_kernel.validation` |
+
 ## ADR — extract 2026-08-08 (wave4)
 
 | Module | Change | Why |
@@ -109,3 +131,29 @@ endpoint resolution plus a lazy `services.foreign_key_orchestration` import.
 
 Both source modules stayed under budget afterwards without the ceiling being
 raised.
+
+## Extraction 2026-10-10
+
+| Module | What moved where | Lines before → after |
+| --- | --- | --- |
+| `services/type_system.py` | Coercion policy → `services/type_coercion.py` | 8484 → 7523 |
+| `services/reconciliation.py` | Vector verifiers → `services/reconciliation_vector_verify.py` | 5201 → 4916 |
+| `connectors/generic_sql.py` | SQLAlchemy/logical-type mappings → `connectors/generic_sql_sa_types.py` | 7015 → 6105 |
+| `connectors/writer_common.py` | Quarantine fit → `connectors/writer_quarantine_fit.py` | 5652 → 5439 |
+| `src/transfer/engine.py` | Preflight, destination, and automap helpers → `engine_preflight.py`, `engine_destination.py`, `engine_automap.py` | 6299 → 5423 |
+| `services/schema_introspect.py` | SQL Server/Oracle introspection → `services/schema_introspect_enterprise.py` | 5290 → 4504 |
+| `src/transfer/stream.py` | Write loop diagnostics → `src/transfer/stream_write.py` | 4337 → 3701 |
+| `src/transfer/adapters.py` | File destination writer → `src/transfer/adapters_file_write.py` | 2551 → 2252 |
+| `services/preflight_service.py` | Context and population gates → `services/preflight_context.py`, `services/preflight_population.py` | 3593 → 2961 |
+
+### Debt: module-object call prefixes
+
+Some moved helpers call back into the original module through a module-object prefix (`_ts.`, `_engine.`, `_si.`, `_x = sys.modules[__name__]`) and the originals keep lazy `__getattr__` / `# noqa: F401` re-exports. This is temporary. It exists only so existing `monkeypatch.setattr(<original module>, ...)` test seams still intercept the moved code. To remove it, migrate those tests to patch the owning module (`type_coercion`, `engine_destination`, `schema_introspect_enterprise`, ...), then drop the prefixes and the re-exports. New code must import from the owning module.
+
+## Extraction 2026-10-13
+
+| Module | What moved where | Lines |
+| --- | --- | --- |
+| `connectors/writer_common.py` | SQL Server `IDENTITY_INSERT` → `connectors/identity_insert.py` | 5524 → under 5460 (`max_lines` lowered 5520 → 5460) |
+
+`writer_common` re-exports `IdentityInsertSession`, `begin_identity_insert`, and `sqlserver_identity_columns`. Tests patch `connectors.identity_insert`.

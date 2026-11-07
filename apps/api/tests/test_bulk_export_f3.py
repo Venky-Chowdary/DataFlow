@@ -41,7 +41,7 @@ def test_bulk_export_default_off(monkeypatch):
 
 
 def test_postgresql_copy_batches_roundtrip():
-    psycopg2 = pytest.importorskip("psycopg2")
+    pytest.importorskip("psycopg2")
     import os
 
     host = os.environ.get("PGHOST") or os.environ.get("DATAFLOW_PG_HOST")

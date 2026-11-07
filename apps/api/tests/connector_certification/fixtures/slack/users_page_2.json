@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "members": [
+    {
+      "id": "U0PAGE2",
+      "name": "fixture.user.p2",
+      "real_name": "Fixture User PageTwo",
+      "is_bot": false,
+      "deleted": false,
+      "updated": 1712349999.001
+    }
+  ],
+  "response_metadata": {
+    "next_cursor": ""
+  }
+}

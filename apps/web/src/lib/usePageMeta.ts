@@ -99,8 +99,6 @@ const JSON_LD_ID = "datawrap-jsonld";
 
 function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, description: string) {
   const existing = document.getElementById(JSON_LD_ID);
-  // Remove legacy id from pre-rebrand sessions.
-  document.getElementById("dataflow-jsonld")?.remove();
   if (meta.robots?.includes("noindex")) {
     existing?.remove();
     return;
@@ -126,7 +124,7 @@ function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, descriptio
         name: "Datawrap",
         alternateName: ["Datawrap Pilot", "Datawrap Transfer Studio"],
         description:
-          "Integrity-first data transfer platform — migrate databases, sync files, and move data with AI semantic mapping, CDC, quarantine, and 8 preflight gates.",
+          "Integrity-first data transfer platform — semantic mapping, 9 preflight gates, native CDC, quarantine with replay, and every load verified value by value.",
         inLanguage: "en-US",
         publisher: { "@id": `${siteUrl}/#organization` },
       },
@@ -157,7 +155,7 @@ function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, descriptio
           "Database migration",
           "File to database transfer",
           "Semantic column mapping",
-          "8 preflight validation gates",
+          "9 preflight validation gates",
           "Scheduled pipelines",
           "MCP server integration",
           "Datawrap Pilot natural-language ops",

@@ -306,6 +306,7 @@ def test_real_world_scenario_transfer(scenario: str, dest_driver: str, tmp_path:
         skip_preflight=True,
         validation_mode="strict",
         mappings=mappings,
+        number_locale="EU" if scenario == "banking" else "",
     )
 
     engine = UniversalTransferEngine()
@@ -316,6 +317,25 @@ def test_real_world_scenario_transfer(scenario: str, dest_driver: str, tmp_path:
         f"{scenario} → {dest_driver}: expected {len(records)}, got {result.records_transferred}"
     )
     assert result.explanation, f"{scenario} → {dest_driver}: missing pipeline explanation"
+
+    if scenario == "banking":
+        import csv
+        from decimal import Decimal
+
+        if destination.kind == "database":
+            from src.transfer.adapters import read_source_database
+
+            stored, _headers, _schema = read_source_database(destination, limit=10)
+        else:
+            filename = Path(str(result.destination_summary["path"]))
+            with filename.open(newline="", encoding="utf-8") as exported:
+                stored = list(csv.DictReader(exported))
+        stored_fee = next(
+            row["fee"] for row in stored if row.get("transaction_id") == "TXN-0002"
+        )
+        assert Decimal(str(stored_fee)) == Decimal("1.99"), (
+            f"{dest_driver}: stored fee was {stored_fee!r}"
+        )
 
     if destination.kind == "database":
         assert result.reconciliation.get("passed") is True, (

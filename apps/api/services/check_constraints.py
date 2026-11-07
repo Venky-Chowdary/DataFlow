@@ -107,6 +107,9 @@ def probe_check_constraints(
 
         return reader(as_driver_cursor(cursor), schema, table)
     except Exception as exc:  # noqa: BLE001 — a refused catalog is evidence
+        from services.catalog_statement_cap import note_budget_exceeded
+
+        note_budget_exceeded(f"The CHECK-constraint catalog probe of {table}", exc)
         return CheckConstraints(
             dialect=d,
             status="unavailable",

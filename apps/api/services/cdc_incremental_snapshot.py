@@ -18,7 +18,17 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterator
 
 _LOCK = threading.RLock()
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+
+
+def _default_data_dir() -> str:
+    # Bind through platform_config so test isolation and volume config are
+    # honored; tests rebind _DATA_DIR/_PATH directly when they need their own.
+    from services.platform_config import data_dir
+
+    return str(data_dir())
+
+
+_DATA_DIR = _default_data_dir()
 _PATH = os.path.join(_DATA_DIR, "cdc_incremental_snapshots.json")
 _MONGO_COLL = "cdc_incremental_snapshots"
 
@@ -118,6 +128,13 @@ class SnapshotSignal:
     # older than the read cannot overwrite them.
     lsn_low: str = ""
     lsn_high: str = ""
+    # Structured filter (services/cdc_snapshot_filter.py) bounding the chunk
+    # reads; None = whole table. Never raw SQL.
+    row_filter: dict[str, Any] | None = None
+    # Owning workspace ("" = requested before signals were scoped: legacy,
+    # platform-admin only while isolation is enforced). The standalone signal
+    # routes read and cancel by id, so they gate on this (D222).
+    workspace_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -140,6 +157,8 @@ class SnapshotSignal:
             gtid_high=str(d.get("gtid_high") or ""),
             lsn_low=str(d.get("lsn_low") or ""),
             lsn_high=str(d.get("lsn_high") or ""),
+            row_filter=d.get("row_filter") or None,
+            workspace_id=str(d.get("workspace_id") or "").strip(),
         )
 
 
@@ -248,22 +267,79 @@ def _signal_store_lock() -> Iterator[None]:
             logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
+def enqueue_gap_recovery_snapshots(
+    source_key: str,
+    tables: list[tuple[str, str | list[str]]],
+    *,
+    chunk_size: int = 1000,
+) -> list[SnapshotSignal]:
+    """Enqueue DDD-3 incremental snapshots after a retention gap.
+
+    Skips a table that already has a pending/running signal so a retry
+    does not double-scan. Empty PK is refused. Does not start a blocking
+    snapshot — the caller must have selected ``incremental_snapshot``.
+    """
+    key = str(source_key or "").strip()
+    if not key:
+        raise ValueError(
+            "CDC incremental gap recovery requires source_key so poll can "
+            "interleave DDD-3 chunks"
+        )
+    existing = {
+        str(getattr(sig, "table", "") or "")
+        for sig in list_signals(key)
+        if str(getattr(sig, "status", "") or "") in {"pending", "running", "in_progress"}
+    }
+    out: list[SnapshotSignal] = []
+    for table, primary_key in tables:
+        name = str(table or "").strip()
+        if not name:
+            continue
+        if name in existing:
+            continue
+        out.append(
+            request_incremental_snapshot(
+                key, name, primary_key=primary_key, chunk_size=chunk_size
+            )
+        )
+    return out
+
+
 def request_incremental_snapshot(
     source_key: str,
     table: str,
     *,
     primary_key: str | list[str] | None = None,
     chunk_size: int = 1000,
+    row_filter: Any = None,
+    workspace_id: str = "",
 ) -> SnapshotSignal:
-    """Enqueue an incremental snapshot for ``table`` on ``source_key``."""
+    """Enqueue an incremental snapshot for ``table`` on ``source_key``.
+
+    ``row_filter`` limits the backfill to matching rows (validated here so a bad
+    filter is a 400 at request time, not a failed signal mid-stream).
+    """
+    from services.cdc_snapshot_filter import describe_snapshot_filter, normalize_snapshot_filter
+
+    spec = normalize_snapshot_filter(row_filter)
     sig = SnapshotSignal(
         id=f"snap_{uuid.uuid4().hex[:12]}",
         source_key=source_key,
         table=table,
         primary_key=_normalize_signal_primary_key(primary_key),
         chunk_size=max(1, min(int(chunk_size), 50_000)),
+        row_filter=spec,
+        workspace_id=str(workspace_id or "").strip(),
     )
-    return _upsert_signal(sig)
+    saved = _upsert_signal(sig)
+    logging.getLogger(__name__).info(
+        "CDC incremental snapshot requested id=%s source=%s table=%s filter=%s",
+        saved.id,
+        source_key,
+        table,
+        describe_snapshot_filter(spec) or "<whole table>",
+    )
+    return saved
 
 
 def list_signals(source_key: str = "", *, status: str = "") -> list[SnapshotSignal]:

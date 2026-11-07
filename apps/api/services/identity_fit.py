@@ -91,6 +91,11 @@ def _scalar_carrier_logicals() -> set[str]:
 def identity_polarity_would_collapse(source_type: str, target_type: str) -> bool:
     """True when a source that *forbids* client writes maps to one that allows them.
 
+    Informational only since D93: value fidelity (``is_lossy_coercion`` /
+    ``is_precision_collapse_coercion``) no longer reads it, because every
+    value lands and identity carry reports the relaxed generator. Kept for
+    the structure-fidelity report and its tests.
+
     Create-new that stamps plain BIGINT while the source was GENERATED ALWAYS
     invents a writable numeric column — Accept risk (or stamp identity DDL).
 

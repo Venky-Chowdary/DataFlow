@@ -28,9 +28,9 @@ def coerce_embedding(
             return None, "missing embedding — refuse zero-vector fabrication"
         if text.startswith("[") and text.endswith("]"):
             try:
-                import json
+                from services.value_serializer import json_loads_exact
 
-                value = json.loads(text)
+                value = json_loads_exact(text)
             except Exception:
                 return None, "embedding string is not a JSON array"
         else:
@@ -39,12 +39,16 @@ def coerce_embedding(
         return None, f"embedding must be a list, got {type(value).__name__}"
     if len(value) == 0:
         return None, "missing embedding — refuse zero-vector fabrication"
+    from services.transform_engine import vector_component_carrier
+
     out: list[float] = []
     for i, item in enumerate(value):
-        try:
-            out.append(float(item))
-        except (TypeError, ValueError):
-            return None, f"embedding[{i}] is not numeric"
+        bound = vector_component_carrier(item)
+        if bound is None:
+            return None, (
+                f"embedding[{i}] cannot bind {item!r} — refuse invent"
+            )
+        out.append(bound)
     if expected_dimension is not None and len(out) != int(expected_dimension):
         return None, (
             f"embedding dimension mismatch: got {len(out)}, "
@@ -116,6 +120,49 @@ def coerce_chunk_index(value: Any, *, default: int = 0) -> int:
     raise ValueError(
         f"chunk_index refused {type(value).__name__} {value!r} — refuse invent"
     )
+
+
+def vector_cell_token(value: Any) -> str:
+    """Dest-canonical present token for vector content / source_id.
+
+    ``or ""`` dropped ``0`` / ``False`` into empty hash material. ``str(True)``
+    invented ``True`` so dest ``true`` missed retry identity. Reader-null
+    sentinels hashed as the wire spelling. Absence collapses to ``""`` —
+    callers treat all-empty source+content as missing identity.
+    """
+    from services.value_serializer import present_cell_text
+
+    return present_cell_text(value) or ""
+
+
+def vector_reject_row_label(row: dict[str, Any], *keys: str) -> str:
+    """Quarantine row label on the dest id wire.
+
+    ``cell_to_string(row.get("id") or "")`` dropped integer ``0`` so the
+    operator saw an empty row. Reader-null stays empty. ``True`` and dest
+    ``true`` share one label. Optional extra keys (``source_id``) are the
+    pgvector fallback when id is absent.
+    """
+    from services.value_serializer import present_cell_text
+
+    for key in keys or ("id",):
+        token = present_cell_text(row.get(key))
+        if token:
+            return token
+    return ""
+
+
+def vector_fallback_material(
+    source_id: Any,
+    chunk_index: int,
+    content: Any,
+) -> str | None:
+    """Digest material for missing-id fallback, or None when both cells are absent."""
+    source = vector_cell_token(source_id)
+    text = vector_cell_token(content)
+    if not source and not text:
+        return None
+    return f"{source}\0{chunk_index}\0{text}"
 
 
 def resolve_embedding_dimension(

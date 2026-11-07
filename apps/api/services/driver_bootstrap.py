@@ -7,7 +7,6 @@ source of truth). Pip package names live only here as the install map.
 from __future__ import annotations
 
 import importlib
-import os
 from services.brand_env import getenv_brand
 import subprocess  # nosec: B404 — only used for auto-installing driver packages from a controlled allowlist
 import sys

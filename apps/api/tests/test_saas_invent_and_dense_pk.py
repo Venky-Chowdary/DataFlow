@@ -1,4 +1,4 @@
-﻿"""SaaS invent refuse + dense MERGE null-PK gate."""
+"""SaaS invent refuse + dense MERGE null-PK gate."""
 
 from __future__ import annotations
 
@@ -18,8 +18,12 @@ def test_assert_dense_upsert_keys_present_refuses_null():
     assert_dense_upsert_keys_present([("1", "a")], ["id"], ["id", "note"])
     with pytest.raises(ValueError, match="null/empty conflict"):
         assert_dense_upsert_keys_present([(None, "a")], ["id"], ["id", "note"])
+    # '' is a value (D53); only a destination that stores '' as NULL refuses it.
+    assert_dense_upsert_keys_present([{"id": "", "note": "x"}], ["id"])
     with pytest.raises(ValueError, match="null/empty conflict"):
-        assert_dense_upsert_keys_present([{"id": "", "note": "x"}], ["id"])
+        assert_dense_upsert_keys_present(
+            [{"id": "", "note": "x"}], ["id"], empty_is_null=True
+        )
 
 
 def test_airtable_update_never_falls_through_to_post():

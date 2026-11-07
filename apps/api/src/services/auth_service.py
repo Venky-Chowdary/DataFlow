@@ -6,13 +6,15 @@ import hashlib
 import hmac
 import json
 import logging
-import re
 
 from services.brand_env import getenv_brand
 import time
 from typing import Any, Optional
 
+from services.password_hash import hash_password as _hash_password
+from services.password_hash import verify_password as _verify_password
 from services.platform_config import is_production
+from services.user_store import credentials_for_auth, record_login
 
 logger = logging.getLogger("dataflow.auth")
 
@@ -23,9 +25,6 @@ _DEV_USER = {
     "name": "Test User",
     "role": "Workspace tester",
 }
-
-# Legacy unsalted SHA-256 hashes are exactly 64 hex characters.
-_LEGACY_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # Cache admin bcrypt hash so we do not re-salt on every login request.
 _ADMIN_USER_CACHE: dict[str, str] | None = None
@@ -173,7 +172,11 @@ def _load_users() -> list[dict[str, Any]]:
     Priority:
     1. DATAFLOW_ADMIN_EMAIL + DATAFLOW_ADMIN_PASSWORD (always included when set)
     2. DATAFLOW_AUTH_USERS JSON list (merged; admin email wins on conflict)
-    3. Dev user — **only** when DATAFLOW_ALLOW_DEV_USER=1 and not production (audit §6.9)
+    3. Accounts an admin created in the user store (merged; env entries win)
+    4. Dev user — **only** when DATAFLOW_ALLOW_DEV_USER=1 and not production (audit §6.9)
+
+    The store comes last so an operator locked out of their own deployment can
+    always recover through the environment-provisioned admin.
     """
     users: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -186,6 +189,13 @@ def _load_users() -> list[dict[str, Any]]:
     for user in _users_from_auth_users_env():
         key = user["email"].strip().lower()
         if key in seen:
+            continue
+        users.append(user)
+        seen.add(key)
+
+    for user in credentials_for_auth():
+        key = user["email"].strip().lower()
+        if key in seen or not user.get("password_hash"):
             continue
         users.append(user)
         seen.add(key)
@@ -245,10 +255,8 @@ def auth_bootstrap_status(*, include_sensitive: bool = False) -> dict[str, Any]:
 
 
 def hash_password(password: str) -> str:
-    """Hash a password with bcrypt (adaptive, salted, slow)."""
-    import bcrypt
-
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+    """Hash a password with bcrypt — see ``services.password_hash``."""
+    return _hash_password(password)
 
 
 def _legacy_verify(password: str, password_hash: str) -> bool:
@@ -258,23 +266,29 @@ def _legacy_verify(password: str, password_hash: str) -> bool:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """Verify a password against a bcrypt hash.
+    """Verify a password against a stored hash — see ``services.password_hash``."""
+    return _verify_password(password, password_hash)
 
-    Legacy unsalted SHA-256 is still accepted in development for backwards
-    compatibility, but it is rejected in production because it is not suitable
-    for regulated deployments.
+
+def _maybe_rehash(email: str, password: str, password_hash: str) -> None:
+    """Transparent bcrypt→argon2id upgrade on a successful login (P0-4).
+
+    Only runs while the signup flag is on; env-provisioned users aren't in
+    the store so ``update_password_hash`` is a silent no-op for them.
     """
-    if not password_hash:
-        return False
-    if _LEGACY_SHA256_RE.match(password_hash):
-        if is_production():
-            return False
-        return _legacy_verify(password, password_hash)
     try:
-        import bcrypt
-        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
-    except ValueError:
-        return False
+        from services.password_hash import needs_rehash
+        from services.user_store import update_password_hash
+
+        if needs_rehash(password_hash):
+            from services.password_hash import hash_password_argon2
+
+            update_password_hash(
+                email=email, password_hash=hash_password_argon2(password),
+                password_algo="argon2id",
+            )
+    except Exception:  # noqa: BLE001 — a failed upgrade must never break login
+        logger.warning("password rehash failed for a stored account")
 
 
 def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
@@ -287,12 +301,16 @@ def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
         if user.get("email", "").strip().lower() != normalized:
             continue
         if verify_password(password, user.get("password_hash", "")):
+            # Stored accounts carry a last-seen stamp so an admin can tell a
+            # dormant login from a live one; env-provisioned users are a no-op.
+            record_login(user["email"])
+            _maybe_rehash(user["email"], password, user.get("password_hash", ""))
             return {
                 "email": user["email"],
                 "name": user.get("name", user["email"]),
                 "role": user.get("role", "member"),
             }
-        logger.info("Login failed for %s — password mismatch", normalized)
+        logger.info("Login failed — password mismatch")
         return None
     # Never dump the configured user directory — aids account discovery via logs.
     logger.info("Login failed — unknown email (users_configured=%s)", len(users))
@@ -309,13 +327,17 @@ def _legacy_tokens_allowed() -> bool:
     return not is_production()
 
 
-def create_token(email: str) -> tuple[str, int]:
-    """Mint Bearer token with server-side session (``jti``) — Phase D3."""
+def create_token(email: str, *, amr: list[str] | None = None) -> tuple[str, int]:
+    """Mint Bearer token with server-side session (``jti``) — Phase D3.
+
+    ``amr``: how the person authenticated (``pwd``/``otp``/``recovery``/``sso``),
+    read by the workspace MFA policy. Omitted means password-only.
+    """
     from services.auth_sessions import create_session
 
     expires = int(time.time()) + _read_token_ttl_sec()
     email_n = email.strip().lower()
-    jti = create_session(email_n, expires_at=expires)
+    jti = create_session(email_n, expires_at=expires, amr=amr)
     payload = f"{email_n}:{expires}:{jti}"
     sig = hmac.new(_token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}:{sig}", expires

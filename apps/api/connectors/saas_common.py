@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, NoReturn
+from typing import Any, Callable, NoReturn
 
 import requests
 from services.error_handling import RetryBudget, with_retry
-from services.value_serializer import cell_to_string
+from services.connector_telemetry import log_retry
+from services.value_serializer import cell_to_string, sanitize_json_value
 
 from connectors.base import ReadBatch
 
@@ -216,6 +217,39 @@ def base_url(host: str, default: str) -> str:
     return host.rstrip("/")
 
 
+def absolute_http_url(host: str, *, port: int | None = 0, ssl: bool | None = None) -> str:
+    """An absolute HTTP(S) URL for a connector host field, URL-form or bare.
+
+    A bare SaaS host (``api.airtable.com``) with the HTTPS port is the
+    ``https://`` origin an API manifest expects; the message "only absolute
+    HTTP(S) URLs are allowed" was the manifest parser refusing the form's own
+    host (D277). A URL-form host is kept as typed; ``ssl=False`` with a
+    non-443 port names a plain-HTTP endpoint (a local stub).
+    """
+    text = (host or "").strip().rstrip("/")
+    if not text:
+        return text
+    if "@" in text.split("://", 1)[-1].split("/", 1)[0]:
+        # A key never travels in the host field, where it would be logged,
+        # shown in briefs and sent in plaintext on a downgrade.
+        raise ValueError("host must not carry credentials (user:password@host)")
+    if "://" in text:
+        return text
+    try:
+        port_num = int(port or 0)
+    except (TypeError, ValueError):
+        port_num = 0
+    # A bare host is an https origin. The stored ssl flag is False by default
+    # on every MCP-created connector, so it cannot mean "send the bearer key
+    # in plaintext": only an explicit non-443 port with ssl=False names a
+    # plain-HTTP endpoint (a local stub). The operator types http:// otherwise.
+    plain = ssl is False and port_num not in (0, 443)
+    scheme = "http" if plain else "https"
+    if port_num and port_num != (80 if plain else 443) and ":" not in text:
+        text = f"{text}:{port_num}"
+    return f"{scheme}://{text}"
+
+
 def token(  # nosec B107
     api_key: str = "",
     connection_string: str = "",
@@ -229,7 +263,21 @@ def token(  # nosec B107
             return v
     if username and password:
         return f"{username.strip()}:{password.strip()}"
+    # Private-app / bearer tokens are often pasted in Password only.
+    if password:
+        return password.strip()
     return ""
+
+
+def saas_record_id(value: Any) -> str | None:
+    """Dest-canonical present record id, or None when absent.
+
+    ``if val`` dropped integer ``0``. Reader-null sentinels became URL ids.
+    ``str(True)`` invented ``True`` so dest ``true`` missed upsert identity.
+    """
+    from services.value_serializer import present_cell_text
+
+    return present_cell_text(value)
 
 
 def request(
@@ -242,15 +290,32 @@ def request(
     data: dict[str, Any] | None = None,
     timeout: float = 30.0,
     retry_budget: RetryBudget | None = None,
+    sleep: Callable[[float], None] | None = None,
     auth_header: str = "Authorization",
     auth_scheme: str = "Bearer",
 ) -> requests.Response:
-    """Make an HTTP request with retriable transient handling (429 / 5xx / timeouts)."""
+    """Make an HTTP request with retriable transient handling (429 / 5xx / timeouts).
+
+    The body is sanitized before it reaches ``requests``, whose encoder knows
+    only JSON-native types: a mapped ``DECIMAL`` cell binds as ``Decimal`` and
+    a temporal cell as ``datetime``, so every reverse-ETL batch holding one
+    died with ``Object of type Decimal is not JSON serializable`` — the whole
+    chunk, not the cell. Sanitizing keeps a decimal exact (``"500.25"``, never
+    a binary float) and refuses non-finite and absent values instead of wiring
+    ``NaN`` or the ``__DF_MISSING__`` sentinel into a customer's CRM record.
+    """
     h = dict(headers or {})
     if token and auth_header:
         h.setdefault(auth_header, f"{auth_scheme} {token}".strip())
     h.setdefault("Accept", "application/json")
     h.setdefault("User-Agent", "Datawrap/1.0")
+
+    body = sanitize_json_value(data) if data is not None else None
+
+    from services.egress_guard import assert_connector_dial_allowed, redirect_guard_hook
+
+    assert_connector_dial_allowed(url, point="http_client")
+    hooks = {"response": [redirect_guard_hook(url)]}
 
     def _call() -> requests.Response:
         resp = requests.request(
@@ -258,13 +323,27 @@ def request(
             url=url,
             headers=h,
             params=params,
-            json=data,
+            json=body,
             timeout=timeout,
+            hooks=hooks,
         )
         resp.raise_for_status()
         return resp
 
-    return with_retry(_call, budget=retry_budget or RetryBudget())
+    retry_options: dict[str, Any] = {}
+    if sleep is not None:
+        retry_options["sleep"] = sleep
+    budget = retry_budget or RetryBudget()
+    return with_retry(
+        _call,
+        budget=budget,
+        on_transient=log_retry(
+            "http_request",
+            driver_family="http",
+            budget=budget,
+        ),
+        **retry_options,
+    )
 
 
 def is_auth_error(exc: Exception) -> bool:

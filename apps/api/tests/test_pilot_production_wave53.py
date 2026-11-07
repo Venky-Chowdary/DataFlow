@@ -76,7 +76,6 @@ def test_run_schedule_now_stages_ack_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_SCHEDULE_STORE", str(tmp_path / "s.json"))
 
     from services import connector_store, schedule_store
-    from services.schedule_store import PipelineSchedule
     import src.ai.copilot.ack_ledger as ack_mod
 
     connector_store._backend_choice = None
@@ -105,6 +104,9 @@ def test_run_schedule_now_stages_ack_ledger(tmp_path, monkeypatch):
     peek = PilotAckLedger(path=tmp_path / "acks.json").peek(ack_id)
     assert peek is not None
     assert peek.get("kind") == "run_schedule"
+    preview = result.output.get("preview") or {}
+    assert "contract_id" not in preview
+    assert "enforce_contract" not in preview
 
 
 def test_redact_payload_masks_password():

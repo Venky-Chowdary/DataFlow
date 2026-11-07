@@ -1,9 +1,17 @@
-"""Generate connector catalog entries for Datawrap (certified + roadmap tiles)."""
+"""Generate connector catalog entries for Datawrap (certified + roadmap tiles).
+
+``data/connector_catalog.json`` is curated on top of this list (statuses and
+descriptions earned by certification, hosted twins, file tiles). Running the
+script merges: curated entries win, a tile this list adds is inserted next to
+its neighbour, and a duplicate is dropped — never renamed. The generator used
+to give a colliding id a random suffix (``snowflake_b1fcb2``), which put 81
+duplicate tiles in the catalog (QA round 11).
+"""
 
 from __future__ import annotations
 
 import json
-import uuid
+import re
 from pathlib import Path
 
 try:
@@ -31,7 +39,8 @@ BETA = [
 # Enterprise databases
 DATABASES = [
     "SQL Server", "Oracle", "DB2", "Sybase ASE", "Informix", "Teradata", "Netezza",
-    "Greenplum", "Vertica", "SingleStore", "CockroachDB", "MariaDB", "Amazon Aurora",
+    "Greenplum", "Vertica", "SingleStore", "CockroachDB", "MariaDB",
+    ("amazon_aurora", "Amazon Aurora MySQL"), "Amazon Aurora PostgreSQL",
     "Amazon RDS PostgreSQL", "Amazon RDS MySQL", "Amazon RDS SQL Server", "Amazon RDS Oracle",
     "Azure SQL Database", "Azure Database for PostgreSQL", "Azure Database for MySQL",
     "Google Cloud SQL PostgreSQL", "Google Cloud SQL MySQL", "Google Cloud SQL SQL Server",
@@ -107,9 +116,11 @@ def _slug(name: str) -> str:
     return name.lower().replace(" ", "_").replace("/", "_").replace(".", "").replace("-", "_")
 
 
-def _entry(name: str, category: str, status: str, description: str) -> dict:
+def _entry(name: str | tuple[str, str], category: str, status: str, description: str) -> dict:
+    # A (id, name) pair keeps a published id when its label changes.
+    cid, name = name if isinstance(name, tuple) else (_slug(name), name)
     return {
-        "id": _slug(name),
+        "id": cid,
         "name": name,
         "category": category,
         "status": status,
@@ -123,7 +134,7 @@ def generate() -> list[dict]:
 
     def add(entry: dict) -> None:
         if entry["id"] in seen:
-            entry["id"] = f"{entry['id']}_{uuid.uuid4().hex[:6]}"
+            return  # one tile per id: a repeated name is the same connector
         seen.add(entry["id"])
         items.append(entry)
 
@@ -134,7 +145,8 @@ def generate() -> list[dict]:
         add(_entry(name, cat, "beta", desc))
 
     for name in DATABASES:
-        add(_entry(name, "database", "planned", f"{name} source and destination connector"))
+        label = name[1] if isinstance(name, tuple) else name
+        add(_entry(name, "database", "planned", f"{label} source and destination connector"))
 
     for name in WAREHOUSES:
         add(_entry(name, "warehouse", "planned", f"{name} analytics warehouse connector"))
@@ -164,20 +176,65 @@ def generate() -> list[dict]:
     regions = ["US", "EU", "APAC", "UK", "CA", "AU", "JP", "DE", "FR", "IN"]
     industries = ["Retail", "Manufacturing", "Energy", "Telecom", "Insurance", "Banking", "Government"]
     base_saas = SAAS[:40]
-    idx = 0
-    while len(items) < 620:
+    # The (base, region, industry) cycle repeats after its least common
+    # multiple; past that every name is a duplicate, so stop there.
+    for idx in range(len(base_saas) * len(industries)):
+        if len(items) >= 620:
+            break
         region = regions[idx % len(regions)]
         industry = industries[idx % len(industries)]
         base = base_saas[idx % len(base_saas)]
         name = f"{base} ({region} {industry})"
         add(_entry(name, "saas", "planned", f"Regional {industry.lower()} deployment for {base}"))
-        idx += 1
 
     return items
 
 
+# ``<id>_<6 hex>``: the random suffix the old generator gave a colliding id.
+_COLLISION_ID = re.compile(r"^(?P<base>.+)_[0-9a-f]{6}$")
+
+
+def merge_catalog(existing: list[dict], generated: list[dict]) -> list[dict]:
+    """Curated ``existing`` entries win; collision copies go; new tiles are added.
+
+    A collision copy is a suffixed id whose name an earlier tile already has.
+    A generated tile is added when neither its id nor its name is in the
+    catalog, right after the nearest generated tile before it. A generated
+    ``(id, name)`` pair relabels that id.
+    """
+    labels = {g["id"]: g["name"] for g in generated}
+    out: list[dict] = []
+    ids: set[str] = set()
+    names: set[str] = set()
+    for row in existing:
+        name = str(row.get("name") or "").casefold()
+        if row["id"] in ids or (_COLLISION_ID.match(row["id"]) and name in names):
+            continue
+        row = dict(row)
+        if row["id"] in labels and labels[row["id"]] != row.get("name"):
+            relabel = next(g for g in generated if g["id"] == row["id"])
+            if _slug(relabel["name"]) != row["id"]:  # explicit (id, name) pair
+                row["name"] = relabel["name"]
+                row["description"] = relabel["description"]
+        out.append(row)
+        ids.add(row["id"])
+        names.add(str(row.get("name") or "").casefold())
+    previous = ""
+    for entry in generated:
+        if entry["id"] not in ids and entry["name"].casefold() not in names:
+            at = next((i + 1 for i, r in enumerate(out) if r["id"] == previous), len(out))
+            out.insert(at, dict(entry))
+            ids.add(entry["id"])
+            names.add(entry["name"].casefold())
+        previous = entry["id"] if entry["id"] in ids else previous
+    return out
+
+
 def main() -> None:
     catalog = generate()
+    if OUTPUT.is_file():
+        existing = json.loads(OUTPUT.read_text(encoding="utf-8")).get("connectors") or []
+        catalog = merge_catalog(existing, catalog)
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(json.dumps({"version": 1, "total": len(catalog), "connectors": catalog}, indent=2, default=json_default), encoding="utf-8")
     print(f"Generated {len(catalog)} connectors -> {OUTPUT}")

@@ -38,7 +38,8 @@ JOB_CHECKPOINT_REJECTED_PREVIEW = int(
     getenv_brand("JOB_CHECKPOINT_REJECTED_PREVIEW", "25") or 25
 )
 JOB_MESSAGE_CHARS = int(getenv_brand("JOB_MESSAGE_CHARS", "2000") or 2000)
-JOB_EVENT_LOG_MAX = int(getenv_brand("JOB_EVENT_LOG_MAX", "100") or 100)
+# Full Theater history (start → end). BSON budget still trims only as last resort.
+JOB_EVENT_LOG_MAX = int(getenv_brand("JOB_EVENT_LOG_MAX", "5000") or 5000)
 
 # Nested blobs that historically blew the update command.
 _HEAVY_TOP_KEYS = frozenset(
@@ -84,6 +85,10 @@ def slim_rejected_detail(detail: Any, *, cell_chars: int = JOB_REJECTED_CELL_CHA
         "row",
         "row_number",
         "index",
+        # The offending value is the finding: without it Inspect shows a reason
+        # for a cell it cannot name, and the export has an empty column.
+        "value",
+        "original_value",
         "reason",
         "message",
         "error",
@@ -271,7 +276,7 @@ def trim_job_update_payload(
         elif key == "checkpoint" and isinstance(out[key], dict):
             out[key] = _resume_tokens_only(out[key])
         elif key == "event_log":
-            out[key] = list(out.get("event_log") or [])[-20:]
+            out[key] = list(out.get("event_log") or [])[-min(JOB_EVENT_LOG_MAX, 500):]
         elif key == "phases":
             # Keep phase labels only — drop long messages.
             phases = out[key]
@@ -334,12 +339,26 @@ def _resume_tokens_only(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "rejected_details_total",
         "rejected_details_truncated",
         "quarantine_dlq_persisted_count",
+        # Resume accounting. Dropping these made a correct resumed load fail
+        # conservation, and a CDC resume re-snapshot the wrong table.
+        "coerced_null_rows",
+        "target_rows_before",
+        "rows_removed_on_read",
+        "rows_source_filtered",
+        "rows_cursor_bounded",
+        "cdc_stream",
+        "cdc_shared_reader",
     )
     out = {k: checkpoint[k] for k in keys if k in checkpoint}
-    # redis_scan_state can be large — keep only if small.
+    # redis_scan_state / qdrant offset can be large — keep only if small.
     rss = checkpoint.get("redis_scan_state")
     if rss is not None and estimate_bson_size(rss) <= 4096:
         out["redis_scan_state"] = rss
+    qdrant = checkpoint.get("qdrant_offset")
+    if qdrant is not None and estimate_bson_size(qdrant) <= 4096:
+        out["qdrant_offset"] = qdrant
+    if checkpoint.get("last_error"):
+        out["last_error"] = str(checkpoint["last_error"])[:500]
     out["rejected_details"] = []
     out["rejected_details_truncated"] = True
     if "rejected_rows" not in out and checkpoint.get("rejected_details_total"):
@@ -450,6 +469,25 @@ def is_document_too_large_error(exc: BaseException) -> bool:
     return False
 
 
+# Fields a live job accumulates that are not the resume token. Mongo's 16 MiB
+# limit is the resulting document, so a slim $set still fails while these stay
+# stored. The emergency retry drops them; quarantine evidence remains in the DLQ.
+_FAT_FIELDS_TO_DROP = (
+    "sample_rows",
+    "signed_mappings",
+    "stamped_mappings",
+    "proof_bundle",
+    "transform_errors",
+    "warnings",
+    "ddl_log",
+    "ddl_executed",
+    "source_preview",
+    "preview_rows",
+    "mapped_rows",
+    "batch_rows",
+)
+
+
 def apply_job_update_with_budget(
     collection: Any,
     filt: dict[str, Any],
@@ -470,4 +508,8 @@ def apply_job_update_with_budget(
             exc_info=exc,
         )
         emergency = emergency_strip_job_update(trimmed)
-        return collection.update_one(filt, {"$set": emergency})
+        unset = {key: "" for key in _FAT_FIELDS_TO_DROP if key not in emergency}
+        update: dict[str, Any] = {"$set": emergency}
+        if unset:
+            update["$unset"] = unset
+        return collection.update_one(filt, update)

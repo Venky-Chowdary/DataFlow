@@ -1,0 +1,161 @@
+{
+  "name": "klaviyo",
+  "docs": "https://developers.klaviyo.com/en/reference/api-overview",
+  "base_url": "https://a.klaviyo.com/api",
+  "auth": {
+    "type": "api_key",
+    "location": "header",
+    "name": "Klaviyo-API-Key"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "lists",
+      "path": "lists",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_headers": {
+        "Accept": "application/vnd.api+json",
+        "revision": "2024-10-15"
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 100,
+        "cursor_param": "page[cursor]",
+        "cursor_path": "links.next"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "type": {"type": "string"},
+          "attributes": {
+            "type": "object",
+            "properties": {
+              "name": {"type": ["string", "null"]},
+              "created": {"type": ["string", "null"], "format": "date-time"},
+              "updated": {"type": ["string", "null"], "format": "date-time"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "profiles",
+      "path": "profiles",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_headers": {
+        "Accept": "application/vnd.api+json",
+        "revision": "2024-10-15"
+      },
+      "cursor": {
+        "field": "attributes.updated",
+        "request_param": "filter",
+        "format": "iso8601",
+        "lookback_s": 1,
+        "request_template": "greater-than(updated,{cursor:%Y-%m-%dT%H:%M:%SZ})"
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 100,
+        "cursor_param": "page[cursor]",
+        "cursor_path": "links.next"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "type": {"type": "string"},
+          "attributes": {
+            "type": "object",
+            "properties": {
+              "email": {"type": ["string", "null"]},
+              "first_name": {"type": ["string", "null"]},
+              "last_name": {"type": ["string", "null"]},
+              "created": {"type": ["string", "null"], "format": "date-time"},
+              "updated": {"type": ["string", "null"], "format": "date-time"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "events",
+      "path": "events",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_headers": {
+        "Accept": "application/vnd.api+json",
+        "revision": "2024-10-15"
+      },
+      "cursor": {
+        "field": "attributes.timestamp",
+        "request_param": "filter",
+        "format": "iso8601",
+        "lookback_s": 1,
+        "request_template": "greater-than(timestamp,{cursor:%Y-%m-%dT%H:%M:%SZ})"
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 100,
+        "cursor_param": "page[cursor]",
+        "cursor_path": "links.next"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "type": {"type": "string"},
+          "attributes": {
+            "type": "object",
+            "properties": {
+              "timestamp": {"type": ["string", "null"]},
+              "metric_id": {"type": ["string", "null"]},
+              "profile_id": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "campaigns",
+      "path": "campaigns",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_headers": {
+        "Accept": "application/vnd.api+json",
+        "revision": "2024-10-15"
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 100,
+        "cursor_param": "page[cursor]",
+        "cursor_path": "links.next"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "type": {"type": "string"},
+          "attributes": {
+            "type": "object",
+            "properties": {
+              "name": {"type": ["string", "null"]},
+              "status": {"type": ["string", "null"]},
+              "created_at": {"type": ["string", "null"], "format": "date-time"},
+              "updated_at": {"type": ["string", "null"], "format": "date-time"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

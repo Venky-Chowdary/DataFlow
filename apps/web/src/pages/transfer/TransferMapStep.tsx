@@ -7,11 +7,17 @@ import {
 } from "../../components/MappingProofDrawer";
 import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
+import { ProgressRing } from "../../components/ui/ProgressRing";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
+import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
+import type { RuleCompileReport } from "../../lib/businessRules";
+import { ruleCensus, ruleMixSummary } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
+import { destCatalogExists } from "../../lib/destSchemaIdentity";
+import { mapBlockerSummary } from "../../lib/mapBlockers";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -71,6 +77,16 @@ interface TransferMapStepProps {
   uniqueKeySuggestions?: UniqueKeySuggestion[];
   compositeKeySuggestions?: Array<{ columns: string[]; uniqueCount: number; sampleRows: number }>;
   onApplyPrimaryKey?: (column: string) => void;
+  /** Dest-exists extras the operator must remap or omit — never silent drop. */
+  extraSourceColumns?: string[];
+  destShapeHeadline?: string;
+  /** Re-probe the destination catalog and re-map — the only exit from an unread dest schema. */
+  onReloadDestSchema?: () => void | Promise<void>;
+  /** Compiled workbook — shown as evidence on each mapped column. */
+  ruleReport?: RuleCompileReport | null;
+  onAcceptRuleDirect?: (index: number) => void;
+  /** Review already owns the action bar. */
+  hideFooter?: boolean;
 }
 
 
@@ -122,12 +138,21 @@ export function TransferMapStep({
   uniqueKeySuggestions = [],
   compositeKeySuggestions = [],
   onApplyPrimaryKey,
+  extraSourceColumns = [],
+  destShapeHeadline = "",
+  onReloadDestSchema,
+  ruleReport = null,
+  onAcceptRuleDirect,
+  hideFooter = false,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("review");
   const [userPickedFilter, setUserPickedFilter] = useState(false);
   const [focusSource, setFocusSource] = useState<string | null>(null);
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
+  // Collapsed by default: the headline plus one primary control is the whole
+  // decision. Ten expanded reasons buried the mapping grid below the fold.
+  const [blockerDetailOpen, setBlockerDetailOpen] = useState(false);
   const [proofOpenLocal, setProofOpenLocal] = useState(false);
   const proofOpen = proofOpenProp ?? proofOpenLocal;
   const setProofOpen = onProofOpenChange ?? setProofOpenLocal;
@@ -166,7 +191,7 @@ export function TransferMapStep({
     onIdentityFixConsumed?.();
   }, [initialFocusSource]);
 
-  const destDisplayType = destKindMode === "database" ? destType : "file";
+  const destDisplayType = destType || (destKindMode === "database" ? "" : "file");
 
   const filterCounts = useMemo(
     () => countByFilter(columnMappings, confidenceThreshold),
@@ -180,12 +205,18 @@ export function TransferMapStep({
     [columnMappings, confidenceThreshold],
   );
 
+  // Same predicate as the Continue gate — the reason shown is the reason enforced.
+  const blockerSummary = useMemo(
+    () => mapBlockerSummary(columnMappings, confidenceThreshold),
+    [columnMappings, confidenceThreshold],
+  );
+
   /** Prefer API proof; refresh pair list from live edits so operators see current transforms. */
   const effectiveProof = useMemo(
     () => mergeMappingProof(mappingProof, columnMappings, {
       destColumns,
       destType: destDisplayType,
-      destTableExists: destKindMode === "database" ? destTableExists : false,
+      destTableExists: destCatalogExists(destKindMode, destTableExists),
     }),
     [mappingProof, columnMappings, destColumns, destDisplayType, destKindMode, destTableExists],
   );
@@ -196,15 +227,56 @@ export function TransferMapStep({
       ? `PK ${primaryKeyField}`
       : `${syncModeLabel || "sync"}`;
 
-  const mappingFooterLabel = mappingReviewCount > 0
-    ? `${mappingReviewCount} need review`
-    : `${approvedCount} ready`;
+  const mappingFooterLabel = health.falseFriendCount > 0
+    ? health.headline
+    : mappingReviewCount > 0
+      ? `${mappingReviewCount} need review`
+      : `${approvedCount} ready`;
+  const approvedPct = columnMappings.length
+    ? Math.round((approvedCount / columnMappings.length) * 100)
+    : 0;
+  const showPkSuggest = Boolean(
+    requiresPrimaryKey
+    && !primaryKeyField
+    && (uniqueKeySuggestions.length > 0 || compositeKeySuggestions.length > 0),
+  );
+
+  // Census stays on the closed summary so review/conflict counts are visible
+  // without pushing the mapping table below the fold.
+  const ruleBannerLine = useMemo(() => {
+    if (!ruleReport) return "";
+    const census = ruleCensus(ruleReport);
+    return `${ruleMixSummary(ruleReport)} · ${census.executable} executable · ${census.review} review · ${census.conflict} conflict`;
+  }, [ruleReport]);
+
+  const continueToValidate = (
+    <button
+      type="button"
+      className="df2-btn df2-btn-primary"
+      onClick={onContinue}
+      disabled={mappingReviewCount > 0}
+      title={
+        blockerSummary.blockers.length > 0
+          ? `${blockerSummary.headline}\n${blockerSummary.detail}`
+          : "Continue to Validate"
+      }
+    >
+      Continue to Validate →
+    </button>
+  );
 
   return (
     <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-map-step-panel">
+      {hideFooter && (
+        <div className="df2-wizard-back">
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onBack}>
+            Back to Connect
+          </button>
+        </div>
+      )}
       <div
         className="df2-card-head df2-map-step-head"
-        title={`${columnMappings.length} mappings · ${approvedCount} ready${mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}`}
+        title={`${columnMappings.length} mappings · ${approvedCount} ready${health.falseFriendCount > 0 ? ` · ${health.headline}` : mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}`}
       >
         <div className="df2-map-step-head-copy">
           <h3 className="df2-card-title">Map columns</h3>
@@ -243,50 +315,146 @@ export function TransferMapStep({
         </div>
       </div>
 
-      {streamNames.length > 1 && (
-        <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">
-          {streamNames.map((name) => (
-            <button
-              key={name}
-              type="button"
-              role="tab"
-              aria-selected={activeStream === name}
-              className={`df2-map-stream-tab${activeStream === name ? " is-active" : ""}${streamBusy === name ? " is-busy" : ""}`}
-              onClick={() => onActiveStreamChange?.(name)}
-              disabled={Boolean(streamBusy)}
-            >
-              {name}
-              {streamBusy === name ? "…" : ""}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {streamsDiverge && streamNames.length > 1 && (
-        <div className="df2-map-stream-diverge" role="alert">
-          <DtIcon name="alert" size={16} />
-          <div>
-            <strong>Stream schemas differ</strong>
-            <p>
-              Each tab has its own column mapping (sent as per-stream write contracts).
-              Review every stream before Validate — incompatible shared destinations still
-              need separate routes.
-            </p>
-            {onRematchAllStreams && (
+      <div className="df2-card-body df2-map-step-body">
+        {(llmUsed || (!primaryKeyField && uniqueKeySuggestions[0] && onApplyPrimaryKey)) && (
+          <p className="df2-map-inline-suggest" data-testid="map-inline-suggest" role="status">
+            <span>Suggested</span>
+            {!primaryKeyField && uniqueKeySuggestions[0] && onApplyPrimaryKey ? (
               <button
                 type="button"
                 className="df2-btn df2-btn-sm"
-                disabled={Boolean(streamBusy)}
-                onClick={() => void onRematchAllStreams()}
+                onClick={() => onApplyPrimaryKey(uniqueKeySuggestions[0].column)}
               >
-                {streamBusy === "all" ? "Rematching…" : "Rematch all streams"}
+                Use {uniqueKeySuggestions[0].column} as the key
               </button>
+            ) : (
+              <span>Semantic mapping is on this route. Approve the rows that match.</span>
+            )}
+          </p>
+        )}
+        {destTableExists !== false && extraSourceColumns.length > 0 && (
+          <details className="df2-map-stream-diverge is-compact" role="status">
+            <summary>
+              <DtIcon name="layers" size={16} />
+              <strong>{destShapeHeadline || "Extra source columns — remap or omit"}</strong>
+              <span> · {extraSourceColumns.length}</span>
+            </summary>
+            <p>
+              {extraSourceColumns.join(", ")} — dest-exists write is name-addressed.
+              These columns are not dropped. Use Remap dest or mark omit.
+            </p>
+          </details>
+        )}
+
+        {streamNames.length > 1 && (
+          <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">
+            {streamNames.map((name) => (
+              <button
+                key={name}
+                type="button"
+                role="tab"
+                aria-selected={activeStream === name}
+                className={`df2-map-stream-tab${activeStream === name ? " is-active" : ""}${streamBusy === name ? " is-busy" : ""}`}
+                onClick={() => onActiveStreamChange?.(name)}
+                disabled={Boolean(streamBusy)}
+              >
+                {name}
+                {streamBusy === name ? "…" : ""}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {streamsDiverge && streamNames.length > 1 && (
+          <div className="df2-map-stream-diverge" role="alert">
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Stream schemas differ</strong>
+              <p>
+                Each tab has its own column mapping (sent as per-stream write contracts).
+                Review every stream before Validate — incompatible shared destinations still
+                need separate routes.
+              </p>
+              {onRematchAllStreams && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm"
+                  disabled={Boolean(streamBusy)}
+                  onClick={() => void onRematchAllStreams()}
+                >
+                  {streamBusy === "all" ? "Rematching…" : "Rematch all streams"}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {ruleReport && (
+          <details className="df2-rule-map-banner">
+            <summary title={ruleBannerLine}>
+              <span className="df2-rule-map-chevron" aria-hidden="true" />
+              <DtIcon name="book" size={16} />
+              <strong>Business rules</strong>
+              <span className="df2-rule-map-census">{ruleBannerLine}</span>
+            </summary>
+            <div className="df2-rule-map-body">
+              <p className="df2-rule-map-kicker">
+                Destination names, write transforms, and lookups land here.
+                Transform kept the pre-load image. Validate contracts never write
+                a column — row-level ones quarantine failing rows at Run, and
+                population ones (unique) are checked after load.
+                Click a rule to see where it came from: workbook row → compiled rule → destination column.
+              </p>
+              {ruleReport.honesty ? (
+                <details className="df2-rule-honesty">
+                  <summary>Compiler contract</summary>
+                  <p>{ruleReport.honesty}</p>
+                </details>
+              ) : null}
+              <BusinessRuleLedger
+                report={ruleReport}
+                embedded
+                onAcceptDirect={onAcceptRuleDirect}
+              />
+            </div>
+          </details>
+        )}
+        {blockerSummary.blockers.length > 0 && (
+          <div className="df2-map-blocker-bar" role="status">
+            <div className="df2-map-blocker-bar-head">
+              <DtIcon name="alert" size={16} />
+              <strong>{blockerSummary.headline}</strong>
+              {blockerSummary.destSchemaUnloadedOnly && onReloadDestSchema && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={destSchemaLoading}
+                  onClick={() => void onReloadDestSchema()}
+                >
+                  {destSchemaLoading ? "Reading destination…" : "Reload destination schema"}
+                </Button>
+              )}
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm df2-btn-ghost"
+                aria-expanded={blockerDetailOpen}
+                onClick={() => setBlockerDetailOpen((v) => !v)}
+              >
+                {blockerDetailOpen ? "Hide detail" : `Why (${blockerSummary.groups.length})`}
+              </button>
+            </div>
+            {blockerDetailOpen && (
+              <ul className="df2-map-blocker-list">
+                {blockerSummary.groups.map((g) => (
+                  <li key={g.code}>
+                    <strong>{g.title}</strong>
+                    <span> — {g.action}</span>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
-        </div>
-      )}
-
-      <div className="df2-card-body df2-map-step-body">
+        )}
         {identityFixBanner && (
           <div className="df2-map-identity-banner is-compact" role="status">
             <DtIcon name="alert" size={16} />
@@ -342,9 +510,17 @@ export function TransferMapStep({
         </div>
       </div>
 
-      <div className="df2-card-footer df2-wizard-footer df2-map-footer">
+      {!hideFooter && <div className="df2-card-footer df2-wizard-footer df2-map-footer">
         <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
         <div className="df2-map-footer-status" aria-live="polite">
+          <ProgressRing
+            value={approvedPct}
+            size={36}
+            tone={mappingReviewCount > 0 ? "warn" : "ok"}
+            className="df2-map-footer-ring"
+          >
+            <strong>{approvedPct}</strong>
+          </ProgressRing>
           <span className={mappingReviewCount > 0 ? "is-warn" : "is-ok"} title={health.weak ? health.detail : undefined}>
             <strong>Mapping</strong> {mappingFooterLabel}
           </span>
@@ -357,44 +533,39 @@ export function TransferMapStep({
             }
           >
             <strong>Identity</strong> {identityFooterLabel}
-            {uniqueKeySuggestions.length > 0 && requiresPrimaryKey && !primaryKeyField && (
-              <>
-                {" · Try "}
-                {uniqueKeySuggestions.slice(0, 2).map((s, i) => (
+          </span>
+          {showPkSuggest && (
+            <details className="df2-map-pk-details">
+              <summary>Try PK</summary>
+              <div className="df2-map-pk-details-body">
+                {uniqueKeySuggestions.slice(0, 2).map((s) => (
                   <button
                     key={s.column}
                     type="button"
                     className="df2-map-footer-pk-suggest"
-                    title={`Unique in ${s.sampleRows}-row sample`}
+                    title={`Unique in ${s.sampleRows}-row sample — not full-table proof`}
                     onClick={() => {
                       onApplyPrimaryKey?.(s.column);
                       onOpenIdentitySettings?.();
                     }}
                   >
-                    {s.column}{i === 0 && uniqueKeySuggestions.length > 1 ? "," : ""}
+                    {s.column}
                   </button>
                 ))}
-              </>
-            )}
-
-            {compositeKeySuggestions.length > 0 && requiresPrimaryKey && !primaryKeyField && (
-              <span className="df2-map-pk-suggest">
-                Composite sample keys:{" "}
-                {compositeKeySuggestions.slice(0, 2).map((s, i) => (
+                {compositeKeySuggestions.slice(0, 2).map((s) => (
                   <button
                     key={s.columns.join(",")}
                     type="button"
-                    className="df2-linkish"
+                    className="df2-map-footer-pk-suggest"
+                    title={`Composite unique in ${s.sampleRows}-row sample`}
                     onClick={() => onApplyPrimaryKey?.(s.columns.join(","))}
-                    title={`Unique in ${s.sampleRows}-row sample`}
                   >
-                    {s.columns.join(" + ")}{i === 0 && compositeKeySuggestions.length > 1 ? "," : ""}
+                    {s.columns.join(" + ")}
                   </button>
                 ))}
-              </span>
-            )}
-
-          </span>
+              </div>
+            </details>
+          )}
         </div>
         <div className="df2-map-footer-actions">
           {onOpenIdentitySettings && (
@@ -407,21 +578,9 @@ export function TransferMapStep({
               <DtIcon name="settings" size={14} /> Advanced
             </button>
           )}
-          <button
-            type="button"
-            className="df2-btn df2-btn-primary"
-            onClick={onContinue}
-            disabled={mappingReviewCount > 0}
-            title={
-              mappingReviewCount > 0
-                ? `${mappingReviewCount} column(s) need Approve or Accept risk before Validate`
-                : "Continue to Validate"
-            }
-          >
-            Continue to Validate →
-          </button>
+          {continueToValidate}
         </div>
-      </div>
+      </div>}
 
       <Dialog
         open={mapDialogOpen}

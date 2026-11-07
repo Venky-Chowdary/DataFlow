@@ -1,0 +1,22 @@
+{
+  "success": true,
+  "data": [
+    {
+      "id": 101,
+      "title": "fixture deal 101",
+      "value": 250.0,
+      "currency": "USD",
+      "status": "open",
+      "stage_id": 2,
+      "add_time": "2024-01-02 10:00:00",
+      "update_time": "2024-01-03 10:00:00"
+    }
+  ],
+  "additional_data": {
+    "pagination": {
+      "start": 100,
+      "limit": 100,
+      "more_items_in_collection": false
+    }
+  }
+}

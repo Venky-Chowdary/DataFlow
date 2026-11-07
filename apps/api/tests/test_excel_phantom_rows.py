@@ -22,6 +22,7 @@ from services.excel_parser import (  # noqa: E402
     count_excel_rows,
     is_blank_row,
     iter_excel_batches,
+    iter_excel_dicts,
     parse_excel_preview,
     sheet_headers,
 )
@@ -76,6 +77,7 @@ def test_preview_excludes_formatting_only_rows():
 def test_count_is_rows_with_values_not_used_range():
     content = _sheet_with_phantom_range(data_rows=3, phantom_rows=500)
     assert count_excel_rows(content) == 3
+    assert len(list(iter_excel_dicts(content))) == 3
 
 
 def test_batches_do_not_yield_all_null_records():

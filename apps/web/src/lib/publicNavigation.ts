@@ -8,6 +8,7 @@ import {
   isHelpDocRoute,
   type HelpDocId,
 } from "./helpDocs";
+import { TRANSFER_READY_DRIVERS } from "./provenEvidence";
 
 export type PublicRoute =
   | "home"
@@ -18,6 +19,9 @@ export type PublicRoute =
   | "privacy"
   | "terms"
   | "security"
+  | "status"
+  | "dpa"
+  | "subprocessors"
   | "help"
   | "product-transfer"
   | "product-pilot"
@@ -26,6 +30,7 @@ export type PublicRoute =
   | "product-pipelines"
   | "product-query"
   | "integrations"
+  | "demos"
   | "solution-migrations"
   | "solution-warehouse"
   | "solution-sync"
@@ -42,6 +47,9 @@ const BASE_HASH_TO_ROUTE: Record<string, Exclude<PublicRoute, HelpDocId>> = {
   privacy: "privacy",
   terms: "terms",
   security: "security",
+  status: "status",
+  dpa: "dpa",
+  subprocessors: "subprocessors",
   help: "help",
   docs: "help",
   guide: "help",
@@ -49,6 +57,10 @@ const BASE_HASH_TO_ROUTE: Record<string, Exclude<PublicRoute, HelpDocId>> = {
   integrations: "integrations",
   connectors: "integrations",
   catalog: "integrations",
+  demos: "demos",
+  videos: "demos",
+  demo: "demos",
+  watch: "demos",
   "product/transfer": "product-transfer",
   "product/pilot": "product-pilot",
   "product/mcp": "product-mcp",
@@ -69,6 +81,9 @@ const BASE_ROUTE_TO_HASH: Record<Exclude<PublicRoute, HelpDocId>, string> = {
   privacy: "#/privacy",
   terms: "#/terms",
   security: "#/security",
+  status: "#/status",
+  dpa: "#/dpa",
+  subprocessors: "#/subprocessors",
   help: "#/help",
   "product-transfer": "#/product/transfer",
   "product-pilot": "#/product/pilot",
@@ -77,6 +92,7 @@ const BASE_ROUTE_TO_HASH: Record<Exclude<PublicRoute, HelpDocId>, string> = {
   "product-pipelines": "#/product/pipelines",
   "product-query": "#/product/query",
   integrations: "#/integrations",
+  demos: "#/demos",
   "solution-migrations": "#/solutions/migrations",
   "solution-warehouse": "#/solutions/warehouse",
   "solution-sync": "#/solutions/sync",
@@ -93,116 +109,141 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   home: {
     title: "Universal Data Transfer Platform",
     description:
-      "Move any data anywhere with AI semantic mapping, 8 preflight gates, quarantine, and checksum proof. Databases, files, warehouses, and APIs.",
+      "Move data between databases, warehouses, files, streams, and APIs. Semantic mapping, 9 preflight gates, native CDC, and every load verified value by value.",
     keywords:
-      "Datawrap, data transfer platform, database migration, ETL, semantic mapping, preflight gates, PostgreSQL Snowflake",
+      "Datawrap, data transfer platform, database migration, ETL, CDC, semantic mapping, preflight gates, data verification, PostgreSQL Snowflake SQL Server",
     canonicalPath: "#/",
   },
   pricing: {
     title: "Pricing",
-    description: "Plans for teams moving data with Transfer Studio, pipelines, and MCP — Starter, Team, and Enterprise.",
+    description: "Starter, Team, and Enterprise plans — verification, preflight, and quarantine in every plan; CDC, Pilot, SSO, and SCIM as you scale.",
     keywords: "Datawrap pricing, ETL pricing, data migration plans, enterprise data transfer cost",
     canonicalPath: "#/pricing",
   },
   enterprise: {
     title: "Enterprise",
-    description: "SSO, RBAC, audit trails, tenant isolation, and dedicated support for governed Datawrap deployments.",
-    keywords: "Datawrap enterprise, SSO ETL, RBAC data platform, tenant isolation, audit trail",
+    description: "SSO (OIDC / SAML), SCIM, RBAC with capped API keys, workspace isolation, BYOK, and a tamper-evident audit chain for governed data movement.",
+    keywords: "Datawrap enterprise, SSO SAML OIDC, SCIM provisioning, RBAC data platform, workspace isolation, BYOK, audit trail",
     canonicalPath: "#/enterprise",
   },
   customers: {
-    title: "Evidence",
-    description: "Measured live-matrix results for Datawrap migrations — what is proven on which engines, and what is explicitly not proven yet.",
-    keywords: "Datawrap evidence, data migration proof, live matrix results, schema drift testing",
+    title: "Customers",
+    description: "Measured on live engines: schema drift, identity and key carry, retry safety, and destination read-back — the proof you get on your own data.",
+    keywords: "Datawrap customers, data migration proof, warehouse loading, schema drift testing",
     canonicalPath: "#/customers",
   },
   contact: {
     title: "Contact sales",
-    description: "Talk to Datawrap about enterprise migrations, governed sync, and dedicated support.",
+    description: "Talk to a Datawrap solutions engineer about migrations, CDC, warehouse loading, and a scoped pilot on your own stack.",
     keywords: "contact Datawrap, data migration sales, enterprise ETL demo",
     canonicalPath: "#/contact",
   },
   privacy: {
     title: "Privacy",
-    description: "How Datawrap handles workspace data, credentials, and audit logs.",
+    description: "How Datawrap handles workspace data, encrypted credentials, retention, subprocessors, and your rights.",
     keywords: "Datawrap privacy policy, data processor, credential encryption",
     canonicalPath: "#/privacy",
   },
   terms: {
     title: "Terms of service",
-    description: "Terms governing use of the Datawrap platform.",
+    description: "Terms of service for the Datawrap platform — accounts, customer data, acceptable use, and enterprise agreements.",
     keywords: "Datawrap terms of service, acceptable use",
     canonicalPath: "#/terms",
   },
   security: {
     title: "Security",
-    description: "Encryption, isolation, residency, and governance controls in Datawrap.",
-    keywords: "Datawrap security, Fernet encryption, workspace isolation, SSO SAML",
+    description: "Workspace isolation, encrypted credentials with BYOK, SSO and SCIM, signed webhooks, and a hash-chained audit log in Datawrap.",
+    keywords: "Datawrap security, BYOK, workspace isolation, SSO SAML OIDC, SCIM, signed webhooks, audit log",
     canonicalPath: "#/security",
+  },
+  status: {
+    title: "Service status",
+    description: "Live readiness of the hosted Datawrap API, control plane, file storage, and connector runtime.",
+    keywords: "Datawrap status, uptime, service health",
+    canonicalPath: "#/status",
+  },
+  dpa: {
+    title: "Data processing addendum",
+    description: "How Datawrap processes personal data as your processor: instructions, security measures, subprocessors, breach notice, transfers, and deletion.",
+    keywords: "Datawrap DPA, data processing agreement, GDPR processor terms",
+    canonicalPath: "#/dpa",
+  },
+  subprocessors: {
+    title: "Subprocessors",
+    description: "Third parties that process personal data on Datawrap's behalf to run the hosted service.",
+    keywords: "Datawrap subprocessors, GDPR subprocessor list",
+    canonicalPath: "#/subprocessors",
   },
   help: {
     title: "Docs & help",
-    description: "Guides for Transfer Studio, connectors, preflight, pipelines, and MCP.",
+    description: "Guides for Transfer Studio, connectors, preflight, verification, pipelines, CDC, Pilot, and MCP.",
     keywords: "Datawrap docs, Transfer Studio guide, preflight gates documentation",
     canonicalPath: "#/help",
   },
   "product-transfer": {
     title: "Transfer Studio",
-    description: "Map, preflight, and prove any-to-any data loads with semantic column mapping.",
+    description: "Map columns by meaning, clear nine preflight gates, and verify every load against the destination, value by value.",
     keywords: "Transfer Studio, column mapping, data transfer wizard, preflight validation",
     canonicalPath: "#/product/transfer",
   },
   "product-pilot": {
     title: "Datawrap Pilot",
-    description: "Natural-language triage for transfers, jobs, schemas, and connectors — Confirm before anything moves.",
+    description: "A copilot on Datawrap's own local engine — no cloud AI key needed. Triage transfers, jobs, and schemas; Confirm before anything moves.",
     keywords: "Datawrap Pilot, AI data agent, natural language ETL, schema inspection chat",
     canonicalPath: "#/product/pilot",
   },
   "product-mcp": {
     title: "MCP Server",
-    description: "Governed transfers from Cursor, Claude, and VS Code via Model Context Protocol.",
+    description: "Governed transfers from Cursor, Claude, and VS Code via MCP — RBAC, capped API keys, and secret references on every call.",
     keywords: "Datawrap MCP, Cursor MCP server, Claude data tools, IDE ETL",
     canonicalPath: "#/product/mcp",
   },
   "product-jobs": {
     title: "Job Theater",
-    description: "Live batch progress, phases, quarantine, and proof reports for every transfer.",
+    description: "Live phases, quarantine with replay, and Gate-8 verification reports for every transfer.",
     keywords: "Job Theater, transfer progress, quarantine report, data reconciliation",
     canonicalPath: "#/product/jobs",
   },
   "product-pipelines": {
     title: "Pipelines",
-    description: "Scheduled sync with watermarks, upsert modes, and governed preflight.",
+    description: "Schedules with typed watermarks, native CDC, mirror with soft delete, and drift review — every run gated and verified.",
     keywords: "Datawrap pipelines, scheduled ETL, incremental sync, CDC pipelines",
     canonicalPath: "#/product/pipelines",
   },
   "product-query": {
     title: "Query Playground",
-    description: "Ad-hoc SQL and document queries against live connectors with export paths.",
+    description: "Ad-hoc SQL and document queries against saved connectors with export paths.",
     keywords: "Query Playground, SQL against connectors, MongoDB query, data export",
     canonicalPath: "#/product/query",
   },
   integrations: {
     title: "Connectors",
-    description: "Native drivers and SQLAlchemy generics with honest transfer-ready labels.",
-    keywords: "Datawrap connectors, PostgreSQL MySQL MongoDB Snowflake BigQuery S3 Iceberg",
+    description: `${TRANSFER_READY_DRIVERS} transfer-ready drivers: PostgreSQL, SQL Server, Oracle, MySQL, MongoDB, Snowflake, BigQuery, S3, Kafka, pgvector, and more.`,
+    keywords: "Datawrap connectors, PostgreSQL MySQL SQL Server Oracle MongoDB Snowflake BigQuery S3 Iceberg Kafka pgvector",
     canonicalPath: "#/integrations",
+  },
+  demos: {
+    title: "Video demos",
+    description:
+      "Watch real Datawrap transfers prove themselves: quarantine and replay, schema drift review, native CDC, files and stored procedures, and the checksum match at the end.",
+    keywords: "Datawrap demo, data migration video, ETL demo, CDC demo, quarantine replay proof",
+    canonicalPath: "#/demos",
   },
   "solution-migrations": {
     title: "Migrations",
-    description: "Cross-schema migrations with semantic mapping and checksum proof.",
+    description: "Cross-schema migrations with semantic mapping, identity and key carry, Unicode safety, and a signed proof pack at cutover.",
     keywords: "database migration, schema migration, PostgreSQL to Snowflake migration",
     canonicalPath: "#/solutions/migrations",
   },
   "solution-warehouse": {
     title: "Warehouse loading",
-    description: "Load Snowflake, BigQuery, and Redshift with reconciliation.",
-    keywords: "warehouse loading, Snowflake load, BigQuery ETL, Redshift sync",
+    description: "Load Snowflake, BigQuery, Iceberg, and cloud storage with MERGE upserts and read-back verification.",
+    keywords: "warehouse loading, Snowflake load, BigQuery ETL, Iceberg, S3 ADLS GCS",
     canonicalPath: "#/solutions/warehouse",
   },
   "solution-sync": {
     title: "Recurring sync",
-    description: "Incremental pipelines with quarantine and upsert modes.",
+    description: "CDC and incremental pipelines with typed watermarks, quarantine, and verification on every run.",
     keywords: "recurring data sync, incremental ETL, upsert CDC, scheduled sync",
     canonicalPath: "#/solutions/sync",
   },

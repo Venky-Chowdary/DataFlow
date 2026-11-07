@@ -9,8 +9,21 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_configured_provider(tmp_path, monkeypatch):
+    """Engine choice is about operator configuration, so start from none."""
+    from services import integrations_store
+
+    monkeypatch.setattr(integrations_store, "STORE_PATH", tmp_path / "integrations.json")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
 
 def test_resolve_engine_auto_is_local(monkeypatch):
+    """A reachable Ollama is not an operator decision — auto stays local."""
     from src.ai.llm import provider as prov
 
     class _Up:
@@ -29,7 +42,7 @@ def test_resolve_engine_local_env(monkeypatch):
     assert prov.resolve_pilot_engine() == "local"
 
 
-def test_pick_narration_prefers_ollama_when_opted_in(monkeypatch):
+def test_pick_narration_prefers_ollama_when_no_cloud_key_is_saved(monkeypatch):
     from src.ai.llm import provider as prov
 
     class _Ollama:

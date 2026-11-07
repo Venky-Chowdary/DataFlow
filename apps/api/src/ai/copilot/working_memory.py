@@ -64,7 +64,8 @@ def _default_path() -> Path:
     override = getenv_brand("PILOT_MEMORY_PATH", "").strip()
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[3] / "data" / "pilot_memory.json"
+    from services.platform_config import data_dir
+    return data_dir() / "pilot_memory.json"
 
 
 def _now() -> float:
@@ -95,6 +96,18 @@ class PilotFocus:
         """True when we know a table to talk about."""
         return bool(self.table)
 
+    def has_scope(self) -> bool:
+        """True when we know *where* to look, even if not yet what.
+
+        Listing a connector's tables settles the connector and nothing else. That
+        is worth remembering: without it, "how many rows in the first one" right
+        after "what tables are on Demo Orders" reached the aggregator with a real
+        table name and no connector, and answered "Connector not found". Only
+        ``has_target`` gates the elliptical-edit layer, so a connector-only focus
+        fills omitted slots without ever claiming a table the operator never named.
+        """
+        return bool(self.table or self.connector_id or self.connector_name)
+
     def describe(self) -> str:
         if not self.table:
             return ""
@@ -115,6 +128,31 @@ class PendingSlot:
     created_at: float = 0.0
 
 
+@dataclass
+class PilotProposal:
+    """The last thing Pilot offered to do, and everything needed to act on it.
+
+    Focus remembers what was *read*; nothing remembered what was *offered*. So
+    "run it" one turn after a transfer plan was parsed from scratch, matched no
+    tool and was refused as undocumented — the operator had to retype the whole
+    route to run the plan they were just shown. Worse, "actually cancel that"
+    after a staged schedule fell through to a job listing, which reads as though
+    the cancel worked while the Confirm row was still live.
+
+    ``staged`` separates the two states that matter. A plan is a rehearsal Pilot
+    can promote to a run on consent. A staged mutation already holds an ack in
+    the ledger, and chat must never self-approve it — Confirm stays the
+    operator's action, so consent can only point at the button.
+    """
+
+    tool: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+    label: str = ""
+    ack_id: str = ""
+    staged: bool = False
+    created_at: float = 0.0
+
+
 class PilotWorkingMemory:
     """Thread-safe, TTL'd, session-scoped focus + pending-slot store."""
 
@@ -124,6 +162,7 @@ class PilotWorkingMemory:
         self._lock = threading.RLock()
         self._focus: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, dict[str, Any]] = {}
+        self._proposals: dict[str, dict[str, Any]] = {}
         self._load()
 
     # ------------------------------------------------------------------ io
@@ -140,13 +179,20 @@ class PilotWorkingMemory:
             for sid, doc in (raw.get("pending") or {}).items():
                 if float(doc.get("created_at") or 0) + self.ttl_sec > now:
                     self._pending[str(sid)] = doc
+            for sid, doc in (raw.get("proposals") or {}).items():
+                if float(doc.get("created_at") or 0) + self.ttl_sec > now:
+                    self._proposals[str(sid)] = doc
         except (OSError, json.JSONDecodeError, TypeError, AttributeError) as exc:
             _log.warning("pilot working memory load failed: %s", exc)
 
     def _persist(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"focus": self._focus, "pending": self._pending}
+            payload = {
+                "focus": self._focus,
+                "pending": self._pending,
+                "proposals": self._proposals,
+            }
             tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
             tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
             tmp.replace(self.path)
@@ -155,7 +201,11 @@ class PilotWorkingMemory:
 
     def _gc_locked(self) -> None:
         now = _now()
-        for store, stamp in ((self._focus, "updated_at"), (self._pending, "created_at")):
+        for store, stamp in (
+            (self._focus, "updated_at"),
+            (self._pending, "created_at"),
+            (self._proposals, "created_at"),
+        ):
             for sid in [
                 k for k, v in store.items() if float(v.get(stamp) or 0) + self.ttl_sec <= now
             ]:
@@ -167,6 +217,7 @@ class PilotWorkingMemory:
             for sid, _ in ordered[: len(self._focus) - _MAX_SESSIONS]:
                 self._focus.pop(sid, None)
                 self._pending.pop(sid, None)
+                self._proposals.pop(sid, None)
 
     # --------------------------------------------------------------- focus
 
@@ -188,7 +239,7 @@ class PilotWorkingMemory:
 
     def remember_focus(self, session_id: str, focus: PilotFocus) -> None:
         sid = (session_id or "").strip()
-        if not sid or not focus.has_target():
+        if not sid or not focus.has_scope():
             return
         focus.updated_at = _now()
         focus.columns = [str(c) for c in (focus.columns or [])][:_MAX_COLUMNS]
@@ -216,7 +267,7 @@ class PilotWorkingMemory:
                     setattr(current, key, "" if isinstance(getattr(current, key), str) else 0)
                 continue
             setattr(current, key, value)
-        if not current.has_target():
+        if not current.has_scope():
             return None
         self.remember_focus(sid, current)
         return current
@@ -256,11 +307,157 @@ class PilotWorkingMemory:
             if self._pending.pop(sid, None) is not None:
                 self._persist()
 
+    # ------------------------------------------------------------ proposal
+
+    def get_proposal(self, session_id: str) -> PilotProposal | None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return None
+        with self._lock:
+            self._gc_locked()
+            doc = self._proposals.get(sid)
+            if not doc:
+                return None
+            try:
+                return PilotProposal(**doc)
+            except TypeError:
+                self._proposals.pop(sid, None)
+                return None
+
+    def remember_proposal(self, session_id: str, proposal: PilotProposal) -> None:
+        sid = (session_id or "").strip()
+        if not sid or not proposal.tool:
+            return
+        proposal.created_at = _now()
+        with self._lock:
+            self._gc_locked()
+            self._proposals[sid] = asdict(proposal)
+            self._persist()
+
+    def clear_proposal(self, session_id: str) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        with self._lock:
+            if self._proposals.pop(sid, None) is not None:
+                self._persist()
+
     def clear_for_tests(self) -> None:
         with self._lock:
             self._focus.clear()
             self._pending.clear()
+            self._proposals.clear()
             self._persist()
+
+
+class _MongoSlots:
+    """One slot kind (focus / pending / proposal) in the shared collection.
+
+    Offers the few dict operations :class:`PilotWorkingMemory` uses, so the
+    focus, pending and proposal logic stays in one place for both backends.
+    """
+
+    def __init__(self, coll: Any, kind: str, stamp: str):
+        self._coll = coll
+        self._kind = kind
+        self._stamp = stamp
+
+    def _id(self, sid: str) -> str:
+        return f"{self._kind}:{sid}"
+
+    def get(self, sid: str, default: Any = None) -> Any:
+        row = self._coll.find_one({"_id": self._id(sid)})
+        return dict(row["doc"]) if row and isinstance(row.get("doc"), dict) else default
+
+    def __setitem__(self, sid: str, doc: dict[str, Any]) -> None:
+        self._coll.replace_one(
+            {"_id": self._id(sid)},
+            {
+                "_id": self._id(sid),
+                "kind": self._kind,
+                "sid": sid,
+                "stamp": float(doc.get(self._stamp) or 0),
+                "doc": json.loads(json.dumps(doc, default=str)),
+            },
+            upsert=True,
+        )
+
+    def pop(self, sid: str, default: Any = None) -> Any:
+        row = self._coll.find_one_and_delete({"_id": self._id(sid)})
+        return row["doc"] if row else default
+
+    def clear(self) -> None:
+        self._coll.delete_many({"kind": self._kind})
+
+    def expire(self, cutoff: float) -> None:
+        self._coll.delete_many({"kind": self._kind, "stamp": {"$lte": cutoff}})
+
+
+class MongoWorkingMemory(PilotWorkingMemory):
+    """Working memory shared by every API replica.
+
+    With a pod-local file, a follow-up ("the second one", "do it") that lands
+    on another replica loses its focus and staged proposal. Expired slots are
+    deleted on a short interval and ignored on read until then.
+    """
+
+    _GC_INTERVAL_SEC = 30.0
+
+    def __init__(self, collection: Any | None = None, ttl_sec: int = _DEFAULT_TTL_SEC):
+        self.path = None  # file-backend attribute; unused here
+        self.ttl_sec = max(60, int(ttl_sec))
+        self._lock = threading.RLock()
+        if collection is None:
+            from services.control_plane_store import mongo_collection
+
+            collection = mongo_collection("pilot_memory")
+        if collection is None:
+            raise RuntimeError(
+                "Shared Pilot memory requires the pilot_memory Mongo collection. "
+                "Refusing a pod-local file store."
+            )
+        self._coll = collection
+        self._focus = _MongoSlots(collection, "focus", "updated_at")  # type: ignore[assignment]
+        self._pending = _MongoSlots(collection, "pending", "created_at")  # type: ignore[assignment]
+        self._proposals = _MongoSlots(collection, "proposal", "created_at")  # type: ignore[assignment]
+        self._last_gc = 0.0
+
+    def _persist(self) -> None:
+        return None
+
+    def _gc_locked(self) -> None:
+        now = _now()
+        if now - self._last_gc < self._GC_INTERVAL_SEC:
+            return
+        self._last_gc = now
+        try:
+            for slots in (self._focus, self._pending, self._proposals):
+                slots.expire(now - self.ttl_sec)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a missed sweep only delays deletion; reads still honour the TTL
+            _log.debug("pilot memory gc skipped", exc_info=True)
+
+    def _fresh(self, doc: Any, stamp: str) -> Any:
+        if doc and float(doc.get(stamp) or 0) + self.ttl_sec > _now():
+            return doc
+        return None
+
+    def get_focus(self, session_id: str) -> PilotFocus | None:
+        sid = (session_id or "").strip()
+        if not sid or not self._fresh(self._focus.get(sid), "updated_at"):
+            return None
+        return super().get_focus(sid)
+
+    def get_pending(self, session_id: str) -> PendingSlot | None:
+        sid = (session_id or "").strip()
+        if not sid or not self._fresh(self._pending.get(sid), "created_at"):
+            return None
+        return super().get_pending(sid)
+
+    def get_proposal(self, session_id: str) -> PilotProposal | None:
+        sid = (session_id or "").strip()
+        if not sid or not self._fresh(self._proposals.get(sid), "created_at"):
+            return None
+        return super().get_proposal(sid)
 
 
 _memory: PilotWorkingMemory | None = None
@@ -268,8 +465,20 @@ _memory_lock = threading.Lock()
 
 
 def get_working_memory() -> PilotWorkingMemory:
+    """Return the process working memory.
+
+    It follows the confirm ledger's backend: when acks are shared in Mongo
+    (multi-replica), focus and staged proposals are too, so a follow-up turn
+    routed to another replica keeps its context.
+    """
     global _memory
     with _memory_lock:
-        if _memory is None:
+        from services.process_role import ack_backend
+
+        if ack_backend() == "mongo":
+            if not isinstance(_memory, MongoWorkingMemory):
+                _memory = MongoWorkingMemory()
+            return _memory
+        if _memory is None or isinstance(_memory, MongoWorkingMemory):
             _memory = PilotWorkingMemory()
         return _memory

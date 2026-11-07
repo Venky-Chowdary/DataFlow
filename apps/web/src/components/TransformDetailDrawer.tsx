@@ -1,7 +1,9 @@
 import { DtIcon } from "./DtIcon";
 import { Button } from "./ui/Button";
 import { Drawer } from "./ui/Drawer";
+import { CopyIdChip } from "./ui/CopyIdChip";
 import { formatSeconds } from "../lib/phaseProfile";
+import { writeJobsDeepLink } from "../lib/appNavigation";
 import type { TransformProject, TransformRunResult } from "../lib/api";
 
 interface TransformDetailDrawerProps {
@@ -11,8 +13,8 @@ interface TransformDetailDrawerProps {
   running?: boolean;
   lastRun?: TransformRunResult | null;
   onClose: () => void;
-  onDryRun: () => void;
-  onRun: () => void;
+  onDryRun?: () => void;
+  onRun?: () => void;
   onExportDbt: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -61,24 +63,28 @@ export function TransformDetailDrawer({
       }
       footer={
         <div className="df2-drawer-actions">
-          <Button
-            size="sm"
-            variant="ghost"
-            loading={running}
-            onClick={onDryRun}
-            leadingIcon={<DtIcon name="activity" size={14} />}
-          >
-            Dry run
-          </Button>
-          <Button
-            size="sm"
-            variant="primary"
-            loading={running}
-            onClick={onRun}
-            leadingIcon={<DtIcon name="play" size={14} />}
-          >
-            Run now
-          </Button>
+          {onDryRun ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={running}
+              onClick={onDryRun}
+              leadingIcon={<DtIcon name="activity" size={14} />}
+            >
+              Dry run
+            </Button>
+          ) : null}
+          {onRun ? (
+            <Button
+              size="sm"
+              variant="primary"
+              loading={running}
+              onClick={onRun}
+              leadingIcon={<DtIcon name="play" size={14} />}
+            >
+              Run now
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="ghost"
@@ -200,6 +206,39 @@ export function TransformDetailDrawer({
             </span>
           </div>
           {lastRun.error && <p className="df2-xform-preview-error">{lastRun.error}</p>}
+          {lastRun.row_accounting && (
+            <div className="df2-xform-ledger" aria-label="Transform row ledger">
+              <span>
+                <strong>Models</strong>
+                {lastRun.row_accounting.models_run}
+              </span>
+              <span>
+                <strong>Written</strong>
+                {lastRun.row_accounting.rows_written.toLocaleString()}
+              </span>
+              <span>
+                <strong>Tests failed</strong>
+                {lastRun.row_accounting.tests_failed}
+              </span>
+              <span className={lastRun.row_accounting.rows_quarantined > 0 ? "is-warn" : undefined}>
+                <strong>Quarantined</strong>
+                {lastRun.row_accounting.rows_quarantined.toLocaleString()}
+              </span>
+            </div>
+          )}
+          {lastRun.row_accounting && lastRun.row_accounting.rows_quarantined > 0 && (
+            <div className="df2-xform-quarantine-cta">
+              <CopyIdChip id={`xform-${project.id}`} label="Quarantine" compact />
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => writeJobsDeepLink(`xform-${project.id}`, "quarantine")}
+                leadingIcon={<DtIcon name="alert" size={14} />}
+              >
+                View quarantine
+              </Button>
+            </div>
+          )}
           <ul className="df2-xform-run-list">
             {lastRun.models.map((m) => (
               <li key={m.name} className={`is-${m.status}`}>

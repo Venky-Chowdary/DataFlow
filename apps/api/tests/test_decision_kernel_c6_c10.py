@@ -118,6 +118,26 @@ def test_c10_proof_pack_requires_full_checksum_and_artifact():
         reconciliation={
             "final_checksum": "a" * 64,
             "matched": True,
+            "source_checksum_provenance": "independent_source_reread",
+            "identity_hash_aligned": True,
+        },
+        validation_summary={
+            "decision_artifact_present": True,
+            "blocked_classes": [],
+        },
+        connector_versions={
+            "source": "openpyxl 3.1.5",
+            "destination": "postgresql 16.2 / psycopg2 2.9.9",
+        },
+        job_id="j1",
+        job_success=True,
+    )
+    assert pack["migration_proven"] is True
+    withheld = build_migration_proof_pack(
+        decision_artifact=art.to_dict(),
+        reconciliation={
+            "final_checksum": "a" * 64,
+            "matched": True,
         },
         validation_summary={
             "decision_artifact_present": True,
@@ -126,7 +146,11 @@ def test_c10_proof_pack_requires_full_checksum_and_artifact():
         job_id="j1",
         job_success=True,
     )
-    assert pack["migration_proven"] is True
+    assert withheld["migration_proven"] is False
+    withheld_reasons = set(withheld["assurance"]["reasons"])
+    assert "connector_versions_not_captured" in withheld_reasons
+    assert "identity_hash_not_aligned" in withheld_reasons
+    assert "source_not_independently_reread" in withheld_reasons
     assert pack["population_checksum"]["checksum_hex_chars"] == 64
     assert pack["proof_plan"]["sample_is_population_proof"] is False
 

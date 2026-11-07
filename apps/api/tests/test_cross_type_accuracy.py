@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -113,7 +114,9 @@ def test_db_to_db_route_live(src: str, dest: str):
     "source_type,target_type,raw,transform,expected",
     [
         ("VARCHAR", "INTEGER", "42", "integer", 42),
-        ("VARCHAR", "DECIMAL", "$1,234.50", "decimal", "1234.50"),
+        # The decimal transform hands the writer an exact Decimal (ec8c95ff) so
+        # bind cannot re-read the canonical spelling under another locale.
+        ("VARCHAR", "DECIMAL", "$1,234.50", "decimal", Decimal("1234.50")),
         ("VARCHAR", "BOOLEAN", "true", "boolean", True),
         ("VARCHAR", "DATE", "2024-06-01", "date", "2024-06-01"),
         ("TIMESTAMP", "DATETIME", "2024-06-01T12:00:00Z", "datetime", "2024-06-01T12:00:00Z"),
@@ -157,7 +160,7 @@ def test_mapping_pipeline_passes_source_types():
         confidence_threshold=0.5,
     )
     by_source = {m["source"]: m for m in result["mappings"]}
-    assert by_source["payment_amount"]["transform"] == "decimal"
+    assert by_source["payment_amount"]["transform"] == "none"
     assert by_source["txn_date"]["transform"] == "date"
     assert by_source["payment_amount"]["source_type"] == "DECIMAL"
 
@@ -290,8 +293,8 @@ def test_csv_to_snowflake_mapping_pipeline_transforms():
         confidence_threshold=0.5,
     )
     by_source = {m["source"]: m for m in result["mappings"]}
-    assert by_source["order_total"]["transform"] == "decimal"
-    assert by_source["quantity"]["transform"] == "integer"
+    assert by_source["order_total"]["transform"] == "none"
+    assert by_source["quantity"]["transform"] == "none"
     assert by_source["is_gift"]["transform"] == "boolean"
     assert by_source["order_date"]["transform"] == "date"
     assert by_source["shipped_at"]["transform"] == "datetime"
@@ -320,6 +323,9 @@ def test_csv_rows_map_to_snowflake_typed_values():
             "transform": infer_transform_for_mapping(
                 c["name"], c["name"].upper(), c["inferred_type"],
                 ddl_type("snowflake", c["inferred_type"]),
+                source_samples=list(c.get("samples") or []) + (
+                    ["$2,499.00"] if c["name"] == "order_total" else []
+                ),
             ),
         }
         for c in CSV_SNOWFLAKE_COLUMNS
@@ -337,8 +343,9 @@ def test_csv_rows_map_to_snowflake_typed_values():
     )
     assert not errors, errors
     assert mapped[0][0] == "ORD-9001"
-    assert mapped[0][2] == "2499.00"
-    assert mapped[0][3] == 5
+    assert mapped[0][2] == Decimal("2499.00")
+    # Native INTEGER wire is identity — digit text is not Parse integer.
+    assert mapped[0][3] in {5, "5"}
     assert mapped[0][4] is True
     assert mapped[0][5] == "2024-11-20"
     assert mapped[0][7] == '{"promo":true}'
@@ -362,8 +369,13 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
         ("n", "boolean", None, True),
         ("maybe", "boolean", None, True),
         # decimals preserve precision
-        ("12345678901234567890.12345", "decimal", "12345678901234567890.12345", False),
-        ("1.5e-10", "decimal", "0.00000000015", False),
+        (
+            "12345678901234567890.12345",
+            "decimal",
+            Decimal("12345678901234567890.12345"),
+            False,
+        ),
+        ("1.5e-10", "decimal", Decimal("0.00000000015"), False),
         # integers reject fractional values
         ("42.0", "integer", 42, False),
         ("999999999999999999999999999999", "integer", 999999999999999999999999999999, False),

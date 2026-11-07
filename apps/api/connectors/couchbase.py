@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import requests
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, load_http_json
 
 from connectors.saas_common import ReadBatch, humanize_http_error
 
@@ -26,6 +26,9 @@ def _url(host: str, port: int, ssl: bool) -> str:
         parsed = urlparse(h)
         if not parsed.port:
             h = urlunparse(parsed._replace(netloc=f"{parsed.hostname}:{port}"))
+    from services.egress_guard import assert_connector_dial_allowed
+
+    assert_connector_dial_allowed(h, point="http_client")
     return f"{h.rstrip('/')}/query/service"
 
 
@@ -38,7 +41,7 @@ def _n1ql(url: str, username: str, password: str, statement: str, timeout: float
         timeout=timeout,
     )
     resp.raise_for_status()
-    body = resp.json()
+    body = load_http_json(resp)
     errors = body.get("errors") or []
     if errors:
         msg = errors[0].get("msg", "Couchbase N1QL error")
@@ -117,6 +120,20 @@ def test_connection(
         return False, f"Couchbase probe failed: {exc}"
     except Exception as exc:
         return False, humanize_http_error(exc, "couchbase")
+
+
+def list_keyspaces(
+    *,
+    host: str = "",
+    port: int = 8093,
+    username: str = "",
+    password: str = "",
+    ssl: bool = False,
+) -> list[str]:
+    """Buckets/collections the query service exposes — the source's tables."""
+    body = _n1ql(_url(host, port, ssl), username, password, "SELECT RAW name FROM system:keyspaces")
+    names = [str(n).strip() for n in (body or {}).get("results") or [] if str(n).strip()]
+    return sorted(set(names))
 
 
 def read_object(

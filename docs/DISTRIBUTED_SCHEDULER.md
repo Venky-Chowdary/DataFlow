@@ -47,3 +47,35 @@ stale:    claimed → queued (reclaim); expired lease steal bumps fence
 
 v1 safety = Mongo queue + leases + fences. Temporal/Celery/SQS remain a later
 option for workflow history UX — not required for correctness.
+
+## Scheduled run lifecycle (QA round 5)
+
+Every scheduled attempt (cadence beat, retry, Run now) is one **run record** in
+the schedule's `run_history`, written before any work starts
+(`services/schedule_run_lifecycle.py`):
+
+```
+pending ──► running ──► completed | completed_with_* | failed | cancelled
+   ├──────► failed   (refused or crashed before a job existed)
+   └──────► skipped  (overlap, pending approval, append replay)
+```
+
+* Every transition is persisted on the record (`transitions`); a terminal
+  record never changes again.
+* Every terminal record has `reason` and `reason_code`.
+* The displayed status (`last_status`, `last_status_reason`, `current_run`,
+  `last_skip` on REST, MCP `get_schedule`/`list_schedules`, and the UI) is
+  derived from the records. The stored `last_status` is a legacy mirror that no
+  reader displays.
+* Orphan sweep (every beat and at startup): an open record whose job's lease
+  and heartbeat expired is failed `worker_lost` ("Worker lost: …") and the job
+  document is settled the same way (conditional on the status read, so a job
+  the job-orphan sweeper resumed first is left running). A `pending` record with
+  no job older than `DATAFLOW_SCHEDULE_UNBOUND_CLAIM_GRACE_SEC` is failed the same way.
+* Skipped beats are recorded with their reason; identical consecutive skips
+  coalesce (`occurrences`, `last_seen_at`). A beat refused because another
+  replica holds the fleet lock is not a skip — that replica runs it.
+* Failures before a job exists consume the cadence slot (no hot loop), park
+  after repeated identical failures, and notify the workspace.
+* Backfill: records written before this existed are read through `run_view`
+  (a `legacy-*` id and a reason derived from `error`).

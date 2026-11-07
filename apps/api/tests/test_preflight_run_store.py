@@ -52,6 +52,33 @@ def test_save_and_get_preflight_run(isolated_store):
     assert not any(r["kind"] == "normalize_control_chars" for r in loaded["suggested_remediations"])
 
 
+def test_a_new_reader_finds_the_run_on_disk(isolated_store):
+    """The id operators quote has to be on disk before the response returns.
+
+    A process restart reads this file. An in-memory dict dropped every run
+    issued before the restart, including ones Validate had already returned.
+    """
+    enriched = store.save_preflight_run(
+        {
+            "passed": True,
+            "passed_count": 8,
+            "total_gates": 8,
+            "gates": [],
+            "blockers": [],
+            "run_id": "pf_restartproof1",
+        },
+        source_label="postgresql.sales",
+        dest_label="mysql.sales",
+    )
+    text = isolated_store.read_text(encoding="utf-8")
+    assert "pf_restartproof1" in text
+    assert enriched["run_id"] == "pf_restartproof1"
+    loaded = store.get_preflight_run("pf_restartproof1")
+    assert loaded is not None
+    assert loaded["passed"] is True
+    assert loaded["dest_label"] == "mysql.sales"
+
+
 def test_list_preflight_runs(isolated_store):
     for i in range(3):
         store.save_preflight_run({"passed": True, "passed_count": 8, "total_gates": 8, "gates": [], "blockers": []})

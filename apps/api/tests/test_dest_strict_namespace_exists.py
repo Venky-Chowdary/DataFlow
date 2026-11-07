@@ -49,7 +49,8 @@ def test_mysql_destination_does_not_cross_database_heal_users():
     assert cur.fetchall.call_count == 3
 
 
-def test_mysql_source_still_cross_database_recovers():
+def test_mysql_source_no_longer_scans_other_databases():
+    """Round 11: the host-wide fallback is gone for sources too (Ensembl hang)."""
     from services.schema_introspect import _introspect_mysql
 
     cur = MagicMock()
@@ -77,9 +78,8 @@ def test_mysql_source_still_cross_database_recovers():
                 strict_namespace=False,
             )
 
-    assert out["ok"] is True
-    assert [c["name"] for c in out["columns"]] == ["id", "email"]
-    assert out.get("schema") == "other_app"
+    assert out["columns"] == []
+    assert out.get("schema") == "railway"
 
 
 def test_attach_db_sample_destination_purpose_passes_strict_namespace():

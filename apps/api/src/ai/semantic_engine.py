@@ -16,6 +16,8 @@ from difflib import SequenceMatcher
 from enum import Enum
 from typing import Optional
 
+from services.transform_engine import CANONICAL_BOOLEAN_SAMPLE_PATTERN
+
 
 class DataCategory(Enum):
     """High-level data categories"""
@@ -382,8 +384,6 @@ SEMANTIC_TYPES: list[SemanticType] = [
         regex_patterns=[r"_date$", r"_dt$", r"^date_"],
         sample_patterns=[
             r"^\d{4}-\d{2}-\d{2}$",
-            r"^\d{2}/\d{2}/\d{4}$",
-            r"^\d{2}-\d{2}-\d{4}$",
         ],
         synonyms=["effective_date", "as_of_date"],
         transformations=["standardize_iso8601"],
@@ -469,7 +469,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         category=DataCategory.BINARY,
         patterns=["is_", "has_", "can_", "flag", "enabled", "active", "deleted"],
         regex_patterns=[r"^is_", r"^has_", r"^can_", r"_flag$"],
-        sample_patterns=[r"^(true|false|1|0|yes|no|y|n)$"],
+        sample_patterns=[CANONICAL_BOOLEAN_SAMPLE_PATTERN],
         synonyms=["indicator", "bool"],
         base_confidence=0.90,
     ),
@@ -704,13 +704,26 @@ class SemanticAnalyzer:
         if not non_empty:
             return 0.5
 
-        if semantic_type and semantic_type.sample_patterns:
+        if semantic_type and (
+            "standardize_iso8601" in semantic_type.transformations
+            or semantic_type.sample_patterns
+        ):
             match_count = 0
-            for value in non_empty[:100]:
-                for pattern in semantic_type.sample_patterns:
-                    if re.match(pattern, str(value).strip(), re.IGNORECASE):
+            from src.ai.knowledge.data_quality_rules import WRITE_BIND_SEMANTIC_TYPES
+            from services.transform_engine import apply_transform
+
+            write_transform = WRITE_BIND_SEMANTIC_TYPES.get(semantic_type.name)
+            if write_transform:
+                for value in non_empty[:100]:
+                    parsed, err = apply_transform(str(value).strip(), write_transform)
+                    if parsed is not None and not err:
                         match_count += 1
-                        break
+            else:
+                for value in non_empty[:100]:
+                    for pattern in semantic_type.sample_patterns:
+                        if re.match(pattern, str(value).strip(), re.IGNORECASE):
+                            match_count += 1
+                            break
 
             match_rate = match_count / min(len(non_empty), 100)
             if match_rate > 0.8:
@@ -741,10 +754,22 @@ class SemanticAnalyzer:
                 int_count += 1
             elif re.match(r'^-?\d+\.?\d*$', val):
                 float_count += 1
-            elif val.lower() in ('true', 'false', '0', '1', 'yes', 'no', 'y', 'n'):
-                bool_count += 1
-            elif re.match(r'^\d{4}-\d{2}-\d{2}', val) or re.match(r'^\d{2}/\d{2}/\d{4}', val):
-                date_count += 1
+            else:
+                from services.transform_engine import apply_transform
+
+                parsed, err = apply_transform(val, "boolean")
+                if parsed is not None and not err:
+                    bool_count += 1
+                    continue
+                # Same bind as the write path — Auto-ambiguous 01/02/2024 is
+                # not a datetime we can read, so do not label the column one.
+                parsed, err = apply_transform(val, "datetime")
+                if parsed is not None and not err:
+                    date_count += 1
+                    continue
+                parsed, err = apply_transform(val, "decimal")
+                if parsed is not None and not err:
+                    float_count += 1
 
         sample_size = min(len(non_empty), 100)
         if int_count / sample_size > 0.8:
@@ -808,6 +833,17 @@ class SemanticAnalyzer:
         if stats.get("unique_percentage", 0) < 1 and inferred_type not in ("boolean",):
             warnings.append("Very low cardinality - consider as enum/category")
 
+        transforms = list(semantic_type.transformations) if semantic_type else []
+        if transforms and sample_values:
+            from services.transform_engine import samples_are_auto_ambiguous_dates
+
+            texts = [str(v) for v in sample_values if v is not None and str(v).strip()]
+            if samples_are_auto_ambiguous_dates(texts) and "standardize_iso8601" in transforms:
+                transforms = [t for t in transforms if t != "standardize_iso8601"]
+                warnings.append(
+                    "Auto cannot bind 01/02/2024 — set date locale MDY or DMY before Date→ISO"
+                )
+
         return ColumnAnalysis(
             column_name=column_name,
             inferred_type=inferred_type,
@@ -816,7 +852,7 @@ class SemanticAnalyzer:
             confidence=round(final_confidence, 3),
             is_pii=semantic_type.is_pii if semantic_type else False,
             compliance=[c for c in (semantic_type.compliance if semantic_type else [])],
-            suggested_transformations=semantic_type.transformations if semantic_type else [],
+            suggested_transformations=transforms,
             null_percentage=stats.get("null_percentage", 0),
             unique_percentage=stats.get("unique_percentage", 0),
             sample_values=sample_values[:5],
@@ -986,91 +1022,13 @@ class SmartMapper:
         target_columns: list[str],
         source_samples: dict[str, list[str]] = None
     ) -> list[MappingSuggestion]:
+        """Map SSOT only — never a second confidence from this class.
+
+        A leftover pair-scorer here invented Date→ISO and user_id→customer_id
+        at high confidence. Transfer / Validate / RAG already use
+        ``services.semantic_mapper.map_columns``. This method must not diverge.
         """
-        Generate intelligent column mappings.
-
-        Uses order-independent global assignment: every source→target pair is
-        scored, then the highest-confidence pairs are assigned first so a weaker
-        earlier column can never claim a target that is a stronger match for a
-        later column (the classic greedy pitfall). Each target is used at most
-        once. Character-level similarity rescues typos and abbreviations that
-        exact/synonym/token matching miss.
-
-        Args:
-            source_columns: List of source column names
-            target_columns: List of target column names
-            source_samples: Optional sample data for source columns
-
-        Returns:
-            List of mapping suggestions with confidence scores
-        """
-        if source_samples is None:
-            source_samples = {}
-
-        source_analyses = {
-            col: self.analyzer.analyze_column(col, source_samples.get(col, []))
-            for col in source_columns
-        }
-        target_analyses = {
-            col: self.analyzer.analyze_column(col, [])
-            for col in target_columns
-        }
-
-        # Score every candidate pair once.
-        candidates: list[tuple[float, str, str]] = []
-        for src_col in source_columns:
-            for tgt_col in target_columns:
-                score, _reason = self._score_pair(
-                    src_col, tgt_col, source_analyses[src_col], target_analyses[tgt_col]
-                )
-                if score > 0.5:
-                    candidates.append((score, src_col, tgt_col))
-
-        # Assign globally: strongest pairs first, one target per source and
-        # one source per target. Deterministic tie-break keeps results stable.
-        candidates.sort(key=lambda c: (-c[0], c[1], c[2]))
-        assigned: dict[str, tuple[str, float]] = {}
-        used_targets: set[str] = set()
-        for score, src_col, tgt_col in candidates:
-            if src_col in assigned or tgt_col in used_targets:
-                continue
-            assigned[src_col] = (tgt_col, score)
-            used_targets.add(tgt_col)
-
-        mappings = []
-        for src_col in source_columns:
-            src_analysis = source_analyses[src_col]
-            match = assigned.get(src_col)
-            if match:
-                tgt_col, score = match
-                _score, reason = self._score_pair(
-                    src_col, tgt_col, src_analysis, target_analyses[tgt_col]
-                )
-                needs_transform = False
-                transform = None
-                if src_analysis.inferred_type != target_analyses[tgt_col].inferred_type:
-                    needs_transform = True
-                    transform = (
-                        f"Convert {src_analysis.inferred_type} to "
-                        f"{target_analyses[tgt_col].inferred_type}"
-                    )
-                mappings.append(MappingSuggestion(
-                    source_column=src_col,
-                    target_column=tgt_col,
-                    confidence=round(score, 3),
-                    reason=reason,
-                    transformation_needed=needs_transform,
-                    suggested_transformation=transform,
-                ))
-            else:
-                mappings.append(MappingSuggestion(
-                    source_column=src_col,
-                    target_column="<unmapped>",
-                    confidence=0.0,
-                    reason="No suitable match found",
-                ))
-
-        return sorted(mappings, key=lambda m: m.confidence, reverse=True)
+        return generate_mappings(source_columns, target_columns, source_samples)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1096,8 +1054,60 @@ def generate_mappings(
     target_columns: list[str],
     source_samples: dict[str, list[str]] = None
 ) -> list[MappingSuggestion]:
-    """Generate intelligent column mappings"""
-    return _mapper.map_columns(source_columns, target_columns, source_samples)
+    """Assign columns with ``map_columns`` — the same SSOT as Transfer/Validate.
+
+    The local SmartMapper invented pair scores and “Convert X to Y” from AI
+    inferred types. That suggested Date→ISO for Auto-ambiguous ``01/02/2024``.
+    Transform stamps now come from ``infer_transform_for_mapping`` with no
+    invented dest type (this assist API does not carry destination DDL).
+    """
+    from services.semantic_mapper import authority_mappings
+    from services.transform_engine import infer_transform_for_mapping
+
+    source_schemas = None
+    if source_samples:
+        source_schemas = [
+            {
+                "name": col,
+                "inferred_type": "VARCHAR",
+                "samples": list(source_samples.get(col) or [])[:8],
+            }
+            for col in source_columns
+        ]
+    rows = authority_mappings(
+        source_columns,
+        target_columns,
+        source_schemas=source_schemas,
+    )
+    out: list[MappingSuggestion] = []
+    samples_by_source = source_samples or {}
+    for row in rows:
+        source = str(row.get("source") or "")
+        target = str(row.get("target") or "<unmapped>")
+        if row.get("create_new"):
+            target = "<unmapped>"
+        transform = None
+        needed = False
+        if target != "<unmapped>":
+            inferred = infer_transform_for_mapping(
+                source,
+                target,
+                "string",
+                None,
+                list(samples_by_source.get(source) or []),
+            )
+            if inferred and inferred != "none":
+                transform = inferred
+                needed = True
+        out.append(MappingSuggestion(
+            source_column=source,
+            target_column=target,
+            confidence=float(row.get("confidence") or 0),
+            reason=str(row.get("reasoning") or "map_columns SSOT"),
+            transformation_needed=needed,
+            suggested_transformation=transform,
+        ))
+    return out
 
 
 def detect_pii(columns: dict[str, list[str]]) -> dict[str, list[ComplianceFramework]]:

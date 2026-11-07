@@ -185,7 +185,23 @@ function jobDestLabel(job: TransferJob): string {
   return job.destination_collection || job.destination_database || "destination";
 }
 
+/** Topology identity for a job dest — type+database, not a per-table collection. */
+function jobDestTopologyLabel(job: TransferJob): string {
+  return job.destination_database || job.destination_type || "destination";
+}
+
+/** Edges whose both ends are saved connections — not virtual job ghosts. */
+export function countSavedConnectionRoutes(topology: DataPlaneTopology): number {
+  const real = new Set(topology.nodes.filter((n) => !n.isVirtual).map((n) => n.id));
+  return topology.edges.filter((e) => real.has(e.sourceNodeId) && real.has(e.destNodeId)).length;
+}
+
 function findConnectorForJobSource(connectors: Connector[], job: TransferJob): Connector | undefined {
+  const id = (job.source_connector_id || "").trim();
+  // A stored id that is not in this workspace must not fall through to a
+  // table-name guess. That guess turned every source table into its own
+  // "route" and left the real connector unlinked.
+  if (id) return connectors.find((c) => c.id === id);
   const sourceName = job.source_name ?? "";
   if (!sourceName) return undefined;
   return connectors.find(
@@ -196,6 +212,8 @@ function findConnectorForJobSource(connectors: Connector[], job: TransferJob): C
 }
 
 function findConnectorForJobDest(connectors: Connector[], job: TransferJob): Connector | undefined {
+  const id = (job.dest_connector_id || "").trim();
+  if (id) return connectors.find((c) => c.id === id);
   const destLabel = jobDestLabel(job).toLowerCase();
   return connectors.find(
     (c) => c.type === job.destination_type
@@ -301,7 +319,7 @@ export function buildDataPlaneTopology(
     const dstId = dstConn
       ? touchNode(dstConn.id, "destination")
       : ensureVirtualNode(
-          jobDestLabel(job) || job.destination_type || "Destination",
+          jobDestTopologyLabel(job),
           job.destination_type || "database",
           "destination",
           job.status === "completed" || job.status === "completed_with_quarantine" || running,
@@ -324,4 +342,65 @@ export function buildDataPlaneTopology(
   }
 
   return { nodes: [...nodeById.values()], edges };
+}
+
+export interface DataPlaneSummary {
+  connectionCount: number;
+  /** Edges the data-plane card draws, saved and observed. */
+  routeCount: number;
+  /** Edges whose both ends are saved connections in this workspace. */
+  savedRouteCount: number;
+  /** Saved connections that appear on at least one edge. Not a health count. */
+  inRouteCount: number;
+  /** Saved connections that are not on any edge. Not a failed-probe count. */
+  notInRouteCount: number;
+  /** Saved connections that are the source end of an edge. */
+  sourceCount: number;
+  /** Saved connections that are the destination end of an edge. */
+  destinationCount: number;
+}
+
+/** One definition for the subtitle and the card, so they cannot disagree. */
+export function summarizeDataPlane(
+  topology: { nodes: Array<{ id: string; role?: TopologyRole; linked?: boolean; isVirtual?: boolean }>; edges: HubEdge[] },
+  connectionCount: number,
+): DataPlaneSummary {
+  const saved = new Set(topology.nodes.filter((n) => !n.isVirtual).map((n) => n.id));
+  const inRoute = new Set<string>();
+  let savedRouteCount = 0;
+  for (const edge of topology.edges) {
+    const srcSaved = saved.has(edge.sourceNodeId);
+    const dstSaved = saved.has(edge.destNodeId);
+    if (srcSaved && dstSaved) savedRouteCount += 1;
+    if (srcSaved) inRoute.add(edge.sourceNodeId);
+    if (dstSaved) inRoute.add(edge.destNodeId);
+  }
+  const linked = topology.nodes.filter((n) => n.linked && !n.isVirtual);
+  const sourceIds = new Set(topology.edges.map((e) => e.sourceNodeId));
+  const destIds = new Set(topology.edges.map((e) => e.destNodeId));
+  return {
+    connectionCount,
+    routeCount: topology.edges.length,
+    savedRouteCount,
+    inRouteCount: inRoute.size,
+    notInRouteCount: Math.max(0, connectionCount - inRoute.size),
+    sourceCount: linked.filter((n) => sourceIds.has(n.id)).length,
+    destinationCount: linked.filter((n) => destIds.has(n.id)).length,
+  };
+}
+
+export function dataPlaneSubtitle(summary: DataPlaneSummary): string {
+  if (summary.connectionCount === 0 && summary.routeCount === 0) {
+    return "Connect sources and destinations to map your topology";
+  }
+  const connections = `${summary.connectionCount} connection${summary.connectionCount === 1 ? "" : "s"}`;
+  if (summary.routeCount === 0) {
+    return `${connections} · no routes yet`;
+  }
+  const routes = `${summary.routeCount} route${summary.routeCount === 1 ? "" : "s"}`;
+  if (summary.savedRouteCount === summary.routeCount) {
+    return `${routes} · ${connections}`;
+  }
+  const saved = `${summary.savedRouteCount} between saved connections`;
+  return `${routes} · ${saved} · ${connections}`;
 }

@@ -66,6 +66,56 @@ def test_file_stream_stamps_precount_of_existing_rows(tmp_path: Path) -> None:
     assert summary[PRECOUNT_KEY] == 2
 
 
+def test_file_stream_strict_append_gate8_closes_on_precount_delta(tmp_path: Path) -> None:
+    """CSV Full Append into existing rows must not fail Gate-8 on whole-table digest.
+
+    Dest held 2; batch wrote 2; dest=4. Strict checksum compared those
+    incomparable populations and marked a healthy write Failed. Dest-before
+    delta is the identity.
+    """
+    from src.transfer.reconcile_step import run_reconciliation
+
+    db = tmp_path / "dest.db"
+    _seed(db, "landing", [(9, "seed"), (10, "seed")])
+    dest = _sqlite_dest(db, "landing")
+    written, _warnings, summary, _ddl = stream_file_to_database(
+        ROWS.encode(),
+        "rows.csv",
+        dest,
+        MAPPINGS,
+        SCHEMA,
+        sync_mode="full_refresh_append",
+        validation_mode="strict",
+    )
+    assert written == 2
+    assert summary[PRECOUNT_KEY] == 2
+    report = run_reconciliation(
+        endpoint=dest,
+        records=[
+            {"id": 1, "name": "alice"},
+            {"id": 2, "name": "bob"},
+        ],
+        columns=["id", "name"],
+        rows_written=written,
+        writer_checksum="writer-ack-not-dest",
+        dest_summary={**summary, "sync_mode": "full_refresh_append"},
+        mappings=MAPPINGS,
+        source_schema=SCHEMA,
+        validation_mode="strict",
+    )
+    assert report["passed"] is True, report.get("message")
+    assert "checksum mismatch" not in str(report.get("message") or "").lower()
+    assert report.get("migration_proven") is not True
+    assert report.get("target_rows_before") == 2
+    msg = str(report.get("message") or "").lower()
+    scoped = str(report.get("checksum_scope") or "")
+    # Either dest-before delta (incomparable whole-table hashes) or keyed-batch
+    # cell proof — both close Gate-8 without failing the healthy append.
+    assert scoped in {"whole_table_not_comparable", "written_batch_keys"} or (
+        "append delta" in msg or "this run wrote" in msg
+    )
+
+
 def test_file_stream_precount_is_zero_for_create_new(tmp_path: Path) -> None:
     # A table that does not exist yet is a known-empty destination — that is a
     # proof of the "before" cardinality, not an unknown.
@@ -98,6 +148,41 @@ def test_database_stream_stamps_precount(tmp_path: Path) -> None:
         SCHEMA,
         sync_mode="full_refresh_append",
         job_id="0" * 24,
+        checkpoint_service=CheckpointService(_FakeMongo()),
+    )
+
+    assert summary[PRECOUNT_KEY] == 1
+
+
+def test_database_stream_restores_precount_on_resume(tmp_path: Path) -> None:
+    """A mid-run COUNT includes rows already written — resume must restore dest-before."""
+    from services.checkpoint_service import Checkpoint
+
+    src_db = tmp_path / "src.db"
+    dst_db = tmp_path / "dst.db"
+    _seed(src_db, "people", [(1, "alice"), (2, "bob")])
+    _seed(dst_db, "people", [(7, "seed"), (1, "alice")])
+
+    source = EndpointConfig(
+        kind="database", format="sqlite", database=str(src_db), table="people"
+    )
+    cp = Checkpoint(
+        job_id="0" * 24,
+        offset=1,
+        chunk_index=1,
+        target_rows_before=1,
+        cursor_column="id",
+        cursor_value="1",
+    )
+    _, _, summary, _ = stream_database_transfer(
+        source,
+        _sqlite_dest(dst_db, "people"),
+        MAPPINGS,
+        SCHEMA,
+        sync_mode="full_refresh_append",
+        stream_contracts=[{"selected": True, "primary_key": "id"}],
+        job_id="0" * 24,
+        checkpoint=cp,
         checkpoint_service=CheckpointService(_FakeMongo()),
     )
 

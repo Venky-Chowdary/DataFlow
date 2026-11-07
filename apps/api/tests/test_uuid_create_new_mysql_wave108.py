@@ -55,8 +55,10 @@ def test_create_new_mapping_stamps_physical_uuid_wire():
     assert create_new_mapping_target_type("UUID", "mysql") == "CHAR(36)"
     assert create_new_mapping_target_type("UUID", "postgresql") == "UUID"
     assert create_new_mapping_target_type("VARCHAR", "mysql") == "TEXT"
+    # MySQL has no native UUID type: CHAR(36) is the equivalent carrier, so the
+    # stamp is the informational uuid_carrier_equivalent note (mysql-D6, 86df26e22).
     risks = assess_create_new_type_risk("UUID", "CHAR(36)", destination_db_type="mysql")
-    assert any(r["kind"] == "uuid_domain" for r in risks)
+    assert any(r["kind"] == "uuid_carrier_equivalent" for r in risks)
 
     mappings = map_columns(
         source_columns=["meta_deviceId"],
@@ -72,7 +74,7 @@ def test_create_new_mapping_stamps_physical_uuid_wire():
     assert mappings[0]["target_type"] == "CHAR(36)"
     assert "CHAR(36)" in (mappings[0].get("reasoning") or "")
     stamped_risks = mappings[0].get("create_new_risks") or []
-    assert any((r.get("kind") == "uuid_domain") for r in stamped_risks)
+    assert any((r.get("kind") == "uuid_carrier_equivalent") for r in stamped_risks)
 
 def test_validate_coercion_uuid_to_uuid_create_new_passes_strict():
     from services.type_coercion_validator import (

@@ -41,7 +41,8 @@ def test_honesty_dict_explicit_delivery_classes() -> None:
     classes = h["delivery_classes"]
     assert set(classes.keys()) == {"exactly_once", "at_least_once", "at_most_once"}
     assert classes["exactly_once"]["claimed"] is False
-    assert classes["exactly_once"]["available"] is False
+    assert classes["exactly_once"]["available"] is True
+    assert classes["exactly_once"]["opt_in"] is True
     assert classes["at_least_once"]["claimed"] is True
     assert classes["at_least_once"]["default"] is True
     assert classes["at_most_once"]["claimed"] is False
@@ -119,6 +120,39 @@ def test_classify_and_gate_append_only_sink() -> None:
     )
     assert mssql["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE
     gate_cdc_destination(dest_type="sqlserver", has_primary_key=True)
+
+
+def test_vector_pk_upsert_is_at_least_once_not_exactly_once() -> None:
+    from services.cdc_effectively_once import (
+        CdcAppendOnlySinkError,
+        SINK_PK_UPSERT_AT_LEAST_ONCE,
+        classify_sink_delivery,
+        gate_cdc_destination,
+    )
+
+    for dest in ("qdrant", "milvus", "weaviate", "pinecone"):
+        posture = classify_sink_delivery(
+            dest_type=dest, has_primary_key=True, write_mode="upsert"
+        )
+        assert posture["class"] == SINK_PK_UPSERT_AT_LEAST_ONCE, dest
+        assert posture["exactly_once"] is False
+        assert posture["delivery_class"] == "at_least_once"
+        assert posture["duplicates_on_redelivery"] is False
+        assert posture["effectively_once_pk_sink"] is False
+        allowed = gate_cdc_destination(
+            dest_type=dest, has_primary_key=True, write_mode="upsert"
+        )
+        assert allowed["class"] == SINK_PK_UPSERT_AT_LEAST_ONCE
+        try:
+            gate_cdc_destination(
+                dest_type=dest,
+                has_primary_key=True,
+                write_mode="upsert",
+                require_effectively_once=True,
+            )
+            raise AssertionError("expected CdcAppendOnlySinkError")
+        except CdcAppendOnlySinkError as exc:
+            assert "exactly-once" in str(exc).lower() or "least-once" in str(exc).lower()
 
 
 def test_should_apply_rejects_stale_lsn() -> None:

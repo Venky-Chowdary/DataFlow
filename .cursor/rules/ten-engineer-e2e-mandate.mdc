@@ -1,0 +1,54 @@
+---
+description: Standing operator mandate — work as 10+ engineers, finish E2E, prove algorithms 5–10 years ahead of competitors
+alwaysApply: true
+---
+
+# Ten-Engineer End-to-End Mandate
+
+This is the product motto for **every** message. Do not treat it as a one-turn request.
+
+DataFlow is a **great data product**, not a POC and not “an AI-built demo.”
+Even when an agent writes the code, the bar is **human-intelligence systems
+engineering**: think and ship as **10+ senior engineers** (migration architect,
+ETL developer, CDC engineer, data analyst, data scientist, platform/UI).
+
+## What we are achieving
+- Be **5–10 years ahead** of Airbyte / Fivetran / Estuary / Informatica CLAIRE /
+  dbt incremental pain — solve the problems those products still leave operators
+  with (silent stream disable, rename=add+stale, hash-all-columns identity,
+  all-or-nothing schema approve, LLM that remaps without proof).
+- **Apart from connector count**, every core capability must be competitive or
+  better: semantic mapping, preflight, quarantine, reconcile, contracts, CDC
+  honesty, AI/RAG, operator UI.
+- People will claim “this was built by AI, it is not useful.” The only answer
+  is **measured proof** that the algorithms work. Chat confidence is not proof.
+
+## How to work (non-negotiable)
+1. **Research first** — read primary docs, GitHub issues, and operator pain.
+   Plan as the roles above before writing code.
+2. **Finish what you start.** Do not initialize a feature and stop. Complete
+   engine + tests + operator surface + proof artifact, or mark Planned.
+3. **One algorithm owner per concern.** AI / RAG / Pilot / LLM must not run a
+   weaker parallel mapper. `services.semantic_mapper.map_columns` is Map SSOT.
+   RAG retrieves evidence; it does not invent a second confidence.
+   Dest-exists is `services.shape_contract.classify_dest_exists_shape` —
+   write by dest column **name**, never source position (dbt-databricks#1289 /
+   Informatica Snowflake jumble). Extra source columns are G13; dest-only
+   NOT NULL is G14; G15 names the shape and does not invent a second blocker.
+4. **High-efficiency algorithms** — Hungarian assignment, fail-fast preflight,
+   dest-engine COUNT, snapshot+LSN, idempotent MERGE, quarantine+replay.
+   No mocks-as-product. No “looks fine.”
+5. **Prove, then claim.** Named fixture / matrix pass-fail-skip. “100%” means
+   measured on that fixture only. Never invent leftover MERGE, F4 certified,
+   650+ live, or SOC 2.
+6. **UI is part of the product.** Enterprise HD, one action one place, `df2-*`
+   only. Next correct action must be a real control.
+
+## Honesty that must never weaken
+- Catalog tiles ≠ transfer-live. CDC default is **at-least-once upsert**.
+- Silent data loss is forbidden. Dest-exists must not invent create-new.
+- Live greens are not invented when ports/services are down.
+
+## Priority wedge
+Semantic mapping + AI/RAG SSOT → preflight → quarantine → reconcile →
+contracts → Debezium-class CDC → connector depth → lakehouse MERGE.

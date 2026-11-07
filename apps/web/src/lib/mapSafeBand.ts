@@ -5,6 +5,7 @@
  * Classification is fail-closed: any ambiguity → attention (never invent "safe").
  */
 import {
+  assumeTimezoneAwaitingZone,
   hasCreateNewTypeRisk,
   isIntentionalOmit,
   isSafeNormalizeMapping,
@@ -29,6 +30,7 @@ export function isSafeBandMapping(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
   if (m.approved) return false;
   if (m.assignmentStrategy === "pending_dest_schema") return false;
+  if (assumeTimezoneAwaitingZone(m)) return false;
   if (mappingRequiresRiskAck(m)) return false;
   if (hasCreateNewTypeRisk(m)) return false;
   if (m.typeNarrowing) return false;
@@ -82,6 +84,15 @@ export function shouldCollapseSafeBand(
   minSafe = 2,
 ): boolean {
   return partition.safe.length >= minSafe;
+}
+
+/**
+ * Fold approved rows only when other rows stay on screen.
+ * Folding the only rows hides the contract and leaves an empty table.
+ */
+export function shouldCollapseReadyBand(partition: MapBandPartition): boolean {
+  if (partition.ready.length < 2) return false;
+  return partition.attention.length > 0 || partition.safe.length > 0;
 }
 
 export function mapBandLabel(id: MapBandId, count: number): string {

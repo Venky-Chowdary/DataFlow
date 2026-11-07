@@ -106,11 +106,10 @@ def test_redis_scan_dedupes_duplicate_keys():
 
     state = RedisScanState()
     client = MagicMock()
-    # First SCAN returns k2 twice (documented Redis SCAN behavior).
-    client.scan.side_effect = [
-        (1, [b"k1", b"k2", b"k2"]),
-        (0, [b"k2", b"k3"]),
-    ]
+    # First SCAN page returns k2 twice (documented Redis SCAN behavior). Keyed
+    # by cursor so the reader's separate population walk sees the same pages.
+    pages = {0: (1, [b"k1", b"k2", b"k2"]), 1: (0, [b"k2", b"k3"])}
+    client.scan.side_effect = lambda cursor=0, **_kw: pages[cursor]
     client.type.return_value = b"string"
     client.get.side_effect = lambda k: f"v-{k}".encode()
 

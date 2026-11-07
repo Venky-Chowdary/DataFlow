@@ -1,0 +1,77 @@
+/**
+ * Transfer Studio Job Theater mount policy.
+ *
+ * Theater is the operator surface for live progress AND completed Gate-8.
+ * Clearing the job id on terminal status unmounts Theater and hides the
+ * Gate-8 card that only renders on `isComplete && job.reconciliation`.
+ *
+ * Leave Theater only via an explicit action (Validate / Map / New transfer).
+ * Do not mount Theater and the result dashboard together — one Gate-8 card.
+ */
+import { isJobTerminal } from "./uiUtils";
+
+/** Keep Theater mounted so Gate-8 / recovery CTAs stay on the operator path. */
+export function keepTheaterMountedOnStatus(status: string | undefined): boolean {
+  return isJobTerminal(status);
+}
+
+/** Route bar "live" is the write, not a completed Theater that is still mounted. */
+export function routeBarLiveWhileWriting(transferring: boolean): boolean {
+  return transferring;
+}
+
+/** Theater XOR result dashboard — never two Gate-8 cards on Execute. */
+export function showStudioResultDashboard(input: {
+  hasResult: boolean;
+  theaterJobId: string | null | undefined;
+}): boolean {
+  return input.hasResult && !input.theaterJobId;
+}
+
+/**
+ * Studio Schedule persists a Validate-approved mapping onto a saved
+ * source→dest connector pair. File sources and inline dests cannot
+ * replay unattended — do not offer a control that toasts-refuses.
+ */
+export function canPersistStudioSchedule(input: {
+  isConnectorSource: boolean;
+  sourceConnectorId?: string | null;
+  destKindMode: string;
+  destConnectorId?: string | null;
+}): boolean {
+  return Boolean(
+    input.isConnectorSource
+    && String(input.sourceConnectorId || "").trim()
+    && input.destKindMode === "database"
+    && String(input.destConnectorId || "").trim(),
+  );
+}
+
+/**
+ * Every terminal Theater status reaches the Studio's run-result handler.
+ *
+ * Wiring only ``onComplete`` left a failed or cancelled run without a result,
+ * so Validate could not tell the verdict was disproved and kept the old green
+ * preflight beside the dead run's "Open live progress".
+ */
+export function terminalTheaterHandlers<J>(handler: (job: J) => void): {
+  onComplete: (job: J) => void;
+  onFailed: (job: J) => void;
+  onCancelled: (job: J) => void;
+} {
+  return { onComplete: handler, onFailed: handler, onCancelled: handler };
+}
+
+/**
+ * The Jobs detail pane caches the full job record; the list carries only a
+ * summary. When the listed status moves to terminal (or first appears
+ * terminal after a live snapshot), the detail must be re-read: reconciliation
+ * and Gate-8 evidence are written at completion and are not in the list row.
+ */
+export function jobDetailNeedsRefetch(
+  shownStatus: string | undefined,
+  listedStatus: string | undefined,
+): boolean {
+  if (!listedStatus || shownStatus === listedStatus) return false;
+  return isJobTerminal(listedStatus);
+}

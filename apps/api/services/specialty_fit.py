@@ -26,7 +26,7 @@ _OBJECTID_EXACT_BINARY_WIRE = frozenset({"BINARY(12)", "VARBINARY(12)", "BYTES(1
 
 # Width-pinned character wires that still pin the 24-char hex domain.
 _PINNED_CHAR_WIDTH_PATTERNS = (
-    r"^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*\)$",
+    r"^N?(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*(?:CHAR|BYTE)?\s*\)$",
     r"^VARCHAR2\s*\(\s*(\d+)\s*(?:BYTE|CHAR)?\s*\)$",
     r"^STRING\s*\(\s*(\d+)\s*\)$",
 )
@@ -50,14 +50,16 @@ def objectid_text_domain_polarity(source_type: str, target_type: str) -> bool:
     from services.type_system import (
         LOGICAL_STRING,
         LOGICAL_TEXT,
+        charset_free_wire_token,
         normalize_logical_type,
         specialty_carrier_base,
-        strip_identity_qualifier,
     )
 
     if specialty_carrier_base(source_type) != "OBJECTID":
         return False
-    upper = strip_identity_qualifier(target_type).strip().upper()
+    # The CHARACTER SET tail is equality, not width (DataFlow's own MySQL /
+    # MariaDB ObjectId column is CHAR(24) CHARACTER SET utf8mb4 ..., D211).
+    upper = charset_free_wire_token(target_type).upper()
     if not upper:
         return False
     if upper in _OBJECTID_EXACT_BINARY_WIRE:

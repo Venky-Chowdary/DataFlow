@@ -3,7 +3,7 @@ import { ConnectorIcon } from "../../app/brand-icons";
 import { DtLogo } from "../DtLogo";
 
 const SOURCE_IDS = ["postgresql", "mysql", "mongodb", "amazon_s3"];
-const DEST_IDS = ["snowflake", "bigquery", "redshift", "elasticsearch"];
+const DEST_IDS = ["snowflake", "bigquery", "sqlserver", "elasticsearch"];
 
 const PIPELINE_STEPS = [
   { label: "Ingest", active: true },

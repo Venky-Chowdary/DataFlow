@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   decimalWouldCollapse,
+  declaredCarrierFidelityRisk,
   effectiveDestCarrier,
   parseStringCarrierWidth,
   saasDefaultCarrier,
@@ -120,5 +121,23 @@ describe("Map fidelity chips — width/scale/SaaS", () => {
     assert.ok(risk);
     assert.equal(risk!.id.startsWith("sample-width-"), true);
     assert.equal(fidelityChipLabel(risk!), "width");
+  });
+});
+
+describe("warehouse LOB ceilings are unlimited string carriers (API SSOT)", () => {
+  // PG TEXT -> an existing Snowflake table: DESC TABLE reads the column back
+  // as VARCHAR(16777216), Snowflake's TEXT. Map asked for a Risk Contract on
+  // TEXT -> VARCHAR while the engine graded the same path preserve.
+  it("TEXT onto Snowflake VARCHAR(16777216) / Redshift VARCHAR(65535) is not a narrowing", () => {
+    for (const tgt of ["VARCHAR(16777216)", "VARCHAR(134217728)", "VARCHAR(65535)"]) {
+      assert.equal(stringWidthWouldNarrow("TEXT", tgt), false, tgt);
+      assert.equal(declaredCarrierFidelityRisk("text", tgt), false, tgt);
+      assert.equal(parseStringCarrierWidth(tgt), null, tgt);
+    }
+  });
+
+  it("a bounded VARCHAR under the ceiling still narrows TEXT", () => {
+    assert.equal(stringWidthWouldNarrow("TEXT", "VARCHAR(65534)"), true);
+    assert.equal(declaredCarrierFidelityRisk("text", "VARCHAR(256)"), true);
   });
 });

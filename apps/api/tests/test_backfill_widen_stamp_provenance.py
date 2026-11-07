@@ -28,6 +28,12 @@ def test_catalog_echo_is_not_an_operator_ceiling():
     assert stamp_is_operator_ceiling(_catalog_stamp()) is False
 
 
+def test_sampled_profile_origin_is_not_an_operator_ceiling():
+    assert stamp_is_operator_ceiling(
+        _catalog_stamp(target_type_origin="sampled_profile")
+    ) is False
+
+
 def test_operator_edit_of_a_catalog_column_is_a_ceiling():
     assert stamp_is_operator_ceiling(_catalog_stamp(user_override=True)) is True
 

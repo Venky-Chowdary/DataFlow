@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services.brand import bigquery_default_dataset
 from connectors.base import ConnectResult
 
 
@@ -70,7 +71,7 @@ def test_database_connection(
             database=database,
             username=username,
             password=password,
-            schema=schema or "dataflow",
+            schema=schema or bigquery_default_dataset(),
             connection_string=connection_string,
             ssl=ssl,
         )

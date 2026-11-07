@@ -23,10 +23,12 @@ import {
   type TransformProject,
   type TransformRunResult,
 } from "../lib/api";
-import type { Connector } from "../lib/types";
+import type { Connector, Screen } from "../lib/types";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 
 interface TransformsPageProps {
   connectors: Connector[];
+  onNavigate?: (screen: Screen) => void;
 }
 
 type Materialization = TransformModelDef["materialization"];
@@ -54,7 +56,8 @@ const EMPTY_DRAFT = (): Omit<TransformProject, "id"> & { id?: string } => ({
   description: "",
 });
 
-export function TransformsPage({ connectors }: TransformsPageProps) {
+export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) {
+  const runGate = useWriteGate(PERMISSIONS.jobRun);
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [projects, setProjects] = useState<TransformProject[]>([]);
@@ -326,6 +329,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
 
   return (
     <PageShell
+      className="df2-page-transforms"
       title="Transforms"
       description="Post-load SQL models that run at the destination after a transfer lands — open a row for Dry run, Run, Export, or Edit."
     >
@@ -474,16 +478,20 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
           </PageSection>
         ) : (
           <>
-            <PageToolbar
-              searchValue={search}
-              onSearchChange={setSearch}
-              searchPlaceholder="Search transforms or models…"
-              actions={
-                <Button variant="primary" size="sm" leadingIcon={<DtIcon name="plus" size={14} />} onClick={openCreate}>
-                  New transform
-                </Button>
-              }
-            />
+            {/* With nothing to search or list, the toolbar only duplicated the
+                empty state's own action. */}
+            {projects.length > 0 && (
+              <PageToolbar
+                searchValue={search}
+                onSearchChange={setSearch}
+                searchPlaceholder="Search transforms or models…"
+                actions={
+                  <Button variant="primary" size="sm" leadingIcon={<DtIcon name="plus" size={14} />} onClick={openCreate}>
+                    New transform
+                  </Button>
+                }
+              />
+            )}
 
             {loading ? (
               <SectionLoader title="Loading transforms" hint="Fetching post-load SQL models…" />
@@ -498,9 +506,19 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
                 }
                 action={
                   projects.length === 0 ? (
-                    <Button variant="primary" leadingIcon={<DtIcon name="plus" size={14} />} onClick={openCreate}>
-                      New transform
-                    </Button>
+                    <div className="df2-empty-actions-row">
+                      <Button variant="primary" leadingIcon={<DtIcon name="plus" size={14} />} onClick={openCreate}>
+                        New transform
+                      </Button>
+                      {/* A model runs against a landed destination table, so
+                          the honest next step when nothing has landed is the
+                          transfer, not another empty form. */}
+                      {onNavigate && (
+                        <Button variant="secondary" leadingIcon={<DtIcon name="arrow-right" size={14} />} onClick={() => onNavigate("transfer")}>
+                          Run a transfer first
+                        </Button>
+                      )}
+                    </div>
                   ) : undefined
                 }
                 page
@@ -599,8 +617,20 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
               selectedProject && lastRunProjectId === selectedProject.id ? lastRun : null
             }
             onClose={closeDrawer}
-            onDryRun={() => selectedProject && void handleRun(selectedProject, true)}
-            onRun={() => selectedProject && void handleRun(selectedProject, false)}
+            onDryRun={
+              runGate.allowed
+                ? () => {
+                    if (selectedProject) void handleRun(selectedProject, true);
+                  }
+                : undefined
+            }
+            onRun={
+              runGate.allowed
+                ? () => {
+                    if (selectedProject) void handleRun(selectedProject, false);
+                  }
+                : undefined
+            }
             onExportDbt={() => selectedProject && void handleExportDbt(selectedProject)}
             onEdit={() => {
               if (!selectedProject) return;

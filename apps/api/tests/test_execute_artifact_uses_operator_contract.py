@@ -82,6 +82,43 @@ def test_unstamped_run_keeps_using_the_derived_maps() -> None:
     assert _operator_contract_maps(req, ENRICHED_MAPS) == ENRICHED_MAPS
 
 
+def test_repreflight_dest_exists_artifact_is_not_adopted_when_operator_stamped() -> None:
+    """Schedule beat: operator hash + Execute dest-exists overlay must not refuse.
+
+    Adopting proof_bundle.decision_artifact as supplied compared dest-exists
+    DDL to the operator Map and failed every later hourly beat.
+    """
+    from services.schema_fingerprint import fingerprint_schema
+
+    art = build_artifact_from_mappings(
+        OPERATOR_MAPS,
+        dest_db="mysql",
+        route_id="validate:mysql",
+        sync_mode="full_refresh_append",
+    ).to_dict()
+    dest_types = {"country": "TEXT", "total": "DECIMAL(7,3)"}
+    live = fingerprint_schema(list(dest_types.keys()), dest_types)
+    overlay = build_artifact_from_mappings(
+        ENRICHED_MAPS,
+        dest_db="mysql",
+        dest_fingerprint=live,
+        route_id="execute:mysql",
+    ).to_dict()
+    req = _Req(OPERATOR_MAPS, approved_hash=art["content_hash"])
+    err, accepted = _enforce_decision_artifact(
+        {"proof_bundle": {"decision_artifact": overlay}},
+        _operator_contract_maps(req, ENRICHED_MAPS),
+        dest_db="mysql",
+        approved_decision_artifact_hash=art["content_hash"],
+        decision_artifact=None,
+        sync_mode="full_refresh_append",
+        destination_column_types=dest_types,
+        destination_table_exists=True,
+    )
+    assert err is None
+    assert accepted is not None
+
+
 def test_real_map_edit_after_validate_is_still_refused() -> None:
     """Fail-closed is preserved: editing the Map must invalidate the stamp."""
     art = _validate_artifact()

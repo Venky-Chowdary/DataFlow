@@ -119,6 +119,15 @@ def test_non_folding_engine_resolves_through_the_inspector() -> None:
     assert ident.columns == {"amount": "Amount", "id": "id"}
 
 
+def test_qualified_name_is_split_before_catalog_lookup() -> None:
+    """``SYSTEM.users`` plus a fallback schema must not look up ``SYSTEM.users``."""
+    ident = resolve_object_identity(
+        _engine_with_both_spellings(), "SYSTEM.users", "PUBLIC", columns=["id"]
+    )
+    assert (ident.exists, ident.schema, ident.table) == (True, "SYSTEM", "users")
+    assert ident.columns == {"id": "id"}
+
+
 def test_empty_table_name_is_absent() -> None:
     assert resolve_object_identity(_OracleEngine({}), "", "system") == ObjectIdentity(
         "system", "", False

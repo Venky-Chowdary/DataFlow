@@ -1,0 +1,123 @@
+{
+  "name": "servicenow",
+  "docs": "https://www.servicenow.com/docs/bundle/zurich-api-reference/page/integrate/inbound-rest/concept/c_TableAPI.html",
+  "base_url": "https://{instance}.service-now.com",
+  "auth": {
+    "type": "basic"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "incident",
+      "path": "api/now/table/incident",
+      "records_path": "result",
+      "primary_key": ["sys_id"],
+      "request_params": {
+        "sysparm_display_value": "true",
+        "sysparm_exclude_reference_link": "true"
+      },
+      "cursor": {
+        "field": "sys_updated_on",
+        "request_param": "sysparm_query",
+        "format": "iso8601",
+        "lookback_s": 60,
+        "request_template": "sys_updated_on>={cursor:%Y-%m-%d %H:%M:%S}^ORDERBYsys_updated_on"
+      },
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "sysparm_limit",
+        "offset_param": "sysparm_offset"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "sys_id": {"type": "string"},
+          "number": {"type": ["string", "null"]},
+          "short_description": {"type": ["string", "null"]},
+          "state": {"type": ["string", "null"]},
+          "priority": {"type": ["string", "null"]},
+          "sys_created_on": {"type": ["string", "null"]},
+          "sys_updated_on": {"type": ["string", "null"]}
+        }
+      }
+    },
+    {
+      "name": "change_request",
+      "path": "api/now/table/change_request",
+      "records_path": "result",
+      "primary_key": ["sys_id"],
+      "request_params": {
+        "sysparm_display_value": "true",
+        "sysparm_exclude_reference_link": "true"
+      },
+      "cursor": {
+        "field": "sys_updated_on",
+        "request_param": "sysparm_query",
+        "format": "iso8601",
+        "lookback_s": 60,
+        "request_template": "sys_updated_on>={cursor:%Y-%m-%d %H:%M:%S}^ORDERBYsys_updated_on"
+      },
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "sysparm_limit",
+        "offset_param": "sysparm_offset"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "sys_id": {"type": "string"},
+          "number": {"type": ["string", "null"]},
+          "short_description": {"type": ["string", "null"]},
+          "state": {"type": ["string", "null"]},
+          "type": {"type": ["string", "null"]},
+          "sys_created_on": {"type": ["string", "null"]},
+          "sys_updated_on": {"type": ["string", "null"]}
+        }
+      }
+    },
+    {
+      "name": "sys_user",
+      "path": "api/now/table/sys_user",
+      "records_path": "result",
+      "primary_key": ["sys_id"],
+      "request_params": {
+        "sysparm_display_value": "true",
+        "sysparm_exclude_reference_link": "true"
+      },
+      "cursor": {
+        "field": "sys_updated_on",
+        "request_param": "sysparm_query",
+        "format": "iso8601",
+        "lookback_s": 60,
+        "request_template": "sys_updated_on>={cursor:%Y-%m-%d %H:%M:%S}^ORDERBYsys_updated_on"
+      },
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "sysparm_limit",
+        "offset_param": "sysparm_offset"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "sys_id": {"type": "string"},
+          "user_name": {"type": ["string", "null"]},
+          "name": {"type": ["string", "null"]},
+          "email": {"type": ["string", "null"]},
+          "department": {"type": ["string", "null"]},
+          "active": {"type": ["string", "boolean", "null"]},
+          "sys_updated_on": {"type": ["string", "null"]}
+        }
+      }
+    }
+  ]
+}

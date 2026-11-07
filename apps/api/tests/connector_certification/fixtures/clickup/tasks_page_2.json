@@ -1,0 +1,13 @@
+{
+  "tasks": [
+    {
+      "id": "fixture-task-p2",
+      "name": "Fixture task page two",
+      "status": {"status": "open"},
+      "date_created": "1704153600000",
+      "date_updated": "1704153600000",
+      "date_closed": null
+    }
+  ],
+  "last_page": true
+}

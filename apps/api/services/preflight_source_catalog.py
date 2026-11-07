@@ -69,12 +69,24 @@ def load_source_foreign_keys(
         return []
     if not source_connector_id and not source_config:
         return []
+    try:
+        from services.procedure_source import is_callable_source
+
+        if is_callable_source(source_config):
+            logger.info(
+                "source FK catalog skipped: callable extract has no catalog relation"
+            )
+            return []
+    except Exception:
+        pass
     cfg, db_type = _resolve_source(
         source_connector_id=source_connector_id,
         source_config=source_config,
         workspace_id=workspace_id,
     )
-    if not cfg or db_type not in SUPPORTED_DIALECTS:
+    from src.transfer.engine_family import family_or_kind
+
+    if not cfg or family_or_kind(db_type) not in SUPPORTED_DIALECTS:
         return []
     measured = measure_source_foreign_keys(db_type, cfg, [table]).get(table)
     if measured is None or not measured.measured:
