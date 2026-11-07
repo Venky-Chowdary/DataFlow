@@ -35,6 +35,10 @@ export interface StudioRouteSnapshot {
   rowLimit: number;
   mappings: RecoveryMapping[];
   scheduleId: string;
+  /** Shape program for this route. Empty replaces a previous route's recipe. */
+  shapeSteps: unknown[];
+  /** Procedure binds. Empty replaces a previous call's parameters. */
+  procedureParams: Record<string, string>;
 }
 
 export interface RecoveryFields extends StudioRouteSnapshot {
@@ -76,6 +80,8 @@ const EMPTY_SNAPSHOT = (): StudioRouteSnapshot => ({
   rowLimit: 0,
   mappings: [],
   scheduleId: "",
+  shapeSteps: [],
+  procedureParams: {},
 });
 
 const text = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
@@ -185,6 +191,23 @@ function mappingsFrom(raw: unknown): RecoveryMapping[] {
   return out;
 }
 
+function stepsFromRecipe(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw.slice();
+  if (raw && typeof raw === "object" && Array.isArray((raw as { steps?: unknown }).steps)) {
+    return ((raw as { steps: unknown[] }).steps).slice();
+  }
+  return [];
+}
+
+function paramsFrom(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "string") out[key] = value;
+  }
+  return out;
+}
+
 function rowLimitOf(value: unknown): number {
   const n = typeof value === "number" ? value : Number(text(value));
   if (!Number.isFinite(n) || n <= 0) return 0;
@@ -218,6 +241,10 @@ function fieldsFromJob(job: unknown): RecoveryFields {
     cursorColumn: hasRequest ? cursorFrom(contracts, "") : "",
     rowLimit: hasRequest ? rowLimitOf(tr.limit) : 0,
     mappings: hasRequest ? mappingsFrom(tr.mappings) : [],
+    shapeSteps: hasRequest ? stepsFromRecipe(tr.shape_recipe) : [],
+    procedureParams: hasRequest
+      ? paramsFrom(src.procedure_params ?? srcExtra.procedure_params)
+      : {},
     partial: !hasRequest,
   };
 }
@@ -242,7 +269,7 @@ function fieldsFromSchedule(sched: Partial<PipelineSchedule>): RecoveryFields {
     sourceConnectorId: text(sched.source_connector_id),
     destConnectorId: text(sched.dest_connector_id),
     sourceTable: text(sched.source_table),
-    destDatabase: "",
+    destDatabase: text((sched as { dest_database?: string }).dest_database),
     destTable: text(sched.dest_table),
     syncMode: text(sched.sync_mode),
     sourceReadMode,
@@ -251,6 +278,8 @@ function fieldsFromSchedule(sched: Partial<PipelineSchedule>): RecoveryFields {
     cursorColumn: text(sched.cursor_column) || cursorFrom(contracts, ""),
     rowLimit: rowLimitOf(sched.row_limit),
     mappings: mappingsFrom(sched.mappings),
+    shapeSteps: stepsFromRecipe(sched.shape_recipe),
+    procedureParams: paramsFrom(sched.procedure_params),
     partial: false,
   };
 }
@@ -271,7 +300,7 @@ function mergeFields(jobFields: RecoveryFields | null, schedule: RecoveryFields 
     sourceConnectorId: prefer(jobFields.sourceConnectorId, schedule.sourceConnectorId),
     destConnectorId: prefer(jobFields.destConnectorId, schedule.destConnectorId),
     sourceTable: prefer(jobFields.sourceTable, schedule.sourceTable),
-    destDatabase: jobFields.destDatabase,
+    destDatabase: prefer(jobFields.destDatabase, schedule.destDatabase),
     destTable: prefer(jobFields.destTable, schedule.destTable),
     syncMode: prefer(jobFields.syncMode, schedule.syncMode),
     sourceReadMode: jobOwnsContract ? jobFields.sourceReadMode : schedule.sourceReadMode,
@@ -280,15 +309,24 @@ function mergeFields(jobFields: RecoveryFields | null, schedule: RecoveryFields 
     cursorColumn: jobOwnsContract ? jobFields.cursorColumn : prefer(jobFields.cursorColumn, schedule.cursorColumn),
     rowLimit: jobOwnsContract ? jobFields.rowLimit : (jobFields.rowLimit || schedule.rowLimit),
     mappings: jobOwnsContract && jobFields.mappings.length ? jobFields.mappings : schedule.mappings,
+    shapeSteps: jobOwnsContract && jobFields.shapeSteps.length ? jobFields.shapeSteps : schedule.shapeSteps,
+    procedureParams: jobOwnsContract && Object.keys(jobFields.procedureParams).length
+      ? jobFields.procedureParams
+      : schedule.procedureParams,
     partial: false,
   };
 }
 
-function workspacesConflict(active: string, ids: string[]): boolean {
-  const named = ids.filter(Boolean);
+/** Browser views, not tenant ids. Comparing them to a job workspace refused a legal open. */
+const WORKSPACE_VIEWS = new Set(["__all__", "__unassigned__"]);
+
+export function workspaceBlocksRecovery(active: string, ids: readonly string[]): boolean {
+  const named = ids.map((id) => text(id)).filter(Boolean);
   if (new Set(named).size > 1) return true;
-  if (!active) return named.length > 0;
-  return named.some((id) => id !== active);
+  const scope = text(active);
+  if (WORKSPACE_VIEWS.has(scope)) return false;
+  if (!scope) return named.length > 0;
+  return named.some((id) => id !== scope);
 }
 
 /**
@@ -305,7 +343,7 @@ export function decideStudioRecovery(input: RecoveryInput): RecoveryDecision {
   const fields = mergeFields(jobFields, scheduleFields);
   const active = text(input.activeWorkspaceId);
   const workspaceIds = [jobFields?.workspaceId || "", scheduleFields?.workspaceId || ""];
-  if (workspacesConflict(active, workspaceIds)) {
+  if (workspaceBlocksRecovery(active, workspaceIds)) {
     return { action: "refuse", reason: "wrong_workspace" };
   }
   const known = new Set(input.knownConnectorIds);
@@ -339,6 +377,8 @@ export interface RecoveryIntentFields {
   rowLimit?: number;
   /** Job and schedule rows are not the same shape. Normalized inside. */
   mappings?: readonly unknown[];
+  shapeSteps?: unknown[];
+  procedureParams?: Record<string, string>;
 }
 
 /**
@@ -363,8 +403,7 @@ export function applyRecoveryIntent(
     };
   }
   const workspaceId = text(intent.workspaceId);
-  const active = text(opts.activeWorkspaceId);
-  if (workspaceId && (!active || workspaceId !== active)) {
+  if (workspaceBlocksRecovery(opts.activeWorkspaceId, [workspaceId])) {
     return {
       refused: "wrong_workspace",
       state: applyStudioRecovery(previous, { action: "refuse", reason: "wrong_workspace" }),
@@ -385,6 +424,8 @@ export function applyRecoveryIntent(
     cursorColumn: text(intent.cursorColumn),
     rowLimit: rowLimitOf(intent.rowLimit),
     mappings: mappingsFrom(intent.mappings),
+    shapeSteps: stepsFromRecipe(intent.shapeSteps),
+    procedureParams: paramsFrom(intent.procedureParams),
     partial: false,
   };
   const known = new Set(opts.knownConnectorIds);
@@ -424,5 +465,153 @@ export function applyStudioRecovery(
     rowLimit: f.rowLimit,
     mappings: f.mappings.map((row) => ({ ...row })),
     scheduleId: f.scheduleId,
+    shapeSteps: f.shapeSteps.slice(),
+    procedureParams: { ...f.procedureParams },
   };
+}
+
+/**
+ * Column effect after a recovery paint.
+ *
+ * Heuristics fill only a field the schedule did not declare. A declared
+ * cursor or key is kept while the mounted column list is still the previous
+ * route, and is not replaced when the new columns include a tempting
+ * `updated_at` or `id`.
+ */
+export function keepDeclaredCursorKey(input: {
+  cursorField: string;
+  primaryKeyField: string;
+  columns: readonly string[];
+  cursorCandidate: string;
+  primaryKeyCandidate: string;
+  declaredCursor: string;
+  declaredPrimaryKey: string;
+}): { cursorField: string; primaryKeyField: string } {
+  const nextField = (
+    current: string,
+    candidate: string,
+    declared: string,
+  ): string => {
+    if (declared) return declared;
+    const known = input.columns.length > 0;
+    if (candidate && (!current || (known && !input.columns.includes(current)))) return candidate;
+    if (!candidate && current && known && !input.columns.includes(current)) return "";
+    return current;
+  };
+  return {
+    cursorField: nextField(input.cursorField, input.cursorCandidate, input.declaredCursor),
+    primaryKeyField: nextField(input.primaryKeyField, input.primaryKeyCandidate, input.declaredPrimaryKey),
+  };
+}
+
+/** Missing destination: drop the previous engine. Empty database clears the previous one. */
+export function destinationEnginePaint(input: {
+  destConnectorId: string;
+  destTable: string;
+  destDatabase: string;
+  connectorFound: boolean;
+}): { connectorId: string; table: string; database: string; clearEngine: boolean } {
+  if (input.destConnectorId && input.connectorFound) {
+    return {
+      connectorId: input.destConnectorId,
+      table: input.destTable,
+      database: input.destDatabase,
+      clearEngine: false,
+    };
+  }
+  return {
+    connectorId: "",
+    table: input.destTable,
+    database: input.destDatabase,
+    clearEngine: true,
+  };
+}
+
+const RECOVERY_STORAGE_KEY = "df2.studioRecovery.v1";
+
+export interface StoredStudioRecovery {
+  workspaceId: string;
+  scheduleId: string;
+  sourceConnectorId: string;
+  destConnectorId: string;
+  sourceTable: string;
+  destDatabase: string;
+  destTable: string;
+  syncMode: string;
+  sourceReadMode: string;
+  sourceSql: string;
+  primaryKey: string;
+  cursorColumn: string;
+  rowLimit: number;
+  mappings: RecoveryMapping[];
+  shapeSteps: unknown[];
+  procedureParams: Record<string, string>;
+  workspaceOfRoute: string;
+}
+
+function storage(): Storage | null {
+  try {
+    return globalThis.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the open route so a hard reload can paint it again. No secrets. */
+export function persistStudioRecovery(activeWorkspaceId: string, snap: StudioRouteSnapshot, routeWorkspaceId = ""): void {
+  const store = storage();
+  if (!store) return;
+  const record: StoredStudioRecovery = {
+    workspaceId: text(activeWorkspaceId),
+    scheduleId: snap.scheduleId,
+    sourceConnectorId: snap.sourceConnectorId,
+    destConnectorId: snap.destConnectorId,
+    sourceTable: snap.sourceTable,
+    destDatabase: snap.destDatabase,
+    destTable: snap.destTable,
+    syncMode: snap.syncMode,
+    sourceReadMode: snap.sourceReadMode,
+    sourceSql: snap.sourceSql,
+    primaryKey: snap.primaryKey,
+    cursorColumn: snap.cursorColumn,
+    rowLimit: snap.rowLimit,
+    mappings: snap.mappings.map((row) => ({ source: row.source, destination: row.destination })),
+    shapeSteps: snap.shapeSteps.slice(),
+    procedureParams: { ...snap.procedureParams },
+    workspaceOfRoute: text(routeWorkspaceId),
+  };
+  try {
+    store.setItem(RECOVERY_STORAGE_KEY, JSON.stringify(record));
+  } catch {
+    // A full session store must not block the paint.
+  }
+}
+
+export function loadStudioRecovery(activeWorkspaceId: string): StoredStudioRecovery | null {
+  const store = storage();
+  if (!store) return null;
+  let parsed: StoredStudioRecovery | null = null;
+  try {
+    const raw = store.getItem(RECOVERY_STORAGE_KEY);
+    if (!raw) return null;
+    parsed = JSON.parse(raw) as StoredStudioRecovery;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const scope = text(activeWorkspaceId);
+  const owner = text(parsed.workspaceOfRoute) || text(parsed.workspaceId);
+  if (owner && !WORKSPACE_VIEWS.has(scope) && scope && owner !== scope && text(parsed.workspaceId) !== scope) {
+    return null;
+  }
+  return parsed;
+}
+
+export function clearStudioRecovery(): void {
+  const store = storage();
+  try {
+    store?.removeItem(RECOVERY_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
 }

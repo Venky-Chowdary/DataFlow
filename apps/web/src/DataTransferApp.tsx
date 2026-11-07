@@ -20,6 +20,7 @@ import { StudioActionsProvider } from "./lib/StudioActionsContext";
 import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { EMPTY_JOB_HISTORY, type JobHistory } from "./lib/jobHistory";
 import { clearSession, readSession, writeSession } from "./lib/session";
+import { loadStudioRecovery } from "./lib/studioRecovery";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId } from "./lib/workspace";
 import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
@@ -148,7 +149,35 @@ function AppShell({
   /** Seed Transfer Studio source from Connectors drawer (id + token so re-clicks re-apply). */
   const [transferSeedSource, setTransferSeedSource] = useState<{ connectorId: string; token: number } | null>(null);
   /** Jobs → Studio deep-link (Validate / repair proposal / seeded mappings). */
-  const [transferStudioIntent, setTransferStudioIntent] = useState<(JobsStudioIntent & { token: number }) | null>(null);
+  const [transferStudioIntent, setTransferStudioIntent] = useState<(JobsStudioIntent & { token: number }) | null>(() => {
+    const saved = loadStudioRecovery(getActiveWorkspaceId());
+    if (!saved) return null;
+    if (!saved.scheduleId && !saved.destTable && !saved.sourceTable && !saved.sourceSql && !saved.sourceConnectorId) {
+      return null;
+    }
+    return {
+      token: 1,
+      step: "source",
+      replaceRoute: true,
+      jobId: undefined,
+      scheduleId: saved.scheduleId || undefined,
+      sourceConnectorId: saved.sourceConnectorId || undefined,
+      destConnectorId: saved.destConnectorId || undefined,
+      sourceTable: saved.sourceTable || undefined,
+      destTable: saved.destTable || undefined,
+      destDatabase: saved.destDatabase,
+      syncMode: saved.syncMode || undefined,
+      sourceReadMode: saved.sourceReadMode,
+      sourceSql: saved.sourceSql,
+      primaryKey: saved.primaryKey,
+      cursorColumn: saved.cursorColumn,
+      rowLimit: saved.rowLimit,
+      mappings: saved.mappings as JobsStudioIntent["mappings"],
+      shapeSteps: saved.shapeSteps,
+      procedureParams: saved.procedureParams,
+      workspaceId: saved.workspaceOfRoute || saved.workspaceId || undefined,
+    };
+  });
   const searchRef = useRef<HTMLInputElement>(null);
   const mobileNavRef = useRef<HTMLElement>(null);
   const mobileNavButtonRef = useRef<HTMLButtonElement>(null);

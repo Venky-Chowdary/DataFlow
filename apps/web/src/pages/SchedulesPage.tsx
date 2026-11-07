@@ -48,6 +48,8 @@ import { formatSyncModeLabel } from "../lib/transferConstants";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
 import { scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
+import { clearStudioRecovery } from "../lib/studioRecovery";
+import { readSession } from "../lib/session";
 import { getActiveWorkspaceId } from "../lib/workspace";
 import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 import {
@@ -260,11 +262,15 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const openStudioFromSchedule = (id: string) => {
     const sched = schedules.find((s) => s.id === id);
     if (!sched || !onStartTransfer) return;
-    const intent = studioIntentFromSchedule(sched, getActiveWorkspaceId());
+    const intent = studioIntentFromSchedule(sched, getActiveWorkspaceId(), Boolean(readSession()));
     if (intent.refused) {
+      clearStudioRecovery();
+      onStartTransfer(intent);
       toast({
-        title: "Schedule is in another workspace",
-        message: "Switch workspace before opening this pipeline in Transfer Studio.",
+        title: intent.refused === "unauthenticated" ? "Sign in required" : "Schedule is in another workspace",
+        message: intent.refused === "unauthenticated"
+          ? "Transfer Studio was cleared. Sign in before opening this pipeline."
+          : "Transfer Studio was cleared. Switch workspace before opening this pipeline.",
         tone: "warning",
       });
       return;

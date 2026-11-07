@@ -78,6 +78,8 @@ test("a paused schedule with mapping_count 0 needs Studio, not Decide", () => {
     rowLimit: 0,
     mappings: [],
     workspaceId: "",
+    shapeSteps: [],
+    procedureParams: {},
   });
 });
 

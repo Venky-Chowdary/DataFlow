@@ -99,6 +99,7 @@ export { scheduleCreateOpensStudio } from "./sourceObjectPick";
 export function studioIntentFromSchedule(
   sched: PipelineSchedule,
   activeWorkspaceId?: string,
+  authenticated = true,
 ): {
   step: "source";
   replaceRoute: true;
@@ -117,13 +118,15 @@ export function studioIntentFromSchedule(
   rowLimit: number;
   mappings: { source: string; destination: string }[];
   workspaceId: string;
+  shapeSteps: unknown[];
+  procedureParams: Record<string, string>;
 } {
   const decision = decideStudioRecovery({
     schedule: sched,
     activeWorkspaceId: activeWorkspaceId ?? sched.workspace_id ?? "",
     knownConnectorIds: [sched.source_connector_id, sched.dest_connector_id].filter(Boolean),
     connectorsLoaded: true,
-    authenticated: true,
+    authenticated,
   });
   if (decision.action === "refuse") {
     return {
@@ -144,6 +147,8 @@ export function studioIntentFromSchedule(
       rowLimit: 0,
       mappings: [],
       workspaceId: "",
+      shapeSteps: [],
+      procedureParams: {},
     };
   }
   const f = decision.fields;
@@ -164,5 +169,7 @@ export function studioIntentFromSchedule(
     rowLimit: f.rowLimit,
     mappings: f.mappings,
     workspaceId: f.workspaceId,
+    shapeSteps: f.shapeSteps,
+    procedureParams: f.procedureParams,
   };
 }

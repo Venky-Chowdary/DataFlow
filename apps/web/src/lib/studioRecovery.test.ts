@@ -5,10 +5,15 @@
  * previous 1,000,000-row route. These cases pin the replacement rules.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   applyStudioRecovery,
   decideStudioRecovery,
+  destinationEnginePaint,
+  keepDeclaredCursorKey,
+  loadStudioRecovery,
+  persistStudioRecovery,
   type StudioRouteSnapshot,
 } from "./studioRecovery.js";
 
@@ -31,6 +36,8 @@ function staleRoute(): StudioRouteSnapshot {
     rowLimit: 1000000,
     mappings: [{ source: "series", destination: "id" }],
     scheduleId: "",
+    shapeSteps: [{ op: "rename", from: "series", to: "id" }],
+    procedureParams: { p: "old" },
   };
 }
 
@@ -238,6 +245,164 @@ describe("studio recovery replaces a stale route", () => {
   });
 });
 
+describe("Transfer Studio wires the recovery decisions into the page effects", () => {
+  const page = readFileSync(new URL("../pages/TransferPage.tsx", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../DataTransferApp.tsx", import.meta.url), "utf8");
+
+  it("the column effect calls keepDeclaredCursorKey and does not assign the heuristic directly", () => {
+    assert.match(page, /keepDeclaredCursorKey\(/);
+    assert.equal(page.includes("setCursorField(cursorCandidate)"), false);
+    assert.equal(page.includes("setPrimaryKeyField(primaryKeyCandidate)"), false);
+  });
+
+  it("a missing destination goes through destinationEnginePaint and a recovery owns shape steps", () => {
+    assert.match(page, /destinationEnginePaint\(/);
+    assert.match(page, /shapeOwnedByRecovery/);
+    assert.match(page, /persistStudioRecovery\(/);
+  });
+
+  it("a hard reload reads the stored route before Studio mounts", () => {
+    assert.match(app, /loadStudioRecovery\(/);
+  });
+});
+
+describe("column effect keeps a declared cursor and key", () => {
+  it("does not clear id/sku on the previous columns or replace them with updated_at/id", () => {
+    const declared = { declaredCursor: "id", declaredPrimaryKey: "sku" };
+    const afterStale = keepDeclaredCursorKey({
+      cursorField: "id",
+      primaryKeyField: "sku",
+      columns: ["series"],
+      cursorCandidate: "",
+      primaryKeyCandidate: "",
+      ...declared,
+    });
+    assert.deepEqual(afterStale, { cursorField: "id", primaryKeyField: "sku" });
+    const afterFresh = keepDeclaredCursorKey({
+      cursorField: afterStale.cursorField,
+      primaryKeyField: afterStale.primaryKeyField,
+      columns: ["id", "sku", "label", "updated_at"],
+      cursorCandidate: "updated_at",
+      primaryKeyCandidate: "id",
+      ...declared,
+    });
+    assert.deepEqual(afterFresh, { cursorField: "id", primaryKeyField: "sku" });
+  });
+
+  it("keeps cursor id when the new columns have no timestamp", () => {
+    const next = keepDeclaredCursorKey({
+      cursorField: "id",
+      primaryKeyField: "id",
+      columns: ["id", "label"],
+      cursorCandidate: "",
+      primaryKeyCandidate: "id",
+      declaredCursor: "id",
+      declaredPrimaryKey: "id",
+    });
+    assert.deepEqual(next, { cursorField: "id", primaryKeyField: "id" });
+  });
+
+  it("a heuristic fills only a field the schedule left empty", () => {
+    const next = keepDeclaredCursorKey({
+      cursorField: "",
+      primaryKeyField: "",
+      columns: ["id", "updated_at"],
+      cursorCandidate: "updated_at",
+      primaryKeyCandidate: "id",
+      declaredCursor: "",
+      declaredPrimaryKey: "",
+    });
+    assert.deepEqual(next, { cursorField: "updated_at", primaryKeyField: "id" });
+  });
+});
+
+describe("reload, refusal, recipe, and a missing destination", () => {
+  it("a hard reload restores the painted route for the same workspace", () => {
+    const mem = new Map<string, string>();
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => mem.get(key) ?? null,
+        setItem: (key: string, value: string) => { mem.set(key, value); },
+        removeItem: (key: string) => { mem.delete(key); },
+      },
+    });
+    const decision = decideStudioRecovery({ job: scheduleJob(), ...loaded });
+    assert.equal(decision.action, "apply");
+    if (decision.action !== "apply") return;
+    const painted = applyStudioRecovery(staleRoute(), decision);
+    persistStudioRecovery("ws-mahi", painted, "ws-mahi");
+    const restored = loadStudioRecovery("ws-mahi");
+    assert.equal(restored?.scheduleId, "sched-1902");
+    assert.equal(restored?.sourceSql, SQL);
+    assert.equal(restored?.cursorColumn, "id");
+    assert.equal(restored?.primaryKey, "id");
+    assert.equal(restored?.destTable, "mahi_qa_20261106_1902_schedule");
+    assert.equal(loadStudioRecovery("ws-other"), null);
+    assert.equal(loadStudioRecovery("__all__")?.scheduleId, "sched-1902");
+  });
+
+  it("a refused open replaces the previous route with an empty one", () => {
+    const decision = decideStudioRecovery({
+      job: scheduleJob(),
+      ...loaded,
+      activeWorkspaceId: "ws-other",
+    });
+    const cleared = applyStudioRecovery(staleRoute(), decision);
+    assert.equal(cleared.destTable, "");
+    assert.equal(cleared.sourceSql, "");
+    assert.equal(cleared.primaryKey, "");
+    assert.equal(cleared.cursorColumn, "");
+    assert.equal(cleared.shapeSteps.length, 0);
+  });
+
+  it("an empty schedule recipe replaces the previous shape steps", () => {
+    const decision = decideStudioRecovery({
+      schedule: {
+        id: "sched-1902",
+        workspace_id: "ws-mahi",
+        source_connector_id: "shop-mysql",
+        dest_connector_id: "inventory-mysql",
+        source_table: "qa_my_seed",
+        dest_table: "mahi_qa_20261106_1902_schedule",
+        dest_database: "inventory",
+        shape_recipe: { steps: [] },
+        procedure_params: {},
+      },
+      ...loaded,
+    });
+    assert.equal(decision.action, "apply");
+    if (decision.action !== "apply") return;
+    const previous = { ...staleRoute(), shapeSteps: [{ op: "rename", from: "series", to: "id" }] };
+    const next = applyStudioRecovery(previous, decision);
+    assert.deepEqual(next.shapeSteps, []);
+    assert.deepEqual(next.procedureParams, {});
+    assert.equal(next.destDatabase, "inventory");
+    assert.equal(JSON.stringify(next.shapeSteps).includes("series"), false);
+  });
+
+  it("a missing destination clears the previous engine and database", () => {
+    const paint = destinationEnginePaint({
+      destConnectorId: "",
+      destTable: "mahi_qa_20261106_1902_schedule",
+      destDatabase: "",
+      connectorFound: false,
+    });
+    assert.equal(paint.clearEngine, true);
+    assert.equal(paint.connectorId, "");
+    assert.equal(paint.database, "");
+    assert.equal(paint.table, "mahi_qa_20261106_1902_schedule");
+    const kept = destinationEnginePaint({
+      destConnectorId: "inventory-mysql",
+      destTable: "landed",
+      destDatabase: "inventory",
+      connectorFound: true,
+    });
+    assert.equal(kept.clearEngine, false);
+    assert.equal(kept.database, "inventory");
+  });
+});
+
 describe("studio recovery refuses the wrong tenant and missing auth", () => {
   it("a signed-out session does not hydrate the route", () => {
     const decision = decideStudioRecovery({
@@ -290,6 +455,20 @@ describe("studio recovery refuses the wrong tenant and missing auth", () => {
     assert.equal(next.destConnectorId, "inventory-mysql");
     assert.equal(next.destTable, "mahi_qa_20261106_1902_schedule");
     assert.equal(next.sourceTable, "qa_my_seed");
+    assert.equal(next.sourceSql, SQL);
+  });
+
+  it("an all-workspaces view is not a tenant mismatch", () => {
+    const decision = decideStudioRecovery({
+      job: scheduleJob(),
+      ...loaded,
+      activeWorkspaceId: "__all__",
+    });
+    assert.equal(decision.action, "apply");
+    if (decision.action !== "apply") return;
+    const next = applyStudioRecovery(staleRoute(), decision);
+    assert.equal(next.destTable, "mahi_qa_20261106_1902_schedule");
+    assert.equal(next.cursorColumn, "id");
     assert.equal(next.sourceSql, SQL);
   });
 

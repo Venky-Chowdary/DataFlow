@@ -51,7 +51,7 @@ import {
   formatValidationModeLabel,
 } from "../lib/transferConstants";
 import { jobStudioDataRules } from "../lib/studioDataRules";
-import { decideStudioRecovery } from "../lib/studioRecovery";
+import { clearStudioRecovery, decideStudioRecovery } from "../lib/studioRecovery";
 import { getActiveWorkspaceId } from "../lib/workspace";
 import { readSession } from "../lib/session";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
@@ -114,6 +114,10 @@ export type JobsStudioIntent = {
   destDatabase?: string;
   workspaceId?: string;
   syncMode?: string;
+  shapeSteps?: unknown[];
+  procedureParams?: Record<string, string>;
+  /** A refused open still replaces the mounted route so the previous one cannot run. */
+  refused?: "unauthenticated" | "wrong_workspace";
   /** Replay a capture-once journal: Studio's Source becomes this verified journal stream. */
   journalId?: string;
   journalStream?: string;
@@ -846,10 +850,24 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
       authenticated: Boolean(readSession()),
     });
     if (decision.action === "refuse") {
+      clearStudioRecovery();
+      openStudio({
+        step: "source",
+        replaceRoute: true,
+        refused: decision.reason,
+        sourceSql: "",
+        primaryKey: "",
+        cursorColumn: "",
+        sourceTable: "",
+        destTable: "",
+        destDatabase: "",
+        shapeSteps: [],
+        procedureParams: {},
+      });
       toast({
         title: decision.reason === "unauthenticated" ? "Sign in required" : "Job is in another workspace",
         message: decision.reason === "wrong_workspace"
-          ? "This job belongs to a different workspace. Switch workspace before opening it in Transfer Studio."
+          ? "Transfer Studio was cleared. Switch workspace before opening this job."
           : "Sign in before opening this job in Transfer Studio.",
         tone: "warning",
       });
@@ -879,6 +897,8 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
       cursorColumn: fields.cursorColumn,
       rowLimit: fields.rowLimit,
       workspaceId: fields.workspaceId || undefined,
+      shapeSteps: fields.shapeSteps,
+      procedureParams: fields.procedureParams,
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings, toast]);

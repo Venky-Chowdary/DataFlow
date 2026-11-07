@@ -51,6 +51,9 @@ export interface TransferPageProps {
     destDatabase?: string;
     workspaceId?: string;
     syncMode?: string;
+    shapeSteps?: unknown[];
+    procedureParams?: Record<string, string>;
+    refused?: "unauthenticated" | "wrong_workspace";
     /** Replay a capture-once journal stream as the Source. */
     journalId?: string;
     journalStream?: string;

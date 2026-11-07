@@ -303,7 +303,15 @@ import {
 } from "../lib/businessRules";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
 import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
-import { applyRecoveryIntent, applyStudioRecovery, decideStudioRecovery, type StudioRouteSnapshot } from "../lib/studioRecovery";
+import {
+  applyRecoveryIntent,
+  applyStudioRecovery,
+  decideStudioRecovery,
+  destinationEnginePaint,
+  keepDeclaredCursorKey,
+  persistStudioRecovery,
+  type StudioRouteSnapshot,
+} from "../lib/studioRecovery";
 import { getActiveWorkspaceId } from "../lib/workspace";
 import {
   analysisFromPipeline,
@@ -348,6 +356,11 @@ export function TransferPage({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
   const autoSelectedSourceConnector = useRef(false);
+  /** Schedule/job declaration. Column heuristics must not replace these. */
+  const declaredCursorRef = useRef("");
+  const declaredPrimaryKeyRef = useRef("");
+  /** Recovery owns the shape program until the operator edits it. */
+  const shapeOwnedByRecovery = useRef(false);
   /** Last applied Connectors→Studio seed token (prevents re-seeding on connectors refresh). */
   const appliedSeedTokenRef = useRef<number | null>(null);
   /** Last destination identity we auto-analyzed — empty means not analyzed yet. */
@@ -2259,16 +2272,17 @@ export function TransferPage({
   }, [step, destKindMode, connectorId, currentDestinationProbeKey, destConnected, destSchemaLoading, destProbeRetryTick, studioFlags.canvas]);
 
   useEffect(() => {
-    if (cursorCandidate && (!cursorField || !currentSourceColumns.includes(cursorField))) {
-      setCursorField(cursorCandidate);
-    } else if (!cursorCandidate && cursorField && !currentSourceColumns.includes(cursorField)) {
-      setCursorField("");
-    }
-    if (primaryKeyCandidate && (!primaryKeyField || !currentSourceColumns.includes(primaryKeyField))) {
-      setPrimaryKeyField(primaryKeyCandidate);
-    } else if (!primaryKeyCandidate && primaryKeyField && !currentSourceColumns.includes(primaryKeyField)) {
-      setPrimaryKeyField("");
-    }
+    const next = keepDeclaredCursorKey({
+      cursorField,
+      primaryKeyField,
+      columns: currentSourceColumns,
+      cursorCandidate,
+      primaryKeyCandidate,
+      declaredCursor: declaredCursorRef.current,
+      declaredPrimaryKey: declaredPrimaryKeyRef.current,
+    });
+    if (next.cursorField !== cursorField) setCursorField(next.cursorField);
+    if (next.primaryKeyField !== primaryKeyField) setPrimaryKeyField(next.primaryKeyField);
     setStreamFields((prev) =>
       seedStreamFieldsFromCandidates(
         advancedStreamNames,
@@ -2669,6 +2683,8 @@ export function TransferPage({
         rowLimit: 0,
         mappings: [],
         scheduleId: "",
+        shapeSteps: [],
+        procedureParams: {},
       };
       const recoveryOpts = {
         activeWorkspaceId: getActiveWorkspaceId(),
@@ -2689,6 +2705,16 @@ export function TransferPage({
         setSourceReadMode(state.sourceReadMode);
         setPrimaryKeyField(state.primaryKey);
         setCursorField(state.cursorColumn);
+        declaredCursorRef.current = state.cursorColumn;
+        declaredPrimaryKeyRef.current = state.primaryKey;
+        setShapeSteps(Array.isArray(state.shapeSteps) ? state.shapeSteps as ShapeStepWire[] : []);
+        setProcedureParams(state.procedureParams || {});
+        shapeOwnedByRecovery.current = true;
+        persistStudioRecovery(
+          getActiveWorkspaceId(),
+          state,
+          seedStudioIntent.workspaceId || "",
+        );
         setRowLimit(state.rowLimit);
         const syncModes = new Set([
           "full_refresh_overwrite",
@@ -2728,10 +2754,29 @@ export function TransferPage({
           setSourceConnectorId("");
           if (state.sourceTable || state.sourceSql) setSourceKind("database");
         }
-        if (state.destConnectorId) applyConnectorSelection(state.destConnectorId);
-        else setConnectorId("");
-        setTargetCollection(state.destTable);
-        if (state.destDatabase) setTargetDb(state.destDatabase);
+        const destPaint = destinationEnginePaint({
+          destConnectorId: state.destConnectorId,
+          destTable: state.destTable,
+          destDatabase: state.destDatabase,
+          connectorFound: connectors.some((c) => c.id === state.destConnectorId),
+        });
+        if (destPaint.clearEngine) {
+          setConnectorId("");
+          setDestType("");
+          setDestSchema("");
+          setDestConnectionString("");
+          setDestPassword("");
+          setDestUsername("");
+          setDestHost("");
+          setDestPort(0);
+          setDestWarehouse("");
+          setTargetDb(destPaint.database);
+          setTargetCollection(destPaint.table);
+        } else {
+          applyConnectorSelection(destPaint.connectorId);
+          setTargetCollection(destPaint.table);
+          if (destPaint.database) setTargetDb(destPaint.database);
+        }
       };
       const applied = applyRecoveryIntent(blank, seedStudioIntent, recoveryOpts);
       paintRecovery(applied.state);
@@ -6491,6 +6536,7 @@ export function TransferPage({
   const hydratedDraft = useRef("");
   useEffect(() => {
     if (!studioFlags.canvas) return;
+    if (shapeOwnedByRecovery.current) return;
     if (!sourceLabel || sourceLabel.startsWith("Choose")) return;
     const key = `${sourceLabel}→${destLabelShort}`;
     if (hydratedDraft.current === key) return;
@@ -8398,6 +8444,7 @@ export function TransferPage({
           recipeBinding={recipeBinding}
           onBindRecipe={setRecipeBinding}
           onChangeSteps={(next) => {
+            shapeOwnedByRecovery.current = false;
             if (!isMultiStreamSource) {
               setShapeSteps(next);
               return;
@@ -9271,6 +9318,7 @@ export function TransferPage({
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
             setCursorField(value);
+            if (value !== declaredCursorRef.current) declaredCursorRef.current = "";
             setCursorSemantics("");
           }
         }}
@@ -9300,6 +9348,7 @@ export function TransferPage({
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
             setPrimaryKeyField(value);
+            if (value !== declaredPrimaryKeyRef.current) declaredPrimaryKeyRef.current = "";
           }
         }}
         onStreamDestProcedureChange={
