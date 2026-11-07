@@ -43,6 +43,7 @@ HARD_GATE_IDS = {
     "g3f_population_fit",
     "g21_control_totals",
     "g22_dest_referential_integrity",
+    "g23_destination_name",
 }
 
 SOFT_GATE_IDS = {
@@ -330,6 +331,28 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "fix_orphans", "label": "Fix parent rows / load order"},
+        ],
+    },
+    "g23_destination_name": {
+        "title": "Destination name",
+        "category": "hard",
+        "why": (
+            "The destination table name is not a plain SQL identifier (letters, "
+            "digits and underscores, not starting with a digit). The writer would "
+            "create the table under a different spelling than the plan, preview "
+            "and job show, so Execute refuses it; Validate refuses it first."
+        ),
+        "fix": (
+            "Rename the destination table to the suggested spelling, or to a name "
+            "of letters, digits and underscores that does not start with a digit, "
+            "then re-run Validate."
+        ),
+        "examples": [
+            "'1M Records' would be stored as 'col_1m_records' — use records_1m.",
+            "'order-items' would be stored as 'order_items' — use order_items.",
+        ],
+        "suggested_actions": [
+            {"kind": "rename_destination", "label": "Rename the destination table"},
         ],
     },
     "g18_cdc_snapshot_mode": {

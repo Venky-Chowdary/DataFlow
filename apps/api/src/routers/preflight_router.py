@@ -754,6 +754,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             mappings=list(body.mappings or []),
             source_table=str(body.source_table or body.source_collection or ""),
             source_config=body.source_config if isinstance(body.source_config, dict) else None,
+            destination_table=str(body.dest_table or body.dest_collection or ""),
             read_scope=resolve_read_scope(
                 sync_mode=body.sync_mode,
                 stream_contracts=body.stream_contracts,

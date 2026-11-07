@@ -143,6 +143,12 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     icon: "shield",
     rule: "After write, every source relationship is dest-enforced or anti-join scanned with zero orphans. Schema FK coverage and a sample orphan probe are not dest population proof.",
   },
+  {
+    id: "g23_destination_name",
+    label: "Destination name",
+    icon: "alert",
+    rule: "The destination table name is a plain SQL identifier, so the table is created under exactly the name the plan shows.",
+  },
 ];
 
 export const CORE_ENGINE_GATE_IDS = [
