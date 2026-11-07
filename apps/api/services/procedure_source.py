@@ -34,6 +34,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -282,6 +283,11 @@ class _ResultSpool:
     total: int
     schema: dict[str, str]
     job_id: str = ""
+    # Next sequential read of the same filter continues here instead of
+    # parsing the spool from byte 0 on every page.
+    resume_key: str = ""
+    resume_line: int = 0
+    resume_pos: int = 0
 
 
 _SPOOL_LOCK = threading.Lock()
@@ -1535,25 +1541,55 @@ def _read_spool_page(
         apply_filter = cursor_after not in (None, "")
     rows: list[list[str]] = []
     start = max(0, int(offset))
-    end = start + max(0, int(limit))
+    limit_n = max(0, int(limit))
+    end = start + limit_n
     matched = 0
+    resume_key = f"{'flt' if apply_filter else 'off'}:{cursor_col}:{cursor_after if apply_filter else ''}"
+    line_no = 0
+    start_pos = 0
+    if spool.resume_key == resume_key and 0 < spool.resume_line <= start:
+        line_no = spool.resume_line
+        start_pos = spool.resume_pos
+        if apply_filter:
+            matched = spool.resume_line
     with spool.path.open("r", encoding="utf-8") as fh:
-        for i, line in enumerate(fh):
+        if start_pos:
+            fh.seek(start_pos)
+        while True:
+            pos = fh.tell()
+            line = fh.readline()
+            if not line:
+                spool.resume_key = ""
+                break
+            # A long scan must not freeze the reconcile heartbeat on the GIL.
+            if line_no and line_no % 2000 == 0:
+                time.sleep(0)
             if not apply_filter:
-                if i < start:
+                if line_no < start:
+                    line_no += 1
                     continue
-                if i >= end:
+                if line_no >= end:
+                    spool.resume_key = resume_key
+                    spool.resume_line = line_no
+                    spool.resume_pos = pos
                     break
                 obj = json_loads_exact(line)
                 rows.append(_row_from_spool_line(obj, spool.headers))
+                line_no += 1
                 continue
             obj = json_loads_exact(line)
             row = _row_from_spool_line(obj, spool.headers)
+            line_no += 1
             if cursor_idx is None or not _row_after_cursor(row, cursor_idx, cursor_after):
                 continue
             if start <= matched < end:
                 rows.append(row)
             matched += 1
+            if matched >= end:
+                spool.resume_key = resume_key
+                spool.resume_line = matched
+                spool.resume_pos = fh.tell()
+                break
     if apply_filter:
         return list(spool.headers), rows, matched
     if cursor_col:

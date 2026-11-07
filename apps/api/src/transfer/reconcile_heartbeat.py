@@ -291,30 +291,41 @@ def source_reread_heartbeat(
     from services.tracing import thread_in_context
 
     progress = ReconcileScan()
-    fixed = {
-        "phase": "reconcile",
-        "progress_pct": reconcile_display_pct(0, max(int(written), 1)),
-        "reconcile_pct": 0,
-        "records_processed": int(written),
-    }
     bound = int(destination_lock_wait_seconds())
     started = time.monotonic()
-    mongo.update_job_status(
-        job_id, "running", **fixed,
-        message=_source_reread_message(0, expected, 0, bound),
-    )
     stop = threading.Event()
     shown = [0]
     logged_step = [-1]
 
+    def _live_fields(read: int) -> dict[str, Any]:
+        # Both numbers are the rows actually re-read. Neither ticks on a timer.
+        return {
+            "phase": "reconcile",
+            "progress_pct": reconcile_display_pct(read, max(int(expected), 1)),
+            "reconcile_pct": reconcile_scan_pct(read, expected),
+            "records_processed": int(written),
+        }
+
+    mongo.update_job_status(
+        job_id, "running", **_live_fields(0),
+        message=_source_reread_message(0, expected, 0, bound),
+    )
+
     def _report(final: bool = False) -> None:
         read = int(progress.rows_hashed)
-        message = _source_reread_message(
-            read, expected, int(time.monotonic() - started), bound
-        )
+        elapsed = int(time.monotonic() - started)
+        message = _source_reread_message(read, expected, elapsed, bound)
+        fields = _live_fields(read)
         if read <= shown[0]:
-            # Alive, nothing new: the stall signal (updated_at) stays put.
-            _stamp_heartbeat(mongo, job_id, {**fixed, "message": message})
+            # No new row. Say how long this page has been blocking. Do not
+            # invent a higher row count. updated_at stays put so a truly
+            # silent worker can still be told from a slow page by heartbeat_at.
+            if read > 0 and not final:
+                message = (
+                    f"{message} The next page has not returned "
+                    f"({elapsed}s since this step started)."
+                )
+            _stamp_heartbeat(mongo, job_id, {**fields, "message": message})
             return
         shown[0] = read
         step = min(10, read * 10 // expected) if expected > 0 else 0
@@ -322,19 +333,19 @@ def source_reread_heartbeat(
             # One event-log line per tenth (and the last count), through the
             # status fence: a cancelled job is never set back to running.
             logged_step[0] = step
-            mongo.update_job_status(job_id, "running", **fixed, message=message)
+            mongo.update_job_status(job_id, "running", **fields, message=message)
         else:
             # Real progress between tenths: the live message and updated_at
             # move without a log line every pulse.
-            mongo.update_job_fields(job_id, {**fixed, "message": message})
+            mongo.update_job_fields(job_id, {**fields, "message": message})
 
     def _pulse() -> None:
         while not stop.wait(interval_s):
             try:
                 _report()
             except Exception as exc:  # noqa: BLE001 - a status line must never fail the run
-                logger.debug("source re-read pulse stopped for %s: %s", job_id, exc)
-                return
+                logger.warning("source re-read pulse failed for %s: %s", job_id, exc)
+                continue
 
     thread = thread_in_context(_pulse, name=f"reread-heartbeat-{job_id[:8]}")
     thread.start()

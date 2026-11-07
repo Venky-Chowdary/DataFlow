@@ -293,6 +293,19 @@ def align_identity_digests(
     }
 
 
+def callable_reread_seek(*, page_start: int, seed_watermark: str | None) -> dict[str, Any]:
+    """Page a query/procedure spool by offset from the run watermark.
+
+    The spool is not ordered for keyset. Passing the previous page's max
+    cursor makes every later page parse the whole file (``id > page_max``
+    with no early stop) and can drop rows the write pass kept. The write
+    path already pages this spool by offset against the run watermark.
+    The re-read uses that same seek.
+    """
+    seed = str(seed_watermark).strip() if seed_watermark not in (None, "") else None
+    return {"offset": max(0, int(page_start)), "cursor_after": seed}
+
+
 def reread_pagination_plan(
     *,
     src_type: str,
