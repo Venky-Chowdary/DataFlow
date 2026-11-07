@@ -1,3 +1,4 @@
+import { streamDropNotice, streamSilenceNeedsCatchUp } from "./jobStreamLiveness";
 import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
@@ -1974,12 +1975,27 @@ export function streamJobProgress(
     };
   };
 
+  let lastEventMs = Date.now();
+  let watchTimer: ReturnType<typeof setInterval> | null = null;
+
+  const noteDelivery = () => {
+    lastEventMs = Date.now();
+  };
+
+  const stopTimers = () => {
+    if (pollTimer) clearInterval(pollTimer);
+    if (watchTimer) clearInterval(watchTimer);
+    pollTimer = null;
+    watchTimer = null;
+  };
+
   const startPolling = () => {
     if (pollTimer) return;
     const poll = async () => {
       if (stopped) return;
       try {
         const job = await fetchJob(jobId);
+        noteDelivery();
         onUpdate(job);
         if (
           job.status === "completed"
@@ -1987,14 +2003,33 @@ export function streamJobProgress(
           || job.status === "failed"
           || job.status === "cancelled"
         ) {
-          if (pollTimer) clearInterval(pollTimer);
+          stopped = true;
+          stopTimers();
         }
-      } catch (e) {
-        onError?.(e instanceof Error ? e : new Error("Poll failed"));
+      } catch {
+        // A missed read is not a failed transfer. The next tick tries again.
       }
     };
-    poll();
+    void poll();
     pollTimer = setInterval(poll, 3000);
+  };
+
+  const armCatchUp = () => {
+    if (watchTimer) return;
+    watchTimer = setInterval(() => {
+      if (stopped) return;
+      if (!streamSilenceNeedsCatchUp(lastEventMs, Date.now())) return;
+      void (async () => {
+        try {
+          const job = await fetchJob(jobId);
+          if (stopped) return;
+          noteDelivery();
+          onUpdate(job);
+        } catch {
+          // Keep the last good frame. Do not invent a row count.
+        }
+      })();
+    }, 4_000);
   };
 
   try {
@@ -2008,6 +2043,7 @@ export function streamJobProgress(
       if (stopped) return;
       try {
         const job = normalize(JSON.parse(ev.data));
+        noteDelivery();
         onUpdate(job);
         if (
           job.status === "completed"
@@ -2016,6 +2052,8 @@ export function streamJobProgress(
           || job.status === "cancelled"
         ) {
           closedTerminal = true;
+          stopped = true;
+          stopTimers();
           es.close();
         }
       } catch {
@@ -2027,18 +2065,21 @@ export function streamJobProgress(
       // Closing a completed stream fires onerror in some browsers. Do not
       // reconnect — that re-appends the last log line and makes it jump.
       if (stopped || closedTerminal) return;
+      onError?.(new Error(streamDropNotice()));
       startPolling();
     };
+    armCatchUp();
     return () => {
       stopped = true;
       es.close();
-      if (pollTimer) clearInterval(pollTimer);
+      stopTimers();
     };
   } catch {
     startPolling();
+    armCatchUp();
     return () => {
       stopped = true;
-      if (pollTimer) clearInterval(pollTimer);
+      stopTimers();
     };
   }
 }

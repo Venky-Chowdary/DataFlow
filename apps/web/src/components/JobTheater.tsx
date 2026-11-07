@@ -18,6 +18,7 @@ import {
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { streamDropNotice } from "../lib/jobStreamLiveness";
 import { isJobParked, isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
@@ -369,8 +370,7 @@ export function JobTheater({
       },
       () => {
         if (doneRef.current) return;
-        append("Live stream interrupted — connection lost");
-        setJob((j) => (j && !isJobTerminal(j.status) ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : j));
+        append(streamDropNotice());
       },
     );
     return stop;
