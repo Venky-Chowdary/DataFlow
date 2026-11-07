@@ -237,7 +237,7 @@ import {
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
-import { readJobEventLog } from "../lib/jobEventLog";
+import { localizeServerEventLog, readJobEventLog } from "../lib/jobEventLog";
 import {
   canPersistStudioSchedule,
   keepTheaterMountedOnStatus,
@@ -6103,7 +6103,10 @@ export function TransferPage({
       explanation: job.explanation,
       mapping_proof: job.mapping_proof,
       ddl_executed: job.ddl_executed ?? job.ddl_log,
-      event_log: job.event_log?.length ? job.event_log : (job._id ? readJobEventLog(job._id) : undefined),
+      // The server stamps its lines in UTC; the session copy is already local.
+      event_log: job.event_log?.length
+        ? localizeServerEventLog(job.event_log)
+        : (job._id ? readJobEventLog(job._id) : undefined),
       cdc_lag_seconds: job.cdc_lag_seconds,
       cdc_plugin: job.cdc_plugin,
       cdc_delivery: job.cdc_delivery,

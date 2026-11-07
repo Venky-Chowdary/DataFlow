@@ -41,7 +41,7 @@ import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
-import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
+import { isTerminalJobLogLine, localizeServerEventLog, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
 import { THEATER_QUARANTINE_ID, scrollToTheaterQuarantine } from "../lib/quarantineTarget";
 import { jobEndpointLabels, presentStoredEventLog, presentStoredExplanation, readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
 import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
@@ -325,7 +325,8 @@ export function JobTheater({
           setLog((current) => {
             const merged = mergeEventLogLines(
               current.map((e) => e.text),
-              update.event_log!,
+              // Server lines are stamped in UTC; ours in local time.
+              localizeServerEventLog(update.event_log),
             );
             const used = new Map(current.map((e) => [e.text, e]));
             const next = merged.map((text) => {
