@@ -103,6 +103,36 @@ def test_contract_enforcer_allows_superset_columns():
     enforcer.enforce(request, sample_schema={"id": "INTEGER", "extra": "TEXT"})
 
 
+def test_contract_enforcer_allows_integer_int_alias():
+    """Signed contracts must not trip on INTEGER vs INT — that is not a meaning change."""
+    contract = DataContract(
+        columns=[ColumnRule(source_name="id", target_name="id", source_type="INTEGER", target_type="INTEGER")],
+        strict=True,
+    )
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        destination=EndpointConfig(kind="database", format="postgresql"),
+    )
+    ContractEnforcer(contract).enforce(request, sample_schema={"id": "INT"})
+
+
+def test_contract_enforcer_blocks_contracted_column_drop():
+    contract = DataContract(
+        columns=[
+            ColumnRule(source_name="id", target_name="id", source_type="INTEGER", target_type="INTEGER", nullable=True),
+            ColumnRule(source_name="email", target_name="email", source_type="VARCHAR", target_type="VARCHAR", nullable=True),
+        ],
+        strict=True,
+    )
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        destination=EndpointConfig(kind="database", format="postgresql"),
+    )
+    with pytest.raises(ContractViolation) as exc:
+        ContractEnforcer(contract).enforce(request, sample_schema={"id": "INTEGER"})
+    assert exc.value.violations[0]["rule"] == "contracted_column_dropped"
+
+
 def test_build_contract_from_preflight_creates_columns_and_mappings():
     request = TransferRequest(
         source=EndpointConfig(kind="file", format="csv"),

@@ -6,6 +6,7 @@ Floor is 100% on this fixture; expand the fixture before lowering.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from collections import defaultdict
@@ -14,7 +15,7 @@ from pathlib import Path
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden_enterprise.json"
 LEGACY_FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden.json"
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 ACCURACY_FLOOR = 1.0
 MIN_CASES = 200
 

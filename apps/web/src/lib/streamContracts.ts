@@ -1,12 +1,21 @@
 /** Per-stream cursor / primary-key overrides for multi-stream Advanced settings. */
 
 import { evaluateCursorSemantics } from "./cursorSemantics";
+import type { MirrorDeleteMode } from "./mirrorDeleteMode";
+import { statementKind } from "./sourceReadMode";
 
 export interface StreamFieldContract {
   cursorField: string;
   primaryKeyField: string;
   /** Declared meaning of the cursor column — never inferred from its name. */
   cursorSemantics?: string;
+  /**
+   * Optional CALL/EXEC that replaces this stream's table extract.
+   * One statement, this stream only — it is not replayed onto the others.
+   */
+  sourceProcedure?: string;
+  /** Optional destination CALL. One execution per row of this stream. */
+  destProcedure?: string;
 }
 
 export interface BuildStreamContractsInput {
@@ -25,6 +34,8 @@ export interface BuildStreamContractsInput {
   streamFields: Record<string, StreamFieldContract>;
   /** Debezium-compatible snapshot mode (CDC only). */
   snapshotMode?: string;
+  /** Mirror only: soft (default, `_deleted` flags) or an explicit hard DELETE. */
+  mirrorDeleteMode?: MirrorDeleteMode;
 }
 
 export function resolveStreamFields(
@@ -39,6 +50,8 @@ export function resolveStreamFields(
     cursorField: override?.cursorField ?? defaultCursor,
     primaryKeyField: override?.primaryKeyField ?? defaultPrimaryKey,
     cursorSemantics: override?.cursorSemantics ?? defaultCursorSemantics,
+    sourceProcedure: override?.sourceProcedure ?? "",
+    destProcedure: override?.destProcedure ?? "",
   };
 }
 
@@ -55,6 +68,10 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
       input.defaultCursorSemantics || "",
     );
     const maps = input.streamMappings?.[name];
+    const sourceProcedure = String(fields.sourceProcedure || "").trim();
+    const destProcedure = String(fields.destProcedure || "").trim();
+    const sourceKind = sourceProcedure ? statementKind(sourceProcedure) : "";
+    const destKind = destProcedure ? statementKind(destProcedure) : "";
     return {
       name,
       selected: true,
@@ -65,8 +82,21 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
       schema_policy: input.schemaPolicy,
       field_count: input.fieldCount,
       validation_mode: input.validationMode,
+      ...(sourceProcedure
+        ? sourceKind === "query"
+          ? { source_read_mode: "query", source_query: sourceProcedure }
+          : { source_read_mode: "procedure", procedure_call: sourceProcedure }
+        : {}),
+      ...(destProcedure
+        ? destKind === "dest_dml"
+          ? { dest_write_mode: "query", dest_query_sql: destProcedure }
+          : { dest_write_mode: "procedure", dest_procedure_call: destProcedure }
+        : {}),
       ...(input.syncMode === "cdc" && input.snapshotMode
         ? { snapshot_mode: input.snapshotMode }
+        : {}),
+      ...(input.syncMode === "mirror" && input.mirrorDeleteMode === "hard"
+        ? { delete_mode: "hard" }
         : {}),
       ...(maps && maps.length
         ? {
@@ -192,6 +222,43 @@ export function streamContractsNeedReview(input: StreamContractReviewInput): boo
   return firstStreamContractIssue(input) !== null;
 }
 
+/**
+ * Seed stream contracts, then force a declared cursor and primary key onto
+ * every selected stream. A heuristic candidate must not outrank a declaration
+ * that is already on the route, including when the previous contract named a
+ * column that is still in the schema.
+ */
+export function applyDeclaredStreamFields(
+  streamNames: string[],
+  prev: Record<string, StreamFieldContract>,
+  cursorCandidate: string,
+  primaryKeyCandidate: string,
+  sourceColumns: string[],
+  declaredCursor: string,
+  declaredPrimaryKey: string,
+): Record<string, StreamFieldContract> {
+  const seeded = seedStreamFieldsFromCandidates(
+    streamNames,
+    prev,
+    declaredCursor || cursorCandidate,
+    declaredPrimaryKey || primaryKeyCandidate,
+    sourceColumns,
+  );
+  if (!declaredCursor && !declaredPrimaryKey) return seeded;
+  const next = { ...seeded };
+  let changed = seeded !== prev;
+  for (const name of streamNames) {
+    const cur = next[name] ?? { cursorField: "", primaryKeyField: "" };
+    const cursorField = declaredCursor || cur.cursorField;
+    const primaryKeyField = declaredPrimaryKey || cur.primaryKeyField;
+    if (cursorField !== cur.cursorField || primaryKeyField !== cur.primaryKeyField || !next[name]) {
+      next[name] = { ...cur, cursorField, primaryKeyField, cursorSemantics: cur.cursorSemantics ?? "" };
+      changed = true;
+    }
+  }
+  return changed ? next : seeded;
+}
+
 /** Merge auto-detected candidates into each stream that lacks a field. */
 export function seedStreamFieldsFromCandidates(
   streamNames: string[],
@@ -226,7 +293,12 @@ export function seedStreamFieldsFromCandidates(
       || cursorSemantics !== (cur.cursorSemantics ?? "")
       || !next[name]
     ) {
-      next[name] = { cursorField, primaryKeyField, cursorSemantics };
+      next[name] = {
+        ...cur,
+        cursorField,
+        primaryKeyField,
+        cursorSemantics,
+      };
       changed = true;
     }
   }

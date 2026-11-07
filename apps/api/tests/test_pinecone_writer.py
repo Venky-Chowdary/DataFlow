@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ if str(_API_ROOT) not in sys.path:
 
 from connectors.pinecone_writer import (
     build_pinecone_vectors,
+    scan_source_ids,
     test_pinecone as probe_pinecone,
     write_mapped_rows,
 )
@@ -157,3 +159,184 @@ def test_pinecone_write_unreachable_fail_closed():
     )
     assert not result.ok
     assert result.error
+
+
+class _FakeResp:
+    def __init__(self, status: int, payload: dict | None = None):
+        self.status_code = status
+        self._payload = payload or {}
+        self.text = json.dumps(self._payload) if payload is not None else ""
+        self.content = self.text.encode("utf-8") if self.text else b""
+
+    def json(self):
+        return json.loads(self.text) if self.text else {}
+
+
+class _PineconeSession:
+    """Dest-engine list+fetch. vectorCount is physical — tests must not treat it as identity."""
+
+    def __init__(
+        self,
+        *,
+        stats_status: int = 200,
+        list_status: int = 200,
+        fetch_status: int = 200,
+        vector_count: int = 0,
+        ids: list[str] | None = None,
+        metadata: dict[str, dict] | None = None,
+        namespace: str = "docs",
+    ):
+        self.stats_status = stats_status
+        self.list_status = list_status
+        self.fetch_status = fetch_status
+        self.vector_count = vector_count
+        self.ids = list(ids or [])
+        self.metadata = dict(metadata or {})
+        self.namespace = namespace
+        self.listed_urls: list[str] = []
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        self.listed_urls.append(str(url))
+        if url.endswith("/describe_index_stats"):
+            if self.stats_status != 200:
+                return _FakeResp(self.stats_status, {})
+            return _FakeResp(
+                200,
+                {
+                    "namespaces": {self.namespace: {"vectorCount": self.vector_count}},
+                    "totalVectorCount": self.vector_count,
+                },
+            )
+        if "/vectors/list" in str(url):
+            if self.list_status != 200:
+                return _FakeResp(self.list_status, {})
+            return _FakeResp(200, {"vectors": [{"id": i} for i in self.ids], "pagination": {}})
+        if url.endswith("/vectors/fetch"):
+            if self.fetch_status != 200:
+                return _FakeResp(self.fetch_status, {})
+            wanted = [
+                str(value)
+                for key, value in (params or [])
+                if key == "ids"
+            ]
+            return _FakeResp(
+                200,
+                {
+                    "vectors": {
+                        vector_id: {
+                            "id": vector_id,
+                            "metadata": self.metadata.get(vector_id, {}),
+                        }
+                        for vector_id in wanted
+                    }
+                },
+            )
+        return _FakeResp(500, {})
+
+    def post(self, url, data=None, headers=None, timeout=None):
+        if url.endswith("/vectors/fetch"):
+            if self.fetch_status != 200:
+                return _FakeResp(self.fetch_status, {})
+            import json as _json
+
+            body = _json.loads(data or "{}")
+            wanted = list(body.get("ids") or [])
+            vectors = {}
+            for vid in wanted:
+                meta = self.metadata.get(vid, {})
+                vectors[vid] = {"id": vid, "metadata": meta}
+            return _FakeResp(200, {"vectors": vectors})
+        return _FakeResp(500, {})
+
+
+def test_pinecone_scan_source_ids_empty_namespace_is_zero(monkeypatch):
+    monkeypatch.setattr(
+        "connectors.pinecone_writer._requests_session",
+        lambda: _PineconeSession(vector_count=0, ids=[]),
+    )
+    state, values = scan_source_ids(
+        {"host": "https://idx.svc.pinecone.io", "api_key": "k"},
+        table_name="docs",
+    )
+    assert state == "complete"
+    assert values == []
+    from services.dest_precount import identity_count_from_source_id_scan
+
+    assert identity_count_from_source_id_scan(state, values) == 0
+
+
+def test_pinecone_scan_source_ids_distinct_not_vector_count(monkeypatch):
+    ids = ["v1", "v2", "v3", "v4", "v5"]
+    meta = {
+        "v1": {"source_id": "doc-1"},
+        "v2": {"source_id": "doc-1"},
+        "v3": {"source_id": "doc-1"},
+        "v4": {"source_id": "doc-2"},
+        "v5": {"source_id": "doc-2"},
+    }
+    monkeypatch.setattr(
+        "connectors.pinecone_writer._requests_session",
+        lambda: _PineconeSession(vector_count=5, ids=ids, metadata=meta),
+    )
+    state, values = scan_source_ids(
+        {"host": "https://idx.svc.pinecone.io", "api_key": "k"},
+        table_name="docs",
+    )
+    assert state == "complete"
+    assert values == ["doc-1", "doc-1", "doc-1", "doc-2", "doc-2"]
+    from services.dest_precount import identity_count_from_source_id_scan
+
+    assert identity_count_from_source_id_scan(state, values) == 2
+
+
+def test_pinecone_scan_source_ids_list_unsupported_is_unmeasured_not_vectorcount(monkeypatch):
+    """Pod indexes have no /vectors/list — vectorCount must not close identity."""
+    session = _PineconeSession(vector_count=5, ids=["v1"], list_status=404)
+    monkeypatch.setattr("connectors.pinecone_writer._requests_session", lambda: session)
+    state, values = scan_source_ids(
+        {"host": "https://idx.svc.pinecone.io", "api_key": "k"},
+        table_name="docs",
+    )
+    assert state == "unmeasured"
+    assert values == []
+    from services.dest_precount import identity_count_from_source_id_scan, destination_row_count
+
+    assert identity_count_from_source_id_scan(state, values) is None
+    n = destination_row_count(
+        "pinecone",
+        {"host": "https://idx.svc.pinecone.io", "api_key": "k"},
+        schema="",
+        table_name="docs",
+    )
+    assert n is None
+
+
+def test_pinecone_scan_source_ids_no_source_id_metadata(monkeypatch):
+    monkeypatch.setattr(
+        "connectors.pinecone_writer._requests_session",
+        lambda: _PineconeSession(
+            vector_count=2,
+            ids=["v1", "v2"],
+            metadata={"v1": {"content": "a"}, "v2": {"content": "b"}},
+        ),
+    )
+    state, values = scan_source_ids(
+        {"host": "https://idx.svc.pinecone.io", "api_key": "k"},
+        table_name="docs",
+    )
+    assert state == "no_field"
+    assert values == []
+
+
+def test_pinecone_scan_source_ids_truncated_past_bound(monkeypatch):
+    monkeypatch.setattr(
+        "connectors.pinecone_writer._requests_session",
+        lambda: _PineconeSession(vector_count=20_001, ids=[]),
+    )
+    state, values = scan_source_ids(
+        {"host": "https://idx.svc.pinecone.io", "api_key": "k"},
+        table_name="docs",
+        max_entities=20_000,
+    )
+    assert state == "truncated"
+    assert values == []

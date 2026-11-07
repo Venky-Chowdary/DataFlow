@@ -4,14 +4,34 @@ A carried foreign key is a *promise*; it is only worth anything if the engine
 was enforcing it while the rows landed. Two real migration outcomes this
 module separates, which a catalog diff alone cannot:
 
-``enforced``   the destination carries the FK, so the engine itself refused
-               orphans as they were written — no scan needed
+``enforced``   the destination carries a foreign key the catalog says was
+               checked against existing rows — no scan needed. PostgreSQL
+               NOT VALID, a SQL Server untrusted or disabled key, and an
+               Oracle NOT VALIDATED key are not this proof; those rows are
+               scanned. SQLAlchemy's PostgreSQL reflection omits NOT VALID,
+               so the validation bit is read from the catalog probe. Redshift,
+               Snowflake, BigQuery, and Databricks store the constraint and
+               do not check rows against it, so a catalog hit is not this
+               proof either. A Snowflake hybrid table skips the scan only when
+               ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` is ``YES``,
+               ``TABLE_CONSTRAINTS.ENFORCED`` is ``YES``, and ``SHOW INDEXES``
+               status is ``ACTIVE``. ``ENFORCED YES`` during
+               ``BUILD VALIDATION FAILURE`` still rejects new writes and does
+               not prove rows already stored, so those rows are scanned.
 ``scanned``    the destination has no such constraint (dropped for load speed,
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real
 
-Composite keys are scanned as a tuple under SQL ``MATCH SIMPLE``: a child row
-with any NULL in the key is unconstrained and is not an orphan.
+Composite keys are scanned as a tuple under the catalog match type. Unreported
+is SQL ``MATCH SIMPLE``: a child row with any NULL in the key is unconstrained
+and is not an orphan. A source ``MATCH FULL`` is that scan, including when the
+destination constraint is enforced as ``MATCH SIMPLE``. ``MATCH PARTIAL`` is
+not a completed scan.
+
+An enforced catalog FK counts only when it is the same relationship: the same
+parent table and the same (child column, parent column) pairs. A constraint on
+the same child columns that points at a different parent column is not that
+promise, and the child rows are scanned.
 
 Anything else — parent table missing, unreadable catalog, failed scan — is
 reported unavailable with a reason. An unproven relationship never counts as
@@ -22,21 +42,59 @@ and only one of them is true.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import sqlalchemy as sa
 
+from services.fk_tuple_scan import _table_col, alias_parent_if_self_ref
+from services.foreign_key_metadata import (
+    enforced_relationship_identities,
+    probe_foreign_keys,
+    relationship_match_type,
+    validation_catalog_dialect,
+)
+from services.fk_tuple_scan import orphan_example_text as _orphan_example_text  # noqa: F401
+from services.fk_tuple_scan import match_scan_refusal, normalize_match, scan_orphan_anti_join
+from services.foreign_key_identity import (
+    fold as _fold,
+    parent_label as _parent_label,
+    parse_foreign_key,
+    relationship_identity,
+    relocated_parent_schema,
+    same_relationship as _same_relationship,
+)
 from services.physical_state_diff import catalog_table_names, resolve_stored_name
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["verify_destination_referential_integrity"]
+GATE_ID = "g22_dest_referential_integrity"
+REPORT_SCHEMA = "dest_referential_integrity_v1"
+_PROVEN_STATUSES = frozenset({"enforced", "scanned"})
 
-MAX_EXAMPLES = 10
+__all__ = [
+    "verify_destination_referential_integrity",
+    "relationship_identity",
+    "referential_integrity_proven",
+    "build_dest_ri_gate",
+    "build_dest_ri_validate_gate",
+    "apply_dest_ri_to_reconcile",
+    "GATE_ID",
+]
 
 
-def _fold(name: Any) -> str:
-    return str(name or "").strip().casefold()
+def _destination_match(
+    identity: tuple[str, tuple[tuple[str, str], ...]] | None,
+    measured: Any,
+    inspector_fks: list[Any],
+) -> str:
+    """Match type the destination catalog recorded for this relationship.
+
+    Owner is :func:`services.foreign_key_metadata.relationship_match_type`.
+    The metadata probe wins. Inspector ``options["match"]`` is the fallback.
+    Empty means unreported.
+    """
+    return relationship_match_type(identity, measured, inspector_fks)
 
 
 def _orphan_scan(
@@ -46,39 +104,24 @@ def _orphan_scan(
     child_columns: list[str],
     parent: Any,
     parent_columns: list[str],
+    match: str = "",
 ) -> dict[str, Any]:
-    """Anti-join the child against the parent through the reflected columns.
-
-    Composite keys join on every column pair at once; MATCH SIMPLE means a key
-    with any NULL component imposes no constraint, so those rows are excluded
-    rather than counted as orphans.
-    """
-    c_cols = [child.c.get(name) for name in child_columns]
-    p_cols = [parent.c.get(name) for name in parent_columns]
-    if any(c is None for c in c_cols) or any(p is None for p in p_cols):
+    """Anti-join via ``fk_tuple_scan`` using the catalog match type."""
+    try:
+        c_cols = [_table_col(child, name) for name in child_columns]
+        p_cols = [_table_col(parent, name) for name in parent_columns]
+    except KeyError:
         return {"available": False, "reason": "join column missing from catalog"}
-
-    on_clause = sa.and_(*[c == p for c, p in zip(c_cols, p_cols)])
-    joined = child.outerjoin(parent, on_clause)
-    where = sa.and_(
-        *[c.is_not(None) for c in c_cols],
-        p_cols[0].is_(None),
+    child_keys = list(getattr(getattr(child, "primary_key", None), "columns", None) or [])
+    return scan_orphan_anti_join(
+        conn,
+        child=child,
+        child_columns=c_cols,
+        parent=parent,
+        parent_columns=p_cols,
+        match=match,
+        child_key_columns=child_keys,
     )
-    count = int(
-        conn.execute(sa.select(sa.func.count()).select_from(joined).where(where)).scalar()
-        or 0
-    )
-    examples = [
-        "+".join("" if v is None else str(v) for v in row)
-        for row in conn.execute(
-            sa.select(*c_cols).select_from(joined).where(where).limit(MAX_EXAMPLES)
-        ).fetchall()
-    ]
-    return {
-        "available": True,
-        "orphan_count": count,
-        "examples": examples,
-    }
 
 
 def _reflect(conn: Any, meta: sa.MetaData, name: str, schema: str | None) -> Any:
@@ -92,6 +135,7 @@ def verify_destination_referential_integrity(
     schema: str = "",
     table: str,
     foreign_keys: list[dict[str, Any]] | None = None,
+    source_schema: str = "",
 ) -> dict[str, Any]:
     """Prove every source relationship still holds in the destination data.
 
@@ -127,14 +171,37 @@ def verify_destination_referential_integrity(
             }
 
         dest_fks = inspector.get_foreign_keys(child_name, schema=schema_arg)
-        enforced = {
-            (
-                "+".join(_fold(c) for c in fk.get("constrained_columns") or ()),
-                _fold(fk.get("referred_table")),
+        measured = None
+        table_kind = ""
+        from services.foreign_key_metadata import _dialect_key
+
+        index_status = ""
+        if _dialect_key(db_type) == "snowflake":
+            from services.foreign_key_metadata import read_snowflake_index_status
+            from services.physical_state_diff import _read_snowflake_table_kind
+
+            table_kind = _read_snowflake_table_kind(
+                conn, schema_arg or "", child_name
             )
-            for fk in dest_fks
-            if fk.get("constrained_columns")
-        }
+            index_status = read_snowflake_index_status(
+                conn, schema_arg or "", child_name
+            )
+            measured = probe_foreign_keys(
+                "snowflake", conn, schema_arg or "", child_name
+            )
+        else:
+            catalog_dialect = validation_catalog_dialect(db_type)
+            if catalog_dialect:
+                measured = probe_foreign_keys(
+                    catalog_dialect, conn, schema_arg or "", child_name
+                )
+        enforced = enforced_relationship_identities(
+            db_type,
+            dest_fks,
+            measured,
+            table_kind=table_kind,
+            index_status=index_status,
+        )
         wanted = list(foreign_keys if foreign_keys is not None else dest_fks)
         if not wanted:
             return {
@@ -148,19 +215,56 @@ def verify_destination_referential_integrity(
             inspector, schema_arg, conn=conn, dialect=str(db_type)
         )
         for fk in wanted:
-            child_cols = [str(c) for c in fk.get("constrained_columns") or () if c]
-            parent_cols = [str(c) for c in fk.get("referred_columns") or () if c]
-            parent_table = str(fk.get("referred_table") or "")
-            key = (
-                "+".join(_fold(c) for c in child_cols),
-                _fold(parent_table),
+            parsed = parse_foreign_key(fk)
+            child_cols = list(parsed.child_columns)
+            parent_cols = list(parsed.parent_columns)
+            parent_schema = _fold(parsed.parent_schema)
+            parent_table = _fold(parsed.parent_table)
+            relocated = relocated_parent_schema(
+                parsed.parent_schema,
+                source_schema=source_schema,
+                dest_schema=schema,
+                in_job=False,
             )
+            if relocated:
+                # The catalog still names the schema the rows were copied from.
+                # An enforced key aimed at that table is not proof the destination
+                # schema's parent holds these rows.
+                parent_schema = _fold(relocated)
             rel: dict[str, Any] = {
                 "columns": child_cols,
                 "referred_table": parent_table,
                 "referred_columns": parent_cols,
             }
-            if key in enforced:
+            if parsed.conflict:
+                rel.update(
+                    status="unavailable",
+                    available=False,
+                    reason=parsed.conflict,
+                )
+                relations.append(rel)
+                continue
+            key = relationship_identity(
+                child_cols, _parent_label(parent_schema, parent_table), parent_cols
+            )
+            source_match = normalize_match(parsed.match)
+            refusal = match_scan_refusal(source_match)
+            if refusal:
+                rel.update(
+                    status="unavailable",
+                    available=False,
+                    match=source_match,
+                    reason=refusal,
+                )
+                relations.append(rel)
+                continue
+            # An enforced MATCH SIMPLE constraint does not prove MATCH FULL.
+            # A partial NULL is legal there and is an orphan under the source rule.
+            dest_match = _destination_match(key, measured, dest_fks)
+            simple_promise = source_match != "full"
+            if any(_same_relationship(key, known) for known in enforced) and (
+                simple_promise or dest_match == "full"
+            ):
                 rel.update(status="enforced", available=True, orphan_count=0)
                 relations.append(rel)
                 continue
@@ -172,18 +276,37 @@ def verify_destination_referential_integrity(
                 )
                 relations.append(rel)
                 continue
-            stored_parent = resolve_stored_name(table_names, parent_table)
+            parent_lookup_schema = parent_schema or None
+            if parent_schema and _fold(parent_schema) != _fold(schema_arg or ""):
+                parent_names = catalog_table_names(
+                    inspector,
+                    parent_lookup_schema,
+                    conn=conn,
+                    dialect=str(db_type),
+                )
+            else:
+                parent_names = table_names
+            stored_parent = resolve_stored_name(parent_names, parent_table)
             if stored_parent is None:
+                qualified = _parent_label(parent_schema, parent_table) or parent_table
                 rel.update(
                     status="unavailable",
                     available=False,
-                    reason=f"parent table {parent_table} absent from destination",
+                    reason=f"parent table {qualified} absent from destination",
                 )
                 relations.append(rel)
                 continue
             try:
                 child_tbl = _reflect(conn, meta, child_name, schema_arg)
-                parent_tbl = _reflect(conn, meta, stored_parent, schema_arg)
+                parent_tbl = alias_parent_if_self_ref(
+                    child_tbl,
+                    _reflect(
+                        conn,
+                        meta,
+                        stored_parent,
+                        parent_lookup_schema or schema_arg,
+                    ),
+                )
                 resolved_child = [
                     resolve_stored_name([c.name for c in child_tbl.columns], name)
                     for name in child_cols
@@ -202,6 +325,7 @@ def verify_destination_referential_integrity(
                     child_columns=[str(c) for c in resolved_child],
                     parent=parent_tbl,
                     parent_columns=[str(p) for p in resolved_parent],
+                    match=source_match,
                 )
             except Exception as exc:  # noqa: BLE001 — a failed scan is evidence
                 logger.warning("destination RI scan failed: %s", exc)
@@ -225,3 +349,303 @@ def verify_destination_referential_integrity(
         ],
         "orphan_rows": sum(int(r.get("orphan_count") or 0) for r in relations),
     }
+
+
+def referential_integrity_proven(evidence: Mapping[str, Any] | None) -> bool:
+    """True only when dest-side relations were enforced or scanned with 0 orphans.
+
+    No relationships is not proven of nothing. Schema-only ``constraint_fk``
+    and a source sample orphan probe never set this.
+    """
+    if not isinstance(evidence, dict):
+        return False
+    relations = [
+        r for r in list(evidence.get("relations") or []) if isinstance(r, dict)
+    ]
+    if not relations:
+        return False
+    if not evidence.get("verified"):
+        return False
+    for rel in relations:
+        status = str(rel.get("status") or "").strip().lower()
+        if status not in _PROVEN_STATUSES:
+            return False
+        if not rel.get("available"):
+            return False
+        if int(rel.get("orphan_count") or 0) > 0:
+            return False
+    return True
+
+
+def build_dest_ri_validate_gate(
+    *,
+    has_relationships: bool,
+    parent_finding: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate never claims dest population RI — that is a post-write Gate-8 proof.
+
+    ``parent_finding`` is the plan-time FK parent probe: a parent that is not at
+    the destination is stated here (warn) instead of failing the run mid-write.
+    """
+    if isinstance(parent_finding, Mapping) and parent_finding.get("code") in {
+        "fk_parent_absent_at_destination",
+        "fk_route_ignore",
+    }:
+        return {
+            "id": GATE_ID,
+            "status": "warn" if parent_finding.get("severity") == "warn" else "skip",
+            "message": str(parent_finding.get("message") or ""),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "evidence": "plan_time_parent_probe",
+                "parents": list(parent_finding.get("parents") or []),
+                "relationships": list(parent_finding.get("columns") or []),
+                "rule_id": f"{GATE_ID}.{parent_finding.get('code')}",
+            },
+        }
+    if not has_relationships:
+        return {
+            "id": GATE_ID,
+            "status": "skip",
+            "message": (
+                "No foreign keys were declared on this route — destination "
+                "referential integrity was not asked."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": False,
+                "rule_id": f"{GATE_ID}.undeclared",
+            },
+        }
+    return {
+        "id": GATE_ID,
+        "status": "skip",
+        "message": (
+            "Source relationships are present. Destination-side referential "
+            "integrity (enforced FK or anti-join orphan scan) is a post-write "
+            "Gate-8 proof — Validate schema coverage (constraint_fk) and a "
+            "sample orphan probe are not that proof."
+        ),
+        "duration_ms": 0,
+        "details": {
+            "schema": REPORT_SCHEMA,
+            "declared": True,
+            "evidence": "unmeasured",
+            "rule_id": f"{GATE_ID}.post_write",
+        },
+    }
+
+
+_ANOMALY_ORIGIN_NOTE = {
+    "source": (
+        " Source anomaly: the source rows already reference parents the source"
+        " does not hold — the copy is faithful, the data is not."
+    ),
+    "destination": (
+        " Destination anomaly: the source holds every referenced parent, so the"
+        " destination parent table is incomplete."
+    ),
+}
+
+
+def build_dest_ri_gate(
+    evidence: Mapping[str, Any] | None,
+    *,
+    has_relationships: bool | None = None,
+) -> dict[str, Any]:
+    """Execute Gate-8 G22 from dest RI evidence.
+
+    Measured orphans fail the job. An unproven scan that counted zero orphans
+    warns and keeps a checksum-matching load — failing it deleted the rows.
+    """
+    relations = []
+    if isinstance(evidence, Mapping):
+        relations = [
+            r for r in list(evidence.get("relations") or []) if isinstance(r, dict)
+        ]
+    asked = bool(has_relationships) or bool(relations)
+    if isinstance(evidence, Mapping):
+        asked = asked or bool(evidence.get("asked") or evidence.get("probe_error"))
+    if not asked:
+        return {
+            "id": GATE_ID,
+            "status": "skip",
+            "message": (
+                "No foreign keys were declared on this route — destination "
+                "referential integrity was not asked."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": False,
+                "rule_id": f"{GATE_ID}.undeclared",
+            },
+        }
+    if not isinstance(evidence, Mapping) or not evidence:
+        return {
+            "id": GATE_ID,
+            "status": "warn",
+            "message": (
+                "Destination referential integrity is unproven — the dest-side "
+                "orphan scan did not run. No orphan rows were measured, so the "
+                "load is kept. Re-run the scan before treating the relationship "
+                "as proven."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "rule_id": f"{GATE_ID}.unproven",
+            },
+        }
+    if evidence.get("probe_error"):
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": (
+                "Destination referential integrity probe failed ("
+                + str(evidence.get("reason") or "error")
+                + ") — orphan rows cannot be ruled out, so the run is not certified."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "reason": str(evidence.get("reason") or ""),
+                "relations": relations,
+                "rule_id": f"{GATE_ID}.probe_error",
+            },
+        }
+    if referential_integrity_proven(evidence):
+        n = len(relations)
+        return {
+            "id": GATE_ID,
+            "status": "pass",
+            "message": (
+                f"Destination referential integrity holds on {n} relationship(s) "
+                "(enforced FK or anti-join scan, 0 orphans)."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "relations": relations,
+                "rule_id": f"{GATE_ID}.proven",
+            },
+        }
+    orphan_rows = int(evidence.get("orphan_rows") or 0)
+    orphan_rels = list(evidence.get("orphan_relations") or [])
+    unavailable = list(evidence.get("unavailable_relations") or [])
+    if orphan_rows > 0 or orphan_rels:
+        named = ", ".join(str(r) for r in orphan_rels[:4]) or "relationship"
+        origin = str(evidence.get("anomaly_origin") or "undetermined")
+        samples = [
+            str(x)
+            for r in relations
+            for x in (r.get("child_examples") or r.get("examples") or [])
+        ][:5]
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": (
+                f"Destination referential integrity failed: {orphan_rows} orphan "
+                f"row(s) on {named}"
+                + (f" (sample: {', '.join(samples)})" if samples else "")
+                + ". A matching row count does not prove parents exist."
+                + _ANOMALY_ORIGIN_NOTE.get(origin, "")
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "orphan_rows": orphan_rows,
+                "orphan_relations": orphan_rels,
+                "orphan_samples": samples,
+                "relations": relations,
+                "anomaly_origin": origin,
+                "source_orphan_rows": evidence.get("source_orphan_rows"),
+                "rule_id": f"{GATE_ID}.orphans",
+            },
+        }
+    reason = str(evidence.get("reason") or "")
+    named_unavail = ", ".join(str(r) for r in unavailable[:4])
+    return {
+        "id": GATE_ID,
+        "status": "warn",
+        "message": (
+            "Destination referential integrity is unproven"
+            + (f" ({named_unavail})" if named_unavail else "")
+            + (f": {reason}" if reason else "")
+            + ". No orphan rows were measured, so the load is kept."
+        ),
+        "duration_ms": 0,
+        "details": {
+            "schema": REPORT_SCHEMA,
+            "declared": True,
+            "unavailable_relations": unavailable,
+            "reason": reason,
+            "relations": relations,
+            "rule_id": f"{GATE_ID}.unproven",
+        },
+    }
+
+
+def apply_dest_ri_to_reconcile(
+    stamped: dict[str, Any],
+    *,
+    evidence: Mapping[str, Any] | None = None,
+    has_relationships: bool | None = None,
+    quarantined_orphans: int = 0,
+) -> dict[str, Any]:
+    """Stamp G22 onto a Gate-8 report and fail the job on measured orphans.
+
+    Orphans the write-path guard quarantined never reach the destination scan,
+    so the survivors' checksum cannot certify the relationship: G22 warns with
+    the quarantined count and the run is not marked proven.
+    """
+    phys = stamped.get("physical_state") if isinstance(stamped.get("physical_state"), dict) else {}
+    ri = evidence
+    if not isinstance(ri, Mapping):
+        ri = phys.get("referential_integrity") if isinstance(phys, dict) else None
+    gate = build_dest_ri_gate(
+        ri if isinstance(ri, Mapping) else None,
+        has_relationships=has_relationships,
+    )
+    quarantined = max(int(quarantined_orphans or 0), 0)
+    if quarantined and str(gate.get("status") or "") in {"pass", "skip", "warn"}:
+        prior_msg = str(gate.get("message") or "") if gate.get("status") == "warn" else ""
+        gate = {
+            "id": GATE_ID,
+            "status": "warn",
+            "message": (
+                f"{quarantined} orphan child row(s) were quarantined before write — "
+                "their parent is absent at the destination. The loaded rows' checksum "
+                "covers the survivors only and does not certify referential integrity."
+                + (f" {prior_msg}" if prior_msg else "")
+            ),
+            "duration_ms": 0,
+            "details": {
+                **dict(gate.get("details") or {}),
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "quarantined_orphan_rows": quarantined,
+                "rule_id": f"{GATE_ID}.quarantined",
+            },
+        }
+    out = dict(stamped)
+    out["g22_dest_referential_integrity"] = gate
+    if quarantined:
+        out["fk_orphans_quarantined"] = quarantined
+        out["migration_proven"] = False
+    status = str(gate.get("status") or "")
+    if status in {"block", "warn"}:
+        if status == "block":
+            out["passed"] = False
+        prior = str(out.get("message") or "").rstrip()
+        extra = str(gate.get("message") or "G22 destination referential integrity failed")
+        out["message"] = f"{prior} {extra}".strip() if prior else extra
+    return out
+

@@ -49,12 +49,15 @@ class UniversalSchema:
     row_count: int = 0
     industry: str | None = None
     file_type: str = ""
+    path: str = ""
 
 
 class UniversalDataFeeder:
     """Feed universal data schemas into the training pipeline."""
 
     def __init__(self, upload_dirs: list[str] | None = None):
+        #: upload stem -> why the parser refused it (round 10).
+        self.unreadable: dict[str, str] = {}
         base = Path(__file__).resolve().parents[3]  # apps/api
         default_dirs = [
             str(base / "uploads"),
@@ -130,7 +133,13 @@ class UniversalDataFeeder:
                     content = file_path.read_bytes()
                     result = self.parser.parse(content, file_path.name)
                     if not result.success or not result.columns:
+                        # Remember why: "not found" for a file that is there
+                        # but unreadable sent the operator looking elsewhere.
+                        self.unreadable[file_path.stem.lower()] = str(
+                            result.error or "no columns could be read"
+                        )
                         continue
+                    self.unreadable.pop(file_path.stem.lower(), None)
 
                     samples: dict[str, list[str]] = {}
                     for col in result.columns:
@@ -147,6 +156,7 @@ class UniversalDataFeeder:
                         samples=samples,
                         row_count=result.row_count,
                         file_type=result.file_type,
+                        path=str(file_path.resolve()),
                     ))
                 except Exception as exc:
                     logger.warning("Could not load schema from %s: %s", file_path, exc)

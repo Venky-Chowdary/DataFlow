@@ -15,31 +15,116 @@ response body fails loudly instead of leaking.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+import re
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-SECRET_KEYS: frozenset[str] = frozenset(
-    {
-        "password",
-        "connection_string",
-        "api_key",
-        "service_account",
-        "private_key",
-        "private_key_passphrase",
-        "token",
-        "access_token",
-        "refresh_token",
-        "secret_key",
-        "client_secret",
-    }
-)
+from services.log_redaction import is_sensitive_key
 
 
 def redact_config(cfg: Mapping[str, Any]) -> dict[str, Any]:
     """Copy of ``cfg`` with every known secret value replaced by ``***``."""
     return {
-        k: ("***" if k in SECRET_KEYS and v not in (None, "") else v)
+        k: ("***" if is_sensitive_key(k) and v not in (None, "") else v)
         for k, v in cfg.items()
     }
+
+
+def redact_url(url: str) -> str:
+    """Redact secret-named query parameters and URL user information."""
+    parsed = urlsplit(str(url))
+    if not parsed.query and "@" not in parsed.netloc:
+        return str(url)
+
+    query: list[tuple[str, str]] = []
+    for name, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if is_sensitive_key(name) and value not in (None, ""):
+            value = "***"
+        query.append((name, value))
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        _, host = netloc.rsplit("@", 1)
+        netloc = f"***@{host}"
+    return urlunsplit(
+        (
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            urlencode(query, doseq=True),
+            parsed.fragment,
+        )
+    )
+
+
+def mask_secrets_in_text(text: str) -> str:
+    """Mask URI credentials and secret query values embedded in free text."""
+    masked = re.sub(r":([^:@/]+)@", ":****@", str(text))
+    url_pattern = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"'`]+", re.IGNORECASE)
+
+    def redact(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        trailing = ""
+        while candidate and candidate[-1] in ".,;:!?)]}":
+            trailing = candidate[-1] + trailing
+            candidate = candidate[:-1]
+        if not candidate:
+            return match.group(0)
+
+        parsed = urlsplit(candidate)
+        netloc = parsed.netloc
+        if "@" in netloc:
+            userinfo, host = netloc.rsplit("@", 1)
+            if ":" in userinfo:
+                username, _, _password = userinfo.partition(":")
+                netloc = f"{username}:****@{host}"
+            else:
+                netloc = f"***@{host}"
+
+        query_url = urlunsplit(
+            (parsed.scheme, "mcp-redaction.invalid", parsed.path, parsed.query, parsed.fragment)
+        )
+        redacted_query = urlsplit(redact_url(query_url)).query
+        return (
+            urlunsplit((parsed.scheme, netloc, parsed.path, redacted_query, parsed.fragment))
+            + trailing
+        )
+
+    return _mask_assigned_secrets(url_pattern.sub(redact, masked))
+
+
+# ``Key=Value;`` connection strings (Azure storage / Service Bus, ODBC, ADO.NET,
+# JDBC properties) carry the secret as a segment, not as URI userinfo: the
+# AccountKey of an ADLS connector was echoed verbatim on every connector
+# response (D253). A braced ODBC value may itself contain ``;``.
+_SEGMENT_ASSIGNMENT = re.compile(
+    r"(?P<pre>(?:^|;)\s*)(?P<key>[A-Za-z][A-Za-z0-9 _.-]*?)(?P<sep>\s*=\s*)"
+    r"(?P<val>\{[^}]*\}|[^;]*)"
+)
+# libpq keyword DSN: ``host=h user=u password=secret``.
+_LIBPQ_SECRET = re.compile(
+    r"(?i)(?P<pre>(?:^|\s))(?P<key>password|passwd|pwd|sslpassword)(?P<sep>\s*=\s*)"
+    r"(?P<val>'(?:[^'\\]|\\.)*'|[^\s;]+)"
+)
+
+
+def _mask_assigned_secrets(text: str) -> str:
+    from services.log_redaction import is_sensitive_key
+
+    def segment(match: re.Match[str]) -> str:
+        value = match.group("val")
+        if not value.strip() or not is_sensitive_key(match.group("key").strip()):
+            return match.group(0)
+        return match.group("pre") + match.group("key") + match.group("sep") + "****"
+
+    def libpq(match: re.Match[str]) -> str:
+        return match.group("pre") + match.group("key") + match.group("sep") + "****"
+
+    if "=" not in text:
+        return text
+    if ";" in text:
+        text = _SEGMENT_ASSIGNMENT.sub(segment, text)
+    return _LIBPQ_SECRET.sub(libpq, text)
 
 
 class RedactedConfig(Mapping[str, Any]):
@@ -70,9 +155,20 @@ class RedactedConfig(Mapping[str, Any]):
 
 
 def probe_config_from_endpoint(db_type: str, endpoint: Any) -> RedactedConfig:
-    """Secret-carrying probe config for an endpoint, safe to place in metadata."""
+    """Secret-carrying probe config for an endpoint, safe to place in metadata.
+
+    TLS / driver keywords the endpoint carries under ``extra`` (for example
+    SQL Server ``trust_server_certificate``) ride on top level: a probe that
+    opened a stricter handshake than the writer failed, and the destination
+    FK orphan probe refused every SQL Server run (D112).
+    """
+    from connectors.generic_sql import connection_options
+
+    extra = getattr(endpoint, "extra", None)
+    tls = connection_options(dict(extra) if isinstance(extra, dict) else {})
     return RedactedConfig(
         {
+            **tls,
             "type": db_type,
             "host": endpoint.host,
             "port": endpoint.port,

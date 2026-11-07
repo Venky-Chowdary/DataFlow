@@ -1,4 +1,4 @@
-﻿"""Temporal / CDC identity / Notion / JSON export / LSN invent refuse."""
+"""Temporal / CDC identity / Notion / JSON export / LSN invent refuse."""
 
 from __future__ import annotations
 

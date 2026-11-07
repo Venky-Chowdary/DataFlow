@@ -13,7 +13,7 @@ rule and never weak attributes like ``capital``.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Sequence
 
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 
@@ -53,6 +53,18 @@ KEY_ADDRESSED_DESTS = frozenset({
 # unique in every mode, because duplicates within one batch are last-write-wins;
 # that is ``sync_requires_unique_identity``, which still covers MongoDB.
 _DERIVED_KEY_DESTS = KEY_ADDRESSED_DESTS - {"mongodb"}
+
+
+def _identity_dest_kind(dest_kind: str | None) -> str:
+    """Canonical kind for identity rules; a vector sink stays itself.
+
+    ``normalize_dest_kind`` folds ``pgvector`` into the PostgreSQL family, which
+    would drop the vector upsert's key-addressed rule.
+    """
+    raw = (dest_kind or "").strip().lower()
+    if raw in KEY_ADDRESSED_DESTS:
+        return raw
+    return normalize_dest_kind(dest_kind) if dest_kind else ""
 
 # Sync modes that must enforce identity uniqueness on the Validate sample for
 # SQL / document stores. Key-addressed sinks always require uniqueness.
@@ -114,6 +126,132 @@ _REDIS_WEAK_KEYS = frozenset(
 )
 
 
+def sync_collapses_in_file_duplicates(sync_mode: str | None) -> bool:
+    """Upsert keeps the last in-file copy of a key. Append and insert do not.
+
+    ``incremental_upsert`` normalizes to ``incremental_deduped``. CDC, mirror,
+    and SCD2 still require a unique identity and are not collapsed here.
+    """
+    return _normalized_mode(sync_mode) in {"upsert", "incremental_deduped"}
+
+
+#: Sources whose read order IS the change order within a key: an upsert keeps the
+#: last read copy of a key, which is its latest record. Kafka gives that order
+#: per partition, so it holds for a topic whose messages are keyed (one key,
+#: one partition) or that has a single partition — the shape of a changelog
+#: topic. The finding text states the assumption.
+ORDERED_LOG_SOURCES = frozenset({"kafka"})
+ORDERED_LOG_NOTE = (
+    "Repeated keys collapsed to the last message read: Kafka orders messages "
+    "within a partition, so this assumes a keyed (per-key partition) or "
+    "single-partition topic. Declare in_file_dedupe=block to refuse repeats instead."
+)
+
+
+def _stream_scope(stream_contracts: list[dict] | None, stream_name: str = "") -> list[dict]:
+    """The contract(s) a decision is about: the named stream, else every selected one."""
+    selected = [
+        c for c in (stream_contracts or [])
+        if isinstance(c, dict) and c.get("selected") is not False
+    ]
+    if stream_name:
+        named = [
+            c for c in selected
+            if str(c.get("name") or c.get("stream") or "").strip() == stream_name.strip()
+        ]
+        if named:
+            return named
+    return selected
+
+
+def latest_wins_dedupe(
+    in_file_dedupe: str | None,
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+    stream_name: str = "",
+) -> str:
+    """``keep_last`` when an upsert's winner per key is defined by read order.
+
+    ``incremental_deduped`` keeps the latest version of each key. With a
+    declared cursor the incremental read is ordered by it, and a changelog
+    topic is read in offset order, so the last copy read IS the latest one.
+    Refusing a repeated key there blocked the normal shape of a changelog
+    (D89) and of a versioned table (E2-023: 3 versions per key). An explicit
+    operator policy (``block`` / ``keep_last``) always wins.
+
+    Decided per stream: ``stream_name`` picks that contract; without it every
+    selected contract must declare a cursor, so a cursorless stream in a
+    multi-stream request still refuses repeated keys.
+    """
+    explicit = str(in_file_dedupe or "").strip()
+    if explicit or not sync_collapses_in_file_duplicates(sync_mode):
+        return explicit
+    from src.transfer.engine_family import engine_family
+
+    if engine_family(source_type) in ORDERED_LOG_SOURCES:
+        return "keep_last"
+    scope = _stream_scope(stream_contracts, stream_name)
+    if scope and all(
+        str(c.get("cursor_field") or c.get("cursor") or "").strip() for c in scope
+    ):
+        return "keep_last"
+    return explicit
+
+
+def table_reads_latest_wins(
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+    stream_name: str = "",
+) -> bool:
+    """True when this read of a table/log defines "the last copy of a key".
+
+    The same answer :func:`latest_wins_dedupe` gives an unset policy: a
+    collapsing sync whose read is cursor-ordered (a versioned table, E2-023)
+    or offset-ordered (a changelog topic, D89). There an operator's explicit
+    ``keep_last`` is the automatic choice spelled out — schedules always
+    stamp ``block`` or ``keep_last``, so refusing it left a versioned-table
+    schedule no setting that runs (QA C2 review 3).
+    """
+    return (
+        latest_wins_dedupe(
+            None,
+            sync_mode,
+            stream_contracts=stream_contracts,
+            source_type=source_type,
+            stream_name=stream_name,
+        )
+        == "keep_last"
+    )
+
+
+def latest_wins_note(source_type: str = "") -> str:
+    """The assumption behind a read-order collapse, for the finding text."""
+    from src.transfer.engine_family import engine_family
+
+    return ORDERED_LOG_NOTE if engine_family(source_type) in ORDERED_LOG_SOURCES else ""
+
+
+def operator_collapses_in_file_duplicates(
+    sync_mode: str | None,
+    in_file_dedupe: str | None = "",
+) -> bool:
+    """Collapse when the sync mode does, unless the operator asked to block.
+
+    An explicit ``block`` policy still fails the load. ``keep_last`` collapses
+    even on append. An empty policy follows the sync mode.
+    """
+    policy = str(in_file_dedupe or "").strip().lower().replace("-", "_")
+    if policy == "block":
+        return False
+    if policy == "keep_last":
+        return True
+    return sync_collapses_in_file_duplicates(sync_mode)
+
+
 def sync_requires_unique_identity(
     sync_mode: str | None,
     dest_kind: str | None = None,
@@ -123,10 +261,32 @@ def sync_requires_unique_identity(
     Key-addressed destinations (Redis, DynamoDB, ES, vector upserts) always
     return True: every write is keyed, so append still collides on duplicates.
     """
-    kind = normalize_dest_kind(dest_kind) if dest_kind else ""
+    kind = _identity_dest_kind(dest_kind)
     if kind in KEY_ADDRESSED_DESTS:
         return True
     return _normalized_mode(sync_mode) in _UNIQUE_IDENTITY_SYNC_MODES
+
+
+def dest_is_key_addressed(
+    dest_kind: str | None,
+    key_columns: Sequence[str] | None = None,
+) -> bool:
+    """True when every write to this destination is addressed by identity.
+
+    Redis ``SET``, DynamoDB ``PutItem``, Elasticsearch index-by-``_id`` and
+    vector upserts replace the value held at the key. Re-writing a key that
+    already exists is the destination's defined behaviour, not a lost row, so
+    cardinality growth cannot account for such a write.
+
+    MongoDB is addressed by ``_id`` alone: an insert whose ``_id`` is unmapped
+    gets a server-assigned ObjectId per document, so an append accumulates
+    rows exactly like a SQL table and its cardinality must be closed by
+    COUNT(*) delta, not a key census over some other mapped column.
+    """
+    kind = _identity_dest_kind(dest_kind)
+    if kind == "mongodb":
+        return any((c or "").strip() == "_id" for c in (key_columns or ()))
+    return kind in KEY_ADDRESSED_DESTS
 
 
 def _normalized_mode(sync_mode: str | None) -> str:
@@ -151,7 +311,7 @@ def missing_identity_blocks(
     its own key can, for insert-only modes — the row still lands exactly once.
     Upsert-class modes need a key everywhere: there is nothing to match on.
     """
-    kind = normalize_dest_kind(dest_kind) if dest_kind else ""
+    kind = _identity_dest_kind(dest_kind)
     if kind in _DERIVED_KEY_DESTS:
         return True
     return _normalized_mode(sync_mode) in _UNIQUE_IDENTITY_SYNC_MODES
@@ -231,6 +391,29 @@ def infer_redis_conflict_columns(
 
     picked = pick_redis_identity_column(list(target_cols))
     return [picked] if picked else []
+
+
+def identity_source_columns(
+    pk_target_columns: Sequence[str] | None,
+    mappings: Iterable[Any] | None,
+) -> list[str]:
+    """Source column for every destination key component, in key order.
+
+    Batch audits read source-keyed cells, while the write key is named by the
+    destination. A component with no mapping keeps its own name (identity map).
+    """
+    target_to_source: dict[str, str] = {}
+    for src, tgt in _mapping_pairs(mappings or []):
+        target_to_source.setdefault(tgt.lower(), src)
+    out: list[str] = []
+    for col in pk_target_columns or []:
+        name = str(col or "").strip()
+        if not name:
+            continue
+        src = target_to_source.get(name.lower(), name)
+        if src not in out:
+            out.append(src)
+    return out
 
 
 def _mapping_pairs(mappings: Iterable[Any]) -> list[tuple[str, str]]:
@@ -348,6 +531,11 @@ def resolve_identity_key(
 
     # Operator identity (Advanced / stream contract) — never silently swap for ``id``.
     contract = str(contract_primary_key or "").strip()
+    if contract and "," in contract:
+        # "id,tenant_id" is not a column. The composite resolvers own that
+        # string; returning it whole made the uniqueness probe look up a
+        # name that does not exist and then fall through to a guessed id.
+        return None, None
     if contract:
         matched_src = src_lower.get(contract.lower())
         if matched_src:
@@ -492,7 +680,6 @@ def _map_identity_names_to_source(
 ) -> list[str]:
     """Map dest/contract identity names onto source columns when possible."""
     pairs = _mapping_pairs(mappings)
-    tgt_by_src = {s: t for s, t in pairs}
     src_by_tgt = {t: s for s, t in pairs}
     srcs = [s for s, _ in pairs]
     if source_columns:
@@ -526,6 +713,41 @@ def _map_identity_names_to_source(
         seen.add(key)
         deduped.append(c)
     return deduped
+
+
+def mapped_catalog_upsert_key(
+    primary_key_columns: Sequence[str] | None,
+    mappings: Iterable[Any],
+) -> tuple[list[str], list[str]]:
+    """Map a source-catalog primary key through the write mapping.
+
+    Returns ``(source_columns, target_columns)``. Empty when the catalog has
+    no key, or when any key column is unmapped — upserting on a partial key
+    would match rows on the wrong identity. This does not invent ``id``.
+    """
+    from services.sync_cursor import map_source_to_target
+
+    keys = [str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()]
+    mapping_list = [m for m in (mappings or []) if isinstance(m, dict)]
+    if not keys or not mapping_list:
+        return [], []
+    by_lower: dict[str, str] = {}
+    for item in mapping_list:
+        src = str(item.get("source") or "").strip()
+        if src:
+            by_lower.setdefault(src.lower(), src)
+    sources: list[str] = []
+    targets: list[str] = []
+    for key in keys:
+        src = by_lower.get(key.lower())
+        if not src:
+            return [], []
+        tgt = str(map_source_to_target(src, mapping_list) or "").strip()
+        if not tgt:
+            return [], []
+        sources.append(src)
+        targets.append(tgt)
+    return sources, targets
 
 
 def resolve_primary_key_source_columns(
@@ -598,3 +820,88 @@ def resolve_primary_key_source_columns(
         contract_primary_key=contract_primary_key,
     )
     return [src] if src else []
+
+
+def _map_identity_names_to_target(
+    names: list[str],
+    *,
+    mappings: Iterable[Any],
+) -> list[str]:
+    """Map source/contract identity names onto destination columns."""
+    pairs = _mapping_pairs(mappings)
+    tgt_by_src = {s.lower(): t for s, t in pairs}
+    tgt_lower = {t.lower(): t for _, t in pairs}
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        tgt = tgt_by_src.get(name.lower()) or tgt_lower.get(name.lower()) or name
+        key = tgt.lower()
+        if not tgt or key in seen:
+            continue
+        seen.add(key)
+        out.append(tgt)
+    return out
+
+
+def resolve_primary_key_columns(
+    mappings: Iterable[Any],
+    source_columns: list[str] | None,
+    dest_kind: str,
+    *,
+    validation_mode: str = "strict",
+    purpose: Purpose = "uniqueness",
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
+    stream_contracts: Iterable[Any] | None = None,
+    stream_name: str = "",
+) -> tuple[list[str], list[str]]:
+    """``(source_columns, target_columns)`` for the full identity.
+
+    Same owner as :func:`resolve_primary_key_source_columns`. An unmapped
+    composite part is kept, not dropped, and does not fall through to a
+    guessed ``id``. Empty when no identity can be named.
+    """
+    sources = resolve_primary_key_source_columns(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=validation_mode,
+        purpose=purpose,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+        stream_name=stream_name,
+    )
+    if not sources:
+        return [], []
+    return sources, _map_identity_names_to_target(sources, mappings=mappings)
+
+
+def resolve_primary_key_target_columns(
+    mappings: Iterable[Any],
+    source_columns: list[str] | None,
+    dest_kind: str,
+    *,
+    validation_mode: str = "strict",
+    purpose: Purpose = "uniqueness",
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
+    stream_contracts: Iterable[Any] | None = None,
+    stream_name: str = "",
+) -> list[str]:
+    """Target-side composite identity for the sample uniqueness probe (G6)."""
+    _sources, targets = resolve_primary_key_columns(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=validation_mode,
+        purpose=purpose,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+        stream_name=stream_name,
+    )
+    return targets

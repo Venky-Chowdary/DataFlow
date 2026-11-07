@@ -88,10 +88,21 @@ def _build_prompt(
     target_columns: list[str],
     source_samples: dict[str, list[str]] | None,
     baseline: list[dict[str, Any]],
+    *,
+    source_types: dict[str, str] | None = None,
+    source_profiles: dict[str, dict[str, int | bool]] | None = None,
 ) -> str:
     from src.ai.llm.prompts import COLUMN_MAPPING_PROMPT
 
-    sanitized_samples = _sanitize_samples(source_samples)
+    from services.ai_egress import (
+        column_profiles_without_cells,
+        metadata_only_enabled,
+    )
+
+    meta_only = metadata_only_enabled()
+    sanitized_samples: dict[str, list[str]] = {}
+    if not meta_only:
+        sanitized_samples = _sanitize_samples(source_samples)
 
     context_lines = []
     if baseline:
@@ -100,6 +111,29 @@ def _build_prompt(
             context_lines.append(
                 f"  {m.get('source')} -> {m.get('target')} "
                 f"(conf={m.get('confidence', 0):.2f}, review={m.get('requires_review', False)})"
+            )
+    types = {
+        str(k): str(v)
+        for k, v in dict(source_types or {}).items()
+        if k and str(v or "").strip()
+    }
+    if types:
+        context_lines.append("Source types (declared/inferred; no cell values):")
+        for col in source_columns[:40]:
+            if col in types:
+                context_lines.append(f"  {col}: {types[col]}")
+    profiles = dict(source_profiles or {})
+    if not profiles and source_samples:
+        profiles = column_profiles_without_cells(source_samples)
+    if profiles:
+        context_lines.append("Column profiles (aggregates only; no cell values):")
+        for col in source_columns[:40]:
+            prof = profiles.get(col)
+            if not isinstance(prof, dict):
+                continue
+            context_lines.append(
+                f"  {col}: n={prof.get('n', 0)} nonempty={prof.get('non_empty', 0)} "
+                f"max_len={prof.get('max_len', 0)} numeric={prof.get('looks_numeric', False)}"
             )
     if sanitized_samples:
         for col in source_columns[:12]:
@@ -110,7 +144,11 @@ def _build_prompt(
     return COLUMN_MAPPING_PROMPT.format(
         source_columns=source_columns,
         target_columns=target_columns,
-        source_samples=sanitized_samples,
+        source_samples=(
+            "[withheld: metadata-only]"
+            if meta_only
+            else sanitized_samples
+        ),
         context="\n".join(context_lines) if context_lines else "None",
     )
 
@@ -195,14 +233,25 @@ def refine_mappings_with_llm(
     target_columns: list[str],
     *,
     source_samples: dict[str, list[str]] | None = None,
+    source_types: dict[str, str] | None = None,
     enabled: bool = True,
+    job_id: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Merge LLM suggestions over BM25/Hungarian baseline. Returns (mappings, meta)."""
+    from services.ai_egress import (
+        column_profiles_without_cells,
+        egress_scope,
+        last_manifest,
+        metadata_only_enabled,
+    )
+
     meta: dict[str, Any] = {
         "llm_used": False,
         "llm_provider": None,
         "llm_error": None,
         "strategy": "deterministic_only",
+        "ai_metadata_only": metadata_only_enabled(),
+        "ai_egress": None,
     }
 
     if not enabled or not is_llm_enabled() or not target_columns or not source_columns:
@@ -222,8 +271,24 @@ def refine_mappings_with_llm(
         from src.ai.llm.fallback import DataTransferFallbackChain
 
         chain = DataTransferFallbackChain()
-        prompt = _build_prompt(source_columns, target_columns, source_samples, baseline_mappings)
-        response = chain.generate(prompt, system=_LLM_SYSTEM)
+        profiles = column_profiles_without_cells(source_samples)
+        outbound_samples = None if metadata_only_enabled() else source_samples
+        prompt = _build_prompt(
+            source_columns,
+            target_columns,
+            outbound_samples,
+            baseline_mappings,
+            source_types=source_types,
+            source_profiles=profiles,
+        )
+        with egress_scope(
+            job_id=job_id,
+            purpose="column_mapping",
+            column_names=source_columns,
+            source_types=source_types,
+        ):
+            response = chain.generate(prompt, system=_LLM_SYSTEM)
+        meta["ai_egress"] = last_manifest()
         if not response.success:
             meta["llm_error"] = "generation_failed"
             return baseline_mappings, meta

@@ -11,7 +11,11 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from connectors.writer_common import quarantine_unfit_specialty_types  # noqa: E402
-from services.schema_inference import is_geography_wire, is_interval_wire  # noqa: E402
+from services.schema_inference import (  # noqa: E402
+    is_geography_wire,
+    is_interval_wire,
+    is_zero_duration_interval_bind,
+)
 
 
 def test_geography_wire_accepts_wkt_geojson_ewkb():
@@ -45,6 +49,25 @@ def test_interval_wire_rejects_ambiguous_numeric():
     assert is_interval_wire("hello") is False
     assert is_interval_wire(42) is False
     assert is_interval_wire("12:30:00") is False  # TIME-shaped, hours <= 23
+    assert is_interval_wire(0) is False
+    assert is_interval_wire("00:00:00") is False
+
+
+def test_zero_duration_interval_bind_is_dest_typed_only():
+    """Dest INTERVAL already named the type — zero duration must bind.
+
+    Global ``is_interval_wire`` still refuses inventing INTERVAL from 0 /
+    midnight TIME so a TIME column is not remapped.
+    """
+    assert is_zero_duration_interval_bind(0) is True
+    assert is_zero_duration_interval_bind(0.0) is True
+    assert is_zero_duration_interval_bind("0") is True
+    assert is_zero_duration_interval_bind("00:00:00") is True
+    assert is_zero_duration_interval_bind("0:00:00") is True
+    assert is_zero_duration_interval_bind(timedelta(0)) is True
+    assert is_zero_duration_interval_bind(42) is False
+    assert is_zero_duration_interval_bind("12:30:00") is False
+    assert is_zero_duration_interval_bind(False) is False
 
 
 def test_quarantine_specialty_holds_out_bad_geography():
@@ -59,6 +82,20 @@ def test_quarantine_specialty_holds_out_bad_geography():
     )
     assert out == [("POINT(0 0)", "fine")]
     assert details and "geography" in details[0]["reason"]
+
+
+def test_quarantine_specialty_keeps_zero_duration_interval():
+    rows = [(0,), ("00:00:00",), ("P3D",)]
+    details: list[dict] = []
+    out = quarantine_unfit_specialty_types(
+        rows,
+        ["dur"],
+        ["INTERVAL"],
+        details,
+        policy="quarantine",
+    )
+    assert out == rows
+    assert details == []
 
 
 def test_quarantine_specialty_holds_out_bad_interval():

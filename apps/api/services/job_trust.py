@@ -11,9 +11,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.reconcile_coverage import (
+    LAST_STREAM_CHECKSUM,
+    NO_OP_DEST_UNCHANGED,
+    PER_STREAM_CHECKSUM,
+)
+
 _TERMINAL = frozenset({
     "completed",
     "completed_with_quarantine",
+    "completed_with_warnings",
     "failed",
     "cancelled",
     "success",
@@ -25,15 +32,59 @@ def is_terminal_status(status: str | None) -> bool:
     return str(status or "").strip().lower() in _TERMINAL
 
 
+def is_append_delta_proof(recon: dict[str, Any] | None) -> bool:
+    """True when Gate-8 closed on dest-before delta, not comparable whole-table hashes.
+
+    Matches Gate-8 UI ``isGate8AppendDelta``: coverage/phase ``row_count``
+    alone is not enough — overwrite conservation fixtures reuse that phase.
+    """
+    if not isinstance(recon, dict) or not recon:
+        return False
+    scope = str(recon.get("checksum_scope") or "").strip().lower()
+    if scope == "whole_table_not_comparable":
+        return True
+    coverage = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
+    phase = str(recon.get("phase") or "").strip().lower()
+    src = str(recon.get("source_checksum") or "").strip()
+    tgt = str(recon.get("target_checksum") or "").strip()
+    hashes_diverge = bool(src and tgt and src != tgt)
+    return (
+        (coverage == "row_count" or "post_write_row_count" in phase)
+        and hashes_diverge
+        and recon.get("checksum_match") is not True
+    )
+
+
 def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
     """True only for independent source↔dest digest match (not writer-ack/sample)."""
     if not isinstance(recon, dict) or not recon:
         return False
+    if is_append_delta_proof(recon):
+        return False
+    # A last-table digest can match and still not be the multi-table job.
+    # Assurance may still say full_checksum on a report that also carries
+    # this scope; the scope wins.
+    scope = str(recon.get("checksum_scope") or "").strip().lower()
+    if scope == LAST_STREAM_CHECKSUM:
+        return False
     assurance = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
     if assurance == "full_checksum":
         return True
+    if assurance in {
+        "row_count",
+        "writer_ack",
+        "sample",
+        "write_pass_dest_readback",
+        PER_STREAM_CHECKSUM,
+        NO_OP_DEST_UNCHANGED,
+        "none",
+    }:
+        return False
+    provenance = str(recon.get("source_checksum_provenance") or "").strip().lower()
+    if provenance in {"writer_ack", "write_pass_fingerprints"}:
+        return False
     phase = str(recon.get("phase") or "").strip().lower()
-    if "writer_ack" in phase or "sample" in phase or "skipped" in phase:
+    if "writer_ack" in phase or "sample" in phase or "skipped" in phase or "row_count" in phase:
         return False
     if recon.get("unproven") is True or recon.get("skipped_readback") is True:
         return False
@@ -79,7 +130,13 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
     )
 
     fidelity = recon.get("row_fidelity_score")
-    if isinstance(fidelity, (int, float)) and fidelity == fidelity:
+    last_stream = (
+        str(recon.get("checksum_scope") or "").strip().lower() == LAST_STREAM_CHECKSUM
+    )
+    # A perfect score on the last table is not a perfect score for the job.
+    if last_stream and passed is not False:
+        recon_score = 70.0
+    elif isinstance(fidelity, (int, float)) and fidelity == fidelity:
         recon_score = max(0.0, min(100.0, float(fidelity) * (100.0 if float(fidelity) <= 1.0 else 1.0)))
         if float(fidelity) <= 1.0:
             recon_score = float(fidelity) * 100.0
@@ -90,8 +147,16 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
         recon_score = 45.0
     elif writer_ack:
         recon_score = 58.0
+    elif assurance == "write_pass_dest_readback" or "write_pass" in phase:
+        recon_score = 82.0
     elif sample:
         recon_score = 68.0
+    elif str(recon.get("verification_verdict") or "").lower() == "partial":
+        # Row-count/checksum checks passed but a declared check (dedupe
+        # winner ordering) is unverifiable — honest partial, never Verified.
+        recon_score = 70.0
+    elif is_append_delta_proof(recon):
+        recon_score = 70.0
     elif has_full_checksum_proof(recon):
         recon_score = 100.0
     elif passed is True:
@@ -113,8 +178,30 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
         r_note = "Pre-write / pending Gate-8 — not independent post-write proof."
     elif writer_ack:
         r_note = "Writer acknowledgment only — independent read-back not captured."
+    elif assurance == "write_pass_dest_readback" or "write_pass" in phase:
+        _vv = str(recon.get("verification_verdict") or "").lower() or "unproven"
+        r_note = (
+            f"verification_verdict={_vv} — dest read-back matches the "
+            "write-pass fingerprint; source warehouse was not independently "
+            "re-read (migration_proven=false)."
+        )
     elif sample:
         r_note = "Sample-verified Gate-8 — not full independent checksum."
+    elif str(recon.get("verification_verdict") or "").lower() == "partial":
+        r_note = (
+            "Gate-8 partially verified — row counts/checksums match but a "
+            "declared dedupe winner-ordering check is unverifiable."
+        )
+    elif is_append_delta_proof(recon):
+        r_note = (
+            "Gate-8 append delta verified — whole-table checksums are not "
+            "comparable; per-cell fidelity is not proven."
+        )
+    elif str(recon.get("checksum_scope") or "").strip().lower() == LAST_STREAM_CHECKSUM:
+        r_note = (
+            "Checksum matches the last stream only — not a single digest "
+            "for the multi-table job."
+        )
     elif missing or extra:
         r_note = f"Keys missing={missing} extra={extra}."
         recon_score = min(recon_score, 70.0)
@@ -135,26 +222,56 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _quarantine_closure(job: dict[str, Any]) -> dict[str, Any] | None:
+    raw = job.get("quarantine_closure")
+    if isinstance(raw, dict) and raw:
+        return raw
+    dest = job.get("destination_summary")
+    if isinstance(dest, dict):
+        stored = dest.get("quarantine_closure")
+        if isinstance(stored, dict) and stored:
+            return stored
+    return None
+
+
+def open_quarantine_count(job: dict[str, Any] | None) -> float:
+    """Hold-outs still in the replay set.
+
+    Historical ``rejected_rows`` is the original transfer's census — after
+    Promote/Replay the operator signal is *open* count. Using the historical
+    figure forever is the Airbyte DLQ lie this product refuses.
+    """
+    j = job if isinstance(job, dict) else {}
+    closure = _quarantine_closure(j)
+    if isinstance(closure, dict) and closure.get("open_count") is not None:
+        return _num(closure.get("open_count"), 0)
+    rejected = _num(j.get("rejected_rows"), 0)
+    if rejected <= 0:
+        rejected = _num((j.get("destination_summary") or {}).get("rejected_rows"), 0)
+    return rejected
+
+
 def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
     """Compute a 0–100 trust score from persisted job fields."""
     j = job if isinstance(job, dict) else {}
     status = str(j.get("status") or "").strip().lower()
     processed = _num(j.get("records_processed"), 0)
-    rejected = _num(j.get("rejected_rows"), 0)
-    if rejected <= 0:
-        rejected = _num((j.get("destination_summary") or {}).get("rejected_rows"), 0)
+    historical_rejected = _num(j.get("rejected_rows"), 0)
+    if historical_rejected <= 0:
+        historical_rejected = _num((j.get("destination_summary") or {}).get("rejected_rows"), 0)
+    rejected = open_quarantine_count(j)
     coerced = _num(j.get("coerced_null_rows"), 0)
     if coerced <= 0:
         coerced = _num((j.get("destination_summary") or {}).get("coerced_null_rows"), 0)
     recon = j.get("reconciliation") if isinstance(j.get("reconciliation"), dict) else {}
     lag = j.get("cdc_lag_seconds")
     lease_conflict = bool(j.get("cdc_lease_conflict"))
-    cursor_gap = bool(j.get("cdc_cursor_gap")) or str(j.get("error_code") or "") in {
-        "cdc_cursor_gap",
-        "cdc_lsn_gap",
-        "cdc_scn_gap",
-        "cdc_binlog_gap",
-    }
+    from services.cdc_cursor_gap import job_has_cursor_gap
+
+    cursor_gap = job_has_cursor_gap(j)
+    snapshot_mode = str(j.get("snapshot_mode") or "").strip()
+    if not snapshot_mode and isinstance(j.get("snapshot_plan"), dict):
+        snapshot_mode = str(j["snapshot_plan"].get("snapshot_mode") or "")
     source_ha_role = str(j.get("source_ha_role") or "").strip().upper() or None
 
     factors: list[dict[str, Any]] = []
@@ -170,13 +287,19 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         outcome = 78.0
         outcome_note = "Completed with quarantine — not full fidelity."
     elif status in {"completed", "success"}:
-        # Terminal success without Gate-8 is not a perfect completeness score.
-        outcome = 100.0 if recon else 82.0
-        outcome_note = (
-            "Terminal success."
-            if recon
-            else "Terminal success — Gate-8 reconcile not on this job yet."
-        )
+        # Terminal success is not a certificate. Completeness tracks Gate-8 depth.
+        if recon and has_full_checksum_proof(recon):
+            outcome = 100.0
+            outcome_note = "Terminal success — Gate-8 independent checksum."
+        elif recon and str(recon.get("assurance_level") or "").lower() == "writer_ack":
+            outcome = 82.0
+            outcome_note = "Terminal success — Gate-8 writer acknowledgment only."
+        elif recon:
+            outcome = 88.0
+            outcome_note = "Terminal success — Gate-8 not independent full_checksum."
+        else:
+            outcome = 82.0
+            outcome_note = "Terminal success — Gate-8 reconcile not on this job yet."
     else:
         outcome = 55.0
         outcome_note = "In progress — score is provisional."
@@ -188,15 +311,23 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         "note": outcome_note,
     })
 
-    # Quarantine / violation rate
-    denom = max(processed, rejected, 1)
+    # Quarantine / violation rate — open hold-outs, not historical rejects.
+    denom = max(processed, rejected, historical_rejected, 1)
     reject_rate = min(1.0, rejected / denom)
     quarantine_score = max(0.0, 100.0 - reject_rate * 400.0)
-    if rejected <= 0:
+    closure = _quarantine_closure(j)
+    verdict = str((closure or {}).get("verdict") or "")
+    if rejected <= 0 and verdict == "closed":
+        quarantine_score = 100.0
+        q_note = (
+            f"{int(historical_rejected):,} original hold-out(s) remediations landed "
+            "(child Gate-8) — not a rewrite of the parent checksum."
+        )
+    elif rejected <= 0:
         quarantine_score = 100.0
         q_note = "No quarantined rows."
     else:
-        q_note = f"{int(rejected):,} quarantined ({reject_rate * 100:.1f}% of processed)."
+        q_note = f"{int(rejected):,} open quarantined ({reject_rate * 100:.1f}% of processed)."
     factors.append({
         "id": "quarantine",
         "label": "Quarantine",
@@ -314,7 +445,9 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
             if f["id"] == "completeness":
                 f["note"] = (
                     "CDC cursor gap (retention / AG·Data Guard failover class) — "
-                    "reset watermark and re-snapshot; continuous CDC across the gap is not claimed."
+                    "purged-window events are gone. when_needed Resume snapshots "
+                    "current source keys then streams from the new tip; initial/never "
+                    "stay fail-closed. Not continuous CDC, not migration_proven."
                 )
 
     # Never grade-A without independent full checksum proof (enterprise honesty).
@@ -353,7 +486,10 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         status=status,
         lease_conflict=lease_conflict,
         cursor_gap=cursor_gap,
+        snapshot_mode=snapshot_mode,
         rejected=rejected,
+        recon=recon if recon else None,
+        quarantine_verdict=verdict,
     )
 
     return {
@@ -398,13 +534,40 @@ def _next_action(
     status: str,
     lease_conflict: bool,
     cursor_gap: bool,
+    snapshot_mode: str = "",
     rejected: float,
+    recon: dict[str, Any] | None = None,
+    quarantine_verdict: str = "",
 ) -> dict[str, str]:
     if cursor_gap:
+        from services.cdc_snapshot_mode import snapshot_mode_recovers_gap
+
+        mode = str(snapshot_mode or "").strip().lower().replace("-", "_")
+        if snapshot_mode_recovers_gap(mode):
+            return {
+                "code": "cursor_gap",
+                "label": "Resume — engine will snapshot",
+                "detail": (
+                    "Purged-window events are gone. Resume re-upserts current source keys, "
+                    "then streams from the new tip. Not continuous CDC. Not migration_proven."
+                ),
+            }
+        if mode == "never":
+            return {
+                "code": "cursor_gap",
+                "label": "Set snapshot when_needed",
+                "detail": (
+                    "snapshot_mode=never forbids a recovery snapshot. Change the mode, then Resume. "
+                    "Purged-window events are gone."
+                ),
+            }
         return {
             "code": "cursor_gap",
             "label": "Reset CDC watermark",
-            "detail": "Clear the cursor, then re-run with snapshot when_needed or initial.",
+            "detail": (
+                "snapshot_mode=initial will not snapshot again. Reset the cursor or set when_needed, "
+                "then re-run. Purged-window events are gone."
+            ),
         }
     if lease_conflict:
         return {
@@ -423,13 +586,61 @@ def _next_action(
         return {"code": "inspect", "label": "Inspect job", "detail": "Open Job Theater for evidence."}
     weakest = min(present, key=lambda f: float(f["score"]))
     wid = weakest["id"]
+    if quarantine_verdict == "closed" and rejected <= 0:
+        if wid in {"quarantine", "completeness"}:
+            return {
+                "code": "quarantine_closed",
+                "label": "Quarantine ledger closed",
+                "detail": (
+                    "Remediations landed with child Gate-8. Parent checksum is "
+                    "historical — not migration_proven."
+                ),
+            }
     if wid == "quarantine" or rejected > 0 and float(weakest["score"]) < 90:
         return {
             "code": "quarantine",
             "label": "Review quarantine",
-            "detail": "Replay or export rejected rows — nothing was silently dropped.",
+            "detail": "Replay or export remaining open rows — nothing was silently dropped.",
         }
     if wid == "reconcile":
+        if recon and recon.get("passed") is True and is_append_delta_proof(recon):
+            return {
+                "code": "append_delta",
+                "label": "Append delta closed — not a dest replace",
+                "detail": (
+                    "Dest grew by this run. Overwrite to replace existing rows, "
+                    "or add a PK and upsert."
+                ),
+            }
+        if (
+            recon
+            and recon.get("passed") is True
+            and str(recon.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM
+        ):
+            return {
+                "code": "last_stream_checksum",
+                "label": "Per-stream checksums — not one job digest",
+                "detail": (
+                    "The job checksum is the last table. Each stream's COUNT(*) "
+                    "is on the stream ledger. Not migration_proven."
+                ),
+            }
+        assurance = str((recon or {}).get("assurance_level") or (recon or {}).get("coverage") or "").lower()
+        phase = str((recon or {}).get("phase") or "").lower()
+        if recon and recon.get("passed") is True and (
+            assurance in {"writer_ack", "write_pass_dest_readback"}
+            or "writer_ack" in phase
+            or "write_pass" in phase
+        ):
+            return {
+                "code": "identity_key",
+                "label": "Add an identity key for per-row proof",
+                "detail": (
+                    "Rows landed. Re-running Validate will not upgrade Gate-8. "
+                    "Map a PK or add Transform hash identity so dest read-back "
+                    "can align rows. Not migration_proven."
+                ),
+            }
         return {
             "code": "reconcile",
             "label": "Investigate Gate-8",

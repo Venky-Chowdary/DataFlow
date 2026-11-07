@@ -35,12 +35,30 @@ class ObjectIdentity:
     resolved: bool = True
     #: Requested column name -> stored column name (only for existing objects).
     columns: dict[str, str] = field(default_factory=dict)
+    #: Stored column name -> the dialect's reflected type (SQLAlchemy reflection
+    #: only; empty where the catalog read did not return types).
+    column_types: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def known_missing(self) -> bool:
+        """The catalog answered and has no such object (never "could not ask")."""
+        return self.resolved and not self.exists
+
+    @property
+    def known_present(self) -> bool:
+        return self.resolved and self.exists
+
+    @property
+    def catalog_unreadable(self) -> bool:
+        """The catalog did not answer; ``exists`` says nothing (D266)."""
+        return not self.resolved
 
 
 def _pick(candidates: list[str], wanted: str) -> str | None:
     """Exact spelling first, then a unique case-insensitive match."""
     if wanted in candidates:
-        return wanted
+        # The catalog's own object: it may carry the dialect's quote flag.
+        return candidates[candidates.index(wanted)]
     matches = [c for c in candidates if c.lower() == wanted.lower()]
     if len(matches) == 1:
         return matches[0]
@@ -122,16 +140,24 @@ def resolve_object_identity(
     schema: str | None = None,
     *,
     columns: list[str] | None = None,
+    dialect: str = "",
 ) -> ObjectIdentity:
-    """Resolve ``schema.table`` (and optionally columns) against the catalog."""
+    """Resolve ``schema.table`` (and optionally columns) against the catalog.
+
+    ``dialect`` names the engine when the caller knows it. A connection that
+    does not expose ``.dialect`` (a pooled proxy, a driver-level connection)
+    otherwise sniffs as unknown and goes to the SQLAlchemy inspector, which
+    cannot inspect it — a readable catalog then read as "unreadable".
+    """
     import sqlalchemy as sa
 
-    want_table = str(table or "")
-    want_schema = str(schema).strip() if schema else None
+    from connectors.sql_identifiers import split_qualified_table
+
+    want_schema, want_table = split_qualified_table(str(table or ""), schema)
     if not want_table:
         return ObjectIdentity(want_schema, want_table, False)
 
-    if _dialect_name(engine) == "oracle":
+    if (dialect or "").strip().lower() == "oracle" or _dialect_name(engine) == "oracle":
         return _oracle_identity(engine, want_table, want_schema, columns)
 
     try:
@@ -160,17 +186,41 @@ def resolve_object_identity(
         return ObjectIdentity(stored_schema, want_table, False)
 
     col_map: dict[str, str] = {}
+    col_types: dict[str, Any] = {}
     if columns:
         try:
-            stored_cols = [
-                str(c.get("name"))
-                for c in insp.get_columns(stored_table, schema=stored_schema)
-            ]
+            reflected = list(insp.get_columns(stored_table, schema=stored_schema))
         except Exception:
-            stored_cols = []
+            reflected = []
+        stored_cols = [c.get("name") for c in reflected if c.get("name") is not None]
         for want in columns:
             hit = _pick(stored_cols, str(want or ""))
             if hit:
                 col_map[str(want)] = hit
+        col_types = {
+            c.get("name"): c.get("type")
+            for c in reflected
+            if str(c.get("name")) in col_map.values() and c.get("type") is not None
+        }
 
-    return ObjectIdentity(stored_schema, stored_table, True, columns=col_map)
+    if _dialect_name(engine) == "snowflake":
+        # SQLAlchemy's Snowflake inspector reports a stored ``ID`` as ``id``;
+        # callers force-quote these names, so a probe sent ``"public"."t"`` /
+        # ``"id"`` — objects Snowflake does not have (QA r12 D8 family).
+        stored_schema = _snowflake_stored(engine, stored_schema)
+        stored_table = _snowflake_stored(engine, stored_table)
+        col_types = {_snowflake_stored(engine, k): v for k, v in col_types.items()}
+        col_map = {k: _snowflake_stored(engine, v) for k, v in col_map.items()}
+    return ObjectIdentity(
+        stored_schema, stored_table, True, columns=col_map, column_types=col_types
+    )
+
+
+def _snowflake_stored(engine: Any, name: Any) -> Any:
+    """The catalog spelling of a name the Snowflake inspector normalized."""
+    if name is None or getattr(name, "quote", None) is True:
+        return None if name is None else str(name)
+    try:
+        return str(engine.dialect.denormalize_name(str(name)))
+    except Exception:
+        return str(name)

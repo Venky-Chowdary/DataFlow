@@ -132,6 +132,7 @@ def comparable_column_pairs(
     """
     if not mappings:
         return None
+    from services.code_crosswalk import declared_crosswalk
     from services.mapping_constraints import is_intentional_omit
 
     eng = normalize_engine(engine)
@@ -154,6 +155,14 @@ def comparable_column_pairs(
         transform = str(mapping.get("transform") or "").strip().lower()
         if transform not in _NO_OP_TYPE_TRANSFORMS:
             return None
+        if declared_crosswalk(mapping):
+            # A code crosswalk rewrites the cell (A→active); the populations
+            # are meant to differ, so neither COPY nor a digest may carry it.
+            return None
+        if mapping.get("rule_contracts"):
+            # Contract failures are quarantined, so source ≠ dest population.
+            # Gate-8 reads None as "per-row fingerprint compare", never a skip.
+            return None
         left = src_types.get(source.lower())
         right = dst_types.get(target.lower())
         if not left or not right:
@@ -164,7 +173,9 @@ def comparable_column_pairs(
     return pairs or None
 
 
-def postgresql_checksum_sql(table_ref: str, columns: list[str]) -> str:
+def postgresql_checksum_sql(
+    table_ref: str, columns: list[str], *, where: str = ""
+) -> str:
     """``SELECT count, digest`` over every row of ``table_ref``.
 
     Each row renders to one text value, is hashed with md5, and the leading 64
@@ -184,21 +195,22 @@ def postgresql_checksum_sql(table_ref: str, columns: list[str]) -> str:
             f"md5(coalesce({quoted}::text, '') || ({quoted} IS NULL)::text)"
         )
     row_text = " || ".join(fields)
+    where_sql = f" WHERE {where}" if (where or "").strip() else ""
     return (
         "SELECT count(*)::bigint AS n, "
         f"coalesce(sum(('x' || substr(md5({row_text}), 1, 15))::bit(60)::bigint::numeric), 0) AS digest "
-        f"FROM {table_ref}"  # nosec B608 — identifiers quoted above
+        f"FROM {table_ref}{where_sql}"  # nosec B608 — identifiers quoted above
     )
 
 
 def postgresql_engine_checksum(
-    cur: Any, table_ref: str, columns: list[str]
+    cur: Any, table_ref: str, columns: list[str], *, where: str = ""
 ) -> EngineChecksum | None:
     """Run the digest, or return ``None`` so the caller keeps the Python path."""
     if not columns:
         return None
     try:
-        cur.execute(postgresql_checksum_sql(table_ref, columns))
+        cur.execute(postgresql_checksum_sql(table_ref, columns, where=where))
         row = cur.fetchone()
     except Exception as exc:
         logger.info("Engine checksum unavailable for %s: %s", table_ref, exc)

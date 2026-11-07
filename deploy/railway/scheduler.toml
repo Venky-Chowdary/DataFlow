@@ -1,0 +1,25 @@
+# Railway — optional cadence process.
+# Do not create this service unless the API is told to stop its own loop.
+#
+# API variables required together with this service:
+#   DATAFLOW_PROCESS_ROLE=api
+#   DATAFLOW_SCHEDULE_LOOP=0
+#   DATAFLOW_API_CLAIM_LOOP=0
+#   DATAFLOW_WORKER_FLEET=1
+#   DATAFLOW_ACK_BACKEND=mongo
+#
+# Without those, the existing API service already fires pipelines.
+# Creating this service and leaving the API loop on runs cadence twice
+# (the Mongo lock keeps a single beat; it does not remove the need
+# to pick one owner).
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.api"
+watchPatterns = ["apps/api/**", "packages/preflight/**", "Dockerfile.api", "scripts/start-scheduler.sh"]
+
+[deploy]
+startCommand = "/app/scripts/start-scheduler.sh"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+numReplicas = 1

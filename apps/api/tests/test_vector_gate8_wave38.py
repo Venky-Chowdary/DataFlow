@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -127,11 +128,13 @@ def test_read_target_sample_weaviate_and_milvus_route():
     m_session = MagicMock()
     m_resp = MagicMock()
     m_resp.status_code = 200
-    m_resp.content = b"{}"
-    m_resp.json.return_value = {
+    m_body = {
         "code": 0,
         "data": [{"id": "m1", "content": "x", "source_id": "s", "vector": [0.1]}],
     }
+    m_resp.content = json.dumps(m_body).encode()
+    m_resp.text = json.dumps(m_body)
+    m_resp.json.return_value = m_body
     m_session.post.return_value = m_resp
     with patch("connectors.milvus_writer._requests_session", return_value=m_session):
         m_rows = read_target_sample(

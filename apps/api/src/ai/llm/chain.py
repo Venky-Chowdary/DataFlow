@@ -9,8 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
-from ..knowledge.synonyms import are_synonyms, resolve_canonical
-from ..knowledge.type_conversions import suggest_type_conversion
+from ..knowledge.synonyms import resolve_canonical
 from .provider import DataTransferLLMProvider, DataTransferLocalProvider
 
 
@@ -102,13 +101,27 @@ class DataTransferReasoningChain:
         data_confidence = 0.8
         if sample_values and matched_pattern and matched_pattern.sample_patterns:
             import re as regex
+            from services.transform_engine import apply_transform
+
             non_empty = [v for v in sample_values if v and str(v).strip()]
             if non_empty:
-                match_count = sum(
-                    1 for v in non_empty[:50]
-                    if any(regex.match(p, str(v).strip(), regex.IGNORECASE)
-                           for p in matched_pattern.sample_patterns)
+                from src.ai.knowledge.data_quality_rules import WRITE_BIND_SEMANTIC_TYPES
+
+                write_transform = WRITE_BIND_SEMANTIC_TYPES.get(
+                    getattr(matched_pattern, "name", "")
                 )
+                match_count = 0
+                for raw in non_empty[:50]:
+                    text = str(raw).strip()
+                    if write_transform:
+                        parsed, err = apply_transform(text, write_transform)
+                        if parsed is not None and not err:
+                            match_count += 1
+                    elif any(
+                        regex.match(p, text, regex.IGNORECASE)
+                        for p in matched_pattern.sample_patterns
+                    ):
+                        match_count += 1
                 data_confidence = match_count / min(len(non_empty), 50)
                 data_confidence = max(data_confidence, 0.3)
 
@@ -129,15 +142,38 @@ class DataTransferReasoningChain:
             final_confidence,
         ))
 
+        inferred = matched_pattern.data_type if matched_pattern else "string"
+        transforms = list(matched_pattern.transformations) if matched_pattern else []
+        if sample_values:
+            from services.transform_engine import apply_transform, samples_are_auto_ambiguous_dates
+
+            texts = [str(v) for v in sample_values if v is not None and str(v).strip()]
+            if samples_are_auto_ambiguous_dates(texts):
+                if inferred in {"date", "datetime"}:
+                    inferred = "string"
+                transforms = [t for t in transforms if t != "standardize_iso8601"]
+            from src.ai.knowledge.data_quality_rules import WRITE_BIND_SEMANTIC_TYPES
+
+            write_transform = WRITE_BIND_SEMANTIC_TYPES.get(
+                getattr(matched_pattern, "name", "") if matched_pattern else ""
+            )
+            if write_transform and texts:
+                if any(
+                    parsed is None or err
+                    for parsed, err in (apply_transform(t, write_transform) for t in texts)
+                ):
+                    if inferred in {"date", "datetime", "boolean", "decimal"}:
+                        inferred = "string"
+
         answer = {
             "column_name": column_name,
             "semantic_type": matched_pattern.name if matched_pattern else None,
             "category": matched_pattern.category.value if matched_pattern else None,
             "is_pii": matched_pattern.is_pii if matched_pattern else False,
             "compliance": matched_pattern.compliance if matched_pattern else [],
-            "transformations": matched_pattern.transformations if matched_pattern else [],
+            "transformations": transforms,
             "canonical_form": canonical,
-            "inferred_type": matched_pattern.data_type if matched_pattern else "string",
+            "inferred_type": inferred,
             "confidence": final_confidence,
         }
 
@@ -165,72 +201,54 @@ class DataTransferReasoningChain:
             1.0,
         ))
 
-        for i, src_col in enumerate(source_columns):
-            src_analysis = self.analyze_column(
-                src_col, (source_samples or {}).get(src_col, [])
-            )
-            best_target = None
-            best_score = 0.0
-            best_reason = ""
+        from services.semantic_mapper import authority_mappings
 
-            for tgt_col in target_columns:
-                if tgt_col in used_targets:
-                    continue
+        source_schemas = None
+        if source_samples:
+            source_schemas = [
+                {
+                    "name": col,
+                    "inferred_type": "VARCHAR",
+                    "samples": list(source_samples.get(col) or [])[:8],
+                }
+                for col in source_columns
+            ]
+        assigned = authority_mappings(
+            source_columns,
+            target_columns,
+            source_schemas=source_schemas,
+        )
+        by_source = {str(m.get("source")): m for m in assigned}
 
-                # Synonym check
-                if are_synonyms(src_col, tgt_col):
-                    score, reason = 0.95, "Synonym match"
-                elif src_col.lower().replace("_", "") == tgt_col.lower().replace("_", ""):
-                    score, reason = 0.98, "Normalized exact match"
-                elif src_col.lower() == tgt_col.lower():
-                    score, reason = 0.96, "Case-insensitive match"
-                else:
-                    tgt_analysis = self.analyze_column(tgt_col)
-                    src_ans = src_analysis.answer if isinstance(src_analysis.answer, dict) else {}
-                    tgt_ans = tgt_analysis.answer if isinstance(tgt_analysis.answer, dict) else {}
+        for src_col in source_columns:
+            row = by_source.get(src_col) or {}
+            tgt = str(row.get("target") or "")
+            conf = float(row.get("confidence") or 0)
+            if tgt and not row.get("create_new") and conf > 0.5:
+                from services.transform_engine import infer_transform_for_mapping
 
-                    if src_ans.get("semantic_type") and src_ans["semantic_type"] == tgt_ans.get("semantic_type"):
-                        score, reason = 0.88, f"Same semantic type: {src_ans['semantic_type']}"
-                    elif resolve_canonical(src_col) == resolve_canonical(tgt_col):
-                        score, reason = 0.90, "Same canonical form"
-                    else:
-                        rag_mapping = self.rag.suggest_mapping(src_col, tgt_col)
-                        score = rag_mapping.confidence
-                        reason = rag_mapping.reasoning or "RAG similarity"
-
-                if score > best_score:
-                    best_score = score
-                    best_target = tgt_col
-                    best_reason = reason
-
-            if best_target and best_score > 0.5:
-                src_ans = src_analysis.answer if isinstance(src_analysis.answer, dict) else {}
-                tgt_analysis = self.analyze_column(best_target)
-                tgt_ans = tgt_analysis.answer if isinstance(tgt_analysis.answer, dict) else {}
-
-                transform = None
-                if src_ans.get("inferred_type") != tgt_ans.get("inferred_type"):
-                    conv = suggest_type_conversion(
-                        src_ans.get("inferred_type", "string"),
-                        tgt_ans.get("inferred_type", "string"),
-                    )
-                    transform = conv["method"] if conv else None
-
+                samples = list((source_samples or {}).get(src_col) or [])
+                inferred = infer_transform_for_mapping(
+                    src_col, tgt, "string", None, samples,
+                )
+                transform = inferred if inferred and inferred != "none" else None
                 mappings.append({
                     "source_column": src_col,
-                    "target_column": best_target,
-                    "confidence": round(best_score, 3),
-                    "reason": best_reason,
+                    "target_column": tgt,
+                    "confidence": round(conf, 3),
+                    "reason": str(row.get("reasoning") or "map_columns SSOT"),
+                    "requires_review": bool(row.get("requires_review")),
                     "transformation_needed": transform is not None,
                     "suggested_transformation": transform,
                 })
-                used_targets.add(best_target)
+                used_targets.add(tgt)
             else:
                 mappings.append({
                     "source_column": src_col,
-                    "target_column": "<unmapped>",
-                    "confidence": 0.0,
-                    "reason": "No suitable match found",
+                    "target_column": "<unmapped>" if not tgt or row.get("create_new") else tgt,
+                    "confidence": round(conf, 3) if tgt else 0.0,
+                    "reason": str(row.get("reasoning") or "No suitable match found"),
+                    "requires_review": True,
                     "transformation_needed": False,
                     "suggested_transformation": None,
                 })

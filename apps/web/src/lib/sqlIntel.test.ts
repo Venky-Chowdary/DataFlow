@@ -176,6 +176,13 @@ describe("extractBindParams", () => {
   it("returns an empty list when there are none", () => {
     assert.deepEqual(extractBindParams("SELECT 1"), []);
   });
+
+  it("collects T-SQL @binds and ignores @@globals", () => {
+    assert.deepEqual(
+      extractBindParams("EXEC get_orders @since, @@ROWCOUNT"),
+      ["since"],
+    );
+  });
 });
 
 describe("extractTableRefs", () => {

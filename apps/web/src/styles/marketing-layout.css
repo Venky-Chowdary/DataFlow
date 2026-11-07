@@ -5,9 +5,16 @@
 
 /* ??? Tokens (single source for marketing density) ??? */
 .lp {
+  /*
+   * One content width for the hero band and for every body section, so a page
+   * has a single left and right edge from the headline to the footer. It is
+   * also what a hero drawing gets to be wide in: at 1120 a 1000-unit canvas
+   * rendered near 560px and set its smallest annotations under 7px.
+   */
+  --lp-shell-max: 1280px;
   /* Single content width for landing + every marketing page */
-  --lp-shell: min(1120px, calc(100% - clamp(28px, 5vw, 64px)));
-  --lp-shell-wide: min(1120px, calc(100% - clamp(28px, 5vw, 64px)));
+  --lp-shell: min(var(--lp-shell-max), calc(100% - clamp(28px, 5vw, 64px)));
+  --lp-shell-wide: min(var(--lp-shell-max), calc(100% - clamp(28px, 5vw, 64px)));
   --lp-gutter: clamp(14px, 3vw, 24px);
   --lp-section-y: clamp(40px, 6vh, 72px);
   --lp-section-y-sm: clamp(28px, 4vh, 48px);
@@ -135,7 +142,7 @@
 }
 
 /* When center links hide, keep actions pinned to the right edge */
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .lp-nav-links:not(.is-open) {
     display: none !important;
   }
@@ -186,7 +193,7 @@
   border: 1px solid var(--lp-line) !important;
   box-shadow: none !important;
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 /* Section rhythm ? tighter, consistent */
@@ -299,7 +306,7 @@
 
 .lp-cinema-band .lp-cinema-band-head p,
 .lp-cinema-band .lp-cinema-band-lead {
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
 }
 
 .lp-cinema-band .lp-mkt-kicker,
@@ -362,7 +369,7 @@
   top: 0.55em;
   width: 4px;
   height: 4px;
-  border-radius: 999px;
+  border-radius: var(--dt-radius-full);
   background: var(--lp-teal);
 }
 
@@ -416,7 +423,7 @@
   border: 1px solid rgba(45, 212, 191, 0.28) !important;
   display: inline-flex;
   padding: 5px 12px;
-  border-radius: 999px;
+  border-radius: var(--dt-radius-full);
 }
 
 .lp-mkt-hero-band--ink h1,
@@ -426,18 +433,19 @@
 
 .lp-mkt-hero-band--ink .lp-mkt-lead,
 .lp-mkt-hero-band--ink .lp-mkt-hero-copy p.lp-mkt-lead {
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
 }
 
 .lp-mkt-hero-band--ink .lp-mkt-breadcrumb {
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
 }
 
 .lp-mkt-hero-copy h1 {
-  max-width: 16ch;
-  font-size: clamp(2rem, 3.2vw, 2.75rem) !important;
-  letter-spacing: -0.035em;
-  line-height: 1.05;
+  max-width: 22ch;
+  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem)) !important;
+  font-weight: 650;
+  letter-spacing: -0.022em;
+  line-height: 1.18;
   color: var(--lp-ink);
 }
 
@@ -558,7 +566,7 @@
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-logos--float .lp-logo-float {
@@ -824,8 +832,22 @@
   display: none !important; /* legacy */
 }
 
+/* A pill is a label, not a banner: it takes its text width, not the card's. */
+.lp .lp-testimonial-row > .lp-cust-industry {
+  justify-self: start;
+}
+
+/*
+ * A fourth card in a 3-up grid leaves one item alone on its own row, which
+ * reads as a mistake next to a full row above it. Four cards balance 2x2.
+ */
+.lp .lp-testimonial-stack:has(> :nth-child(4):last-child) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 @media (max-width: 960px) {
-  .lp-testimonial-stack {
+  .lp-testimonial-stack,
+  .lp .lp-testimonial-stack:has(> :nth-child(4):last-child) {
     grid-template-columns: 1fr;
   }
 }
@@ -987,7 +1009,7 @@
 
 .lp-price-plan-row--enterprise .lp-price-plan-period,
 .lp-price-plan-row--enterprise .lp-price-plan-row-blurb {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-price-plan-row--enterprise .lp-price-plan-name,
@@ -1129,7 +1151,7 @@
 
 .lp-enterprise-panel-row em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-mkt-security-flow {
@@ -1563,7 +1585,7 @@
   padding: 22px 22px !important;
   border: 1px solid var(--lp-line) !important;
   border-radius: 14px !important;
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 72%) !important;
+  background: linear-gradient(180deg, var(--df-brand-muted) 0%, var(--df-surface) 72%) !important;
   box-shadow: none !important;
 }
 
@@ -1632,7 +1654,7 @@
   border: 1px solid var(--lp-line) !important;
   border-left: 3px solid var(--lp-teal) !important;
   border-radius: 10px !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   min-width: 0;
 }
 
@@ -2365,7 +2387,7 @@
 
 .lp-hero--home .lp-hero-flow-rail {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
@@ -2440,7 +2462,7 @@
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-home-stack-row {
@@ -2743,7 +2765,7 @@
   display: grid;
   gap: 6px;
   font-size: 13px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-home-usecases {
@@ -2868,7 +2890,7 @@
   margin: 0 0 22px;
   font-size: 15px;
   line-height: 1.55;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   max-width: 48ch;
 }
 
@@ -2948,7 +2970,7 @@
   height: 100%;
   object-fit: cover;
   object-position: center;
-  z-index: 0;
+  z-index: var(--df-z-floor);
   transform: scale(1.02);
   animation: lp-pricing-hero-drift 28s ease-in-out infinite alternate;
 }
@@ -2956,7 +2978,7 @@
 .lp-pricing-hero-scrim {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: var(--df-z-base);
   background:
     linear-gradient(105deg, rgba(7, 20, 26, 0.88) 0%, rgba(7, 20, 26, 0.55) 48%, rgba(7, 20, 26, 0.35) 100%),
     linear-gradient(0deg, rgba(7, 20, 26, 0.75) 0%, transparent 42%);
@@ -2964,7 +2986,7 @@
 
 .lp-pricing-hero-inner {
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   width: var(--lp-pricing-shell);
   margin: 0 auto;
   padding: clamp(72px, 12vh, 120px) 0 clamp(48px, 8vh, 80px);
@@ -3044,7 +3066,7 @@
   width: var(--lp-pricing-shell);
   margin: clamp(-36px, -5vh, -24px) auto 0;
   position: relative;
-  z-index: 3;
+  z-index: var(--df-z-canvas-stage);
   padding-bottom: clamp(40px, 6vh, 64px);
 }
 
@@ -3063,7 +3085,7 @@
   padding: 28px 24px 24px;
   border-radius: 20px;
   background: #fff;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
   transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.35s ease;
 }
@@ -3074,7 +3096,7 @@
 }
 
 .lp-pricing-card.is-featured {
-  border-color: color-mix(in srgb, var(--df-brand, #0f766e) 55%, #e2e8f0);
+  border-color: color-mix(in srgb, var(--df-brand) 55%, #e2e8f0);
   background: linear-gradient(180deg, #f0fdfa 0%, #fff 42%);
   box-shadow: 0 22px 50px rgba(15, 118, 110, 0.14);
 }
@@ -3085,7 +3107,7 @@
   right: 14px;
   padding: 4px 10px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -3147,7 +3169,7 @@
 .lp-pricing-card-features li svg {
   flex-shrink: 0;
   margin-top: 2px;
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
 }
 
 .lp-btn--block {
@@ -3182,7 +3204,7 @@
 
 .lp-pricing-v2-table-wrap {
   overflow-x: auto;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 16px;
   background: #fff;
 }
@@ -3197,7 +3219,7 @@
 .lp-pricing-v2-table td {
   padding: 14px 18px;
   text-align: left;
-  border-bottom: 1px solid var(--df-border, #e2e8f0);
+  border-bottom: 1px solid var(--df-border);
   font-size: 0.92rem;
 }
 
@@ -3216,7 +3238,7 @@
 }
 
 .lp-pricing-v2-table .is-hot {
-  background: color-mix(in srgb, var(--df-brand, #0f766e) 6%, #fff);
+  background: color-mix(in srgb, var(--df-brand) 6%, #fff);
 }
 
 .lp-pricing-yes {
@@ -3232,7 +3254,7 @@
 }
 
 .lp-pricing-no {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-pricing-v2-principles {
@@ -3248,7 +3270,7 @@
   padding: 20px 18px;
   border-radius: 14px;
   background: #f8fafc;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   display: grid;
   gap: 6px;
 }
@@ -3293,7 +3315,7 @@
   margin: 0;
   max-width: 48ch;
   line-height: 1.5;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-pricing-v2-cta-actions {

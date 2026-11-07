@@ -34,6 +34,12 @@ class _FakeMongo:
         self.jobs[job_id]["status"] = status
         return True
 
+    def update_job_fields(self, job_id: str, fields: dict) -> bool:
+        if not fields:
+            return False
+        self.jobs.setdefault(job_id, {}).update(fields)
+        return True
+
 
 @pytest.fixture(autouse=True)
 def _patch_mongodb_service(monkeypatch):

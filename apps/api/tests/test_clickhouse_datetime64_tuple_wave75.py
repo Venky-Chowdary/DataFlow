@@ -25,7 +25,6 @@ def test_ch_datetime64_polarity_and_ddl():
         ddl_type,
         normalize_logical_type,
         parse_temporal_fractional_precision,
-        specialty_carrier_would_collapse,
     )
 
     assert _ch_to_logical("DateTime64(3)") == "DateTime64(3)"

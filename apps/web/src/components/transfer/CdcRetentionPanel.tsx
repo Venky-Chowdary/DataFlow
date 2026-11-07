@@ -4,6 +4,7 @@ import { Button } from "../ui/Button";
 import { clearCdcCursor, probeCdcRetention, type CdcRetentionProbe } from "../../lib/api";
 import { useToast } from "../Toast";
 import { useConfirm } from "../ui/ConfirmDialog";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 
 export interface CdcRetentionPanelProps {
   /** When set, show proactive status from a job or Validate probe. */
@@ -29,6 +30,8 @@ export interface CdcRetentionPanelProps {
   } | null;
   onResume?: () => void;
   resuming?: boolean;
+  /** When the cursor-gap panel already owns fail-closed recovery. */
+  hideGap?: boolean;
 }
 
 /**
@@ -45,9 +48,12 @@ export function CdcRetentionPanel({
   probeRequest,
   onResume,
   resuming,
+  hideGap,
 }: CdcRetentionPanelProps) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const runGate = useWriteGate(PERMISSIONS.jobRun);
+  const workspaceManageGate = useWriteGate(PERMISSIONS.workspaceManage);
   const [busy, setBusy] = useState(false);
   const [cleared, setCleared] = useState(false);
   const [live, setLive] = useState<CdcRetentionProbe | null>(null);
@@ -59,7 +65,7 @@ export function CdcRetentionPanel({
   const dialect = live?.cdc_retention_dialect || dialectProp || "source";
   const cursorKey = live?.retention?.cursor_key || cursorKeyProp || probeRequest?.cursor_key || "";
 
-  const notable = status === "gap" || status === "at_risk";
+  const notable = (status === "gap" && !hideGap) || status === "at_risk";
 
   useEffect(() => {
     setCleared(false);
@@ -167,7 +173,7 @@ export function CdcRetentionPanel({
         </span>
       </div>
       <div className="df2-theater-v3-next-actions">
-        {probeRequest && (
+        {probeRequest && runGate.allowed && (
           <Button
             size="sm"
             variant="secondary"
@@ -179,7 +185,7 @@ export function CdcRetentionPanel({
             Check retention
           </Button>
         )}
-        {(status === "gap" || status === "at_risk") && !cleared && (
+        {(((status === "gap" && !hideGap) || status === "at_risk") && !cleared && workspaceManageGate.allowed) && (
           <Button
             size="sm"
             variant={status === "gap" ? "danger" : "secondary"}

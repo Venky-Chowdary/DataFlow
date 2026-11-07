@@ -203,9 +203,9 @@ def probe_oracle_ha(conn: Any) -> SourceHaProbe:
 
 def probe_source_ha(cfg: dict[str, Any]) -> SourceHaProbe:
     """Open a real engine from ``cfg`` and probe HA role (sqlserver / oracle)."""
-    dialect = str(cfg.get("type") or cfg.get("format") or "").lower()
-    if dialect in {"mssql", "sql_server", "microsoft_sql_server", "azure_sql_database"}:
-        dialect = "sqlserver"
+    from src.transfer.engine_family import family_or_kind
+
+    dialect = family_or_kind(str(cfg.get("type") or cfg.get("format") or ""))
     if dialect not in {"sqlserver", "oracle"}:
         return SourceHaProbe(
             dialect=dialect or "unknown",
@@ -244,15 +244,9 @@ def attach_source_ha(cdc: Any, src_cfg: dict[str, Any] | None) -> SourceHaProbe 
     """Probe once and stash on the CDC adapter for lag/checkpoint fields."""
     if not src_cfg:
         return None
-    dialect = str(src_cfg.get("type") or "").lower()
-    if dialect not in {
-        "sqlserver",
-        "mssql",
-        "oracle",
-        "sql_server",
-        "microsoft_sql_server",
-        "azure_sql_database",
-    }:
+    from src.transfer.engine_family import family_or_kind
+
+    if family_or_kind(str(src_cfg.get("type") or "")) not in {"sqlserver", "oracle"}:
         return None
     probe = probe_source_ha_safe(src_cfg)
     try:

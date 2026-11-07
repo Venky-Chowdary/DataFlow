@@ -123,6 +123,13 @@ def test_snapshot_uses_repeatable_read_and_lsn_token() -> None:
     )
     executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list if c.args)
     assert "REPEATABLE READ" in executed
+    select_sql = [
+        str(c.args[0])
+        for c in cur.execute.call_args_list
+        if c.args and "SELECT" in str(c.args[0]).upper() and "FROM" in str(c.args[0]).upper()
+    ]
+    assert select_sql
+    assert all("OFFSET" not in sql.upper() for sql in select_sql)
 
 
 def test_poll_parses_slot_changes() -> None:

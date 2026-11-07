@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -15,7 +16,7 @@ def _norm(name: str) -> str:
 _OMIT_TRANSFORMS = frozenset({"omit", "intentional_omit", "drop", "exclude"})
 
 
-def is_intentional_omit(mapping: dict[str, Any] | None) -> bool:
+def is_intentional_omit(mapping: Mapping[str, Any] | None) -> bool:
     """True when the operator explicitly excluded this source from the write map."""
     if not mapping:
         return False
@@ -37,8 +38,13 @@ def known_target(name: str, target_columns: list[str]) -> bool:
     """True when name matches a declared destination column (case/underscore insensitive)."""
     if not target_columns:
         return True
+    from services.semantic_mapper import name_identical
+
     needle = _norm(name)
-    return any(_norm(col) == needle for col in target_columns)
+    # ``name_identical`` is the one owner of "same column" (case, separators,
+    # transliteration, sanitiser spellings); ``_norm`` keeps the whitespace /
+    # dash fold this module always had.
+    return any(name_identical(name, col) or _norm(col) == needle for col in target_columns)
 
 
 def _is_create_new_mapping(m: dict) -> bool:
@@ -91,7 +97,9 @@ def enforce_destination_constraints(
         # Resolve canonical target spelling from the destination schema.
         # Prefer an exact (case-insensitive) match so columns like `id` and
         # `_id` do not collapse to the first normalized hit.
-        exact = next((c for c in target_columns if c.lower() == tgt.lower()), None)
+        from services.semantic_mapper import name_identical
+
+        exact = next((c for c in target_columns if name_identical(tgt, c)), None)
         canon = exact or next((c for c in target_columns if _norm(c) == _norm(tgt)), tgt)
         out["target"] = canon
         kept.append(out)
@@ -159,6 +167,83 @@ def classify_source_coverage(
         "accounted": len(cols) - len(unaccounted),
         "complete": not unaccounted,
     }
+
+
+def dest_exists_write_column_names(
+    *,
+    target_schema: dict[str, Any] | None = None,
+    dest_extra: dict[str, Any] | None = None,
+) -> list[str]:
+    """Dest column names for dest-exists overwrite retain (G13).
+
+    Overwrite dest-exists clears live *types* so recreate is not typed against
+    the doomed carrier (``_destination_schema_probe`` returns ``{}``). Column
+    *names* still live on ``overwrite_replaced_column_types`` /
+    ``schema_nullability`` so extra source stays unaccounted instead of becoming
+    an invented dest column.
+    """
+    extra = dest_extra or {}
+    for src in (
+        target_schema,
+        extra.get("overwrite_replaced_column_types"),
+        extra.get("schema_types"),
+        extra.get("schema_nullability"),
+    ):
+        if isinstance(src, dict) and src:
+            names = [str(k).strip() for k in src.keys() if str(k).strip()]
+            if names:
+                return names
+        if isinstance(src, (list, tuple)):
+            names = [str(x).strip() for x in src if str(x).strip()]
+            if names:
+                return names
+    return []
+
+
+def retain_dest_exists_write_mappings(
+    mappings: list[dict] | None,
+    dest_columns: list[str] | None,
+) -> list[dict]:
+    """Dest-exists overwrite writes dest columns only.
+
+    Extra source columns stay unaccounted so G13 can block. Inventing a
+    create-new dest column from source position is the dest-exists jumble
+    (write by dest name — never source position).
+    """
+    from connectors.sql_identifiers import sanitize_identifier, sanitized_spellings
+
+    dest = {_norm(c) for c in (dest_columns or []) if str(c).strip()}
+    if not dest:
+        return list(mappings or [])
+    # The table DataFlow created holds sanitised names (``Café`` -> ``Caf_``).
+    # A source spelled differently from its column resolves through the
+    # sanitiser's own mapping, and the write targets the column that exists
+    # (D55) - otherwise drift reads the original spelling as a new column.
+    dest_by_sanitised = {
+        sanitize_identifier(str(c)).lower(): str(c).strip()
+        for c in (dest_columns or [])
+        if str(c).strip()
+    }
+    kept: list[dict] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        if is_intentional_omit(m):
+            kept.append(m)
+            continue
+        tgt = str(m.get("target") or "").strip()
+        if not tgt:
+            continue
+        # Run 1 may predate transliteration (``Caf_``) or follow it (``cafe``).
+        actual = next(
+            (dest_by_sanitised[k] for k in sorted(sanitized_spellings(tgt)) if k in dest_by_sanitised),
+            None,
+        )
+        if actual and actual != tgt:
+            kept.append({**m, "target": actual})
+        elif _norm(tgt) in dest:
+            kept.append(m)
+    return kept
 
 
 def mapping_plan_summary(

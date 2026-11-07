@@ -32,6 +32,32 @@ def _sync_mode_note(sync_mode: str) -> str:
     return notes.get(mode, f"Sync mode '{sync_mode}' will be applied.")
 
 
+def _selected_contracts(request: Any) -> list[dict[str, Any]]:
+    raw = getattr(request, "stream_contracts", None) or []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or item.get("selected") is False:
+            continue
+        name = str(item.get("name") or item.get("stream") or "").strip()
+        if name:
+            out.append(item)
+    return out
+
+
+def _summary_stream_names(summary: dict[str, Any] | None) -> list[str]:
+    """Engine stream order. Empty unless this summary is a multi-table run."""
+    if not isinstance(summary, dict) or summary.get("multi_stream") is not True:
+        return []
+    names: list[str] = []
+    for item in summary.get("streams") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("stream") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names if len(names) >= 2 else []
+
+
 def _mapping_line(m: dict[str, Any], schema: dict[str, str] | None) -> str:
     src = m.get("source") or "?"
     tgt = m.get("target") or "?"
@@ -62,27 +88,61 @@ def build_pipeline_explanation(
     """Generate a plain-English description of what the pipeline did."""
     src = _fmt_endpoint(request.source)
     dst = _fmt_endpoint(request.destination)
+    names = _summary_stream_names(destination_summary)
+    contracts = _selected_contracts(request) if names else []
     lines: list[str] = []
-    lines.append(f"Transfer: {src} → {dst}")
-    lines.append(f"Operation: {request.operation}, sync mode: {request.sync_mode}, validation: {request.validation_mode}")
-    lines.append(f"Sync behavior: {_sync_mode_note(request.sync_mode)}")
-
-    lines.append(
-        f"Source inferred {len(columns)} columns: {', '.join(columns[:10])}"
-        + ("..." if len(columns) > 10 else "")
-    )
-    if source_schema:
-        type_sample = ", ".join(f"{c}: {_describe_type(c, source_schema)}" for c in columns[:5])
-        lines.append(f"Sample types — {type_sample}")
-
-    if mappings:
-        mapped = [f"  • {_mapping_line(m, source_schema)}" for m in mappings[:20]]
-        if len(mappings) > 20:
-            mapped.append(f"  • ... and {len(mappings) - 20} more mappings")
-        lines.append("Schema mapping:")
-        lines.extend(mapped)
+    if names:
+        listed = ", ".join(names)
+        lines.append(f"Transfer: {src.split(' (')[0]} ({listed}) → {dst.split(' (')[0]} ({listed}) — {len(names)} tables")
     else:
-        lines.append("Schema mapping: identity (source columns copied to target)")
+        lines.append(f"Transfer: {src} → {dst}")
+    lines.append(f"Operation: {request.operation}, sync mode: {request.sync_mode}, validation: {request.validation_mode}")
+    sync_note = _sync_mode_note(request.sync_mode)
+    if names and sync_note == "Destination will be cleared and fully replaced with source data.":
+        sync_note = "Each selected table is cleared and fully replaced with that table's source rows."
+    lines.append(f"Sync behavior: {sync_note}")
+
+    if names and len(contracts) >= 2:
+        by_name = {str(item.get("name") or item.get("stream") or "").strip(): item for item in contracts}
+        ordered = [by_name[name] for name in names if name in by_name]
+        ordered.extend(item for item in contracts if item not in ordered)
+        lines.append("Schema mapping by table:")
+        for contract in ordered:
+            cname = str(contract.get("name") or contract.get("stream") or "").strip()
+            maps = [m for m in (contract.get("mappings") or []) if isinstance(m, dict)]
+            cols = [str(m.get("source")) for m in maps if m.get("source")]
+            shown = ", ".join(cols[:10]) + ("..." if len(cols) > 10 else "")
+            column_word = "column" if len(cols) == 1 else "columns"
+            lines.append(f"{cname}: {len(cols)} {column_word}" + (f" ({shown})" if shown else ""))
+            schema = {
+                str(m.get("source")): str(m.get("source_type") or "inferred")
+                for m in maps
+                if m.get("source")
+            }
+            for mapping in maps[:12]:
+                lines.append(f"  • {_mapping_line(mapping, schema)}")
+            if len(maps) > 12:
+                lines.append(f"  • ... and {len(maps) - 12} more mappings")
+    else:
+        if names:
+            last = str((destination_summary or {}).get("table") or names[-1]).strip() or names[-1]
+            lines.append(f"Column sample and schema mapping are the last stream ({last}), not every table.")
+        lines.append(
+            f"Source inferred {len(columns)} columns: {', '.join(columns[:10])}"
+            + ("..." if len(columns) > 10 else "")
+        )
+        if source_schema:
+            type_sample = ", ".join(f"{c}: {_describe_type(c, source_schema)}" for c in columns[:5])
+            lines.append(f"Sample types — {type_sample}")
+
+        if mappings:
+            mapped = [f"  • {_mapping_line(m, source_schema)}" for m in mappings[:20]]
+            if len(mappings) > 20:
+                mapped.append(f"  • ... and {len(mappings) - 20} more mappings")
+            lines.append("Schema mapping:")
+            lines.extend(mapped)
+        else:
+            lines.append("Schema mapping: identity (source columns copied to target)")
 
     rows = rows_written if rows_written is not None else destination_summary.get("rows_written", 0)
     rej = rejected_rows if rejected_rows is not None else destination_summary.get("rejected_rows", 0)

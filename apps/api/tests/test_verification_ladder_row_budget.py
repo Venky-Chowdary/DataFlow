@@ -47,7 +47,7 @@ def test_reader_returns_everything_under_the_budget(tmp_path: Path) -> None:
     path = _sqlite_with(tmp_path, 120)
     rows = read_sqlite_rows(database=path, table="t", max_rows=BUDGET)
     assert len(rows) == 120
-    assert rows[0] == {"id": 0, "v": "v0"}
+    assert rows[0] == {"id": "0", "v": "v0"}
 
 
 def test_column_projection_survives_batched_reads(tmp_path: Path) -> None:
@@ -90,3 +90,20 @@ def test_oversized_run_never_reaches_the_readers(monkeypatch: Any) -> None:
         validation_mode="strict",
     )
     assert out["verification_ladder"]["skipped"] is True
+
+
+def test_oversized_mysql_still_names_the_decline() -> None:
+    """A dest the in-memory ladder does not read must not return a bare Gate-8 report."""
+    report = {"passed": True, "source_rows": MAX_LADDER_ROWS + 1, "target_rows": 1}
+    out = _maybe_attach_verification_ladder(
+        report,
+        endpoint=EndpointConfig(kind="database", format="mysql", table="t"),
+        source_endpoint=None,
+        records=[],
+        columns=["id"],
+        dest_summary={},
+        mappings=[{"source": "id", "target": "id"}],
+        validation_mode="strict",
+    )
+    assert out["verification_ladder"]["skipped"] is True
+    assert out["passed"] is True

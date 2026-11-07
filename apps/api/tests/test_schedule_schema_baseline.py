@@ -63,7 +63,7 @@ def _guard(monkeypatch, sched, introspected: dict[str, Any] | None, recorded: li
     monkeypatch.setattr(
         runner,
         "_remember_source_schema",
-        lambda s, schema, fp: recorded.append((schema, fp)),
+        lambda s, schema, fp, **_k: recorded.append((schema, fp)),
     )
     runner._guard_source_schema_drift(sched, _Request())
 
@@ -118,9 +118,114 @@ def test_accepting_the_new_shape_clears_the_finding():
     ).blocks
 
 
+def test_callable_drift_peeks_and_never_introspects_a_table(monkeypatch):
+    """A colliding physical table must not become the CALL baseline."""
+    import services.schedule_runner as runner
+
+    from src.transfer.models import EndpointConfig
+
+    class _CallableRequest:
+        source = EndpointConfig(
+            kind="database",
+            format="postgresql",
+            table="get_orders",
+            extra={
+                "source_read_mode": "procedure",
+                "procedure_call": "CALL get_orders()",
+            },
+        )
+        destination = _Endpoint()
+        mappings = [{"source": "order_id", "target": "order_id"}]
+
+    def _boom(_endpoint):
+        raise AssertionError("callable drift must not introspect a table")
+
+    class _Batch:
+        headers = ["order_id", "amount"]
+        meta = {"native_types": {"order_id": "INTEGER", "amount": "NUMERIC"}}
+
+    monkeypatch.setattr(
+        "src.transfer.endpoint_intelligence.introspect_endpoint",
+        _boom,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "services.procedure_source.read_callable_batch",
+        lambda *_a, **_k: _Batch(),
+    )
+    monkeypatch.setattr("services.procedure_source.close_callable_spool", lambda *a, **k: None)
+
+    recorded: list = []
+    monkeypatch.setattr(
+        runner,
+        "_remember_source_schema",
+        lambda s, schema, fp, **_k: recorded.append(schema),
+    )
+    runner._guard_source_schema_drift(_Sched(None), _CallableRequest())
+    assert recorded
+    assert recorded[0]["order_id"] == "INTEGER"
+    assert "amount" in recorded[0]
+
+
 def test_the_accept_endpoint_is_registered():
     """The control the refusal points at has to exist."""
     from src.routers.schedules_router import router
 
     paths = {getattr(r, "path", "") for r in router.routes}
     assert any("accept-source-schema" in p for p in paths)
+
+
+def test_dest_mysql_does_not_invent_source_ntz_narrow(monkeypatch):
+    """Snowflake → MySQL must not park joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ."""
+    ntz = {"joining_date": "TIMESTAMP_NTZ", "emp_id": "NUMBER"}
+
+    class _Src:
+        format = "snowflake"
+
+    class _Dst:
+        format = "mysql"
+
+    class _Cross:
+        source = _Src()
+        destination = _Dst()
+        mappings = [{"source": c, "target": c} for c in ntz]
+
+    recorded: list = []
+    import services.schedule_runner as runner
+
+    monkeypatch.setattr(
+        "src.transfer.endpoint_intelligence.introspect_endpoint",
+        lambda _e: {"schema": dict(ntz), "columns": list(ntz)},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_remember_source_schema",
+        lambda s, schema, fp, **_k: recorded.append((schema, fp)),
+    )
+    runner._guard_source_schema_drift(_Sched(ntz), _Cross())
+    assert recorded, "unchanged source must record the baseline, not park"
+
+
+def test_same_declaration_narrow_helper_names_the_venky_finding():
+    from services.schema_drift import is_same_declaration_narrow
+
+    assert is_same_declaration_narrow([
+        {
+            "kind": "narrow_type",
+            "column": "joining_date",
+            "old_type": "TIMESTAMP_NTZ",
+            "new_type": "TIMESTAMP_NTZ",
+        }
+    ])
+    assert not is_same_declaration_narrow([
+        {
+            "kind": "narrow_type",
+            "column": "amount",
+            "old_type": "DECIMAL(12,2)",
+            "new_type": "DECIMAL(6,2)",
+        }
+    ])
+    assert not is_same_declaration_narrow([
+        {"kind": "drop", "column": "region", "old_type": "VARCHAR"},
+    ])

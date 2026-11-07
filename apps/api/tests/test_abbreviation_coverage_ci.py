@@ -1,13 +1,14 @@
 """Abbreviation coverage CI — grow dictionary from enterprise golden evidence."""
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from collections import Counter
 from pathlib import Path
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden_enterprise.json"
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 
 # Tokens that look like abbreviations but are ordinary English / domain leaves.
 _COMMON_WORDS = frozenset(

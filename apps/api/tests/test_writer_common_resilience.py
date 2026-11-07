@@ -1,5 +1,7 @@
 """Writer row-mapping resilience tests."""
 
+from decimal import Decimal
+
 from connectors.writer_common import (
     build_mapped_rows,
     resolve_target_columns,
@@ -36,7 +38,10 @@ def test_quarantine_policy_holds_out_bad_rows():
         column_types={"AMT": "DECIMAL", "CUST_ID": "TEXT"},
         error_policy="quarantine",
     )
-    assert mapped == [("10.50", "C1"), ("20.00", "C3")]
+    # A decimal transform binds an exact Decimal, as a boolean binds a bool:
+    # the driver never re-parses text, so scale (10.50) survives the write.
+    assert mapped == [(Decimal("10.50"), "C1"), (Decimal("20.00"), "C3")]
+    assert [str(cell) for cell, _ in mapped] == ["10.50", "20.00"]
     assert errors and "row 2" in errors[0]
 
 

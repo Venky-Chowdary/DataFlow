@@ -6,8 +6,10 @@ from typing import Any
 
 from services.mapping_constraints import (
     classify_source_coverage,
+    dest_exists_write_column_names,
     detect_duplicate_targets,
     enforce_destination_constraints,
+    retain_dest_exists_write_mappings,
 )
 from services.preflight_service import run_file_preflight
 
@@ -159,6 +161,78 @@ def test_low_confidence_mapping_dropped_from_the_active_map_blocks():
 
     assert dropped == ["c21"]
     assert "c21" in classify_source_coverage(SOURCE_COLUMNS, kept)["unaccounted"]
+
+
+def test_dest_exists_overwrite_leaves_extra_source_unaccounted():
+    """Write by dest name — extra source is G13, not an invented dest column."""
+    dest_cols = ["id", "amount", "code"]
+    mappings = [
+        {"source": "id", "target": "id", "create_new": True, "confidence": 0.99},
+        {"source": "amount", "target": "amount", "create_new": True, "confidence": 0.99},
+        {"source": "code", "target": "code", "create_new": True, "confidence": 0.99},
+        {
+            "source": "extra_unmapped",
+            "target": "extra_unmapped",
+            "create_new": True,
+            "confidence": 0.99,
+        },
+    ]
+    kept = retain_dest_exists_write_mappings(mappings, dest_cols)
+    assert [m["source"] for m in kept] == ["id", "amount", "code"]
+    coverage = classify_source_coverage(
+        ["id", "amount", "code", "extra_unmapped"], kept
+    )
+    assert coverage["unaccounted"] == ["extra_unmapped"]
+
+
+def test_dest_exists_write_column_names_reads_replaced_types_when_schema_cleared():
+    """Overwrite dest-exists probe returns {} types; names still live on extra."""
+    assert dest_exists_write_column_names(target_schema={}) == []
+    names = dest_exists_write_column_names(
+        target_schema={},
+        dest_extra={
+            "overwrite_replaced_column_types": {
+                "id": "INT",
+                "amt_dec": "NUMERIC(12,4)",
+            },
+            "schema_nullability": {"id": False, "amt_dec": False, "ghost": True},
+        },
+    )
+    assert names == ["id", "amt_dec"]
+
+
+def test_auto_map_overwrite_dest_exists_leaves_extra_unaccounted(monkeypatch):
+    """Live probe empties dest types on overwrite; extra source must still be G13."""
+    from src.transfer import engine as eng
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    def fake_probe(destination, sync_mode=""):
+        destination.extra = {
+            **(destination.extra or {}),
+            "overwrite_replaced_column_types": {
+                "id": "INT",
+                "amt_dec": "NUMERIC(12,4)",
+                "code": "TEXT",
+            },
+        }
+        return {}, True
+
+    monkeypatch.setattr(eng, "_destination_schema_probe", fake_probe)
+    req = TransferRequest(
+        source=EndpointConfig(kind="database", format="postgresql", table="src"),
+        destination=EndpointConfig(
+            kind="database", format="postgresql", table="dst", extra={}
+        ),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="strict",
+    )
+    columns = ["id", "amt_dec", "code", "extra_unmapped"]
+    schema = {c: "string" for c in columns}
+    sample = [{"id": 1, "amt_dec": "1000.00", "code": "USD", "extra_unmapped": "x"}]
+    maps = eng._auto_map(req, columns, schema, sample_rows=sample)
+    assert [m.get("source") for m in maps] == ["id", "amt_dec", "code"]
+    coverage = classify_source_coverage(columns, maps)
+    assert coverage["unaccounted"] == ["extra_unmapped"]
 
 
 def test_create_new_mapping_counts_as_written():

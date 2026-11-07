@@ -45,11 +45,11 @@ export function PageToolbar({
             {searchValue ? (
               <button
                 type="button"
-                className="df2-toolbar-clear"
+                className="df2-close-btn df2-close-btn-sm"
                 onClick={() => onSearchChange("")}
                 aria-label="Clear search"
               >
-                ×
+                <DtIcon name="x" size={13} />
               </button>
             ) : null}
           </label>

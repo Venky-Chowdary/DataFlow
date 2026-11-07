@@ -91,7 +91,7 @@ def _schema_yml(project: TransformProject) -> str:
                 for t in tests:
                     if t.test_type == "accepted_values":
                         vals = ", ".join(_yaml_quote(v) for v in t.values)
-                        lines.append(f"          - accepted_values:")
+                        lines.append("          - accepted_values:")
                         lines.append(f"              values: [{vals}]")
                     elif t.test_type == "relationships":
                         lines.append("          - relationships:")
@@ -101,6 +101,19 @@ def _schema_yml(project: TransformProject) -> str:
                         lines.append(f"          - {t.test_type}")
     lines.append("")
     return "\n".join(lines)
+
+
+def dbt_export_honesty() -> dict[str, Any]:
+    """The claim the export hook is allowed to make — not a dbt Cloud product.
+
+    Pilot reads this so "do you support dbt Cloud" cannot drift from the
+    pack the transform router actually writes.
+    """
+    return {
+        "is_dbt_cloud": False,
+        "is_managed_elt": False,
+        "purpose": "Complement warehouse ELT with sources/models hooks after a governed load",
+    }
 
 
 def export_dbt_files(project: TransformProject) -> dict[str, Any]:
@@ -140,11 +153,7 @@ def export_dbt_files(project: TransformProject) -> dict[str, Any]:
         "project_name": project.name,
         "file_count": len(files),
         "files": files,
-        "honesty": {
-            "is_dbt_cloud": False,
-            "is_managed_elt": False,
-            "purpose": "Complement warehouse ELT with sources/models hooks after a governed load",
-        },
+        "honesty": dbt_export_honesty(),
     }
 
 

@@ -13,25 +13,72 @@ import json
 from typing import Any
 
 import requests
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string, json_default, load_http_json
 
 from connectors.saas_common import ReadBatch, humanize_http_error
 
 
+# Bolt is Neo4j's binary protocol; this reader speaks the HTTP Cypher API on
+# the same server. Default listeners: Bolt 7687, HTTP 7474, HTTPS 7473.
+_BOLT_SCHEMES = frozenset({"bolt", "bolt+s", "bolt+ssc", "neo4j", "neo4j+s", "neo4j+ssc"})
+_BOLT_PORT = 7687
+_HTTP_PORT = 7474
+_HTTPS_PORT = 7473
+
+
 def _url(host: str, port: int, ssl: bool, database: str) -> str:
+    """HTTP Cypher endpoint for a host, URL or pasted Bolt URI.
+
+    A Bolt URI (``neo4j+s://…``, ``bolt://…:7687``) or the Bolt port used to be
+    dialed as HTTP, and the Bolt listener drops an HTTP request without a reply
+    — "RemoteDisconnected" (D143). The Bolt scheme names the server and its TLS
+    posture; the HTTP API is that server's 7474 (7473 over TLS).
+    """
+    from urllib.parse import urlparse
+
     h = (host or "localhost").strip().rstrip("/")
     if not h:
         h = "localhost"
     if "://" not in h:
         scheme = "https" if ssl else "http"
         h = f"{scheme}://{h}"
-    if port:
-        from urllib.parse import urlparse, urlunparse
-        parsed = urlparse(h)
-        if not parsed.port:
-            h = urlunparse(parsed._replace(netloc=f"{parsed.hostname}:{port}"))
+    parsed = urlparse(h)
+    scheme = parsed.scheme.lower()
+    if scheme in _BOLT_SCHEMES:
+        scheme = "https" if ssl or scheme.endswith(("+s", "+ssc")) else "http"
+    chosen = parsed.port or (int(port) if port else 0)
+    if chosen == _BOLT_PORT:
+        chosen = _HTTPS_PORT if scheme == "https" else _HTTP_PORT
+    netloc = (parsed.hostname or "localhost") + (f":{chosen}" if chosen else "")
     db = (database or "neo4j").strip()
-    return f"{h.rstrip('/')}/db/{db}/tx/commit"
+    return f"{scheme}://{netloc}/db/{db}/tx/commit"
+
+
+def _http_api_unreachable_message(url: str, exc: Exception) -> str:
+    """Why the HTTP Cypher API did not answer, naming Bolt when that is the cause.
+
+    This connector speaks Neo4j's HTTP API. A Bolt port (7687, or a tunnel
+    forwarded to Bolt) drops the HTTP request — "RemoteDisconnected" (D143).
+    """
+    from urllib.parse import urlparse
+
+    from services.brand import PRODUCT_NAME
+    from services.wire_protocol_sniff import speaks_bolt
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    port = parsed.port or (_HTTPS_PORT if parsed.scheme == "https" else 80)
+    http_ports = "7474, or 7473 with TLS"
+    if speaks_bolt(host, port):
+        return (
+            f"{host}:{port} is a Neo4j Bolt port. {PRODUCT_NAME}'s Neo4j connector uses "
+            f"Neo4j's HTTP API, not Bolt: set the port to the HTTP port ({http_ports})."
+        )
+    return (
+        f"Could not reach Neo4j's HTTP API at {host}:{port} ({type(exc).__name__}). "
+        f"{PRODUCT_NAME}'s Neo4j connector uses the HTTP API ({http_ports}), not the Bolt "
+        "port 7687: make sure the HTTP port is reachable and set it as the port."
+    )
 
 
 def _run_cypher(url: str, username: str, password: str, statement: str, timeout: float = 30.0) -> Any:
@@ -39,7 +86,7 @@ def _run_cypher(url: str, username: str, password: str, statement: str, timeout:
     auth = (username, password) if username and password else None
     resp = requests.post(url, json=payload, auth=auth, timeout=timeout)
     resp.raise_for_status()
-    body = resp.json()
+    body = load_http_json(resp)
     errors = body.get("errors") or []
     if errors:
         raise RuntimeError(errors[0].get("message", "Neo4j Cypher error"))
@@ -137,6 +184,23 @@ def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
     return columns, rows
 
 
+def list_labels(
+    *,
+    host: str = "",
+    port: int = 7474,
+    database: str = "neo4j",
+    username: str = "",
+    password: str = "",
+    ssl: bool = False,
+) -> list[str]:
+    """Node labels in the database. Empty means the graph has no labels."""
+    url = _url(host, port, ssl, database)
+    body = _run_cypher(url, username, password, "CALL db.labels() YIELD label RETURN label")
+    _columns, rows = _extract_rows(body)
+    labels = [row[0] for row in rows if row and str(row[0]).strip()]
+    return sorted(set(labels))
+
+
 def test_connection(
     *,
     host: str = "",
@@ -148,7 +212,10 @@ def test_connection(
     ssl: bool = False,
     **kwargs: Any,
 ) -> tuple[bool, str]:
-    cfg = {**kwargs, "host": host, "port": port, "database": database, "username": username, "password": password}
+    cfg = {
+        **kwargs, "host": host or connection_string, "port": port, "database": database,
+        "username": username, "password": password,
+    }
     url = _url(cfg.get("host", ""), cfg.get("port", 7474), cfg.get("ssl", False), cfg.get("database", "neo4j"))
     try:
         _run_cypher(url, username, password, "MATCH (n) RETURN count(n) AS count LIMIT 1")
@@ -156,7 +223,7 @@ def test_connection(
     except requests.exceptions.Timeout:
         return False, "Neo4j connection timed out. Check the host/port and network."
     except requests.exceptions.ConnectionError as exc:
-        return False, f"Could not reach Neo4j host: {exc}"
+        return False, _http_api_unreachable_message(url, exc)
     except requests.exceptions.HTTPError as exc:
         code = exc.response.status_code if exc.response else 0
         if code in (401, 403):
@@ -175,7 +242,12 @@ def read_object(
     **kwargs: Any,
 ) -> ReadBatch:
     merged = {**cfg, **kwargs}
-    url = _url(merged.get("host", ""), merged.get("port", 7474), merged.get("ssl", False), merged.get("database", "neo4j"))
+    url = _url(
+        merged.get("host") or merged.get("connection_string") or "",
+        merged.get("port", 7474),
+        merged.get("ssl", False),
+        merged.get("database", "neo4j"),
+    )
     username = merged.get("username") or ""
     password = merged.get("password") or ""
     label = (object or "").strip()

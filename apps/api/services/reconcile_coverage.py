@@ -17,6 +17,237 @@ WHOLE_TABLE_NOT_COMPARABLE = "whole_table_not_comparable"
 # Target digest was re-read WHERE pk IN (written keys): per-cell proof of this
 # batch, deliberately silent about rows the job never wrote.
 WRITTEN_BATCH_KEYS = "written_batch_keys"
+# CDC catch-up: dest COUNT vs current source-table COUNT. Last-batch writer
+# checksum is not that population. Engine digest of source vs dest (same
+# engine) can still close full_checksum; this scope is COUNT-only honesty.
+CDC_SOURCE_IMAGE_COUNT = "cdc_source_image_count"
+# CDC catch-up where every source-row fingerprint was found on the dest.
+# Dest extras do not fail (changelog is not S). This is not full_checksum
+# and not platform exactly-once.
+CDC_SOURCE_IMAGE_VALUES = "cdc_source_image_values"
+# A router recipe partitioned the population into per-route tables, each read
+# back independently. Population conservation is the proof level — one
+# source-vs-destination digest cannot compare a partitioned population, so
+# per-route read-back digests are reported, not compared as one checksum.
+ROUTE_PARTITIONED = "route_partitioned"
+# A quiet incremental poll: the reader found nothing past the watermark, so no
+# batch exists to compare and the proof is that the destination count did not
+# move. Population evidence must not be turned on such a report — comparing a
+# zero-row batch against a sink that legitimately holds earlier rows fails the
+# normal outcome of every scheduled incremental sync.
+NO_OP_DEST_UNCHANGED: Final[str] = "no_op_destination_unchanged"
+# Sequential multi-table runs reconcile once, against the endpoint restored
+# to the last table. That digest is real for the last table. It is not a
+# digest of the job. Summing populations into it would fail a correct
+# per-table checksum.
+LAST_STREAM_CHECKSUM: Final[str] = "last_stream"
+PER_STREAM_CHECKSUM: Final[str] = "per_stream_checksum"
+
+# Scopes that already refuse a whole-job full_checksum claim. Qualifying a
+# multi-table run must not replace them with last_stream.
+_NARROW_CHECKSUM_SCOPES: Final[frozenset[str]] = frozenset(
+    {
+        WHOLE_TABLE_NOT_COMPARABLE,
+        WRITTEN_BATCH_KEYS,
+        CDC_SOURCE_IMAGE_COUNT,
+        CDC_SOURCE_IMAGE_VALUES,
+        NO_OP_DEST_UNCHANGED,
+        LAST_STREAM_CHECKSUM,
+    }
+)
+
+
+def is_no_op_report(report: dict[str, Any]) -> bool:
+    """True when the report declares a no-op poll (nothing read, nothing written)."""
+    return str((report or {}).get("assurance_level") or "") == NO_OP_DEST_UNCHANGED
+
+
+def is_last_stream_checksum(report: dict[str, Any] | None) -> bool:
+    """True when the job digest is the last table of a multi-table run."""
+    return str((report or {}).get("checksum_scope") or "") == LAST_STREAM_CHECKSUM
+
+
+def _stream_dest_counts(streams: list[Any]) -> tuple[int, int, list[str]]:
+    """Sum measured dest COUNT(*) values. ``True`` is not a count."""
+    dest_sum = 0
+    measured = 0
+    unbalanced: list[str] = []
+    for row in streams:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "stream")
+        ledger = row.get("row_accounting")
+        if not isinstance(ledger, dict):
+            continue
+        if str(ledger.get("conservation_kind") or "") == "scd2":
+            # SCD2 dest COUNT(*) includes closed history rows, so it can never
+            # be a population proof. The ledger's balanced=False is its honest
+            # "unproven by count" marker — SCD2 identity is proven by its own
+            # key-diff merge, not here. Excluding the stream keeps the job
+            # qualified instead of failed.
+            continue
+        if ledger.get("balanced") is False:
+            unbalanced.append(name)
+        count = ledger.get("dest_count")
+        if type(count) is int:
+            dest_sum += count
+            measured += 1
+    return dest_sum, measured, unbalanced
+
+
+def _population_sentence(dest_sum: int, measured: int, stream_count: int) -> str:
+    if measured <= 0:
+        return (
+            f"Job destination population was not counted across {stream_count} streams."
+        )
+    if measured == stream_count:
+        return (
+            f"Job destination population is {dest_sum} across {stream_count} "
+            "streams (each COUNT(*))."
+        )
+    return (
+        f"Job destination population is {dest_sum} on {measured} of "
+        f"{stream_count} streams; the rest were not counted."
+    )
+
+
+_LAST_STREAM_LADDER_NOTE = (
+    "L1–L3 compared the last stream only, not the multi-table job."
+)
+
+
+def _qualify_last_stream_ladder(report: dict[str, Any]) -> dict[str, Any]:
+    """The nested ladder must not keep a whole-job checksum claim.
+
+    Gate-8 attaches L1–L3 before the multi-table qualifier runs, so the
+    ladder still says ``full_checksum`` and ``population_checksum_proof``
+    for the last table. A reader of that object would undo the parent
+    scope. The layer measurements stay; the claim does not.
+    """
+    ladder = report.get("verification_ladder")
+    if not isinstance(ladder, dict) or not ladder:
+        return report
+    if str(ladder.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM:
+        return report
+    qualified = dict(ladder)
+    assurance = str(qualified.get("assurance_level") or "")
+    if assurance in {"full_checksum", "five_layer"}:
+        qualified["assurance_level"] = PER_STREAM_CHECKSUM
+    qualified["checksum_scope"] = LAST_STREAM_CHECKSUM
+    if qualified.get("population_checksum_proof") is True:
+        qualified["population_checksum_proof"] = False
+    note = str(qualified.get("screening_note") or "").rstrip()
+    if _LAST_STREAM_LADDER_NOTE not in note:
+        qualified["screening_note"] = (
+            f"{note} {_LAST_STREAM_LADDER_NOTE}".strip() if note else _LAST_STREAM_LADDER_NOTE
+        )
+    out = dict(report)
+    out["verification_ladder"] = qualified
+    return out
+
+
+def qualify_multi_stream_reconciliation(
+    report: dict[str, Any],
+    dest_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Name a multi-table checksum as the last stream, not the whole job.
+
+    ``run_non_cdc_multi_stream_sequential`` keeps the last stream's summary and
+    Gate-8 runs once against that restored endpoint. The last table's digest
+    can match. Reporting it as ``full_checksum`` for the job says a 2-row
+    table proved a 4-row transfer. This does not add the stream counts into
+    that digest — a summed population would fail a correct per-table checksum.
+    A ledger that is already unbalanced stays a failure.
+    """
+    if not isinstance(report, dict) or not isinstance(dest_summary, dict):
+        return report
+    if not dest_summary.get("multi_stream"):
+        return report
+    streams = dest_summary.get("streams")
+    if not isinstance(streams, list) or len(streams) < 2:
+        return report
+    scope = str(report.get("checksum_scope") or "")
+    if scope in _NARROW_CHECKSUM_SCOPES:
+        if scope == LAST_STREAM_CHECKSUM:
+            return _qualify_last_stream_ladder(report)
+        return report
+    claimed_full = (
+        str(report.get("assurance_level") or "") == "full_checksum"
+        or str(report.get("coverage") or "") == "full_checksum"
+    )
+
+    dest_sum, measured, unbalanced = _stream_dest_counts(streams)
+    names = [
+        str(row.get("name") or "").strip()
+        for row in streams
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    ]
+    last_table = str(
+        dest_summary.get("table") or (names[-1] if names else "") or "the last stream"
+    )
+    last_rows = report.get("source_rows")
+    if last_rows is None:
+        last_rows = report.get("target_rows")
+
+    out = dict(report)
+    out["checksum_scope"] = LAST_STREAM_CHECKSUM
+    out["multi_stream"] = True
+    out["stream_count"] = len(streams)
+    out["migration_proven"] = False
+    out["population_proof"] = False
+    out = _qualify_last_stream_ladder(out)
+    if measured:
+        out["job_dest_count"] = dest_sum
+        out["job_dest_count_measured_streams"] = measured
+    if str(out.get("assurance_level") or "") == "full_checksum":
+        out["assurance_level"] = PER_STREAM_CHECKSUM
+    if str(out.get("coverage") or "") == "full_checksum":
+        out["coverage"] = PER_STREAM_CHECKSUM
+
+    if unbalanced:
+        out["passed"] = False
+        named = ", ".join(unbalanced)
+        out["message"] = (
+            f"Stream ledger unbalanced on {named}. "
+            f"The job checksum is the digest of {last_table} only, "
+            f"not a single digest of {len(streams)} streams."
+        )
+        return out
+
+    if out.get("passed") is not True:
+        if out.get("passed") is False and claimed_full:
+            base = str(out.get("message") or "Reconciliation failed").rstrip()
+            if "not the whole job" not in base and last_table not in base:
+                out["message"] = (
+                    f"{base} Checksum scope is {last_table} only, "
+                    f"not the {len(streams)}-stream job."
+                )
+        return out
+
+    # Writer-ack and append reports already refuse full_checksum. Only a
+    # report that claimed the whole job gets a new sentence. The scope
+    # stamp above is what stops trust from reading a matching pair of
+    # last-table hashes as job proof.
+    if not claimed_full:
+        return out
+
+    out["message"] = (
+        f"Checksum matches {last_table} ({last_rows} rows). "
+        f"{_population_sentence(dest_sum, measured, len(streams))} "
+        "This digest is not the whole job."
+    )
+    return out
+
+
+def is_cdc_source_image_count_report(report: dict[str, Any]) -> bool:
+    """True when Gate-8 proved CDC catch-up by dest COUNT vs live source COUNT.
+
+    Leftover dest keys sit outside that proof (changelog is not S; leftover
+    MERGE is a hard no-op). The in-memory ladder must not treat those extras as
+    a snapshot-identity failure, and must not claim ``full_checksum``.
+    """
+    scope = str((report or {}).get("checksum_scope") or "")
+    return scope in {CDC_SOURCE_IMAGE_COUNT, CDC_SOURCE_IMAGE_VALUES}
 
 
 def row_count_scope_stamp(out: dict[str, Any]) -> dict[str, Any] | None:
@@ -65,7 +296,21 @@ def is_unproven_export(out: dict[str, Any], msg: str) -> bool:
 #: case for exactly the large tables where the claim matters most.
 SOURCE_DIGEST_WRITER_ACK: Final[str] = "writer_ack"
 SOURCE_DIGEST_REMAPPED_ROWS: Final[str] = "remapped_source_rows"
+SOURCE_DIGEST_WRITE_PASS: Final[str] = "write_pass_fingerprints"
 SOURCE_DIGEST_ENGINE_POPULATION: Final[str] = "engine_population"
+#: Second warehouse scan after the write, paged like the extract (scan/keyset,
+#: never OFFSET on snapshot-scan sources). Dest is read back independently.
+#: This is the Fivetran/HVR Compare class of proof — it may earn full_checksum.
+SOURCE_DIGEST_SOURCE_REREAD: Final[str] = "independent_source_reread"
+
+#: Provenances that are independent of the writer's own account of the write.
+INDEPENDENT_SOURCE_DIGESTS: Final[frozenset[str]] = frozenset(
+    {
+        SOURCE_DIGEST_REMAPPED_ROWS,
+        SOURCE_DIGEST_ENGINE_POPULATION,
+        SOURCE_DIGEST_SOURCE_REREAD,
+    }
+)
 
 
 def is_writer_ack_only(
@@ -77,7 +322,12 @@ def is_writer_ack_only(
     where the digest came from, whereas the message text can only be guessed at.
     """
     if source_provenance == SOURCE_DIGEST_WRITER_ACK:
-        return True
+        # A dest digest is independent even when the source side is the writer's
+        # account. Treating that pair as writer-only hid a 1M-row Snowflake
+        # SELECT * behind "read-back not available".
+        return not bool(target_checksum)
+    if source_provenance in INDEPENDENT_SOURCE_DIGESTS:
+        return False
     return bool(
         not target_checksum
         or "verified by writer" in msg
@@ -123,8 +373,14 @@ def append_row_count_report(
     rows_skipped: int,
     sample_compare: dict[str, Any] | None,
     target_rows_before: int | None = None,
+    keyed_expected_delta: int | None = None,
 ) -> Any:
     """Cardinality verdict for an append into a non-empty destination.
+
+    ``keyed_expected_delta`` is the writer's key census (``inserts - deletes``)
+    for a merge into an occupied destination: a keyed write grows the table by
+    the keys it inserted, not by the batch size, so it replaces ``expected_rows``
+    as the delta identity.
 
     The only cardinality proof available for append is the *delta*:
     ``target_rows - target_rows_before == expected_rows``. The final count on
@@ -153,6 +409,7 @@ def append_row_count_report(
         "checksum_match": False,
         "population_proof": False,
         "checksum_scope": WHOLE_TABLE_NOT_COMPARABLE,
+        "target_rows_before": target_rows_before,
     }
 
     if target_rows_before is None:
@@ -171,15 +428,38 @@ def append_row_count_report(
         )
 
     delta = target_rows - int(target_rows_before)
-    if delta != expected_rows:
+    keyed = keyed_expected_delta is not None
+    identity = int(keyed_expected_delta) if keyed else expected_rows
+    verb = "merged" if keyed else "appended"
+    if delta != identity:
         return ReconciliationReport(
             passed=False,
             message=(
-                f"Append delta mismatch: destination held {target_rows_before} "
-                f"row(s) before the write and {target_rows} after — {delta} "
-                f"appended, {expected_rows} expected.{sample_note}"
+                f"{'Keyed' if keyed else 'Append'} delta mismatch: destination held "
+                f"{target_rows_before} row(s) before the write and {target_rows} "
+                f"after — {delta} {verb}, {identity} expected"
+                + (
+                    f" (batch of {expected_rows} event(s): inserts - deletes = "
+                    f"{identity}).{sample_note}"
+                    if keyed
+                    else f".{sample_note}"
+                )
             ),
             assurance_level="none",
+            **common,
+        )
+
+    if keyed:
+        return ReconciliationReport(
+            passed=True,
+            message=(
+                f"Keyed delta verified ({expected_rows} event(s) merged, "
+                f"{identity} net new key(s): {target_rows_before} → {target_rows}). "
+                "Whole-table digests are not comparable for a merge into "
+                "pre-existing rows — per-cell fidelity is NOT proven."
+                f"{sample_note}"
+            ),
+            assurance_level="row_count",
             **common,
         )
 
@@ -195,3 +475,31 @@ def append_row_count_report(
         assurance_level="row_count",
         **common,
     )
+
+
+_LAST_STREAM_NOTE_SUFFIX = (
+    " This note is the last stream. It does not earn migration_proven for the job."
+)
+
+
+def annotate_last_stream_checksum_note(dest_summary: dict[str, Any] | None) -> None:
+    """Keep a last-stream re-read note from reading as job proof.
+
+    The stream writer stamps ``checksum_note`` on the table it just read.
+    On a multi-table run that object is the restored endpoint. A sentence
+    that says the re-read can earn ``migration_proven`` is true for that
+    table and false for the job. Append the job limit once.
+    """
+    if not isinstance(dest_summary, dict) or dest_summary.get("multi_stream") is not True:
+        return
+    streams = dest_summary.get("streams")
+    if not isinstance(streams, list) or len(streams) < 2:
+        return
+    note = str(dest_summary.get("checksum_note") or "").strip()
+    if not note:
+        return
+    if "full_checksum" not in note and "migration_proven" not in note:
+        return
+    if "does not earn migration_proven for the job" in note:
+        return
+    dest_summary["checksum_note"] = note + _LAST_STREAM_NOTE_SUFFIX

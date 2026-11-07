@@ -17,6 +17,7 @@ from connectors.sql_identifiers import (
     quote_table_ref,
     require_safe_identifier,
     sanitize_identifier,
+    split_qualified_table,
 )
 
 
@@ -46,6 +47,26 @@ def test_quote_table_ref_mysql_never_embeds_raw_payload() -> None:
 def test_quote_table_ref_postgresql_schema_table() -> None:
     ref = quote_table_ref("orders", "public", dialect="postgresql")
     assert ref == '"public"."orders"'
+
+
+def test_split_qualified_table_does_not_double_prefix() -> None:
+    """Studio stores ``public.case_a_src`` while the connector has schema=public."""
+    assert split_qualified_table("public.case_a_src", "public") == ("public", "case_a_src")
+    assert split_qualified_table("case_a_src", "public") == ("public", "case_a_src")
+    assert split_qualified_table("other.case_a_src", "public") == ("other", "case_a_src")
+    assert split_qualified_table('"public"."case_a_src"', "public") == ("public", "case_a_src")
+    assert split_qualified_table('"public.case_a_src"', "public") == ("public", "public.case_a_src")
+    assert split_qualified_table("case_a_src", None) == (None, "case_a_src")
+    assert quote_table_ref("public.case_a_src", "public", dialect="postgresql") == (
+        '"public"."case_a_src"'
+    )
+    assert quote_table_ref("case_a_src", "public", dialect="postgresql") == (
+        '"public"."case_a_src"'
+    )
+    compiled_wrong = 'public."public.case_a_src"'
+    assert compiled_wrong not in quote_table_ref(
+        "public.case_a_src", "public", dialect="postgresql"
+    )
 
 
 def test_quote_table_ref_snowflake() -> None:
@@ -97,6 +118,40 @@ def test_quote_column_list_escapes_quotes() -> None:
 
 def test_quote_sql_identifier_mysql_backticks() -> None:
     assert quote_sql_identifier("a`b", "`") == "`a``b`"
+
+
+def test_a_spaced_sqlite_table_is_read_under_its_own_name(tmp_path) -> None:
+    import sqlite3
+
+    from services.preflight_sample import engine_sample_rows
+
+    path = tmp_path / "spaced.db"
+    conn = sqlite3.connect(path)
+    conn.execute('create table "order details"(id integer primary key, name text)')
+    conn.execute("insert into \"order details\" values (1, 'bolt')")
+    conn.commit()
+    conn.close()
+    sample = engine_sample_rows(
+        source_kind="database",
+        source_format="sqlite",
+        source_config={"type": "sqlite", "database": str(path)},
+        source_table="order details",
+        limit=10,
+    )
+    assert sample.unavailable_reason == ""
+    assert sample.rows == [{"id": "1", "name": "bolt"}]
+
+
+def test_a_space_in_a_table_name_stays_inside_the_quotes() -> None:
+    """DEF-C-047: sanitizing the space addressed ``Order_Details``, which does not exist."""
+    assert quote_table_ref("qa6c7_Order Details", "public", dialect="postgresql") == (
+        '"public"."qa6c7_Order Details"'
+    )
+    assert quote_table_ref("qa6c7_Order Details", "dbo", dialect="sqlserver") == (
+        "[dbo].[qa6c7_Order Details]"
+    )
+    assert quote_table_ref("qa6c7_Order Details", dialect="mysql") == "`qa6c7_Order Details`"
+    assert quote_table_ref("qa6c7_Order Details", dialect="sqlite") == '"qa6c7_Order Details"'
 
 
 def test_malicious_table_not_in_from_clause_shape() -> None:

@@ -43,6 +43,14 @@ def test_mapping_source_type_is_restamped_for_artifact_parity():
     assert rows[0]["source_type"] == "OBJECTID"
 
 
+def test_restamp_finds_folded_oracle_catalog_keys():
+    rows = restamp_mapping_source_types(
+        [{"source": "amount", "target": "amount", "source_type": "VARCHAR"}],
+        {"AMOUNT": "DECIMAL(18,2)"},
+    )
+    assert rows[0]["source_type"] == "DECIMAL(18,2)"
+
+
 def test_stale_map_stamp_blocks_at_validate_not_at_write():
     """The pasted Mongo→Postgres symptom, as a gate assertion."""
     from services.preflight_service import run_file_preflight

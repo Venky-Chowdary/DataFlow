@@ -19,6 +19,7 @@ from services.secondary_indexes import (  # noqa: E402
     IndexColumn,
     SourceIndex,
     SourceIndexes,
+    _split_index_key,
     plan_index_carry,
     probe_secondary_indexes,
 )
@@ -41,6 +42,14 @@ def _plan(indexes: SourceIndexes, dest: str = "postgresql", **kw):
     }
     params.update(kw)
     return plan_index_carry(indexes, **params)
+
+
+def test_index_key_parse_keeps_operator_class_and_rejects_expressions():
+    assert _split_index_key("status") == ("status", "")
+    assert _split_index_key("status DESC") == ("status", "")
+    assert _split_index_key("status varchar_pattern_ops") == ("status", "varchar_pattern_ops")
+    assert _split_index_key('"Code" text_pattern_ops') == ("Code", "text_pattern_ops")
+    assert _split_index_key("lower(status)") is None
 
 
 def test_plain_composite_index_is_carried_with_column_order():
@@ -68,6 +77,44 @@ def test_expression_index_is_refused_not_approximated():
     assert not d.carried and not d.skipped
     assert "expression" in d.reason
 
+
+def test_gin_index_is_reproduced_with_its_access_method():
+    """A gin index recreated as btree is a different index — USING must travel."""
+    idx = SourceIndex(
+        "idx_payload",
+        (IndexColumn("status"),),
+        method="gin",
+    )
+    [d] = _plan(_measured(idx))
+    assert d.carried
+    assert " USING gin " in d.dest_sql
+
+
+def test_operator_class_travels_with_the_key():
+    idx = SourceIndex(
+        "idx_code",
+        (IndexColumn("status", opclass="varchar_pattern_ops"),),
+    )
+    [d] = _plan(_measured(idx))
+    assert d.carried
+    assert "varchar_pattern_ops" in d.dest_sql
+
+
+def test_operator_class_is_refused_on_a_dialect_that_has_none():
+    idx = SourceIndex(
+        "idx_code",
+        (IndexColumn("status", opclass="varchar_pattern_ops"),),
+    )
+    [d] = _plan(_measured(idx), dest="mysql")
+    assert not d.carried
+    assert "operator class" in d.reason
+
+
+def test_sqlite_cannot_hold_a_gin_index():
+    idx = SourceIndex("idx_payload", (IndexColumn("status"),), method="gin")
+    [d] = _plan(_measured(idx), dest="sqlite")
+    assert not d.carried
+    assert "access method" in d.reason or "cannot reproduce" in d.reason
 
 def test_index_over_an_unmapped_column_is_refused():
     idx = SourceIndex("idx_secret", (IndexColumn("ssn"),))
@@ -274,3 +321,36 @@ def test_probe_of_an_unknown_dialect_is_unavailable_not_empty():
     result = probe_secondary_indexes("neo4j", None, "", "orders")
     assert result.status == "unavailable"
     assert result.items == ()
+
+
+def test_mysql_index_probe_survives_missing_expression_column():
+    """MariaDB 10.x has no STATISTICS.EXPRESSION — that is not 'no indexes'."""
+
+    class _Cur:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.connection = self
+
+        def rollback(self) -> None:
+            return None
+
+        def execute(self, sql: str, params: tuple) -> None:
+            self.calls += 1
+            if "EXPRESSION" in sql:
+                raise Exception("(1054, \"Unknown column 'EXPRESSION' in 'SELECT'\")")
+            self._rows = [
+                ("PRIMARY", 0, 1, "id", "A", "BTREE"),
+                ("email", 0, 1, "email", "A", "BTREE"),
+                ("idx_status", 1, 1, "status", "A", "BTREE"),
+            ]
+
+        def fetchall(self):
+            return list(self._rows)
+
+    result = probe_secondary_indexes("mysql", _Cur(), "dataflow", "people")
+    assert result.status == "measured", result.detail
+    by_name = {i.name: i for i in result.items}
+    assert "idx_status" in by_name
+    assert by_name["idx_status"].columns == (IndexColumn("status"),)
+    assert not by_name["idx_status"].unique
+    assert by_name["email"].unique

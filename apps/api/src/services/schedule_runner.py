@@ -4,6 +4,7 @@ from __future__ import annotations
 from services.schedule_runner import (
     CHECK_INTERVAL_SECONDS,
     LOCK_TTL_SECONDS,
+    ScheduleStartError,
     _acquire_scheduler_lock,
     _clear_stale_running_schedules,
     _endpoint_from_connector,
@@ -19,4 +20,4 @@ from services.schedule_runner import (
     run_schedule_loop,
 )
 
-__all__ = ['logger', '_executor', 'CHECK_INTERVAL_SECONDS', 'LOCK_TTL_SECONDS', '_scheduler_instance_id', '_lock_expiry', '_mongo_backend', '_acquire_scheduler_lock', '_release_scheduler_lock', '_resolve_connector', '_endpoint_from_connector', '_run_schedule', '_run_due_schedules', '_clear_stale_running_schedules', 'run_schedule_loop']
+__all__ = ['logger', '_executor', 'CHECK_INTERVAL_SECONDS', 'LOCK_TTL_SECONDS', 'ScheduleStartError', '_scheduler_instance_id', '_lock_expiry', '_mongo_backend', '_acquire_scheduler_lock', '_release_scheduler_lock', '_resolve_connector', '_endpoint_from_connector', '_run_schedule', '_run_due_schedules', '_clear_stale_running_schedules', 'run_schedule_loop']

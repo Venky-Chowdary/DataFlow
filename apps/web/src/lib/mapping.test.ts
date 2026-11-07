@@ -7,7 +7,13 @@ import {
   acknowledgeMappingRisk,
   applyDestTypeChange,
   applyStructPolicyChange,
+  applyReductionReason,
+  reductionEvidenceGap,
+  applyDeclaredSourceZone,
   applyTransformChange,
+  assumeTimezoneAwaitingZone,
+  declaredSourceZone,
+  suggestedSourceZones,
   approveMappingHonestly,
   approveMappingsHonestly,
   buildPreflightMappings,
@@ -17,6 +23,7 @@ import {
   editableFromPipelineMappings,
   engineStampedRiskChip,
   engineTransformToUi,
+  formatCodeCrosswalk,
   formatColumnProfileStrip,
   inferLogicalFromSample,
   isSafeNormalizeMapping,
@@ -27,13 +34,64 @@ import {
   mappingsFromAnalysis,
   mergeSignedRiskContracts,
   mergeStampedTargetTypes,
+  parseCodeCrosswalk,
   uiTransformToEngine,
   widenMappingToVarchar,
+  isControlTotalCandidate,
+  isCodeCrosswalkCandidate,
+  isCodeCrosswalkDeclared,
   type EditableMapping,
 } from "./mapping.js";
+import { needsMappingReview } from "./columnWorkbench.js";
 import { typeFamily } from "./typeDisplay.js";
 
 describe("transform SSOT round-trip", () => {
+  it("approving a mapping preserves a held business rule as not applied", () => {
+    const mapping: EditableMapping = {
+      source: "email",
+      target: "email",
+      confidence: 0.94,
+      approved: false,
+      inferredType: "VARCHAR",
+      destType: "VARCHAR",
+      businessRule: {
+        kind: "formula",
+        kindLabel: "Review",
+        text: "=HYPERLINK(\"https://example.test\")",
+        status: "needs_confirmation",
+        confidence: 0,
+        ruleId: "V008",
+      },
+    };
+    const approved = approveMappingHonestly(mapping);
+    assert.equal(approved.approved, true);
+    assert.equal(approved.businessRule?.status, "needs_confirmation");
+    assert.equal(approved.businessRule?.ruleId, "V008");
+  });
+
+  it("approving a mapping preserves a held business rule as not applied", () => {
+    const mapping: EditableMapping = {
+      source: "email",
+      target: "email",
+      confidence: 0.94,
+      approved: false,
+      inferredType: "VARCHAR",
+      destType: "VARCHAR",
+      businessRule: {
+        kind: "formula",
+        kindLabel: "Review",
+        text: "=HYPERLINK(\"https://example.test\")",
+        status: "needs_confirmation",
+        confidence: 0,
+        ruleId: "V008",
+      },
+    };
+    const approved = approveMappingHonestly(mapping);
+    assert.equal(approved.approved, true);
+    assert.equal(approved.businessRule?.status, "needs_confirmation");
+    assert.equal(approved.businessRule?.ruleId, "V008");
+  });
+
   it("preserves phone/currency/integer engine transforms through Map edit", () => {
     const editable = editableFromPipelineMappings(
       [
@@ -86,6 +144,73 @@ describe("transform SSOT round-trip", () => {
   });
 });
 
+describe("declared source zone", () => {
+  const zoneless: EditableMapping = {
+    source: "created_at",
+    target: "created_at",
+    confidence: 0.95,
+    approved: false,
+    sourceType: "TIMESTAMP",
+    targetType: "date",
+    transform: "none",
+  };
+
+  it("serializes the named zone as the engine transform", () => {
+    const declared = applyDeclaredSourceZone(zoneless, "Europe/Berlin");
+    assert.equal(declared.transform, "assume_timezone");
+    assert.equal(declared.engineTransform, "assume_timezone:Europe/Berlin");
+    assert.equal(declaredSourceZone(declared), "Europe/Berlin");
+    assert.equal(assumeTimezoneAwaitingZone(declared), false);
+    assert.equal(uiTransformToEngine("assume_timezone", "assume_timezone:Europe/Berlin"), "assume_timezone:Europe/Berlin");
+    assert.equal(buildPreflightMappings([], [declared])[0].transform, "assume_timezone:Europe/Berlin");
+  });
+
+  it("never lets an unnamed zone reach the engine", () => {
+    const chosen = applyTransformChange(zoneless, "assume_timezone");
+    assert.equal(assumeTimezoneAwaitingZone(chosen), true);
+    assert.equal(chosen.engineTransform, undefined);
+    assert.equal(uiTransformToEngine("assume_timezone", chosen.engineTransform), undefined);
+
+    const cleared = applyDeclaredSourceZone(applyDeclaredSourceZone(zoneless, "UTC"), "  ");
+    assert.equal(assumeTimezoneAwaitingZone(cleared), true);
+    assert.equal(cleared.engineTransform, undefined);
+  });
+
+  it("round-trips an engine declaration back onto the control", () => {
+    assert.equal(engineTransformToUi("assume_timezone:Asia/Kolkata"), "assume_timezone");
+    const editable = editableFromPipelineMappings(
+      [
+        {
+          source: "created_at",
+          target: "created_at",
+          confidence: 0.95,
+          transform: "assume_timezone:Asia/Kolkata",
+          source_type: "TIMESTAMP",
+          target_type: "date",
+        },
+      ],
+      [],
+      ["created_at"],
+      0.75,
+      { created_at: "date" },
+    );
+    assert.equal(editable[0].transform, "assume_timezone");
+    assert.equal(declaredSourceZone(editable[0]), "Asia/Kolkata");
+  });
+
+  it("keeps the zone when the operator reselects the control", () => {
+    const declared = applyDeclaredSourceZone(zoneless, "UTC");
+    assert.equal(declaredSourceZone(applyTransformChange(declared, "assume_timezone")), "UTC");
+  });
+
+  it("suggests UTC first and offers real zone names", () => {
+    const zones = suggestedSourceZones();
+    assert.equal(zones[0], "UTC");
+    assert.ok(zones.includes("Asia/Kolkata"));
+    assert.equal(new Set(zones).size, zones.length);
+  });
+});
+
 describe("fail-closed Map approve", () => {
   it("does not auto-approve exact-name lossy_cast pairs", () => {
     const editable = editableFromPipelineMappings(
@@ -109,6 +234,25 @@ describe("fail-closed Map approve", () => {
     );
     assert.equal(editable[0].approved, false);
     assert.equal(editable[0].requiresReview, true);
+  });
+
+  it("approveMappingHonestly allows Approve when overwrite will drop the live carrier", () => {
+    const next = approveMappingsHonestly([
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "lossy_cast",
+        typeNarrowing: true,
+        inferredType: "DECIMAL(20,9)",
+        destType: "INTEGER",
+        existsInDestination: true,
+        liveCarrierDoomed: true,
+      },
+    ]);
+    assert.equal(next[0].approved, true);
+    assert.equal(next[0].requiresReview, false);
   });
 
   it("approveMappingHonestly refuses lossy_cast even when operator Approve-all runs", () => {
@@ -653,6 +797,96 @@ describe("destination schema honesty", () => {
     assert.ok(editable[0].confidence <= 0.93);
   });
 
+  it("does not flatten create-new confidence to a 95% wall", () => {
+    const rows = editableFromPipelineMappings([
+      {
+        source: "c_custkey",
+        target: "c_custkey",
+        confidence: 0.88,
+        transform: "none",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        source_type: "BIGINT",
+        target_type: "NUMBER(38,0)",
+        fidelity: "preserve",
+      },
+      {
+        source: "c_acctbal",
+        target: "c_acctbal",
+        confidence: 0.91,
+        transform: "none",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        source_type: "DECIMAL(11,6)",
+        target_type: "NUMBER(11,6)",
+        fidelity: "preserve",
+      },
+    ]);
+    assert.equal(rows[0].confidence, 0.88);
+    assert.equal(rows[1].confidence, 0.91);
+    assert.notEqual(rows[0].confidence, rows[1].confidence);
+  });
+
+  it("hydrates compiled business-rule confidence from the pipeline wire", () => {
+    const editable = editableFromPipelineMappings([
+      {
+        source: "status",
+        target: "status",
+        confidence: 0.8,
+        transform: "none",
+        business_rule: {
+          kind: "lookup",
+          kind_label: "Lookup",
+          text: "A → ACTIVE",
+          status: "executable",
+          confidence: 0.98,
+          sheet: "Codes",
+          row: 4,
+        },
+      },
+      {
+        source: "notes",
+        target: "notes",
+        confidence: 0.4,
+        transform: "none",
+        business_rule: {
+          kind: "unknown",
+          kind_label: "Review",
+          text: "N/A",
+          status: "needs_confirmation",
+        },
+      },
+    ]);
+    assert.equal(editable[0].businessRule?.confidence, 0.98);
+    assert.equal(editable[0].businessRule?.kind, "lookup");
+    assert.equal(editable[1].businessRule?.confidence, 0);
+    assert.equal(editable[1].businessRule?.status, "needs_confirmation");
+    const wire = buildPreflightMappings([], editable);
+    assert.equal(wire[0].business_rule?.confidence, 0.98);
+    assert.equal(wire[1].business_rule?.confidence, 0);
+  });
+
+  it("create-new Approve destType is the target_type Validate reads", () => {
+    const pf = buildPreflightMappings([], [
+      {
+        source: "DEP_TIME",
+        target: "DEP_TIME",
+        confidence: 0.9,
+        transform: "none",
+        approved: true,
+        requiresReview: false,
+        isPii: false,
+        createNew: true,
+        existsInDestination: false,
+        assignmentStrategy: "create_compatible_new",
+        destType: "NUMBER(12,9)",
+        inferredType: "NUMBER(9,6)",
+      },
+    ]);
+    assert.equal(pf[0].target_type, "NUMBER(12,9)");
+    assert.equal(pf[0].create_new, true);
+  });
+
   it("caps create-new confidence in buildPreflightMappings before preflight", () => {
     const fromEditable = buildPreflightMappings([], [
       {
@@ -732,6 +966,20 @@ describe("destination schema honesty", () => {
     assert.equal(existing[0].approved, false);
   });
 
+  it("create-new destType uses catalog inferred_type, not sample semantic_type", () => {
+    const cols = [{
+      column_name: "C_CUSTKEY",
+      confidence: 0.99,
+      inferred_type: "DECIMAL(38,0)",
+      semantic_type: "BIGINT",
+      is_pii: false,
+      compliance: [],
+    }];
+    const create = mappingsFromAnalysis(cols, undefined, ["other_col"]);
+    assert.equal(create[0].createNew, true);
+    assert.equal(create[0].destType, "DECIMAL(38,0)");
+  });
+
   it("intentional omit is first-class Map policy", () => {
     const base: EditableMapping = {
       source: "ssn",
@@ -761,6 +1009,159 @@ describe("destination schema honesty", () => {
     assert.equal(payload[1].target, "");
   });
 
+  it("carries the Map reduction reason to the G16 wire fields", () => {
+    const omitted = applyTransformChange(
+      { source: "fax", target: "fax", confidence: 0.99, approved: false, transform: "none" },
+      "omit",
+    );
+    const withReason: EditableMapping = {
+      ...applyReductionReason(omitted, "archive_only"),
+      omitReasonText: "Kept for the 7-year retention obligation",
+      archiveReference: "s3://audit-archive/legacy_customer/2026",
+      retentionUntil: "2033-01-31",
+      omitApprovedBy: "R. Mehta",
+    };
+    const payload = buildPreflightMappings([], [
+      { source: "id", target: "id", confidence: 0.99, approved: true, transform: "none" },
+      withReason,
+    ]);
+
+    // Recording the reason must not withdraw the omission itself.
+    assert.equal(payload[1].transform, "omit");
+    assert.equal(payload[1].intentional_omit, true);
+    assert.equal(payload[1].target, "");
+    assert.equal(payload[1].omit_reason, "archive_only");
+    assert.equal(payload[1].omit_reason_text, "Kept for the 7-year retention obligation");
+    assert.equal(payload[1].archive_reference, "s3://audit-archive/legacy_customer/2026");
+    assert.equal(payload[1].retention_until, "2033-01-31");
+    assert.equal(payload[1].omit_approved_by, "R. Mehta");
+    // A carried column never ships reduction evidence.
+    assert.equal(payload[0].omit_reason, undefined);
+  });
+
+  it("carries a declared code crosswalk on the G20 wire field", () => {
+    const payload = buildPreflightMappings([], [
+      {
+        source: "status",
+        target: "status",
+        confidence: 0.99,
+        approved: true,
+        transform: "none",
+        codeCrosswalk: { A: "active", B: "blocked" },
+        codeCrosswalkSystem: "legacy_status→v2",
+      },
+    ]);
+    assert.deepEqual(payload[0].code_crosswalk, { A: "active", B: "blocked" });
+    assert.equal(payload[0].code_crosswalk_system, "legacy_status→v2");
+  });
+
+  it("does not ship a code crosswalk on an omitted column", () => {
+    const omitted = applyTransformChange(
+      {
+        source: "status",
+        target: "status",
+        confidence: 0.99,
+        approved: false,
+        transform: "none",
+        codeCrosswalk: { A: "active" },
+      },
+      "omit",
+    );
+    const payload = buildPreflightMappings([], [omitted]);
+    assert.equal(payload[0].code_crosswalk, undefined);
+  });
+
+  it("parses OLD=NEW / OLD->NEW / OLD→NEW and ignores comments", () => {
+    const parsed = parseCodeCrosswalk("# comment\nA=active\nB -> blocked\nC→closed\n");
+    assert.deepEqual(parsed, { A: "active", B: "blocked", C: "closed" });
+    assert.equal(formatCodeCrosswalk(parsed), "A=active\nB=blocked\nC=closed");
+    assert.equal(parseCodeCrosswalk(""), undefined);
+    assert.deepEqual(parseCodeCrosswalk("A=A"), { A: "A" });
+  });
+
+  it("never ships a reduction reason for a column that is carried again", () => {
+    const omitted = applyReductionReason(
+      applyTransformChange(
+        { source: "fax", target: "fax", confidence: 0.99, approved: false, transform: "none" },
+        "omit",
+      ),
+      "dropped_not_required",
+    );
+    const restored = applyTransformChange(
+      { ...omitted, omitReasonText: "New screen has no fax", omitApprovedBy: "R. Mehta" },
+      "none",
+    );
+
+    assert.equal(restored.omitReason, undefined);
+    assert.equal(restored.omitReasonText, undefined);
+    assert.equal(restored.omitApprovedBy, undefined);
+    assert.equal(buildPreflightMappings([], [restored])[0].omit_reason, undefined);
+  });
+
+  it("drops reason-scoped evidence when the reason is cleared or unknown", () => {
+    const omitted: EditableMapping = {
+      source: "fax",
+      target: "",
+      confidence: 1,
+      approved: true,
+      transform: "omit",
+      omitReason: "archive_only",
+      archiveReference: "s3://audit-archive/legacy",
+      retentionUntil: "2033-01-31",
+    };
+
+    const cleared = applyReductionReason(omitted, "");
+    assert.equal(cleared.omitReason, undefined);
+    assert.equal(cleared.archiveReference, undefined);
+    assert.equal(cleared.retentionUntil, undefined);
+
+    // An unknown code is not a reason — it must not silently keep the archive claim.
+    const bogus = applyReductionReason(omitted, "dropped_because_i_said_so");
+    assert.equal(bogus.omitReason, undefined);
+    assert.equal(bogus.archiveReference, undefined);
+
+    // Moving to a non-archive reason retires the archive claim with it.
+    const moved = applyReductionReason(omitted, "dropped_obsolete");
+    assert.equal(moved.omitReason, "dropped_obsolete");
+    assert.equal(moved.archiveReference, undefined);
+    assert.equal(moved.retentionUntil, undefined);
+  });
+
+  it("names the evidence G16 still needs, and only for omitted rows", () => {
+    const omitted = applyTransformChange(
+      { source: "fax", target: "fax", confidence: 0.99, approved: false, transform: "none" },
+      "omit",
+    );
+
+    assert.match(reductionEvidenceGap(omitted) || "", /No reduction reason/);
+    assert.match(
+      reductionEvidenceGap(applyReductionReason(omitted, "dropped_obsolete")) || "",
+      /needs a note/,
+    );
+    assert.match(
+      reductionEvidenceGap({
+        ...applyReductionReason(omitted, "archive_only"),
+        omitReasonText: "Kept in the audit archive",
+      }) || "",
+      /archive/i,
+    );
+    assert.equal(
+      reductionEvidenceGap({
+        ...applyReductionReason(omitted, "archive_only"),
+        omitReasonText: "Kept in the audit archive",
+        archiveReference: "s3://audit-archive/legacy",
+      }),
+      null,
+    );
+    // Observed codes stand on the sample the engine checks, not on a note.
+    assert.equal(reductionEvidenceGap(applyReductionReason(omitted, "dropped_empty")), null);
+    // A carried column has no reduction to evidence.
+    assert.equal(
+      reductionEvidenceGap({ source: "id", target: "id", confidence: 0.99, approved: true, transform: "none" }),
+      null,
+    );
+  });
+
   it("consumes pipeline create_new_risks stamp before Validate", () => {
     const editable = editableFromPipelineMappings(
       [{
@@ -787,6 +1188,33 @@ describe("destination schema honesty", () => {
     assert.equal(mappingRequiresRiskAck(editable[0]), true);
     assert.equal(createNewRiskChipLabel(editable[0]), "TZ risk");
     assert.ok(engineStampedRiskChip(editable[0])?.label === "TZ risk");
+  });
+
+  it("shows the epoch ceiling of a MySQL TIMESTAMP as a review, not a contract", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "created_at",
+        target: "created_at",
+        confidence: 0.92,
+        source_type: "TIMESTAMPTZ",
+        target_type: "TIMESTAMP(6)",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        create_new_risks: [{
+          kind: "instant_range_cap",
+          severity: "warn",
+          message:
+            "Create-new TIMESTAMPTZ → TIMESTAMP(6) keeps the instant but caps its "
+            + "range to 1970-01-01 00:00:01 UTC .. 2038-01-19 03:14:07 UTC.",
+        }],
+      }],
+      [],
+      [],
+      0.75,
+    );
+    assert.equal(createNewRiskChipLabel(editable[0]), "range risk");
+    assert.equal(engineStampedRiskChip(editable[0])?.severity, "warn");
+    assert.equal(mappingAckTier(editable[0]), "review");
   });
 
   it("cast fidelity never auto-approves as Ready without Accept risk", () => {
@@ -827,6 +1255,38 @@ describe("destination schema honesty", () => {
     );
     assert.equal(editable[0].approved, false);
     assert.equal(editable[0].requiresReview, false);
+  });
+
+  it("first Validate does not need Approve for INTEGER → existing INT4 after round", () => {
+    // Engine path after apply_shape_type_ceilings: rounded decimal is INTEGER,
+    // dest is the existing int4. Continue already treats preserve as not-Issues;
+    // the G4 wire must not re-invent requires_review from the missing click.
+    const dests = ["INT4", "INT", "INTEGER"] as const;
+    for (const dest of dests) {
+      const editable = editableFromPipelineMappings(
+        [{
+          source: "arr_time",
+          target: "arr_time",
+          confidence: 0.99,
+          source_type: "INTEGER",
+          target_type: dest,
+          fidelity: "preserve",
+          requires_review: false,
+          transform: "none",
+        }],
+        [],
+        ["arr_time"],
+        0.85,
+        { arr_time: dest },
+      );
+      assert.equal(editable[0].approved, false, dest);
+      assert.equal(editable[0].requiresReview, false, dest);
+      assert.equal(needsMappingReview(editable[0], 0.85), false, dest);
+      const wire = buildPreflightMappings([], editable);
+      assert.equal(wire[0].requires_review, false, dest);
+      assert.equal(wire[0].user_override, false, dest);
+      assert.equal(wire[0].source_type, "INTEGER", dest);
+    }
   });
 
   it("does not treat pending dest schema as create-new Widen", () => {
@@ -947,5 +1407,87 @@ describe("column profile Map strip", () => {
   it("formatColumnProfileStrip returns null when empty", () => {
     assert.equal(formatColumnProfileStrip(undefined), null);
     assert.equal(formatColumnProfileStrip({}), null);
+  });
+});
+
+describe("G21 control total wire", () => {
+  it("carries control_total through buildPreflightMappings", () => {
+    const payload = buildPreflightMappings([], [
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: true,
+        transform: "none",
+        destType: "DECIMAL(12,2)",
+        controlTotal: true,
+      },
+      {
+        source: "id",
+        target: "id",
+        confidence: 0.99,
+        approved: true,
+        transform: "none",
+        destType: "INTEGER",
+      },
+    ]);
+    assert.equal(payload[0].control_total, true);
+    assert.equal(payload[1].control_total, undefined);
+  });
+
+  it("defaults MONEY carriers as control-total candidates", () => {
+    const money: EditableMapping = {
+      source: "balance",
+      target: "balance",
+      confidence: 0.99,
+      approved: true,
+      transform: "none",
+      destType: "MONEY",
+    };
+    const id: EditableMapping = {
+      source: "id",
+      target: "id",
+      confidence: 0.99,
+      approved: true,
+      transform: "none",
+      destType: "INTEGER",
+    };
+    assert.equal(isControlTotalCandidate(money), true);
+    assert.equal(isControlTotalCandidate(id), false);
+  });
+
+  it("lets an operator declare a crosswalk on a plain varchar code column", () => {
+    const base = { confidence: 0.99, approved: true, transform: "none" as const };
+    const status: EditableMapping = {
+      ...base,
+      source: "status",
+      target: "status",
+      inferredType: "VARCHAR(4)",
+      destType: "VARCHAR(4)",
+    };
+    // No enum marker anywhere, yet G20 must be askable — this is the ordinary
+    // mainframe status/code column.
+    assert.equal(status.semanticRole, undefined);
+    assert.equal(isCodeCrosswalkCandidate(status), true);
+    // Candidacy is not a declaration: nothing is mapped until the operator says so.
+    assert.equal(isCodeCrosswalkDeclared(status), false);
+    assert.equal(
+      isCodeCrosswalkDeclared({ ...status, codeCrosswalk: { A: "active" } }),
+      true,
+    );
+    const amount: EditableMapping = {
+      ...base,
+      source: "amount",
+      target: "amount",
+      inferredType: "DECIMAL(12,2)",
+      destType: "DECIMAL(12,2)",
+    };
+    assert.equal(isCodeCrosswalkCandidate(amount), false);
+    const omitted: EditableMapping = {
+      ...status,
+      transform: "omit",
+      target: "",
+    };
+    assert.equal(isCodeCrosswalkCandidate(omitted), false);
   });
 });

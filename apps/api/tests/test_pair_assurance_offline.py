@@ -62,8 +62,8 @@ def test_value_fixtures_use_real_transforms():
 
 def test_assess_pair_proof_honesty_stamps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
-        "services.pair_assurance.PROOF_DIR",
-        tmp_path / "pair_assurance",
+        "services.pair_assurance._proof_dir",
+        lambda: tmp_path / "pair_assurance",
     )
     proof = assess_pair("postgresql", "mysql", write_proof=True)
     assert proof["mode"] == "offline"
@@ -103,8 +103,8 @@ def test_mongodb_to_postgresql_objectid_cell():
 
 def test_run_committed_pair_assurance_all_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
-        "services.pair_assurance.PROOF_DIR",
-        tmp_path / "pair_assurance",
+        "services.pair_assurance._proof_dir",
+        lambda: tmp_path / "pair_assurance",
     )
     # Full SKU set — this is the enterprise gate (offline, real engines).
     summary = run_committed_pair_assurance(write_proof=True)

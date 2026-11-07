@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   acknowledgeMappingRisk,
+  applyOperatorRemapDest,
+  applyDestTypeChange,
   mappingHasClearingRiskContract,
   mappingRequiresRiskAck,
   type EditableMapping,
@@ -44,6 +46,24 @@ function clean(over: Partial<EditableMapping> = {}): EditableMapping {
 }
 
 describe("carryOperatorDecisions", () => {
+  it("keeps an operator-typed destination name across regeneration", () => {
+    const typed = applyOperatorRemapDest(clean({ source: "item", target: "item" }), "description");
+    const approved = { ...typed, approved: true, requiresReview: false };
+    const regenerated = [clean({ source: "item", target: "item", createNew: true })];
+    const carried = carryOperatorDecisions(regenerated, [approved]);
+    assert.equal(carried[0].target, "description");
+    assert.equal(carried[0].operatorTarget, true);
+    assert.equal(carried[0].createNew, approved.createNew);
+    assert.equal(carried[0].approved, true);
+
+    const unapproved = carryOperatorDecisions(regenerated, [typed]);
+    assert.equal(unapproved[0].target, "description");
+    assert.equal(unapproved[0].approved, false);
+
+    const proposed = carryOperatorDecisions(regenerated, [clean({ source: "item", target: "description" })]);
+    assert.equal(proposed[0].target, "item");
+  });
+
   it("replays approvals and signed contracts onto regenerated mappings", () => {
     const signed = acknowledgeMappingRisk(lossy(), { executionPolicy: "QUARANTINE_ROW" });
     assert.equal(mappingHasClearingRiskContract(signed), true);
@@ -80,6 +100,115 @@ describe("carryOperatorDecisions", () => {
     const regenerated = [lossy(), clean()];
     assert.deepEqual(carryOperatorDecisions(regenerated, [lossy(), clean()]), regenerated);
     assert.deepEqual(carryOperatorDecisions(regenerated, []), regenerated);
+  });
+
+  it("keeps a declared reduction and its G16 evidence across regeneration", () => {
+    // Regeneration proposes a target for the column again, which moves the
+    // decision fingerprint — the omission must survive that anyway.
+    const dropped: EditableMapping = {
+      ...clean({ source: "old_audit_trail", target: "", transform: "omit", approved: true }),
+      omitReason: "archive_only",
+      omitReasonText: "Retired 2019 audit trail",
+      archiveReference: "mainframe-vault://audit/2019",
+      retentionUntil: "2031-12-31",
+      omitApprovedBy: "Priya Raman",
+    };
+
+    const carried = carryOperatorDecisions(
+      [clean({ source: "old_audit_trail", target: "old_audit_trail" }), lossy()],
+      [dropped, lossy()],
+    );
+
+    assert.equal(carried[0].transform, "omit");
+    assert.equal(carried[0].target, "");
+    assert.equal(carried[0].omitReason, "archive_only");
+    assert.equal(carried[0].omitReasonText, "Retired 2019 audit trail");
+    assert.equal(carried[0].archiveReference, "mainframe-vault://audit/2019");
+    assert.equal(carried[0].retentionUntil, "2031-12-31");
+    assert.equal(carried[0].omitApprovedBy, "Priya Raman");
+    // Other rows are untouched by the reduction replay.
+    assert.equal(carried[1].transform, undefined);
+  });
+
+  it("keeps a declared code crosswalk across regeneration", () => {
+    const prior: EditableMapping = {
+      ...clean({ source: "status", target: "status", approved: true }),
+      codeCrosswalk: { A: "active", B: "blocked" },
+      codeCrosswalkSystem: "legacy_status→v2",
+    };
+    const carried = carryOperatorDecisions(
+      [clean({ source: "status", target: "status_v2" })],
+      [prior],
+    );
+    assert.deepEqual(carried[0].codeCrosswalk, { A: "active", B: "blocked" });
+    assert.equal(carried[0].codeCrosswalkSystem, "legacy_status→v2");
+  });
+
+  it("keeps a hand-picked destination carrier across regeneration", () => {
+    // The operator widened VARCHAR(4) → VARCHAR(255) in Map. Validate honoured
+    // it; coming back to Map re-inferred VARCHAR(4) and the widening was gone,
+    // so the run the operator reviewed was not the run Execute would make.
+    const declared = applyDestTypeChange(
+      clean({ source: "code", target: "code", inferredType: "VARCHAR(4)", destType: "VARCHAR(4)" }),
+      "VARCHAR(255)",
+    );
+    assert.equal(declared.destType, "VARCHAR(255)");
+
+    const carried = carryOperatorDecisions(
+      [clean({ source: "code", target: "code", inferredType: "VARCHAR(4)", destType: "VARCHAR(4)" })],
+      [declared],
+    );
+
+    assert.equal(carried[0].destType, "VARCHAR(255)");
+    assert.equal(carried[0].destTypeDeclared, "VARCHAR(255)");
+  });
+
+  it("carries the approval that was signed for the declared carrier", () => {
+    const declared = applyDestTypeChange(
+      clean({ source: "code", target: "code", inferredType: "VARCHAR(4)", destType: "VARCHAR(4)" }),
+      "VARCHAR(255)",
+    );
+    const approved = { ...declared, approved: true, requiresReview: false };
+
+    const carried = carryOperatorDecisions(
+      [clean({ source: "code", target: "code", inferredType: "VARCHAR(4)", destType: "VARCHAR(4)" })],
+      [approved],
+    );
+
+    assert.equal(carried[0].destType, "VARCHAR(255)");
+    assert.equal(carried[0].approved, true);
+  });
+
+  it("does not restore a carrier on a column the operator dropped", () => {
+    const declared = applyDestTypeChange(
+      clean({ source: "code", target: "code", destType: "VARCHAR(4)" }),
+      "VARCHAR(255)",
+    );
+    const carried = carryOperatorDecisions(
+      [clean({ source: "code", target: "code", destType: "VARCHAR(4)" })],
+      [{ ...declared, transform: "omit", approved: true }],
+    );
+    assert.equal(carried[0].transform, "omit");
+    assert.equal(carried[0].destType, "VARCHAR(4)");
+  });
+
+  it("leaves an inferred carrier alone when nothing was declared", () => {
+    const carried = carryOperatorDecisions(
+      [clean({ source: "code", target: "code", destType: "VARCHAR(8)" })],
+      [clean({ source: "code", target: "code", destType: "VARCHAR(4)", approved: true })],
+    );
+    assert.equal(carried[0].destType, "VARCHAR(8)");
+    assert.equal(carried[0].destTypeDeclared, undefined);
+  });
+
+  it("does not omit a column the operator never dropped", () => {
+    const carried = carryOperatorDecisions(
+      [clean({ source: "email", target: "email" })],
+      [clean({ source: "old_audit_trail", target: "", transform: "omit", approved: true })],
+    );
+
+    assert.equal(carried[0].transform, undefined);
+    assert.equal(carried[0].target, "email");
   });
 
   it("fingerprints differ per column so decisions never cross rows", () => {
@@ -140,5 +269,61 @@ describe("holdOutRowsAndContinue", () => {
       0,
       "regeneration must not reopen the quarantine loop",
     );
+  });
+
+  it("carries a control-total declaration across regeneration", () => {
+    const prior: EditableMapping[] = [
+      { ...clean(), source: "amount", target: "amount", controlTotal: true },
+    ];
+    const regenerated: EditableMapping[] = [
+      { ...clean(), source: "amount", target: "amount" },
+    ];
+    const carried = carryOperatorDecisions(regenerated, prior);
+    assert.equal(carried[0].controlTotal, true);
+  });
+
+  it("replays compiled workbook dests onto rematch identity rows", () => {
+    const prior: EditableMapping[] = [
+      {
+        ...clean(),
+        source: "fname",
+        target: "first_name",
+        createNew: true,
+        businessRule: {
+          text: "Map fname to first_name",
+          kind: "direct",
+          kindLabel: "Direct map",
+          status: "executable",
+          confidence: 0.95,
+        },
+      },
+    ];
+    const rematch: EditableMapping[] = [
+      { ...clean(), source: "fname", target: "fname", createNew: true, approved: true },
+    ];
+    const carried = carryOperatorDecisions(rematch, prior);
+    assert.equal(carried[0].target, "first_name");
+  });
+});
+
+describe("reapplySeededTargets (Jobs → Studio source re-pick)", () => {
+  const m = (source: string, target: string, extra: Partial<EditableMapping> = {}): EditableMapping => ({
+    source, target, confidence: 0.9, destType: "TEXT", approved: false, ...extra,
+  } as EditableMapping);
+  it("the job's non-identity targets win over fresh name-identity proposals and stay pending review", async () => {
+    const { reapplySeededTargets } = await import("./mappingDecisions");
+    const seed = [m("id", "order_id", { destType: "BIGINT", reason: "Seeded from job 6ae8d59a…" }), m("item", "description")];
+    const out = reapplySeededTargets([m("id", "id", { approved: true }), m("ITEM", "item"), m("qty", "qty")], seed);
+    assert.deepEqual(out.map((x) => x.target), ["order_id", "description", "qty"]);
+    assert.equal(out[0].destType, "BIGINT");
+    assert.equal(out[0].approved, false);
+    assert.equal(out[0].requiresReview, true);
+    assert.equal(out[2].approved, false);
+    assert.equal(out[2].target, "qty");
+  });
+  it("no seed leaves proposals untouched", async () => {
+    const { reapplySeededTargets } = await import("./mappingDecisions");
+    const next = [m("id", "id")];
+    assert.equal(reapplySeededTargets(next, null), next);
   });
 });

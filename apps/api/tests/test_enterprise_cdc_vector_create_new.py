@@ -109,7 +109,13 @@ def test_create_compatible_new_confidence_capped_for_review():
     assert float(out[0]["confidence"]) <= 0.84
 
 
-def test_identity_passthrough_create_new_under_g4_floor():
+def test_identity_passthrough_create_new_preserve_is_approve_eligible_not_silent():
+    """TEXT→TEXT onto a table that does not exist is an equivalent CREATE.
+
+    The G4 review floor (≤0.84) is for projected casts that can lose data; a
+    preserve-class create-new is Approve-eligible (0.95–0.97) but is still
+    stamped ``equivalent_create_new`` so Map never shows it as dest-proven.
+    """
     from services.semantic_mapper import map_columns
 
     mappings = map_columns(
@@ -123,8 +129,33 @@ def test_identity_passthrough_create_new_under_g4_floor():
         destination_table_exists=False,
     )
     assert all(m["assignment_strategy"] == "identity_passthrough" for m in mappings)
-    assert all(m.get("requires_review") is True for m in mappings)
-    assert all(float(m["confidence"]) <= 0.84 for m in mappings)
+    assert all(m.get("conversion_class") == "identity" for m in mappings), mappings
+    assert all(m.get("requires_review") is False for m in mappings)
+    assert all(m.get("mapping_class") == "equivalent_create_new" for m in mappings)
+    assert all(0.95 <= float(m["confidence"]) <= 0.97 for m in mappings)
+
+
+def test_identity_passthrough_create_new_lossy_cast_stays_under_g4_floor():
+    from services.semantic_mapper import _apply_create_new_risk_stamps
+
+    out = _apply_create_new_risk_stamps(
+        [
+            {
+                "source": "amount",
+                "target": "amount",
+                "confidence": 0.95,
+                "assignment_strategy": "identity_passthrough",
+                "create_new": True,
+                "score_gap": 0.0,
+                "source_type": "DECIMAL(38,10)",
+                "target_type": "REAL",
+                "fidelity": "lossy_cast",
+            }
+        ],
+        "postgresql",
+    )
+    assert out[0]["requires_review"] is True
+    assert float(out[0]["confidence"]) <= 0.84
 
 
 def test_vectorize_metadata_only_rows_get_distinct_ids():

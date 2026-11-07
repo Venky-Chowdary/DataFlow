@@ -120,6 +120,7 @@ def _run_transfer(
     dest_kwargs: dict[str, Any],
     table_or_key: str,
     rows: int,
+    job_id: str | None = None,
 ) -> ScaleResult:
     import sys
     from pathlib import Path
@@ -148,7 +149,7 @@ def _run_transfer(
     )
 
     start = time.monotonic()
-    result = UniversalTransferEngine().execute_tracked(request, _new_job_id())
+    result = UniversalTransferEngine().execute_tracked(request, job_id or _new_job_id())
     elapsed = time.monotonic() - start
     return ScaleResult(
         target=target_label,
@@ -201,7 +202,9 @@ def benchmark_s3(rows: int = 1_000_000) -> ScaleResult:
     )
 
 
-def benchmark_sqlite(rows: int = 100_000, *, db_path: str | None = None) -> ScaleResult:
+def benchmark_sqlite(
+    rows: int = 100_000, *, db_path: str | None = None, job_id: str | None = None
+) -> ScaleResult:
     """Local, credential-free baseline benchmark using SQLite."""
     import os
     import sqlite3
@@ -216,6 +219,7 @@ def benchmark_sqlite(rows: int = 100_000, *, db_path: str | None = None) -> Scal
             dest_kwargs={"connection_string": path},
             table_or_key="dataflow_bench",
             rows=rows,
+            job_id=job_id,
         )
         conn = sqlite3.connect(path)
         try:
@@ -230,13 +234,21 @@ def benchmark_sqlite(rows: int = 100_000, *, db_path: str | None = None) -> Scal
             os.unlink(path)
 
 
-def run_local_benchmark(rows: int = 100_000, *, db_path: str | None = None) -> dict[str, Any]:
-    """Run the credential-free local benchmark and return a standardized report."""
+def run_local_benchmark(
+    rows: int = 100_000, *, db_path: str | None = None, job_id: str | None = None
+) -> dict[str, Any]:
+    """Run the credential-free local benchmark and return a standardized report.
+
+    Sets the in-memory job store for THIS process. The hosted API never calls
+    it in-process (``services.benchmark_runs`` runs it in a child process): the
+    defaults it sets would otherwise switch off the object store for every
+    later transfer the API runs.
+    """
     import os
 
     os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
     os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
-    result = benchmark_sqlite(rows, db_path=db_path)
+    result = benchmark_sqlite(rows, db_path=db_path, job_id=job_id)
     return {
         "target": result.target,
         "rows": result.rows,

@@ -12,6 +12,7 @@ from typing import Any
 
 from connectors import rest_api
 from connectors.saas_common import ReadBatch, base_url, request, token
+from services.value_serializer import load_http_json
 
 DEFAULT_HOST = "myshopify.com"
 API_VERSION = "2024-04"
@@ -100,7 +101,7 @@ def describe_metafield_definitions(
                 data=payload,
                 timeout=30,
             )
-            body = resp.json() if hasattr(resp, "json") else {}
+            body = load_http_json(resp)
             gql_errors = body.get("errors")
             if gql_errors:
                 msg = str(gql_errors)

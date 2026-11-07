@@ -7,9 +7,10 @@
  * ``validation_assistant._remap_to_type_for_mismatch`` so one-click Fix CTAs
  * do not invent bare VARCHAR for UUID/ObjectId/DECIMAL/temporal blockers.
  */
-import { gateLabel } from "./preflightGates.js";
+import { blockerTitle, GATE_CATALOG, gateLabel, isInternalGateId, isSchemaDriftEcho } from "./preflightGates.js";
 import type {
   CoercionColumn,
+  CoercionSampleFailure,
   PreflightGate,
   PreflightResult,
   ValidationIssue,
@@ -95,10 +96,198 @@ export interface ExecutiveSummary {
   title: string;
   subtitle: string;
   untilLines: string[];
-  rootCauseCount: number;
+  blockingGateCount: number;
   readinessCaption: string;
   railLine: string;
   aiPromptHint: string | null;
+}
+
+export interface BlockingGateSummary {
+  id: string;
+  title: string;
+  detail: string;
+  line: string;
+}
+
+function canonicalGateId(id: string): string {
+  return GATE_CATALOG.find((gate) => gate.id === id || gate.aliases?.includes(id))?.id ?? id;
+}
+
+function knownGateId(rawId: unknown): string | null {
+  const id = String(rawId || "").trim();
+  if (!id) return null;
+  return GATE_CATALOG.find((gate) => gate.id === id || gate.aliases?.includes(id))?.id ?? null;
+}
+
+function cleanGateDetail(message: string, title: string): string {
+  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return message.replace(new RegExp(`^${escaped}\\s*[:—–-]?\\s*`, "i"), "").trim();
+}
+
+/** Single operator-facing list for every blocked-gate count and summary. */
+export function buildBlockingGateSummaries(
+  preflight: PreflightResult | null | undefined,
+): BlockingGateSummary[] {
+  if (!preflight) return [];
+  const messagesByGate = new Map<string, string[]>();
+  const rootGateByBlockerId = new Map<string, string>();
+  for (const root of preflight.root_causes ?? []) {
+    const impactedGates = root.impacted_gates ?? [];
+    if (impactedGates.length !== 1) continue;
+    for (const blockerId of [root.root_id, ...(root.absorbed_blocker_ids ?? [])]) {
+      rootGateByBlockerId.set(blockerId, impactedGates[0]);
+    }
+  }
+  const add = (rawId: unknown, rawMessage?: unknown) => {
+    const id = String(rawId || "").trim();
+    if (!id) return;
+    const key = canonicalGateId(id);
+    const messages = messagesByGate.get(key) ?? [];
+    const message = String(rawMessage || "").trim();
+    if (message && !messages.includes(message)) messages.push(message);
+    messagesByGate.set(key, messages);
+  };
+  const gateWithMessage = (message: string): string | null => {
+    for (const [id, messages] of messagesByGate) {
+      if (messages.includes(message)) return id;
+    }
+    return null;
+  };
+
+  for (const gate of preflight.gates ?? []) {
+    if (gate.status === "block") add(gate.id, gate.message);
+  }
+  for (const blocker of preflight.blockers ?? []) {
+    const details = blocker.details as Record<string, unknown> | undefined;
+    const detailGate = Array.isArray(details?.impacted_gates)
+      ? details.impacted_gates.find((id): id is string => typeof id === "string")
+      : null;
+    const gateId = knownGateId(blocker.guidance?.gate)
+      ?? knownGateId(rootGateByBlockerId.get(blocker.id) || detailGate)
+      ?? knownGateId(blocker.id);
+    if (gateId) {
+      add(gateId, blocker.message);
+      continue;
+    }
+    if (/^proof_\d+$/i.test(blocker.id) && gateWithMessage(blocker.message)) continue;
+    if (
+      /^proof_\d+$/i.test(blocker.id)
+      && isSchemaDriftEcho(blocker.message)
+      && [...messagesByGate.keys()].some((id) => id === "schema_drift" || isSchemaDriftEcho(messagesByGate.get(id)?.[0]))
+    ) {
+      add("schema_drift", blocker.message);
+      continue;
+    }
+    add(blocker.id, blocker.message);
+  }
+  for (const root of preflight.root_causes ?? []) {
+    for (const id of root.impacted_gates ?? []) {
+      add(id, root.title || root.summary);
+    }
+  }
+
+  return [...messagesByGate.entries()].map(([id, messages]) => {
+    const titleCandidate = messages
+      .filter((message) => message.length <= 72 && !/\d|:/.test(message) && /^[A-Z]/.test(message))
+      .sort((left, right) => left.length - right.length)[0];
+    const knownGate = GATE_CATALOG.some((gate) => gate.id === id);
+    const title = knownGate ? gateLabel(id) : titleCandidate || blockerTitle(id);
+    const detail = [...new Set(messages
+      .filter((message) => message !== title)
+      .map((message) => cleanGateDetail(message, title))
+      .filter(Boolean))].join(" · ");
+    return {
+      id,
+      title,
+      detail,
+      line: detail ? `${title} — ${detail}` : title,
+    };
+  });
+}
+
+function mergeDuplicateBlockers(
+  items: DisplayBlocker[],
+  summaries: BlockingGateSummary[],
+): DisplayBlocker[] {
+  const byGate = new Map(summaries.map((summary) => [summary.id, summary]));
+  const output: DisplayBlocker[] = [];
+  const grouped = new Map<string, DisplayBlocker>();
+  for (const item of items) {
+    if (item.kind !== "blocker") {
+      output.push(item);
+      continue;
+    }
+    const message = String(item.source?.message || item.message || "").trim();
+    const driftSummaryId = summaries.find((summary) => summary.id === "schema_drift")?.id;
+    const messageGate = summaries.find((summary) => {
+      const detail = cleanGateDetail(message, summary.title);
+      return Boolean(
+        message
+        && (
+          message === summary.line
+          || message === summary.detail
+          || (detail && summary.detail.includes(detail))
+          || message.toLowerCase().startsWith(summary.title.toLowerCase())
+        ),
+      );
+    })?.id;
+    const proofEcho = isInternalGateId(String(item.source?.id || item.key))
+      && isSchemaDriftEcho(message)
+      && Boolean(driftSummaryId);
+    const rawId = proofEcho
+      ? (driftSummaryId || "schema_drift")
+      : (
+        knownGateId(item.source?.guidance?.gate)
+        || knownGateId(item.source?.id || item.key)
+        || messageGate
+        || item.source?.id
+        || item.key
+      );
+    const id = canonicalGateId(String(rawId || item.key));
+    const summary = byGate.get(id);
+    const existing = grouped.get(id);
+    if (!existing) {
+      grouped.set(id, {
+        ...item,
+        key: id,
+        title: summary?.title ?? item.title,
+        message: summary?.detail || "",
+      });
+      continue;
+    }
+    if (
+      existing.source
+      && isInternalGateId(String(existing.source.id || ""))
+      && item.source
+      && !isInternalGateId(String(item.source.id || ""))
+    ) {
+      existing.source = item.source;
+      existing.fix = item.fix || existing.fix;
+      existing.why = item.why || existing.why;
+      existing.suggested_actions = item.suggested_actions?.length
+        ? item.suggested_actions
+        : existing.suggested_actions;
+    }
+    existing.issues = [...new Set([...(existing.issues ?? []), ...(item.issues ?? [])])];
+    existing.suggested_actions = [
+      ...new Map(
+        [...(existing.suggested_actions ?? []), ...(item.suggested_actions ?? [])]
+          .map((action) => [`${action.kind}:${action.column || ""}:${action.label}`, action]),
+      ).values(),
+    ];
+  }
+  output.push(...grouped.values());
+  return output;
+}
+
+function suggestedActionsOf(
+  b: PreflightResult["blockers"][number],
+): ValidationSuggestedAction[] | undefined {
+  if (b.suggested_actions?.length) return b.suggested_actions;
+  const fromDetails = (b.details as { suggested_actions?: ValidationSuggestedAction[] } | undefined)
+    ?.suggested_actions;
+  if (Array.isArray(fromDetails) && fromDetails.length) return fromDetails;
+  return b.guidance?.suggested_actions;
 }
 
 export interface DisplayBlocker {
@@ -144,6 +333,11 @@ export function isFidelityCollapseSignal(
   gateId?: string,
 ): boolean {
   const blob = textBlob(message, details);
+  // A uniqueness-probe error is not a type-path. G9 still says
+  // "integrity failed", which must not become Accept risk on Map.
+  if (/uniqueness probe/i.test(blob) && details?.fidelity_collapse !== true) {
+    return false;
+  }
   if (FIDELITY_RE.test(blob)) return true;
   if (details?.fidelity_collapse === true) return true;
   const framing = asRecord(details?.framing);
@@ -446,6 +640,22 @@ export function partitionExplainIssues(issues: ValidationIssue[]): {
   return { blockers, warnings, isoGroup };
 }
 
+/**
+ * Offending cells on a coercion column.
+ * Preflight columns from older jobs and partial payloads omit `sample_failures`.
+ * Reading `.length` on that hole crashed the whole Transfer Studio tree.
+ */
+export function coercionSampleFailures(col: {
+  sample_failures?: CoercionSampleFailure[] | null;
+}): CoercionSampleFailure[] {
+  return Array.isArray(col.sample_failures) ? col.sample_failures : [];
+}
+
+/** Coercion counters are optional on partial payloads. Missing is zero, not a throw. */
+export function coercionCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 /** True when samples look green but declared types still collapse fidelity. */
 export function isDeclaredFidelityCollapse(col: CoercionColumn): boolean {
   if (col.fidelity_collapse) return true;
@@ -486,6 +696,7 @@ export function buildDisplayBlockers(
   preflight: PreflightResult,
   syncMode?: string,
 ): DisplayBlocker[] {
+  const gateSummaries = buildBlockingGateSummaries(preflight);
   // Engine Root Cause SSOT — prefer when present (Module 2).
   const engineRoots = preflight.root_causes ?? [];
   if (engineRoots.length > 0) {
@@ -535,18 +746,18 @@ export function buildDisplayBlockers(
       items.push({
         key: b.id,
         kind: "blocker",
-        title: gateLabel(b.id),
+        title: blockerTitle(b.id, b.message),
         message: b.message,
         issues: Array.isArray(b.details?.issue_texts)
           ? (b.details.issue_texts as string[])
           : undefined,
         fix: b.guidance?.fix,
         why: b.guidance?.why,
-        suggested_actions: b.guidance?.suggested_actions,
+        suggested_actions: suggestedActionsOf(b),
         source: b,
       });
     }
-    return items;
+    return mergeDuplicateBlockers(items, gateSummaries);
   }
 
   const root = findDuplicateKeyRoot(preflight, syncMode);
@@ -593,18 +804,18 @@ export function buildDisplayBlockers(
     items.push({
       key: b.id,
       kind: "blocker",
-      title: gateLabel(b.id),
+      title: blockerTitle(b.id, b.message),
       message: b.message,
       issues: Array.isArray(b.details?.issue_texts)
         ? (b.details.issue_texts as string[])
         : undefined,
       fix: b.guidance?.fix,
       why: b.guidance?.why,
-      suggested_actions: b.guidance?.suggested_actions,
+      suggested_actions: suggestedActionsOf(b),
       source: b,
     });
   }
-  return items;
+  return mergeDuplicateBlockers(items, gateSummaries);
 }
 
 /** True when G9 only sampled uniqueness — Execute may still run a full source probe. */
@@ -635,10 +846,12 @@ export function buildExecutiveSummary(
   if (!preflight) return null;
   const root = findDuplicateKeyRoot(preflight, syncMode);
   const displayBlockers = buildDisplayBlockers(preflight, syncMode);
-  const rootCauseCount = displayBlockers.length;
-  const blockedGates = (preflight.gates ?? []).filter((g) => g.status === "block").length;
+  const blockingGates = buildBlockingGateSummaries(preflight);
+  const blockingGateCount = blockingGates.length;
+  const blockedGateLines = blockingGates.map((gate) => gate.line);
   const passed = preflight.passed_count ?? 0;
   const total = preflight.total_gates || (preflight.gates?.length ?? 0);
+  const blockedEngineGateCount = (preflight.gates ?? []).filter((gate) => gate.status === "block").length;
   const readinessCaption = `${passed}/${total} gates · readiness is the share of gates that passed`;
   const complianceOnly = Boolean(
     preflight.proof_bundle?.transfer_decision?.compliance_only
@@ -646,7 +859,7 @@ export function buildExecutiveSummary(
       /pii\/compliance|compliance review/i.test(b.message)
       || b.source?.details?.compliance_ack_required === true
     )
-  ) && rootCauseCount > 0 && blockedGates === 0;
+  ) && blockedEngineGateCount === 0;
   const sampleUniqueness = isSampleUniquenessOnly(preflight);
 
   if (preflight.passed) {
@@ -659,7 +872,7 @@ export function buildExecutiveSummary(
           decision === "review" ? "review-grade / local preflight" : "awaiting transfer decision"
         } — confirm API Validate before Execute`,
         untilLines: ["Confirm API preflight with decision approve (not browser-local only)"],
-        rootCauseCount: 0,
+        blockingGateCount: 0,
         readinessCaption,
         railLine: "Review-grade — Execute not fully unlocked",
         aiPromptHint: "Why is this transfer still in review after Validate?",
@@ -675,7 +888,7 @@ export function buildExecutiveSummary(
           "Prefer upsert + unique primary key when identity must be unique",
           "Re-run Validate after source probe wiring if this route should fail closed earlier",
         ],
-        rootCauseCount: 0,
+        blockingGateCount: 0,
         readinessCaption,
         railLine: "Execute unlocked · uniqueness not population-proven",
         aiPromptHint: "Why did Validate pass uniqueness on a sample but Execute fail on duplicates?",
@@ -685,7 +898,7 @@ export function buildExecutiveSummary(
       title: "Execute-ready · not migration proven",
       subtitle: `${passed}/${total} checks passed · Execute unlocked — Gate-8 post-write proof still required`,
       untilLines: [],
-      rootCauseCount: 0,
+      blockingGateCount: 0,
       readinessCaption,
       railLine: "Execute unlocked · migration_proven pending write",
       aiPromptHint: null,
@@ -695,38 +908,26 @@ export function buildExecutiveSummary(
   if (complianceOnly) {
     return {
       title: "Approve PII to unlock Execute",
-      subtitle: `${passed}/${total} engine gates passed · compliance acknowledgment required`,
-      untilLines: ["Confirm governance policy allows moving detected PII fields"],
-      rootCauseCount: 1,
+      subtitle: `${blockingGateCount} blocking gate${blockingGateCount === 1 ? "" : "s"} · ${passed}/${total} engine gates passed · compliance acknowledgment required`,
+      untilLines: blockedGateLines.length
+        ? blockedGateLines
+        : ["Confirm governance policy allows moving detected PII fields"],
+      blockingGateCount,
       readinessCaption,
       railLine: "Awaiting PII / compliance approval",
       aiPromptHint: "Why is PII review required for this transfer?",
     };
   }
 
-  const untilLines: string[] = [];
-  if (root) untilLines.push("Duplicate identity keys resolved");
-  if (displayBlockers.some((b) => b.kind === "fidelity_root")) {
-    untilLines.push("Lossy / fidelity risk acknowledged or remapped on Map");
-  }
-  for (const item of displayBlockers) {
-    if (item.kind === "duplicate_root" || item.kind === "fidelity_root") continue;
-    untilLines.push(item.title);
-  }
-  // Cap bullets so the hero stays scannable.
-  const until = untilLines.slice(0, 4);
-
   return {
     title: "Validation blocked",
-    subtitle: `${rootCauseCount} blocking issue${rootCauseCount === 1 ? "" : "s"} · ${passed}/${total} checks passed · Execute stays locked`,
-    untilLines: until,
-    rootCauseCount,
+    subtitle: `Validation blocked: ${blockingGateCount} blocking gate${blockingGateCount === 1 ? "" : "s"} · ${passed}/${total} checks passed · Execute stays locked`,
+    untilLines: blockedGateLines,
+    blockingGateCount,
     readinessCaption,
-    railLine: root
-      ? `Blocked by duplicate identity keys${root.primaryKey ? ` on ${root.primaryKey}` : ""}`
-      : blockedGates > 0
-        ? `Blocked by ${blockedGates} gate${blockedGates === 1 ? "" : "s"}`
-        : "Validation blocked — fix issues before Execute",
+    railLine: blockingGateCount > 0
+      ? `Blocked by ${blockingGateCount} gate${blockingGateCount === 1 ? "" : "s"}`
+      : "Validation blocked — fix issues before Execute",
     aiPromptHint: root ? "Why are duplicate IDs blocking this transfer?" : null,
   };
 }
@@ -746,13 +947,20 @@ export function rankAndDedupeSuggestedActions(
         return 1;
       case "add_transform":
         return 2;
+      case "run_population_orphan_scan":
+        return 2;
       case "open_bad_data_fix":
       case "normalize_control_chars":
       case "quarantine_and_rerun":
+      case "fix_orphans":
         return 3;
       case "map_column":
       case "review_mappings":
       case "rerun_mapping":
+      case "confirm_or_remap":
+      case "confirm_add":
+        return 4;
+      case "reload_dest_schema":
         return 4;
       case "check_connection":
         return 5;
@@ -783,4 +991,3 @@ export function rankAndDedupeSuggestedActions(
   }
   return out;
 }
-

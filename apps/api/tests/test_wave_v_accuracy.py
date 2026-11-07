@@ -56,6 +56,7 @@ def test_sqlserver_full_ct_page_refuses_unsafe_version_advance():
     prior = cdc.version
     conn = MagicMock()
     cur = MagicMock()
+    cur.fetchone.return_value = (1, 100)
     cur.fetchall.return_value = [(6, "U", "1"), (6, "U", "2")]
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)

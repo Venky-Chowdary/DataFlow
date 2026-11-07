@@ -7,37 +7,45 @@
 /* ── Tokens tighten ─────────────────────────────────────────────── */
 .lp {
   /* Canonical content width — landing + all marketing pages share this */
-  --lp-shell: min(1120px, calc(100% - clamp(28px, 5vw, 64px)));
+  --lp-shell: min(var(--lp-shell-max), calc(100% - clamp(28px, 5vw, 64px)));
   --lp-shell-wide: var(--lp-shell);
   --lp-bg: #f6f8fa;
-  --lp-ink: #0b1220;
-  --lp-muted: #475569;
+  --lp-ink: var(--df-navy-900);
+  --lp-muted: var(--df-steel-400);
   --lp-muted-soft: #64748b;
   --lp-line: #e2e8f0;
   --lp-panel: #ffffff;
-  --lp-accent: #0d9488;
-  --lp-accent-ink: #0f766e;
-  --lp-teal: #0d9488;
-  --lp-ink-deep: #0a3d3a;
-  --lp-title-lg: clamp(2.75rem, 5.2vw, 4.25rem);
-  --lp-title: clamp(1.85rem, 3vw, 2.65rem);
-  --lp-section-y: clamp(72px, 10vh, 120px);
+  --lp-accent: var(--df-teal-500);
+  --lp-accent-ink: var(--df-teal-600);
+  --lp-teal: var(--df-teal-500);
+  --lp-ink-deep: var(--df-logo-tile);
+  --lp-fs-kicker: 11px;
+  --lp-fs-h1: clamp(1.75rem, 2.2vw, 2.125rem);
+  --lp-fs-h1-home: clamp(2rem, 2.8vw, 2.625rem);
+  --lp-fs-h2: clamp(1.25rem, 1.5vw, 1.5rem);
+  --lp-fs-lead: 15px;
+  --lp-fs-body: 14.5px;
+  --lp-fs-meta: 13px;
+  --lp-fs-small: 12.5px;
+  --lp-title-lg: var(--lp-fs-h1-home);
+  --lp-title: var(--lp-fs-h1);
+  --lp-section-y: clamp(48px, 6vh, 72px);
   --lp-measure: 40rem;
   --lp-shadow-editorial: 0 1px 0 rgba(15, 23, 42, 0.04), 0 24px 64px rgba(10, 61, 58, 0.08);
   --lp-shadow-soft: 0 1px 0 rgba(15, 23, 42, 0.04);
-  --lp-radius-card: 16px;
+  --lp-radius-card: 8px;
   background:
     radial-gradient(ellipse 90% 55% at 50% -10%, rgba(13, 148, 136, 0.07), transparent 55%),
     linear-gradient(180deg, #fbfcfd 0%, var(--lp-bg) 38%, #eef2f5 100%);
 }
 
 .lp-home {
-  --lp-section-y: clamp(80px, 11vh, 128px);
+  --lp-section-y: clamp(48px, 6vh, 72px);
 }
 
 /* ── Announce ───────────────────────────────────────────────────── */
 .lp-announce {
-  background: linear-gradient(90deg, #0a3d3a 0%, #0f766e 55%, #0d9488 100%);
+  background: linear-gradient(90deg, var(--df-logo-tile) 0%, var(--df-teal-600) 55%, var(--df-teal-500) 100%);
   border-bottom: none;
   font-size: 13px;
   letter-spacing: 0.01em;
@@ -95,7 +103,7 @@
 }
 
 .lp-nav-dropdown {
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   padding: 8px;
   box-shadow: var(--lp-shadow-editorial);
   border-color: rgba(226, 232, 240, 0.95);
@@ -104,7 +112,7 @@
 
 .lp-nav-dropdown a,
 .lp-nav-dropdown button {
-  border-radius: 10px;
+  border-radius: var(--df-radius-lg);
   padding: 10px 12px;
 }
 
@@ -118,19 +126,20 @@
   font-family: var(--lp-font-display);
   font-weight: 650;
   letter-spacing: -0.015em;
-  border-radius: 10px;
+  border-radius: var(--df-radius-lg);
   transition: transform var(--lp-dur-fast) var(--lp-ease), box-shadow var(--lp-dur) var(--lp-ease),
     background var(--lp-dur-fast) var(--lp-ease);
 }
 
 .lp-btn--brand {
-  background: linear-gradient(180deg, #14b8a6 0%, #0d9488 100%);
+  /* Deep-teal stops: white label stays >= 4.5:1 across the gradient (WCAG AA) */
+  background: linear-gradient(180deg, var(--df-teal-600) 0%, #115e59 100%);
   border-color: transparent;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.2) inset, 0 8px 20px rgba(13, 148, 136, 0.28);
 }
 
 .lp-btn--brand:hover {
-  background: linear-gradient(180deg, #2dd4bf 0%, #0f766e 100%);
+  background: linear-gradient(180deg, #115e59 0%, #134e4a 100%);
   transform: translateY(-1px);
 }
 
@@ -146,13 +155,13 @@
 }
 
 .lp-btn--outline:hover {
-  border-color: #94a3b8;
+  border-color: var(--df-text-tertiary);
   background: #fff;
 }
 
 /* ── Footer — dark ink plane ────────────────────────────────────── */
 .lp-footer.lp-footer--compact {
-  background: linear-gradient(180deg, #0a3d3a 0%, #071c1a 100%);
+  background: linear-gradient(180deg, var(--df-logo-tile) 0%, #071c1a 100%);
   color: rgba(236, 253, 245, 0.78);
   border-top: none;
   padding: 56px 0 28px;
@@ -186,10 +195,53 @@
 
 .lp-footer-tagline {
   margin: 10px 0 0;
-  max-width: 28ch;
-  font-size: 13px;
+  max-width: 32ch;
+  font-size: var(--lp-fs-meta, 13px);
   line-height: 1.5;
   color: rgba(167, 243, 208, 0.65);
+}
+
+.lp-mkt-hero-band {
+  padding: clamp(28px, 4vw, 40px) 0 !important;
+}
+
+.lp-mkt-hero-grid {
+  width: var(--lp-shell);
+  max-width: none;
+  align-items: stretch;
+}
+
+.lp-mkt-hero-copy h1,
+.lp-mkt-hero-band--ink h1,
+.lp-mkt-hero-band--ink .lp-mkt-hero-copy h1 {
+  max-width: 22ch;
+  font-family: var(--lp-font-display);
+  font-size: var(--lp-fs-h1) !important;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+}
+
+.lp-mkt-hero-copy .lp-mkt-lead,
+.lp-mkt-hero-band--ink .lp-mkt-lead {
+  font-size: var(--lp-fs-lead) !important;
+  line-height: 1.55;
+  max-width: 46ch;
+}
+
+.lp-mkt-legal-layout {
+  width: var(--lp-shell);
+  margin: 0 auto;
+  padding: clamp(28px, 4vw, 40px) 0 64px;
+}
+
+.lp-mkt-legal-block h2 {
+  font-family: var(--lp-font-display);
+  font-size: var(--lp-fs-h2);
+}
+
+.lp-mkt-legal-block p {
+  font-size: var(--lp-fs-body);
+  line-height: 1.6;
 }
 
 .lp-footer-bottom {
@@ -272,11 +324,11 @@
 
 .lp-hero-home-grid {
   width: min(1240px, calc(100% - clamp(24px, 5vw, 72px))) !important;
-  padding: clamp(40px, 7vh, 80px) 0 clamp(28px, 4vh, 48px) !important;
-  gap: clamp(28px, 4vw, 56px) !important;
+  padding: clamp(24px, 3.5vh, 40px) 0 clamp(20px, 3vh, 32px) !important;
+  gap: clamp(24px, 3.5vw, 40px) !important;
   position: relative;
-  z-index: 1;
-  align-items: stretch !important;
+  z-index: var(--df-z-base);
+  align-items: center !important;
 }
 
 /* Hero brand lockup removed — logo lives in navbar only */
@@ -291,11 +343,11 @@
 .lp-hero.lp-hero--home .lp-hero-title {
   font-family: var(--lp-font-display) !important;
   font-size: var(--lp-title-lg) !important;
-  font-weight: 760 !important;
-  letter-spacing: -0.048em !important;
-  line-height: 1.02 !important;
-  margin-bottom: 20px !important;
-  max-width: 12ch !important;
+  font-weight: 650 !important;
+  letter-spacing: -0.024em !important;
+  line-height: 1.16 !important;
+  margin-bottom: 14px !important;
+  max-width: 20ch !important;
 }
 
 .lp-hero--home .lp-hero-sub {
@@ -303,7 +355,7 @@
   line-height: 1.6 !important;
   max-width: 38ch !important;
   margin-bottom: 28px !important;
-  color: #334155 !important;
+  color: var(--df-steel-500) !important;
 }
 
 .lp-hero--home .lp-hero-cta {
@@ -323,10 +375,11 @@
   padding: 0 !important;
   background: transparent !important;
   box-shadow: var(--lp-shadow-editorial);
-  overflow: hidden !important;
+  overflow: visible !important;
+  min-width: 0 !important;
   min-height: 0 !important;
   height: auto !important;
-  align-self: stretch !important;
+  align-self: center !important;
   display: flex !important;
 }
 
@@ -397,7 +450,7 @@
 
 .lp-hero--home .lp-hero-flow-rail {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
@@ -433,8 +486,8 @@
 }
 
 .lp-hero--home .lp-hero-flow-card header {
-  color: #0f766e;
-  font-size: 10px;
+  color: var(--df-teal-600);
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   font-weight: 720;
@@ -445,7 +498,7 @@
   font-size: 13.5px;
   font-weight: 740;
   letter-spacing: -0.02em;
-  color: #0b1220;
+  color: var(--df-navy-900);
 }
 
 .lp-hero--home .lp-hero-flow-card p,
@@ -464,22 +517,22 @@
 
 .lp-hero--home .lp-hero-flow-meters div {
   background: rgba(240, 253, 250, 0.9);
-  border-radius: 8px;
+  border-radius: var(--df-radius-md);
   padding: 5px 7px;
 }
 
 .lp-hero--home .lp-hero-flow-meters em {
-  color: #0f766e;
+  color: var(--df-teal-600);
   font-weight: 740;
   font-style: normal;
 }
 
 .lp-hero-flow-waveband {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   flex: 1 1 auto;
   min-height: 120px;
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   overflow: hidden;
   border: 1px solid rgba(94, 234, 212, 0.22);
   background: rgba(7, 28, 26, 0.45);
@@ -498,14 +551,14 @@
   position: absolute;
   left: 12px;
   bottom: 10px;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   display: grid;
   gap: 1px;
   pointer-events: none;
 }
 
 .lp-hero-flow-waveband-label span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: rgba(94, 234, 212, 0.75);
@@ -520,7 +573,7 @@
 
 .lp-hero-flow-proof {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: flex;
   flex-wrap: wrap;
   gap: 8px 14px;
@@ -571,7 +624,7 @@
   border-block: 1px solid var(--lp-line);
   background: rgba(255, 255, 255, 0.72);
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-home-stack-label {
@@ -666,7 +719,7 @@
   background: #fff;
   border: 1px solid var(--lp-line);
   box-shadow: none;
-  border-left: 3px solid #f59e0b;
+  border-left: 3px solid var(--df-logo-strap);
 }
 
 .lp-home-pain-num {
@@ -733,7 +786,7 @@
 }
 
 .lp-home-arch-step:nth-child(1) {
-  border-top: 3px solid #0f766e;
+  border-top: 3px solid var(--df-teal-600);
 }
 
 .lp-home-arch-step:nth-child(3) {
@@ -761,13 +814,13 @@
 }
 
 .lp-home-arch-step:nth-child(3) li::before {
-  background: #f59e0b;
+  background: var(--df-logo-strap);
 }
 
 .lp-home-arch-step:nth-child(5) {
   background: linear-gradient(165deg, #fffbeb 0%, #fff 65%);
   border-color: rgba(245, 158, 11, 0.28);
-  border-top: 3px solid #f59e0b;
+  border-top: 3px solid var(--df-logo-strap);
 }
 
 .lp-home-arch-step--connector {
@@ -788,7 +841,7 @@
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #5eead4;
   font-size: 16px;
   font-weight: 700;
@@ -808,8 +861,8 @@
   justify-content: center;
   width: 34px;
   height: 34px;
-  border-radius: 10px;
-  background: #0a3d3a;
+  border-radius: var(--df-radius-lg);
+  background: var(--df-logo-tile);
   color: #5eead4;
   font-family: var(--lp-font-display);
   font-weight: 720;
@@ -879,7 +932,7 @@
   position: static !important;
   transform: none !important;
   inset: auto !important;
-  z-index: 1;
+  z-index: var(--df-z-base);
   clear: both;
   grid-column: 1 / -1;
 }
@@ -947,11 +1000,11 @@
   bottom: 14px;
   width: 3px;
   border-radius: 2px;
-  background: #0f766e;
+  background: var(--df-teal-600);
 }
 
 .lp-home-proof-chapters article:nth-child(2)::before {
-  background: #f59e0b;
+  background: var(--df-logo-strap);
 }
 
 .lp-home-proof-chapters article:nth-child(3)::before {
@@ -1023,7 +1076,7 @@
 }
 
 .lp-home-proof-stage figcaption {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   border-top-color: rgba(94, 234, 212, 0.18);
 }
 
@@ -1128,8 +1181,8 @@
   justify-content: center;
   width: 34px;
   height: 34px;
-  border-radius: 10px;
-  background: #0a3d3a;
+  border-radius: var(--df-radius-lg);
+  background: var(--df-logo-tile);
   color: #5eead4;
   font-family: var(--lp-font-display);
   font-size: 12px;
@@ -1170,7 +1223,7 @@
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
-  color: #0f766e;
+  color: var(--df-teal-600);
   background: #ecfdf5;
   border: 1px solid rgba(13, 148, 136, 0.28);
 }
@@ -1204,7 +1257,7 @@
 }
 
 .lp-home-trust-panel > header span {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 740;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1230,7 +1283,7 @@
 
 .lp-home-trust-panel-row em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: right;
 }
 
@@ -1265,8 +1318,8 @@
   justify-content: center;
   width: 36px;
   height: 36px;
-  border-radius: 10px;
-  background: #0a3d3a;
+  border-radius: var(--df-radius-lg);
+  background: var(--df-logo-tile);
   color: #5eead4;
   font-family: var(--lp-font-display);
   font-weight: 720;
@@ -1323,6 +1376,14 @@
   box-shadow: var(--lp-shadow-editorial);
 }
 
+.lp-home-tab-visual {
+  min-width: 0;
+}
+
+.lp-home-tab-visual .lp-product-shot-route {
+  color: var(--df-steel-400);
+}
+
 .lp-home-tab-copy h3 {
   font-family: var(--lp-font-display);
   font-size: clamp(1.4rem, 2.2vw, 1.85rem);
@@ -1356,7 +1417,7 @@
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: #2dd4bf;
+  background: var(--df-teal-400);
   box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.2);
 }
 
@@ -1392,7 +1453,7 @@
   width: 8px;
   height: 8px;
   border-radius: 2px;
-  background: #f59e0b;
+  background: var(--df-logo-strap);
 }
 
 .lp-home-usecase-list {
@@ -1496,8 +1557,8 @@
   margin: 28px 0 22px;
   display: grid;
   gap: 14px;
-  width: 100vw;
   margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
   padding: 4px 0;
 }
 
@@ -1606,6 +1667,7 @@
 
 /* ── Pricing editorial ──────────────────────────────────────────── */
 .lp-mkt-page.lp-pricing-v2,
+.lp-mkt-page.lp-sales,
 .lp-mkt-page.lp-contact-v2,
 .lp-mkt-page.lp-contact-v3,
 .lp-mkt-page.lp-contact-v4,
@@ -1617,7 +1679,9 @@
 .lp-mkt-page.lp-cust-v2,
 .lp-mkt-page.lp-cust-v3,
 .lp-mkt-page.lp-sec-v2,
-.lp-mkt-page.lp-int-v2 {
+.lp-mkt-page.lp-int-v2,
+.lp-mkt-page.lp-demos,
+.lp-mkt-page.lp-mkt-page-rich {
   max-width: none !important;
   width: 100% !important;
   margin: 0 !important;
@@ -1733,7 +1797,7 @@
 
 .lp-pricing-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   padding: clamp(56px, 8vh, 88px) 0 clamp(72px, 10vh, 110px);
@@ -1756,7 +1820,7 @@
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: #2dd4bf;
+  background: var(--df-teal-400);
   box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.25);
 }
 
@@ -1785,9 +1849,9 @@
 
 .lp-pricing-v2-plans {
   width: var(--lp-shell) !important;
-  margin: -48px auto 0;
+  margin: 28px auto 0;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   padding-bottom: 48px;
 }
 
@@ -1820,15 +1884,15 @@
   border-color: rgba(13, 148, 136, 0.45);
   background:
     linear-gradient(180deg, #f0fdfa 0%, #fff 38%);
-  box-shadow: 0 16px 48px rgba(13, 148, 136, 0.16);
-  transform: translateY(-8px);
+  box-shadow: 0 8px 28px rgba(13, 148, 136, 0.12);
+  transform: none;
 }
 
 .lp-pricing-card-flag {
   position: absolute;
   top: -11px;
   left: 24px;
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #5eead4;
   font-size: 11px;
   font-weight: 720;
@@ -1882,7 +1946,7 @@
   align-items: flex-start;
   gap: 8px;
   font-size: 13.5px;
-  color: #334155;
+  color: var(--df-steel-500);
 }
 
 .lp-pricing-v2-compare {
@@ -1961,7 +2025,7 @@
 }
 
 .lp-pricing-principle {
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   border: 1px solid var(--lp-line);
   background: #fff;
   padding: 20px;
@@ -1994,7 +2058,7 @@
   gap: 24px;
   padding: 32px 36px;
   border-radius: 20px;
-  background: linear-gradient(135deg, #0a3d3a 0%, #0f766e 100%);
+  background: linear-gradient(135deg, var(--df-logo-tile) 0%, var(--df-teal-600) 100%);
   color: #ecfdf5;
 }
 
@@ -2026,7 +2090,7 @@
   position: relative;
   overflow: hidden;
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 88px) 0 clamp(40px, 6vh, 64px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
   background:
     radial-gradient(ellipse 65% 55% at 82% 18%, rgba(245, 158, 11, 0.22), transparent 55%),
     radial-gradient(ellipse 50% 50% at 8% 88%, rgba(45, 212, 191, 0.18), transparent 50%),
@@ -2065,7 +2129,7 @@
 
 .lp-cust-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -2131,7 +2195,7 @@
   line-height: 1.5;
   color: #fff;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-cust-hero-quote footer {
@@ -2155,7 +2219,7 @@
   margin: 0 auto;
   padding: clamp(28px, 4vh, 40px) 0 0;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
@@ -2176,7 +2240,7 @@
   font-size: 1.55rem;
   font-weight: 760;
   letter-spacing: -0.04em;
-  color: #0a3d3a;
+  color: var(--df-logo-tile);
   margin-bottom: 4px;
 }
 
@@ -2261,7 +2325,7 @@
   font-size: 11px;
   font-weight: 740;
   letter-spacing: 0.08em;
-  color: #0f766e;
+  color: var(--df-teal-600);
   margin-bottom: 12px;
 }
 
@@ -2359,7 +2423,7 @@
   font-weight: 720;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #0f766e;
+  color: var(--df-teal-600);
 }
 
 .lp-cust-story-meta em {
@@ -2369,7 +2433,7 @@
   padding: 4px 8px;
   border-radius: 999px;
   background: rgba(10, 61, 58, 0.06);
-  color: #0a3d3a;
+  color: var(--df-logo-tile);
 }
 
 .lp-cust-story-card p {
@@ -2410,7 +2474,7 @@
   position: relative;
   overflow: hidden;
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 88px) 0 clamp(40px, 6vh, 64px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
   background:
     radial-gradient(ellipse 70% 60% at 78% 18%, rgba(45, 212, 191, 0.24), transparent 55%),
     radial-gradient(ellipse 45% 50% at 6% 90%, rgba(56, 189, 248, 0.12), transparent 50%),
@@ -2425,7 +2489,7 @@
 
 .lp-sec-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -2508,7 +2572,7 @@
   margin: 0 auto;
   padding: clamp(28px, 4vh, 36px) 0 0;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-sec-badges .lp-mkt-compliance-badges {
@@ -2523,7 +2587,7 @@
 }
 
 .lp-sec-badges .lp-mkt-compliance-badge {
-  background: #0a3d3a !important;
+  background: var(--df-logo-tile) !important;
   color: #ecfdf5 !important;
   border: 1px solid rgba(94, 234, 212, 0.28) !important;
 }
@@ -2591,7 +2655,7 @@
   position: absolute;
   inset: 0 0 auto 0;
   height: 3px;
-  background: linear-gradient(90deg, #0f766e, #5eead4);
+  background: linear-gradient(90deg, var(--df-teal-600), #5eead4);
   transform: scaleX(0.35);
   transform-origin: left;
   transition: transform 280ms ease;
@@ -2602,11 +2666,11 @@
 }
 
 .lp-sec-layer-card:nth-child(3)::before {
-  background: linear-gradient(90deg, #f59e0b, #fde68a);
+  background: linear-gradient(90deg, var(--df-logo-strap), #fde68a);
 }
 
 .lp-sec-layer-card:nth-child(4)::before {
-  background: linear-gradient(90deg, #0a3d3a, #34d399);
+  background: linear-gradient(90deg, var(--df-logo-tile), #34d399);
 }
 
 .lp-sec-layer-card:hover {
@@ -2630,15 +2694,15 @@
   font-size: 1.35rem;
   font-weight: 740;
   letter-spacing: -0.03em;
-  color: #0a3d3a;
+  color: var(--df-logo-tile);
 }
 
 .lp-sec-layer-tag {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #0f766e;
+  color: var(--df-teal-600);
   padding: 4px 8px;
   border-radius: 999px;
   background: rgba(13, 148, 136, 0.08);
@@ -2666,7 +2730,7 @@
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #0a3d3a;
+  color: var(--df-logo-tile);
 }
 
 .lp-sec-agent {
@@ -2714,7 +2778,7 @@
   gap: 14px;
   padding: 22px 18px;
   border-radius: 16px;
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #ecfdf5;
   box-shadow: 0 18px 40px rgba(10, 61, 58, 0.28);
 }
@@ -2755,7 +2819,7 @@
   font-weight: 720;
   letter-spacing: 0.04em;
   padding: 6px 10px;
-  border-radius: 10px;
+  border-radius: var(--df-radius-lg);
   background: rgba(45, 212, 191, 0.14);
   color: #99f6e4;
 }
@@ -2771,7 +2835,7 @@
   position: relative;
   overflow: hidden;
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 88px) 0 clamp(40px, 6vh, 64px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
   background:
     radial-gradient(ellipse 60% 55% at 85% 15%, rgba(56, 189, 248, 0.18), transparent 55%),
     radial-gradient(ellipse 50% 45% at 10% 85%, rgba(245, 158, 11, 0.14), transparent 50%),
@@ -2786,7 +2850,7 @@
 
 .lp-int-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -2807,7 +2871,7 @@
   align-items: center;
   gap: 8px;
   padding: 14px 8px;
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(7, 28, 26, 0.45);
   backdrop-filter: blur(8px);
@@ -2829,7 +2893,7 @@
 
 .lp-int-hero-tile em {
   font-style: normal;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2841,14 +2905,14 @@
   margin: 0 auto;
   padding: clamp(28px, 4vh, 36px) 0 0;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 
 .lp-int-strip > div {
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   padding: 16px 14px;
   background: #fff;
   border: 1px solid var(--lp-line);
@@ -2862,7 +2926,7 @@
   font-size: 1.15rem;
   font-weight: 740;
   letter-spacing: -0.03em;
-  color: #0a3d3a;
+  color: var(--df-logo-tile);
   margin-bottom: 2px;
 }
 
@@ -2923,13 +2987,13 @@
 }
 
 .lp-int-family-card header span {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   padding: 4px 9px;
   border-radius: 999px;
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #ecfdf5;
 }
 
@@ -3012,13 +3076,13 @@
   width: 7px;
   height: 7px;
   border-radius: 2px;
-  background: #f59e0b;
+  background: var(--df-logo-strap);
 }
 
 .lp-int-honesty-panel {
   border-radius: 16px;
   padding: 18px;
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #ecfdf5;
 }
 
@@ -3164,7 +3228,7 @@
 
 .lp-login-brand-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   height: 100%;
   max-height: 100dvh;
   display: flex;
@@ -3207,6 +3271,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: clamp(14px, 1.4vw, 16px);
+  /* The brand panel is always dark — the default --df-text-primary (dark
+     navy in light theme) renders dark-on-dark. On-dark variant. */
+  color: #f0fdfa;
 }
 
 .lp-login-brand-logo .dt-logo,
@@ -3243,6 +3310,17 @@
   max-width: 14ch;
 }
 
+/* Decorative accent rule under the H1 — a flow element with its own
+   margin, so it can never touch the heading at any width (was an
+   absolutely-positioned rail that could clip the trailing glyph). */
+.lp-login-brand-rule {
+  display: block;
+  width: 64px;
+  height: 1px;
+  margin: 18px 0 0;
+  background: linear-gradient(90deg, rgba(94, 234, 212, 0.6), transparent);
+}
+
 .lp-login-brand-kicker {
   color: #5eead4;
   font-size: 11px;
@@ -3263,7 +3341,7 @@
 .lp-login-proof {
   margin: 0;
   padding: clamp(12px, 1.6vh, 16px);
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   border: 1px solid rgba(94, 234, 212, 0.24);
   background: rgba(7, 28, 26, 0.4);
   backdrop-filter: blur(8px);
@@ -3471,7 +3549,7 @@
 
 .lp-login-auth-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: min(448px, 100%);
   /* Grow with the card — parent `.lp-login-auth` scrolls on short viewports.
      Flex + max-height previously shrunk the overflow:hidden card and hid Sign in. */
@@ -3533,7 +3611,7 @@
 
 .lp-login-auth-mark {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: fit-content;
   max-width: 100%;
   margin: clamp(18px, 3.2vh, 28px) 0 clamp(10px, 1.6vh, 16px);
@@ -3565,7 +3643,7 @@
   font-weight: 720;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: #0f766e;
+  color: var(--df-teal-600);
   margin: 0 0 8px;
 }
 
@@ -3586,7 +3664,7 @@
 }
 
 .lp-login-auth-sub strong {
-  color: #0a3d3a;
+  color: var(--df-logo-tile);
   font-weight: 700;
 }
 
@@ -3599,11 +3677,11 @@
 }
 
 .lp-login-auth-steps span {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 740;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #0f766e;
+  color: var(--df-teal-600);
   padding: 5px 10px;
   border-radius: 999px;
   background: rgba(13, 148, 136, 0.1);
@@ -3640,7 +3718,7 @@
   justify-content: center;
   gap: 8px;
   min-height: 52px;
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   box-shadow: 0 12px 28px rgba(13, 148, 136, 0.3);
 }
 
@@ -3674,7 +3752,7 @@
   border-radius: 12px;
   background: linear-gradient(180deg, rgba(13, 148, 136, 0.08), rgba(13, 148, 136, 0.03));
   border: 1px solid rgba(13, 148, 136, 0.12);
-  color: #0f766e;
+  color: var(--df-teal-600);
   font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.01em;
@@ -3848,37 +3926,48 @@
     min-height: 100dvh;
   }
 
+  /* Brand collapses to a compact header ABOVE the card — Back stays
+     top-left, logo right, and the page title is the one line of copy.
+     The bottom edge is a deliberate rounded seam instead of a hard
+     horizontal cut where the gradient stops. */
   .lp-login-brand {
     min-height: auto;
-    order: 2;
+    height: auto;
+    flex: 0 0 auto;
+    order: 0;
+    border-radius: 0 0 26px 26px;
+    box-shadow: 0 1px 0 rgba(13, 148, 136, 0.18);
   }
 
   .lp-login-brand-inner {
+    height: auto;
     max-height: none;
     overflow: visible;
-    gap: 14px;
-    padding: 20px 20px 24px;
+    gap: 10px;
+    padding: 14px 16px 16px;
   }
 
   .lp-login-brand-body {
     justify-content: flex-start;
-    gap: 12px;
+    gap: 6px;
+  }
+
+  .lp-login-brand-kicker,
+  .lp-login-brand-lead,
+  .lp-login-proof,
+  .lp-login-metrics,
+  .lp-login-brand-dest,
+  .lp-login-brand-foot {
+    display: none;
   }
 
   .lp-login-brand-title {
-    font-size: clamp(1.55rem, 6.5vw, 2.1rem);
+    font-size: clamp(1.25rem, 5.5vw, 1.6rem);
     max-width: none;
+    margin: 0;
   }
 
-  .lp-login-brand-lead {
-    max-width: none;
-  }
-
-  .lp-login-metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .lp-login-auth {
+    .lp-login-auth {
     order: 1;
     overflow: visible;
     border-left: none;
@@ -3901,6 +3990,19 @@
 
   .lp-login-auth-arc {
     opacity: 0.35;
+  }
+}
+
+@media (max-width: 559px) {
+  /* "Create your workspace" sat ~8px under the Back row on 390px — give
+     the head->title stack the same vertical rhythm token the tablet
+     header uses instead of the tight compact-header gap. */
+  .lp-login-brand-inner {
+    gap: var(--lp-brand-head-gap, 22px);
+  }
+
+  .lp-login-brand-body {
+    padding-top: var(--lp-brand-title-pad, 8px);
   }
 }
 
@@ -3927,7 +4029,7 @@
   }
 
   .lp-login-metric span {
-    font-size: 10px;
+    font-size: var(--df-fs-xs);
   }
 
   .lp-login-auth-banner {
@@ -3948,7 +4050,7 @@
 
   .lp-login-auth-steps span {
     padding: 4px 8px;
-    font-size: 10px;
+    font-size: var(--df-fs-xs);
   }
 
   .lp-login-trust {
@@ -4011,7 +4113,7 @@
   grid-template-columns: var(--docs-rail) minmax(0, 1fr);
   gap: 0;
   min-height: 70vh;
-  background: #fff;
+  background: var(--df-surface);
   border-top: 1px solid var(--lp-line);
   /* Near full viewport so workspace screenshots stay large and aligned */
   width: min(1680px, calc(100% - clamp(16px, 2vw, 40px)));
@@ -4021,7 +4123,7 @@
 
 .docs-space > .docs-space-nav-desktop {
   min-width: 0;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   border-right: 1px solid var(--lp-line);
 }
 
@@ -4041,7 +4143,7 @@
   overflow: auto;
   padding: 28px 18px 48px;
   border-right: 1px solid var(--lp-line);
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .docs-sidebar-brand {
@@ -4051,7 +4153,7 @@
   margin-bottom: 18px;
   padding: 12px 12px;
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--lp-line);
 }
 
@@ -4075,7 +4177,7 @@
   text-align: left;
   border: none;
   background: transparent;
-  border-radius: 8px;
+  border-radius: var(--df-radius-md);
   padding: 9px 12px;
   font-size: 13.5px;
   line-height: 1.35;
@@ -4095,7 +4197,7 @@
 .docs-sidebar-group h3 {
   margin: 18px 0 6px;
   padding: 0 12px;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -4145,7 +4247,7 @@
   padding: 12px 14px;
   border-radius: 12px;
   border: 1px solid var(--lp-line);
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   width: 100%;
   max-width: none;
 }
@@ -4168,8 +4270,8 @@
 .docs-featured-card {
   text-align: left;
   border: 1px solid var(--lp-line);
-  border-radius: 14px;
-  background: #fff;
+  border-radius: var(--df-radius-xl);
+  background: var(--df-surface);
   padding: 18px 16px;
   cursor: pointer;
   display: grid;
@@ -4221,9 +4323,9 @@
 
 .docs-category-card {
   border: 1px solid var(--lp-line);
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
   text-align: left;
   cursor: pointer;
   padding: 0;
@@ -4242,7 +4344,7 @@
   aspect-ratio: 16 / 9;
   object-fit: cover;
   object-position: top left;
-  background: #0b1220;
+  background: var(--df-navy-900);
   border-bottom: 1px solid var(--lp-line);
 }
 
@@ -4268,7 +4370,7 @@
   font-style: normal;
   font-size: 13px;
   line-height: 1.45;
-  color: #475569;
+  color: var(--df-steel-400);
   margin-top: 2px;
 }
 
@@ -4279,7 +4381,7 @@
   border: 1px solid rgba(13, 148, 136, 0.2);
   background:
     radial-gradient(ellipse 70% 80% at 0% 0%, rgba(13, 148, 136, 0.08), transparent 55%),
-    #f8fafc;
+    var(--df-surface-muted);
 }
 
 .docs-space-algorithm h2 {
@@ -4300,7 +4402,7 @@
 }
 
 .docs-space-algorithm-steps li {
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--lp-line);
   border-radius: 12px;
   padding: 14px;
@@ -4358,7 +4460,7 @@
   font-weight: 720;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: #0f766e;
+  color: var(--df-teal-600);
   background: #ecfdf5;
   border: 1px solid rgba(13, 148, 136, 0.28);
 }
@@ -4392,7 +4494,7 @@
 .docs-article-content > .docs-section p {
   font-size: 15.5px;
   line-height: 1.7;
-  color: #334155;
+  color: var(--df-steel-500);
   margin: 0 0 14px;
   max-width: none;
 }
@@ -4408,15 +4510,15 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.9em;
   padding: 1px 6px;
-  border-radius: 6px;
+  border-radius: var(--df-radius-sm);
   background: #f1f5f9;
-  color: #0f766e;
+  color: var(--df-teal-600);
 }
 
 .docs-steps {
   margin: 0 0 16px;
   padding-left: 22px;
-  color: #334155;
+  color: var(--df-steel-500);
   line-height: 1.7;
   max-width: none;
 }
@@ -4488,7 +4590,7 @@
   transform: none !important;
   border: none !important;
   border-radius: 10px !important;
-  background: #0b1220 !important;
+  background: var(--df-navy-900) !important;
   box-shadow: 0 18px 44px rgba(15, 23, 42, 0.14) !important;
 }
 
@@ -4517,7 +4619,7 @@
 .docs-shot-marker {
   position: absolute;
   transform: translate(-50%, -50%);
-  z-index: 2;
+  z-index: var(--df-z-raised);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4538,7 +4640,7 @@
   font-size: 14px;
   font-weight: 780;
   color: #fff;
-  background: #f59e0b;
+  background: var(--df-logo-strap);
   border: 3px solid #fff;
   box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.55);
 }
@@ -4546,7 +4648,7 @@
 .docs-shot-marker > span {
   display: inline-block;
   padding: 6px 10px;
-  border-radius: 8px;
+  border-radius: var(--df-radius-md);
   font-size: 12px;
   font-weight: 720;
   letter-spacing: -0.01em;
@@ -4610,9 +4712,9 @@
   font-size: 15px;
   font-weight: 760;
   color: #ecfdf5;
-  background: linear-gradient(160deg, #0a3d3a, #0f766e);
+  background: linear-gradient(160deg, var(--df-logo-tile), var(--df-teal-600));
   box-shadow: 0 8px 18px rgba(10, 61, 58, 0.22);
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .docs-workflow-arrow {
@@ -4620,7 +4722,7 @@
   width: 2px;
   min-height: 36px;
   margin-top: 6px;
-  background: linear-gradient(180deg, #14b8a6, rgba(20, 184, 166, 0.15));
+  background: linear-gradient(180deg, var(--df-brand-bright), rgba(20, 184, 166, 0.15));
   border-radius: 999px;
 }
 
@@ -4651,7 +4753,7 @@
   border-radius: 999px;
   font-size: 12px;
   font-weight: 650;
-  color: #0f766e;
+  color: var(--df-teal-600);
   background: #ecfdf5;
   border: 1px solid rgba(13, 148, 136, 0.22);
 }
@@ -4665,7 +4767,7 @@
   margin: 0 0 14px;
   font-size: 15.5px;
   line-height: 1.7;
-  color: #334155;
+  color: var(--df-steel-500);
   max-width: none;
 }
 
@@ -4673,7 +4775,7 @@
   margin-top: 12px;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .docs-space {
     --docs-rail: 280px;
   }
@@ -4731,7 +4833,7 @@
 .docs-pager button {
   border: 1px solid var(--lp-line);
   background: #fff;
-  border-radius: 10px;
+  border-radius: var(--df-radius-lg);
   padding: 10px 14px;
   font-size: 13px;
   font-weight: 600;
@@ -4776,7 +4878,7 @@
 
 .lp-contact-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -4879,12 +4981,12 @@
 .lp-contact-v2 .lp-contact-stepper-index {
   width: 24px;
   height: 24px;
-  border-radius: 8px;
+  border-radius: var(--df-radius-md);
   display: grid;
   place-items: center;
   font-size: 11px;
   font-weight: 740;
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #5eead4;
 }
 
@@ -4994,7 +5096,7 @@
 .lp-contact-v2 select.lp-mkt-input {
   width: 100%;
   border: 1px solid var(--lp-line);
-  border-radius: 10px;
+  border-radius: var(--df-radius-lg);
   padding: 10px 12px;
   font: inherit;
   color: var(--lp-ink);
@@ -5154,7 +5256,7 @@
 
 .lp-ct5-brand-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   height: 100%;
   box-sizing: border-box;
   padding: clamp(28px, 4.5vh, 48px) clamp(32px, 4.5vw, 64px) clamp(28px, 4vh, 40px);
@@ -5213,7 +5315,7 @@
 .lp-ct5-proof {
   margin: 0 0 28px;
   padding: 16px 18px;
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   border: 1px solid rgba(94, 234, 212, 0.18);
   background: rgba(7, 28, 26, 0.35);
   backdrop-filter: blur(8px);
@@ -5420,13 +5522,13 @@
 }
 
 .lp-ct5-steps li.is-active {
-  color: #0a3d3a;
+  color: var(--df-logo-tile);
   background: #ecfdf5;
   border-color: rgba(13, 148, 136, 0.22);
 }
 
 .lp-ct5-steps li.is-active span {
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #ecfdf5;
 }
 
@@ -5435,7 +5537,7 @@
 }
 
 .lp-ct5-steps li.is-done span {
-  background: #14b8a6;
+  background: var(--df-brand-bright);
   color: #fff;
 }
 
@@ -5466,7 +5568,7 @@
   border: 1px solid #dbe3ea;
   background: #fff;
   color: var(--lp-ink);
-  border-radius: 10px;
+  border-radius: var(--df-radius-lg);
   padding: 10px 10px;
   font-size: 13px;
   font-weight: 650;
@@ -5481,8 +5583,8 @@
 }
 
 .lp-ct5-pick-item.is-on {
-  background: #0a3d3a;
-  border-color: #0a3d3a;
+  background: var(--df-logo-tile);
+  border-color: var(--df-logo-tile);
   color: #ecfdf5;
   box-shadow: 0 6px 14px rgba(10, 61, 58, 0.18);
 }
@@ -5528,7 +5630,7 @@
 .lp-ct5-input:focus-visible,
 .lp-ct5-textarea:focus-visible {
   outline: none;
-  border-color: #0d9488;
+  border-color: var(--df-teal-500);
   box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.18);
 }
 
@@ -5597,7 +5699,7 @@
   display: grid;
   place-items: center;
   background: #ecfdf5;
-  color: #0f766e;
+  color: var(--df-teal-600);
   box-shadow: 0 10px 24px rgba(13, 148, 136, 0.15);
 }
 
@@ -5777,7 +5879,7 @@
 
 .lp-ct6-top-aside > div {
   padding: 12px 12px 11px;
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   border: 1px solid rgba(94, 234, 212, 0.2);
   background: rgba(7, 28, 26, 0.35);
   backdrop-filter: blur(8px);
@@ -5877,11 +5979,11 @@
 
 .lp-ct6-step.is-active {
   background: linear-gradient(180deg, #f0fdfa 0%, #ecfdf5 100%);
-  box-shadow: inset 0 -3px 0 #0d9488;
+  box-shadow: inset 0 -3px 0 var(--df-teal-500);
 }
 
 .lp-ct6-step.is-active .lp-ct6-step-index {
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #ecfdf5;
 }
 
@@ -5890,13 +5992,13 @@
 }
 
 .lp-ct6-step.is-done .lp-ct6-step-index {
-  background: #14b8a6;
+  background: var(--df-brand-bright);
   color: #fff;
 }
 
 .lp-ct6-step.is-done .lp-ct6-step-line,
 .lp-ct6-step.is-active .lp-ct6-step-line {
-  background: #14b8a6;
+  background: var(--df-brand-bright);
 }
 
 .lp-ct6-form {
@@ -5986,8 +6088,8 @@
 }
 
 .lp-ct6-pick-item.is-on {
-  background: #0a3d3a;
-  border-color: #0a3d3a;
+  background: var(--df-logo-tile);
+  border-color: var(--df-logo-tile);
   color: #ecfdf5;
   box-shadow: 0 8px 18px rgba(10, 61, 58, 0.18);
 }
@@ -6039,7 +6141,7 @@
 .lp-ct6-input:focus-visible,
 .lp-ct6-textarea:focus-visible {
   outline: none;
-  border-color: #0d9488;
+  border-color: var(--df-teal-500);
   box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.18);
 }
 
@@ -6102,7 +6204,7 @@
   display: grid;
   place-items: center;
   background: #ecfdf5;
-  color: #0f766e;
+  color: var(--df-teal-600);
 }
 
 .lp-ct6-success h2 {
@@ -6204,7 +6306,7 @@
 
 .lp-cust3-hero-inner h1 em {
   font-style: normal;
-  color: #0f766e;
+  color: var(--df-teal-600);
 }
 
 .lp-cust3-lead {
@@ -6242,7 +6344,7 @@
   font-size: 1.55rem;
   font-weight: 760;
   letter-spacing: -0.04em;
-  color: #0a3d3a;
+  color: var(--df-logo-tile);
   margin-bottom: 4px;
 }
 
@@ -6305,7 +6407,7 @@
 }
 
 .lp-cust3-featured-aside {
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #ecfdf5;
   border-radius: 18px;
   padding: 24px 22px;
@@ -6390,6 +6492,14 @@
   color: var(--lp-ink);
 }
 
+.lp-cust3-section-head p {
+  margin: 10px 0 0;
+  max-width: 62ch;
+  font-size: 15.5px;
+  line-height: 1.55;
+  color: var(--lp-muted);
+}
+
 .lp-cust3-story-stack {
   display: grid;
   gap: 0;
@@ -6415,7 +6525,7 @@
   font-weight: 720;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: #0f766e;
+  color: var(--df-teal-600);
   margin-bottom: 10px;
 }
 
@@ -6494,48 +6604,6 @@
   background: #f7f8fa;
 }
 
-.lp-wh-hero {
-  background:
-    radial-gradient(ellipse 60% 50% at 85% 20%, rgba(45, 212, 191, 0.16), transparent 55%),
-    linear-gradient(160deg, #071c1a 0%, #0a3d3a 50%, #0f766e 100%);
-  color: #ecfdf5;
-  padding: clamp(48px, 8vh, 84px) 0;
-}
-
-.lp-wh-hero-inner {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: clamp(24px, 4vw, 40px);
-  align-items: center;
-}
-
-.lp-wh-hero-copy h1 {
-  font-family: var(--lp-font-display);
-  font-size: clamp(2.1rem, 4vw, 3.2rem);
-  font-weight: 760;
-  letter-spacing: -0.045em;
-  line-height: 1.08;
-  margin: 0 0 14px;
-  color: #fff;
-  max-width: 14ch;
-}
-
-.lp-wh-lead {
-  margin: 0 0 24px;
-  font-size: 16.5px;
-  line-height: 1.55;
-  color: rgba(236, 253, 245, 0.78);
-  max-width: 42ch;
-}
-
-.lp-wh-hero-visual {
-  min-width: 0;
-}
-
-.lp-wh-hero-visual > * {
-  max-width: 100%;
-}
-
 .lp-wh-rail {
   background: #fff;
   border-bottom: 1px solid var(--lp-line);
@@ -6553,7 +6621,7 @@
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #0a3d3a;
+  color: var(--df-logo-tile);
 }
 
 .lp-wh-split {
@@ -6619,12 +6687,12 @@
   width: 7px;
   height: 7px;
   border-radius: 2px;
-  background: #f59e0b;
+  background: var(--df-logo-strap);
 }
 
 .lp-wh-panel {
   border-radius: 16px;
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #ecfdf5;
   padding: 8px 0;
   overflow: hidden;
@@ -6681,7 +6749,7 @@
 
 .lp-wh-modes > div {
   padding: 16px 18px;
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   background: #fff;
   border: 1px solid var(--lp-line);
 }
@@ -6745,7 +6813,7 @@
   font-size: 12px;
   font-weight: 740;
   letter-spacing: 0.08em;
-  color: #0f766e;
+  color: var(--df-teal-600);
   margin-bottom: 10px;
 }
 
@@ -6834,7 +6902,7 @@
     radial-gradient(ellipse 45% 50% at 8% 85%, rgba(245, 158, 11, 0.1), transparent 50%),
     linear-gradient(155deg, #071c1a 0%, #0a3d3a 45%, #0f766e 82%, #115e59 100%);
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 88px) 0 clamp(36px, 5vh, 56px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
 }
 
 .lp-ent-hero-waves {
@@ -6846,7 +6914,7 @@
 
 .lp-ent-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -6900,7 +6968,7 @@
   width: 7px;
   height: 7px;
   border-radius: 2px;
-  background: #f59e0b;
+  background: var(--df-logo-strap);
 }
 
 .lp-ent-hero-stage {
@@ -6964,7 +7032,7 @@
   font-weight: 650;
   color: rgba(148, 163, 184, 0.9);
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--df-radius-md);
 }
 
 .lp-ent-stage-rail span.is-active {
@@ -6995,7 +7063,7 @@
 }
 
 .lp-ent-stage-pill {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -7021,7 +7089,7 @@
 
 .lp-ent-stage-cards span {
   display: block;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: #5eead4;
@@ -7054,7 +7122,7 @@
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #14b8a6, #f59e0b);
+  background: linear-gradient(90deg, var(--df-brand-bright), var(--df-logo-strap));
 }
 
 .lp-ent-stage-rows {
@@ -7080,7 +7148,7 @@
 
 .lp-ent-stage-rows em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: right;
 }
 
@@ -7093,7 +7161,7 @@
   width: var(--lp-shell) !important;
   margin: -28px auto 0;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
@@ -7301,7 +7369,7 @@
 
 .lp-ent-panel-row em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: right;
 }
 
@@ -7310,7 +7378,7 @@
     radial-gradient(ellipse 60% 80% at 80% 20%, rgba(45, 212, 191, 0.18), transparent 55%),
     linear-gradient(160deg, #071c1a 0%, #0a3d3a 55%, #0f766e 100%);
   color: #ecfdf5;
-  padding: clamp(48px, 7vh, 80px) 0;
+  padding: clamp(32px, 5vh, 48px) 0;
 }
 
 .lp-ent-cta-inner {
@@ -7324,10 +7392,10 @@
 
 .lp-ent-cta-inner h2 {
   font-family: var(--lp-font-display);
-  font-size: clamp(1.6rem, 2.8vw, 2.2rem);
-  font-weight: 740;
-  letter-spacing: -0.035em;
-  margin: 0 0 10px;
+  font-size: var(--lp-fs-h2, clamp(1.25rem, 1.5vw, 1.5rem));
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  margin: 0 0 8px;
   color: #fff;
 }
 
@@ -7367,13 +7435,14 @@
 /* ── Solutions editorial ────────────────────────────────────────── */
 .lp-sol-hero {
   position: relative;
-  overflow: hidden;
+  overflow-x: clip;
+  overflow-y: visible;
   background:
     radial-gradient(ellipse 70% 60% at 78% 20%, rgba(45, 212, 191, 0.2), transparent 55%),
     radial-gradient(ellipse 40% 50% at 8% 90%, rgba(245, 158, 11, 0.1), transparent 50%),
     linear-gradient(155deg, #071c1a 0%, #0a3d3a 48%, #0f766e 100%);
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 84px) 0 clamp(40px, 6vh, 64px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
 }
 
 .lp-sol-hero-waves {
@@ -7385,7 +7454,7 @@
 
 .lp-sol-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -7396,13 +7465,13 @@
 
 .lp-sol-hero-copy h1 {
   font-family: var(--lp-font-display);
-  font-size: clamp(2rem, 4vw, 3.1rem);
-  font-weight: 760;
-  letter-spacing: -0.04em;
-  line-height: 1.1;
-  margin: 0 0 14px;
+  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem));
+  font-weight: 650;
+  letter-spacing: -0.022em;
+  line-height: 1.18;
+  margin: 0 0 10px;
   color: #fff;
-  max-width: 16ch;
+  max-width: 22ch;
 }
 
 .lp-sol-hero-lead {
@@ -7428,7 +7497,7 @@
   margin: 0 auto;
   padding: clamp(28px, 4vh, 40px) 0 0;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
@@ -7554,7 +7623,7 @@
   width: 40px;
   height: 40px;
   border-radius: 12px;
-  background: #0a3d3a;
+  background: var(--df-logo-tile);
   color: #5eead4;
   font-family: var(--lp-font-display);
   font-weight: 720;
@@ -7736,7 +7805,7 @@
 }
 
 /* ── Responsive ─────────────────────────────────────────────────── */
-@media (max-width: 1024px) {
+@media (max-width: 1023px) {
   .lp-hero-home-grid {
     grid-template-columns: 1fr !important;
   }
@@ -7754,7 +7823,6 @@
   .lp-cust3-featured-grid,
   .lp-cust3-story,
   .lp-cust3-metrics-row,
-  .lp-wh-hero-inner,
   .lp-wh-split-grid,
   .lp-wh-flow-list {
     grid-template-columns: 1fr !important;
@@ -7902,7 +7970,7 @@
   }
 
   .lp-pricing-v2-plans {
-    margin-top: -40px;
+    margin-top: 20px;
   }
 }
 
@@ -7912,7 +7980,7 @@
   }
 
   .lp-pricing-v2-plans {
-    margin-top: -24px;
+    margin-top: 16px;
   }
 
   .lp-pricing-hero-inner h1,
@@ -8001,7 +8069,7 @@
   max-width: min(100%, 640px);
   width: 100%;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-section-footer--center {
@@ -8015,7 +8083,7 @@
   max-width: 100%;
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .lp-mkt-next-cta.lp-section-footer,
   .lp .lp-mkt-next-cta.lp-section-footer {
     flex-direction: column;
@@ -8037,13 +8105,29 @@
   gap: 16px;
 }
 
+/* A pill is a label, not a banner: it takes its text width, not the card's. */
+.lp .lp-mkt-evidence-card > .lp-cust-industry {
+  justify-self: start;
+}
+
+/* Four cards read as a balanced 2x2, not a full row plus one stray. */
+.lp .lp-mkt-evidence-grid:has(> :nth-child(4):last-child) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 720px) {
+  .lp .lp-mkt-evidence-grid:has(> :nth-child(4):last-child) {
+    grid-template-columns: 1fr;
+  }
+}
+
 .lp-mkt-evidence-card {
   display: grid;
   grid-template-rows: auto 1fr auto;
   gap: 12px;
   padding: 22px 20px;
   border: 1px solid var(--lp-line);
-  border-radius: 14px;
+  border-radius: var(--df-radius-xl);
   background: #fff;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
   min-width: 0;
@@ -8066,7 +8150,7 @@
 
 .lp-mkt-evidence-card footer strong {
   font-size: 13.5px;
-  color: #0f766e;
+  color: var(--df-teal-600);
 }
 
 .lp-mkt-evidence-card footer code {
@@ -8108,7 +8192,7 @@
 
 .lp-mkt-gap-badge {
   display: inline-block;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 750;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -8129,7 +8213,7 @@
 
 .lp-mkt-gap-badge.is-unaudited {
   background: #f1f5f9;
-  color: #475569;
+  color: var(--df-steel-400);
 }
 
 @media (max-width: 720px) {
@@ -8141,7 +8225,7 @@
 
 /* Compliance posture — badges always carry the "no certificate yet" note. */
 .lp-mkt-compliance-note {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 0 clamp(16px, 4vw, 40px) 20px;
   font-size: 12.5px;
@@ -8154,4 +8238,834 @@
   padding: 0;
   color: inherit;
   opacity: 0.72;
+}
+
+/* ── Enterprise marketing system (wins last) ───────────────────────
+   One shell, one type scale, compact heroes, document legal, footer.
+   Cards size to content. Left columns do not stretch empty. */
+
+.lp-subpage .lp-sales-hero h1,
+.lp-subpage .lp-mkt-hero-copy h1,
+.lp-subpage .lp-mkt-hero-band--ink .lp-mkt-hero-copy h1 {
+  font-size: var(--lp-fs-h1) !important;
+  line-height: 1.2 !important;
+  letter-spacing: -0.03em !important;
+  max-width: 22ch;
+}
+
+.lp-subpage .lp-sales-hero-lead,
+.lp-subpage .lp-mkt-lead,
+.lp-subpage .lp-mkt-hero-band--ink .lp-mkt-lead {
+  font-size: var(--lp-fs-lead) !important;
+  line-height: 1.55 !important;
+}
+
+.lp-subpage h2,
+.lp-sales-compare h2,
+.lp-sales-faq h2,
+.lp-sales-honesty h2,
+.lp-pricing-v2-compare-head h2 {
+  font-size: var(--lp-fs-h2);
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+}
+
+.lp-sales-hero {
+  padding: 28px 0 32px !important;
+}
+
+.lp-sales-hero--page .lp-sales-hero-inner {
+  grid-template-columns: 1fr !important;
+}
+
+.lp-sales-hero--split .lp-sales-hero-inner {
+  grid-template-columns: minmax(0, 1.1fr) minmax(292px, 0.78fr) !important;
+  align-items: start !important;
+}
+
+.lp-sales-hero-copy {
+  justify-content: flex-start !important;
+  min-height: 0 !important;
+}
+
+.lp-sales-hero-meta {
+  margin: -4px 0 10px !important;
+  font-size: var(--lp-fs-meta) !important;
+  line-height: 1.45 !important;
+  color: #64748b !important;
+  max-width: 62ch !important;
+}
+
+.lp-sales-hero--ink .lp-sales-hero-meta {
+  color: rgba(167, 243, 208, 0.72) !important;
+}
+
+.lp-sales-hero--doc {
+  background: #f6f8fa !important;
+  color: var(--lp-ink) !important;
+  border-bottom: 1px solid var(--lp-line);
+  padding: 24px 0 28px !important;
+}
+
+.lp-sales-hero--doc h1 {
+  color: var(--lp-ink) !important;
+  max-width: 20ch;
+}
+
+.lp-sales-hero--doc .lp-sales-hero-lead {
+  color: var(--lp-muted) !important;
+  max-width: 62ch !important;
+}
+
+.lp-sales-hero--doc .lp-sales-kicker {
+  color: var(--df-teal-600);
+  background: #f0fdfa;
+  border-color: color-mix(in srgb, var(--df-teal-500) 28%, #e4e8ee);
+}
+
+.lp-sales-hero-steps {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 16px 0 0;
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid rgba(94, 234, 212, 0.16);
+}
+
+.lp-sales-hero-steps li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.lp-sales-hero-steps li > span {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--df-radius-md);
+  display: grid;
+  place-items: center;
+  background: rgba(45, 212, 191, 0.12);
+  color: #5eead4;
+  font-size: var(--df-fs-xs);
+  font-weight: 750;
+}
+
+.lp-sales-hero-steps strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 13.5px;
+  font-weight: 680;
+  color: #fff;
+}
+
+.lp-sales-hero-steps p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: rgba(226, 232, 240, 0.68);
+}
+
+.lp-sales-hero--split .lp-sales-form,
+.lp-sales-hero--split .lp-sales-success {
+  height: auto !important;
+  align-self: start;
+}
+
+.lp-sales-form {
+  padding: 16px 18px 14px !important;
+  border-radius: 12px !important;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12) !important;
+}
+
+.lp-sales-form-head h2 {
+  font-size: 1.05rem !important;
+  margin: 0 0 4px !important;
+}
+
+.lp-sales-form-head p {
+  margin: 0 0 12px !important;
+  font-size: 12.5px !important;
+}
+
+.lp-sales-fields {
+  gap: 8px !important;
+  margin-bottom: 10px !important;
+}
+
+.lp-sales-input,
+.lp-sales-textarea {
+  padding: 7px 10px !important;
+  font-size: 13.5px !important;
+}
+
+.lp-sales-honesty {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.3fr);
+  gap: 20px 48px;
+  align-items: start;
+}
+
+.lp-sales-honesty .lp-sales-rail-links {
+  grid-column: 2;
+  margin-top: 4px;
+}
+
+.lp-sales-honesty h2 {
+  margin: 8px 0 0;
+  color: var(--lp-ink);
+}
+
+.lp-sales-honesty ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--lp-muted);
+  font-size: var(--lp-fs-body);
+  line-height: 1.6;
+}
+
+.lp-sales-follow {
+  padding: 28px 0 !important;
+}
+
+.lp-mkt-legal-layout {
+  width: var(--lp-shell) !important;
+  margin: 0 auto !important;
+  padding: 32px 0 72px !important;
+  display: grid !important;
+  grid-template-columns: 220px minmax(0, 1fr) !important;
+  gap: 40px !important;
+}
+
+.lp-mkt-legal-nav {
+  position: sticky;
+  top: 88px;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.lp-mkt-legal-nav h2 {
+  margin: 0 0 12px !important;
+  font-size: 11px !important;
+  letter-spacing: 0.08em !important;
+}
+
+.lp-mkt-legal-nav ul {
+  gap: 6px !important;
+}
+
+.lp-mkt-legal-nav button {
+  font-size: 13px !important;
+  font-weight: 550 !important;
+  padding: 4px 0 !important;
+}
+
+.lp-mkt-legal-content {
+  max-width: 42rem;
+}
+
+.lp-mkt-legal-block {
+  padding: 0 0 22px;
+  margin: 0 0 22px;
+  border-bottom: 1px solid var(--lp-line);
+}
+
+.lp-mkt-legal-block:last-of-type {
+  border-bottom: 0;
+  margin-bottom: 0;
+}
+
+.lp-mkt-legal-block h2 {
+  margin: 0 0 8px;
+  font-size: 1.125rem !important;
+  font-weight: 680;
+  color: var(--lp-ink);
+}
+
+.lp-mkt-legal-block p {
+  margin: 0;
+  font-size: var(--lp-fs-body) !important;
+  line-height: 1.65 !important;
+  color: var(--lp-muted);
+}
+
+.lp-pricing-v2-plans {
+  margin-top: 28px !important;
+}
+
+.lp-pricing-card {
+  min-height: 0;
+}
+
+.lp-pricing-card-blurb {
+  min-height: 0 !important;
+}
+
+.lp-pricing-card .lp-btn {
+  margin-top: auto;
+}
+
+.lp-pricing-card.is-featured {
+  transform: none !important;
+}
+
+.lp-mkt-hero-band {
+  padding: 28px 0 32px !important;
+}
+
+.lp-mkt-hero-grid {
+  align-items: start !important;
+}
+
+/* A decorative illustration can be cropped to keep the hero band short; a
+   product shot cannot — clipping the semantic map to 248px hid two of its four
+   mapped columns and made the hero claim less than the product does. */
+.lp-mkt-hero-visual .lp-mkt-illustration {
+  max-height: 248px;
+  overflow: hidden;
+}
+
+.lp-mkt-hero-visual .lp-mkt-shot,
+.lp-mkt-hero-visual .lp-cinema-stage {
+  max-height: none;
+  overflow: visible;
+}
+
+.lp-footer.lp-footer--compact {
+  background: #07111f !important;
+  padding: 0 !important;
+}
+
+.lp-footer--compact .lp-footer-inner {
+  width: var(--lp-shell) !important;
+  max-width: none !important;
+  margin: 0 auto !important;
+  padding: 40px 0 20px !important;
+}
+
+.lp-footer--compact .lp-footer-grid {
+  display: grid !important;
+  grid-template-columns: 1.25fr repeat(4, minmax(0, 1fr)) !important;
+  gap: 20px 28px !important;
+  padding: 0 0 20px !important;
+  align-items: start;
+}
+
+.lp-footer--compact h4,
+.lp-footer--compact .lp-footer-grid h4 {
+  margin: 0 0 10px !important;
+  font-size: 11px !important;
+  letter-spacing: 0.1em !important;
+  text-transform: uppercase !important;
+  color: #5eead4 !important;
+}
+
+.lp-footer--compact a,
+.lp-footer--compact .lp-footer-link {
+  display: block !important;
+  margin: 0 0 8px !important;
+  padding: 0 !important;
+  font-size: 13.5px !important;
+  line-height: 1.35 !important;
+  color: rgba(226, 232, 240, 0.78) !important;
+}
+
+.lp-footer--compact a:hover,
+.lp-footer--compact .lp-footer-link:hover {
+  color: #fff !important;
+}
+
+.lp-footer-tagline {
+  margin: 10px 0 8px !important;
+  max-width: 28ch;
+  font-size: 13.5px !important;
+  color: rgba(236, 253, 245, 0.78) !important;
+}
+
+.lp-footer-proof {
+  margin: 0;
+  max-width: 36ch;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(148, 163, 184, 0.78);
+}
+
+.lp-footer--compact .lp-footer-bottom {
+  display: flex !important;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-top: 8px !important;
+  padding: 16px 0 0 !important;
+  border-top: 1px solid rgba(94, 234, 212, 0.12) !important;
+  font-size: 12.5px !important;
+  color: var(--df-text-tertiary) !important;
+}
+
+@media (max-width: 960px) {
+  .lp-sales-hero--split .lp-sales-hero-inner,
+  .lp-sales-honesty,
+  .lp-mkt-legal-layout,
+  .lp-footer--compact .lp-footer-grid,
+  .lp-sales-compare header {
+    grid-template-columns: 1fr !important;
+  }
+
+  .lp-sales-compare header p:last-of-type {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+  }
+
+  .lp-sales-hero-slas {
+    grid-template-columns: 1fr 1fr !important;
+    max-width: none;
+  }
+
+  .lp-mkt-legal-nav {
+    position: static !important;
+  }
+}
+
+@media (max-width: 800px) {
+  .lp-footer--compact .lp-footer-grid {
+    grid-template-columns: 1fr 1fr !important;
+  }
+}
+
+/* ── Fluent surfaces — one shell, one card, no decorative drift ──
+   Microsoft/Google density: 8px radius, hairline border, no lift,
+   no per-tile gradients. Every marketing section uses --lp-shell. */
+
+.lp-sales-compare-inner,
+.lp-sales-compare > .lp-mkt-wrap,
+.lp-sales-faq > .lp-mkt-wrap {
+  width: var(--lp-shell) !important;
+  max-width: none !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+
+.lp-sales-compare,
+.lp-sales-faq {
+  padding: 48px 0 !important;
+}
+
+.lp-sales-faq h2,
+.lp-pricing-v2-compare-head,
+.lp-ent-section-head,
+.lp-cust3-section-head,
+.lp-sec-section-head,
+.lp-int-section-head {
+  max-width: 40rem;
+}
+
+.lp-sales-compare header {
+  max-width: none !important;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 8px 40px;
+  align-items: end;
+  margin-bottom: 4px;
+}
+
+.lp-sales-compare header .lp-sales-kicker {
+  grid-column: 1;
+}
+
+.lp-sales-compare header h2 {
+  grid-column: 1;
+  margin: 0;
+}
+
+.lp-sales-compare header p:last-of-type {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: end;
+  max-width: none !important;
+  margin: 0 !important;
+}
+
+.lp-sales-table-wrap,
+.lp-pricing-v2-table-wrap {
+  margin-top: 20px;
+  border: 1px solid var(--lp-line) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: none !important;
+}
+
+.lp-sales-table,
+.lp-pricing-v2-table {
+  font-size: 13.5px !important;
+}
+
+.lp-sales-table thead th,
+.lp-pricing-v2-table thead th {
+  background: #f8fafc !important;
+  color: var(--df-steel-400) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.06em;
+}
+
+.lp-sales-table tbody td:last-child {
+  background: #f8fffd;
+  color: var(--df-teal-600);
+  font-weight: 650;
+}
+
+.lp :is(
+  .lp-pricing-card,
+  .lp-pricing-principle,
+  .lp-ent-capability,
+  .lp-sec-layer-card,
+  .lp-int-family-card,
+  .lp-mkt-evidence-card,
+  .lp-home-market-grid article,
+  .lp-home-depth-list li,
+  .lp-sales-form,
+  .lp-sales-success,
+  .lp-sales-rail-box,
+  .lp-ent-panel
+) {
+  border: 1px solid var(--lp-line) !important;
+  border-radius: 8px !important;
+  background: #fff !important;
+  box-shadow: none !important;
+  transform: none !important;
+  filter: none !important;
+  color: var(--lp-ink) !important;
+}
+
+.lp :is(
+  .lp-pricing-card,
+  .lp-ent-capability,
+  .lp-sec-layer-card,
+  .lp-int-family-card,
+  .lp-mkt-evidence-card,
+  .lp-home-market-grid article
+):hover {
+  transform: none !important;
+  box-shadow: none !important;
+  border-color: #d0d6de !important;
+}
+
+.lp-pricing-card.is-featured {
+  border-color: var(--df-teal-500) !important;
+  background: #fff !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.lp-pricing-card-flag {
+  top: 12px !important;
+  left: auto !important;
+  right: 12px !important;
+  background: var(--df-teal-600) !important;
+  color: #fff !important;
+  border-radius: 4px !important;
+  letter-spacing: 0.04em !important;
+}
+
+.lp-home-market-grid article.is-ours {
+  border-color: var(--df-teal-500) !important;
+  background: #fff !important;
+}
+
+.lp-ent-capability:nth-child(n),
+.lp-sec-layer-card:nth-child(n),
+.lp-int-family-card:nth-child(n) {
+  background: #fff !important;
+  border-color: var(--lp-line) !important;
+  color: var(--lp-ink) !important;
+}
+
+.lp-ent-capability:nth-child(n) > span,
+.lp-ent-capability:nth-child(n) h3,
+.lp-sec-layer-card:nth-child(n) h3,
+.lp-sec-layer-card:nth-child(n) .lp-sec-layer-num,
+.lp-sec-layer-card:nth-child(n) em {
+  color: inherit !important;
+}
+
+.lp-ent-capability:nth-child(n) p,
+.lp-sec-layer-card:nth-child(n) p {
+  color: var(--lp-muted) !important;
+}
+
+.lp-ent-capability > span,
+.lp-sec-layer-num,
+.lp-sec-layer-tag {
+  color: var(--df-teal-600) !important;
+}
+
+.lp-sec-layer-card::before {
+  display: none !important;
+}
+
+.lp-int-honesty {
+  border-radius: 8px !important;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+
+.lp-int-honesty-panel {
+  border-radius: 8px !important;
+  background: #0c1b2e !important;
+}
+
+.lp-pricing-v2-cta-inner,
+.lp-ent-cta-inner,
+.lp-cust3-cta-inner,
+.lp-int-cta {
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+
+.lp-pricing-v2-cta-inner,
+.lp-ent-cta-band,
+.lp-cust3-cta,
+.lp-int-cta {
+  background: #0c1b2e !important;
+}
+
+.lp-btn {
+  border-radius: 6px !important;
+}
+
+.lp-btn--brand {
+  box-shadow: none !important;
+}
+
+.lp-btn--brand:hover {
+  transform: none !important;
+}
+
+.lp-reveal {
+  opacity: 1 !important;
+  transform: none !important;
+}
+
+/* ── Auth flow pages (signup / verify / forgot / reset) ─────────────────
+   Same gate chrome as login, with the copy that was suppressed there:
+   the flow pages NEED the subtitle (destination + expiry) visible. */
+.lp-login--flow .lp-login-auth-sub {
+  display: block;
+}
+
+/* (The decorative rail is gone — the accent rule under the H1 is a flow
+   element now, so nothing decorative needs hiding on narrow viewports.) */
+
+/* "Forgot password?" — a quiet text link, not a native button. */
+.lp-login--gate .lp-login-forgot {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 4px 2px;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--df-teal-600);
+  white-space: nowrap;
+  cursor: pointer;
+  border-radius: var(--df-radius-sm);
+}
+
+.lp-login--gate .lp-login-forgot:hover {
+  text-decoration: underline;
+}
+
+.lp-login--gate .lp-login-forgot:focus-visible {
+  outline: 2px solid var(--df-teal-500);
+  outline-offset: 2px;
+}
+
+/* "Forgot password?" sits on its own line right under the password field,
+   right-aligned; the remember checkbox keeps a line of its own below. */
+.lp-login--gate .lp-login-forgot-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -4px;
+}
+
+/* Inline actions inside alerts (e.g. "Enter verification code"). */
+.lp-login--gate .lp-login-alert button,
+.lp-login--gate .lp-login-alert .lp-login-alert-link {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--df-teal-600);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.lp-login--gate .lp-login-alert button:hover {
+  text-decoration: underline;
+}
+
+.lp-login--gate .lp-login-alert button:focus-visible {
+  outline: 2px solid var(--df-teal-500);
+  outline-offset: 2px;
+}
+
+/* Disabled link buttons (resend cooldown) read muted, not live. */
+.lp-login--gate .lp-login-legal button:disabled,
+.lp-login--gate .lp-login-legal button[aria-disabled="true"] {
+  color: #94a3b8;
+  cursor: default;
+  font-weight: 500;
+}
+
+.lp-login--gate .lp-login-legal button:disabled:hover,
+.lp-login--gate .lp-login-legal button[aria-disabled="true"]:hover {
+  text-decoration: none;
+}
+
+.lp-login-resend-status {
+  margin: 4px 0 0;
+  min-height: 16px;
+  font-size: 12.5px;
+  color: #64748b;
+  text-align: center;
+}
+
+.lp-login-cta-spaced {
+  margin-top: 16px;
+}
+
+.lp-login-turnstile {
+  margin: 2px 0 0;
+  min-height: 0;
+  width: 100%;
+}
+
+/* The Turnstile iframe honours theme:"dark" + size:"flexible"; keep the
+   host at full field width so the widget never sits narrower than inputs. */
+.lp-login-turnstile iframe {
+  width: 100%;
+}
+
+/* Mobile: card gets real top/side padding; brand follows directly. */
+@media (max-width: 960px) {
+  .lp-login--gate .lp-login-auth {
+    padding: 16px 16px 24px;
+    justify-content: flex-start;
+  }
+
+  .lp-login--gate .lp-login-auth-inner {
+    padding: 0;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+}
+
+/* ── Dark theme: the auth surface honours data-theme like the app ────── */
+html[data-theme="dark"] .lp-login--gate {
+  --lg-ink: var(--df-auth-dark-ink);
+  --lg-muted: var(--df-auth-dark-muted);
+  --lg-line: var(--df-auth-dark-line);
+  background: var(--df-auth-dark-canvas);
+  color: var(--lg-ink);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth {
+  background:
+    radial-gradient(ellipse 80% 55% at 90% 0%, rgba(45, 212, 191, 0.12), transparent 58%),
+    radial-gradient(ellipse 60% 50% at 0% 100%, rgba(245, 158, 11, 0.08), transparent 52%),
+    linear-gradient(160deg, var(--df-auth-dark-grad-start) 0%, var(--df-auth-dark-grad-mid) 45%, var(--df-auth-dark-canvas) 100%);
+  border-left-color: rgba(45, 212, 191, 0.12);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-card {
+  background: var(--df-auth-dark-card);
+  border-color: rgba(45, 212, 191, 0.18);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-head h2 {
+  color: #f0fdfa;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-sub,
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-sub strong {
+  color: var(--df-auth-dark-sub);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-kicker {
+  color: #5eead4;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-label {
+  color: var(--df-auth-dark-label);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input {
+  background: var(--df-auth-dark-field);
+  border-color: rgba(94, 234, 212, 0.22);
+  color: #ecfdf5;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input::placeholder {
+  color: var(--df-auth-dark-placeholder);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input:focus {
+  border-color: var(--df-teal-400);
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.22);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-legal {
+  color: var(--df-auth-dark-legal);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-legal button,
+html[data-theme="dark"] .lp-login--gate .lp-login-forgot,
+html[data-theme="dark"] .lp-login--gate .lp-login-alert button {
+  color: var(--df-teal-400);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-legal button:disabled {
+  color: var(--df-auth-dark-disabled);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-remember {
+  color: var(--df-auth-dark-sub);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert--danger {
+  background: rgba(220, 38, 38, 0.12);
+  border-color: rgba(220, 38, 38, 0.4);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert strong {
+  color: var(--df-auth-dark-alert-title);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert--danger strong {
+  color: #fecaca;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert p {
+  color: var(--df-auth-dark-alert-body);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-field-error {
+  color: #f87171;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-resend-status {
+  color: var(--df-auth-dark-legal);
 }

@@ -25,6 +25,7 @@ from services.decision_kernel.ddl import (
 )
 from services.decision_kernel.execute_gate import (
     build_artifact_from_mappings,
+    create_new_validate_holds_after_dest_exists,
     enforce_decision_artifact,
 )
 from services.decision_kernel.invent import (
@@ -77,14 +78,17 @@ from services.decision_kernel.structural import (
 from services.decision_kernel.logical_type import LogicalType, NativeType, parse_type_ref
 from services.decision_kernel.types import (
     create_new_mapping_target_type,
+    decimal_capacity_is_equal_or_wider,
     ddl_invent_never_narrower_than_table,
     ddl_type,
     float_width_carrier,
+    inherit_measured_string_width,
     integer_width_carrier,
     is_lossy_coercion,
     is_precision_collapse_coercion,
     materialize_dest_ddl,
     normalize_logical_type,
+    refuse_create_new_numeric_collapse,
 )
 from services.decision_kernel.findings import (
     FINDING_SCHEMA,
@@ -93,6 +97,8 @@ from services.decision_kernel.findings import (
     build_finding,
     classify_transform_failure,
     findings_from_coercion_report,
+    findings_from_population_fit,
+    merge_validation_findings,
     rank_suggested_target_type,
     recommended_action_for_failure,
     typed_cast_incompatible_with_text_sink,
@@ -140,6 +146,8 @@ __all__ = [
     "build_decision_artifact",
     "build_finding",
     "findings_from_coercion_report",
+    "findings_from_population_fit",
+    "merge_validation_findings",
     "build_migration_proof_pack",
     "build_proof_plan",
     "classify_conversion",
@@ -150,6 +158,8 @@ __all__ = [
     "classify_transform_failure",
     "compute_content_hash",
     "create_new_mapping_target_type",
+    "create_new_validate_holds_after_dest_exists",
+    "refuse_create_new_numeric_collapse",
     "ddl_identity_columns",
     "ddl_identity_divergence",
     "ddl_identity_report",
@@ -161,9 +171,11 @@ __all__ = [
     "extract_population_checksum",
     "float_width_carrier",
     "integer_width_carrier",
+    "inherit_measured_string_width",
     "invent_context_from_sync_mode",
     "invent_dest_type",
     "stamp_additive_mapping_types",
+    "decimal_capacity_is_equal_or_wider",
     "is_lossy_coercion",
     "is_precision_collapse_coercion",
     "materialize_dest_ddl",

@@ -201,3 +201,24 @@ new logic.
 
 Anything quoted from this file must name the runner and date: these counts are
 environment-specific, and the docs set already contains several stale ones.
+
+
+## Track C addendum — key-addressed expectations at scale
+
+`docs/SCALE_MATRIX_NOSQL.md` records the >= 100K sweep for the non-relational
+and analytical engines. Two rules that runbook readers keep getting wrong:
+
+- `full_refresh_append` into a **key-addressed** destination lands `N`, not
+  `2N`. The write target is the key (`HSET <prefix>:<id>`, `PutItem`, an
+  `_id`-addressed upsert), so a second run rewrites the same keys. Take the
+  classification from `services.primary_key.KEY_ADDRESSED_DESTS` — the canonical
+  owner — and pass `key_addressed=True` to
+  `tests.sync_mode_probe.expected_rows`; do not keep a local list.
+- Redis and DynamoDB have no server-side cursor predicate, so
+  `incremental_append` from them is filtered client-side by
+  `services.sync_cursor`. A cell that lands `2N` there is replay, which is a
+  defect, not an addressing quirk.
+
+The `dynamodb → *` preflight `NoneType.__format__` fault recorded above did not
+reproduce in this sweep; `dynamodb→postgresql` and `dynamodb→mysql` were
+measured in all four modes.

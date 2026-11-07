@@ -60,9 +60,22 @@ def test_auto_increment_pk_transfers_without_a_fidelity_block(
 
 @pytest.mark.parametrize("source", RESTRICTED_GENERATORS)
 @pytest.mark.parametrize("target", ["INTEGER", "BIGINT", "NUMBER(38,0)"])
-def test_dropping_a_write_restriction_still_collapses(source: str, target: str):
+def test_dropping_a_write_restriction_is_a_ddl_difference_not_a_lost_value(
+    source: str, target: str
+):
+    """The restriction is detected, but every value still arrives (D93).
+
+    Identity carry reports the relaxed generator; value fidelity does not
+    charge a Risk Contract for a key whose values land exactly.
+    """
+    from services.type_system import strip_identity_qualifier
+
     assert identity_polarity_would_collapse(source, target) is True
-    assert is_lossy_coercion(source, target) is True
+    # The grade is the base type's: ``NUMBER`` -> ``INTEGER`` stays lossy for
+    # its own reason, ``INT`` -> ``BIGINT`` is clean, generator or not.
+    assert is_lossy_coercion(source, target) is is_lossy_coercion(
+        strip_identity_qualifier(source) or "INTEGER", target
+    )
 
 
 @pytest.mark.parametrize("source", RESTRICTED_GENERATORS)

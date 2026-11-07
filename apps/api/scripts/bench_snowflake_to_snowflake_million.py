@@ -1,0 +1,45 @@
+"""Time a real Snowflake→Snowflake identity append through the production stream engine.
+
+Seeds fakesnow `bench_snowflake_src` when missing. Fails closed unless
+dest COUNT(*) equals the source COUNT with rejected_rows=0.
+Empty dest is CTAS / INSERT SELECT of mapped columns, not COPY INTO /
+CLONE / leftover MERGE. Same account+database+schema+table declines.
+Dest `bench_snowflake_clone` is unique (not reused from `bench_1m` /
+`bench_adls_clone.jsonl` / `bench_gcs_clone.jsonl`). fakesnow is not a
+customer-tenant PRODUCTION_SKU.
+
+    cd apps/api && python scripts/bench_snowflake_to_snowflake_million.py
+
+    BENCH_ROWS=1000000 BENCH_SRC=bench_snowflake_src BENCH_DEST=bench_snowflake_clone \\
+      python scripts/bench_snowflake_to_snowflake_million.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+API_ROOT = Path(__file__).resolve().parents[1]
+if str(API_ROOT) not in sys.path:
+    sys.path.insert(0, str(API_ROOT))
+
+from services.million_row_bench import run_snowflake_snowflake_volume  # noqa: E402
+
+
+if __name__ == "__main__":
+    rows = int(os.environ.get("BENCH_ROWS", "1000000"))
+    src = os.environ.get("BENCH_SRC", "bench_snowflake_src")
+    dest = os.environ.get("BENCH_DEST", "bench_snowflake_clone")
+    proof = os.environ.get("BENCH_PROOF")
+    if not proof:
+        proof = str(Path("/opt/cursor/artifacts") / f"snowflake_snowflake_{rows}_proof.json")
+    run_snowflake_snowflake_volume(
+        rows=rows,
+        dest_table=dest,
+        source_table=src,
+        sync_mode=os.environ.get("BENCH_SYNC", "full_refresh_append"),
+        keep_dest=os.environ.get("BENCH_KEEP_DEST") == "1",
+        fail_closed=True,
+        proof_path=proof,
+    )

@@ -23,9 +23,24 @@ from services.destination_privilege_probe import (
 )
 
 
-def test_unsupported_engine_is_unavailable_not_deny():
-    # Use a sink without a privilege catalog probe (ES/S3/Redis are supported).
-    result = probe_destination_privileges("pinecone", host="x", database="d")
+def test_create_on_write_probe_ok_when_test_succeeds():
+    with patch(
+        "src.transfer.connector_registry.run_probe",
+        return_value=(True, "Pinecone index reachable"),
+    ):
+        result = probe_destination_privileges(
+            "pinecone",
+            host="http://127.0.0.1:5081",
+            port=5081,
+            table="sku_ns",
+            password="pclocal",
+        )
+    assert result.status == "ok"
+    assert result.can_write is True
+    assert result.can_create_table is True
+    assert "create-on-first-write" in result.detail
+    # Use a sink without a privilege catalog probe (vector dests now probe).
+    result = probe_destination_privileges("neo4j", host="x", database="d")
     assert result.status == "unavailable"
     assert result.can_write is None
     can_write, can_create, meta = resolve_write_flags(True, result)
@@ -58,6 +73,24 @@ def test_resolve_write_flags_disconnected():
     )
     can_write, can_create, _ = resolve_write_flags(False, probe)
     assert can_write is False and can_create is False
+
+
+def test_mysql_grant_database_ignores_a_foreign_schema_name():
+    from services.destination_privilege_probe import (
+        _mysql_grant_databases,
+        _mysql_role_grants,
+    )
+
+    assert _mysql_grant_databases("qa", "public") == ["qa"]
+    assert _mysql_grant_databases("qa", "dbo") == ["qa"]
+    assert _mysql_grant_databases("", "app") == ["app"]
+    assert _mysql_role_grants(
+        [
+            "GRANT USAGE ON *.* TO `app`@`%`",
+            "GRANT `app_writer`@`%` TO `app`@`%`",
+            "GRANT SELECT, INSERT ON `qa`.* TO `app`@`%`",
+        ]
+    ) == [("app_writer", "%")]
 
 
 def test_mysql_grant_covers_star_and_table_scope():
@@ -153,6 +186,14 @@ def test_bigquery_deny_matrix(role, expect_write):
     assert can_c is expect_write
 
 
+def test_bigquery_empty_acl_is_cloud_deny_not_grant():
+    """Production BQ with no access_entries stays deny. Emulator is a separate path."""
+    can_w, can_c, matched = evaluate_bigquery_access_entries([])
+    assert can_w is False
+    assert can_c is False
+    assert matched == ""
+
+
 @pytest.mark.parametrize(
     "session,tab,exists,need_update,expect_write,expect_create",
     [
@@ -233,6 +274,52 @@ def test_kafka_probe_mocked_describe_acls():
     if result.status == "ok":
         assert result.can_write is True
         assert result.method == "describe_acls"
+
+
+def test_kafka_probe_acl_describe_exception_is_create_on_produce():
+    kafka = pytest.importorskip("kafka")
+    del kafka
+    mock_admin = MagicMock()
+    mock_admin.list_topics.return_value = ["payments_kafka"]
+    mock_admin.describe_acls.side_effect = AttributeError(
+        "'NoneType' object has no attribute 'resource_pattern'"
+    )
+    with patch("kafka.admin.KafkaAdminClient", return_value=mock_admin), patch(
+        "connectors.kafka_writer._bootstrap",
+        return_value="localhost:9092",
+    ):
+        result = probe_destination_privileges(
+            "kafka",
+            host="localhost",
+            table="payments_kafka",
+            table_exists=False,
+        )
+    assert result.status == "ok"
+    assert result.can_write is True
+    assert result.can_create_table is True
+    assert "create-on-produce" in result.detail
+    assert result.method == "list_topics"
+
+
+def test_kafka_probe_empty_acls_is_create_on_produce():
+    kafka = pytest.importorskip("kafka")
+    del kafka
+    mock_admin = MagicMock()
+    mock_admin.list_topics.return_value = ["orders"]
+    mock_admin.describe_acls.return_value = []
+    with patch("kafka.admin.KafkaAdminClient", return_value=mock_admin), patch(
+        "connectors.kafka_writer._bootstrap",
+        return_value="localhost:9092",
+    ):
+        result = probe_destination_privileges(
+            "kafka",
+            host="localhost",
+            table="orders",
+            table_exists=False,
+        )
+    assert result.status == "ok"
+    assert result.can_create_table is True
+    assert "create-on-produce" in result.detail
 
 
 # ── Mongo / Redis / Kafka ────────────────────────────────────────────────────
@@ -600,6 +687,139 @@ def test_s3_acl_deny_matrix():
     assert evaluate_s3_acl_grants([{"Permission": "WRITE"}]) == (True, True)
 
 
+def test_gcs_iam_deny_matrix():
+    from services.destination_privilege_probe import evaluate_gcs_iam_bindings
+
+    assert evaluate_gcs_iam_bindings([{"role": "roles/storage.objectAdmin"}]) == (True, False)
+    assert evaluate_gcs_iam_bindings([{"role": "roles/storage.admin"}]) == (True, True)
+    assert evaluate_gcs_iam_bindings([{"role": "roles/storage.objectViewer"}]) == (False, False)
+    assert evaluate_gcs_iam_bindings(
+        [{"role": "roles/custom", "permissions": ["storage.objects.create"]}]
+    ) == (True, False)
+
+
+def test_gcs_emulator_iam_fallback_is_bucket_access_not_customer_iam():
+    mock_bucket = MagicMock()
+    mock_bucket.get_iam_policy.side_effect = RuntimeError("IAM not implemented")
+    mock_client = MagicMock()
+    mock_client.get_bucket.return_value = mock_bucket
+    with patch("connectors.gcs_common.gcs_client", return_value=mock_client):
+        result = probe_destination_privileges(
+            "gcs",
+            host="localhost",
+            port=4443,
+            database="dataflow-test",
+            connection_string="http://localhost:4443",
+            table="exports/out.json",
+            table_exists=False,
+            extra={"storage_emulator": True, "anonymous": True},
+        )
+    assert result.status == "ok"
+    assert result.can_write is True
+    assert result.can_create_table is True
+    assert result.method == "emulator_bucket_access"
+    assert result.engine == "gcs"
+
+
+def test_gcs_customer_iam_unavailable_stays_unavailable():
+    mock_bucket = MagicMock()
+    mock_bucket.get_iam_policy.side_effect = RuntimeError("IAM not implemented")
+    mock_client = MagicMock()
+    mock_client.get_bucket.return_value = mock_bucket
+    with patch("connectors.gcs_common.gcs_client", return_value=mock_client):
+        result = probe_destination_privileges(
+            "google_cloud_storage",
+            host="my-project",
+            database="landing",
+            table="exports/out.json",
+            table_exists=True,
+        )
+    assert result.status == "unavailable"
+    assert result.method == "get_iam_policy"
+
+
+def test_sqlserver_probe_threads_tls_extra_into_engine():
+    captured: dict = {}
+
+    def fake_engine(cfg):
+        captured.update(cfg)
+        raise RuntimeError("stop-after-cfg")
+
+    with patch(
+        "connectors.generic_sql.get_sqlalchemy_engine",
+        side_effect=fake_engine,
+    ):
+        result = probe_destination_privileges(
+            "sqlserver",
+            host="127.0.0.1",
+            port=1433,
+            database="dataflow",
+            schema="dbo",
+            table="t1",
+            username="sa",
+            password="x",
+            extra={"trust_server_certificate": True, "encrypt": "yes"},
+        )
+    assert captured.get("extra", {}).get("trust_server_certificate") is True
+    assert captured.get("extra", {}).get("encrypt") == "yes"
+    assert result.status == "unavailable"
+
+
+def test_gcs_probe_mocked_iam_deny():
+    mock_bucket = MagicMock()
+    mock_bucket.get_iam_policy.return_value = {
+        "bindings": [{"role": "roles/storage.objectViewer", "members": ["user:a@b"]}],
+    }
+    mock_client = MagicMock()
+    mock_client.get_bucket.return_value = mock_bucket
+    with patch("connectors.gcs_common.gcs_client", return_value=mock_client):
+        result = probe_destination_privileges(
+            "google_cloud_storage",
+            host="my-project",
+            database="landing",
+            table="exports/out.json",
+            table_exists=True,
+        )
+    assert result.status == "denied"
+    assert result.can_write is False
+    assert result.method == "get_iam_policy"
+    assert result.engine == "gcs"
+
+
+def test_adls_access_account_key_is_full_control():
+    from services.destination_privilege_probe import evaluate_adls_access
+
+    assert evaluate_adls_access(has_account_key=True, container_exists=True) == (True, True)
+    assert evaluate_adls_access(has_account_key=False, roles=["Reader"]) == (False, False)
+    assert evaluate_adls_access(
+        has_account_key=False,
+        roles=["Storage Blob Data Contributor"],
+    ) == (True, False)
+    assert evaluate_adls_access(has_account_key=False, acl_permissions="racwdl") == (True, True)
+
+
+def test_adls_probe_mocked_account_key():
+    mock_container = MagicMock()
+    mock_container.get_container_properties.return_value = {"name": "landing"}
+    mock_container.get_container_access_policy.return_value = {}
+    mock_client = MagicMock()
+    mock_client.get_container_client.return_value = mock_container
+    with patch("connectors.adls_common.blob_service_client", return_value=mock_client):
+        result = probe_destination_privileges(
+            "adls",
+            host="acct",
+            database="landing",
+            table="exports/out.json",
+            username="acct",
+            password="fake-account-key",
+            table_exists=True,
+        )
+    assert result.status == "ok"
+    assert result.can_write is True
+    assert result.can_create_table is True
+    assert result.engine == "adls"
+
+
 def test_s3_probe_mocked_acl():
     mock_client = MagicMock()
     mock_client.head_bucket.return_value = {}
@@ -676,3 +896,192 @@ def test_g2_pass_includes_probe_method_in_message():
     assert g2["status"] == "pass"
     assert "SHOW GRANTS" in g2["message"]
     assert g2["details"]["privilege_probe"]["method"] == "SHOW GRANTS"
+
+
+def test_mysql_create_is_seen_on_the_database_through_a_role():
+    """CREATE granted only by a default role, with a Postgres-shaped schema name, is still CREATE."""
+    replies = [
+        [("GRANT USAGE ON *.* TO `app`@`%`",), ("GRANT `app_writer`@`%` TO `app`@`%`",)],
+        [("GRANT SELECT, INSERT, CREATE ON `qa`.* TO `app_writer`@`%`",)],
+    ]
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, *_a, **_k):
+            return None
+
+        def fetchall(self):
+            return replies.pop(0)
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def close(self):
+            return None
+
+    with patch("connectors.mysql_conn.get_connection", return_value=_Conn()):
+        result = probe_destination_privileges(
+            "mysql",
+            host="127.0.0.1",
+            port=3306,
+            database="qa",
+            schema="public",
+            username="app",
+            password="app",
+            table="orders",
+            table_exists=False,
+            ssl=False,
+        )
+    assert result.can_create_table is True
+    assert result.status == "ok"
+    assert replies == []
+
+
+def test_mysql_privilege_probe_uses_the_caller_tls_posture():
+    """Validate must not demand TLS the writer was not asked to use.
+
+    Local / emulator MySQL answers Error 2026 when the probe forced ssl=True
+    while the transfer connected with ssl=False — CREATE then died as
+    ``Privilege catalog unavailable`` after the write path was already proven.
+    """
+    captured: dict[str, object] = {}
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, *_a, **_k):
+            return None
+
+        def fetchall(self):
+            return [("GRANT ALL PRIVILEGES ON *.* TO 'dataflow'@'%'",)]
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def close(self):
+            return None
+
+    def _fake_get_connection(**kwargs):
+        captured.update(kwargs)
+        return _Conn()
+
+    with patch("connectors.mysql_conn.get_connection", side_effect=_fake_get_connection):
+        result = probe_destination_privileges(
+            "mysql",
+            host="127.0.0.1",
+            port=3306,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            table="orders",
+            ssl=False,
+        )
+    assert captured.get("ssl") is False
+    assert captured.get("purpose") == "probe"
+    assert result.status == "ok"
+    assert result.can_create_table is True
+
+
+def test_g2_blocks_redshift_staging_denied_via_run_file_preflight():
+    from services.preflight_service import run_file_preflight
+
+    pf = run_file_preflight(
+        columns=["id"],
+        column_types={"id": "INTEGER"},
+        row_count=1,
+        mappings=[{"source": "id", "target": "id", "confidence": 0.99}],
+        destination_connected=True,
+        destination_can_write=True,
+        destination_can_create=True,
+        destination_table_exists=True,
+        destination_db_type="redshift",
+        sample_rows=[{"id": 1}],
+        redshift_staging_probe={
+            "status": "denied",
+            "method": "head_bucket",
+            "engine": "redshift",
+            "detail": "Staging bucket `dw-stage` is not writable for COPY FROM S3",
+            "bucket": "dw-stage",
+        },
+    )
+    g2 = next(g for g in pf["gates"] if g["id"] == "g2_destination")
+    assert g2["status"] == "block"
+    assert "staging" in g2["message"].lower()
+    assert pf["redshift_staging_probe"]["status"] == "denied"
+
+
+def test_generic_sql_sqlite_dsn_uses_filesystem_probe(tmp_path):
+    db = tmp_path / "lab.db"
+    db.write_bytes(b"")
+    result = probe_destination_privileges(
+        "generic_sql",
+        database=str(db),
+        connection_string=f"sqlite:///{db}",
+        table="orders",
+        table_exists=False,
+    )
+    assert result.status == "ok"
+    assert result.engine == "sqlite"
+    assert result.can_create_table is True
+    assert result.can_write is True
+
+
+def test_generic_sql_duckdb_dsn_uses_embedded_probe(tmp_path):
+    path = tmp_path / "lab.duckdb"
+    result = probe_destination_privileges(
+        "generic_sql",
+        database=str(path),
+        connection_string=f"duckdb:///{path}",
+        table="orders",
+        table_exists=False,
+    )
+    assert result.status == "ok"
+    assert result.engine == "duckdb"
+    assert result.can_create_table is True
+
+
+def test_dynamodb_list_tables_probe_never_writes():
+    import boto3
+    from moto.server import ThreadedMotoServer
+
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+    server.start()
+    try:
+        host, port = server.get_host_and_port()
+        url = f"http://{host}:{port}"
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url=url,
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+            region_name="us-east-1",
+        )
+        before = list(client.list_tables().get("TableNames") or [])
+        result = probe_destination_privileges(
+            "dynamodb",
+            host=host,
+            port=int(port),
+            connection_string=url,
+            table="lab_orders",
+            username="test",
+            password="test",
+            table_exists=False,
+        )
+        assert result.status == "ok"
+        assert result.method == "list_tables"
+        assert result.can_create_table is True
+        after = list(client.list_tables().get("TableNames") or [])
+        assert after == before, "privilege probe must not CreateTable / PutItem"
+    finally:
+        server.stop()

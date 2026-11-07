@@ -223,3 +223,17 @@ def test_no_catalog_payload_keeps_the_refuse_to_certify_absence_line():
     items = _check_items(plan)
     assert [i.status for i in items] == ["unsupported"]
     assert "refuse to certify absence" in items[0].reason
+
+
+def test_legacy_check_list_is_planned_not_dropped():
+    """Predicate strings without the meta envelope still go through the planner."""
+    catalog = _catalog(check_constraints=["qty > 0"])
+    plan = plan_create_new_fidelity(
+        catalog,
+        dest_dialect="postgresql",
+        target_columns=["id", "qty"],
+        target_types=["INTEGER", "INTEGER"],
+    )
+    items = _check_items(plan)
+    assert [i.status for i in items] == ["carried"]
+    assert any("CHECK" in c.upper() for c in plan.table_constraints)

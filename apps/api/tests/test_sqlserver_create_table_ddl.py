@@ -1,6 +1,7 @@
 """SQL Server CREATE TABLE must not emit unsupported IF NOT EXISTS."""
 
 from __future__ import annotations
+import os
 
 import importlib.util
 import socket
@@ -38,7 +39,7 @@ def test_verify_sqlserver_table_live_edge() -> None:
             server="127.0.0.1",
             port=1433,
             user="sa",
-            password="Datawrap_CDC_2022!",
+            password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
             database="dataflow",
             login_timeout=3,
             timeout=5,
@@ -65,7 +66,7 @@ def test_verify_sqlserver_table_live_edge() -> None:
         port=1433,
         database="dataflow",
         username="sa",
-        password="Datawrap_CDC_2022!",
+        password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         connection_string="",
         schema="dbo",
         table_name="df_verify_probe",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import csv
+import csv  # noqa: F401 — kept for callers importing this module's namespace
 import io
 import json
 from typing import Any
@@ -141,18 +141,21 @@ def convert_rows(
         raise ValueError(f"Conversion {src} → {tgt} not supported")
 
     if tgt == "csv":
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(headers)
-        writer.writerows(rows)
-        return buf.getvalue().encode("utf-8"), "text/csv"
+        # C04: one codec — NULL is an empty unquoted cell, '' is quoted "".
+        from services.csv_codec import csv_cell_encode, format_csv_row
+
+        lines = [format_csv_row([str(h) for h in headers], ",")]
+        for row in rows:
+            lines.append(format_csv_row([csv_cell_encode(v) for v in row], ","))
+        return ("\n".join(lines) + "\n").encode("utf-8"), "text/csv"
 
     if tgt == "tsv":
-        buf = io.StringIO()
-        writer = csv.writer(buf, delimiter="\t")
-        writer.writerow(headers)
-        writer.writerows(rows)
-        return buf.getvalue().encode("utf-8"), "text/tab-separated-values"
+        from services.csv_codec import csv_cell_encode, format_csv_row
+
+        lines = [format_csv_row([str(h) for h in headers], "\t")]
+        for row in rows:
+            lines.append(format_csv_row([csv_cell_encode(v) for v in row], "\t"))
+        return ("\n".join(lines) + "\n").encode("utf-8"), "text/tab-separated-values"
 
     if tgt == "json":
         objects = _rows_to_objects(headers, rows)

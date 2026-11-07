@@ -10,8 +10,6 @@ This regression fails if CREATE invent narrows bare logical ``integer`` to INT32
 
 from __future__ import annotations
 
-import os
-import socket
 import uuid
 
 import pytest
@@ -24,6 +22,7 @@ from services.decision_kernel import (
     stamp_additive_mapping_types,
 )
 from services.type_system import DDL_TYPES, LOGICAL_INTEGER, ddl_type, integer_bit_width
+from tests.helpers.live_env import pg_creds, pg_up
 
 
 def test_materialize_and_pg_type_bare_integer_are_bigint():
@@ -94,26 +93,17 @@ def test_stamp_additive_does_not_collapse_logical_integer_to_int32():
     assert got not in {"INTEGER", "INT", "INT32", "SIGNED"}
 
 
-def _pg_reachable() -> bool:
-    host = os.environ.get("ITEM1_PG_HOST", "127.0.0.1")
-    port = int(os.environ.get("ITEM1_PG_PORT", "5432"))
-    try:
-        with socket.create_connection((host, port), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-@pytest.mark.skipif(not _pg_reachable(), reason="PostgreSQL not reachable for live CREATE")
+@pytest.mark.skipif(not pg_up("ITEM1"), reason="PostgreSQL not reachable for live CREATE")
 def test_live_pg_writer_create_bare_integer_is_int8_and_holds_int64():
     """information_schema + bit-exact insert via postgresql_writer (production path)."""
     import psycopg2
 
-    host = os.environ.get("ITEM1_PG_HOST", "127.0.0.1")
-    port = int(os.environ.get("ITEM1_PG_PORT", "5432"))
-    database = os.environ.get("ITEM1_PG_DB", "postgres")
-    username = os.environ.get("ITEM1_PG_USER", "postgres")
-    password = os.environ.get("ITEM1_PG_PASSWORD", "admin")
+    creds = pg_creds("ITEM1")
+    host = creds["host"]
+    port = creds["port"]
+    database = creds["database"]
+    username = creds["username"]
+    password = creds["password"]
     table = f"item1_pg_{uuid.uuid4().hex[:10]}"
 
     result = write_mapped_rows(

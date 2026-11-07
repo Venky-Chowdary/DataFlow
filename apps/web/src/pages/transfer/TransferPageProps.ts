@@ -20,6 +20,8 @@ export interface TransferPageProps {
     jobId?: string;
     preflight?: PreflightResult;
     validationMode?: string;
+    schemaPolicy?: string;
+    deliveryGuarantee?: string;
     mappings?: Array<{
       source?: string;
       destination?: string;
@@ -29,5 +31,31 @@ export interface TransferPageProps {
       transforms?: { type?: string }[];
       [key: string]: unknown;
     }>;
+    /** Schedules → Studio: preload the parked route so Map can persist a contract. */
+    sourceConnectorId?: string;
+    destConnectorId?: string;
+    sourceTable?: string;
+    destTable?: string;
+    /** Persist mappings onto this parked draft when the footer Schedules. */
+    scheduleId?: string;
+    /**
+     * Replace the mounted route. Empty SQL, keys, and tables clear the
+     * previous route instead of leaving it on screen.
+     */
+    replaceRoute?: boolean;
+    sourceReadMode?: string;
+    sourceSql?: string;
+    primaryKey?: string;
+    cursorColumn?: string;
+    rowLimit?: number;
+    destDatabase?: string;
+    workspaceId?: string;
+    syncMode?: string;
+    shapeSteps?: unknown[];
+    procedureParams?: Record<string, string>;
+    refused?: "unauthenticated" | "wrong_workspace";
+    /** Replay a capture-once journal stream as the Source. */
+    journalId?: string;
+    journalStream?: string;
   } | null;
 }

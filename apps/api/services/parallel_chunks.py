@@ -17,12 +17,13 @@ caller supplies a ``process(idx, item)`` function.
 from __future__ import annotations
 
 import concurrent.futures
-import os
-from services.brand_env import getenv_brand
+import contextvars
 import queue
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from typing import TypeVar
+
+from services.brand_env import getenv_brand
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -30,6 +31,12 @@ R = TypeVar("R")
 # Phase F6 — library default follows stream (env unset → 4, not 1).
 DEFAULT_WORKERS = int(getenv_brand("PARALLEL_WORKERS", "4") or "4")
 DEFAULT_PREFETCH = int(getenv_brand("PARALLEL_QUEUE", str(max(DEFAULT_WORKERS * 2, 4))))
+
+
+# Marker for a chunk that did not write. Not an exception instance so a
+# successful result that happens to be an exception object cannot be confused
+# with it — process() returns the caller's value, which is not this sentinel.
+_CHUNK_GAP = object()
 
 
 class ChunkAborted(Exception):
@@ -135,7 +142,13 @@ class ChunkDispatcher:
         if self._executor is None:
             raise RuntimeError("Use ChunkDispatcher as a context manager (with ...)")
         self._wait_for_room()
-        future = self._executor.submit(self._guarded(process), idx, item)
+        # A worker starts with none of the caller's contextvars, and the run's
+        # locale contracts live there: without this copy a chunk reads 10.129
+        # under Auto and refuses a row the first chunk wrote.
+        ctx = contextvars.copy_context()
+        future = self._executor.submit(
+            lambda i, it: ctx.run(self._guarded(process), i, it), idx, item
+        )
         self._pending[future] = idx
         if self._next_yield is None:
             self._next_yield = idx
@@ -185,6 +198,41 @@ class ChunkDispatcher:
                         f"buffer has {sorted(self._buffer.keys())[:5]}"
                     )
 
+    def drain_committed_prefix(self) -> list[tuple[int, R]]:
+        """In-order results that already wrote, stopping at the first gap.
+
+        A source outage aborts chunks that have not started. Chunks that
+        already committed stay ahead of the checkpoint unless the caller
+        applies this prefix before giving up (DEF-C-017: the job showed
+        40,000 rows while the destination held 160,000). A later success
+        is not returned across a missing index — applying it would skip
+        the hole. :meth:`results` still raises :class:`ChunkAborted`.
+        """
+        while self._pending:
+            done, _ = concurrent.futures.wait(
+                set(self._pending),
+                timeout=30,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            for future in done:
+                idx = self._pending.pop(future)
+                try:
+                    self._buffer[idx] = future.result()
+                except ChunkAborted:
+                    self._buffer[idx] = _CHUNK_GAP
+                except BaseException as exc:  # noqa: BLE001 - gap marker, caller re-raises
+                    self._buffer[idx] = exc
+        committed: list[tuple[int, R]] = []
+        while self._next_yield is not None and self._next_yield in self._buffer:
+            item = self._buffer.pop(self._next_yield)
+            if item is _CHUNK_GAP or isinstance(item, BaseException):
+                break
+            committed.append((self._next_yield, item))
+            self._next_yield += 1
+        return committed
+
 
 class OrderedChunkRunner(ChunkDispatcher):
     """Run a per-chunk function in parallel while returning results in order.
@@ -225,15 +273,29 @@ class OrderedChunkRunner(ChunkDispatcher):
         if self._executor is None:
             raise RuntimeError("Use OrderedChunkRunner as a context manager (with ...)")
 
+        # A reader that dies mid-stream must not look like a stream that ended.
+        # Without this the exception stays on the reader thread, the sentinel is
+        # posted, and the caller sees a short but *successful* run — a corrupt row
+        # halfway through a file, or a shaping recipe refusing one, would silently
+        # truncate the load and still report the rows it managed to write.
+        reader_error: list[BaseException] = []
+
         def _reader() -> None:
             try:
                 for idx, item in iterable:
                     self._prefetch.put((idx, item))
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the consumer
+                reader_error.append(exc)
             finally:
                 # Sentinel tells the dispatcher the input stream is done.
                 self._prefetch.put(None)
 
-        reader_thread = threading.Thread(target=_reader, daemon=True)
+        # The iterable itself does work (shaping, parsing) that reads the same
+        # per-run contracts, so the reader inherits the caller's context too.
+        reader_ctx = contextvars.copy_context()
+        reader_thread = threading.Thread(
+            target=lambda: reader_ctx.run(_reader), daemon=True
+        )
         reader_thread.start()
 
         try:
@@ -287,6 +349,11 @@ class OrderedChunkRunner(ChunkDispatcher):
                         f"Parallel chunk ordering broken: expecting {self._next_yield}, "
                         f"buffer has {sorted(self._buffer.keys())[:5]}"
                     )
+            # Every chunk the reader managed to hand over has now been yielded, so
+            # the caller's accounting is intact; the read itself still failed, and
+            # it is raised here rather than reported as a completed stream.
+            if reader_error:
+                raise reader_error[0]
         finally:
             # Drain any stragglers and clean up.
             while self._pending or self._buffer:
@@ -307,3 +374,67 @@ class OrderedChunkRunner(ChunkDispatcher):
                 self._executor.shutdown(wait=True, cancel_futures=True)
                 self._executor = None
             reader_thread.join(timeout=5)
+
+
+def shares_one_destination_connection(max_workers: int) -> bool:
+    """True when later batches must stay on the thread that opened the connection.
+
+    SQLite, Snowflake, Iceberg, and a public TCP proxy each force one writer.
+    ``ChunkDispatcher`` still runs that writer on a pool thread. psycopg2 is
+    not safe there: the next COPY waits forever, and the destination stops
+    growing after the pages that already committed.
+    """
+    try:
+        workers = int(max_workers)
+    except (TypeError, ValueError):
+        return True
+    return workers <= 1
+
+
+def drive_ordered_batches(
+    *,
+    max_workers: int,
+    initial: T,
+    fetch_next: Callable[[T], T | None],
+    prepare: Callable[[int, T], T],
+    process: Callable[[int, T], R],
+    apply_result: Callable[[int, R], None],
+    start_idx: int,
+) -> None:
+    """Write the pages after the synchronous DDL page.
+
+    ``max_workers <= 1`` runs ``process`` on the caller. A shared psycopg2 or
+    Snowflake connection created on that thread must not be handed to the pool.
+    More than one worker keeps the overlapping read/write path.
+    """
+    if shares_one_destination_connection(max_workers):
+        idx = start_idx
+        batch = fetch_next(initial)
+        while batch:
+            prepared = prepare(idx, batch)
+            apply_result(idx, process(idx, prepared))
+            batch = fetch_next(batch)
+            idx += 1
+        return
+
+    idx = start_idx
+    with ChunkDispatcher(max_workers=max_workers) as dispatcher:
+        try:
+            batch = fetch_next(initial)
+            while batch:
+                prepared = prepare(idx, batch)
+                dispatcher.submit(idx, prepared, process)
+                for ready_idx, result in dispatcher.ready():
+                    apply_result(ready_idx, result)
+                batch = fetch_next(batch)
+                idx += 1
+            for ready_idx, result in dispatcher.results():
+                apply_result(ready_idx, result)
+        except BaseException:
+            # A chunk already writing is allowed to finish. Apply that prefix
+            # before the error propagates so the checkpoint matches rows the
+            # destination already holds. Queued chunks still do not write.
+            dispatcher.abort()
+            for ready_idx, result in dispatcher.drain_committed_prefix():
+                apply_result(ready_idx, result)
+            raise

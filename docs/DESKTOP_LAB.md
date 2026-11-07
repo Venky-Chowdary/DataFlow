@@ -1,0 +1,167 @@
+# Desktop lab — 80 catalog slots as source and dest
+
+Operator option on **Proofs → Integrity ledger → Run desktop lab**.
+
+`POST /api/v1/workspace/proofs/desktop-lab` binds every id in
+`services.desktop_lab.DESKTOP_LAB_CONNECTORS` (≥80) and runs:
+
+1. **Map SSOT** — `semantic_mapper.map_columns` must land `id`/`amount`/`code`
+2. **Cell transform SSOT** — `apply_transform` integer/decimal/none on the fixture
+3. **ShapeEngine** — trim + upper on `code` (` usd` → `USD`) before Map/write
+4. **Validate** — Execute with preflight (`skip_preflight=False`, strict)
+5. **Dest role** — shaped 2-row fixture → that connector
+6. **Source role** — that object → SQLite
+7. **Payload reconcile** — SQLite must contain `(1, 1000.00, USD)` and `(2, 2000.50, EUR)`
+8. **No silent loss** — `rejected_rows` and `coerced_null_rows` must be 0
+
+`100%` on this fixture means every listed slot passed Map + Validate + dest +
+source + payload with zero rejected/coerced rows. Source-only (PDF/DOCX/HTML/REST)
+and dest-only (pgvector) tiles are excluded — they cannot pass both ways.
+
+## Unique-engine cartesian
+
+`POST /api/v1/workspace/proofs/desktop-lab-cross` (Proofs → **Run unique-engine matrix**)
+runs every *live unique engine* as source × every live unique engine as dest:
+
+Default unique engines (25 pairs): PostgreSQL, MySQL, MongoDB, SQLite, MinIO S3.
+
+`DATAFLOW_CROSS_EXTENDED=1` adds SQL Server, Oracle, fake-gcs, Azurite, DynamoDB
+Local, fakesnow, BigQuery emulator, Redis, Iceberg REST, and Elasticsearch when
+`:9200` answers. Pair/seed calls that exceed `DATAFLOW_CROSS_PAIR_TIMEOUT`
+(default 90s) are **skipped**, never passed. Closed ports skip with a named
+reason. Salesforce / HubSpot / Stripe stay omitted until a live tenant exists.
+Emulators are not a customer-tenant SKU.
+
+Proofs → **Run unique-engine matrix** returns HTTP 200 with `success=false` when
+pairs failed or skipped so the ledger can show the report. A 422 used to hide
+the counts behind a generic toast.
+
+That is **not** 80×80 catalog aliases (Neon/RDS share the Postgres wire) and not
+60 unique connectors.
+
+```bash
+DATAFLOW_CROSS_MATRIX=1 PYTHONPATH=. python -m pytest \
+  tests/test_desktop_lab_cross_matrix.py -q
+
+# Every unique engine that can answer on this box (SQL Server, Redis, ES, warehouses)
+DATAFLOW_CROSS_MATRIX=1 DATAFLOW_CROSS_EXTENDED=1 PYTHONPATH=. python -m pytest \
+  tests/test_desktop_lab_cross_matrix.py -q
+
+# Cartesian + 80 catalog slots + every saved schedule + port inventory
+DATAFLOW_PROVE_ALL=1 DATAFLOW_CROSS_EXTENDED=1 PYTHONPATH=. python -m pytest \
+  tests/test_live_fleet_proof.py -q
+```
+
+## Type × sync × schema (named fixture — not every type)
+
+`tests/desktop_lab_dimensions.py` is the live type × two-run sync × schema-shape
+matrix on PostgreSQL and MySQL only. It is **not** every SQL type, every
+canonical sync mode, or every dest-exists shape.
+
+Measured on this host (`desktop_lab_dimensions.json`): **24 passed / 0 failed /
+0 skipped** of 24 cells.
+
+- **Types:** the 7-column FIDELITY fixture (`id`, `amt_dec`, `amt_float`,
+  `note_null`, `note_empty`, `ts_utc`, `flag`). JSON / array / UUID / binary
+  are not in this fixture.
+- **Sync:** overwrite, append, incremental_append, upsert (two-run row counts).
+  CDC / SCD2 / mirror / reverse_etl / incremental_deduped are not claimed here.
+- **Schema:** create-new typed, dest-exists compatible, dest-exists DECIMAL→INT
+  (fail-closed), and dest-exists extra source G13 (fail-closed) on four SQL
+  routes. Dest-exists overwrite keeps live dest types/nullability.
+
+```bash
+PYTHONPATH=. python -m pytest tests/test_desktop_lab_dimensions.py -q
+```
+
+## Previously untested dimensions (live desktop)
+
+`tests/desktop_lab_untested.py` covers what the 7-column overwrite fixture
+skipped, against services that are actually up.
+
+Measured on this host: **29 passed / 0 failed / 1 skipped** of 30 cells
+(`test_desktop_lab_untested_important_dimensions`, 48.47s,
+`desktop_lab_untested.json`).
+
+Passed: dest-exists JSONB/UUID/BYTEA/INTERVAL; **INT[] create-new and
+dest-exists stay `bigint[]` (never invent JSONB)**; XML + native POINT;
+**PostGIS GEOGRAPHY** dest-exists (`geography(Point,4326)`); nested explode
+CSV→PG; incremental_deduped and mirror on PG and MySQL dest; SCD2 PG→SQLite;
+reverse-ETL PG→MySQL; **local SaaS HTTP stub** Salesforce / HubSpot / Stripe
+(not a customer org; Stripe Planned refuse measured); MySQL ROW binlog →
+SQLite CDC plus **redelivery replay** (`exactly_once_claimed=false`);
+PG logical → PG CDC; G14 dest-only NOT NULL; PG→SQLite/Mongo/S3/SQL Server
+dest-exists; **Oracle dest-exists** (fresh process); **GCS / ADLS create-new**
+on fake-gcs / Azurite (emulator, not customer-tenant);
+`production_sku_validate_honesty` (78 routes, 0 planned).
+
+Skipped (not invented green): **BQ create-new** — goccy emulator
+`sql: connection is already closed` (5s health probe). Create-new was
+measured on this host when the emulator was healthy; that is not a
+customer-tenant PRODUCTION_SKU. Catalog tiles are not transfer-live.
+CDC default remains **at-least-once upsert**.
+
+```bash
+PYTHONPATH=. python -m pytest tests/test_desktop_lab_untested.py -q
+```
+
+## Honesty
+
+- **80 is catalog slots**, not unique engines, not catalog tile count, not 650+ live.
+- Hosted twins (Neon / RDS / CNPG / OpenShift PostgreSQL) share the parent driver.
+  They prove alias wiring on a real write/read.
+- Unique duplex engines are counted separately (`unique_engines_duplex_passed`).
+- A backend that is down is `skipped` with a reason — never a fake green.
+- CDC default remains **at-least-once upsert**.
+
+## Reproduce
+
+```bash
+cd apps/api
+PYTHONPATH=. python -m pytest tests/test_desktop_lab_duplex_matrix.py -q
+```
+
+
+## Track C — NoSQL / analytics scale matrix (100K harness)
+
+`apps/api/tests/scale/nosql_matrix.py` extends this lab from
+per-route smoke checks to a scale sweep at `--rows 100000` over MongoDB,
+Redis, DynamoDB Local, the BigQuery emulator, DuckDB, and — when they can be
+proven on the box — Elasticsearch, ClickHouse and Iceberg, each paired with
+PostgreSQL and MySQL in both directions plus same-engine round trips, across
+all four sync modes.
+
+```bash
+cd apps/api
+DATAFLOW_SCALE_NOSQL=1 PYTHONPATH=. python -m tests.scale.nosql_matrix \
+    --rows 100000 --out /tmp/track_c.json
+```
+
+Two fleet notes learned by running it:
+
+- The compose `mongo-init` step used `#` comments inside the `mongosh --eval`
+  script, so the shell raised `SyntaxError` and `rs0` was never initiated —
+  every MongoDB route then failed on a node with no replica set. Comments in
+  that block must be JavaScript (`//`).
+- Elasticsearch, ClickHouse and Iceberg are **not** in the `amd64-sql` profile.
+  The harness records the driver's own error as the skip reason rather than
+  reporting a red engine; see `docs/SCALE_MATRIX_NOSQL.md` for the verbatim
+  strings.
+
+Measured results live in `docs/SCALE_MATRIX_NOSQL.md`, dated and attributed to
+this host — never quote them without that attribution.
+
+## Measured on this host — 2026-09-01
+
+Not 60+ unique connectors. Not 650+ tiles.
+
+| Proof | Passed | Failed | Skipped | Of | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Core unique-engine cartesian (PG, MySQL, Mongo, SQLite, MinIO S3) | 25 | 0 | 0 | 25 | dest COUNT=2 every pair |
+| Extended unique-engine cartesian (15 engines) | 121 | 35 | 69 | 225 | Oracle/Iceberg ports closed; SQL Server TLS; DynamoDB DDL identity; fakesnow/BQ uniqueness probe; Redis/ES G13 |
+| Desktop lab catalog slots | 88 | 0 | 0 | 88 | unique engines duplex 18 |
+| Saved schedules Run Now | 1 | 0 | 0 | 1 | Lab PG→MySQL; independent MySQL COUNT=5 |
+| PRODUCTION_SKU pytest | 52 | 9 | 25 | 86 | emulator dest-existence / SQL Server TLS / pgvector / DynamoDB |
+
+Reachable backends: PostgreSQL, MySQL, MongoDB, SQL Server, Redis, Elasticsearch, MinIO, fake-GCS, Azurite, DynamoDB Local, BigQuery emulator, fakesnow. Closed: Oracle `:1521`, Iceberg REST `:8181`.
+

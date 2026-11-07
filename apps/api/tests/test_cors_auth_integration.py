@@ -51,6 +51,11 @@ def test_stream_with_query_token_is_allowed(client, monkeypatch):
     import src.services.auth_service as auth_mod
 
     email = "stream@test.local"
+    # A session token is honoured only for an account that exists (a token
+    # outliving its deleted account is refused by the auth middleware).
+    import src.middleware.auth_middleware as auth_mw
+
+    monkeypatch.setattr(auth_mw, "lookup_user", lambda e: {"email": e, "role": "viewer"})
     token, _ = auth_mod.create_token(email)
 
     # The job id is fake; the stream endpoint will 404, but auth must pass first.

@@ -1,0 +1,11 @@
+[
+  {
+    "id": 101,
+    "subject": "fixture ticket 101",
+    "status": 4,
+    "priority": 2,
+    "requester_id": 77,
+    "created_at": "2024-01-02T00:00:00Z",
+    "updated_at": "2024-01-03T00:00:00Z"
+  }
+]

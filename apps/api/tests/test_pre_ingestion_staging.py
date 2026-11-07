@@ -18,6 +18,35 @@ def test_staging_table_name_stable():
     assert staging_table_name("public.orders") == "public_orders_df_staging"
 
 
+def test_staging_endpoint_drops_parent_shape_stamps_and_procedure_hooks():
+    """The staging sibling is a DataFlow-owned plain table: parent live-shape
+    stamps would grade it against the wrong DDL and a customer CALL hook
+    would bind staged rows into the client's procedure."""
+    from services.pre_ingestion_staging import staging_endpoint
+    from src.transfer.models import EndpointConfig
+
+    dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        table="users",
+        database="/tmp/x.db",
+        extra={
+            "table_exists": True,
+            "schema_types": {"id": "INTEGER"},
+            "primary_key_columns": ["id"],
+            "dest_write_mode": "procedure",
+            "dest_procedure_before": "CALL load_users()",
+            "unrelated_option": "kept",
+        },
+    )
+    clone = staging_endpoint(dest)
+    assert clone.table == "users_df_staging"
+    assert clone.collection == "users_df_staging"
+    assert clone.extra == {"unrelated_option": "kept"}
+    assert dest.table == "users"
+    assert dest.extra["dest_write_mode"] == "procedure"
+
+
 def test_pre_ingestion_staging_balanced_excludes_bad_from_primary(tmp_path: Path):
     """Balanced + staging: clean row on primary; bad row only in staging + DLQ."""
     from src.transfer.engine import UniversalTransferEngine

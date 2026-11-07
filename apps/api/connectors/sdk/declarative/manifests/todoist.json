@@ -1,0 +1,93 @@
+{
+  "name": "todoist",
+  "docs": "https://developer.todoist.com/rest/v2/",
+  "base_url": "https://api.todoist.com/rest/v2",
+  "auth": {
+    "type": "bearer"
+  },
+  "defaults": {
+    "page_size": 200,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "tasks",
+      "path": "tasks",
+      "records_path": "results",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 200
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "cursor",
+        "cursor_path": "next_cursor",
+        "page_size": 200,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "content": {"type": ["string", "null"]},
+          "project_id": {"type": ["string", "null"]},
+          "is_completed": {"type": ["boolean", "null"]},
+          "created_at": {"type": ["string", "null"], "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "projects",
+      "path": "projects",
+      "records_path": "results",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 200
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "cursor",
+        "cursor_path": "next_cursor",
+        "page_size": 200,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": ["string", "null"]},
+          "is_archived": {"type": ["boolean", "null"]},
+          "created_at": {"type": ["string", "null"], "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "sections",
+      "path": "sections",
+      "records_path": "results",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 200
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "cursor",
+        "cursor_path": "next_cursor",
+        "page_size": 200,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": ["string", "null"]},
+          "project_id": {"type": ["string", "null"]}
+        }
+      }
+    }
+  ]
+}

@@ -314,7 +314,9 @@ def test_pipeline_preserves_decimal_params_and_demotes_bare_varchar():
         ["notes"],
         ["notes"],
         source_schemas=[{"name": "notes", "inferred_type": "VARCHAR", "samples": []}],
-        target_schemas=[{"name": "notes", "inferred_type": "VARCHAR", "samples": []}],
+        # Onto a typed column: a bare VARCHAR with no samples proves nothing
+        # about the cast. (Onto a same-named text column it loses nothing, D159.)
+        target_schemas=[{"name": "notes", "inferred_type": "INTEGER", "samples": []}],
         destination_db_type="postgresql",
         use_llm=False,
         destination_table_exists=True,

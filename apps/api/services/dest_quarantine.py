@@ -17,9 +17,12 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import replace
+from contextlib import closing
 from datetime import datetime, timezone
 from typing import Any
+
+from services.procedure_destination import sibling_table_endpoint
+from services.type_system import materialize_dest_ddl
 
 logger = logging.getLogger(__name__)
 
@@ -78,21 +81,82 @@ def dlq_table_name(dest_table: str | None) -> str:
 
 
 def dlq_endpoint(destination: Any, *, dest_table: str | None = None) -> Any:
-    """Clone destination endpoint pointing at the DLQ table/collection."""
+    """Clone destination endpoint pointing at the DLQ table/collection.
+
+    The DLQ is always a plain table owned by DataFlow. A destination driven by
+    a stored procedure / dest DML / before-after hooks must not carry that
+    contract onto the clone: the ``_df_*`` rows would be bound into the
+    client's INSERT or CALL (which has none of those columns), the hooks would
+    fire a second time, and no ``*_df_quarantine`` table would ever exist.
+    The parent table's probed live shape (``schema_types`` ...) is dropped for
+    the same reason: graded against it, every ``_df_*`` column is "missing".
+    """
     table = dest_table or getattr(destination, "table", None) or getattr(destination, "collection", None) or "import"
-    dlq = dlq_table_name(str(table))
-    return replace(destination, table=dlq, collection=dlq)
+    return sibling_table_endpoint(destination, dlq_table_name(str(table)))
+
+
+def operator_quarantine_json_cell(value: Any) -> Any:
+    """Operator-visible cell. SQL NULL is JSON null. Empty string stays empty.
+
+    ``__DF_SQL_NULL__`` is the internal transfer wire so NULL and ``""`` stay
+    distinct inside the writer. The quarantine payload and the job API must
+    not show that token. ``__DF_MISSING__`` stays the missing token — it is
+    not SQL NULL.
+    """
+    from services.value_serializer import (
+        DF_MISSING_SENTINEL,
+        SQL_NULL_SENTINEL,
+        cell_to_string,
+        is_missing_sentinel,
+        unescape_wire_text,
+    )
+
+    if is_missing_sentinel(value):
+        return DF_MISSING_SENTINEL
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value.strip() == SQL_NULL_SENTINEL:
+            return None
+        return unescape_wire_text(value)
+    text = cell_to_string(value, preserve_sql_null=True)
+    if text == SQL_NULL_SENTINEL:
+        return None
+    return text
+
+
+def project_operator_quarantine_details(details: list[Any]) -> list[Any]:
+    """Copy findings so the API shows JSON null. Stored rows stay the wire."""
+    projected: list[Any] = []
+    for detail in details or []:
+        if not isinstance(detail, dict):
+            projected.append(detail)
+            continue
+        copied = dict(detail)
+        if "value" in copied:
+            copied["value"] = operator_quarantine_json_cell(copied.get("value"))
+        for key in ("values", "source_values"):
+            payload = copied.get(key)
+            if isinstance(payload, dict):
+                copied[key] = {
+                    str(k): operator_quarantine_json_cell(v) for k, v in payload.items()
+                }
+        projected.append(copied)
+    return projected
 
 
 def rejected_details_to_dlq_records(
     details: list[dict[str, Any]],
     *,
     job_id: str,
-) -> list[dict[str, str]]:
-    """Map writer ``rejected_details`` into DLQ table rows (string cells)."""
-    from connectors.writer_common import quarantine_cell_wire
+) -> list[dict[str, Any]]:
+    """Map writer ``rejected_details`` into DLQ table rows.
 
-    rows: list[dict[str, str]] = []
+    ``_df_payload`` is JSON the operator can query: SQL NULL is JSON null and
+    an empty string stays ``""``. ``_df_value`` is SQL NULL for a null cell.
+    The internal wire token is not stored in either column.
+    """
+    rows: list[dict[str, Any]] = []
     created = _now()
     for detail in details or []:
         if not isinstance(detail, dict):
@@ -106,11 +170,11 @@ def rejected_details_to_dlq_records(
             "_df_row": str(detail.get("row") if detail.get("row") is not None else ""),
             "_df_column": str(detail.get("column") or ""),
             "_df_target": str(detail.get("target") or ""),
-            "_df_value": quarantine_cell_wire(detail.get("value")),
+            "_df_value": operator_quarantine_json_cell(detail.get("value")),
             "_df_reason": str(detail.get("reason") or ""),
             "_df_policy": str(detail.get("policy") or ""),
             "_df_payload": json.dumps(
-                {str(k): quarantine_cell_wire(v) for k, v in payload.items()},
+                {str(k): operator_quarantine_json_cell(v) for k, v in payload.items()},
                 ensure_ascii=False,
             ),
             "_df_created_at": created,
@@ -156,7 +220,15 @@ def write_dest_quarantine(
     endpoint = dlq_endpoint(destination)
     columns = list(META_COLUMNS)
     schema = {c: "string" for c in columns}
-    mappings = [{"source": c, "target": c, "confidence": 1.0} for c in columns]
+    # Unstamped mappings fell back to the Map default carrier `VARCHAR`, which
+    # MySQL rejects outright (1064: a width is mandatory) — so the DLQ table
+    # could never be created and no destination copy of the evidence existed.
+    # The carrier is materialized for the destination dialect instead.
+    dlq_carrier = materialize_dest_ddl(dest_type, "string")
+    mappings = [
+        {"source": c, "target": c, "target_type": dlq_carrier, "confidence": 1.0}
+        for c in columns
+    ]
 
     rows_written, ddl_log, summary = write_destination_database(
         endpoint,
@@ -169,10 +241,19 @@ def write_dest_quarantine(
         job_id=f"{job_id}_dlq" if job_id else None,
     )
     table = endpoint.table or dlq_table_name("import")
+    written = int(rows_written or 0)
+    # A short write is not a durable destination copy: report it as such rather
+    # than claiming `ok` beside a table holding fewer rows than the findings.
+    ok = written >= len(records)
     return {
-        "ok": True,
+        "ok": ok,
+        "error": (
+            ""
+            if ok
+            else f"destination DLQ wrote {written} of {len(records)} finding(s)"
+        ),
         "skipped": False,
-        "rows_written": int(rows_written or 0),
+        "rows_written": written,
         "table": table,
         "ddl": list(ddl_log or [])[:20],
         "writer_summary": {
@@ -193,14 +274,30 @@ def _sqlite_db_path(destination: Any) -> str:
     )
 
 
-def _qualified_dlq_table(cfg: dict[str, Any], table: str) -> str:
-    from connectors.generic_sql import get_sql_schema
-    from connectors.writer_common import quote_sql_identifier
+def _quote_ident(name: str, dest_type: str = "") -> str:
+    """Quote a DLQ identifier in the destination dialect.
 
+    MySQL without ANSI_QUOTES treats ``"col"`` as a string literal, so
+    ``WHERE "_df_promoted_at" = ''`` is always false and open_rows stays 0
+    even when the dest DLQ holds unpromoted findings.
+    """
+    from connectors.writer_common import quote_sql_identifier
+    from services.dialect_profiles import quote_char_for
+
+    quote = quote_char_for(dest_type)
+    if not quote:
+        return str(name)
+    return quote_sql_identifier(name, quote)
+
+
+def _qualified_dlq_table(cfg: dict[str, Any], table: str, dest_type: str = "") -> str:
+    from connectors.generic_sql import get_sql_schema
+
+    dialect = dest_type or str(cfg.get("type") or "")
     schema_name = get_sql_schema(cfg) or ""
-    table_q = quote_sql_identifier(table)
+    table_q = _quote_ident(table, dialect)
     if schema_name:
-        return f"{quote_sql_identifier(schema_name)}.{table_q}"
+        return f"{_quote_ident(schema_name, dialect)}.{table_q}"
     return table_q
 
 
@@ -217,7 +314,6 @@ def mark_dlq_promoted(
     """
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
-    from connectors.writer_common import quote_sql_identifier
 
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     if not dest_supports_dlq_table(dest_type):
@@ -265,7 +361,7 @@ def mark_dlq_promoted(
                 if job_id:
                     sql += ' AND "_df_job_id" = ?'
                     params.append(job_id)
-            with sqlite3.connect(path, timeout=8) as conn:
+            with closing(sqlite3.connect(path, timeout=8)) as conn:
                 cur = conn.execute(sql, params)
                 updated = int(cur.rowcount or 0)
                 conn.commit()
@@ -275,32 +371,56 @@ def mark_dlq_promoted(
         from connectors.generic_sql import get_sqlalchemy_engine
 
         cfg = resolve_connector_config(destination)
-        qualified = _qualified_dlq_table(cfg, table)
+        qualified = _qualified_dlq_table(cfg, table, dest_type)
         engine = get_sqlalchemy_engine(cfg)
+        q = lambda name: _quote_ident(name, dest_type)
         params_sa: dict[str, Any] = {"promoted_at": promoted_at}
         if by_job:
             sql = (
-                f"UPDATE {qualified} SET {quote_sql_identifier('_df_promoted_at')} = :promoted_at "  # nosec B608
-                f"WHERE {quote_sql_identifier('_df_job_id')} = :job_id "
-                f"AND ({quote_sql_identifier('_df_promoted_at')} IS NULL "
-                f"OR {quote_sql_identifier('_df_promoted_at')} = '')"
+                f"UPDATE {qualified} SET {q('_df_promoted_at')} = :promoted_at "  # nosec B608
+                f"WHERE {q('_df_job_id')} = :job_id "
+                f"AND ({q('_df_promoted_at')} IS NULL "
+                f"OR {q('_df_promoted_at')} = '')"
             )
             params_sa["job_id"] = job_id
         else:
             placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
             params_sa.update({f"id{i}": ids[i] for i in range(len(ids))})
             sql = (
-                f"UPDATE {qualified} SET {quote_sql_identifier('_df_promoted_at')} = :promoted_at "  # nosec B608
-                f"WHERE {quote_sql_identifier('_df_qid')} IN ({placeholders})"
+                f"UPDATE {qualified} SET {q('_df_promoted_at')} = :promoted_at "  # nosec B608
+                f"WHERE {q('_df_qid')} IN ({placeholders})"
             )
             if job_id:
-                sql += f" AND {quote_sql_identifier('_df_job_id')} = :job_id"
+                sql += f" AND {q('_df_job_id')} = :job_id"
                 params_sa["job_id"] = job_id
         with engine.begin() as conn:
             result = conn.execute(sa.text(sql), params_sa)
             updated = int(result.rowcount or 0)
         return {"updated": updated, "table": table, "promoted_at": promoted_at}
     except Exception as exc:
+        if re.search(
+            r"undefined.?table|does not exist|no such table|invalid object name",
+            str(exc),
+            re.I,
+        ):
+            # Shape-divert / DLQ-only findings live in the control-plane DLQ —
+            # the destination may never have had a {table}_df_quarantine.
+            # Absent table is not an error: the closure ledger must not
+            # diverge on an UPDATE to a store the finding never lived in (R3).
+            logger.info(
+                "mark_dlq_promoted: no destination quarantine table %s — "
+                "findings live in the control-plane DLQ",
+                table,
+            )
+            return {
+                "updated": 0,
+                "skipped": True,
+                "reason": (
+                    "no destination quarantine table — findings live in "
+                    "the control-plane DLQ"
+                ),
+                "table": table,
+            }
         logger.warning("mark_dlq_promoted failed: %s", exc)
         return {"updated": 0, "error": str(exc)[:300], "table": table}
 
@@ -362,7 +482,6 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
     """Count unpromoted DLQ rows (optional job filter) for Studio badges."""
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
-    from connectors.writer_common import quote_sql_identifier
 
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     if not dest_supports_dlq_table(dest_type):
@@ -414,7 +533,7 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
             if job_id:
                 sql += ' AND "_df_job_id" = ?'
                 params.append(job_id)
-            with sqlite3.connect(path, timeout=8) as conn:
+            with closing(sqlite3.connect(path, timeout=8)) as conn:
                 row = conn.execute(sql, params).fetchone()
                 n = int(row[0] or 0) if row else 0
             return {"supported": True, "open_rows": n, "table": table}
@@ -423,16 +542,17 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
         from connectors.generic_sql import get_sqlalchemy_engine
 
         cfg = resolve_connector_config(destination)
-        qualified = _qualified_dlq_table(cfg, table)
+        qualified = _qualified_dlq_table(cfg, table, dest_type)
         engine = get_sqlalchemy_engine(cfg)
+        q = lambda name: _quote_ident(name, dest_type)
         sql = (
             f"SELECT COUNT(*) FROM {qualified} "  # nosec B608
-            f"WHERE ({quote_sql_identifier('_df_promoted_at')} IS NULL "
-            f"OR {quote_sql_identifier('_df_promoted_at')} = '')"
+            f"WHERE ({q('_df_promoted_at')} IS NULL "
+            f"OR {q('_df_promoted_at')} = '')"
         )
         params_sa: dict[str, Any] = {}
         if job_id:
-            sql += f" AND {quote_sql_identifier('_df_job_id')} = :job_id"
+            sql += f" AND {q('_df_job_id')} = :job_id"
             params_sa["job_id"] = job_id
         with engine.connect() as conn:
             row = conn.execute(sa.text(sql), params_sa).fetchone()

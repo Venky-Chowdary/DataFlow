@@ -1,36 +1,437 @@
-"""Audit log API — real workspace events + tip anchors."""
+"""Audit log API — real workspace events + tip anchors + scoped export."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+import csv
+import io
+import json
+import os
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from pydantic import BaseModel, Field
+
+from services.audit_coverage import record_security_event
+from services.workspace_access import tenant_scope as _tenant_scope
 
 router = APIRouter(prefix="/audit", tags=["Audit"])
 
 
+def tenant_scope(request: Request):
+    """The request's tenant scope; a header naming a workspace the caller is not
+    in is a 403 that is itself an audit event (authz.denied, cross_workspace)."""
+    try:
+        return _tenant_scope(request)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            from services.audit_coverage import record_authz_denial
+
+            request.state.workspace_header_rejected = True
+            record_authz_denial(
+                request,
+                required_permission="audit.read",
+                effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+                reason="cross_workspace",
+            )
+        raise
+
+
+def audit_export_honesty() -> dict[str, object]:
+    """Claims the audit download is allowed to make — not a signed letter.
+
+    Pilot reads this so "do you have SOC 2" / "can you sign a HIPAA BAA"
+    cannot drift into an attestation the export route does not issue.
+    """
+    return {
+        "official": False,
+        "kind": "workspace_audit_sample",
+        "signed_soc2": False,
+        "signed_hipaa_baa": False,
+        "signed_gdpr_dpa": False,
+        "note": (
+            "Workspace-scoped audit export. HMAC-SHA256 chain is diligence, "
+            "NOT a SOC 2 Type II letter, GDPR DPA, or HIPAA BAA attestation."
+        ),
+    }
+
+
+def _tenant_of(workspace_id: str) -> str:
+    from services.tenant_store import get_tenant_for_workspace
+
+    if not workspace_id:
+        return ""
+    tenant = get_tenant_for_workspace(workspace_id)
+    return str(tenant.id) if tenant else ""
+
+
+def _report_workspace(scope) -> str:
+    """One workspace for a report; "" (platform) only for a platform admin."""
+    if not scope.workspace_id and not scope.unrestricted:
+        raise HTTPException(status_code=403, detail="No workspace membership")
+    return scope.workspace_id
+
+
+def _require_platform_admin(request: Request, scope, permission: str) -> None:
+    """Platform-wide audit actions (purge, seal the platform head) — D220.
+
+    The chain and its retention are shared by every tenant, so a workspace
+    admin (every self-serve signup is one) may neither run them nor read the
+    platform figures they return.
+    """
+    from services.workspace_access import require_platform_admin
+
+    require_platform_admin(
+        request,
+        scope,
+        permission,
+        "This acts on the platform-wide audit trail: platform administrators only.",
+    )
+
+
+def _workspace_checkpoints(checkpoints: object) -> list[dict[str, object]]:
+    """Retention checkpoints as a workspace may see them: when, not how many.
+
+    A checkpoint's ``removed_count`` and boundary hashes describe the whole
+    platform chain (D220).
+    """
+    if not isinstance(checkpoints, list):
+        return []
+    return [
+        {"kind": c.get("kind"), "at": c.get("at")}
+        for c in checkpoints
+        if isinstance(c, dict)
+    ]
+
+
+def _next_after_seq(
+    events: list[dict[str, object]], after_seq: int | None
+) -> tuple[int | None, dict[str, str]]:
+    if after_seq is None:
+        return None, {}
+    next_seq = int(events[-1].get("chain_seq") or after_seq) if events else after_seq
+    return next_seq, {"X-Next-After-Seq": str(next_seq)}
+
+
+def _cef_header_escape(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _cef_extension_escape(value: object) -> str:
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("=", "\\=")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "\\n")
+    )
+
+
+def _cef_time_ms(value: object) -> int:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp() * 1000)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _cef_line(event: dict[str, object]) -> str:
+    """CEF intentionally omits details; the NDJSON export includes them."""
+    action = str(event.get("action") or "")
+    severity = {"info": 3, "success": 1, "warn": 6, "error": 8}.get(
+        str(event.get("level") or "info"), 3
+    )
+    header_action = _cef_header_escape(action)
+    extension = [
+        f"rt={_cef_time_ms(event.get('time'))}",
+        f"suser={_cef_extension_escape(event.get('actor') or '')}",
+        f"act={_cef_extension_escape(action)}",
+        f"request={_cef_extension_escape(event.get('resource') or '')}",
+        "cs1Label=workspace_id",
+        f"cs1={_cef_extension_escape(event.get('workspace_id') or '')}",
+        "cs2Label=event_hash",
+        f"cs2={_cef_extension_escape(event.get('event_hash') or '')}",
+        "cs3Label=prev_hash",
+        f"cs3={_cef_extension_escape(event.get('prev_hash') or '')}",
+        f"cs4Label=actor_type cs4={_cef_extension_escape(event.get('actor_type') or '')} cs5Label=actor_id cs5={_cef_extension_escape(event.get('actor_id') or '')}",
+        "cn1Label=chain_seq",
+        f"cn1={event.get('chain_seq') or 0}",
+        f"externalId={_cef_extension_escape(event.get('id') or '')}",
+    ]
+    device_version = os.getenv("DATAFLOW_VERSION", "1")
+    return (
+        f"CEF:0|Datawrap|Datawrap|{_cef_header_escape(device_version)}|"
+        f"{header_action}|{header_action}|{severity}|{' '.join(extension)}"
+    )
+
+
+_MASKED_NOTE = (
+    "API key, service-account and SCIM token ids are masked to their last four "
+    "characters for this reader; a workspace or platform admin's export carries "
+    "them whole. Masked records do not re-hash to event_hash."
+)
+
+
+def _reader_masker(request: Request, workspace_id: str):
+    """The projection this reader is shown, or ``None`` for a key manager (Browser 20)."""
+    from services.audit_actor_display import KeyIdMasker, reader_sees_key_ids
+
+    return None if reader_sees_key_ids(request, workspace_id) else KeyIdMasker()
+
+
+def _reader_view(masker, events: list) -> tuple[list, bool]:
+    """Events as this reader may see them: key ids whole only for key managers."""
+    if masker is None:
+        return events, False
+    return [masker(e) for e in events], True
+
+
 @router.get("/events")
 async def list_events(
+    request: Request,
     limit: int = Query(50, ge=1, le=500),
     level: str | None = Query(None, description="info | success | warn | error | all"),
+    after_seq: int | None = Query(None, ge=0),
+    action: str | None = Query(
+        None,
+        max_length=512,
+        description="Comma-separated action names; a trailing * matches a prefix (team.member.*)",
+    ),
+    q: str | None = Query(None, max_length=200, description="Substring of action, resource or actor"),
+    search: str | None = Query(None, max_length=200, description="Alias of q"),
+    before_seq: int | None = Query(
+        None, ge=0, description="Continue a truncated search below this chain_seq (search_resume_before_seq)"
+    ),
 ):
     from services.audit_log import list_audit_events
 
-    events = list_audit_events(limit=limit, level=level)
-    return {"events": events, "count": len(events)}
+    scope = tenant_scope(request)
+    workspace_id = scope.header_workspace_id
+    tenant_id = _tenant_of(workspace_id)
+    masker = _reader_masker(request, workspace_id)
+    # Scope by the caller's workspaces (or the one they are looking at). Do not
+    # AND tenant_id: events stamped with this workspace before a tenant existed
+    # would vanish, and a shared tenant must not pull sibling-workspace rows.
+    # A masked reader's search matches what it is shown, never a hidden key id.
+    events = list_audit_events(
+        limit=limit,
+        level=level,
+        workspace_filter=scope.strict_filter(),
+        after_seq=after_seq,
+        action=action,
+        search=q or search,
+        search_projection=masker,
+        before_seq=before_seq,
+    )
+    next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    search_truncated = bool(getattr(events, "search_truncated", False))
+    search_resume_before_seq = getattr(events, "search_resume_before_seq", None)
+    from services.audit_actor_display import add_actor_display
+
+    events, masked = _reader_view(masker, add_actor_display(events))
+    return JSONResponse(
+        {
+            "events": events,
+            "count": len(events),
+            "key_ids_masked": masked,
+            # A projected search stopped at its scan window: older matches may exist.
+            "search_truncated": search_truncated,
+            "search_resume_before_seq": search_resume_before_seq,
+            "workspace_id": workspace_id or None,
+            "tenant_id": tenant_id or None,
+            "next_after_seq": next_seq,
+        },
+        headers=cursor_headers,
+    )
+
+
+@router.get("/export")
+async def export_events(
+    request: Request,
+    format: str = Query("csv", description="csv | json | ndjson | cef"),
+    limit: int = Query(5000, ge=1, le=20000),
+    level: str | None = Query(None),
+    since: str | None = Query(None, description="ISO-8601 inclusive lower bound"),
+    until: str | None = Query(None, description="ISO-8601 inclusive upper bound"),
+    after_seq: int | None = Query(None, ge=0),
+):
+    """Workspace-scoped audit download for an auditor sample.
+
+    One workspace: ``X-Workspace-Id``, else the caller's own. Only events
+    stamped with that workspace are included. This is evidence, not a
+    SOC 2 / HIPAA letter. CEF omits event details intentionally; use NDJSON
+    when those details are needed.
+    """
+    from services.audit_log import latest_event_hash, list_audit_events
+
+    scope = tenant_scope(request)
+    try:
+        workspace_id = scope.target_workspace_id()
+    except HTTPException as exc:
+        if exc.status_code != 400:
+            raise
+        raise HTTPException(
+            status_code=400,
+            detail="X-Workspace-Id is required for audit export. "
+            "This download is a workspace sample, not a global dump.",
+        ) from exc
+    tenant_id = _tenant_of(workspace_id)
+    events = list_audit_events(
+        limit=limit,
+        level=level,
+        workspace_id=workspace_id,
+        since=since,
+        until=until,
+        after_seq=after_seq,
+    )
+    next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    events, masked = _reader_view(_reader_masker(request, workspace_id), events)
+    tip = latest_event_hash()
+    honesty = audit_export_honesty()
+    if masked:
+        honesty = {**honesty, "key_ids_masked": True, "key_ids_note": _MASKED_NOTE}
+        # Every format says so, NDJSON and CEF included (no envelope there).
+        cursor_headers = {**cursor_headers, "X-Datawrap-Key-Ids-Masked": "1"}
+    attestation = {
+        "official": honesty["official"],
+        "kind": honesty["kind"],
+        "note": honesty["note"],
+    }
+    fmt = (format or "csv").strip().lower()
+    if fmt not in ("csv", "json", "ndjson", "cef"):
+        raise HTTPException(status_code=400, detail="format must be csv, json, ndjson, or cef")
+    record_security_event(
+        "audit.export.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"format": fmt, "row_count": len(events), "key_ids_masked": masked},
+    )
+    if fmt == "json":
+        return JSONResponse(
+            {
+                "events": events,
+                "count": len(events),
+                "workspace_id": workspace_id,
+                "tenant_id": tenant_id or None,
+                "tip_hash": tip,
+                "hash_alg": "HMAC-SHA256",
+                "honesty": honesty,
+                "attestation": attestation,
+                "key_ids_masked": masked,
+                "next_after_seq": next_seq,
+            },
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="datawrap-audit-{workspace_id}.json"'
+                ),
+                **cursor_headers,
+            },
+        )
+    if fmt == "ndjson":
+        body = "".join(
+            json.dumps(event, ensure_ascii=False, default=str) + "\n"
+            for event in events
+        )
+        return Response(
+            body,
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="datawrap-audit-{workspace_id}.ndjson"'
+                ),
+                **cursor_headers,
+            },
+        )
+    if fmt == "cef":
+        body = "".join(_cef_line(event) + "\n" for event in events)
+        return PlainTextResponse(
+            body,
+            media_type="text/plain",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="datawrap-audit-{workspace_id}.cef"'
+                ),
+                **cursor_headers,
+            },
+        )
+
+    columns = [
+        "id", "time", "actor", "actor_type", "actor_id", "action", "resource", "level",
+        "workspace_id", "tenant_id", "event_hash", "prev_hash", "hash_alg",
+        "details",
+    ]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(columns)
+    for ev in events:
+        row = [ev.get(col, "") for col in columns[:-1]]
+        details = ev.get("details") or {}
+        row.append(json.dumps(details, ensure_ascii=False, default=str) if details else "")
+        writer.writerow(row)
+    body = (
+        f"# {honesty}\n"
+        f"# workspace_id={workspace_id} tenant_id={tenant_id or ''} "
+        f"count={len(events)} tip_hash={tip or ''}\n"
+    ) + buf.getvalue()
+    filename = f"datawrap-audit-{workspace_id}.csv"
+    return PlainTextResponse(
+        body,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"; workspace-id={workspace_id}'
+            ),
+            **cursor_headers,
+        },
+    )
 
 
 @router.get("/tip")
-async def get_audit_tip():
-    """Return the HMAC chain tip plus the latest external anchor receipt."""
-    from services.audit_anchor import latest_anchor, list_anchors
-    from services.audit_log import latest_event_hash
+async def get_audit_tip(request: Request):
+    """The chain head for the caller's scope.
 
+    A platform admin gets the platform head, the anchor receipts and the
+    process-wide count of audit write failures. Everyone else — every self-serve signup is a workspace admin — gets the
+    head of their own workspace's records and none of the platform figures
+    (D220): anchors seal the platform head, and the failure count is the
+    whole deployment's.
+    """
+    from services.audit_anchor import latest_anchor, list_anchors
+    from services.audit_coverage import audit_access_failure_count
+    from services.audit_log import latest_event_hash, list_audit_events
+    from services.workspace_filter import WorkspaceFilter
+
+    scope = tenant_scope(request)
+    if not scope.unrestricted:
+        workspace_id = _report_workspace(scope)
+        latest = list_audit_events(limit=1, workspace_filter=WorkspaceFilter.only(workspace_id))
+        head = str((latest[0] if latest else {}).get("event_hash") or "") or None
+        return {
+            "scope": "workspace",
+            "workspace_id": workspace_id,
+            "tip_hash": head,
+            "anchor": None,
+            "anchors_recent": [],
+            "matched": False,
+            "audit_access_failures": None,
+            "honesty": (
+                "Head of this workspace's own audit records (HMAC-SHA256). Anchors "
+                "seal the platform-wide chain and are a platform administrator's view."
+            ),
+        }
     tip = latest_event_hash()
     anchor = latest_anchor()
     return {
+        "scope": "platform",
+        "workspace_id": None,
         "tip_hash": tip,
         "anchor": anchor,
         "anchors_recent": list_anchors(limit=5),
         "matched": bool(tip and anchor and anchor.get("tip_hash") == tip),
+        "audit_access_failures": audit_access_failure_count(),
         "honesty": (
             "Tip is HMAC-SHA256 chain head. Anchor is a diligence seal "
             "(stub by default — not auditor WORM / TSA until provider configured)."
@@ -38,11 +439,323 @@ async def get_audit_tip():
     }
 
 
+@router.get("/secret-scan")
+async def scan_audit_secrets(
+    request: Request,
+    limit: int = Query(20000, ge=1, le=20000),
+):
+    from services.audit_log import scan_audit_events_for_secrets
+
+    scope = tenant_scope(request)
+    result = scan_audit_events_for_secrets(
+        limit=limit,
+        workspace_filter=scope.strict_filter(),
+    )
+    record_security_event(
+        "audit.secret_scan.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"flagged_count": len(result.get("findings") or [])},
+    )
+    return result
+
+
+@router.get("/verify")
+async def verify_audit_chain(
+    request: Request,
+    limit: int = Query(5000, ge=1, le=20000, description="Records to walk, oldest first"),
+):
+    """Re-walk the evidence chain.
+
+    With ``X-Workspace-Id`` (or for any non-admin) this is the workspace's own
+    chain: its records and the per-workspace links between them, so another
+    tenant's records can neither fail nor appear in the verdict (R7). With no
+    header a platform admin gets the platform-wide walk, each finding naming
+    its workspace.
+
+    The verdict (C4): ``verified`` is true only when every record in scope was
+    checked and holds up. A record signed under a key this deployment no longer
+    holds (not configured, not retired, not in the persisted keyring) cannot be
+    checked, so it is never counted as verified — and not as tampering when the
+    deployment's sealed key history shows it signed with that key and the
+    record falls within that key's use, or the record sits before the chain
+    position where the history began (a key an earlier deploy lost). A record
+    naming any other key after that position is tampering
+    (``unknown_key_after_keyring``), as is a history whose signed anchor
+    record was reset (``key_history_tampered``; see
+    ``POST /chain/key-history/reanchor`` after a secrets-key change). A chain whose only exceptions are lost keys reports
+    ``status: verified_with_exceptions``, ``verified: false``,
+    ``tampering_detected: false`` and ``unverifiable_key_lost`` (``count`` and
+    ``by_key_id``); supplying that key as a retired audit key makes those
+    records verify again. A record whose content no longer matches its
+    signature, or a record missing from the chain, is tampering (``status:
+    findings``, ``tampering_detected: true``) whatever else is lost; a fork
+    from concurrent writers is counted under ``categories.fork``.
+    ``verified: null`` means nothing was walked (``nothing_checked`` or
+    ``store_unavailable``).
+    """
+    from services.evidence_chain import verify_chain
+
+    scope = tenant_scope(request)
+    workspace_id = _report_workspace(scope)
+    result = verify_chain(limit=limit, workspace_id=workspace_id)
+    if workspace_id:
+        result = {
+            **result,
+            "retention_checkpoints": _workspace_checkpoints(result.get("retention_checkpoints")),
+        }
+    record_security_event(
+        "audit.verify.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={
+            "ok": bool(result.get("verified")),
+            "verified_count": result.get("checked", 0),
+        },
+    )
+    return result
+
+
+class ReanchorBody(BaseModel):
+    reason: str = Field(min_length=10, max_length=500)
+    accept_causes: list[str] = Field(default_factory=lambda: ["legacy_datetime_roundtrip"])
+    dry_run: bool = True
+
+
+@router.post("/chain/reanchor")
+async def reanchor_audit_chain(body: ReanchorBody, request: Request):
+    """Platform admin: migrate records the old hash input broke (R7).
+
+    Dry run by default. Applying it files ``audit.chain.reanchored`` into the
+    chain and seals each accepted record as it stands; see
+    ``services.audit_chain_reanchor``. A workspace admin cannot do this: the
+    chain is shared, so the decision is the platform's.
+    """
+    from services.audit_chain_reanchor import ReanchorError, reanchor_chain
+    from services.audit_log import actor_from_request
+
+    scope = tenant_scope(request)
+    if not scope.unrestricted or scope.workspace_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Re-anchoring the audit chain is a platform administrator action.",
+        )
+    try:
+        result = reanchor_chain(
+            actor=actor_from_request(request),
+            reason=body.reason,
+            accept_causes=body.accept_causes,
+            dry_run=body.dry_run,
+        )
+    except ReanchorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_security_event(
+        "audit.chain.reanchor", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"dry_run": body.dry_run, "accepted": len(result["accepted"])},
+    )
+    return result
+
+
+class KeyHistoryReanchorBody(BaseModel):
+    reason: str = Field(min_length=10, max_length=500)
+    dry_run: bool = True
+    acknowledge_findings: bool = False
+
+
+@router.post("/chain/key-history/reanchor")
+async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Request):
+    """Platform admin: start the sealed audit key history over.
+
+    For a deployment whose ``DATAFLOW_SECRETS_KEY`` changed: the history's
+    MACs no longer verify, so ``/verify`` reports ``key_history_tampered``
+    until an administrator re-anchors it. Dry run by default.
+
+    Both the dry run and the apply run the platform ``verify_chain`` first.
+    While it reports tampering, the call is refused (409) unless
+    ``acknowledge_findings`` is true. Applying it writes the signed
+    ``audit.key_history.reanchored`` chain record whose signed details carry
+    the previous history position, the positions it supersedes, the history
+    problem it resolves and every tampering finding at that moment; the
+    verifier keeps reporting those as ``prior_tampering`` (a re-anchor never
+    whitewashes tampering). History entries whose MAC fails are re-sealed as
+    of now, so records before the re-anchor naming them read as lost keys.
+    A workspace admin cannot do this.
+
+    Upgrade note: key-history rows written in the a350ff42a format (MAC
+    without namespace, epoch without a chain anchor) fail the current MAC and
+    read as ``key_history_tampered`` until re-anchored here. That format was
+    never released, so only test deployments of the integration branch are
+    affected.
+    """
+    from services import audit_chain_keystore as keystore
+    from services.audit_log import actor_from_request
+    from services.evidence_chain import verify_chain
+
+    scope = tenant_scope(request)
+    if not scope.unrestricted or scope.workspace_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Re-anchoring the audit key history is a platform administrator action.",
+        )
+    report = verify_chain()
+    tampering = [
+        {k: f.get(k) for k in ("kind", "category", "event_id", "chain_seq", "workspace_id")}
+        for f in report.get("findings") or [] if f.get("category") == "tampering"
+    ]
+    problem = str(report.get("key_history_tampered") or "")
+    inconclusive = int((report.get("categories") or {}).get("inconclusive") or 0)
+    if (report.get("tampering_detected") or inconclusive) and not body.acknowledge_findings:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"The audit chain reports tampering or inconclusive records "
+                f"({len(tampering)} tampering, {inconclusive} inconclusive"
+                f"{'; key history: ' + problem if problem else ''}). Re-anchoring records "
+                "them as prior tampering; send acknowledge_findings=true to proceed."
+            ),
+        )
+    try:
+        result = keystore.reanchor_key_history(
+            actor=actor_from_request(request), reason=body.reason, dry_run=body.dry_run,
+            findings=tampering, history_seq=int(report.get("key_history_seq") or 0),
+            superseded=list(report.get("key_history_signed_positions") or []),
+            history_problem=problem,
+        )
+        if report.get("secrets_key_changed") and not body.dry_run:
+            result["keyring_rekeyed"] = keystore.rekey_after_secrets_change(
+                actor=actor_from_request(request)
+            )
+    except keystore.KeystoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail="The audit key history is not reachable.") from exc
+    record_security_event(
+        "audit.key_history.reanchor", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={
+            "dry_run": body.dry_run, "applied": not body.dry_run, "reason": body.reason,
+            "acknowledged_findings": bool(body.acknowledge_findings),
+            "prior_tampering": len(tampering), "history_problem": problem or None,
+            "entries_resealed": len(result["entries_resealed"]),
+        },
+    )
+    return result
+
+
+@router.post("/verify-pack")
+async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...)):
+    """Verify an exported proof pack, and whether the chain still holds its record.
+
+    Three separable questions, answered separately: is the pack's own signature
+    intact, does it still hold the content its chain record was filed for, and
+    is that record still in the store. Accepts the pack itself or
+    ``{"pack": <pack>}``, like ``/transfer/proof-pack/verify``; a body that is
+    not a pack is a 422 naming the missing keys (PP3).
+    """
+    from services.evidence_chain import find_anchor
+    from services.proof_pack_request import pack_from_body
+    from services.signed_proof_pack import (
+        pack_body_digest_excluding_anchor,
+        verify_signed_proof_pack,
+    )
+
+    pack = pack_from_body(body)
+    result = verify_signed_proof_pack(pack)
+    anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
+    digest = pack_body_digest_excluding_anchor(pack)
+    chain_record = find_anchor(digest) if anchor.get("anchored") else None
+    chain_record_withheld = False
+    if chain_record:
+        # find_anchor searches the whole chain, so the record may belong to a
+        # workspace this reader cannot see: then only "found" is reported.
+        # Whether its key id shows whole is decided by the RECORD's workspace,
+        # not the reader's header (a workspace admin of A must not read B's
+        # key ids); a record with no workspace is whole for a platform admin only.
+        from services.audit_actor_display import KeyIdMasker, reader_sees_key_ids
+
+        record_ws = str(chain_record.get("workspace_id") or "")
+        scope = tenant_scope(request)
+        # An unscoped record is visible only to a scope that allows "" (L5).
+        if not scope.allows(record_ws):
+            chain_record, chain_record_withheld = {"id": chain_record.get("id")}, True
+        elif not reader_sees_key_ids(request, record_ws):
+            chain_record = KeyIdMasker()(dict(chain_record))
+    record_security_event(
+        "audit.verify_pack.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"ok": bool(result.get("valid"))},
+    )
+    return {
+        **result,
+        "evidence_sha256": digest,
+        "chain_anchor": anchor or None,
+        "chain_record_found": bool(chain_record),
+        "chain_record_withheld": chain_record_withheld,
+        "chain_record": (
+            None if chain_record_withheld else
+            {
+                "id": chain_record.get("id"),
+                "time": chain_record.get("time"),
+                "actor": chain_record.get("actor"),
+                "event_hash": chain_record.get("event_hash"),
+                "prev_hash": chain_record.get("prev_hash"),
+            }
+            if chain_record
+            else None
+        ),
+        "honesty": (
+            "Signature intact means the pack was not edited since it was sealed. "
+            "A missing chain record means the store no longer holds the record filed "
+            "for this pack — which retention alone can cause, so read /audit/verify "
+            "for the retention checkpoints before calling it tampering."
+            if anchor.get("anchored")
+            else "This pack was exported without a chain anchor, so there is no "
+            "chain record to compare it against."
+        ),
+    }
+
+
+@router.post("/retention/purge")
+async def purge_audit_retention(
+    request: Request,
+    dry_run: bool = Query(False),
+):
+    from services.audit_log import (
+        AuditConfigError,
+        append_audit_event,
+        purge_expired_audit_events,
+    )
+    from services.audit_log import actor_from_request, workspace_id_from_request
+
+    _require_platform_admin(request, tenant_scope(request), "audit.retention.purge")
+    correlation_id = getattr(request.state, "correlation_id", None)
+    if correlation_id is None:
+        correlation_id = request.headers.get("X-Correlation-ID")
+
+    try:
+        result = purge_expired_audit_events(dry_run=dry_run)
+    except AuditConfigError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    append_audit_event(
+        action="audit.retention.purge",
+        resource=request.url.path,
+        actor=actor_from_request(request),
+        level="warn" if result["removed"] else "info",
+        correlation_id=correlation_id,
+        workspace_id=workspace_id_from_request(request),
+        details=result,
+    )
+    return result
+
+
 @router.post("/tip/anchor")
-async def force_anchor_tip():
-    """Manually seal the current tip (ops / compliance export)."""
+async def force_anchor_tip(request: Request):
+    """Manually seal the current platform tip (ops / compliance export).
+
+    Platform administrators only: it seals and returns the platform head.
+    """
     from services.audit_anchor import anchor_tip, latest_anchor
     from services.audit_log import latest_event_hash
+
+    _require_platform_admin(request, tenant_scope(request), "audit.tip.anchor")
 
     tip = latest_event_hash()
     if not tip:

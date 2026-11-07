@@ -146,3 +146,50 @@ def test_apply_mssql_session_guards_sets_ansi_warnings():
     executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list if c.args)
     assert "ANSI_WARNINGS ON" in executed
     assert "ANSI_PADDING ON" in executed
+
+
+def test_ascii_fast_path_agrees_with_unit_aware_fit():
+    """The ASCII short-circuit must not change a single verdict.
+
+    ``quarantine_unfit_strings`` skips the dialect unit lookup for ASCII text
+    no longer than the declared width. ASCII spends one unit per character
+    under every rule, so the verdict must match the byte/UTF-16 dialects too —
+    and non-ASCII must still fall through to the full check.
+    """
+    cases = [
+        ("abcde", "VARCHAR(5)", True),
+        ("abcdef", "VARCHAR(5)", False),
+        ("aébc", "VARCHAR(4)", True),          # 4 code points
+        ("aébc", "VARCHAR2(4 BYTE)", False),   # 5 UTF-8 bytes
+        ("naïve", "NVARCHAR(5)", True),        # 5 UTF-16 units
+        ("😀", "VARCHAR(1)", True),            # one code point
+        ("😀", "VARCHAR2(1 BYTE)", False),     # four UTF-8 bytes
+    ]
+    for value, ddl, expected_kept in cases:
+        details: list[dict] = []
+        out = quarantine_unfit_strings(
+            [(value,)],
+            ["col"],
+            [ddl],
+            details,
+            policy="quarantine",
+            dialect_label="VARCHAR",
+            dest_db="postgresql",
+        )
+        assert (out == [(value,)]) is expected_kept, (value, ddl)
+        assert bool(details) is not expected_kept, (value, ddl)
+
+
+def test_missing_sentinel_is_never_width_quarantined():
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    details: list[dict] = []
+    out = quarantine_unfit_strings(
+        [(DF_MISSING_SENTINEL,)],
+        ["col"],
+        ["VARCHAR(3)"],
+        details,
+        policy="quarantine",
+    )
+    assert out == [(DF_MISSING_SENTINEL,)]
+    assert details == []

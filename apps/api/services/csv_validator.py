@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import io
-import re
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +12,9 @@ from services.transform_engine import (
     _parse_boolean,
     _parse_date,
     _parse_datetime,
+    _parse_decimal,
     _parse_integer,
 )
-
-_INT_RE = re.compile(r"^-?\d+$")
-_DEC_RE = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")
-_BOOL_VALUES = frozenset({"true", "false", "yes", "no", "1", "0", "y", "n", "t", "f"})
 
 
 def _check_value(value: str, inferred: str) -> str | None:
@@ -30,11 +26,12 @@ def _check_value(value: str, inferred: str) -> str | None:
         if _parse_integer(v) is None:
             return f"expected integer, got {v[:40]!r}"
     elif t in ("DECIMAL", "NUMERIC", "FLOAT", "DOUBLE"):
-        cleaned = v.replace("$", "").replace(",", "").replace("€", "").strip()
-        if not _DEC_RE.match(cleaned) and _parse_integer(cleaned) is None:
+        if _parse_decimal(v) is None:
             return f"expected number, got {v[:40]!r}"
     elif t in ("BOOLEAN", "BOOL"):
-        if _parse_boolean(v) is None and v.lower() not in _BOOL_VALUES:
+        # Write-path tokens only. Informal yes/on used to pass this check and
+        # then quarantine on Execute (`Invalid boolean: 'yes'`).
+        if _parse_boolean(v) is None:
             return f"expected boolean, got {v[:40]!r}"
     elif t in ("DATE",):
         if not _parse_date(v):
@@ -46,6 +43,34 @@ def _check_value(value: str, inferred: str) -> str | None:
         if v[0:1] not in ("{", "["):
             return f"expected JSON, got {v[:40]!r}"
     return None
+
+
+def _write_refusal(value: str, err: str) -> str:
+    """The refusal the write path gives this cell (the calendar rule names its own)."""
+    from connectors.sql_temporal import invalid_calendar_reason
+
+    v = (value or "").strip()
+    calendar = invalid_calendar_reason(v)
+    if calendar:
+        return calendar
+    # The write path's own numeric refusal, so the hold-out policy can read it
+    # (validation_mode_contract.is_numeric_cast_refusal, R4-D02).
+    if err.startswith("expected integer"):
+        return f"Invalid integer: {v[:40]!r}"
+    if err.startswith("expected number"):
+        return f"Invalid decimal: {v[:40]!r}"
+    return err
+
+
+def _holdout_modes(refusals: list[str], *, capped: bool) -> dict[str, bool]:
+    from services.validation_mode_contract import mode_holds_out_refusal
+
+    def every(mode: str) -> bool:
+        return bool(refusals) and not capped and all(
+            mode_holds_out_refusal(mode, r, record_batch=True) for r in refusals
+        )
+
+    return {"balanced": every("balanced"), "lenient": every("lenient")}
 
 
 def _parse_csv_rows(text: str, delimiter: str) -> tuple[list[str], list[list[str]]]:
@@ -81,6 +106,8 @@ def validate_csv_content(
 
     col_index = {h: i for i, h in enumerate(header_row)}
     issues: list[str] = []
+    #: The write path's own refusal for each issue, for the hold-out policy.
+    refusals: list[str] = []
     limit = scan_limit_rows if scan_limit_rows is not None else len(data_rows)
     rows_scanned = 0
 
@@ -95,6 +122,7 @@ def validate_csv_content(
             err = _check_value(parts[idx], inferred)
             if err and len(issues) < max_issues:
                 issues.append(f"row {line_no} · {col}: {err}")
+                refusals.append(_write_refusal(parts[idx], err))
         if len(issues) >= max_issues:
             break
 
@@ -106,6 +134,10 @@ def validate_csv_content(
         "full_scan": scan_limit_rows is None or scan_limit_rows >= total_data_rows,
         "issues": issues,
         "issue_count": len(issues),
+        # Which validation mode holds EVERY listed issue out — the API's one
+        # policy, so Studio offers only a switch that clears them (review B4).
+        # A capped list (more issues than listed) proves nothing: no mode.
+        "holdout_modes": _holdout_modes(refusals, capped=len(issues) >= max_issues),
         "parser": "csv_stdlib",
     }
 

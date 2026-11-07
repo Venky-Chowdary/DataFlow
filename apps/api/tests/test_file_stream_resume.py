@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -43,6 +44,24 @@ def _csv_bytes(rows: int = 6) -> bytes:
     return "\n".join(lines).encode()
 
 
+def _stream_write_view(args, kwargs) -> tuple[int, Any]:
+    """Row count + first cell after file-stream skipped the retained matrix."""
+    data_rows = kwargs.get("data_rows")
+    if data_rows is None and len(args) > 5:
+        data_rows = args[5]
+    if data_rows:
+        return len(data_rows), data_rows[0][0] if data_rows[0] else None
+    spool = kwargs.get("source_spool")
+    if spool is not None:
+        first = None
+        for _start, bundle in spool.iter_bundles(1):
+            if bundle and bundle[0]:
+                first = bundle[0][0]
+            break
+        return int(getattr(spool, "row_count", 0) or 0), first
+    return 0, None
+
+
 def test_stream_file_resume_skips_committed_chunks(monkeypatch):
     from transfer.file_stream import stream_file_to_database
     from transfer.models import EndpointConfig
@@ -57,14 +76,21 @@ def test_stream_file_resume_skips_committed_chunks(monkeypatch):
         error_policy=None,
         **_kwargs,
     ):
+        rows, first_id = _stream_write_view(
+            (dest_type, destination, dest_cfg, dest_table, headers, data_rows),
+            {
+                "data_rows": data_rows,
+                "source_spool": _kwargs.get("source_spool"),
+            },
+        )
         calls.append({
             "chunk_idx": chunk_idx,
             "create_table": create_table,
-            "rows": len(data_rows),
-            "first_id": data_rows[0][0] if data_rows else None,
+            "rows": rows,
+            "first_id": first_id,
             "write_mode": write_mode,
         })
-        return len(data_rows), "checksum", {"rejected_rows": 0}
+        return rows, "checksum", {"rejected_rows": 0}
 
     monkeypatch.setattr("transfer.file_stream._write_batch", fake_write_batch)
     monkeypatch.setattr("transfer.file_stream.CHUNK_SIZE", 2)
@@ -155,9 +181,9 @@ def test_stream_file_resume_recomputes_full_checksum(monkeypatch):
     calls: list[dict] = []
 
     def fake_write_batch(*args, **kwargs):
-        data_rows = kwargs.get("data_rows") or args[5]
-        calls.append({"rows": len(data_rows)})
-        return len(data_rows), "checksum", {"rejected_rows": 0}
+        rows, _first = _stream_write_view(args, kwargs)
+        calls.append({"rows": rows})
+        return rows, "checksum", {"rejected_rows": 0}
 
     monkeypatch.setattr("transfer.file_stream._write_batch", fake_write_batch)
     monkeypatch.setattr("transfer.file_stream.CHUNK_SIZE", 2)
@@ -202,8 +228,8 @@ def test_stream_file_resume_full_rescan_respects_source_filter(monkeypatch):
     from transfer.models import EndpointConfig
 
     def fake_write_batch(*args, **kwargs):
-        data_rows = kwargs.get("data_rows") or args[5]
-        return len(data_rows), "checksum", {"rejected_rows": 0}
+        rows, _first = _stream_write_view(args, kwargs)
+        return rows, "checksum", {"rejected_rows": 0}
 
     monkeypatch.setattr("transfer.file_stream._write_batch", fake_write_batch)
     monkeypatch.setattr("transfer.file_stream.CHUNK_SIZE", 2)
@@ -252,8 +278,8 @@ def test_resume_restores_first_pass_quarantine_for_conservation(monkeypatch):
     from transfer.models import EndpointConfig
 
     def fake_write_batch(*args, **kwargs):
-        data_rows = kwargs.get("data_rows") or args[5]
-        return len(data_rows), "checksum", {"rejected_rows": 0}  # this pass is clean
+        rows, _first = _stream_write_view(args, kwargs)
+        return rows, "checksum", {"rejected_rows": 0}  # this pass is clean
 
     monkeypatch.setattr("transfer.file_stream._write_batch", fake_write_batch)
     monkeypatch.setattr("transfer.file_stream.CHUNK_SIZE", 2)

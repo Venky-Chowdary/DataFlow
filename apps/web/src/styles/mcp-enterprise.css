@@ -9,22 +9,22 @@
   justify-content: space-between;
   gap: 16px;
   padding: 20px 22px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: var(--df-radius-card, 12px);
-  background: linear-gradient(135deg, #f0fdfa 0%, #fff 55%);
+  background: linear-gradient(135deg, var(--df-brand-muted) 0%, var(--df-surface) 55%);
 }
 
 .df2-mcp-hero-copy h2 {
   margin: 0 0 6px;
   font-size: 18px;
-  font-weight: 650;
-  color: #0f172a;
+  font-weight: 600;
+  color: var(--df-text-primary);
 }
 
 .df2-mcp-hero-copy p {
   margin: 0;
   font-size: 14px;
-  color: #64748b;
+  color: var(--df-text-secondary);
   max-width: 56ch;
   line-height: 1.5;
 }
@@ -35,13 +35,13 @@
   gap: 10px;
   padding: 10px 14px;
   border-radius: 10px;
-  background: #fff;
-  border: 1px solid var(--df-line, #e2e8f0);
+  background: var(--df-surface);
+  border: 1px solid var(--df-line);
 }
 
 .df2-mcp-hero-status strong {
   font-size: 14px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-mcp-endpoint-card {
@@ -51,9 +51,9 @@
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: var(--df-radius-card, 12px);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-mcp-layout {
@@ -64,9 +64,9 @@
 }
 
 .df2-mcp-panel {
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: var(--df-radius-card, 12px);
-  background: #fff;
+  background: var(--df-surface);
   overflow: visible;
 }
 
@@ -101,13 +101,14 @@
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--df-line, #e2e8f0);
+  border-bottom: 1px solid var(--df-line);
 }
 
 .df2-mcp-panel-head h2 {
   margin: 0;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
+  color: var(--df-text-primary);
 }
 
 .df2-mcp-panel-body {
@@ -126,9 +127,9 @@
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-mcp-integration-row .df2-cell-main {
@@ -159,7 +160,7 @@
 .df2-mcp-tools-section h2 {
   margin: 0 0 10px;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-mcp-grid {
@@ -170,9 +171,9 @@
 
 .df2-mcp-tile {
   padding: 10px 12px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   min-height: 0;
   height: fit-content;
 }
@@ -181,7 +182,7 @@
   display: block;
   font-size: 12px;
   font-weight: 600;
-  color: #0f766e;
+  color: var(--df-brand-strong);
   margin-bottom: 6px;
   word-break: break-all;
 }
@@ -203,19 +204,19 @@
 .df2-mcp-logs-table td {
   padding: 10px 12px;
   text-align: left;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid var(--df-border);
 }
 
 .df2-mcp-logs-table th {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--df-z-base);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #64748b;
-  background: #f8fafc;
+  color: var(--df-text-tertiary);
+  background: var(--df-surface-muted);
 }
 
 .df2-mcp-log-status {
@@ -227,17 +228,32 @@
 }
 
 .df2-mcp-log-status--ok {
-  background: #ecfdf5;
-  color: #047857;
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-mcp-log-status--warn {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
 }
 
 .df2-mcp-log-status--err {
-  background: #fef2f2;
-  color: #b91c1c;
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-mcp-layout {
     grid-template-columns: 1fr;
   }
+}
+
+.df2-mcp-log-actor {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--df-text-muted);
 }

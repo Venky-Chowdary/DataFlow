@@ -1,0 +1,5 @@
+Contact: mailto:contact@datawrap.io
+Expires: 2027-10-31T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://www.datawrap.io/.well-known/security.txt
+Policy: https://www.datawrap.io/#/security

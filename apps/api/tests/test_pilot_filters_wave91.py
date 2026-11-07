@@ -16,6 +16,7 @@ import json
 import os
 import uuid
 from datetime import date, datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -211,9 +212,31 @@ def test_numeric_column_refuses_text_literal():
     assert "numeric" in str(err.value)
 
 
-def test_boolean_column_accepts_words():
-    assert _ground("is_paid = yes")[0].values == [True]
+def test_numeric_column_refuses_auto_ambiguous_grouping():
+    """Pilot must not invent 1234 from a lone 1,234 — same as the write path."""
+    with pytest.raises(PredicateError) as err:
+        _ground("amount > 1,234")
+    assert "1,234" in str(err.value)
+    assert "locale" in str(err.value).lower()
+
+
+def test_numeric_column_accepts_currency_and_both_separators():
+    preds = _ground("amount > $1,234.56")
+    assert preds[0].values == [Decimal("1234.56")]
+
+
+def test_boolean_column_accepts_canonical_wire_only():
+    assert _ground("is_paid = true")[0].values == [True]
     assert _ground("is_paid = false")[0].values == [False]
+    assert _ground("is_paid = 1")[0].values == [True]
+
+
+def test_boolean_column_refuses_informal_yes():
+    """Informal yes invents truth the write path refuses."""
+    with pytest.raises(PredicateError) as err:
+        _ground("is_paid = yes")
+    assert "yes" in str(err.value)
+    assert "true/false" in str(err.value).lower() or "canonical" in str(err.value).lower()
 
 
 def test_boolean_column_refuses_a_number_word():
@@ -225,6 +248,39 @@ def test_date_column_refuses_a_non_date():
     with pytest.raises(PredicateError) as err:
         _ground("ordered_at = notadate")
     assert "date column" in str(err.value)
+
+
+def test_date_column_refuses_auto_ambiguous_slash_date():
+    """01/02/2024 is Jan 2 or Feb 1 — Auto must not invent MDY the way strptime did."""
+    with pytest.raises(PredicateError) as err:
+        _ground("ordered_at = 01/02/2024")
+    message = str(err.value)
+    assert "01/02/2024" in message
+    assert "locale" in message.lower()
+
+
+def test_date_column_accepts_unambiguous_day_first():
+    preds = _ground("ordered_at = 31/12/2024")
+    assert preds[0].op == "range"
+    assert preds[0].values == [date(2024, 12, 31), date(2025, 1, 1)]
+
+
+def test_date_column_honors_mdy_and_dmy_locale():
+    from services.transform_engine import reset_active_date_locale, set_active_date_locale
+
+    mdy = set_active_date_locale("MDY")
+    try:
+        preds = _ground("ordered_at = 01/02/2024")
+        assert preds[0].values == [date(2024, 1, 2), date(2024, 1, 3)]
+    finally:
+        reset_active_date_locale(mdy)
+
+    dmy = set_active_date_locale("DMY")
+    try:
+        preds = _ground("ordered_at = 01/02/2024")
+        assert preds[0].values == [date(2024, 2, 1), date(2024, 2, 2)]
+    finally:
+        reset_active_date_locale(dmy)
 
 
 def test_date_equality_becomes_a_whole_day_range():

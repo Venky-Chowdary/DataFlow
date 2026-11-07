@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import re
+import time
 from services.brand_env import getenv_brand
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
 
+from services.egress_guard import egress_url_allowed, host_is_blocked, redirect_target_allowed
+from services.ops_events import emit_event
 from services.notification_store import (
     NotificationChannel,
     get_channel_decrypted,
@@ -27,13 +31,14 @@ from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
 
-# Only HTTP(S) webhook/mail APIs are allowed — never file:/ or arbitrary schemes.
-_ALLOWED_SCHEMES = frozenset({"http", "https"})
+#: Channel kinds send_to_channel dispatches; anything else logs as "unknown".
+_CHANNEL_KINDS = frozenset({"slack", "teams", "email", "servicenow", "webhook"})
 
 
 def _allowed_url(url: str) -> bool:
-    parsed = urllib.parse.urlparse(url)
-    return parsed.scheme in _ALLOWED_SCHEMES
+    # Webhooks stay default-deny. The connector allowlist is for on-prem
+    # database dials, not for an HTTP client that would follow a private hop.
+    return egress_url_allowed(url, allowlist=())
 
 
 def _env_smtp() -> dict[str, Any]:
@@ -43,26 +48,78 @@ def _env_smtp() -> dict[str, Any]:
         "user": getenv_brand("SMTP_USER", ""),
         "password": getenv_brand("SMTP_PASSWORD", ""),
         "use_tls": getenv_brand("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes"),
-        "from": getenv_brand("SMTP_FROM", "dataflow@localhost"),
+        "from": getenv_brand("SMTP_FROM", "datawrap@localhost"),
     }
 
 
-def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a public http(s) redirect. A private or metadata target is refused.
+
+    The allowlist does not apply: a webhook that 302s onto 169.254.169.254
+    stays refused even when that address would be a permitted direct dial.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        if not redirect_target_allowed(str(newurl or "")):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+#: Sent on every outbound HTTP call. Cloudflare-fronted APIs (Resend) refuse
+#: the default ``Python-urllib/3.x`` agent with 403 "error code: 1010" before
+#: the credential is even read (D130).
+USER_AGENT = "Datawrap/1.0 (+https://www.datawrap.io)"
+
+_EMAIL_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_ERROR_BODY_CHARS = 500
+
+
+def _redacted_error_body(raw: bytes) -> str:
+    """A refusal body short enough to triage, with echoed addresses masked."""
+    text = raw[: _ERROR_BODY_CHARS * 2].decode("utf-8", errors="ignore")
+    return _EMAIL_ADDRESS.sub("<redacted-email>", text)[:_ERROR_BODY_CHARS]
+
+
+def _http_post(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+    *,
+    raw_body: bytes | None = None,
+) -> dict[str, Any]:
+    """POST JSON. A non-2xx answer returns ``ok: False`` with its ``status`` and
+    a short redacted ``body`` so callers can tell a refusal from a transport
+    failure; a transport failure carries no ``status``."""
     if not _allowed_url(url):
-        return {"ok": False, "error": f"URL scheme not allowed: {url}"}
+        return {"ok": False, "error": "Webhook URL is not allowed (private, loopback, or non-http(s))"}
     try:
-        data = json.dumps(payload, default=json_default).encode("utf-8")
+        data = raw_body if raw_body is not None else json.dumps(payload, default=json_default).encode("utf-8")
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json", **(headers or {})},
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT, **(headers or {})},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec: B310 — scheme is restricted to http(s) above
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=timeout) as resp:  # nosec: B310 — scheme + host gated by egress_guard
             body = resp.read().decode("utf-8", errors="ignore")
-        return {"ok": True, "status": resp.status, "body": body[:500]}
+        return {"ok": True, "status": resp.status, "body": body[:2000]}
+    except urllib.error.HTTPError as exc:
+        try:
+            body = _redacted_error_body(exc.read() or b"")
+        except Exception:  # noqa: BLE001 — an unreadable error body is still a refusal
+            body = ""
+        logger.warning("notification HTTP POST refused: status=%s", exc.code)
+        refused: dict[str, Any] = {"ok": False, "status": int(exc.code), "body": body, "error": str(exc)}
+        retry_after = (exc.headers.get("Retry-After") if exc.headers else None) or ""
+        if retry_after.strip().isdigit():
+            refused["retry_after_sec"] = int(retry_after.strip())
+        return refused
     except Exception as exc:
-        logger.warning("HTTP POST to %s failed: %s", url, exc)
+        # Slack/Teams webhook URLs carry their secret in the path; the error
+        # text can echo it. The class name is enough to triage.
+        logger.warning("notification HTTP POST failed: %s", type(exc).__name__)
         return {"ok": False, "error": str(exc)}
 
 
@@ -83,8 +140,10 @@ def _send_sendgrid(recipients: list[str], subject: str, body: str, from_addr: st
     return {"ok": False, "error": result.get("body") or result.get("error") or "SendGrid send failed"}
 
 
-def _send_resend(recipients: list[str], subject: str, body: str, from_addr: str, api_key: str) -> dict[str, Any]:
+def _send_resend(recipients: list[str], subject: str, body: str, from_addr: str, api_key: str, reply_to: str = "") -> dict[str, Any]:
     payload = {"from": from_addr, "to": recipients, "subject": subject, "text": body}
+    if reply_to:
+        payload["reply_to"] = reply_to
     result = _http_post(
         "https://api.resend.com/emails",
         payload,
@@ -103,17 +162,35 @@ def _send_mailgun(recipients: list[str], subject: str, body: str, from_addr: str
     data = urllib.parse.urlencode({"from": from_addr, "to": ",".join(recipients), "subject": subject, "text": body}).encode("utf-8")
     import base64
     credentials = base64.b64encode(f"api:{api_key}".encode()).decode()
-    req = urllib.request.Request(url, data=data, headers={"Authorization": f"Basic {credentials}"}, method="POST")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Authorization": f"Basic {credentials}", "User-Agent": USER_AGENT},
+        method="POST",
+    )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec: B310 — scheme is https and validated above
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=30) as resp:  # nosec: B310 — scheme is https and validated above
             resp_body = resp.read().decode("utf-8", errors="ignore")
         return {"ok": True, "status": resp.status, "body": resp_body[:500]}
     except Exception as exc:
-        logger.warning("Mailgun send failed: %s", exc)
+        logger.warning("Mailgun send failed: %s", type(exc).__name__)
         return {"ok": False, "error": str(exc)}
 
 
-def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+# SMTP connect/read ceiling — must stay under the mail outbox claim lease
+# (mail_outbox._LEASE_SEC) so one send can never outlive its claim.
+_SMTP_TIMEOUT_SEC = 30.0
+
+
+def _smpt_send(
+    recipients: list[str],
+    subject: str,
+    body: str,
+    smtp_cfg: dict[str, Any] | None = None,
+    *,
+    html: str | None = None,
+    reply_to: str | None = None,
+) -> dict[str, Any]:
     cfg = smtp_cfg or _env_smtp()
     host = cfg.get("host") or _env_smtp().get("host")
     port = int(cfg.get("port") or _env_smtp().get("port"))
@@ -124,6 +201,8 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
 
     if not host:
         return {"ok": False, "error": "SMTP host not configured"}
+    if host_is_blocked(str(host)):
+        return {"ok": False, "error": "SMTP host is not allowed (private, loopback, or metadata)"}
 
     try:
         import smtplib
@@ -133,9 +212,13 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
         msg["From"] = from_addr
         msg["To"] = ", ".join(recipients)
         msg["Subject"] = subject
+        if reply_to:
+            msg["Reply-To"] = reply_to
         msg.set_content(body)
+        if html:
+            msg.add_alternative(html, subtype="html")
 
-        with smtplib.SMTP(host, port, timeout=30) as server:
+        with smtplib.SMTP(host, port, timeout=_SMTP_TIMEOUT_SEC) as server:
             if use_tls:
                 server.starttls()
             if user:
@@ -143,8 +226,54 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
             server.send_message(msg)
         return {"ok": True}
     except Exception as exc:
-        logger.warning("SMTP send failed: %s", exc)
+        logger.warning("SMTP send failed: %s", type(exc).__name__)
         return {"ok": False, "error": str(exc)}
+
+
+def _slack_acknowledged(result: dict[str, Any]) -> dict[str, Any]:
+    """Slack's own acknowledgement, not merely "the host answered 200".
+
+    Any endpoint that returns 2xx used to be reported as *Test message sent*, so
+    a webhook pointed at the wrong host — or at an intranet page — read as a
+    working alert route until the day an incident went unnoticed. An incoming
+    webhook answers ``200`` with the body ``ok``; the Web API answers JSON with
+    ``"ok": true``. Anything else is a delivery we cannot claim.
+    """
+    if not result.get("ok"):
+        return result
+    body = str(result.get("body", "")).strip()
+    if body.lower() == "ok":
+        return result
+    try:
+        if json.loads(body).get("ok") is True:
+            return result
+    except (ValueError, AttributeError):
+        pass
+    return {
+        "ok": False,
+        "status": result.get("status"),
+        "error": (
+            f"Endpoint answered HTTP {result.get('status')} but did not acknowledge as Slack "
+            f"(expected body 'ok', got {body[:120]!r}) — check the webhook URL"
+        ),
+    }
+
+
+def _teams_acknowledged(result: dict[str, Any]) -> dict[str, Any]:
+    """Teams' own acknowledgement: ``1`` from a connector, ``202`` from a workflow."""
+    if not result.get("ok"):
+        return result
+    body = str(result.get("body", "")).strip()
+    if body == "1" or (result.get("status") == 202 and not body):
+        return result
+    return {
+        "ok": False,
+        "status": result.get("status"),
+        "error": (
+            f"Endpoint answered HTTP {result.get('status')} but did not acknowledge as Microsoft "
+            f"Teams (expected '1' or 202 Accepted, got {body[:120]!r}) — check the webhook URL"
+        ),
+    }
 
 
 def _send_slack(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
@@ -152,7 +281,7 @@ def _send_slack(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
     if not url:
         return {"ok": False, "error": "Slack webhook URL missing"}
     text = payload.get("text") or _payload_text(payload)
-    return _http_post(url, {"text": text})
+    return _slack_acknowledged(_http_post(url, {"text": text}))
 
 
 def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
@@ -160,7 +289,7 @@ def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
     if not url:
         return {"ok": False, "error": "Teams webhook URL missing"}
     text = payload.get("text") or _payload_text(payload)
-    return _http_post(
+    return _teams_acknowledged(_http_post(
         url,
         {
             "@type": "MessageCard",
@@ -169,7 +298,7 @@ def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
             "summary": payload.get("title", "Datawrap alert"),
             "sections": [{"activityTitle": payload.get("title", ""), "text": text}],
         },
-    )
+    ))
 
 
 def _send_email(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
@@ -252,16 +381,102 @@ def _send_webhook(channel: NotificationChannel, payload: dict[str, Any]) -> dict
             headers = json.loads(headers)
         except Exception:
             headers = {}
-    return _http_post(url, payload, headers or {})
+    from services.webhook_signing import SECRET_CONFIG_KEY, signature_headers
+
+    body = json.dumps(payload, default=json_default).encode("utf-8")
+    secret = str(channel.config.get(SECRET_CONFIG_KEY) or "")
+    signed = dict(headers or {})
+    stamp = ""
+    if secret:
+        # The signature covers exactly the bytes sent; it is added last so a
+        # configured custom header can never replace it.
+        sig = signature_headers(secret, body)
+        signed.update(sig)
+        from services.webhook_signing import TIMESTAMP_HEADER
+
+        stamp = str(sig.get(TIMESTAMP_HEADER) or "")
+    result = _http_post(url, payload, signed, raw_body=body)
+    if stamp:
+        # The delivery log keeps which signature went out (its timestamp),
+        # never the signature or the secret.
+        result = {**result, "signed": True, "signature_timestamp": stamp}
+    return result
 
 
 def _payload_text(payload: dict[str, Any]) -> str:
     return payload.get("text") or json.dumps(payload, default=json_default, indent=2)
 
 
-def send_to_channel(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
+def send_to_channel(
+    channel: NotificationChannel,
+    payload: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deliver ``payload``, emit one ``notification.delivery.*`` event, and
+    append the attempt to the delivery log.
+
+    The event names the channel kind and id, never the URL, recipients, or
+    error text. A failed delivery is WARNING: it does not fail the job.
+    ``context`` names what the delivery is about (``schedule_id``, ``job_id``,
+    ``event``) for the delivery log (QA SC9); every path — job alerts,
+    schedule alerts for runs refused before a job existed, test-sends — comes
+    through here, so every attempt is recorded once.
+    """
+    from services.notification_delivery_log import build_record, record_delivery
+
+    def _log(result: dict[str, Any] | None, started_at: float, error: BaseException | None = None) -> None:
+        record_delivery(build_record(
+            channel=channel,
+            payload=payload,
+            result=result,
+            duration_ms=(time.monotonic() - started_at) * 1000.0,
+            context=context,
+            error=error,
+        ))
+
+    kind = str(channel.kind or "")
+    fields = {
+        "channel_kind": kind if kind in _CHANNEL_KINDS else "unknown",
+        "channel_id": channel.id,
+        "workspace_id": channel.workspace_id or None,
+    }
     if not channel.enabled:
-        return {"ok": False, "error": "Channel disabled"}
+        emit_event(
+            logger, "notification.delivery.skipped", outcome="skipped",
+            reason="channel_disabled", **fields,
+        )
+        skipped = {"ok": False, "error": "Channel disabled"}
+        _log(skipped, time.monotonic())
+        return skipped
+    started = time.monotonic()
+    try:
+        result = _dispatch_to_channel(channel, payload)
+    except Exception as exc:
+        emit_event(
+            logger, "notification.delivery.failed", outcome="failed",
+            level=logging.WARNING, error=exc, reason="exception",
+            duration_ms=(time.monotonic() - started) * 1000.0, **fields,
+        )
+        _log(None, started, exc)
+        raise
+    _log(result, started)
+    status = result.get("status") if isinstance(result, dict) else None
+    ok = bool(isinstance(result, dict) and result.get("ok"))
+    emit_event(
+        logger,
+        "notification.delivery.succeeded" if ok else "notification.delivery.failed",
+        outcome="succeeded" if ok else "failed",
+        level=None if ok else logging.WARNING,
+        duration_ms=(time.monotonic() - started) * 1000.0,
+        http_status=status if isinstance(status, int) else None,
+        reason=None if ok else ("unknown_kind" if fields["channel_kind"] == "unknown" else "not_delivered"),
+        **fields,
+    )
+    return result
+
+
+def _dispatch_to_channel(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
     kind = channel.kind
     if kind == "slack":
         return _send_slack(channel, payload)
@@ -276,37 +491,93 @@ def send_to_channel(channel: NotificationChannel, payload: dict[str, Any]) -> di
     return {"ok": False, "error": f"Unknown channel kind: {kind}"}
 
 
-def notify_workspace(workspace_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Broadcast a payload to every enabled channel in a workspace."""
+def notify_workspace(
+    workspace_id: str,
+    payload: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Broadcast a payload to every enabled channel in a workspace.
+
+    One alert per failure per channel: every sender comes through here, so the
+    dedupe lives here (``_failure_alert_key`` + ``claim_alert``) instead of in
+    each sender.
+    """
+    key = _failure_alert_key(payload, context)
+    if key and _owned_by_schedule_alert(payload, context):
+        # A schedule-fired job's failure is announced by the scheduler, with
+        # the schedule's name and whether it is parked; the engine's generic
+        # job alert stands down.
+        return []
     channels = list_channels(workspace_id=workspace_id, enabled_only=True)
     results = []
     for channel in channels:
         decrypted = get_channel_decrypted(channel.id)
         if not decrypted:
             continue
-        results.append({"channel_id": channel.id, "kind": channel.kind, **send_to_channel(decrypted, payload)})
+        if key:
+            from services.notification_delivery_log import claim_alert
+
+            if not claim_alert(key, channel.id):
+                continue
+        sent = send_to_channel(decrypted, payload, context=context)
+        results.append({"channel_id": channel.id, "kind": channel.kind, **sent})
     return results
 
 
-def log_job_notifications(job_id: str, results: list[dict[str, Any]]) -> bool:
-    """Persist per-channel delivery results on the job record for the UI."""
-    if not results:
+_FAILED_STATUSES = frozenset({"failed", "error", "cancelled_with_error"})
+
+
+def _failure_alert_key(payload: dict[str, Any], context: dict[str, Any] | None) -> str:
+    """``failed|job:<id>`` or ``failed|run:<schedule>:<run>``; "" when not a failure."""
+    from services.notification_delivery_log import current_context
+
+    ctx = {**current_context(), **(context or {})}
+    if str((payload or {}).get("status") or "").strip().lower() not in _FAILED_STATUSES:
+        return ""
+    job_id = str(ctx.get("job_id") or (payload or {}).get("job_id") or "").strip()
+    if job_id:
+        return f"failed|job:{job_id}"
+    schedule_id = str(ctx.get("schedule_id") or "").strip()
+    run_id = str(ctx.get("run_id") or "").strip()
+    if schedule_id and run_id:
+        return f"failed|run:{schedule_id}:{run_id}"
+    return ""
+
+
+def _owned_by_schedule_alert(payload: dict[str, Any], context: dict[str, Any] | None) -> bool:
+    """True for a job alert about a job a schedule dispatched (the scheduler alerts)."""
+    from services.notification_delivery_log import current_context
+
+    ctx = {**current_context(), **(context or {})}
+    if ctx.get("schedule_id"):
+        return False  # this *is* the schedule alert
+    job_id = str((payload or {}).get("job_id") or "").strip()
+    if not job_id:
         return False
     try:
-        from datetime import datetime, timezone
+        from services.schedule_store import schedule_for_job
 
-        from bson import ObjectId
+        return schedule_for_job(job_id) is not None
+    except Exception:  # noqa: BLE001 - unknown ownership: keep the job alert
+        logger.debug("schedule ownership lookup failed for job %s", job_id, exc_info=True)
+        return False
 
+
+def log_job_notifications(job_id: str, results: list[dict[str, Any]]) -> bool:
+    """Persist per-channel delivery results on the job record for the UI.
+
+    A run refused before a job existed has no job record (``job_id`` is ""):
+    its deliveries live in the delivery log only. The job store decides how a
+    job is addressed (Mongo ObjectId, memory id) — ``ObjectId("")`` raised and
+    the memory store was never written.
+    """
+    if not results or not str(job_id or "").strip():
+        return False
+    try:
         from services.mongodb_service import get_mongodb_service
 
-        mongo = get_mongodb_service()
-        db = mongo.get_database()
-        collection = db["transfer_jobs"]
-        collection.update_one(
-            {"_id": ObjectId(job_id)},
-            {"$set": {"notifications": results, "updated_at": datetime.now(timezone.utc)}},
-        )
-        return True
+        return bool(get_mongodb_service().update_job_fields(job_id, {"notifications": results}))
     except Exception:
         logger.exception("Failed to persist notification log for job=%s", job_id)
         return False

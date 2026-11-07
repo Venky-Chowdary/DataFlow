@@ -3,6 +3,11 @@
 Invariant: after the initial dump, the final resume token must be
 ``phase=streaming`` at the same LSN captured during the REPEATABLE READ
 snapshot — so poll resumes without a gap outside the replication slot.
+
+MySQL file:pos handoff (locked SHOW MASTER STATUS → phase=streaming at the
+same file/pos) lives in ``test_cdc_mysql_mid_snapshot`` and the live
+``test_cdc_mysql_binlog_transfer_e2e`` matrix. SQL Server native LSN handoff
+lives in ``test_cdc_sqlserver_native_integration``.
 """
 
 from __future__ import annotations

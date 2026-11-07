@@ -1,4 +1,4 @@
-﻿"""Refuse null-PK mass-delete and SaaS/Dynamo/Parquet invent paths."""
+"""Refuse null-PK mass-delete and SaaS/Dynamo/Parquet invent paths."""
 
 from __future__ import annotations
 
@@ -51,7 +51,6 @@ def test_dynamo_key_schema_strict_composite():
 
 
 def test_hubspot_does_not_invent_id_from_email():
-    from connectors import hubspot_writer as hw
 
     # Simulate the identity extract used in write loop
     id_property = "hs_object_id"

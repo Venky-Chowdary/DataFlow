@@ -1,0 +1,1166 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DtIcon } from "../../components/DtIcon";
+import { TransformColumnCatalog } from "../../components/transfer/TransformColumnCatalog";
+import { TransformColumnChart } from "../../components/transfer/TransformColumnChart";
+import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
+import { ClassicColumnLayout } from "../../components/transfer/ClassicColumnLayout";
+import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
+import { TransformLibraryPicker, type TransformRecipeBinding } from "../../components/transfer/TransformLibraryPicker";
+import { TransferTransformCanvas } from "../../components/transfer/TransferTransformCanvas";
+import { StudioFlagBanner } from "../../components/transfer/StudioFlagBanner";
+import { RulesImportCard, SuggestionsCard } from "../../components/transfer/TransformPrepCards";
+import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
+import { ButtonGroup } from "../../components/ui/ButtonGroup";
+import { useToast } from "../../components/Toast";
+import { Dialog } from "../../components/ui/Dialog";
+import { fetchShapeCatalog, importBusinessRules, previewShapeRecipe, profileShapeSource } from "../../lib/api";
+import type { RuleCompileReport } from "../../lib/businessRules";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
+import {
+  changedCellIndex,
+  describeStep,
+  moveStep,
+  removeStep,
+  sortSuggestions,
+  continueTransformState,
+  preloadTransformRefusalReason,
+  preloadTransformRefused,
+  kitchenCatalogColumns,
+  kitchenSampleValues,
+  canvasValidationIssues,
+  previewErrorForSteps,
+  previewSampleNote,
+  sourceColumnsBeside,
+  samplePopulationBanner,
+  recipePayload,
+  stampStepSourceTable,
+  summarizeEffect,
+  toggleStep,
+  type ShapeCatalog,
+  type ShapeOperation,
+  type ShapePreviewResponse,
+  type ShapeProfileResponse,
+  type ShapeStepWire,
+  type ShapeSuggestion,
+  type TransformImage,
+} from "../../lib/shape";
+import { columnsEnteringColumnLayout, isColumnLayoutStep } from "../../lib/columnLayout";
+import { columnsNeedingAttention } from "../../lib/transformProfile";
+
+interface TransferTransformStepProps {
+  /** Sampled source rows already held by the studio — no connector round-trip. */
+  sampleRows: Record<string, unknown>[];
+  sourceColumns: string[];
+  /** Declared source carriers from the catalog — the types the recipe starts from. */
+  sourceSchema: Record<string, string>;
+  /** Declared destination carriers, so a narrowing decimal is caught here. */
+  targetSchema: Record<string, string>;
+  sourceLabel: string;
+  destRouteLabel: string;
+  /** Total source population, so the sample notice can state what it is not. */
+  rowCount?: number;
+  steps: ShapeStepWire[];
+  onChangeSteps: (steps: ShapeStepWire[]) => void;
+  /** Library binding (two-transform model): which named recipe produced the
+   * steps, at which version, under which params. Propagates to the transfer
+   * payload as provenance. */
+  recipeBinding?: TransformRecipeBinding | null;
+  onBindRecipe?: (binding: TransformRecipeBinding | null) => void;
+  /**
+   * The transformed image Map, Validate and the run request are held to: the
+   * recipe identity, the columns it produces, and the carriers those columns
+   * now hold. Null when no recipe can run, so nothing downstream claims one.
+   */
+  onIdentity: (identity: TransformImage | null) => void;
+  onBack: () => void;
+  onContinue: () => void;
+  /** CDC / SCD2 / mirror refuse pre-load — history was not written by this recipe. */
+  syncMode?: string;
+  /**
+   * Compiled workbook applied onto this transfer. Transform owns the upload
+   * because both schemas exist here; Map owns the per-column evidence.
+   */
+  onApplyRules?: (report: RuleCompileReport) => void;
+  ruleReport?: RuleCompileReport | null;
+  sourceTable?: string;
+  destTable?: string;
+  sourceTables?: string[];
+  sourceCatalog?: Record<string, string[]>;
+  /** Per-table sample. Preview of orders must not run on the customers rows. */
+  streamSamples?: Record<string, {
+    columns: string[];
+    schema: Record<string, string>;
+    rows: Record<string, unknown>[];
+  }>;
+  destTables?: string[];
+  destCatalog?: Record<string, string[]>;
+  /** Full-program hash when the sample on screen is not the primary table. */
+  onProgramHash?: (hash: string) => void;
+  /** Ordered canvas. Off keeps the step list. */
+  canvasEnabled?: boolean;
+  /** Source format for the preview's value model (database '' is a value). */
+  sourceType?: string;
+  /** Return to the source step so the operator can open the schema tree. */
+  onOpenSchema?: () => void;
+  /** Workspace settings could not be read. Empty when the read succeeded. */
+  studioFlagsError?: string;
+  /** Workspace canvas is on and this browser has not opted in. */
+  canvasOptIn?: boolean;
+  onOptInCanvas?: () => void;
+  /** Close the optional canvas and return to Connect. */
+  onCollapse?: () => void;
+}
+
+const PREVIEW_ROWS = 12;
+const PREVIEW_DEBOUNCE_MS = 250;
+const NO_ROWS: Record<string, unknown>[] = [];
+
+function isTransportTimeout(message: string): boolean {
+  return /timed out|abort|504|network/i.test(message);
+}
+
+function cellText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+/**
+ * Transform — repair the source on the read, before Map and the write.
+ *
+ * Two workspaces: rules and steps, then the sample result. Nothing here mutates
+ * the source. The recipe travels with the plan under an identity Execute is held
+ * to, and every step states what it did — cells changed, nulls introduced, rows
+ * removed. How the step works opens in its own window, off this page.
+ */
+export function TransferTransformStep({
+  sampleRows,
+  sourceColumns,
+  sourceSchema,
+  targetSchema,
+  sourceLabel,
+  destRouteLabel,
+  rowCount,
+  steps,
+  onChangeSteps,
+  recipeBinding,
+  onBindRecipe,
+  onIdentity,
+  onBack,
+  onContinue,
+  syncMode,
+  onApplyRules,
+  ruleReport,
+  sourceTable = "",
+  destTable = "",
+  sourceTables = [],
+  sourceCatalog = {},
+  streamSamples,
+  destTables = [],
+  destCatalog = {},
+  onProgramHash,
+  canvasEnabled = false,
+  sourceType = "",
+  onOpenSchema,
+  studioFlagsError = "",
+  canvasOptIn = false,
+  onOptInCanvas,
+  onCollapse,
+}: TransferTransformStepProps) {
+  const plan = useWriteGate(PERMISSIONS.jobPlan);
+  const { dismissMatching } = useToast();
+  useEffect(() => {
+    // These confirm earlier steps. A late route analysis can toast after this
+    // step has mounted, so clear again once that response lands.
+    const clear = () => {
+      dismissMatching("Route ready");
+      dismissMatching("Source profiled");
+      dismissMatching("Dev preview workspace");
+    };
+    clear();
+    const timer = window.setTimeout(clear, 700);
+    return () => window.clearTimeout(timer);
+  }, [dismissMatching]);
+  const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
+  const [catalogError, setCatalogError] = useState("");
+  const [profile, setProfile] = useState<ShapeProfileResponse | null>(null);
+  const [profileError, setProfileError] = useState("");
+  const [preview, setPreview] = useState<ShapePreviewResponse | null>(null);
+  const [previewError, setPreviewError] = useState("");
+  const [previewErrorKey, setPreviewErrorKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [pane, setPane] = useState<"prepare" | "result">("prepare");
+  const [showEveryResultColumn, setShowEveryResultColumn] = useState(true);
+  const [showAllColumns, setShowAllColumns] = useState(false);
+  const [selectedColumn, setSelectedColumn] = useState("");
+  const [showBuilder, setShowBuilder] = useState(false);
+  const [previewRetry, setPreviewRetry] = useState(0);
+  const [ruleBusy, setRuleBusy] = useState(false);
+  const [ruleError, setRuleError] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [previewedStepsKey, setPreviewedStepsKey] = useState("");
+  const [canvasStep, setCanvasStep] = useState<number | null>(null);
+  const stepsListRef = useRef<HTMLOListElement | null>(null);
+
+  const tables = useMemo(
+    () => sourceTables.map((name) => name.trim()).filter(Boolean),
+    [sourceTables],
+  );
+  const [focusTable, setFocusTable] = useState("");
+  const activeTable = tables.includes(focusTable)
+    ? focusTable
+    : (sourceTable && tables.includes(sourceTable) ? sourceTable : tables[0] || "");
+  const primaryTable = tables[0] || "";
+  const viewingPrimary = !primaryTable || activeTable === primaryTable;
+  const focusedSample = activeTable ? streamSamples?.[activeTable] : undefined;
+  const usingStreamSample = tables.length > 1 && Boolean(streamSamples);
+  const previewColumns = usingStreamSample && focusedSample?.columns?.length
+    ? focusedSample.columns
+    : sourceColumns;
+  const previewSchema = usingStreamSample && focusedSample && Object.keys(focusedSample.schema || {}).length
+    ? focusedSample.schema
+    : sourceSchema;
+  const previewRows = usingStreamSample ? (focusedSample?.rows ?? NO_ROWS) : sampleRows;
+  const rowsKey = useMemo(() => JSON.stringify(previewRows.slice(0, 200)), [previewRows]);
+  const stepsKey = useMemo(() => JSON.stringify(steps), [steps]);
+  const shownPreviewError = previewErrorForSteps(previewError, previewErrorKey, stepsKey);
+  const canvasIssues = useMemo(
+    () => canvasValidationIssues(shownPreviewError, preview?.refusal),
+    [shownPreviewError, preview?.refusal],
+  );
+  const schemaKey = useMemo(() => JSON.stringify(targetSchema), [targetSchema]);
+  const sourceSchemaKey = useMemo(() => JSON.stringify(sourceSchema), [sourceSchema]);
+  const shapedColumns = preview?.recipe.output_columns ?? previewColumns;
+  const retyped = useMemo(
+    () => Object.entries(preview?.retyped_columns ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+    [preview],
+  );
+
+  const onPickRules = useCallback(async (file: File | undefined) => {
+    if (!file || !onApplyRules) return;
+    if (!plan.allowed) {
+      setRuleError("Planning a transfer is required to import rules.");
+      return;
+    }
+    setRuleBusy(true);
+    setRuleError("");
+    try {
+      const report = await importBusinessRules({
+        file,
+        sourceColumns,
+        destColumns: Object.keys(targetSchema || {}),
+        sourceTable,
+        destTable,
+        sourceTables,
+        sourceCatalog,
+        destTables,
+        destCatalog,
+        sourceTypes: sourceSchema,
+        destTypes: targetSchema,
+        syncMode,
+      });
+      onApplyRules(report);
+    } catch (err) {
+      setRuleError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRuleBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceSchema, sourceTable, destTable, sourceTables, sourceCatalog, destTables, destCatalog, syncMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchShapeCatalog()
+      .then((next) => { if (!cancelled) setCatalog(next); })
+      .catch((err) => { if (!cancelled) setCatalogError(err instanceof Error ? err.message : String(err)); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Profiling only describes rows the caller already holds, so it is a read: a
+  // viewer sees the same findings an operator would act on. Previewing composes a
+  // recipe identity, which is plan work, so that call stays behind the gate.
+  useEffect(() => {
+    if (!previewRows.length) return;
+    let cancelled = false;
+    profileShapeSource({
+      sample_rows: previewRows.slice(0, 200),
+      source_columns: previewColumns,
+      target_schema: targetSchema,
+    })
+      .then((next) => { if (!cancelled) { setProfile(next); setProfileError(""); } })
+      .catch((err) => { if (!cancelled) setProfileError(err instanceof Error ? err.message : String(err)); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowsKey, schemaKey, previewColumns.join("|")]);
+
+  const timer = useRef<number | null>(null);
+  useEffect(() => {
+    if (!plan.allowed || !previewRows.length) return;
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    let cancelled = false;
+    timer.current = window.setTimeout(() => {
+      setBusy(true);
+      previewShapeRecipe({
+        recipe: { steps },
+        sample_rows: previewRows.slice(0, 200),
+        source_columns: previewColumns,
+        column_types: previewSchema,
+        target_schema: targetSchema,
+        focus_table: tables.length > 1 ? activeTable : undefined,
+        source_tables: tables.length > 1 ? tables : undefined,
+        source_catalog: tables.length > 1 ? sourceCatalog : undefined,
+        source_type: sourceType || undefined,
+      })
+        .then((next) => {
+          if (cancelled) return;
+          setPreview(next);
+          setPreviewError("");
+          setPreviewErrorKey("");
+          setPreviewedStepsKey(stepsKey);
+          const image = {
+            hash: next.recipe.recipe_hash,
+            columns: next.recipe.output_columns,
+            columnTypes: next.column_types ?? {},
+            retypedColumns: next.retyped_columns ?? {},
+            sampleRows: next.after,
+          };
+          // The hash names the whole program. Columns of another table must
+          // not replace the primary image Map is held to.
+          if (viewingPrimary) onIdentity(image);
+          else onProgramHash?.(image.hash);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setPreview(null);
+          setPreviewedStepsKey("");
+          setPreviewError(err instanceof Error ? err.message : String(err));
+          setPreviewErrorKey(stepsKey);
+          // A recipe the engine refuses has no identity to approve.
+          if (viewingPrimary) onIdentity(null);
+        })
+        .finally(() => { if (!cancelled) setBusy(false); });
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    plan.allowed,
+    rowsKey,
+    stepsKey,
+    schemaKey,
+    sourceSchemaKey,
+    sourceColumns.join("|"),
+    previewRetry,
+    sourceTable,
+    activeTable,
+    viewingPrimary,
+    tables.join("|"),
+    tables.map((name) => `${name}:${(sourceCatalog[name] || []).join(",")}`).join("|"),
+    previewColumns.join("|"),
+    previewSchema,
+  ]);
+
+  useEffect(() => {
+    if (canvasEnabled) return;
+    const step = preview?.refusal?.step;
+    if (!step || !stepsListRef.current) return;
+    const node = stepsListRef.current.querySelector<HTMLElement>(`#xform-step-${step}`);
+    node?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [canvasEnabled, preview?.refusal?.step]);
+
+  useEffect(() => {
+    if (!canvasEnabled) return;
+    const step = preview?.refusal?.step;
+    if (!step || step < 1) return;
+    setCanvasStep(step - 1);
+  }, [canvasEnabled, preview?.refusal?.step, preview?.refusal?.message]);
+
+  const operationsByName = useMemo(() => {
+    const index = new Map<string, ShapeOperation>();
+    for (const op of catalog?.operations ?? []) index.set(op.op, op);
+    return index;
+  }, [catalog]);
+
+  const ownStep = useCallback((step: ShapeStepWire) => (
+    stampStepSourceTable(step, activeTable, tables.length)
+  ), [activeTable, tables.length]);
+
+  const addStep = useCallback((step: ShapeStepWire) => {
+    if (preloadTransformRefused(syncMode)) return;
+    onChangeSteps([...steps, ownStep(step)]);
+  }, [onChangeSteps, ownStep, steps, syncMode]);
+
+  const applySuggestion = useCallback((suggestion: ShapeSuggestion) => {
+    if (preloadTransformRefused(syncMode)) return;
+    onChangeSteps([...steps, ownStep(suggestion.step)]);
+  }, [onChangeSteps, ownStep, steps, syncMode]);
+
+  const suggestions = useMemo(
+    () => sortSuggestions(preview?.suggestions?.length ? preview.suggestions : (profile?.suggestions ?? [])),
+    [preview, profile],
+  );
+  const appliedIds = useMemo(
+    () => new Set(steps.map((step) => `${step.op}:${step.column ?? ""}`)),
+    [steps],
+  );
+  const openSuggestions = suggestions.filter((s) => !appliedIds.has(`${s.step.op}:${s.step.column ?? ""}`));
+
+  const effect = preview?.effect ?? null;
+  const changed = useMemo(() => changedCellIndex(preview?.changed_cells ?? []), [preview]);
+  const beforeRows = preview?.before?.slice(0, PREVIEW_ROWS) ?? sampleRows.slice(0, PREVIEW_ROWS);
+  const afterRows = preview?.after?.slice(0, PREVIEW_ROWS) ?? [];
+  const columnsBefore = sourceColumns.length ? sourceColumns : Object.keys(beforeRows[0] ?? {});
+  const columnsAfter = shapedColumns.length ? shapedColumns : columnsBefore;
+  const layoutColumns = useMemo(
+    () => columnsEnteringColumnLayout(steps, columnsBefore),
+    [columnsBefore, steps],
+  );
+
+  const hasEnabledRecipe = Boolean(recipePayload(steps));
+  const kitchen = kitchenCatalogColumns(
+    profile?.columns ?? [],
+    preview?.shaped_profile,
+    hasEnabledRecipe,
+  );
+  const profiledColumns = kitchen.columns;
+  const kitchenRows = kitchen.from === "shaped" ? preview?.after : sampleRows;
+  const attention = columnsNeedingAttention(profiledColumns);
+  const continueState = continueTransformState({
+    steps,
+    preview,
+    previewError: shownPreviewError,
+    busy,
+    previewMatchesSteps: previewedStepsKey === stepsKey && preview !== null,
+    syncMode,
+    ruleCount: ruleReport?.rule_count ?? 0,
+  });
+  const preloadRefused = preloadTransformRefused(syncMode);
+  const catalogColumns = showAllColumns || attention === 0
+    ? profiledColumns
+    : profiledColumns.filter((column) => column.blanks || column.untrimmed || column.inner_whitespace
+      || column.non_printable || column.unnormalized_unicode || Object.keys(column.sentinels).length
+      || column.json_array_like || column.json_object_like);
+  const visibleColumns = catalogColumns.length ? catalogColumns : profiledColumns;
+  const selectedProfile = visibleColumns.find((column) => column.name === selectedColumn)
+    ?? visibleColumns[0]
+    ?? null;
+  const selectedSuggestion = selectedProfile
+    ? openSuggestions.find((item) => item.step.column === selectedProfile.name) ?? null
+    : null;
+  const selectedSamples = selectedProfile
+    ? kitchenSampleValues(selectedProfile.name, sampleRows, kitchenRows, kitchen.from)
+    : [];
+  const changedColumnNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const key of changed) {
+      const column = key.slice(key.indexOf(":") + 1);
+      if (column) names.add(column);
+    }
+    for (const column of columnsAfter) {
+      if (!columnsBefore.includes(column)) names.add(column);
+    }
+    return columnsAfter.filter((column) => names.has(column));
+  }, [changed, columnsAfter, columnsBefore]);
+  const resultColumns = showEveryResultColumn || changedColumnNames.length === 0
+    ? columnsAfter
+    : changedColumnNames;
+  const sourceResultColumns = showEveryResultColumn
+    ? columnsBefore
+    : sourceColumnsBeside(columnsBefore, resultColumns, steps);
+  const resultRefused = Boolean(shownPreviewError || preview?.refusal);
+
+  return (
+    <section className={canvasEnabled ? "df2-xform df2-studio-next" : "df2-xform"} aria-labelledby="xform-title">
+      <StudioFlagBanner
+        error={studioFlagsError}
+        optIn={canvasOptIn}
+        onOptIn={onOptInCanvas ?? (() => {})}
+        kind="canvas"
+      />
+      <header className="df2-xform-head">
+        <div className="df2-xform-head-row">
+          <div className="df2-xform-head-copy">
+            <h2 className="df2-xform-title" id="xform-title">Transform</h2>
+            <p className="df2-xform-route">
+              <span>{sourceLabel}</span>
+              <DtIcon name="transfer" size={14} />
+              <span>{destRouteLabel}</span>
+            </p>
+          </div>
+          <div className="df2-xform-head-side">
+            {preview?.recipe.recipe_hash ? (
+              <span className="df2-xform-identity" title="Pinned at approval and re-checked before Execute">
+                <DtIcon name="shield" size={14} />
+                Transform ID {preview.recipe.recipe_hash}
+              </span>
+            ) : (
+              <span className="df2-xform-identity is-empty">
+                {busy ? "Previewing…" : "No transform declared"}
+              </span>
+            )}
+            {canvasEnabled && onCollapse && (
+              <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onCollapse}>
+                Hide transform
+              </button>
+            )}
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost df2-btn-sm df2-xform-help"
+              aria-haspopup="dialog"
+              onClick={() => setGuideOpen(true)}
+            >
+              <DtIcon name="info" size={14} /> How it works
+            </button>
+          </div>
+        </div>
+        {!canvasEnabled && (
+        <div className="df2-tabs df2-xform-panes" role="tablist" aria-label="Transform workspace">
+          <button
+            type="button"
+            role="tab"
+            id="xform-tab-prepare"
+            className={`df2-tab${pane === "prepare" ? " active" : ""}`}
+            aria-selected={pane === "prepare"}
+            aria-controls="xform-panel-prepare"
+            onClick={() => setPane("prepare")}
+          >
+            Rules & transforms
+            {ruleReport ? <span className="df2-xform-pane-count">{ruleReport.rule_count}</span> : null}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="xform-tab-result"
+            className={`df2-tab${pane === "result" ? " active" : ""}`}
+            aria-selected={pane === "result"}
+            aria-controls="xform-panel-result"
+            onClick={() => setPane("result")}
+          >
+            Result
+            <span className={`df2-xform-pane-count${resultRefused ? " is-refused" : ""}`}>
+              {resultRefused ? "Refused" : steps.length ? `${steps.length} steps` : "Sample"}
+            </span>
+          </button>
+        </div>
+        )}
+      </header>
+
+      {preloadRefused && (
+        <div className="df2-alert df2-alert-warn" role="status">
+          <DtIcon name="alert" size={16} />
+          <div>
+            <p>{preloadTransformRefusalReason(syncMode)}</p>
+            <p>CDC default stays at-least-once upsert. Continue without a recipe, or switch sync mode.</p>
+          </div>
+        </div>
+      )}
+
+      <Dialog
+        open={guideOpen}
+        onClose={() => setGuideOpen(false)}
+        title="How Transform works"
+        subtitle="The recipe runs while the data is read. The source file or table is never modified."
+        size="xl"
+        className="df2-xform-guide-dialog"
+        footer={(
+          <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={() => setGuideOpen(false)}>
+            Close
+          </button>
+        )}
+      >
+        <TransformGuidePanel postLoadOnly={catalog?.post_load_only.operations ?? []} />
+      </Dialog>
+
+      {!plan.allowed && (
+        <div className="df2-alert df2-alert-info" role="status">
+          <DtIcon name="lock" size={16} />
+          <div>
+            <p>{plan.reason}</p>
+            <p className="df2-label-hint">
+              The profile, the charts and “Read the operations” are yours to inspect — they are the
+              real findings and the real vocabulary. Applying one is plan work.
+            </p>
+          </div>
+        </div>
+      )}
+      {catalogError && (
+        <div className="df2-alert df2-alert-error" role="alert">
+          <DtIcon name="x" size={16} />
+          <div><p>{catalogError}</p></div>
+        </div>
+      )}
+      {profileError && (
+        <div className="df2-alert df2-alert-warn" role="status">
+          <DtIcon name="alert" size={16} />
+          <div><p>Profile unavailable: {profileError}</p></div>
+        </div>
+      )}
+      {!canvasEnabled && shownPreviewError && (
+        <div
+          className={`df2-alert ${isTransportTimeout(shownPreviewError) ? "df2-alert-warn" : "df2-alert-error"}`}
+          role={isTransportTimeout(shownPreviewError) ? "status" : "alert"}
+        >
+          <DtIcon name={isTransportTimeout(shownPreviewError) ? "alert" : "x"} size={16} />
+          <div>
+            <p>{isTransportTimeout(shownPreviewError) ? "Preview request timed out." : shownPreviewError}</p>
+            <p className="df2-label-hint">
+              {isTransportTimeout(shownPreviewError)
+                ? steps.length
+                  ? "The recipe has no identity until preview answers. Retry, or remove the steps and continue without transforming."
+                  : "The sample below is still the source. Continue without transforming — Validate still re-checks the whole population. Retry preview if the control plane is back."
+                : "The recipe is refused, so it has no identity to approve. Fix or remove the step."}
+            </p>
+            {isTransportTimeout(shownPreviewError) && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                onClick={() => { setPreviewError(""); setPreviewErrorKey(""); setPreviewRetry((n) => n + 1); }}
+              >
+                Retry preview
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      {!canvasEnabled && preview?.refusal && (
+        <div className="df2-alert df2-alert-error" role="alert">
+          <DtIcon name="x" size={16} />
+          <div>
+            <p>
+              Step {preview.refusal.step} ({preview.refusal.op}) refused row {preview.refusal.row}
+              {preview.refusal.column ? ` on ${preview.refusal.column}` : ""}: {preview.refusal.message}
+            </p>
+            <p className="df2-label-hint">
+              This row stops the run. Change the step's error policy to divert or null if that is the
+              decision you want, or repair the value at source.
+            </p>
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm"
+              onClick={() => {
+                setPane("prepare");
+                const node = document.getElementById(`xform-step-${preview.refusal?.step}`);
+                window.setTimeout(() => node?.scrollIntoView({ block: "nearest", behavior: "smooth" }), 0);
+              }}
+            >
+              Jump to step {preview.refusal.step}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div
+        role="tabpanel"
+        id="xform-panel-prepare"
+        aria-labelledby="xform-prepare-label"
+        hidden={canvasEnabled ? false : pane !== "prepare"}
+        className="df2-xform-panel"
+      >
+      <h2 id="xform-prepare-label" className="df2-sr-only">Rules and transforms</h2>
+      {onBindRecipe ? (
+        <TransformLibraryPicker
+          sourceColumns={sourceColumns}
+          applied={recipeBinding}
+          disabled={!plan.allowed}
+          onApply={(steps, binding) => {
+            onChangeSteps(steps);
+            onBindRecipe(binding);
+          }}
+          onClear={() => {
+            onBindRecipe(null);
+            onChangeSteps([]);
+          }}
+        />
+      ) : null}
+      {!canvasEnabled && onApplyRules ? (
+        <RulesImportCard
+          ruleReport={ruleReport}
+          sourceTables={sourceTables}
+          ruleError={ruleError}
+          fileInputRef={fileInputRef}
+          onPickRules={onPickRules}
+          ruleBusy={ruleBusy}
+          allowed={plan.allowed}
+        />
+      ) : null}
+      <div className={canvasEnabled ? "df2-xform-grid is-canvas" : "df2-xform-flow"}>
+        {!canvasEnabled && (
+          <ClassicColumnLayout
+            columns={layoutColumns}
+            steps={steps}
+            canPlan={plan.allowed && !preloadRefused}
+            onApply={(next) => onChangeSteps(next.map((step) => (
+              isColumnLayoutStep(step) ? ownStep(step) : step
+            )))}
+          />
+        )}
+        {!canvasEnabled && (
+          <SuggestionsCard
+            suggestions={openSuggestions}
+            profileReady={Boolean(profile)}
+            allowed={plan.allowed}
+            disabledReason={plan.reason}
+            onAdd={applySuggestion}
+          />
+        )}
+
+        {canvasEnabled ? (
+          <TransferTransformCanvas
+            catalog={catalog}
+            steps={steps}
+            issues={canvasIssues}
+            selectedStep={canvasStep}
+            onSelectedStepChange={setCanvasStep}
+            onChangeSteps={onChangeSteps}
+            columns={columnsBefore.map((name) => ({
+              name,
+              type: String(sourceSchema[name] || previewSchema[name] || preview?.column_types?.[name] || ""),
+            }))}
+            suggestions={openSuggestions}
+            canPlan={plan.allowed}
+            disabledReason={plan.reason}
+            syncRefused={preloadRefused}
+            refusalReason={preloadTransformRefusalReason(syncMode)}
+            activeTable={activeTable}
+            sourceType={sourceType}
+            previewBanner={samplePopulationBanner(
+              Math.min(PREVIEW_ROWS, beforeRows.length),
+              rowCount,
+            )}
+            effectSummary={summarizeEffect(effect)}
+            onRunPreview={() => {
+              setPreviewError("");
+              setPreviewErrorKey("");
+              setPreviewRetry((count) => count + 1);
+            }}
+            onContinue={onContinue}
+            canContinue={continueState.enabled}
+            onOpenSchema={onOpenSchema ?? onBack}
+            rules={onApplyRules ? (
+              <RulesImportCard
+                ruleReport={ruleReport}
+                sourceTables={sourceTables}
+                ruleError={ruleError}
+                fileInputRef={fileInputRef}
+                onPickRules={onPickRules}
+                ruleBusy={ruleBusy}
+                allowed={plan.allowed}
+              />
+            ) : null}
+            repairs={(
+              <SuggestionsCard
+                suggestions={openSuggestions}
+                profileReady={Boolean(profile)}
+                allowed={plan.allowed}
+                disabledReason={plan.reason}
+                onAdd={applySuggestion}
+              />
+            )}
+            ledger={ruleReport ? <BusinessRuleLedger report={ruleReport} embedded /> : null}
+            previewColumns={columnsAfter}
+            previewRows={afterRows.length ? afterRows : beforeRows}
+            sampleRows={beforeRows}
+            onApplySuggestion={applySuggestion}
+            previewStatus={
+              busy
+                ? "Previewing the recipe…"
+                : shownPreviewError
+                  ? shownPreviewError
+                  : preview?.recipe.recipe_hash
+                    ? `${summarizeEffect(effect) || "Preview matches the recipe."} · ${preview.recipe.recipe_hash}`
+                    : samplePopulationBanner(Math.min(PREVIEW_ROWS, beforeRows.length), rowCount)
+            }
+          />
+        ) : (
+        <section className="df2-xform-card" aria-labelledby="xform-recipe-title">
+          <header className="df2-xform-card-head">
+            <h3 id="xform-recipe-title">Steps, in order</h3>
+            {/* A viewer opens the same panel read-only: the operations are what the
+                refusal text says are readable, and nothing in it can be applied. */}
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm"
+              aria-expanded={showBuilder}
+              title={plan.allowed ? "Compose a step by hand" : "Read the operations this engine accepts"}
+              onClick={() => setShowBuilder((open) => !open)}
+            >
+              <DtIcon name={showBuilder ? "minus" : "plus"} size={14} />
+              {showBuilder
+                ? " Close"
+                : plan.allowed ? " Add a step" : " Read the operations"}
+            </button>
+          </header>
+
+          {tables.length > 1 && (
+            <div className="df2-xform-stream-tabs" role="tablist" aria-label="Table this step applies to">
+              {tables.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  role="tab"
+                  aria-selected={name === activeTable}
+                  onClick={() => setFocusTable(name)}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+          {tables.length > 1 && (
+            <p className="df2-label-hint">
+              {previewRows.length
+                ? `New steps apply to ${activeTable}. The other tables keep their own steps.`
+                : `${activeTable} has no sample yet. Reload it on the Source step before previewing its steps.`}
+            </p>
+          )}
+          {preview?.preview_note && (
+            <p className="df2-label-hint">{preview.preview_note}</p>
+          )}
+          {steps.length === 0 ? (
+            <p className="df2-xform-empty">
+              <DtIcon name="check" size={16} />
+              No steps. The source passes through unchanged — exactly today's behaviour.
+            </p>
+          ) : (
+            <ol className="df2-xform-steps" ref={stepsListRef}>
+              {steps.map((step, index) => {
+                const stepEffect = effect?.steps?.[index];
+                const disabled = step.enabled === false;
+                const refused = preview?.refusal?.step === index + 1;
+                return (
+                  <li
+                    key={`${step.op}:${index}`}
+                    id={`xform-step-${index + 1}`}
+                    className={`${disabled ? "is-disabled" : ""}${refused ? " is-refused" : ""}${step.source_table && activeTable && step.source_table !== activeTable ? " is-other-stream" : ""}`.trim()}
+                  >
+                    <div className="df2-xform-step-head">
+                      <span className="df2-xform-step-index">{index + 1}</span>
+                      <strong>{describeStep(step, operationsByName.get(step.op))}</strong>
+                      <code className="df2-xform-step-op">{step.op}</code>
+                      {tables.length > 1 && step.source_table && (
+                        <span className="df2-badge">{step.source_table}</span>
+                      )}
+                      {step.on_error && step.on_error !== "refuse" && (
+                        <span className="df2-badge">on error: {step.on_error}</span>
+                      )}
+                      {operationsByName.get(step.op)?.buffered ? (
+                        <span
+                          className="df2-badge df2-badge-warn"
+                          title="Holds the population in memory (up to 500,000 rows) and emits at end-of-stream; the run fails loud past the cap"
+                        >
+                          buffered · 500k row cap
+                        </span>
+                      ) : null}
+                      {step.op === "lookup" && step.options?.reference ? (
+                        <span
+                          className="df2-badge"
+                          title="Reads the saved connector's table live once at run start and caches it for the run — re-run to pick up changed reference data"
+                        >
+                          live table · run-start cache
+                        </span>
+                      ) : null}
+                      {operationsByName.get(step.op)?.expands ? (
+                        <span
+                          className="df2-badge df2-badge-warn"
+                          title="Adds rows. Dest COUNT is the expanded image, not a surplus."
+                        >
+                          expands rows
+                        </span>
+                      ) : operationsByName.get(step.op)?.active ? (
+                        <span
+                          className="df2-badge df2-badge-warn"
+                          title="Changes the row count, so it moves the conservation ledger"
+                        >
+                          moves the ledger
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="df2-xform-step-effect">
+                      {stepEffect
+                        ? [
+                            `${stepEffect.rows_in.toLocaleString()} in`,
+                            `${stepEffect.rows_out.toLocaleString()} out`,
+                            stepEffect.cells_changed ? `${stepEffect.cells_changed.toLocaleString()} cell(s) changed` : "",
+                            stepEffect.rows_removed ? `${stepEffect.rows_removed.toLocaleString()} removed` : "",
+                            stepEffect.rows_expanded ? `${stepEffect.rows_expanded.toLocaleString()} added` : "",
+                            stepEffect.rows_diverted ? `${stepEffect.rows_diverted.toLocaleString()} diverted` : "",
+                            stepEffect.nulls_introduced ? `${stepEffect.nulls_introduced.toLocaleString()} null(s) introduced` : "",
+                          ].filter(Boolean).join(" · ")
+                        : disabled
+                          ? "Disabled — excluded from the recipe and its identity."
+                          : "Not yet measured."}
+                    </p>
+                    <ButtonGroup label={`Actions for step ${index + 1}`} className="df2-xform-step-controls">
+                      <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed || index === 0}
+                        title="Move earlier" aria-label={`Move step ${index + 1} earlier`}
+                        onClick={() => onChangeSteps(moveStep(steps, index, -1))}>Up</button>
+                      <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed || index === steps.length - 1}
+                        title="Move later" aria-label={`Move step ${index + 1} later`}
+                        onClick={() => onChangeSteps(moveStep(steps, index, 1))}>Down</button>
+                      <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed}
+                        onClick={() => onChangeSteps(toggleStep(steps, index))}>
+                        {disabled ? "Enable" : "Disable"}
+                      </button>
+                      <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost is-danger" disabled={!plan.allowed}
+                        onClick={() => onChangeSteps(removeStep(steps, index))}>Remove</button>
+                    </ButtonGroup>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+
+          {effect && (
+            /* A refused row is the operator's own Refuse policy fail-closing, so
+               the sample legitimately stops short of a balance — calling that a
+               defect blamed the engine for the step's configured behaviour. Only
+               an unbalanced sample with no refusal is an accounting defect. */
+            <p className={`df2-xform-ledger${effect.balanced || preview?.refusal ? "" : " is-unbalanced"}`}>
+              <DtIcon name={effect.balanced ? "check" : "alert"} size={14} />
+              {summarizeEffect(effect)}
+              {effect.balanced
+                ? " · every sampled row is accounted for"
+                : preview?.refusal
+                  ? " · the preview stopped at the refused row above, so the remaining sampled rows were not transformed"
+                  : " · ledger does not balance — this is a defect, do not approve"}
+            </p>
+          )}
+
+          {showBuilder && (
+            <TransformStepBuilder
+              catalog={catalog}
+              columns={columnsAfter}
+              canPlan={plan.allowed && !preloadRefused}
+              disabledReason={preloadRefused ? preloadTransformRefusalReason(syncMode) : plan.reason}
+              onAdd={addStep}
+            />
+          )}
+        </section>
+        )}
+        {!canvasEnabled && (
+          <section className="df2-xform-card df2-xform-preview" aria-labelledby="xform-preview-title">
+            <header className="df2-xform-card-head">
+              <h3 id="xform-preview-title">Sample</h3>
+              <div className="df2-xform-preview-tools">
+                {changedColumnNames.length > 0 ? (
+                  <div className="df2-segment" role="group" aria-label="Sample columns">
+                    <button
+                      type="button"
+                      className={showEveryResultColumn ? "" : "active"}
+                      aria-pressed={!showEveryResultColumn}
+                      onClick={() => setShowEveryResultColumn(false)}
+                    >
+                      What changed
+                    </button>
+                    <button
+                      type="button"
+                      className={showEveryResultColumn ? "active" : ""}
+                      aria-pressed={showEveryResultColumn}
+                      onClick={() => setShowEveryResultColumn(true)}
+                    >
+                      All columns
+                    </button>
+                  </div>
+                ) : null}
+                <span className="df2-xform-note">
+                  {busy
+                    ? "Previewing…"
+                    : previewSampleNote(beforeRows.length, afterRows.length, PREVIEW_ROWS)}
+                </span>
+              </div>
+            </header>
+            <div className="df2-xform-grids">
+              <div className="df2-xform-gridpane">
+                <h4>Source, unchanged</h4>
+                <div className="df2-xform-scroll">
+                  <table className="df2-table df2-table-compact">
+                    <thead>
+                      <tr>{sourceResultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {beforeRows.map((row, index) => (
+                        <tr key={index}>
+                          {sourceResultColumns.map((column) => <td key={column}>{cellText(row[column])}</td>)}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="df2-xform-gridpane">
+                <h4>After the recipe</h4>
+                {afterRows.length === 0 ? (
+                  <p className="df2-xform-empty">
+                    {shownPreviewError
+                      ? "The preview did not run. The recipe was refused before any row was removed."
+                      : busy
+                        ? "Checking this recipe against the sample."
+                        : steps.length
+                          ? "No rows survive the recipe on this sample."
+                          : "Nothing transformed yet. The source rows are on the left."}
+                  </p>
+                ) : (
+                  <div className="df2-xform-scroll">
+                    <table className="df2-table df2-table-compact">
+                      <thead>
+                        <tr>{resultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
+                      </thead>
+                      <tbody>
+                        {afterRows.map((row, index) => (
+                          <tr key={index}>
+                            {resultColumns.map((column) => (
+                              <td
+                                key={column}
+                                className={changed.has(`${index}:${column}`) ? "is-xform-changed" : ""}
+                                title={changed.has(`${index}:${column}`) ? "Changed by the recipe" : undefined}
+                              >
+                                {changed.has(`${index}:${column}`) ? <span className="df2-sr-only">changed</span> : null}
+                                {cellText(row[column])}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+            {retyped.length > 0 && (
+              <p className="df2-xform-note df2-xform-retyped">
+                <DtIcon name="info" size={14} />
+                {" "}Map and Validate now read {retyped.length === 1 ? "this column" : "these columns"} as
+                the transform leaves {retyped.length === 1 ? "it" : "them"}:{" "}
+                {retyped.map(([column, carrier]) => `${column} → ${carrier}`).join(", ")}. Columns no step
+                wrote keep their declared source type.
+              </p>
+            )}
+          </section>
+        )}
+      {!canvasEnabled && ruleReport ? (
+        <BusinessRuleLedger
+          report={ruleReport}
+          embedded
+        />
+      ) : null}
+      </div>
+
+      </div>
+
+      <div
+        role="tabpanel"
+        id="xform-panel-result"
+        aria-labelledby="xform-result-label"
+        hidden={canvasEnabled ? true : pane !== "result"}
+        className="df2-xform-panel"
+      >
+      <h2 id="xform-result-label" className="df2-sr-only">Transform result</h2>
+      <dl className="df2-xform-stats">
+        <div>
+          <dt>Sampled rows</dt>
+          <dd>
+            {(profile?.sampled_rows ?? sampleRows.length).toLocaleString()}
+            {rowCount ? <small> of {rowCount.toLocaleString()}</small> : null}
+          </dd>
+        </div>
+        <div>
+          <dt>Columns</dt>
+          <dd>
+            {(profiledColumns.length || sourceColumns.length).toLocaleString()}
+            {kitchen.from === "shaped" ? <small> after transform</small> : null}
+          </dd>
+        </div>
+        <div className={attention ? "is-attention" : ""}>
+          <dt>Columns with findings</dt>
+          <dd>{attention.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Steps applied</dt>
+          <dd>
+            {steps.length.toLocaleString()}
+            {catalog ? <small> of {catalog.max_steps} allowed</small> : null}
+          </dd>
+        </div>
+      </dl>
+
+      {profiledColumns.length > 0 && (
+        <section className="df2-xform-card df2-xform-kitchen-card" aria-labelledby="xform-profile-title">
+          <header className="df2-xform-card-head">
+            <h3 id="xform-profile-title">Columns</h3>
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost df2-btn-sm"
+              onClick={() => setShowAllColumns((all) => !all)}
+            >
+              {showAllColumns || attention === 0
+                ? (attention ? "Only columns with findings" : `All ${profiledColumns.length} columns`)
+                : `All ${profiledColumns.length} columns`}
+            </button>
+          </header>
+          {kitchen.from === "shaped" ? (
+            <p className="df2-xform-note">
+              Source names, plus columns this recipe derived. Map chooses the destination names.
+            </p>
+          ) : profile?.sample_notice ? (
+            <p className="df2-xform-note">{profile.sample_notice}</p>
+          ) : null}
+          <div className="df2-xform-kitchen">
+            <TransformColumnCatalog
+              columns={visibleColumns}
+              selected={selectedProfile?.name ?? ""}
+              onSelect={setSelectedColumn}
+            />
+            {selectedProfile ? (
+              <TransformColumnChart
+                profile={selectedProfile}
+                targetType={targetSchema[selectedProfile.name]}
+                sampleValues={selectedSamples}
+                suggestion={selectedSuggestion}
+                canApply={plan.allowed && !preloadRefused}
+                applyReason={preloadRefused ? preloadTransformRefusalReason(syncMode) : plan.reason}
+                onApplySuggestion={applySuggestion}
+              />
+            ) : (
+              <p className="df2-xform-empty">Select a column to inspect its profile.</p>
+            )}
+          </div>
+        </section>
+      )}
+
+      <p className="df2-xform-note">
+        Before and after sample rows stay on Rules & transforms, next to the recipe.
+      </p>
+
+      </div>
+
+      <footer className="df2-xform-actions">
+        <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
+          {canvasEnabled ? "Back to Connect" : "Back to Destination"}
+        </button>
+        {!canvasEnabled && pane === "prepare" && hasEnabledRecipe ? (
+          <button
+            type="button"
+            className="df2-btn df2-btn-primary"
+            onClick={() => setPane("result")}
+          >
+            Review result
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="df2-btn df2-btn-primary"
+            disabled={!continueState.enabled}
+            title={continueState.reason}
+            onClick={onContinue}
+          >
+            {continueState.label}
+          </button>
+        )}
+      </footer>
+    </section>
+  );
+}

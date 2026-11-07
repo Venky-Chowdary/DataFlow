@@ -18,13 +18,23 @@ export const FILE_FORMAT_SOURCE_TYPES = new Set([
 
 export const STEP_SOURCE = 1;
 export const STEP_DESTINATION = 2;
-export const STEP_MAP = 3;
-export const STEP_VALIDATE = 4;
-export const STEP_RUN = 5;
+/**
+ * Transform (pre-load) sits before Map deliberately: Map decides carriers,
+ * narrowing risk contracts and the DDL identity from the columns and values it
+ * is shown, so transforming must be the last thing that changes source-side
+ * truth. "Shape" was the engine's word for it and meant nothing to an operator;
+ * the operator-facing label states when it runs, which is the whole distinction
+ * from the post-load transforms under Operations.
+ */
+export const STEP_SHAPE = 3;
+export const STEP_MAP = 4;
+export const STEP_VALIDATE = 5;
+export const STEP_RUN = 6;
 
 export const STEPS: { n: number; label: string; shortLabel: string; icon: string }[] = [
   { n: STEP_SOURCE, label: "Source", shortLabel: "Src", icon: "upload" },
   { n: STEP_DESTINATION, label: "Destination", shortLabel: "Dest", icon: "connectors" },
+  { n: STEP_SHAPE, label: "Transform", shortLabel: "Xform", icon: "layers" },
   { n: STEP_MAP, label: "Map", shortLabel: "Map", icon: "sparkle" },
   { n: STEP_VALIDATE, label: "Validate", shortLabel: "Gate", icon: "gate" },
   { n: STEP_RUN, label: "Run", shortLabel: "Run", icon: "transfer" },

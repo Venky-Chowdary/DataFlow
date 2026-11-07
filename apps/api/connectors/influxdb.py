@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import requests
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, load_http_json
 
 from connectors.saas_common import ReadBatch, humanize_http_error
 
@@ -26,6 +26,9 @@ def _url(host: str, port: int, ssl: bool) -> str:
         parsed = urlparse(h)
         if not parsed.port:
             h = urlunparse(parsed._replace(netloc=f"{parsed.hostname}:{port}"))
+    from services.egress_guard import assert_connector_dial_allowed
+
+    assert_connector_dial_allowed(h, point="http_client")
     return h.rstrip("/")
 
 
@@ -36,7 +39,7 @@ def _query(url_base: str, database: str, q: str, username: str = "", password: s
     auth = (username, password) if username and password else None
     resp = requests.get(f"{url_base}/query", params=params, auth=auth, timeout=timeout)
     resp.raise_for_status()
-    return resp.json()
+    return load_http_json(resp)
 
 
 def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
@@ -114,6 +117,56 @@ def test_connection(
         return False, f"InfluxDB probe failed: {exc}"
     except Exception as exc:
         return False, humanize_http_error(exc, "influxdb")
+
+
+def _first_column(body: Any) -> list[str]:
+    """First column of every series row (SHOW MEASUREMENTS / TAG KEYS)."""
+    _headers, rows = _extract_rows(body)
+    return [row[0] for row in rows if row and str(row[0]).strip()]
+
+
+def list_measurements(
+    *,
+    host: str = "",
+    port: int = 8086,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    ssl: bool = False,
+) -> list[str]:
+    """Measurements in the database — the tables an InfluxDB source offers."""
+    body = _query(_url(host, port, ssl), database, "SHOW MEASUREMENTS", username, password)
+    return sorted(set(_first_column(body)))
+
+
+def measurement_schema(
+    *,
+    measurement: str,
+    host: str = "",
+    port: int = 8086,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    ssl: bool = False,
+) -> tuple[dict[str, str], list[str]]:
+    """Declared field types (``float``/``integer``/...) and tag keys of one measurement."""
+    url_base = _url(host, port, ssl)
+    quoted = measurement.replace('"', '\\"')
+    fields_body = _query(
+        url_base, database, f'SHOW FIELD KEYS FROM "{quoted}"', username, password  # nosec B608
+    )
+    _headers, rows = _extract_rows(fields_body)
+    idx_key = _headers.index("fieldKey") if "fieldKey" in _headers else 0
+    idx_type = _headers.index("fieldType") if "fieldType" in _headers else 1
+    fields = {
+        row[idx_key]: row[idx_type].strip().lower()
+        for row in rows
+        if len(row) > max(idx_key, idx_type) and row[idx_key]
+    }
+    tags_body = _query(
+        url_base, database, f'SHOW TAG KEYS FROM "{quoted}"', username, password  # nosec B608
+    )
+    return fields, _first_column(tags_body)
 
 
 def read_object(

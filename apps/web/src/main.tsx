@@ -7,10 +7,13 @@ import "@fontsource/plus-jakarta-sans/700.css";
 import "@fontsource/ibm-plex-sans/400.css";
 import "@fontsource/ibm-plex-sans/500.css";
 import "@fontsource/ibm-plex-sans/600.css";
+import "@fontsource/ibm-plex-sans/700.css";
 import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/500.css";
+import "@fontsource/jetbrains-mono/700.css";
 import { DataTransferApp } from "./DataTransferApp";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
+import "./styles/marketing-base.css";
 import "./styles/app-styles.css";
 
 /* ToastProvider lives once inside DataTransferApp — mounting it here too

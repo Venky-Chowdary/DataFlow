@@ -1,0 +1,126 @@
+{
+  "name": "gitlab",
+  "docs": "https://docs.gitlab.com/ee/api/rest/",
+  "base_url": "https://gitlab.com/api/v4",
+  "auth": {
+    "type": "api_key",
+    "location": "header",
+    "name": "PRIVATE-TOKEN"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "projects",
+      "path": "projects",
+      "records_path": "$",
+      "primary_key": ["id"],
+      "request_params": {
+        "membership": true,
+        "order_by": "updated_at",
+        "sort": "asc",
+        "per_page": 100
+      },
+      "cursor": {
+        "field": "updated_at",
+        "request_param": "updated_after",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "link_header",
+        "page_size": 100,
+        "page_size_param": "per_page"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "path_with_namespace": {"type": "string"},
+          "visibility": {"type": ["string", "null"]},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"},
+          "last_activity_at": {"type": ["string", "null"]}
+        }
+      }
+    },
+    {
+      "name": "issues",
+      "path": "issues",
+      "records_path": "$",
+      "primary_key": ["id"],
+      "request_params": {
+        "scope": "all",
+        "order_by": "updated_at",
+        "sort": "asc",
+        "per_page": 100
+      },
+      "cursor": {
+        "field": "updated_at",
+        "request_param": "updated_after",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "link_header",
+        "page_size": 100,
+        "page_size_param": "per_page"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "iid": {"type": "integer"},
+          "project_id": {"type": "integer"},
+          "title": {"type": "string"},
+          "state": {"type": "string"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "merge_requests",
+      "path": "merge_requests",
+      "records_path": "$",
+      "primary_key": ["id"],
+      "request_params": {
+        "scope": "all",
+        "order_by": "updated_at",
+        "sort": "asc",
+        "per_page": 100
+      },
+      "cursor": {
+        "field": "updated_at",
+        "request_param": "updated_after",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "link_header",
+        "page_size": 100,
+        "page_size_param": "per_page"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "iid": {"type": "integer"},
+          "project_id": {"type": "integer"},
+          "title": {"type": "string"},
+          "state": {"type": "string"},
+          "merged_at": {"type": ["string", "null"], "format": "date-time"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  ]
+}

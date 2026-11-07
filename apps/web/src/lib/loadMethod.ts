@@ -24,6 +24,230 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
   },
   copy: { label: "COPY", description: "Bulk COPY into the destination." },
   bulk_copy: { label: "Bulk COPY", description: "Bulk COPY into the destination." },
+  copy_text_pg_to_mysql_load_data: {
+    label: "PostgreSQL COPY → MySQL LOAD DATA",
+    description:
+      "Identity append/overwrite: PostgreSQL COPY text piped into STRICT "
+      + "LOAD DATA LOCAL INFILE. Dest COUNT(*) must equal the source snapshot.",
+  },
+  copy_text_pg_to_mysql_load_data_upsert: {
+    label: "PostgreSQL COPY → MySQL upsert",
+    description:
+      "Identity upsert: LOAD DATA into a staging table, then INSERT ... ON "
+      + "DUPLICATE KEY UPDATE. Proof is dest PK ⋈ staging, not dest COUNT(*).",
+  },
+  copy_binary_server_to_server_upsert: {
+    label: "Server COPY then upsert",
+    description:
+      "Identity upsert: binary COPY into staging, then INSERT ... ON CONFLICT. "
+      + "Proof is dest PK ⋈ staging, not dest COUNT(*).",
+  },
+  copy_binary_server_to_server_incremental_append: {
+    label: "Server COPY incremental append",
+    description:
+      "Identity incremental: binary COPY of rows past the cursor watermark into "
+      + "staging, then INSERT (duplicate PK fails closed). Dest COUNT(*) must "
+      + "equal dest_before + staging.",
+  },
+  copy_binary_server_to_server_incremental_deduped: {
+    label: "Server COPY incremental upsert",
+    description:
+      "Identity incremental: binary COPY of rows past the cursor watermark into "
+      + "staging, then INSERT ... ON CONFLICT. Proof is dest PK ⋈ staging.",
+  },
+  copy_text_pg_to_mysql_load_data_incremental_append: {
+    label: "PostgreSQL COPY → MySQL incremental append",
+    description:
+      "Identity incremental: COPY of rows past the cursor watermark into staging, "
+      + "then INSERT (duplicate PK fails closed). Dest COUNT(*) must equal "
+      + "dest_before + staging.",
+  },
+  copy_text_pg_to_mysql_load_data_incremental_deduped: {
+    label: "PostgreSQL COPY → MySQL incremental upsert",
+    description:
+      "Identity incremental: COPY of rows past the cursor watermark into staging, "
+      + "then INSERT ... ON DUPLICATE KEY UPDATE. Proof is dest PK ⋈ staging.",
+  },
+  copy_text_mysql_to_pg_stdin_incremental_append: {
+    label: "MySQL → PostgreSQL incremental append",
+    description:
+      "Identity incremental: MySQL consistent-snapshot SELECT of rows past the "
+      + "cursor watermark into staging COPY, then INSERT (duplicate PK fails closed).",
+  },
+  copy_text_mysql_to_pg_stdin_incremental_deduped: {
+    label: "MySQL → PostgreSQL incremental upsert",
+    description:
+      "Identity incremental: MySQL consistent-snapshot SELECT of rows past the "
+      + "cursor watermark into staging COPY, then INSERT ... ON CONFLICT.",
+  },
+  insert_select_mysql_same_instance_incremental_append: {
+    label: "MySQL INSERT SELECT incremental append",
+    description:
+      "Identity incremental: same-instance INSERT SELECT of rows past the cursor "
+      + "watermark into staging, then INSERT (duplicate PK fails closed).",
+  },
+  insert_select_mysql_same_instance_incremental_deduped: {
+    label: "MySQL INSERT SELECT incremental upsert",
+    description:
+      "Identity incremental: same-instance INSERT SELECT of rows past the cursor "
+      + "watermark into staging, then INSERT ... ON DUPLICATE KEY UPDATE.",
+  },
+  copy_text_mysql_to_mysql_load_data_incremental_append: {
+    label: "MySQL LOAD DATA incremental append",
+    description:
+      "Identity incremental: cross-host LOAD DATA of rows past the cursor "
+      + "watermark into staging, then INSERT (duplicate PK fails closed).",
+  },
+  copy_text_mysql_to_mysql_load_data_incremental_deduped: {
+    label: "MySQL LOAD DATA incremental upsert",
+    description:
+      "Identity incremental: cross-host LOAD DATA of rows past the cursor "
+      + "watermark into staging, then INSERT ... ON DUPLICATE KEY UPDATE.",
+  },
+  attach_insert_select_sqlite: {
+    label: "SQLite ATTACH INSERT SELECT",
+    description:
+      "Identity append/overwrite: ATTACH the source file and INSERT SELECT. "
+      + "Dest COUNT(*) must equal the source snapshot. Not .dump / .import.",
+  },
+  attach_insert_select_sqlite_incremental_append: {
+    label: "SQLite incremental append",
+    description:
+      "Identity incremental: INSERT SELECT of rows past the cursor watermark "
+      + "into staging, then INSERT (duplicate PK fails closed).",
+  },
+  attach_insert_select_sqlite_incremental_deduped: {
+    label: "SQLite incremental upsert",
+    description:
+      "Identity incremental: INSERT SELECT of rows past the cursor watermark "
+      + "into staging, then INSERT ... ON CONFLICT DO UPDATE.",
+  },
+  copy_text_pg_executemany_sqlite: {
+    label: "PostgreSQL COPY → SQLite",
+    description:
+      "Identity append/overwrite: PostgreSQL COPY text piped into SQLite "
+      + "executemany. DATE lands as TEXT. Dest COUNT(*) must equal the source snapshot.",
+  },
+  copy_text_pg_executemany_sqlite_incremental_append: {
+    label: "PostgreSQL → SQLite incremental append",
+    description:
+      "Identity incremental: COPY of DATE rows past the cursor watermark into "
+      + "staging, then INSERT (duplicate PK fails closed). TIMESTAMP is COPY-unsafe.",
+  },
+  copy_text_pg_executemany_sqlite_incremental_deduped: {
+    label: "PostgreSQL → SQLite incremental upsert",
+    description:
+      "Identity incremental: COPY of DATE rows past the cursor watermark into "
+      + "staging, then INSERT ... ON CONFLICT. TIMESTAMP is COPY-unsafe.",
+  },
+  select_mysql_executemany_sqlite: {
+    label: "MySQL snapshot → SQLite",
+    description:
+      "Identity append/overwrite: MySQL consistent-snapshot SELECT into SQLite "
+      + "executemany. DATETIME lands as TEXT. Dest COUNT(*) must equal the source snapshot.",
+  },
+  select_mysql_executemany_sqlite_incremental_append: {
+    label: "MySQL → SQLite incremental append",
+    description:
+      "Identity incremental: MySQL consistent-snapshot SELECT of DATETIME rows "
+      + "past the cursor watermark into staging, then INSERT (duplicate PK fails closed).",
+  },
+  select_mysql_executemany_sqlite_incremental_deduped: {
+    label: "MySQL → SQLite incremental upsert",
+    description:
+      "Identity incremental: MySQL consistent-snapshot SELECT of DATETIME rows "
+      + "past the cursor watermark into staging, then INSERT ... ON CONFLICT.",
+  },
+  select_sqlite_copy_from_stdin_pg: {
+    label: "SQLite → PostgreSQL COPY",
+    description:
+      "Identity append/overwrite: SQLite SELECT encoded as PostgreSQL COPY FROM "
+      + "STDIN. Dest COUNT(*) must equal the source snapshot. Not .dump.",
+  },
+  select_sqlite_copy_from_stdin_pg_incremental_append: {
+    label: "SQLite → PostgreSQL incremental append",
+    description:
+      "Identity incremental: SQLite SELECT of TEXT or naive-ISO DATETIME rows past the cursor watermark "
+      + "into staging COPY, then INSERT (duplicate PK fails closed). Unix-epoch, tz-aware, and date-only DATETIME decline.",
+  },
+  select_sqlite_copy_from_stdin_pg_incremental_deduped: {
+    label: "SQLite → PostgreSQL incremental upsert",
+    description:
+      "Identity incremental: SQLite SELECT of TEXT or naive-ISO DATETIME rows past the cursor watermark "
+      + "into staging COPY, then INSERT ... ON CONFLICT. Unix-epoch, tz-aware, and date-only DATETIME decline.",
+  },
+  select_sqlite_load_data_mysql: {
+    label: "SQLite → MySQL LOAD DATA",
+    description:
+      "Identity append/overwrite: SQLite SELECT encoded as STRICT LOAD DATA. "
+      + "Dest COUNT(*) must equal the source snapshot. Not .dump / sqlldr.",
+  },
+  select_sqlite_load_data_mysql_incremental_append: {
+    label: "SQLite → MySQL incremental append",
+    description:
+      "Identity incremental: SQLite SELECT of TEXT or naive-ISO DATETIME rows past the cursor watermark "
+      + "into staging LOAD DATA, then INSERT (duplicate PK fails closed). Unix-epoch, tz-aware, and date-only DATETIME decline.",
+  },
+  select_sqlite_load_data_mysql_incremental_deduped: {
+    label: "SQLite → MySQL incremental upsert",
+    description:
+      "Identity incremental: SQLite SELECT of TEXT or naive-ISO DATETIME rows past the cursor watermark "
+      + "into staging LOAD DATA, then INSERT ... ON DUPLICATE KEY UPDATE. Unix-epoch, tz-aware, and date-only DATETIME decline.",
+  },
+  csv_executemany_sqlite: {
+    label: "CSV → SQLite",
+    description:
+      "Identity append/overwrite: local CSV parsed into SQLite executemany. "
+      + "Dest COUNT(*) must equal the mapped source COUNT. Not pandas.",
+  },
+  csv_executemany_sqlite_incremental_append: {
+    label: "CSV → SQLite incremental append",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging, "
+      + "then INSERT (duplicate PK fails closed). Not a SQL WHERE on the file.",
+  },
+  csv_executemany_sqlite_incremental_deduped: {
+    label: "CSV → SQLite incremental upsert",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging, "
+      + "then INSERT ... ON CONFLICT. Not a SQL WHERE on the file.",
+  },
+  csv_copy_from_stdin_pg: {
+    label: "CSV → PostgreSQL COPY",
+    description:
+      "Identity append/overwrite: local CSV piped into COPY FROM STDIN. "
+      + "Dest COUNT(*) must equal the mapped source COUNT.",
+  },
+  csv_copy_from_stdin_pg_incremental_append: {
+    label: "CSV → PostgreSQL incremental append",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging COPY, "
+      + "then INSERT (duplicate PK fails closed). Not a SQL WHERE on the file.",
+  },
+  csv_copy_from_stdin_pg_incremental_deduped: {
+    label: "CSV → PostgreSQL incremental upsert",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging COPY, "
+      + "then INSERT ... ON CONFLICT. Not a SQL WHERE on the file.",
+  },
+  csv_load_data_mysql: {
+    label: "CSV → MySQL LOAD DATA",
+    description:
+      "Identity append/overwrite: local CSV into STRICT LOAD DATA. "
+      + "Dest COUNT(*) must equal the mapped source COUNT.",
+  },
+  csv_load_data_mysql_incremental_append: {
+    label: "CSV → MySQL incremental append",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging LOAD DATA, "
+      + "then INSERT (duplicate PK fails closed). Not a SQL WHERE on the file.",
+  },
+  csv_load_data_mysql_incremental_deduped: {
+    label: "CSV → MySQL incremental upsert",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging LOAD DATA, "
+      + "then INSERT ... ON DUPLICATE KEY UPDATE. Not a SQL WHERE on the file.",
+  },
   insert: { label: "Insert", description: "Row batches inserted into the destination." },
   upsert: { label: "Upsert", description: "Row batches merged on the identity key." },
   merge_batch: {
@@ -36,14 +260,57 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
   },
 };
 
+const FILE_RECORD_COPY =
+  /^(json|yaml|fwf|excel|xml|parquet|avro|orc)_records_(executemany_sqlite|copy_from_stdin_pg|load_data_mysql)(?:_incremental_(append|deduped))?$/;
+
+const FILE_RECORD_KIND: Record<string, string> = {
+  json: "JSON",
+  yaml: "YAML",
+  fwf: "Fixed-width",
+  excel: "Excel",
+  xml: "XML",
+  parquet: "Parquet",
+  avro: "Avro",
+  orc: "ORC",
+};
+
+function fileRecordCopyInfo(method: string): LoadMethodInfo | null {
+  const match = method.match(FILE_RECORD_COPY);
+  if (!match) return null;
+  const kind = FILE_RECORD_KIND[match[1]] ?? match[1].toUpperCase();
+  const dest = match[2].includes("sqlite")
+    ? "SQLite"
+    : match[2].includes("pg")
+      ? "PostgreSQL"
+      : "MySQL";
+  const inc = match[3] === "append"
+    ? " incremental append"
+    : match[3] === "deduped"
+      ? " incremental upsert"
+      : "";
+  return {
+    label: `${kind} → ${dest}${inc}`,
+    description: inc
+      ? `Identity incremental: ${kind} records past the cursor watermark into staging, `
+        + "then the dest bulk apply. Nested cells stay on the row path. "
+        + "Not a SQL WHERE on the file."
+      : `Identity append/overwrite: ${kind} records mapped into the dest bulk load. `
+        + "Dest COUNT(*) must equal the mapped source COUNT. Nested cells stay on the row path.",
+  };
+}
+
 export function loadMethodLabel(method: string | null | undefined): string {
   const key = String(method || "").trim();
   if (!key) return "";
-  return LOAD_METHODS[key]?.label ?? key;
+  return LOAD_METHODS[key]?.label ?? fileRecordCopyInfo(key)?.label ?? key;
 }
 
 export function loadMethodDescription(method: string | null | undefined): string {
   const key = String(method || "").trim();
   if (!key) return "";
-  return LOAD_METHODS[key]?.description ?? `Load path for this job: ${key}.`;
+  return (
+    LOAD_METHODS[key]?.description
+    ?? fileRecordCopyInfo(key)?.description
+    ?? `Load path for this job: ${key}.`
+  );
 }

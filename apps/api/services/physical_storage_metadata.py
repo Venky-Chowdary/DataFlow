@@ -21,6 +21,12 @@ import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from services.catalog_statement_cap import (
+    budget_exceeded,
+    budget_exceeded_detail,
+    note_budget_exceeded,
+)
+
 logger = logging.getLogger(__name__)
 
 PhysicalStorageStatus = Literal["measured", "unavailable"]
@@ -215,49 +221,39 @@ def _mysql_tablespace(cursor: Any, schema: str, table: str) -> str | None:
     ``information_schema.TABLES`` dropped ``TABLESPACE_NAME`` in MySQL 8 and
     MariaDB never had it; ``INNODB_TABLES`` needs the PROCESS privilege, so a
     refusal here must not fail the whole probe.
+
+    Two lookups scoped to this one table: the former JOIN of
+    ``innodb_tablespaces`` × ``innodb_tables`` walked every table of every
+    schema on the server (QA round 11: Ensembl preflight > 5 minutes).
     """
     try:
+        space = _rows(
+            cursor,
+            "SELECT space FROM information_schema.innodb_tables WHERE name = %s",
+            (f"{schema}/{table}",),
+        )
+        if not space or space[0][0] is None:
+            return None
         rows = _rows(
             cursor,
-            """
-            SELECT s.name FROM information_schema.innodb_tablespaces s
-              JOIN information_schema.innodb_tables t ON t.space = s.space
-             WHERE t.name = CONCAT(%s, '/', %s)
-            """,
-            (schema, table),
+            "SELECT name FROM information_schema.innodb_tablespaces WHERE space = %s",
+            (space[0][0],),
         )
     except Exception as exc:  # noqa: BLE001 — a refused catalog is evidence
+        if budget_exceeded(exc):
+            raise
         logger.debug("innodb tablespace lookup unavailable: %s", exc)
         return None
     return str(rows[0][0]) if rows and rows[0][0] else None
 
 
 def _probe_mysql(cursor: Any, schema: str, table: str) -> PhysicalStorage:
+    # One table, one scoped read each: no correlated subqueries per row of
+    # ``information_schema.tables``.
     rows = _rows(
         cursor,
         """
-        SELECT t.table_name,
-               (SELECT count(*) FROM information_schema.partitions p
-                 WHERE p.table_schema = t.table_schema
-                   AND p.table_name = t.table_name
-                   AND p.partition_name IS NOT NULL),
-               (SELECT MIN(p.partition_method) FROM information_schema.partitions p
-                 WHERE p.table_schema = t.table_schema
-                   AND p.table_name = t.table_name
-                   AND p.partition_name IS NOT NULL),
-               (SELECT MIN(p.partition_expression) FROM information_schema.partitions p
-                 WHERE p.table_schema = t.table_schema
-                   AND p.table_name = t.table_name
-                   AND p.partition_name IS NOT NULL),
-               (SELECT GROUP_CONCAT(
-                          CONCAT(p.partition_name, '\\t',
-                                 COALESCE(p.partition_description, ''))
-                          ORDER BY p.partition_ordinal_position SEPARATOR '\\n')
-                  FROM information_schema.partitions p
-                 WHERE p.table_schema = t.table_schema
-                   AND p.table_name = t.table_name
-                   AND p.partition_name IS NOT NULL)
-          FROM information_schema.tables t
+        SELECT t.table_name FROM information_schema.tables t
          WHERE t.table_schema = %s AND t.table_name = %s
         """,
         (schema, table),
@@ -268,13 +264,23 @@ def _probe_mysql(cursor: Any, schema: str, table: str) -> PhysicalStorage:
             f"{schema}.{table} not visible in information_schema for this user; "
             "physical placement unmeasured (not proof of absence)",
         )
-    _name, part_count, method, expression, bound_blob = rows[0]
+    parts = _rows(
+        cursor,
+        """
+        SELECT partition_name, partition_method, partition_expression,
+               partition_description
+          FROM information_schema.partitions
+         WHERE table_schema = %s AND table_name = %s
+           AND partition_name IS NOT NULL
+         ORDER BY partition_ordinal_position
+        """,
+        (schema, table),
+    )
+    part_count = len(parts)
+    method = min((str(p[1]) for p in parts if p[1]), default=None)
+    expression = min((str(p[2]) for p in parts if p[2]), default=None)
     tspace = _mysql_tablespace(cursor, schema, table)
-    bounds = [
-        {"name": line.split("\t", 1)[0], "bound": line.split("\t", 1)[1]}
-        for line in str(bound_blob or "").split("\n")
-        if "\t" in line
-    ]
+    bounds = [{"name": str(p[0]), "bound": str(p[3] or "")} for p in parts]
     keys = [
         part.strip().strip("`")
         for part in str(expression or "").split(",")
@@ -437,6 +443,10 @@ def probe_physical_storage(
         return probe(_as_cursor(cursor), schema, table)
     except Exception as exc:  # noqa: BLE001 — probe must never fail the run
         logger.debug("physical storage probe failed for %s.%s: %s", schema, table, exc)
+        if note_budget_exceeded(f"The physical-storage catalog probe of {table}", exc):
+            return _unavailable(
+                key, budget_exceeded_detail(f"The physical-storage catalog probe of {table}")
+            )
         return _unavailable(key, f"Physical storage catalog unreadable: {exc}")
 
 
