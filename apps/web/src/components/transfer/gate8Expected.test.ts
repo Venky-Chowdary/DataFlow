@@ -205,7 +205,8 @@ describe("Gate-8 identity-proof honesty", () => {
       sample_compare: { passed: true, compared: 10, mismatches: [], alignment: "key_aligned" },
     };
     assert.equal(isGate8IdentityUnproven(report), false);
-    assert.equal(classifyGate8Status(report).fullPass, true);
+    assert.equal(classifyGate8Status(report).fullPass, false);
+    assert.equal(classifyGate8Status(report).label, "Unproven");
   });
 });
 
@@ -343,10 +344,27 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
       assurance_level: "full_checksum",
       coverage: "full_checksum",
       source_checksum_provenance: "independent_source_reread",
+      source_checksum: "abc",
+      target_checksum: "abc",
       source_rows: 2,
       target_rows: 2,
     };
     assert.equal(presentMultiStreamGate8(report, { multi_stream: false, streams: [] }), report);
+    const view = classifyGate8Status(report);
+    assert.equal(view.fullPass, true);
+    assert.equal(view.label, "Independent re-read");
+  });
+
+  it("accepts a declared verify-time population digest as full proof", () => {
+    const report = {
+      passed: true,
+      phase: "post_write_verified",
+      coverage: "full_checksum",
+      checksum_scope: "verify_time_population_digest",
+      source_checksum_provenance: "independent_source_reread",
+      source_checksum: "abc",
+      target_checksum: "abc",
+    };
     const view = classifyGate8Status(report);
     assert.equal(view.fullPass, true);
     assert.equal(view.label, "Independent re-read");

@@ -129,17 +129,20 @@ def planned_create_primary_key(
     mappings: list[dict[str, Any]] | None,
     operator_key_columns: list[str] | None,
     source_schema_catalog: Any = None,
+    destination_config: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """The PRIMARY KEY the writer's CREATE TABLE would declare on MySQL, or ``[]``.
 
     Asked of the writer's own planner (``schema_fidelity.resolve_create_fidelity_plan``)
     with the inputs the write path gives it (``stream.py`` / ``stream_write.py``):
-    ``write_mode`` is upsert only for an upsert-family sync with a key; keys are
-    carried for upsert and for overwrite (``carry_source_keys``), withheld for an
-    append; the operator key is the destination key only on upsert. SCD2's
+    The shared duplicate-policy resolver applies the explicit destination
+    options to the sync's initial write mode. Keys are carried for effective
+    upsert and overwrite (``carry_source_keys``), withheld for plain append;
+    the operator key is the destination key only on upsert. SCD2's
     history table never carries the key (``scd2_engine``) and the CDC apply
     table declares its key columns itself (``cdc_eos_sa``). No second rulebook.
     """
+    from services.duplicate_policy import DuplicatePolicyError, resolve_duplicate_policy
     from services.schema_fidelity import resolve_create_fidelity_plan
     from services.sync_cursor import is_overwrite_sync, normalize_sync_mode, requires_upsert
 
@@ -155,6 +158,19 @@ def planned_create_primary_key(
     if mode == "cdc":
         return keys
     write_mode = "upsert" if requires_upsert(mode) and keys and mode != "scd2" else "insert"
+    if mode != "scd2":
+        cfg = destination_config or {}
+        try:
+            decision = resolve_duplicate_policy(
+                duplicate_policy=str(cfg.get("duplicate_policy") or ""),
+                allow_duplicates=bool(cfg.get("allow_duplicates")),
+                sync_mode=mode,
+                business_key=bool(keys),
+                write_mode=write_mode,
+            )
+        except DuplicatePolicyError:
+            return []
+        write_mode = decision.write_mode
     carry = mode != "scd2" and (write_mode != "insert" or is_overwrite_sync(mode))
     plan = resolve_create_fidelity_plan(
         source_schema_catalog=source_schema_catalog,
@@ -243,6 +259,7 @@ def keyless_create_refusal(
     if planned_create_primary_key(
         sync_mode=mode, mappings=mappings, operator_key_columns=keys,
         source_schema_catalog=catalog,
+        destination_config=destination_config,
     ):
         return None
     table = str(destination_table or "the destination table")

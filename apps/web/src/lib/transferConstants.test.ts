@@ -13,6 +13,23 @@ import {
   syncModeHonestyLine,
 } from "./transferConstants.js";
 
+describe("MySQL append identity honesty", () => {
+  for (const driver of ["mysql", "mariadb"]) {
+    it(`names keyless CREATE and the server restriction for ${driver}`, () => {
+      const line = syncModeHonestyLine("full_refresh_append", false, driver);
+      assert.match(line, /no PRIMARY KEY|keyless/i);
+      assert.match(line, /selected identity key/i);
+      assert.match(line, /server.*requires.*primary key/i);
+      assert.match(line, /Validate/i);
+    });
+  }
+  it("keeps existing destination constraints authoritative", () => {
+    const line = syncModeHonestyLine("full_refresh_append", true, "mysql");
+    assert.match(line, /existing.*constraints/i);
+    assert.doesNotMatch(line, /duplicate.*will not block/i);
+  });
+});
+
 describe("availableSyncModes", () => {
   it("hides SCD2/mirror on Mongo destinations", () => {
     const modes = availableSyncModes({

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { DtIcon } from "./DtIcon";
+import { Dialog } from "./ui/Dialog";
 import {
   mergeToastStack,
   toastFingerprint,
@@ -35,7 +36,14 @@ const TONE_ICON: Record<ToastTone, string> = {
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
+  const [review, setReview] = useState<ToastItem[]>([]);
+  const reviewRef = useRef<ToastItem[]>([]);
   const timers = useRef(new Map<string, number>());
+
+  useEffect(() => () => {
+    for (const handle of timers.current.values()) window.clearTimeout(handle);
+    timers.current.clear();
+  }, []);
 
   const dismiss = useCallback((id: string) => {
     const handle = timers.current.get(id);
@@ -50,11 +58,34 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     (id: string, tone: ToastTone) => {
       const prior = timers.current.get(id);
       if (prior != null) window.clearTimeout(prior);
+      if (reviewRef.current.some((item) => item.id === id)) {
+        timers.current.delete(id);
+        return;
+      }
       const holdMs = tone === "error" ? 16000 : tone === "warning" ? 10000 : 4500;
-      timers.current.set(id, window.setTimeout(() => dismiss(id), holdMs));
+      timers.current.set(id, window.setTimeout(() => {
+        if (!reviewRef.current.some((item) => item.id === id)) dismiss(id);
+      }, holdMs));
     },
     [dismiss],
   );
+
+  const openReview = useCallback((next: ToastItem[]) => {
+    reviewRef.current = next;
+    for (const item of next) {
+      const handle = timers.current.get(item.id);
+      if (handle != null) window.clearTimeout(handle);
+      timers.current.delete(item.id);
+    }
+    setReview(next);
+  }, []);
+
+  const closeReview = useCallback(() => {
+    const previous = reviewRef.current;
+    reviewRef.current = [];
+    setReview([]);
+    for (const item of previous) scheduleDismiss(item.id, item.tone);
+  }, [scheduleDismiss]);
 
   const dismissMatching = useCallback((title: string) => {
     const match = title.trim();
@@ -78,7 +109,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       const key = toastFingerprint({ title: cleanTitle, message: cleanMessage, tone });
       const now = Date.now();
       const incoming: ToastItem = {
-        id: crypto.randomUUID(),
+        id: reviewRef.current.find((item) => item.key === key)?.id ?? crypto.randomUUID(),
         key,
         title: cleanTitle,
         message: cleanMessage,
@@ -87,7 +118,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       };
       let shownId = incoming.id;
       setItems((prev) => {
-        const merged = mergeToastStack(prev, incoming, now);
+        const merged = mergeToastStack(prev, incoming, now, undefined, prev.length + 1);
         shownId = merged.shownId;
         return merged.items;
       });
@@ -104,7 +135,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [dock, setDock] = useState<HTMLElement | null>(null);
   useEffect(() => {
     const sync = () => {
-      const el = document.querySelector<HTMLElement>("[data-df2-toast-dock]");
+      const el = Array.from(document.querySelectorAll<HTMLElement>("[data-df2-toast-dock]"))
+        .find((candidate) => {
+          if (candidate.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+          for (let ancestor: HTMLElement | null = candidate; ancestor; ancestor = ancestor.parentElement) {
+            const style = window.getComputedStyle(ancestor);
+            if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
+          }
+          return true;
+        }) ?? null;
       setDock((prev) => (prev === el ? prev : el));
     };
     sync();
@@ -113,17 +152,22 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     // querySelector-on-render misses it — a toast emitted before the dock
     // existed would float forever. Observe instead (D-BP-20 residual).
     const mo = new MutationObserver(sync);
-    mo.observe(document.body, { childList: true, subtree: true });
+    mo.observe(document.body, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ["hidden", "inert", "aria-hidden", "style", "class"],
+    });
     return () => mo.disconnect();
   }, []);
 
   // D-BP-27: a docked lane can never render a partially visible toast — cap
   // visible to the newest 2 and collapse the rest into a "+N more" chip.
-  const visible = dock ? items.slice(-2) : items;
-  const hiddenCount = dock ? Math.max(0, items.length - visible.length) : 0;
+  const visible = items.slice(-2);
+  const hiddenCount = Math.max(0, items.length - visible.length);
 
   const host = (
-    <div className="dt-toast-host" aria-live="polite" aria-relevant="additions" aria-atomic="false">
+    <div className="dt-toast-host" aria-live="polite" aria-relevant="additions" aria-atomic="false"
+      aria-hidden={review.length > 0 || undefined} inert={review.length > 0 || undefined}
+      style={review.length > 0 ? { display: "none" } : undefined}>
         {visible.map((t) => (
           <div key={t.id} className={`dt-toast dt-toast--${t.tone}`} role={t.tone === "error" ? "alert" : "status"}>
             <span className="dt-toast-icon" aria-hidden>
@@ -133,16 +177,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               <strong className="dt-toast-title">{t.title}</strong>
               {t.message && <span className="dt-toast-message">{t.message}</span>}
             </div>
-            <button type="button" className="dt-toast-close" onClick={() => dismiss(t.id)} aria-label="Dismiss notification">
+            <button type="button" className="dt-toast-close" onClick={() => openReview([t])}
+              aria-label="View notification details" aria-haspopup="dialog" title="View notification details">
+              <DtIcon name="book" size={16} />
+            </button>
+            <button type="button" className="dt-toast-close" onClick={() => dismiss(t.id)} aria-label="Dismiss notification" title="Dismiss notification">
               <DtIcon name="x" size={16} />
             </button>
             <span className={`dt-toast-timer dt-toast-timer--${t.tone}`} aria-hidden />
           </div>
         ))}
         {hiddenCount > 0 && (
-          <div className="dt-toast-more" role="status">
+          <button type="button" className="dt-toast-more" onClick={() => openReview([...items].reverse())}
+            aria-label={`Review ${hiddenCount} more notifications`} aria-haspopup="dialog" title="Review notifications">
             +{hiddenCount} more
-          </div>
+          </button>
         )}
     </div>
   );
@@ -150,7 +199,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      {dock ? createPortal(host, dock) : host}
+      {createPortal(host, dock ?? document.body)}
+      <Dialog open={review.length > 0} onClose={closeReview} title="Notification details" size="md" className="dt-toast-review">
+        {review.map((item) => (
+          <section key={item.id} className={`dt-toast-review-item dt-toast-review-item--${item.tone}`}>
+            <h3>{item.title}</h3>
+            {item.message && <p>{item.message}</p>}
+          </section>
+        ))}
+      </Dialog>
     </ToastContext.Provider>
   );
 }

@@ -176,6 +176,12 @@ def test_engine_copy_reports_count_proof_and_verify_time_digest_honestly(tmp_pat
     assert report.get("source_checksum")
     assert report.get("source_checksum") == report.get("target_checksum")
     assert report.get("checksum_match") is True
+    assert report.get("source_checksum_provenance") == "independent_source_reread"
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    assurance = classify_post_write_assurance(report)
+    assert assurance["migration_proven"] is True
+    assert assurance["claim_level"] == "full_checksum"
 
 
 def test_multi_stream_sqlite_copy_keeps_declared_integer_key(tmp_path: Path):

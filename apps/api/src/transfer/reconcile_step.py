@@ -8651,6 +8651,7 @@ def run_reconciliation(
             recon["source_checksum"] = _l3_src
             recon["target_checksum"] = _l3_dst
             recon["checksum_match"] = _l3_src == _l3_dst
+            recon["source_checksum_provenance"] = "independent_source_reread"
             # full_checksum names the *matching* coverage — stamping it on a
             # proven mismatch lets a failed job read as verified (the verdict
             # field carries the failure; the label must not contradict it).

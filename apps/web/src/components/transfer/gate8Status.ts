@@ -264,6 +264,19 @@ export function gate8SampleDeclinedReason(report: Gate8Reconciliation): string {
     || "No identity key to align the read-back sample against the source.";
 }
 
+export function isGate8FullChecksumProof(report: Gate8Reconciliation): boolean {
+  const source = String(report.source_checksum || "").trim();
+  const target = String(report.target_checksum || "").trim();
+  return report.passed === true && Boolean(source) && source === target
+    && report.checksum_match !== false
+    && ["", "full_checksum"].includes(String(report.coverage || "").toLowerCase())
+    && ["", "whole_table", "verify_time_population_digest"].includes(String(report.checksum_scope || "").toLowerCase())
+    && report.source_checksum_provenance === "independent_source_reread"
+    && !isGate8IdentityUnproven(report) && !isGate8CellFidelityUnproven(report)
+    && !isGate8PreWriteSimulation(report) && !isGate8WriterAckOnly(report)
+    && !isGate8SampleVerified(report) && !isGate8WritePassDestReadback(report);
+}
+
 export function classifyGate8Status(
   report: Gate8Reconciliation | null | undefined,
 ): Gate8StatusView {
@@ -282,11 +295,8 @@ export function classifyGate8Status(
   if (isGate8LastStream(report) && report.passed === true) {
     return { label: "Last stream checksum", tone: "warn", fullPass: false };
   }
-  const provenance = String(report.source_checksum_provenance || "").toLowerCase();
   if (
-    report.passed === true
-    && provenance === "independent_source_reread"
-    && String(report.assurance_level || report.coverage || "").toLowerCase() === "full_checksum"
+    isGate8FullChecksumProof(report)
   ) {
     return { label: "Independent re-read", tone: "ok", fullPass: true };
   }
@@ -319,7 +329,7 @@ export function classifyGate8Status(
     return { label: "Pre-write only", tone: "warn", fullPass: false };
   }
   if (report.passed === true) {
-    return { label: "Passed", tone: "ok", fullPass: true };
+    return { label: "Unproven", tone: "warn", fullPass: false };
   }
   return { label: "Pending", tone: "muted", fullPass: false };
 }

@@ -253,10 +253,14 @@ export function syncModeHonestyLine(
       return (
         "Inserts into the existing table. Live destination types bind — Full append "
         + "does not CREATE a new table and does not ALTER NUMBER/VARCHAR widths. "
-        + "An empty leftover table still exists."
+        + "An empty leftover table still exists. Existing destination key constraints still apply."
       );
     }
     if (destTableExists === false) {
+      if (["mysql", "mariadb"].includes(String(destDbType || "").toLowerCase())) {
+        return "Table is missing: plain append creates no PRIMARY KEY. A selected identity key alone does not change DDL. "
+          + "A server that requires a primary key rejects keyless CREATE. Validate checks the effective write policy.";
+      }
       return (
         "Table is missing — first write CREATE TABLE from Map types, then insert. "
         + "This is create-new, not append into leftover DDL."

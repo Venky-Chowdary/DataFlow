@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { isSqlNullQuarantineCell, nullWireLabel } from "../../lib/nullWire";
 import { DtIcon } from "../DtIcon";
+import { Dialog } from "../ui/Dialog";
 import { useToast } from "../Toast";
 import { downloadJobQuarantineCsv, fetchJobQuarantine, proposeRepairFromQuarantine, replayJobQuarantine, type RepairMapping, type RepairProposal } from "../../lib/api";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
@@ -116,7 +117,11 @@ function triggerBlobDownload(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
-export function QuarantinePanel({
+export function QuarantinePanel(props: QuarantinePanelProps) {
+  return <QuarantinePanelJob key={props.jobId} {...props} />;
+}
+
+function QuarantinePanelJob({
   jobId,
   rejectedRows,
   coercedNullRows,
@@ -131,6 +136,16 @@ export function QuarantinePanel({
   onRepairMappingsApplied,
 }: QuarantinePanelProps) {
   const { toast } = useToast();
+  const active = useRef(true);
+  const loadSequence = useRef(0);
+  const loadActive = useRef(false);
+  const replayActive = useRef(false);
+  const editOpener = useRef<HTMLElement | null>(null);
+  const refreshIssue = useRef(false);
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
   const [open, setOpen] = useState(initiallyOpen || autoLoad || Boolean(initialDetails?.length));
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(Boolean(initialDetails?.length));
@@ -152,6 +167,7 @@ export function QuarantinePanel({
   const [editNull, setEditNull] = useState(false);
   const [applySuggested, setApplySuggested] = useState(true);
   const [replayResult, setReplayResult] = useState<{
+    verified: boolean;
     job_id: string;
     rows_written: number;
     rejected: number;
@@ -168,16 +184,24 @@ export function QuarantinePanel({
   const [quarantineDurable, setQuarantineDurable] = useState<boolean | null | undefined>(undefined);
   const [quarantineDlqError, setQuarantineDlqError] = useState<string | null | undefined>(undefined);
   const [closure, setClosure] = useState<import("../../lib/api").QuarantineInfo["quarantine_closure"]>(undefined);
+  const [replayBlockReason, setReplayBlockReason] = useState<string | null>(
+    () => truncatedDetails > 0 ? "Checking whether all quarantine findings are available before replay." : null,
+  );
 
   const transformOverrides = useMemo(() => buildTransformOverrides(rows), [rows]);
   const hasStripSuggestion = Object.values(transformOverrides).some(
     (v) => v === "strip_controls" || v.includes("strip"),
   );
 
-  const load = async () => {
+  const load = async (afterReplay = false) => {
+    if (editIndex !== null || (replayActive.current && !afterReplay)) return null;
+    const sequence = ++loadSequence.current;
+    const current = () => active.current && loadSequence.current === sequence;
     setLoading(true);
+    loadActive.current = true;
     try {
       const data = await fetchJobQuarantine(jobId);
+      if (!current()) return null;
       const apiRows = data.quarantine || [];
       const next = apiRows.length ? apiRows : (initialDetails ?? []);
       setRows(next);
@@ -195,10 +219,21 @@ export function QuarantinePanel({
       setQuarantineDurable(data.quarantine_durable);
       setQuarantineDlqError(data.quarantine_dlq_error ?? null);
       setClosure(data.quarantine_closure);
+      setReplayBlockReason(
+        Object.prototype.hasOwnProperty.call(data, "replay_block_reason")
+          ? data.replay_block_reason || null
+          : "The server did not confirm that replay can reconstruct every quarantine row. Refresh with an updated API or re-run before replaying.",
+      );
+      if (refreshIssue.current && data.quarantine_closure?.verdict && data.quarantine_closure.verdict !== "diverging") {
+        refreshIssue.current = false;
+        setReplayError(null);
+      }
       setOpen(true);
       setLoaded(true);
+      return data;
     } catch (e) {
-      if (initialDetails?.length) {
+      if (!current()) return null;
+      if (initialDetails?.length && !rows.length) {
         setRows(initialDetails);
         setIssueCount(initialDetails.length);
         setSource(quarantineEvidenceSource(initialDetails));
@@ -206,8 +241,12 @@ export function QuarantinePanel({
         setLoaded(true);
       }
       toast({ title: "Could not load quarantine", message: (e as Error).message, tone: "error" });
+      return null;
     } finally {
-      setLoading(false);
+      if (current()) {
+        loadActive.current = false;
+        setLoading(false);
+      }
     }
   };
 
@@ -242,6 +281,8 @@ export function QuarantinePanel({
   };
 
   const openEdit = (index: number) => {
+    if (loadActive.current || replayActive.current || repairBusy) return;
+    editOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const value = rows[index]?.value;
     const sqlNull = isSqlNullQuarantineCell(value);
     setEditIndex(index);
@@ -250,7 +291,7 @@ export function QuarantinePanel({
   };
 
   const saveEdit = () => {
-    if (editIndex == null) return;
+    if (editIndex == null || loadActive.current || replayActive.current || repairBusy) return;
     const nextValue = editNull ? null : editValue;
     setRows((prev) =>
       prev.map((r, i) => {
@@ -265,6 +306,7 @@ export function QuarantinePanel({
   };
 
   const proposeRepair = async () => {
+    if (loadActive.current || replayActive.current || repairBusy || editIndex !== null) return;
     if (!rows.length) {
       toast({ title: "No findings", message: "Load quarantine rows before proposing a repair.", tone: "warning" });
       return;
@@ -281,6 +323,7 @@ export function QuarantinePanel({
           suggested_transform: r.suggested_transform,
         })),
       });
+      if (!active.current) return;
       setRepairProposal(proposal);
       setRepairOpen(true);
       toast({
@@ -289,13 +332,17 @@ export function QuarantinePanel({
         tone: "success",
       });
     } catch (e) {
+      if (!active.current) return;
       toast({ title: "Propose failed", message: (e as Error).message, tone: "error" });
     } finally {
-      setRepairBusy(false);
+      if (active.current) setRepairBusy(false);
     }
   };
 
   const replay = async () => {
+    if (loadActive.current || replayActive.current || repairBusy || editIndex !== null) return;
+    replayActive.current = true;
+    refreshIssue.current = false;
     setReplaying(true);
     setReplayResult(null);
     setReplayError(null);
@@ -307,9 +354,16 @@ export function QuarantinePanel({
         rows: rows.filter(isOpenFinding),
         transform_overrides: overrides,
       });
+      if (!active.current) return;
       const promoted = result.dest_dlq_promoted;
       const gate8 = result.reconciliation;
+      const verified = result.success === true && gate8?.passed === true;
+      const ledgerFailed = Boolean(promoted?.error) || result.quarantine_closure?.verdict === "diverging";
+      const failure = !verified ? gate8?.message || "Child replay proof failed or is unavailable."
+        : ledgerFailed ? promoted?.error || result.quarantine_closure?.next_action || "Replay ledger requires review." : null;
+      setReplayError(failure);
       setReplayResult({
+        verified,
         job_id: result.job_id,
         rows_written: result.rows_written,
         rejected: result.rejected,
@@ -318,6 +372,10 @@ export function QuarantinePanel({
       toast({
         title: !result.success
           ? "Promote failed Gate-8"
+          : !verified
+            ? "Replay proof not verified"
+          : ledgerFailed
+            ? "Replay ledger requires review"
           : result.rejected
             ? "Promote finished with rejects"
             : "Promote / Replay finished",
@@ -340,17 +398,29 @@ export function QuarantinePanel({
         ]
           .filter(Boolean)
           .join(" · "),
-        tone: !result.success || result.rejected || promoted?.error ? "warning" : "success",
+        tone: !verified || ledgerFailed || result.rejected ? "warning" : "success",
       });
-      onReplayComplete?.(result.job_id);
-      await load();
+      const refreshed = await load(true);
+      if (!active.current) return;
+      const currentVerdict = refreshed?.quarantine_closure?.verdict;
+      if (!refreshed || !currentVerdict) {
+        refreshIssue.current = !failure;
+        setReplayError([failure, "Child replay finished, but the recovery ledger could not be verified. Refresh before continuing."].filter(Boolean).join(" "));
+      } else if (currentVerdict === "diverging") {
+        refreshIssue.current = !failure;
+        setReplayError([failure, refreshed.quarantine_closure?.next_action || "Recovery ledger is diverging. Review before continuing."].filter(Boolean).join(" "));
+      } else if (verified && !ledgerFailed) {
+        onReplayComplete?.(result.job_id);
+      }
     } catch (e) {
+      if (!active.current) return;
       // A toast disappears; a refused replay has to stay on screen, or the
       // control reads as a silent no-op.
       setReplayError((e as Error).message);
       toast({ title: "Replay failed", message: (e as Error).message, tone: "error" });
     } finally {
-      setReplaying(false);
+      replayActive.current = false;
+      if (active.current) setReplaying(false);
     }
   };
 
@@ -358,17 +428,21 @@ export function QuarantinePanel({
   const topColumns = summarizeColumns(rows.filter(isOpenFinding));
   const displayRowCount = rowCount || (rejectedRows ?? 0) || issueCount;
   const displayFindings = loaded ? issueCount : (rejectedRows ?? 0) || issueCount;
-  const isWriteSource = source === "write" || source === "job";
+  const isWriteSource = source === "write" || source === "job" || source === "dlq";
   const isPreflight = source === "preflight";
   const durableLost = quarantineDurable === false;
   const openFindings = rows.filter(isOpenFinding);
   const openCount = closure?.open_count ?? openFindings.length;
-  const promotedCount = closure?.promoted_count ?? Math.max(0, rows.length - openFindings.length);
-  const ledgerClosed = closure?.verdict === "closed" || (openCount === 0 && promotedCount > 0);
+  const promotedCount = closure?.promoted_count ?? rows.filter((row) => row.retry_status === "promoted").length;
+  const ledgerClosed = closure?.verdict === "closed";
   const replayableFindings = openFindings.filter(isReplayable);
   const nothingToRebuild = loaded && openFindings.length > 0 && replayableFindings.length === 0;
   const canReplay =
-    isWriteSource && openCount > 0 && !durableLost && !ledgerClosed && !nothingToRebuild;
+    isWriteSource && openCount > 0 && !durableLost && !ledgerClosed && !nothingToRebuild && !replayBlockReason;
+  const recoveryVerified = Boolean(
+    replayResult?.verified && !replaying && !replayError && !replayResult.rejected
+    && closure?.verdict && closure.verdict !== "diverging",
+  );
 
   return (
     <div className="df2-quarantine-panel">
@@ -451,6 +525,7 @@ export function QuarantinePanel({
         </div>
       </div>
 
+      <div className="df2-quarantine-notifications" data-df2-toast-dock="" />
       {/* Closed-loop next action — one obvious primary path */}
       <div className="df2-quarantine-next" role="region" aria-label="Next remediation step">
         <div className="df2-quarantine-next-copy">
@@ -492,6 +567,10 @@ export function QuarantinePanel({
               parent transfer&apos;s checksum. Replay is disabled so we do not bulk-drain
               already-landed keys.
             </p>
+          ) : replayBlockReason ? (
+            <p className="df2-quarantine-durable-warn" role="alert">
+              Replay is unavailable: {replayBlockReason} Export the complete findings or restore the durable DLQ before retrying.
+            </p>
           ) : canReplay ? (
             <p>
               Write-time rejects
@@ -529,7 +608,7 @@ export function QuarantinePanel({
               type="button"
               className="df2-btn df2-btn-sm df2-btn-secondary"
               onClick={() => void proposeRepair()}
-              disabled={repairBusy}
+              disabled={repairBusy || loading || replaying || editIndex !== null}
               title="Create a durable repair proposal from quarantine findings (human approve required)"
             >
               <DtIcon name="sparkle" size={14} />
@@ -541,7 +620,7 @@ export function QuarantinePanel({
               type="button"
               className="df2-btn df2-btn-sm df2-btn-primary"
               onClick={() => void replay()}
-              disabled={replaying || rows.length === 0}
+              disabled={replaying || loading || repairBusy || editIndex !== null || rows.length === 0}
             >
               <DtIcon name="transfer" size={14} />{" "}
               {replaying
@@ -576,6 +655,7 @@ export function QuarantinePanel({
             <input
               type="checkbox"
               checked={applySuggested}
+              disabled={loading || replaying || repairBusy || editIndex !== null}
               onChange={(e) => setApplySuggested(e.target.checked)}
             />
             Apply suggested transforms on replay
@@ -598,7 +678,7 @@ export function QuarantinePanel({
               </span>
             </div>
             <div className="df2-job-log-actions">
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void load()} disabled={loading}>
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void load()} disabled={loading || replaying || repairBusy || editIndex !== null}>
                 Refresh
               </button>
               <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => setOpen(false)}>Close</button>
@@ -630,14 +710,14 @@ export function QuarantinePanel({
 
           {replayError && (
             <div className="df2-quarantine-durable-warn" role="alert">
-              Replay refused: {replayError}
+              Replay requires review: {replayError}
             </div>
           )}
           {replayResult && (
-            <div className="df2-quarantine-replay-result" role="status">
-              <DtIcon name="check" size={14} />
+            <div className={`df2-quarantine-replay-result ${recoveryVerified ? "is-verified" : "is-review"}`} role="status">
+              <DtIcon name={recoveryVerified ? "check" : "warning"} size={14} />
               <span>
-                Replay job <code>{replayResult.job_id.slice(0, 8)}</code> wrote{" "}
+                {replayResult.verified ? "Child proof verified" : "Child proof unverified"} · Replay job <code>{replayResult.job_id.slice(0, 8)}</code> wrote{" "}
                 {replayResult.rows_written.toLocaleString()} row(s)
                 {replayResult.rejected > 0 ? `, ${replayResult.rejected.toLocaleString()} still rejected` : ""}
                 {replayResult.dest_dlq_promoted?.updated != null
@@ -707,7 +787,7 @@ export function QuarantinePanel({
                       <td>{r.policy || "—"}</td>
                       <td>
                         {canReplay && (
-                          <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => openEdit(i)}>
+                          <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => openEdit(i)} disabled={loading || replaying || repairBusy}>
                             Edit
                           </button>
                         )}
@@ -721,16 +801,20 @@ export function QuarantinePanel({
         </section>
       )}
 
-      {editIndex != null && (
-        <div className="df2-quarantine-edit-backdrop" role="presentation" onClick={() => setEditIndex(null)}>
-          <div
-            className="df2-quarantine-edit-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="df2-quarantine-edit-title"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 id="df2-quarantine-edit-title">Edit quarantined value</h3>
+      <Dialog
+        open={editIndex !== null}
+        onClose={() => setEditIndex(null)}
+        restoreFocusTo={editOpener.current}
+        title="Edit quarantined value"
+        size="md"
+        footer={(
+          <>
+            <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setEditIndex(null)}>Cancel</button>
+            <button type="button" className="df2-btn df2-btn-primary" onClick={saveEdit} disabled={loading || replaying || repairBusy}>Save</button>
+          </>
+        )}
+      >
+        {editIndex !== null && <>
             <p>
               Fix the value for{" "}
               <strong>{rows[editIndex]?.column || "column"}</strong>
@@ -759,13 +843,8 @@ export function QuarantinePanel({
               />
               SQL NULL — an empty field is an empty string
             </label>
-            <div className="df2-quarantine-edit-actions">
-              <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setEditIndex(null)}>Cancel</button>
-              <button type="button" className="df2-btn df2-btn-primary" onClick={saveEdit}>Save</button>
-            </div>
-          </div>
-        </div>
-      )}
+        </>}
+      </Dialog>
       <RepairProposalDrawer
         open={repairOpen}
         proposal={repairProposal}

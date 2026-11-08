@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import sqlite3
+from copy import deepcopy
+
+import pytest
+
 from services.agentic_repair import (
     apply_actions_to_mappings,
     apply_actions_with_report,
@@ -212,3 +219,184 @@ def test_decide_route_records_authenticated_actor_not_body_actor() -> None:
     )
     assert res.status_code == 200, res.text
     assert res.json()["decided_by"] == "mallory@corp.com"
+
+
+@pytest.mark.parametrize("source_format", ["sqlite", "csv"])
+def test_approved_strip_controls_revalidates_and_executes_local_text(
+    tmp_path, monkeypatch, source_format,
+) -> None:
+    from services import agentic_repair, mongodb_service
+    from services.preflight_service import run_file_preflight
+    from src.transfer import engine as engine_mod
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from tests.test_copy_csv_local import _isolate_cursor_store
+    from tests.test_property2_golden_path_never_blocked import _FakeMongo
+
+    jobs = _FakeMongo()
+    monkeypatch.setattr(mongodb_service, "get_mongodb_service", lambda: jobs)
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: jobs)
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(agentic_repair, "_proposals_coll", lambda: None)
+    monkeypatch.setattr(agentic_repair, "_audit_coll", lambda: None)
+    _isolate_cursor_store(monkeypatch, tmp_path)
+
+    parent_id = "repair-parent"
+    jobs.update_job_status(
+        parent_id, "failed", error="historical failure", records_transferred=0,
+        rejected_details=[{"column": "title", "reason": "historical finding"}],
+    )
+    parent_before = deepcopy(jobs.get_job(parent_id))
+    columns = ["id", "title", "untouched"]
+    column_types = {"id": "INTEGER", "title": "TEXT", "untouched": "TEXT"}
+    rows = [
+        (1, "hello\u200bworld", "keep\u200bthis"),
+        (2, "clean", "unchanged"),
+        (3, "a\u200bb", "also\u200bkeep"),
+    ]
+    destination_path = tmp_path / "destination.sqlite"
+    with sqlite3.connect(destination_path) as connection:
+        connection.execute("CREATE TABLE repaired (id INTEGER, clean_title TEXT, untouched TEXT)")
+        schema_before = connection.execute("PRAGMA table_info(repaired)").fetchall()
+
+    source_content = b""
+    source_path = tmp_path / "source.sqlite"
+    if source_format == "sqlite":
+        with sqlite3.connect(source_path) as connection:
+            connection.execute("CREATE TABLE source_rows (id INTEGER, title TEXT, untouched TEXT)")
+            connection.executemany("INSERT INTO source_rows VALUES (?, ?, ?)", rows)
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(source_path), table="source_rows",
+        )
+        with sqlite3.connect(source_path) as connection:
+            sampled = connection.execute("SELECT id, title, untouched FROM source_rows ORDER BY id").fetchall()
+    else:
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer)
+        writer.writerow(columns)
+        writer.writerows(rows)
+        source_content = buffer.getvalue().encode("utf-8")
+        sampled = [
+            (int(row["id"]), row["title"], row["untouched"])
+            for row in csv.DictReader(io.StringIO(source_content.decode("utf-8")))
+        ]
+        source = EndpointConfig(kind="file", format="csv")
+    assert sampled == rows
+    population = [dict(zip(columns, row)) for row in sampled]
+    mappings = [
+        {"source": "id", "target": "id", "target_type": "INTEGER", "confidence": 1.0},
+        {
+            "source": "title", "target": "clean_title", "target_type": "TEXT",
+            "confidence": 1.0, "transform_override": True,
+        },
+        {"source": "untouched", "target": "untouched", "target_type": "TEXT", "confidence": 1.0},
+    ]
+    original_mappings = deepcopy(mappings)
+
+    def revalidate(current_mappings):
+        return run_file_preflight(
+            columns=columns, column_types=column_types, row_count=len(rows),
+            mappings=current_mappings, sample_rows=population,
+            population_rows=population, rows_are_population=True,
+            source_kind=source.kind, source_format=source.format,
+            source_connected=True, destination_connected=True,
+            destination_db_type="sqlite", destination_table="repaired",
+            destination_table_exists=True, destination_can_create=True,
+            destination_can_write=True,
+            destination_column_types={"id": "INTEGER", "clean_title": "TEXT", "untouched": "TEXT"},
+            sync_mode="full_refresh_append", validation_mode="strict",
+        )
+
+    baseline = revalidate(mappings)
+    assert baseline["passed"] is True, baseline
+    assert mappings == original_mappings
+
+    action = {"kind": "add_transform", "column": "title", "transform": "strip_controls"}
+
+    def proposal(proposal_id):
+        candidate = agentic_repair.RepairProposal(
+            id=proposal_id, job_id=parent_id, source="contract",
+            summary="Explicitly remove format controls from title only",
+            actions=[dict(action)], auto_applicable=False,
+        )
+        agentic_repair._upsert_proposal(candidate)
+        return candidate
+
+    apply_calls = []
+
+    def apply(actions):
+        apply_calls.append(deepcopy(actions))
+        return apply_actions_with_report(mappings, actions)
+
+    rejected = proposal("repair-rejected")
+    assert agentic_repair.get_proposal(rejected.id).status == "proposed"
+    assert mappings == original_mappings
+    decision = decide_proposal(rejected.id, approve=False, actor="tester", apply_fn=apply)
+    assert decision.status == "rejected"
+    assert apply_calls == []
+    assert mappings == original_mappings
+    with sqlite3.connect(destination_path) as connection:
+        assert connection.execute("SELECT * FROM repaired").fetchall() == []
+
+    approved = proposal("repair-approved")
+    assert mappings == original_mappings
+    decision = decide_proposal(approved.id, approve=True, actor="tester", apply_fn=apply)
+    assert decision.status == "applied", decision.apply_result
+    assert decision.decided_by == "tester"
+    assert apply_calls == [[action]]
+    assert decision.apply_result["applied"] is True
+    assert decision.apply_result["mutated_count"] == 1
+    assert decision.apply_result["skipped_actions"] == []
+    applied_mappings = decision.apply_result["mappings"]
+    expected_mappings = deepcopy(original_mappings)
+    expected_mappings[1].update(
+        transform="strip_controls", transforms=[{"type": "strip_controls"}],
+    )
+    assert applied_mappings == expected_mappings
+    assert mappings == original_mappings
+    persisted = agentic_repair.get_proposal(approved.id)
+    assert persisted.status == "applied"
+    assert persisted.apply_result["mappings"] == applied_mappings
+    validated = revalidate(applied_mappings)
+    assert validated["passed"] is True, validated
+    with sqlite3.connect(destination_path) as connection:
+        assert connection.execute("SELECT * FROM repaired").fetchall() == []
+        assert connection.execute("PRAGMA table_info(repaired)").fetchall() == schema_before
+
+    request = TransferRequest(
+        source=source,
+        destination=EndpointConfig(
+            kind="database", format="sqlite", database=str(destination_path), table="repaired",
+        ),
+        mappings=applied_mappings, column_types=column_types,
+        source_filename="source.csv" if source_format == "csv" else "",
+        source_content=source_content, sync_mode="full_refresh_append",
+        validation_mode="strict", triggered_by="tester",
+    )
+    assert request.skip_preflight is False
+    child_id = "repair-child"
+    jobs.update_job_status(child_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(request, child_id)
+    assert result.success is True, result.error
+    assert result.records_transferred == 3
+    assert result.validation_plan["passed"] is True, result.validation_plan
+    assert result.reconciliation["passed"] is True, result.reconciliation
+    assert int(result.reconciliation.get("rejected_rows") or 0) == 0
+    with sqlite3.connect(destination_path) as connection:
+        assert connection.execute(
+            "SELECT id, clean_title, untouched FROM repaired ORDER BY id",
+        ).fetchall() == [
+            (1, "helloworld", "keep\u200bthis"),
+            (2, "clean", "unchanged"),
+            (3, "ab", "also\u200bkeep"),
+        ]
+        assert connection.execute("SELECT COUNT(*) FROM repaired").fetchone() == (3,)
+        assert connection.execute("PRAGMA table_info(repaired)").fetchall() == schema_before
+    if source_format == "sqlite":
+        with sqlite3.connect(source_path) as connection:
+            assert connection.execute(
+                "SELECT id, title, untouched FROM source_rows ORDER BY id",
+            ).fetchall() == rows
+    else:
+        assert request.source_content == source_content
+    assert jobs.get_job(parent_id) == parent_before

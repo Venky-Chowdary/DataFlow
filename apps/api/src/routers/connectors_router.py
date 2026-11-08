@@ -1570,6 +1570,18 @@ async def get_job_quarantine(job_id: str, request: Request):
 
     stored_closure = job_quarantine_closure(job)
     closure = evaluate_replay_closure(details, last_replay=(stored_closure or {}).get("last_replay"))
+    from services.quarantine_dlq import (
+        MaskedQuarantineReplayError,
+        canonical_replay_details,
+        quarantine_sample_incomplete,
+    )
+
+    stored_details = job.get("rejected_details") or (job.get("destination_summary") or {}).get("rejected_details") or []
+    try:
+        replay_details = canonical_replay_details(job) or list(stored_details)
+        replay_block_reason = quarantine_sample_incomplete(job, replay_details)
+    except MaskedQuarantineReplayError as exc:
+        replay_block_reason = str(exc)
     if stored_closure:
         closure = {
             **stored_closure,
@@ -1655,6 +1667,7 @@ async def get_job_quarantine(job_id: str, request: Request):
         "rows_refused_unit": rows_refused_unit,
         "rows_unaccounted": rows_unaccounted,
         "open_count": open_n,
+        "replay_block_reason": replay_block_reason,
         "source": source,
         "quarantine": _operator_quarantine_rows(details),
         "dest_dlq": dest_dlq,
@@ -2452,18 +2465,19 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             recon["message"] = (
                 "Quarantined values were not loaded — replay wrote 0 rows."
             )
+        elif recon.get("passed") is not True:
+            status = "failed"
         elif rejected > 0:
             status = "completed_with_quarantine"
-        elif not recon.get("passed", True):
-            status = "failed"
         else:
             status = "completed"
 
+        gate8_passed = recon.get("passed") is True
         recorded = record_replay(
             durable,
             attempted=details,
             child_rejected=list(dest_summary.get("rejected_details") or []),
-            gate8_passed=bool(recon.get("passed")),
+            gate8_passed=gate8_passed,
             child_job_id=child_job_id,
             rows_written=int(rows_written or 0),
             rejected=rejected,
@@ -2478,7 +2492,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         landed_ids = set(recorded.get("promoted_identities") or [])
 
         promote_meta: dict[str, Any] = {}
-        if recon.get("passed") and landed_ids:
+        if gate8_passed and landed_ids:
             try:
                 from services.dest_quarantine import mark_dlq_promoted
 

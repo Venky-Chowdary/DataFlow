@@ -1,0 +1,56 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { JSDOM } from "jsdom";
+import {
+  DATE_LOCALES, NUMBER_LOCALES, SCHEMA_POLICIES, SYNC_MODES, VALIDATION_MODES, syncModeHonestyLine,
+} from "../../lib/transferConstants";
+
+test("append identity is selected metadata, not an implicit destination key or mode change", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
+    url: "http://localhost/", pretendToBeVisual: true,
+  });
+  Object.assign(globalThis, {
+    window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
+  const { act, createElement } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { DestinationAdvancedDrawer } = await import("./DestinationAdvancedDrawer");
+  const root = createRoot(document.getElementById("root")!);
+  const selected: string[] = [];
+  const modes: string[] = [];
+  const noop = () => {};
+  try {
+    await act(async () => root.render(createElement(DestinationAdvancedDrawer, {
+      open: true, onClose: noop, syncModes: SYNC_MODES, schemaPolicies: SCHEMA_POLICIES,
+      validationModes: VALIDATION_MODES, dateLocales: DATE_LOCALES, numberLocales: NUMBER_LOCALES,
+      syncMode: "full_refresh_append", schemaPolicy: "manual_review", validationMode: "strict",
+      dateLocale: "", numberLocale: "", backfillNewFields: false,
+      streamNames: ["sample-orders"], streamFields: {}, defaultCursor: "", defaultPrimaryKey: "order_id",
+      sourceColumns: ["order_id", "status"], sourceSchema: { order_id: "INTEGER", status: "TEXT" },
+      syncModeLabel: "Full append", schemaPolicyLabel: "Manual approval", requiresCursor: false,
+      requiresPrimaryKey: false, streamNeedsReview: false,
+      onSyncModeChange: (mode) => modes.push(mode), onSchemaPolicyChange: noop,
+      onValidationModeChange: noop, onDateLocaleChange: noop, onNumberLocaleChange: noop,
+      onBackfillChange: noop, onStreamCursorChange: noop, onStreamCursorSemanticsChange: noop,
+      onStreamPrimaryKeyChange: (_stream, value) => selected.push(value),
+      syncHonestyLine: syncModeHonestyLine("full_refresh_append", false, "mysql"),
+    })));
+    const control = document.querySelector<HTMLSelectElement>('[aria-label="Identity key for sample-orders"]');
+    assert.ok(control);
+    assert.equal(control.value, "order_id");
+    assert.match(control.closest("td")!.textContent || "", /Identity metadata/);
+    const cursor = document.querySelector('[aria-label="Cursor field for sample-orders"]')!;
+    assert.doesNotMatch(cursor.closest("td")!.textContent || "", /Identity metadata/);
+    assert.match(document.body.textContent || "", /plain append creates no PRIMARY KEY/);
+    assert.doesNotMatch(document.body.textContent || "", /duplicate id values will not block/);
+    control.value = "status";
+    await act(async () => control.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
+    assert.deepEqual(selected, ["status"]);
+    assert.deepEqual(modes, []);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});

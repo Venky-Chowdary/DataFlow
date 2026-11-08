@@ -300,3 +300,238 @@ def test_planned_key_is_the_writers_planner_answer():
                                          operator_key_columns=["id"],
                                          source_schema_catalog=cats[cat])
         assert got == want, (mode, cat, got)
+
+
+def _pure_csv_plan_and_g6(monkeypatch, mode, target, key_hint, requirement):
+    from services import dest_require_primary_key as rpk
+    from services.ddl_compatibility import evaluate_ddl_compatibility
+
+    mappings = [{"source": "order_id", "target": target},
+                {"source": "name", "target": "name"}]
+    source = {"config": {"type": "csv"}, "table": "orders.csv"}
+    destination_config = {"type": "mysql"}
+    probes = []
+    catalogs = []
+
+    def server_probe(cfg):
+        probes.append(cfg)
+        return requirement
+
+    def source_catalog(src, maps):
+        catalogs.append((src, maps))
+        return None
+
+    monkeypatch.setattr(rpk, "server_requires_primary_key", server_probe)
+    monkeypatch.setattr(rpk, "source_catalog_for_create", source_catalog)
+    planned = rpk.planned_create_primary_key(
+        sync_mode=mode, mappings=mappings,
+        operator_key_columns=[key_hint] if key_hint else [],
+        source_schema_catalog=None,
+    )
+    compatible, issues = evaluate_ddl_compatibility(
+        mappings=mappings, table_exists=False, dest_connected=True,
+        dest_db_type="mysql", allow_create=True, sync_mode=mode,
+        destination_table="orders", contract_primary_key=key_hint,
+        destination_config=destination_config, create_source=source,
+    )
+    assert probes == [destination_config]
+    assert catalogs == ([(source, mappings)] if requirement.variable or requirement.unreadable
+                        else [])
+    return planned, compatible, issues
+
+
+@pytest.mark.parametrize("target", ["order_id", "order_key"])
+@pytest.mark.parametrize("mode, keyed", [
+    ("full_refresh_append", False),
+    ("incremental_append", False),
+    ("upsert", True),
+    ("incremental_deduped", True),
+    ("full_refresh_overwrite", False),
+])
+def test_pure_csv_selected_key_planner_and_g6(monkeypatch, target, mode, keyed):
+    from services.dest_require_primary_key import PrimaryKeyRequirement
+
+    planned, compatible, issues = _pure_csv_plan_and_g6(
+        monkeypatch, mode, target, "order_id",
+        PrimaryKeyRequirement(variable="sql_require_primary_key"),
+    )
+    assert planned == ([target] if keyed else [])
+    assert compatible is keyed, issues
+    if keyed:
+        assert issues == []
+    else:
+        assert len(issues) == 1
+        assert "sql_require_primary_key=ON" in issues[0]
+        assert "MySQL error 3750" in issues[0]
+        assert "declares no" in issues[0]
+        assert mode in issues[0]
+        assert "upsert" in issues[0]
+
+
+@pytest.mark.parametrize("target", ["order_id", "order_key"])
+@pytest.mark.parametrize("mode", ["upsert", "incremental_deduped"])
+@pytest.mark.parametrize("key_hint", [None, "unmapped_order_id"], ids=["missing", "unmapped"])
+def test_pure_csv_missing_or_unmapped_key_refuses(monkeypatch, target, mode, key_hint):
+    from services.dest_require_primary_key import PrimaryKeyRequirement
+
+    planned, compatible, issues = _pure_csv_plan_and_g6(
+        monkeypatch, mode, target, key_hint,
+        PrimaryKeyRequirement(variable="sql_require_primary_key"),
+    )
+    assert planned == []
+    assert not compatible
+    assert len(issues) == 1
+    assert "sql_require_primary_key=ON" in issues[0]
+    assert "MySQL error 3750" in issues[0]
+    assert "declares no PRIMARY KEY" in issues[0]
+
+
+@pytest.mark.parametrize("target", ["order_id", "order_key"])
+@pytest.mark.parametrize("state", ["on", "unreadable", "off"])
+def test_pure_csv_detect_probe_evidence_is_not_overclaimed(monkeypatch, target, state):
+    from services.dest_require_primary_key import PrimaryKeyRequirement
+
+    requirements = {
+        "on": PrimaryKeyRequirement(variable="sql_require_primary_key"),
+        "unreadable": PrimaryKeyRequirement(
+            unreadable="sql_require_primary_key unreadable (1227)"),
+        "off": PrimaryKeyRequirement(),
+    }
+    planned, compatible, issues = _pure_csv_plan_and_g6(
+        monkeypatch, "detect", target, "order_id", requirements[state],
+    )
+    assert planned == []
+    assert compatible is (state == "off"), issues
+    if state == "off":
+        assert issues == []
+        return
+    assert len(issues) == 1
+    if state == "on":
+        assert "sql_require_primary_key=ON" in issues[0]
+        assert "detect" in issues[0]
+        assert "MySQL error 3750" in issues[0]
+    else:
+        assert "Could not read whether the destination forces" in issues[0]
+        assert "unreadable (1227)" in issues[0]
+        assert "if the server forces one" in issues[0]
+        assert "MySQL 3750" in issues[0]
+        assert "=ON" not in issues[0]
+        assert "The destination server has" not in issues[0]
+
+
+@pytest.mark.parametrize("mode", ["full_refresh_append", "incremental_append"])
+@pytest.mark.parametrize("options, expected_write_mode", [
+    ({"duplicate_policy": "upsert"}, "upsert"),
+    ({"duplicate_policy": "skip_duplicates"}, "upsert"),
+    ({"duplicate_policy": "merge", "allow_duplicates": True}, "upsert"),
+    ({"duplicate_policy": "append"}, "insert"),
+    ({"allow_duplicates": True}, "insert"),
+    ({}, "insert"),
+])
+def test_pure_explicit_policy_writer_and_g6_same_inputs(
+    monkeypatch, mode, options, expected_write_mode,
+):
+    from services import dest_require_primary_key as rpk
+    from services.ddl_compatibility import evaluate_ddl_compatibility
+    from services.duplicate_policy import resolve_duplicate_policy
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.models import EndpointConfig
+
+    destination = EndpointConfig(kind="database", format="mysql", extra=dict(options))
+    destination_config = resolve_connector_config(destination)
+    assert all(destination_config[key] == value for key, value in options.items())
+    decision = resolve_duplicate_policy(
+        duplicate_policy=str(destination.extra.get("duplicate_policy") or ""),
+        allow_duplicates=bool(destination.extra.get("allow_duplicates")),
+        sync_mode=mode, business_key=True, write_mode="insert",
+    )
+    assert decision.write_mode == expected_write_mode
+    mappings = [{"source": "order_id", "target": "order_key"}]
+    monkeypatch.setattr(rpk, "server_requires_primary_key",
+                        lambda cfg: rpk.PrimaryKeyRequirement(variable="sql_require_primary_key"))
+    monkeypatch.setattr(rpk, "source_catalog_for_create", lambda src, maps: None)
+    compatible, issues = evaluate_ddl_compatibility(
+        mappings=mappings, table_exists=False, dest_connected=True,
+        dest_db_type="mysql", allow_create=True, sync_mode=mode,
+        destination_table="orders", contract_primary_key="order_id",
+        destination_config=destination_config,
+    )
+    assert compatible is (expected_write_mode == "upsert"), issues
+    planned = rpk.planned_create_primary_key(
+        sync_mode=mode, mappings=mappings, operator_key_columns=["order_id"],
+        destination_config=destination_config,
+    )
+    assert planned == (["order_key"] if expected_write_mode == "upsert" else [])
+    if compatible:
+        assert issues == []
+    else:
+        assert len(issues) == 1 and "MySQL error 3750" in issues[0]
+
+
+@pytest.mark.parametrize("mode", ["full_refresh_append", "incremental_append"])
+@pytest.mark.parametrize("policy", ["upsert", "skip_duplicates", "unknown_policy"])
+@pytest.mark.parametrize("key_hint", [None, "unmapped_order_id"], ids=["missing", "unmapped"])
+def test_pure_explicit_policy_missing_key_fails_closed(monkeypatch, mode, policy, key_hint):
+    from services import dest_require_primary_key as rpk
+    from services.ddl_compatibility import evaluate_ddl_compatibility
+    from services.duplicate_policy import DuplicatePolicyError, resolve_duplicate_policy
+    from services.schema_fidelity import build_catalog_from_introspect, catalog_to_payload
+
+    mappings = [{"source": "order_id", "target": "order_key"}]
+    catalog = catalog_to_payload(build_catalog_from_introspect(
+        dialect="postgresql", columns=["order_id"],
+        column_types={"order_id": "integer"}, nullable={"order_id": False},
+        keys={"primary_key_columns": ["order_id"], "unique_keys": []},
+    ))
+    cfg = {"type": "mysql", "duplicate_policy": policy}
+    with pytest.raises(DuplicatePolicyError):
+        resolve_duplicate_policy(
+            duplicate_policy=policy, sync_mode=mode, business_key=False, write_mode="insert",
+        )
+    monkeypatch.setattr(rpk, "server_requires_primary_key",
+                        lambda cfg: rpk.PrimaryKeyRequirement(variable="sql_require_primary_key"))
+    monkeypatch.setattr(rpk, "source_catalog_for_create", lambda src, maps: catalog)
+    assert rpk.planned_create_primary_key(
+        sync_mode=mode, mappings=mappings,
+        operator_key_columns=[key_hint] if key_hint else [],
+        source_schema_catalog=catalog, destination_config=cfg,
+    ) == []
+    compatible, issues = evaluate_ddl_compatibility(
+        mappings=mappings, table_exists=False, dest_connected=True,
+        dest_db_type="mysql", allow_create=True, sync_mode=mode,
+        destination_table="orders", contract_primary_key=key_hint,
+        destination_config=cfg,
+    )
+    assert not compatible and len(issues) == 1
+    assert "MySQL error 3750" in issues[0]
+
+
+@pytest.mark.parametrize("mode", ["upsert", "incremental_deduped"])
+@pytest.mark.parametrize("options", [{"duplicate_policy": "append"}, {"allow_duplicates": True}])
+def test_pure_explicit_append_overrides_upsert_for_create(monkeypatch, mode, options):
+    from services import dest_require_primary_key as rpk
+    from services.ddl_compatibility import evaluate_ddl_compatibility
+    from services.duplicate_policy import resolve_duplicate_policy
+
+    mappings = [{"source": "order_id", "target": "order_key"}]
+    decision = resolve_duplicate_policy(
+        duplicate_policy=str(options.get("duplicate_policy") or ""),
+        allow_duplicates=bool(options.get("allow_duplicates")),
+        sync_mode=mode, business_key=True, write_mode="upsert",
+    )
+    assert decision.write_mode == "insert"
+    cfg = {"type": "mysql", **options}
+    monkeypatch.setattr(rpk, "server_requires_primary_key",
+                        lambda cfg: rpk.PrimaryKeyRequirement(variable="sql_require_primary_key"))
+    monkeypatch.setattr(rpk, "source_catalog_for_create", lambda src, maps: None)
+    assert rpk.planned_create_primary_key(
+        sync_mode=mode, mappings=mappings, operator_key_columns=["order_id"],
+        destination_config=cfg,
+    ) == []
+    compatible, issues = evaluate_ddl_compatibility(
+        mappings=mappings, table_exists=False, dest_connected=True,
+        dest_db_type="mysql", allow_create=True, sync_mode=mode,
+        destination_table="orders", contract_primary_key="order_id", destination_config=cfg,
+    )
+    assert not compatible and len(issues) == 1
+    assert "MySQL error 3750" in issues[0]

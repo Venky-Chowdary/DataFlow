@@ -1391,11 +1391,11 @@ export function TransferPage({
       }
       const isComposite = column.includes(",");
       toast({
-        title: isComposite ? `Composite PK → ${column.replace(/,/g, " + ")}` : `Primary key → ${column}`,
+        title: isComposite ? `Composite identity selected: ${column.replace(/,/g, " + ")}` : `Identity selected: ${column}`,
         message: isComposite
           ? "Composite unique in the Validate sample only — use when a single column is a false PK. Confirm in Advanced, then Re-run Validate."
           : "Unique in the Validate sample only — confirm in Advanced, then Re-run Validate.",
-        tone: "success",
+        tone: "info",
       });
     },
     [primarySourceStream, sourceStreamName, toast],

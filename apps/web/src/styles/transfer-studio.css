@@ -3508,6 +3508,15 @@ th.df2-type-string .df2-type-badge {
   width: 100%;
   min-width: 0;
 }
+.df2-dest-advanced-drawer .df2-stream-identity-control {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.df2-dest-advanced-drawer .df2-stream-identity-control .df2-label-hint {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 .df2-dest-advanced-drawer .df2-stream-table th,
 .df2-dest-advanced-drawer .df2-stream-table td {
   padding: 8px 10px;
@@ -8986,25 +8995,66 @@ th.df2-type-string .df2-type-badge {
 
 .df2-repair-proposal {
   display: grid;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.df2-repair-proposal code { white-space: normal; overflow-wrap: anywhere; }
+.df2-repair-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--df-text-secondary);
+}
+.df2-repair-status strong { color: var(--df-text-primary); }
+.df2-repair-metadata,
+.df2-repair-action-details {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 0;
+  font-size: 12px;
+}
+.df2-repair-metadata > div,
+.df2-repair-action-details > div { min-width: 0; }
+.df2-repair-metadata dt,
+.df2-repair-action-details dt { color: var(--df-text-muted); font-size: 11px; }
+.df2-repair-metadata dd,
+.df2-repair-action-details dd { margin: 2px 0 0; color: var(--df-text-primary); }
+.df2-repair-metadata { padding-bottom: 10px; border-bottom: 1px solid var(--df-border); }
+.df2-repair-action-details { grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr); }
+.df2-repair-action-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--df-text-primary);
+}
+.df2-repair-action-title svg { flex-shrink: 0; align-self: center; }
+.df2-repair-manual-note,
+.df2-repair-action-note { margin: 0; line-height: 1.4; }
+.df2-repair-manual-note { color: var(--df-text-secondary); }
+@media (max-width: 600px) {
+  .df2-repair-metadata,
+  .df2-repair-action-details { grid-template-columns: minmax(0, 1fr); gap: 6px; }
 }
 .df2-repair-root {
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid #fecaca;
-  background: #fef2f2;
+  padding: 10px 12px;
+  border-left: 3px solid var(--df-border);
+  background: var(--df-surface-muted);
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
-.df2-repair-root strong { color: #991b1b; font-size: 13px; }
-.df2-repair-root p { margin: 0; font-size: 12.5px; color: #7f1d1d; line-height: 1.45; }
+.df2-repair-root strong { color: var(--df-text-primary); font-size: 13px; }
+.df2-repair-root p { margin: 0; font-size: 12.5px; color: var(--df-text-secondary); line-height: 1.45; }
 .df2-repair-next-steps {
   margin: 0;
   padding-left: 18px;
   display: grid;
   gap: 4px;
   font-size: 12.5px;
-  color: #7f1d1d;
+  color: var(--df-text-secondary);
   line-height: 1.4;
 }
 .df2-repair-summary p {
@@ -9022,17 +9072,15 @@ th.df2-type-string .df2-type-badge {
   gap: 8px;
 }
 .df2-repair-issues li {
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid #e2e8f0;
-  background: var(--df-surface);
+  padding: 8px 10px;
+  border-left: 3px solid var(--df-border);
 }
 .df2-repair-issues li.is-block {
-  border-color: #fecaca;
+  border-color: var(--df-danger);
   background: var(--df-danger-bg);
 }
 .df2-repair-issues li.is-warn {
-  border-color: #fde68a;
+  border-color: var(--df-warning);
   background: var(--df-warning-bg);
 }
 .df2-repair-issues li strong { display: block; font-size: 13px; color: var(--df-text-primary); }
@@ -9042,13 +9090,14 @@ th.df2-type-string .df2-type-badge {
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 6px;
+  gap: 0;
 }
 .df2-repair-actions li {
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  background: var(--df-surface-muted);
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--df-border);
   font-size: 12.5px;
   color: var(--df-text-secondary);
 }
@@ -10575,12 +10624,7 @@ button.df2-vd-assist-toggle:focus-visible {
   display: flex;
   flex-direction: row;
   justify-content: flex-end;
-  /* wrap (not nowrap) + shrinkable pills: with nowrap + flex-shrink:0 a
-     second pill that didn't fit pushed the row past the dock's left edge,
-     and the dock's overflow:hidden clipped it — a partially visible toast
-     (the D-BP-27 class, at every width). Wrapped pills stay fully inside
-     the band, which grows in-flow and covers nothing. */
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   row-gap: 4px;
   gap: 4px 6px;
   align-items: center;
@@ -10595,10 +10639,10 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-toast-dock .dt-toast {
   position: relative;
-  width: auto;
+  width: 0;
   min-width: 0;
   max-width: min(300px, 100%);
-  flex-shrink: 1;
+  flex: 1 1 0;
   padding: 5px 8px;
   border-radius: 8px;
   gap: 6px;
@@ -10610,23 +10654,13 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-toast-dock .dt-toast-title,
 .df2-toast-dock .dt-toast-message {
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  display: block;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .df2-toast-dock .dt-toast-message {
-  max-width: 220px;
   font-size: 11px;
-}
-/* Warnings and errors carry the address and the recovery step — a
-   one-line ellipsis hid both. Wrap them, bounded so the dock stays compact. */
-.df2-toast-dock .dt-toast--warning .dt-toast-message,
-.df2-toast-dock .dt-toast--error .dt-toast-message {
-  white-space: normal;
-  text-overflow: clip;
-  max-width: 420px;
-  max-height: 8.5em;
-  overflow-y: auto;
 }
 /* At <=1280 the chrome stacks as a flex column (D-BP-23); the dock becomes
    a full-width in-flow row of that column — a reserved lane inside the
@@ -10650,13 +10684,14 @@ button.df2-vd-assist-toggle:focus-visible {
    bottom), every visible toast fully inside the dock band, and the band
    keeps >=8px clearance above the stepper. */
 .df2-toast-dock .dt-toast-more {
+  align-self: center;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   padding: 5px 8px;
   border-radius: 8px;
   border: 1px dashed var(--df-border);
-  color: var(--df-text-muted);
+  color: var(--df-text-secondary);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -10679,7 +10714,7 @@ button.df2-vd-assist-toggle:focus-visible {
   .df2-page-transfer-studio .df2-toast-dock .dt-toast {
     width: 100%;
     max-width: 100%;
-    flex-shrink: 0;
+    flex: 0 0 auto;
   }
   .df2-page-transfer-studio .df2-toast-dock .dt-toast-more {
     order: -9999;

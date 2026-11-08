@@ -356,7 +356,8 @@ def classify_post_write_assurance(
       none | pre_write_only | writer_ack | sample | full_checksum | failed
 
     migration_proven:
-      True only for passed post-write full_checksum coverage.
+            True only for literal passed True, matching nonempty whole-transfer digests
+            with independent_source_reread provenance and no explicit checksum veto.
       Sample assurance is post_write_verified but NOT migration_proven
       (sample ≠ population / full-table fidelity claim).
     """
@@ -375,14 +376,12 @@ def classify_post_write_assurance(
     phase = str(recon.get("phase") or "").lower()
     coverage = str(recon.get("coverage") or "").lower()
     preview = bool(recon.get("preview") or recon.get("post_write_pending"))
-    passed = bool(recon.get("passed"))
+    passed = recon.get("passed") is True
     src = str(recon.get("source_checksum") or "").strip()
     tgt = str(recon.get("target_checksum") or "").strip()
     checksum_match = bool(src and tgt and src == tgt)
     if recon.get("checksum_match") is False:
         checksum_match = False
-    elif recon.get("checksum_match") is True:
-        checksum_match = True
 
     from services.destination_ri_probe import referential_integrity_proven as _ri_proven
 
@@ -524,7 +523,15 @@ def classify_post_write_assurance(
             ),
         }
 
-    if coverage == "full_checksum" or (passed and checksum_match and not preview):
+    if (
+        passed
+        and checksum_match
+        and coverage in {"", "full_checksum"}
+        and str(recon.get("checksum_scope") or "") in {
+            "", "whole_table", "verify_time_population_digest"
+        }
+        and str(recon.get("source_checksum_provenance") or "") == "independent_source_reread"
+    ):
         ri_note = (
             " Destination referential integrity proven (enforced FK or anti-join scan)."
             if ri_proven
@@ -550,7 +557,10 @@ def classify_post_write_assurance(
         "population_proof": False,
         "referential_integrity_proven": ri_proven,
         "checksum_match": checksum_match,
-        "note": "Unrecognized Gate-8 posture — refuse migration proven claim.",
+        "note": (
+            "Gate-8 lacks eligible whole-transfer scope, independent source re-read "
+            "provenance, or matching digests — refuse migration proven claim."
+        ),
     }
 
 

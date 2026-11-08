@@ -1123,8 +1123,8 @@ export function DestinationAdvancedDrawer({
           <p className="df2-adv-identity-note">
             {requiresPrimaryKey
               ? "Primary key is required for this sync mode (upsert / CDC / mirror / SCD2)."
-              : "Full refresh · Append / Overwrite does not require a unique primary key. "
-                + "You can still set one for documentation; duplicate id values will not block Validate."}
+              : "This sync mode does not require an identity key. A selected field is not proof of uniqueness "
+                + "or a destination PRIMARY KEY. Existing destination constraints and server CREATE policies still apply."}
             {requiresCursor
               ? " Cursor is required for incremental / CDC, and what it means in the "
                 + "source decides what this sync can capture \u2014 a column name cannot "
@@ -1147,7 +1147,7 @@ export function DestinationAdvancedDrawer({
                   <th>Mode</th>
                   <th>Cursor</th>
                   <th>Cursor means</th>
-                  <th>Primary key</th>
+                  <th title="The write mode and source catalog determine destination key enforcement">Identity key</th>
                   <th>Policy</th>
                   <th>Status</th>
                 </tr>
@@ -1229,7 +1229,8 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td data-label="Primary key">
+                      <td data-label="Identity key">
+                        <div className="df2-stream-identity-control">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={fields.primaryKeyField && streamCols.includes(fields.primaryKeyField)
@@ -1237,7 +1238,7 @@ export function DestinationAdvancedDrawer({
                             : ""}
                           disabled={streamCols.length === 0}
                           onChange={(e) => onStreamPrimaryKeyChange(streamName, e.target.value)}
-                          aria-label={`Primary key for ${streamName}`}
+                          aria-label={`Identity key for ${streamName}`}
                         >
                           <option value="">
                             {requiresPrimaryKey ? "Select key" : "Optional (append)"}
@@ -1248,6 +1249,10 @@ export function DestinationAdvancedDrawer({
                             </option>
                           ))}
                         </select>
+                        {(syncMode === "full_refresh_append" || syncMode === "incremental_append") && (
+                          <span className="df2-label-hint">Identity metadata; Validate checks the effective write policy.</span>
+                        )}
+                        </div>
                       </td>
                       <td data-label="Policy">{schemaPolicyLabel}</td>
                       <td data-label="Status">

@@ -1,6 +1,7 @@
 import { formatRowsProcessed } from "../lib/jobRows";
 import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { BookOpen, ClipboardList, Code2, FileText, Gauge, GitCompareArrows, History, Network, PanelRightOpen, ScrollText, Shield, type LucideIcon } from "lucide-react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "../components/DtIcon";
 import { JobTheater } from "../components/JobTheater";
@@ -76,12 +77,64 @@ import { localizeServerEventLog, readJobEventLog } from "../lib/jobEventLog";
 import { MappingProofDrawer, type MappingProof } from "../components/MappingProofDrawer";
 import { Drawer } from "../components/ui/Drawer";
 import {
-  JobEvidenceLaunchGrid,
+  type JobEvidenceLaunchItem,
   JobExplanationView,
   JobLogTable,
   JobOverviewNote,
 } from "../components/jobs/JobEvidenceLaunch";
 import type { RepairMapping } from "../lib/api";
+
+const evidenceIcons: Record<string, LucideIcon> = {
+  gate8: Shield,
+  preflight: ClipboardList,
+  writer: Gauge,
+  "run-meta": FileText,
+  timeline: History,
+  "mapping-proof": GitCompareArrows,
+  "mapping-table": GitCompareArrows,
+  "event-log": ScrollText,
+  "ddl-log": Code2,
+  explanation: BookOpen,
+  streams: Network,
+};
+
+function JobsEvidenceList({ label, items }: { label: string; items: JobEvidenceLaunchItem[] }) {
+  const listId = useId();
+  return (
+    <section className="df2-jobs-evidence-list" aria-label={label}>
+      <h3>{label}</h3>
+      <ul>
+        {items.map(item => {
+          const Icon = evidenceIcons[item.id] || FileText;
+          const descriptionId = `${listId}-${item.id}`;
+          return (
+            <li key={item.id} className={item.disabled ? "is-unavailable" : undefined}>
+              <Icon className="df2-jobs-evidence-list-icon" size={18} aria-hidden="true" />
+              <div className="df2-jobs-evidence-list-copy">
+                <strong>{item.title}</strong>
+                <span id={descriptionId}>{item.description}</span>
+              </div>
+              <span className={`df2-jobs-evidence-list-status tone-${item.disabled ? "default" : item.tone || "default"}`}>
+                {item.disabled ? "Not captured" : item.meta || "Recorded"}
+              </span>
+              <button
+                type="button"
+                className="df2-jobs-evidence-list-open"
+                disabled={item.disabled}
+                onClick={item.onOpen}
+                aria-label={`Open ${item.title}`}
+                aria-describedby={descriptionId}
+                title={item.disabled ? `${item.title}: not captured` : `Open ${item.title}`}
+              >
+                <PanelRightOpen size={16} aria-hidden="true" />
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
 
 export type JobsStudioIntent = {
   step?: "validate" | "map" | "source";
@@ -1308,10 +1361,6 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                       >
                         {detailTab === "detail" && (
                           <div className="df2-jobs-detail-pane">
-                            <JobOverviewNote>
-                              Overview of this run. Open evidence panels from the right for Gate-8,
-                              run metadata, timeline, and logs — keep this pane scannable.
-                            </JobOverviewNote>
                             <ConservationLedgerCard
                               job={liveJob}
                               onOpenValidate={() => openValidateInStudio()}
@@ -1337,7 +1386,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               }
                             />
 
-                            <JobEvidenceLaunchGrid
+                            <JobsEvidenceList
                               label="Evidence panels"
                               items={[
                                 {
@@ -1411,8 +1460,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                 },
                                 {
                                   id: "mapping-proof",
-                                  title: "Mapping proof",
-                                  description: "Column match evidence for this job",
+                                  title: mappingProof || mappingCount === 0 ? "Mapping proof" : "Column mappings",
+                                  description: mappingProof
+                                    ? "Column match evidence for this job"
+                                    : "Stored column mappings; match proof not captured",
                                   icon: "layers",
                                   meta: mappingProof?.summary?.mapped_count != null
                                     ? `${mappingProof.summary.mapped_count} pairs`
@@ -1603,10 +1654,6 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
 
                         {detailTab === "mapping" && (
                           <div className="df2-jobs-detail-pane">
-                            <JobOverviewNote>
-                              Mapping overview for this job. Open proof or the column table in a
-                              right-side panel — do not scroll three evidence dumps in one pane.
-                            </JobOverviewNote>
                             <div className="df2-drawer-facts df2-jobs-map-overview">
                               <div className="df2-drawer-fact">
                                 <span>Columns</span>
@@ -1625,11 +1672,13 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               <div className="df2-drawer-fact">
                                 <span>Risks / review</span>
                                 <strong>
-                                  {(mappingProof?.summary?.risk_count ?? 0)} / {(mappingProof?.summary?.review_count ?? 0)}
+                                  {mappingProof?.summary?.risk_count != null && mappingProof.summary.review_count != null
+                                    ? `${mappingProof.summary.risk_count} / ${mappingProof.summary.review_count}`
+                                    : "Not captured"}
                                 </strong>
                               </div>
                             </div>
-                            <JobEvidenceLaunchGrid
+                            <JobsEvidenceList
                               label="Mapping evidence"
                               items={[
                                 {
@@ -1698,10 +1747,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
 
                         {detailTab === "log" && (
                           <div className="df2-jobs-detail-pane">
-                            <JobOverviewNote>
-                              Event, DDL, and pipeline explanation open as right-side panels — one at a time.
-                            </JobOverviewNote>
-                            <JobEvidenceLaunchGrid
+                            <JobsEvidenceList
                               label="Logs"
                               items={[
                                 {

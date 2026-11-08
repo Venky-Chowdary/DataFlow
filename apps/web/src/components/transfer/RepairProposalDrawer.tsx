@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { Drawer } from "../ui/Drawer";
@@ -45,7 +45,43 @@ function isIsoWarningIssue(issue: Record<string, unknown>): boolean {
  * Approve with mappings runs the real ``apply_actions_to_mappings`` path on the API.
  * Without mutative actions (e.g. duplicate identity keys), Approve & apply is disabled.
  */
-export function RepairProposalDrawer({
+export function RepairProposalDrawer(props: RepairProposalDrawerProps) {
+  if (!props.proposal) return null;
+  return <RepairProposalState key={`${props.proposal.id}:${props.proposal.job_id || ""}`} {...props} />;
+}
+
+function RepairActionDetails({ action, manual = false }: { action: Record<string, unknown>; manual?: boolean }) {
+  return (
+    <>
+      <div className="df2-repair-action-title">
+        <DtIcon name={manual ? "settings" : "layers"} size={14} />
+        <strong>
+          {action.kind === "change_target_type" ? "Change target type"
+            : action.kind === "add_transform" ? "Add transform"
+              : action.kind === "map_column" ? "Map column"
+                : action.kind === "fix_source_keys" ? "Fix source keys"
+                  : "Review proposed step"}
+        </strong>
+      </div>
+      {manual && <p className="df2-repair-manual-note">Manual step. Not applied by this proposal.</p>}
+      <dl className="df2-repair-action-details">
+        <div><dt>Column</dt><dd><code>{String(action.column || action.source || "Not specified")}</code></dd></div>
+        <div>
+          <dt>{action.transform ? "Proposed transform" : "Proposed change"}</dt>
+          <dd>{action.transform ? <code>{String(action.transform)}</code>
+            : action.to_type ? <code>{String(action.to_type)}</code>
+              : action.destination ? <code>{String(action.destination)}</code>
+                : "See step details"}</dd>
+        </div>
+        <div><dt>Evidence</dt><dd>{action.apply_proven === true ? "Proven against scanned values"
+          : action.apply_proven === false ? "Not proven" : "Unverified"}</dd></div>
+      </dl>
+      {action.label ? <p className="df2-repair-action-note">{String(action.label)}</p> : null}
+    </>
+  );
+}
+
+function RepairProposalState({
   open,
   proposal,
   mappings = [],
@@ -55,8 +91,24 @@ export function RepairProposalDrawer({
   onOpenIdentitySettings,
   onOpenMap,
 }: RepairProposalDrawerProps) {
+  const active = useRef(open);
+  const generation = useRef(0);
+  const decisionContext = JSON.stringify([proposal?.actions, mappings]);
+  const deciding = useRef(false);
+  const closeRef = useRef(onClose);
+  useEffect(() => { closeRef.current = onClose; }, [onClose]);
+  useEffect(() => {
+    generation.current += 1;
+    active.current = open;
+    return () => { active.current = false; generation.current += 1; };
+  }, [open, decisionContext]);
+  const closeWhenIdle = useCallback(() => {
+    if (!deciding.current) closeRef.current();
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
 
   const analysis = useMemo(() => {
     if (!proposal) {
@@ -103,6 +155,10 @@ export function RepairProposalDrawer({
   const canReject = status === "proposed" || status === "approved";
 
   const decide = async (approve: boolean) => {
+    if (!active.current || deciding.current || (approve ? !canDecide : !canReject)) return;
+    deciding.current = true;
+    const requestGeneration = generation.current;
+    const current = () => active.current && generation.current === requestGeneration;
     setBusy(true);
     setError(null);
     try {
@@ -110,36 +166,45 @@ export function RepairProposalDrawer({
         approve,
         mappings: approve && canApplyMappings ? mappings : undefined,
       });
+      if (!current()) return;
+      if (decided.id !== proposal.id || (proposal.job_id && decided.job_id !== proposal.job_id)) {
+        throw new Error("Repair response does not match the current proposal. Reload before applying changes.");
+      }
       if (
         approve
-        && decided.apply_result?.applied
+        && decided.status === "applied"
+        && decided.apply_result?.applied === true
         && decided.apply_result?.mappings
         && Array.isArray(decided.apply_result.mappings)
+        && decided.apply_result.mappings.length > 0
       ) {
         onApplied?.(decided.apply_result.mappings as RepairMapping[], decided);
-      } else if (approve && decided.apply_result && decided.apply_result.applied === false) {
+      } else if (approve && canApplyMappings) {
         setError(
           String(
-            decided.apply_result.message
-            || decided.apply_result.reason
+            decided.apply_result?.message
+            || decided.apply_result?.reason
             || "No mapping changes applied — this proposal cannot auto-fix the blocker.",
           ),
         );
-        onDecided?.(decided);
+        if (decided.status === "approved") onDecided?.(decided);
         return;
       } else {
         onDecided?.(decided);
       }
       onClose();
     } catch (e) {
+      if (!current()) return;
       setError((e as Error).message || "Repair decision failed");
     } finally {
-      setBusy(false);
+      deciding.current = false;
+      if (active.current) setBusy(false);
     }
   };
 
   /** No mappings yet — do not audit-approve (that would lock Apply). Hand off to Validate. */
   const continueWithoutDecide = () => {
+    if (!active.current || deciding.current) return;
     onDecided?.(proposal);
     onClose();
   };
@@ -147,13 +212,14 @@ export function RepairProposalDrawer({
   return (
     <Drawer
       open={open}
-      onClose={onClose}
+      onClose={closeWhenIdle}
       size="lg"
       title="Repair proposal"
+      ariaLabel="Repair proposal"
       subtitle={
         analysis.canMutateMappings
-          ? "Human-gated fix — nothing auto-applies without approve."
-          : "Guidance only — mapping Approve cannot fix this root cause."
+          ? "Mapping changes pending approval"
+          : "Manual repair required"
       }
       icon={<DtIcon name="sparkle" size={18} />}
       footer={
@@ -168,7 +234,7 @@ export function RepairProposalDrawer({
           >
             Reject
           </Button>
-          {analysis.duplicateRoot && (onOpenIdentitySettings || onOpenMap) ? (
+          {analysis.duplicateRoot && !canApplyMappings && (onOpenIdentitySettings || onOpenMap) ? (
             <Button
               variant="primary"
               onClick={() => {
@@ -219,16 +285,13 @@ export function RepairProposalDrawer({
       }
     >
       <div className="df2-repair-proposal">
-        <p className="df2-label-hint" style={{ marginTop: 0 }}>
-          Proposal <code>{proposal.id}</code>
-          {proposal.job_id ? <> · job <code>{proposal.job_id}</code></> : null}
-          {" · "}
-          source <strong>{proposal.source}</strong>
-          {" · "}
-          confidence <strong>{proposal.confidence}</strong>
-          {" · "}
-          status <strong>{proposal.status}</strong>
-        </p>
+        <div className="df2-repair-status"><span>Status</span><strong>{proposal.status}</strong></div>
+        <dl className="df2-repair-metadata">
+          <div><dt>Proposal</dt><dd><code>{proposal.id}</code></dd></div>
+          {proposal.job_id ? <div><dt>Job</dt><dd><code>{proposal.job_id}</code></dd></div> : null}
+          <div><dt>Source</dt><dd>{proposal.source || "Not specified"}</dd></div>
+          <div><dt>Confidence</dt><dd>{proposal.confidence ?? "Unverified"}</dd></div>
+        </dl>
 
         {analysis.duplicateRoot && (
           <div className="df2-repair-root" role="status">
@@ -249,6 +312,16 @@ export function RepairProposalDrawer({
                 then Re-run Validate.
               </li>
             </ol>
+            {canApplyMappings && (onOpenIdentitySettings || onOpenMap) && (
+              <Button variant="secondary" size="sm" disabled={busy} onClick={() => {
+                if (deciding.current) return;
+                if (onOpenIdentitySettings) onOpenIdentitySettings();
+                else onOpenMap?.();
+                onClose();
+              }} leadingIcon={<DtIcon name="settings" size={14} />}>
+                Review identity separately
+              </Button>
+            )}
           </div>
         )}
 
@@ -262,8 +335,8 @@ export function RepairProposalDrawer({
             </p>
             <ol className="df2-repair-next-steps">
               <li>Approve updates the Map CREATE types listed below — the destination is not written yet.</li>
-              <li>Each type was proven against the overflow values Validate scanned (same write-path check Execute uses).</li>
-              <li>Validate runs again on those same values and should clear this gate. Click Execute only then.</li>
+              <li>Evidence below identifies types proven against scanned values. Missing or unknown proof flags are unverified.</li>
+              <li>Re-run Validate after approval. Execute only after the required gates pass.</li>
             </ol>
             <p className="df2-label-hint">
               Live destination columns still need ALTER — Map cannot change destination
@@ -313,28 +386,24 @@ export function RepairProposalDrawer({
           </div>
         )}
 
-        {proposal.auto_applicable && (
+        {proposal.auto_applicable === true && (
           <p className="df2-label-hint" role="status">
-            Marked auto-applicable (additive only) — still requires explicit approve in Studio.
+            Marked auto-applicable. Explicit approval is still required; this flag is not validation evidence.
           </p>
         )}
         {error && (
-          <p className="df2-label-hint" role="alert" style={{ color: "var(--df2-danger, #b42318)" }}>
+          <p ref={errorRef} tabIndex={-1} className="df2-label-hint" role="alert" style={{ color: "var(--df2-danger, #b42318)" }}>
             {error}
           </p>
         )}
 
         {analysis.mutativeActions.length > 0 && (
           <>
-            <h4 className="df2-label">Applyable mapping actions ({analysis.mutativeActions.length})</h4>
+            <h4 className="df2-label">Proposed mapping changes ({analysis.mutativeActions.length})</h4>
             <ul className="df2-repair-actions">
               {analysis.mutativeActions.map((a, i) => (
                 <li key={`m-${String(a.kind)}-${String(a.column ?? "")}-${i}`}>
-                  <strong>{String(a.kind || "action")}</strong>
-                  {a.column ? <> · <code>{String(a.column)}</code></> : null}
-                  {a.to_type ? <> → {String(a.to_type)}</> : null}
-                  {a.transform ? <> · transform {String(a.transform)}</> : null}
-                  {a.label ? <span className="df2-label-hint"> — {String(a.label)}</span> : null}
+                  <RepairActionDetails action={a} />
                 </li>
               ))}
             </ul>
@@ -343,12 +412,11 @@ export function RepairProposalDrawer({
 
         {analysis.guidanceActions.length > 0 && (
           <>
-            <h4 className="df2-label">Guidance ({analysis.guidanceActions.length})</h4>
+            <h4 className="df2-label">Manual steps ({analysis.guidanceActions.length})</h4>
             <ul className="df2-repair-actions">
               {analysis.guidanceActions.map((a, i) => (
                 <li key={`g-${String(a.kind)}-${i}`}>
-                  <strong>{String(a.kind || "action")}</strong>
-                  {a.label ? <span className="df2-label-hint"> — {String(a.label)}</span> : null}
+                  <RepairActionDetails action={a} manual />
                 </li>
               ))}
             </ul>

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from services.signed_proof_pack import (
@@ -9,6 +11,223 @@ from services.signed_proof_pack import (
     export_proof_pack_for_job,
     verify_signed_proof_pack,
 )
+
+
+@pytest.mark.parametrize("verdict", ["false", "true", 1, False, None, True])
+def test_full_checksum_assurance_requires_literal_true(verdict):
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    report = {
+        "phase": "post_write", "coverage": "full_checksum",
+        "source_checksum_provenance": "independent_source_reread",
+        "source_checksum": "abc", "target_checksum": "abc", "source_rows": 5, "target_rows": 5,
+    }
+    if verdict is not None:
+        report["passed"] = verdict
+    assurance = classify_post_write_assurance(report)
+
+    assert assurance["migration_proven"] is (verdict is True)
+    assert assurance["post_write_verified"] is (verdict is True)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"target_checksum": "different"},
+        {"target_checksum": "different", "checksum_match": True},
+        {"source_checksum": ""},
+        {"target_checksum": ""},
+        {"source_checksum": None, "target_checksum": None},
+        {"source_checksum": " ", "target_checksum": " "},
+        {"source_checksum": "", "target_checksum": "", "checksum_match": True},
+        {"checksum_match": False},
+    ],
+)
+def test_full_checksum_rejects_contradictory_digest_evidence(changes):
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    report = {
+        "passed": True, "phase": "post_write", "coverage": "full_checksum",
+        "source_checksum": "abc", "target_checksum": "abc",
+        "source_checksum_provenance": "independent_source_reread",
+        **changes,
+    }
+    original = dict(report)
+    assurance = classify_post_write_assurance(report)
+
+    assert assurance["migration_proven"] is False
+    assert assurance["population_proof"] is False
+    assert assurance["post_write_verified"] is False
+    assert assurance["checksum_match"] is False
+    assert report == original
+
+
+@pytest.mark.parametrize("coverage", ["full_checksum", ""])
+@pytest.mark.parametrize("provenance", [None, "writer_stream", "source_reread"])
+def test_full_checksum_requires_independent_provenance(coverage, provenance):
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    report = {
+        "passed": True, "phase": "post_write", "coverage": coverage,
+        "source_checksum": "abc", "target_checksum": "abc",
+    }
+    if provenance is not None:
+        report["source_checksum_provenance"] = provenance
+    assurance = classify_post_write_assurance(report)
+
+    assert assurance["migration_proven"] is False
+    assert assurance["population_proof"] is False
+    assert assurance["post_write_verified"] is False
+    assert assurance["checksum_match"] is True
+    assert assurance["claim_level"] == "none"
+    assert "independent" in assurance["note"].lower()
+    assert report["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ["written_batch_keys", "last_stream", "whole_table_not_comparable",
+     "cdc_source_image_count", "no_op_destination_unchanged", "route_partitioned",
+     "unrecognized_scope"],
+)
+def test_full_checksum_cannot_promote_narrow_or_unknown_scope(scope):
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    assurance = classify_post_write_assurance({
+        "passed": True, "phase": "post_write", "coverage": "full_checksum",
+        "source_checksum": "abc", "target_checksum": "abc",
+        "source_checksum_provenance": "independent_source_reread",
+        "checksum_scope": scope,
+    })
+
+    assert assurance["migration_proven"] is False
+    assert assurance["population_proof"] is False
+    assert assurance["claim_level"] != "full_checksum"
+
+
+@pytest.mark.parametrize("verdict", ["false", "true", 1, False, None, True])
+def test_signed_roundtrip_verdict_cannot_hide_behind_completeness(verdict, monkeypatch):
+    monkeypatch.setattr("services.signed_proof_pack._platform_secret", lambda: b"test-proof-secret")
+    report = {
+        "phase": "post_write", "coverage": "full_checksum",
+        "source_checksum": "abc", "target_checksum": "abc",
+        "source_checksum_provenance": "independent_source_reread",
+        "identity_hash_aligned": True,
+    }
+    if verdict is not None:
+        report["passed"] = verdict
+    pack = build_signed_proof_pack(
+        job_id="job-verdict", reconciliation=report,
+        mapping_hash="map-h1",
+        connector_versions={"source": "postgresql-16.4", "destination": "sqlite-3.45"},
+    )
+    shipped = json.loads(json.dumps(pack))
+
+    assert shipped["proof_incomplete_reasons"] == []
+    assert shipped["assurance"]["migration_proven"] is (verdict is True)
+    assert shipped["assurance"]["post_write_verified"] is (verdict is True)
+    assert shipped["gate8"] == report
+    assert verify_signed_proof_pack(shipped)["ok"] is True
+    assert verify_signed_proof_pack(shipped)["errors"] == []
+
+
+@pytest.mark.parametrize("coverage", ["full_checksum", ""])
+@pytest.mark.parametrize("scope", ["", "whole_table"])
+def test_signed_full_checksum_real_contract_remains_proven(coverage, scope, monkeypatch):
+    monkeypatch.setattr("services.signed_proof_pack._platform_secret", lambda: b"test-proof-secret")
+    report = {
+        "passed": True, "phase": "post_write", "coverage": coverage,
+        "checksum_scope": scope,
+        "source_checksum": "abc", "target_checksum": "abc",
+        "source_checksum_provenance": "independent_source_reread",
+        "identity_hash_aligned": True,
+    }
+    pack = build_signed_proof_pack(
+        job_id="job-real-contract", reconciliation=report,
+        mapping_hash="map-h1",
+        connector_versions={"source": "postgresql-16.4", "destination": "sqlite-3.45"},
+    )
+    shipped = json.loads(json.dumps(pack))
+
+    assert shipped["proof_incomplete_reasons"] == []
+    assert shipped["assurance"]["claim_level"] == "full_checksum"
+    assert shipped["assurance"]["migration_proven"] is True
+    assert shipped["assurance"]["post_write_verified"] is True
+    assert shipped["assurance"]["checksum_match"] is True
+    assert shipped["assurance"]["population_proof"] is False
+    assert shipped["assurance"]["referential_integrity_proven"] is False
+    assert verify_signed_proof_pack(shipped)["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "changes, expected_match",
+    [
+        ({"target_checksum": "different"}, False),
+        ({"checksum_match": False}, False),
+        ({"source_checksum_provenance": None}, True),
+        ({"source_checksum_provenance": None,
+          "source_independently_reread": True, "checksum_mode": "source_reread"}, True),
+    ],
+)
+def test_signed_unproven_evidence_remains_authentic(changes, expected_match, monkeypatch):
+    monkeypatch.setattr("services.signed_proof_pack._platform_secret", lambda: b"test-proof-secret")
+    report = {
+        "passed": True, "phase": "post_write", "coverage": "full_checksum",
+        "source_checksum": "abc", "target_checksum": "abc",
+        "source_checksum_provenance": "independent_source_reread",
+        "identity_hash_aligned": True,
+        **changes,
+    }
+    pack = build_signed_proof_pack(
+        job_id="job-unproven", reconciliation=report,
+        mapping_hash="map-h1",
+        connector_versions={"source": "postgresql-16.4", "destination": "sqlite-3.45"},
+    )
+    shipped = json.loads(json.dumps(pack))
+
+    assert shipped["proof_incomplete_reasons"] == []
+    assert shipped["gate8"] == report
+    assert shipped["gate8"]["passed"] is True
+    assert shipped["assurance"]["migration_proven"] is False
+    assert shipped["assurance"]["population_proof"] is False
+    assert shipped["assurance"]["post_write_verified"] is False
+    assert shipped["assurance"]["checksum_match"] is expected_match
+    assert verify_signed_proof_pack(shipped)["ok"] is True
+    assert verify_signed_proof_pack(shipped)["errors"] == []
+
+
+@pytest.mark.parametrize(
+    "changes, claim_level, verified, population",
+    [
+        ({"coverage": "sample"}, "sample", True, False),
+        ({"coverage": "writer_ack"}, "writer_ack", False, False),
+        ({"phase": "pre_write_simulation", "preview": True}, "pre_write_only", False, False),
+        ({"checksum_scope": "written_batch_keys"}, "none", False, False),
+        ({"checksum_scope": "last_stream"}, "per_stream_checksum", True, False),
+        ({"checksum_scope": "whole_table_not_comparable"}, "row_count", True, False),
+        ({"checksum_scope": "cdc_source_image_values"}, "cdc_source_image_values", True, True),
+        ({"coverage": "none", "phase": "post_write_skipped", "unproven": True,
+          "skipped_readback": True, "checksum_match": False}, "none", False, False),
+        ({"coverage": "collapse"}, "none", False, False),
+        ({"coerced_null_rows": 1}, "coerced", False, False),
+        ({"verification_ladder": {"passed": False}}, "failed", False, False),
+    ],
+)
+def test_existing_assurance_downgrades_remain_intact(changes, claim_level, verified, population):
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    report = {
+        "passed": True, "phase": "post_write", "coverage": "full_checksum",
+        "source_checksum": "abc", "target_checksum": "abc",
+        "source_checksum_provenance": "independent_source_reread",
+        **changes,
+    }
+    assurance = classify_post_write_assurance(report)
+
+    assert assurance["claim_level"] == claim_level
+    assert assurance["post_write_verified"] is verified
+    assert assurance["migration_proven"] is False
+    assert assurance["population_proof"] is population
 
 
 @pytest.mark.parametrize("secret", ["", "x" * 31, "dev-only-not-for-production"])

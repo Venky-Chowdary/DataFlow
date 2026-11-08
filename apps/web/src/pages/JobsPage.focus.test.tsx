@@ -166,6 +166,122 @@ describe("Jobs focus: isolated real components with synthetic jobs (not authenti
   });
 });
 
+describe("Jobs evidence: isolated real components with synthetic jobs", () => {
+  function evidenceSection(label = "Evidence panels") {
+    const section = host.querySelector<HTMLElement>(`.df2-jobs-evidence-list[aria-label="${label}"]`);
+    assert.ok(section);
+    assert.ok(section.querySelector("ul"), "evidence must retain native list semantics");
+    assert.equal(section.querySelector('[role="listitem"]'), null, "buttons must retain button semantics");
+    return section;
+  }
+
+  function evidenceAction(label: string, section = evidenceSection()) {
+    const button = section.querySelector<HTMLButtonElement>(`button[aria-label="Open ${label}"]`);
+    assert.ok(button);
+    assert.ok(button.querySelector("svg.lucide-panel-right-open"));
+    return button;
+  }
+
+  async function closeDrawer() {
+    const button = document.querySelector<HTMLButtonElement>('[role="dialog"] button[aria-label="Close"]');
+    assert.ok(button);
+    await click(button);
+    assert.equal(document.querySelector('[role="dialog"]'), null);
+  }
+
+  it("shows absent evidence as unavailable rather than hiding it or implying a valid proof", async () => {
+    mobile = false;
+    await render([jobs[0]]);
+    assert.equal(evidenceSection().querySelectorAll("li").length, 9);
+    for (const label of ["Gate-8 reconcile", "Validate / preflight", "Writer & throughput", "Mapping proof", "DDL & stream log", "Pipeline explanation"]) {
+      const button = evidenceAction(label);
+      assert.equal(button.disabled, true, label);
+      const item = button.closest("li")!;
+      assert.equal(item.querySelector(".df2-jobs-evidence-list-status")?.textContent, "Not captured");
+      assert.equal(item.querySelector(".tone-ok"), null);
+      await click(button);
+      assert.equal(document.querySelector('[role="dialog"]'), null);
+    }
+    await click(evidenceAction("Run metadata"));
+    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Run metadata/);
+    await closeDrawer();
+  });
+
+  it("labels the existing mapping-table fallback honestly and keeps proof unavailable in Mapping", async () => {
+    mobile = false;
+    await render([{ ...jobs[0], transfer_request: { mappings: [{ source: "customer_id", target: "account_id" }] } } as TransferJob]);
+    assert.equal(evidenceSection().querySelector('button[aria-label="Open Mapping proof"]'), null);
+    await click(evidenceAction("Column mappings"));
+    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Column map.*customer_id.*account_id/s);
+    await closeDrawer();
+    const mapping = evidenceSection("Mapping evidence");
+    assert.equal(evidenceAction("Mapping proof", mapping).disabled, true);
+    assert.match(host.querySelector(".df2-jobs-map-overview")?.textContent || "", /Risks \/ reviewNot captured/);
+    await click(evidenceAction("Column map table", mapping));
+    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Column map.*customer_id.*account_id/s);
+    await closeDrawer();
+  });
+
+  it("opens recorded evidence without upgrading limited or failed proof to success", async () => {
+    mobile = false;
+    const job = {
+      ...jobs[0],
+      records_per_second: 25,
+      event_log: ["Synthetic durable event"],
+      streams: [{ name: "synthetic_accounts", status: "completed", records_processed: 10 }],
+      reconciliation: { passed: true, unproven: true, source_rows: 10, target_rows: 10, message: "Readback not captured" },
+      preflight: { passed: false, passed_count: 0, total_gates: 1, readiness_score: 0,
+        gates: [{ id: "synthetic_gate", status: "block", message: "Synthetic gate blocked" }] },
+      mapping_proof: { dest_mode: "match_existing", summary: { mapped_count: 1, risk_count: 0, review_count: 0 },
+        mappings: [{ source: "customer_id", target: "account_id", source_type: "INTEGER", target_type: "INTEGER",
+          transform: "none", transform_fidelity: "preserve", confidence: 0.8 }] },
+    } as TransferJob;
+    await render([job]);
+    for (const label of ["Gate-8 reconcile", "Validate / preflight"]) {
+      assert.equal(evidenceAction(label).disabled, false);
+      assert.equal(evidenceAction(label).closest("li")!.querySelector(".tone-ok"), null);
+    }
+    for (const [label, content] of [
+      ["Gate-8 reconcile", /Gate-8 reconcile/],
+      ["Validate / preflight", /Synthetic gate blocked/],
+      ["Writer & throughput", /Writer & throughput/],
+      ["Phase timeline", /Phase timeline/],
+      ["Event log", /Synthetic durable event/],
+      ["Mapping proof", /customer_id.*account_id/s],
+    ] as const) {
+      await click(evidenceAction(label));
+      assert.match(document.querySelector('[role="dialog"]')?.textContent || "", content, label);
+      await closeDrawer();
+    }
+    const logsTab = host.querySelector<HTMLButtonElement>('#job-tab-log');
+    assert.ok(logsTab);
+    await click(logsTab);
+    await click(evidenceAction("Streams", evidenceSection("Logs")));
+    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Stream conservation.*synthetic_accounts/s);
+    await closeDrawer();
+  });
+
+  it("preserves log and explanation drawer callbacks with separately labeled evidence actions", async () => {
+    mobile = false;
+    await render([{ ...jobs[0], ddl_log: ["CREATE TABLE synthetic_accounts"], explanation: "Synthetic pipeline summary." } as TransferJob]);
+    await click(evidenceAction("DDL & stream log"));
+    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /CREATE TABLE synthetic_accounts/);
+    await closeDrawer();
+    await click(evidenceAction("Pipeline explanation"));
+    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Synthetic pipeline summary/);
+    await closeDrawer();
+    const logsTab = host.querySelector<HTMLButtonElement>('#job-tab-log');
+    assert.ok(logsTab);
+    await click(logsTab);
+    const logs = evidenceSection("Logs");
+    assert.equal(logs.querySelectorAll("li").length, 4);
+    assert.equal(evidenceAction("Streams", logs).disabled, true);
+    await click(evidenceAction("DDL & stream", logs));
+    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /CREATE TABLE synthetic_accounts/);
+    await closeDrawer();
+  });
+});
+
 after(() => {
   globalThis.fetch = originalFetch;
   dom.window.close();

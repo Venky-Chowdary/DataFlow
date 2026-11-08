@@ -4496,6 +4496,8 @@ export interface QuarantineInfo {
   rows_refused_unit?: number;
   /** Reject total that no retrievable finding or named rollback explains. */
   rows_unaccounted?: number;
+  /** Server-side reason replay cannot safely reconstruct all eligible source rows. */
+  replay_block_reason?: string | null;
   /** Destination DLQ table durability — independent of the control plane. */
   dest_dlq_durable?: boolean | null;
   open_count?: number;

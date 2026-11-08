@@ -1,6 +1,6 @@
 /** Gate-8 reconciliation proof — source vs destination rows + checksums. */
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useToast } from "../Toast";
 import { HiddenFileInput } from "../ui/HiddenFileInput";
 import {
@@ -21,6 +21,7 @@ import {
   isGate8WriterAckOnly,
   isGate8WritePassDestReadback,
   isGate8CellFidelityUnproven,
+  isGate8FullChecksumProof,
 } from "./gate8Status";
 import type {
   Gate8Reconciliation,
@@ -164,6 +165,8 @@ export function Gate8ProofCard({
   onRerunLabel = "Re-run transfer",
 }: Gate8ProofCardProps) {
   const { toast } = useToast();
+  const verifySequence = useRef(0);
+  const verifyInputId = useId();
   const [verifyState, setVerifyState] = useState<
     | { status: "idle" }
     | { status: "working" }
@@ -182,8 +185,11 @@ export function Gate8ProofCard({
   } | null>(null);
   const controlTotals = readControlTotals(report);
   useEffect(() => {
+    verifySequence.current += 1;
     setVerifyState({ status: "idle" });
-  }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed]);
+    return () => { verifySequence.current += 1; };
+  }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed,
+    report.checksum_scope, report.coverage, report.source_checksum_provenance]);
   useEffect(() => {
     setPackSummary(null);
     if (!jobId) return;
@@ -201,7 +207,7 @@ export function Gate8ProofCard({
           ? (pack.proof_incomplete_reasons as string[])
           : [];
         setPackSummary({
-          migration_proven: Boolean(assurance.migration_proven),
+          migration_proven: assurance.migration_proven === true,
           claim_level: String(assurance.claim_level || ""),
           accepted_risks: risks.length,
           incomplete: incomplete.slice(0, 4),
@@ -209,7 +215,7 @@ export function Gate8ProofCard({
           ddl_hash: hashes.ddl_hash != null ? String(hashes.ddl_hash) : null,
           mapping_hash: hashes.mapping_hash != null ? String(hashes.mapping_hash) : null,
           rollback: rb.strategy
-            ? `${rb.strategy}${rb.executable ? " (executable staging discard)" : " (not executable)"}`
+            ? `${rb.strategy}${rb.executable === true ? " (executable staging discard)" : " (not executable)"}`
             : undefined,
         });
       } catch {
@@ -226,10 +232,10 @@ export function Gate8ProofCard({
   const lastStream = !preWrite && !sampleVerified && !keyedBatch && isGate8LastStream(report);
   const appendDelta = !preWrite && !sampleVerified && !keyedBatch && !lastStream && isGate8AppendDelta(report);
   const writerAck = !preWrite && !sampleVerified && !appendDelta && !keyedBatch && isGate8WriterAckOnly(report);
-  const passed = Boolean(report.passed) && !preWrite && !writerAck;
+  const passed = report.passed === true && !preWrite && !writerAck;
   const cellUnproven = !preWrite && !writerAck && isGate8CellFidelityUnproven(report);
-  const simulationOk = Boolean(report.passed) && preWrite;
-  const writerAckOk = Boolean(report.passed) && writerAck;
+  const simulationOk = report.passed === true && preWrite;
+  const writerAckOk = report.passed === true && writerAck;
   const sourceRows = Number(report.source_rows ?? 0);
   const targetRows = Number(report.target_rows ?? 0);
   const rejectedRows = Number(report.rejected_rows ?? 0);
@@ -284,7 +290,7 @@ export function Gate8ProofCard({
     || Boolean(sampleError)
     || sampleSkipped;
 
-  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven && !appendDelta && !keyedBatch && !lastStream && !cellUnproven;
+  const fullChecksumPass = isGate8FullChecksumProof(report);
   const toneClass = preWrite
     ? (simulationOk ? "is-pending" : "is-fail")
     : writerAck
@@ -312,7 +318,7 @@ export function Gate8ProofCard({
                 ? "Last stream checksum matches — not the whole job"
               : cellUnproven && passed
                 ? "Rows counted — cell values not read back"
-              : (fullChecksumPass ? "Source and destination match" : "Reconciliation did not verify");
+              : (fullChecksumPass ? "Source and destination match" : passed ? "Comparison reported — full proof unavailable" : "Reconciliation did not verify");
   const badge = preWrite
     ? (simulationOk ? "Pending" : "Failed")
     : writerAck
@@ -329,14 +335,14 @@ export function Gate8ProofCard({
                 ? "Last stream"
               : cellUnproven && passed
                 ? "Count only"
-              : (fullChecksumPass ? "Verified" : "Failed");
+              : (fullChecksumPass ? "Verified" : passed ? "Unproven" : "Failed");
   const badgeClass = preWrite
     ? (simulationOk ? "is-pending" : "is-bad")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-bad")
       : identityUnproven || sampleVerified || ((appendDelta || keyedBatch || lastStream || cellUnproven) && passed)
         ? "is-pending"
-        : (fullChecksumPass ? "is-ok" : "is-bad");
+        : (fullChecksumPass ? "is-ok" : passed ? "is-pending" : "is-bad");
 
   return (
     <section
@@ -833,17 +839,19 @@ export function Gate8ProofCard({
             </button>
           )}
           <HiddenFileInput
-            id="df2-gate8-verify-proof"
+            id={verifyInputId}
             accept="application/json,.json"
             disabled={verifyState.status === "working"}
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = "";
               if (!file) return;
+              const sequence = ++verifySequence.current;
               setVerifyState({ status: "working" });
               void verifyProofFile(file)
                 .then((res) => {
-                  if (res.ok) {
+                  if (verifySequence.current !== sequence) return;
+                  if (res.ok === true) {
                     setVerifyState({ status: "ok", sha: res.content_sha256 });
                   } else {
                     setVerifyState({
@@ -853,6 +861,7 @@ export function Gate8ProofCard({
                   }
                 })
                 .catch((err) => {
+                  if (verifySequence.current !== sequence) return;
                   setVerifyState({
                     status: "fail",
                     errors: [err instanceof Error ? err.message : "Verify failed"],
@@ -861,7 +870,7 @@ export function Gate8ProofCard({
             }}
           />
           <label
-            htmlFor="df2-gate8-verify-proof"
+            htmlFor={verifyInputId}
             className="df2-btn df2-btn-sm"
             aria-disabled={verifyState.status === "working"}
             title="Re-check an exported HMAC proof pack (buyer diligence)"
@@ -869,18 +878,27 @@ export function Gate8ProofCard({
             {verifyState.status === "working" ? "Verifying…" : "Verify proof pack"}
           </label>
         </div>
-        {verifyState.status === "ok" && (
-          <p className="df2-gate8-proof-verify is-ok" role="status">
-            HMAC proof pack verified
-            {verifyState.sha ? ` · content ${verifyState.sha.slice(0, 12)}…` : ""}.
-          </p>
-        )}
-        {verifyState.status === "fail" && (
-          <p className="df2-gate8-proof-verify is-fail" role="alert">
-            Proof verify failed: {verifyState.errors.join("; ")}
-          </p>
-        )}
       </div>
+
+      {verifyState.status === "working" && (
+        <div className="df2-gate8-proof-verify is-pending" role="status">
+          <strong>Signature verification in progress</strong>
+          <span>Pack integrity not yet verified.</span>
+        </div>
+      )}
+      {verifyState.status === "ok" && (
+        <div className="df2-gate8-proof-verify is-ok" role="status">
+          <strong>Signature valid</strong>
+          <span>Pack integrity only</span>
+          {verifyState.sha && <span>Content SHA-256: <code>{verifyState.sha}</code></span>}
+        </div>
+      )}
+      {verifyState.status === "fail" && (
+        <div className="df2-gate8-proof-verify is-fail" role="alert">
+          <strong>Signature verification failed</strong>
+          <span>Pack integrity not verified: {verifyState.errors.join("; ")}</span>
+        </div>
+      )}
 
       {explanation && (
         <details className="df2-gate8-proof-explain">

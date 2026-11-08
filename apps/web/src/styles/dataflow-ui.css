@@ -6379,7 +6379,12 @@ html,
   font-size: var(--df-fs-md, 13.5px);
   font-weight: 700;
   line-height: 1.3;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .dt-toast-message {
@@ -6389,15 +6394,52 @@ html,
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
-  max-height: 12em;
-  overflow-y: auto;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-height: 2.9em;
+  overflow: hidden;
 }
 
-/* Errors carry remediation text (TLS advice, quarantine reasons). Never
-   truncate them into a 4-line clamp — operators need the full sentence. */
-.dt-toast--error .dt-toast-message,
-.dt-toast--warning .dt-toast-message {
-  max-height: 16em;
+.dt-toast-more {
+  align-self: flex-end;
+  flex-shrink: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--df-border);
+  border-radius: 6px;
+  background: var(--df-surface);
+  color: var(--df-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.dt-toast-close:focus-visible,
+.dt-toast-more:focus-visible {
+  outline: 2px solid var(--df-brand);
+  outline-offset: -2px;
+}
+
+.dt-toast-review .dt-toast-review-item + .dt-toast-review-item {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--df-border);
+}
+
+.dt-toast-review-item h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.dt-toast-review-item p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .dt-toast-close {
