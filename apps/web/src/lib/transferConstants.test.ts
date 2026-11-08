@@ -31,6 +31,16 @@ describe("MySQL append identity honesty", () => {
 });
 
 describe("availableSyncModes", () => {
+  it("keeps incremental append available for relational database routes", () => {
+    const modes = availableSyncModes({
+      destDriver: "mysql",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: false,
+    }).map((m) => m.id);
+    assert.ok(modes.includes("incremental_append"));
+  });
+
   it("hides SCD2/mirror on Mongo destinations", () => {
     const modes = availableSyncModes({
       destDriver: "mongodb",

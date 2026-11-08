@@ -268,6 +268,26 @@ describe("Transfer Studio wires the recovery decisions into the page effects", (
     assert.match(page, /persistStudioRecovery\(/);
   });
 
+  it("source edits clear source contracts without changing destination or recovery state", () => {
+    const reset = page.match(
+      /const resetSourceContractForUserChange = useCallback\(\(\) => \{([\s\S]*?)\}, \[\]\);/,
+    )?.[1];
+    assert.ok(reset);
+    assert.match(reset, /declaredCursorRef\.current = ""/);
+    assert.match(reset, /declaredPrimaryKeyRef\.current = ""/);
+    assert.match(reset, /setStreamFields\(\{\}\)/);
+    assert.match(reset, /setStreamMappings\(\{\}\)/);
+    assert.doesNotMatch(reset, /setSyncMode/);
+    assert.doesNotMatch(reset, /setConnectorId|setTargetDb|setTargetCollection/);
+    assert.match(page, /onChange=\{\(kind\) => \{\s*resetSourceContractForUserChange\(\)/);
+    assert.match(page, /onChange=\{\(id\) => \{\s*resetSourceContractForUserChange\(\)/);
+    assert.match(page, /value=\{sourceConnector\?\.type === "mongodb" \? sourceCollection : sourceTable\}[\s\S]{0,160}resetSourceContractForUserChange\(\)/);
+    assert.match(page, /setSourceTable=\{\(value\) => \{\s*resetSourceContractForUserChange\(\)/);
+    assert.match(page, /onPickSourceObject=\{\(name\) => \{\s*resetSourceContractForUserChange\(\)/);
+    assert.match(page, /setCursorField\(state\.cursorColumn\);\s*declaredCursorRef\.current = state\.cursorColumn/);
+    assert.doesNotMatch(page.match(/const resetRouteForDestinationChange = useCallback\(\(\) => \{([\s\S]*?)\}, \[\]\);/)?.[1] || "", /resetSourceContractForUserChange/);
+  });
+
   it("a hard reload reads the stored route before Studio mounts", () => {
     assert.match(app, /loadStudioRecovery\(/);
   });

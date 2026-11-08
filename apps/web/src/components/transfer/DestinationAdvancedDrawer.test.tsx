@@ -54,3 +54,45 @@ test("append identity is selected metadata, not an implicit destination key or m
     dom.window.close();
   }
 });
+
+test("a stale recovered cursor is blank and can be replaced from the loaded schema", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
+    url: "http://localhost/", pretendToBeVisual: true,
+  });
+  Object.assign(globalThis, {
+    window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
+  const { act, createElement } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { DestinationAdvancedDrawer } = await import("./DestinationAdvancedDrawer");
+  const root = createRoot(document.getElementById("root")!);
+  try {
+    await act(async () => root.render(createElement(DestinationAdvancedDrawer, {
+      open: true, onClose: () => {}, syncModes: SYNC_MODES, schemaPolicies: SCHEMA_POLICIES,
+      validationModes: VALIDATION_MODES, dateLocales: DATE_LOCALES, numberLocales: NUMBER_LOCALES,
+      syncMode: "incremental_append", schemaPolicy: "manual_review", validationMode: "strict",
+      dateLocale: "", numberLocale: "", backfillNewFields: false,
+      streamNames: ["Records"],
+      streamFields: { Records: { cursorField: "Records.order_id", primaryKeyField: "" } },
+      defaultCursor: "Records.order_id", defaultPrimaryKey: "",
+      sourceColumns: ["id", "event_date"], sourceSchema: { id: "INTEGER", event_date: "DATE" },
+      syncModeLabel: "Incremental append", schemaPolicyLabel: "Manual review",
+      requiresCursor: true, requiresPrimaryKey: false, streamNeedsReview: true,
+      onSyncModeChange: () => {}, onSchemaPolicyChange: () => {}, onValidationModeChange: () => {},
+      onDateLocaleChange: () => {}, onNumberLocaleChange: () => {}, onBackfillChange: () => {},
+      onStreamCursorChange: () => {}, onStreamCursorSemanticsChange: () => {},
+      onStreamPrimaryKeyChange: () => {},
+      syncHonestyLine: syncModeHonestyLine("incremental_append", false, "mysql"),
+    })));
+    const cursor = document.querySelector<HTMLSelectElement>('[aria-label="Cursor field for Records"]');
+    assert.ok(cursor);
+    assert.equal(cursor.value, "");
+    assert.deepEqual(Array.from(cursor.options).map((option) => option.value), ["", "id", "event_date"]);
+    assert.match(cursor.closest("td")?.textContent || "", /Select cursor/);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});

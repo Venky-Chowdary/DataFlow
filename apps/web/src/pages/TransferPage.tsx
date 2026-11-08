@@ -2324,6 +2324,23 @@ export function TransferPage({
     routeAnalyzedKeyRef.current = "";
   }, []);
 
+  const resetSourceContractForUserChange = useCallback(() => {
+    declaredCursorRef.current = "";
+    declaredPrimaryKeyRef.current = "";
+    setCursorField("");
+    setPrimaryKeyField("");
+    setCursorSemantics("");
+    setStreamFields({});
+    setStreamMappings({});
+    setColumnMappings([]);
+    setTransferPlan(null);
+    setPersistedPlanId(null);
+    setPreflight(null);
+    setPreflightError("");
+    setValidatedContractKey(null);
+    setCellPreview(null);
+  }, []);
+
   const applyConnectorSelection = (id: string) => {
     setConnectorId(id);
     if (!id) return;
@@ -2430,11 +2447,12 @@ export function TransferPage({
 
     appliedSeedTokenRef.current = seedSourceConnector.token;
     autoSelectedSourceConnector.current = true;
+    resetSourceContractForUserChange();
     setSourceConnectorId(seeded.id);
     setFile(null);
     setParsed(null);
     setStep(STEP_SOURCE);
-  }, [seedSourceConnector, connectors]);
+  }, [seedSourceConnector, connectors, resetSourceContractForUserChange]);
 
   /**
    * Jobs → Studio: rebuild the job's route so Validate re-reads the same source
@@ -3238,14 +3256,20 @@ export function TransferPage({
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
-    if (selected) processFile(selected);
+    if (selected) {
+      resetSourceContractForUserChange();
+      processFile(selected);
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
     const selected = e.dataTransfer.files?.[0];
-    if (selected) processFile(selected);
+    if (selected) {
+      resetSourceContractForUserChange();
+      processFile(selected);
+    }
   };
 
   const loadSampleDataset = async () => {
@@ -3255,6 +3279,7 @@ export function TransferPage({
       if (!res.ok) throw new Error("Sample file not found");
       const blob = await res.blob();
       const sample = new File([blob], "sample-orders.csv", { type: "text/csv" });
+      resetSourceContractForUserChange();
       await processFile(sample);
     } catch (e) {
       toast({
@@ -3390,6 +3415,8 @@ export function TransferPage({
         tone: "warning",
       });
       setStep(STEP_DESTINATION);
+      setAdvancedLocaleFocus(null);
+      setAdvancedOpen(true);
       return true;
     }
     return false;
@@ -7237,6 +7264,7 @@ export function TransferPage({
                     || (sourceKind === "cloud" && Boolean(cloudPath))
                   }
                   onChange={(kind) => {
+                    resetSourceContractForUserChange();
                     setSourceKind(kind);
                     setSourceConnectorId("");
                     setTransferPlan(null);
@@ -7455,7 +7483,10 @@ export function TransferPage({
                     <input
                       className="df2-input"
                       value={cloudPath}
-                      onChange={(e) => setCloudPath(e.target.value)}
+                      onChange={(e) => {
+                        resetSourceContractForUserChange();
+                        setCloudPath(e.target.value);
+                      }}
                       placeholder="s3://bucket/path/orders.jsonl"
                     />
                   </div>
@@ -7485,7 +7516,10 @@ export function TransferPage({
                   id="source-connector"
                   label="Source connector"
                   value={sourceConnectorId}
-                  onChange={setSourceConnectorId}
+                  onChange={(id) => {
+                    resetSourceContractForUserChange();
+                    setSourceConnectorId(id);
+                  }}
                   connectors={dbSourceConnectors}
                   placeholder="Select connector…"
                   hint="Saved connection (host, database, credentials)."
@@ -7567,6 +7601,7 @@ export function TransferPage({
                     label={sourceConnector?.type === "mongodb" ? "Collection(s)" : "Table(s)"}
                     value={sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable}
                     onChange={(next) => {
+                      resetSourceContractForUserChange();
                       if (sourceConnector?.type === "mongodb") setSourceCollection(next);
                       else setSourceTable(next);
                     }}
@@ -7604,8 +7639,14 @@ export function TransferPage({
                 connectorId={sourceConnectorId}
                 connectorType={sourceConnector?.type}
                 readMode={sourceReadMode}
-                setSourceTable={setSourceTable}
-                setSourceCollection={setSourceCollection}
+                setSourceTable={(value) => {
+                  resetSourceContractForUserChange();
+                  setSourceTable(value);
+                }}
+                setSourceCollection={(value) => {
+                  resetSourceContractForUserChange();
+                  setSourceCollection(value);
+                }}
                 onInsertText={insertSql}
               />
 
@@ -7726,6 +7767,7 @@ export function TransferPage({
                 onRetrySourceIntrospect={retrySourceIntrospect}
                 sourceObjectNames={sourceObjectNames}
                 onPickSourceObject={(name) => {
+                  resetSourceContractForUserChange();
                   sourceIntrospectGateRef.current = { key: "", status: "idle" };
                   if (sourceConnector?.type === "mongodb") setSourceCollection(name);
                   else setSourceTable(name);
