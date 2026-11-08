@@ -3906,12 +3906,13 @@ def read_table_cursor_batch(
     cursor_primary_key: str | None = None,
     cursor_key_columns: list[str] | None = None,
     cursor_inclusive: bool = False,
+    source_driver: str = "",
     **extra: Any,
 ) -> ReadBatch:
     """Cursor/keyset pagination for incremental and streaming transfers.
 
     ``cursor_key_columns`` (Phase F2) is the ordered composite key for seek
-    pagination — N-col OR/AND, portable to SQL Server / Oracle. When omitted,
+    pagination — native PostgreSQL tuples or portable OR/AND. When omitted,
     ``cursor_column`` + optional ``cursor_primary_key`` keep the legacy 1-/2-col
     path (including ``cursor|pk`` bookmarks).
     """
@@ -3954,21 +3955,25 @@ def read_table_cursor_batch(
             # Resolve ordered key columns for seek.
             key_names: list[str] = []
             if cursor_key_columns:
-                key_names = [
-                    name
-                    for name in (
-                        reflected_column_name(table_obj, str(c))
-                        for c in cursor_key_columns
-                        if c
-                    )
-                    if name is not None
-                ]
+                for requested in cursor_key_columns:
+                    if not requested:
+                        raise ValueError(f"Cursor/keyset columns not found in table {table}: empty key")
+                    resolved = reflected_column_name(table_obj, str(requested))
+                    if resolved is None:
+                        raise ValueError(
+                            f"Cursor/keyset columns not found in table {table}: {requested!r}"
+                        )
+                    key_names.append(resolved)
             else:
                 cursor_name = (
                     reflected_column_name(table_obj, cursor_column)
                     if cursor_column
                     else None
                 )
+                if cursor_column and cursor_name is None:
+                    raise ValueError(
+                        f"Cursor/keyset columns not found in table {table}: {cursor_column!r}"
+                    )
                 if cursor_name is not None:
                     key_names = [cursor_name]
                 pk_name = (
@@ -3976,6 +3981,10 @@ def read_table_cursor_batch(
                     if (cursor_primary_key or "").strip()
                     else None
                 )
+                if (cursor_primary_key or "").strip() and pk_name is None:
+                    raise ValueError(
+                        f"Cursor/keyset columns not found in table {table}: {cursor_primary_key!r}"
+                    )
                 if pk_name is not None and pk_name not in key_names:
                     key_names.append(pk_name)
             if not key_names:
@@ -4007,8 +4016,14 @@ def read_table_cursor_batch(
                     # Cursor-only watermark with a tie-break column: seek on
                     # the cursor alone, order on both (deterministic page edge).
                     seek_cols = key_cols[:1]
+                seek_dialect = (source_driver or _dialect_key(cfg)).lower()
+                if seek_dialect == "postgresql" and engine.dialect.name != "postgresql":
+                    seek_dialect = engine.dialect.name
                 stmt = stmt.where(
-                    sqlalchemy_keyset_clause(sa, seek_cols, bookmark)
+                    sqlalchemy_keyset_clause(
+                        sa, seek_cols, bookmark,
+                        dialect=seek_dialect,
+                    )
                 )
             stmt = stmt.order_by(*key_cols).limit(limit)
 

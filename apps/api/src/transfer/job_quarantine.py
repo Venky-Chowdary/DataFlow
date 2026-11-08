@@ -119,7 +119,7 @@ def align_reported_rejects(summary: dict[str, Any]) -> int:
 def align_rejects_to_stored_table(
     summary: dict[str, Any], dest_result: dict[str, Any] | None
 ) -> None:
-    """After the dest quarantine write, the headline is the row count that landed.
+    """Count destination quarantine rows plus control-plane diverted rows.
 
     A failed write (``rows_written`` 0, or not ok) must not be aligned down to
     zero — that would hide the rejects. A skipped sink is not a table.
@@ -139,6 +139,7 @@ def align_rejects_to_stored_table(
     )
     if findings:
         written = quarantined_row_count(findings[:written])
+    written += max(int(summary.get("rows_diverted") or 0), 0)
     current = int(summary.get("rejected_rows") or 0)
     if written != current:
         summary["rejected_count_aligned_from"] = current
@@ -246,6 +247,9 @@ def checkpoint_quarantine_summary(
         "rejected_details_truncated": truncated,
         "quarantine_checkpoint_durable": True,
     }
+    phase_profile = checkpoint.get("phase_profile")
+    if isinstance(phase_profile, dict):
+        summary["phase_profile"] = phase_profile
     rejected = int(checkpoint.get("rejected_rows") or total or 0)
     summary["rejected_rows"] = split_refused_unit(details, rejected, summary)
     return summary

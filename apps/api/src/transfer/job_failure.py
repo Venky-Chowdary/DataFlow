@@ -972,6 +972,7 @@ def _fail_job_preflight(
         gate_codes_from_preflight,
         open_schedule_drift_approval,
         schedule_id_from_job,
+        schema_evidence_from_preflight,
     )
 
     codes = gate_codes_from_preflight(pf)
@@ -979,7 +980,7 @@ def _fail_job_preflight(
         message=error_message,
         codes=codes,
         job_id=job_id,
-        evidence={"gate_codes": codes},
+        evidence={"gate_codes": codes, "schema_findings": schema_evidence_from_preflight(pf)},
     )
     schedule_id = ""
     if approval is not None:

@@ -69,9 +69,20 @@ def test_cdc_reexport_still_works():
     assert params == ["x", "x", "y"]
 
 
-def test_generic_sql_cursor_composite_sqlite():
+@pytest.mark.parametrize("source_driver", ["sqlite", "postgresql", "redshift"])
+def test_generic_sql_cursor_composite_sqlite(monkeypatch, source_driver):
     """SQLAlchemy path used by SQL Server/Oracle — exercise via sqlite dialect."""
     from connectors.generic_sql import read_table_cursor_batch
+    import services.keyset_pagination as keyset
+
+    seen_dialects = []
+    original_clause = keyset.sqlalchemy_keyset_clause
+
+    def recorded_clause(*args, **kwargs):
+        seen_dialects.append(kwargs.get("dialect"))
+        return original_clause(*args, **kwargs)
+
+    monkeypatch.setattr(keyset, "sqlalchemy_keyset_clause", recorded_clause)
 
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "k.db"
@@ -101,6 +112,7 @@ def test_generic_sql_cursor_composite_sqlite():
             columns=["order_id", "line_id", "qty"],
             limit=2,
             cursor_key_columns=["order_id", "line_id"],
+            source_driver=source_driver,
         )
         assert len(first.rows) == 2
         assert first.rows[0][:2] == ["A", "1"]
@@ -123,6 +135,7 @@ def test_generic_sql_cursor_composite_sqlite():
             columns=["order_id", "line_id", "qty"],
             limit=10,
             cursor_key_columns=["order_id", "line_id"],
+            source_driver=source_driver,
         )
         # Must not skip A/3 (same leading key as bookmark).
         got = [(r[0], str(r[1])) for r in second.rows]
@@ -130,6 +143,193 @@ def test_generic_sql_cursor_composite_sqlite():
         assert ("B", "1") in got
         assert ("A", "1") not in got
         assert ("A", "2") not in got
+        assert got == [("A", "3"), ("B", "1"), ("B", "2")]
+        expected_dialect = "sqlite" if source_driver == "postgresql" else source_driver
+        assert seen_dialects == [expected_dialect]
+
+
+@pytest.mark.parametrize("width", [1, 3, 8])
+@pytest.mark.parametrize("dialect", ["postgresql", "redshift", "sqlserver", "oracle", "sqlite"])
+def test_sqlalchemy_seek_binding_growth_and_dialect_safety(width, dialect):
+    import sqlalchemy as sa
+    from sqlalchemy.dialects import mssql, oracle, postgresql, sqlite
+    from services.keyset_pagination import sqlalchemy_keyset_clause
+
+    compilers = {
+        "postgresql": postgresql.dialect(), "redshift": postgresql.dialect(),
+        "sqlserver": mssql.dialect(), "oracle": oracle.dialect(), "sqlite": sqlite.dialect(),
+    }
+    columns = [sa.column(f"key_{position}", sa.Integer()) for position in range(width)]
+    bookmark = encode_keyset_bookmark(list(range(width)))
+    clause = sqlalchemy_keyset_clause(sa, columns, bookmark, dialect=dialect)
+    compiled = clause.compile(dialect=compilers[dialect])
+
+    expected = width if dialect == "postgresql" else width * (width + 1) // 2
+    assert len(compiled.params) == expected
+    assert all(isinstance(bound.type, sa.Integer) for bound in compiled.binds.values())
+    if width > 1:
+        if dialect == "postgresql":
+            assert isinstance(clause.left, sa.sql.elements.Tuple)
+            assert " OR " not in str(compiled)
+        else:
+            assert " OR " in str(compiled)
+
+
+@pytest.mark.parametrize("source_driver", ["postgresql", "redshift"])
+def test_composite_dispatch_preserves_source_dialect(source_driver):
+    from unittest.mock import patch
+    from connectors.base import ReadBatch
+    from src.transfer.batch_readers import _read_batch_impl
+
+    with patch("connectors.generic_sql.read_table_cursor_batch", return_value=ReadBatch(
+        headers=["a", "b", "c"], rows=[], offset=0, total_rows=None,
+    )) as reader:
+        _read_batch_impl(
+            source_driver, {"host": "unused", "database": "unused"}, "records",
+            ["a", "b", "c"], 0, 100, cursor_column="a",
+            cursor_key_columns=["a", "b", "c"],
+        )
+
+    assert reader.call_args.kwargs["source_driver"] == source_driver
+    assert reader.call_args.kwargs["type"] == "postgresql"
+
+
+def test_dispatch_rejects_blank_keys_before_reducing_to_legacy_seek():
+    from unittest.mock import patch
+    from src.transfer.batch_readers import _read_batch_impl
+
+    with patch("connectors.postgresql_reader.read_table_cursor_batch") as reader:
+        with pytest.raises(ValueError, match="empty key"):
+            _read_batch_impl(
+                "postgresql", {"host": "unused", "database": "unused"}, "records",
+                ["a", "b"], 0, 100, cursor_column="a", cursor_key_columns=["a", "b", ""],
+            )
+    reader.assert_not_called()
+
+
+def test_postgresql_tuple_seek_preserves_mixed_typed_bind_values():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    import sqlalchemy as sa
+    from sqlalchemy.dialects import postgresql
+    from services.keyset_pagination import sqlalchemy_keyset_clause
+
+    columns = [
+        sa.column("changed_at", sa.DateTime(timezone=True)),
+        sa.column("amount", sa.Numeric(20, 6)),
+        sa.column("id", sa.String()),
+    ]
+    clause = sqlalchemy_keyset_clause(
+        sa, columns,
+        encode_keyset_bookmark(["2026-01-01T10:00:00+05:30", "12345.123456", "O'Reilly"]),
+        dialect="postgresql",
+    )
+    markers = list(clause.right.clauses)
+
+    assert markers[0].value == datetime(2026, 1, 1, 4, 30, tzinfo=timezone.utc)
+    assert isinstance(markers[0].type, sa.DateTime) and markers[0].type.timezone
+    assert markers[1].value == Decimal("12345.123456")
+    assert isinstance(markers[1].type, sa.Numeric)
+    assert markers[2].value == "O'Reilly"
+    assert isinstance(markers[2].type, sa.String)
+    compiled = clause.compile(dialect=postgresql.dialect())
+    assert len(compiled.params) == 3
+    assert "O'Reilly" not in str(compiled)
+
+
+def test_native_and_portable_three_key_seeks_return_identical_strict_successors():
+    import sqlalchemy as sa
+    from services.keyset_pagination import sqlalchemy_keyset_clause
+
+    engine = sa.create_engine("sqlite://")
+    table = sa.Table("records", sa.MetaData(), *[
+        sa.Column(name, sa.Integer, primary_key=True) for name in ["a", "b", "c"]
+    ])
+    source = [(1, 1, 1), (1, 1, 2), (1, 2, 1), (2, 1, 1), (2, 2, 1)]
+    try:
+        table.create(engine)
+        with engine.begin() as connection:
+            connection.execute(table.insert(), [dict(zip(["a", "b", "c"], row)) for row in source])
+        with engine.connect() as connection:
+            for dialect in ["postgresql", "sqlite"]:
+                clause = sqlalchemy_keyset_clause(
+                    sa, list(table.c), encode_keyset_bookmark([1, 1, 2]), dialect=dialect,
+                )
+                result = connection.execute(sa.select(table).where(clause).order_by(*table.c)).all()
+                assert [tuple(row) for row in result] == source[2:]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("dialect", ["", "oracle", "postgresql", "redshift", "sqlserver", "mysql"])
+@pytest.mark.parametrize("width", [1, 3])
+def test_timezone_keyset_bind_dialect_isolation(dialect, width):
+    from datetime import datetime, timezone
+    import sqlalchemy as sa
+    from sqlalchemy.dialects import mssql, mysql, oracle, postgresql
+    from services.keyset_pagination import sqlalchemy_keyset_clause
+
+    compilers = {
+        "": oracle.dialect(), "oracle": oracle.dialect(), "postgresql": postgresql.dialect(),
+        "redshift": postgresql.dialect(), "sqlserver": mssql.dialect(), "mysql": mysql.dialect(),
+    }
+    columns = [sa.column("changed_at", sa.DateTime(timezone=True))]
+    columns.extend(sa.column(f"key_{position}", sa.Integer) for position in range(1, width))
+    parts = ["2026-01-01T10:00:00+05:30", *[str(position) for position in range(1, width)]]
+    clause = sqlalchemy_keyset_clause(sa, columns, encode_keyset_bookmark(parts), dialect=dialect)
+    compiled = clause.compile(dialect=compilers[dialect])
+    stamps = [value for value in compiled.params.values() if isinstance(value, datetime)]
+
+    assert len(stamps) == (1 if dialect == "postgresql" else width)
+    if dialect in ("", "oracle"):
+        assert "from_tz" in str(compiled).lower()
+        assert all(stamp == datetime(2026, 1, 1, 4, 30) for stamp in stamps)
+    else:
+        assert "from_tz" not in str(compiled).lower()
+        assert all(stamp == datetime(2026, 1, 1, 4, 30, tzinfo=timezone.utc) for stamp in stamps)
+
+
+@pytest.mark.parametrize("key_columns", [
+    ["order_id", "missing"], ["missing", "line_id"], ["order_id", ""], ["", "line_id"],
+])
+def test_generic_sql_rejects_partially_missing_key_before_first_page(tmp_path, key_columns):
+    from connectors.generic_sql import read_table_cursor_batch
+
+    database = tmp_path / "invalid_key.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE lines (order_id TEXT, line_id INTEGER, "
+            "PRIMARY KEY (order_id, line_id))"
+        )
+        connection.executemany("INSERT INTO lines VALUES (?, ?)", [("A", 1), ("A", 2), ("A", 3)])
+
+    with pytest.raises(ValueError, match="keyset columns not found"):
+        read_table_cursor_batch(
+            host="", port=0, database=str(database), username="", password="",
+            schema="", connection_string="", ssl=False, type="sqlite", table="lines",
+            cursor_column="order_id", cursor_key_columns=key_columns,
+            cursor_after=None, limit=2,
+        )
+
+
+@pytest.mark.parametrize("cursor_column, primary_key", [("order_id", "missing"), ("missing", "line_id")])
+def test_generic_sql_rejects_partially_missing_legacy_key(tmp_path, cursor_column, primary_key):
+    from connectors.generic_sql import read_table_cursor_batch
+
+    database = tmp_path / "invalid_legacy_key.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE lines (order_id TEXT, line_id INTEGER, PRIMARY KEY (order_id, line_id))"
+        )
+        connection.executemany("INSERT INTO lines VALUES (?, ?)", [("A", 1), ("A", 2), ("A", 3)])
+
+    with pytest.raises(ValueError, match="keyset columns not found"):
+        read_table_cursor_batch(
+            host="", port=0, database=str(database), username="", password="",
+            schema="", connection_string="", ssl=False, type="sqlite", table="lines",
+            cursor_column=cursor_column, cursor_primary_key=primary_key,
+            cursor_after=None, limit=2,
+        )
 
 
 @pytest.mark.parametrize(

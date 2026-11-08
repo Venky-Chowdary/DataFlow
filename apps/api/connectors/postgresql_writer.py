@@ -1338,36 +1338,8 @@ def _copy_upsert_batch(
 
     # Per-call UUID so a failed prior stage left on a reused session cannot collide.
     stage = f"_df_copy_ups_{uuid.uuid4().hex[:16]}"
-    conn = getattr(cur, "connection", None)
-
-    def _drop_stage_best_effort() -> None:
-        drop = sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage))
-        try:
-            cur.execute(drop)
-            return
-        except Exception:
-            pass
-        if conn is None:
-            return
-        # Aborted transaction blocks DDL until rollback.
-        try:
-            conn.rollback()
-        except Exception:
-            return
-        try:
-            cur.execute(drop)
-        except Exception as exc:
-            logger.debug("TEMP upsert stage drop skipped: %s", exc)
-
-    def _rollback_aborted() -> None:
-        """A failed COPY aborts the transaction. The values fallback must not run in it."""
-        if conn is None:
-            return
-        try:
-            conn.rollback()
-        except Exception:
-            logger.debug("upsert stage rollback skipped", exc_info=True)
-
+    savepoint = sql_mod.Identifier(f"{stage}_sp")
+    cur.execute(sql_mod.SQL("SAVEPOINT {}").format(savepoint))
     try:
         cur.execute(
             sql_mod.SQL("CREATE TEMP TABLE {} AS SELECT * FROM {}.{} WHERE 0=1").format(
@@ -1414,16 +1386,12 @@ def _copy_upsert_batch(
                 conflict,
             )
         cur.execute(merge)
-        _drop_stage_best_effort()
-        return len(batch)
+        cur.execute(sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage)))
     except Exception as exc:
-        # COPY or the merge failed. PostgreSQL then rejects every later
-        # statement with "current transaction is aborted" and hides the
-        # first error (MariaDB → Postgres upsert). Roll back, then the
-        # values path. If that path only repeats the aborted-transaction
-        # error, raise the original failure.
-        _rollback_aborted()
-        _drop_stage_best_effort()
+        try:
+            cur.execute(sql_mod.SQL("ROLLBACK TO SAVEPOINT {}").format(savepoint))
+        except Exception as recovery_exc:
+            raise exc from recovery_exc
         try:
             _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
         except Exception as fallback_exc:
@@ -1431,7 +1399,8 @@ def _copy_upsert_batch(
             if "current transaction is aborted" in fallback or "infailedsqltransaction" in fallback:
                 raise exc from fallback_exc
             raise
-        return len(batch)
+    cur.execute(sql_mod.SQL("RELEASE SAVEPOINT {}").format(savepoint))
+    return len(batch)
 
 
 def _open_pg(

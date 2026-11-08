@@ -5,7 +5,7 @@ import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
 import { Button } from "./ui/Button";
-import { JobPhase, JobProgress, LoadHistoryReport, PreflightResult } from "../lib/types";
+import { JobPhase, JobProgress, LoadHistoryReport, PhaseProfileReport, PreflightResult } from "../lib/types";
 import {
   cancelJob,
   executeJobRollback,
@@ -23,6 +23,7 @@ import { streamDropNotice } from "../lib/jobStreamLiveness";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId } from "../lib/workspace";
 import { isJobParked, isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
+import { PhaseProfileCard } from "./transfer/PhaseProfileCard";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
@@ -677,6 +678,12 @@ export function JobTheaterView({
     isComplete,
     isRunning,
   });
+  const reconcileProgress = reconciling && job.reconcile_pct != null
+    && Number.isFinite(Number(job.reconcile_pct))
+    ? Math.max(0, Math.min(100, Number(job.reconcile_pct)))
+    : null;
+  const reconcileIndeterminate = reconciling && reconcileProgress == null;
+  const progressValue = reconciling ? reconcileProgress : progress;
   /** Continuous CDC / no finite denominator — pulse the ring, do not invent %. */
   const indeterminate = Boolean(job.progress_indeterminate) && !(total > 0);
 
@@ -1129,7 +1136,7 @@ export function JobTheaterView({
 
       <div className={`df2-theater-v3-progress-block${reconciling ? " is-reconciling" : ""}`}>
         <div className="df2-theater-v3-progress-top">
-          <div className={`df2-theater-v3-ring ${isFailed ? "is-failed" : isComplete ? "is-done" : reconciling ? "is-reconcile" : ""}${indeterminate && isRunning && !reconciling ? " is-indeterminate" : ""}`} aria-hidden>
+          <div className={`df2-theater-v3-ring ${isFailed ? "is-failed" : isComplete ? "is-done" : reconciling ? "is-reconcile" : ""}${(indeterminate && isRunning && !reconciling) || reconcileIndeterminate ? " is-indeterminate" : ""}`} aria-hidden>
             <svg viewBox="0 0 56 56">
               <circle cx="28" cy="28" r="24" className="track" />
               <circle
@@ -1138,19 +1145,21 @@ export function JobTheaterView({
                 r="24"
                 className="fill"
                 pathLength={100}
-                strokeDasharray={ringDasharray(progress, {
-                  indeterminate: Boolean(indeterminate && isRunning && !reconciling),
-                  exact: Boolean(reconciling && progress < 99),
+                strokeDasharray={ringDasharray(progressValue ?? 0, {
+                  indeterminate: Boolean((indeterminate && isRunning && !reconciling) || reconcileIndeterminate),
+                  exact: Boolean(reconciling && reconcileProgress != null),
                 })}
                 transform="rotate(-90 28 28)"
               />
             </svg>
             <strong>
-              {indeterminate && isRunning && !reconciling
-                ? "…"
-                : reconciling && progress < 99
-                  ? `${progress.toFixed(1)}%`
-                  : `${progress}%`}
+              {reconcileIndeterminate
+                ? "Verify"
+                : indeterminate && isRunning && !reconciling
+                  ? "…"
+                  : reconciling
+                    ? `${reconcileProgress}%`
+                    : `${progress}%`}
             </strong>
           </div>
           <div className="df2-theater-v3-progress-copy">
@@ -1189,14 +1198,19 @@ export function JobTheaterView({
           </div>
         </div>
         <div
-          className={`df2-theater-v3-bar ${isRunning ? "is-live" : ""} ${stalled && isRunning ? "is-stalled" : ""} ${reconciling ? "is-reconcile" : ""} ${isFailed ? "is-failed" : ""}`}
+          className={`df2-theater-v3-bar ${isRunning ? "is-live" : ""} ${stalled && isRunning ? "is-stalled" : ""} ${reconciling ? "is-reconcile" : ""} ${reconcileIndeterminate ? "is-indeterminate" : ""} ${isFailed ? "is-failed" : ""}`}
           role="progressbar"
-          aria-valuenow={progress}
+          aria-valuenow={progressValue ?? undefined}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-label={reconciling ? "Reconciling destination data" : "Transfer progress"}
+          aria-valuetext={reconciling
+            ? reconcileProgress == null
+              ? "Verification running; percentage unavailable"
+              : `${reconcileProgress}% of verification complete`
+            : `${progress}% of transfer progress`}
         >
-          <div className="df2-theater-v3-bar-fill" style={{ width: `${Math.min(progress, 100)}%` }}>
+          <div className="df2-theater-v3-bar-fill" style={{ width: reconcileIndeterminate ? "34%" : `${Math.min(progressValue ?? 0, 100)}%` }}>
             {isRunning && <span className="df2-theater-v3-bar-shimmer" aria-hidden />}
           </div>
         </div>
@@ -1210,9 +1224,27 @@ export function JobTheaterView({
               : `${processed.toLocaleString()} written so far`}
           </span>
           {total > 0 && <span>{total.toLocaleString()} total</span>}
-          {reconciling && <span className="df2-theater-v3-bar-legend-note">99% reserved for reconcile proof</span>}
+          {reconciling && (
+            <span className="df2-theater-v3-bar-legend-note">
+              {reconcileProgress == null
+                ? "Verifying destination · progress not reported"
+                : `${reconcileProgress}% of verification complete`}
+            </span>
+          )}
         </div>
       </div>
+
+      <PhaseProfileCard
+        profile={
+          destinationSummary.phase_profile && typeof destinationSummary.phase_profile === "object"
+            ? destinationSummary.phase_profile as PhaseProfileReport
+            : null
+        }
+        engineSeconds={engineSeconds}
+        scopeNote={destinationSummary.multi_stream === true
+          ? "Live timing is for the current stream, not the whole job."
+          : null}
+      />
 
       <div className="df2-theater-v3-metrics">
         <article
@@ -2022,17 +2054,10 @@ export function JobTheaterView({
               <DtIcon name="globe" size={14} /> Copy deep-link
             </button>
           </div>
-          <MappingProofDrawer
-            open={mappingProofOpen}
-            onClose={() => setMappingProofOpen(false)}
-            proof={resolvedProof}
-            sourceLabel={sourceLabel}
-            destLabel={destLabel}
-          />
         </details>
       )}
 
-      {resolvedProof && earlyFail && (
+      {resolvedProof && (
         <MappingProofDrawer
           open={mappingProofOpen}
           onClose={() => setMappingProofOpen(false)}

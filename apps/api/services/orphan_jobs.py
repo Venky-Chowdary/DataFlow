@@ -275,6 +275,7 @@ def settle_orphan(
         phase="queued",
         orphan_reclaims=attempt,
         orphan_reclaimed_at=datetime.now(timezone.utc).isoformat(),
+        only_if_orphan_reclaims=job.get("orphan_reclaims"),
     ):
         return OrphanDisposition(job_id, "skipped", "status_changed")
     try:

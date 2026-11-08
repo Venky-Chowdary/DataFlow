@@ -117,7 +117,7 @@ function PreviewBody({
                 className={view === "table" ? "active" : ""}
                 onClick={() => setView("table")}
               >
-                <DtIcon name="layers" size={13} /> Table
+                <DtIcon name="table" size={13} /> Table
               </button>
               <button
                 type="button"

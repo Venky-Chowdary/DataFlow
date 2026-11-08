@@ -173,7 +173,7 @@ def cursor_python_value(text: str, kind: str, *, column: str = "") -> Any:
     return text
 
 
-def sa_cursor_bind(col: Any, text: Any) -> Any:
+def sa_cursor_bind(col: Any, text: Any, *, dialect: str = "") -> Any:
     """A typed SQLAlchemy bind of watermark ``text`` against column ``col``.
 
     Use it on the right-hand side of every cursor comparison
@@ -190,7 +190,7 @@ def sa_cursor_bind(col: Any, text: Any) -> Any:
         return sa.cast(sa.literal(raw), col_type)
     value = cursor_python_value(raw, kind, column=str(getattr(col, "name", "") or ""))
     if kind == "datetime_tz":
-        return _instant_bind(col, value)
+        return _instant_bind(col, value, dialect=dialect)
     if kind == "date" and isinstance(value, datetime):
         return sa.bindparam(None, value, type_=sa.DateTime(), unique=True)
     if kind == "integer" and isinstance(value, Decimal):
@@ -198,7 +198,7 @@ def sa_cursor_bind(col: Any, text: Any) -> Any:
     return sa.bindparam(None, value, type_=col_type, unique=True)
 
 
-def _instant_bind(col: Any, value: datetime) -> Any:
+def _instant_bind(col: Any, value: datetime, *, dialect: str = "") -> Any:
     """Bind an instant against a zone-bearing column, per dialect.
 
     python-oracledb binds a ``datetime`` without its tzinfo, and pyodbc's
@@ -210,7 +210,7 @@ def _instant_bind(col: Any, value: datetime) -> Any:
     from connectors.generic_sql import _oracle_tz_kind_sa
 
     utc = _to_utc_naive(value)
-    if _oracle_tz_kind_sa(getattr(col, "type", None)):
+    if (not dialect or dialect == "oracle") and _oracle_tz_kind_sa(getattr(col, "type", None)):
         from sqlalchemy.dialects import oracle
 
         stamp = sa.bindparam(None, utc, type_=oracle.TIMESTAMP(), unique=True)

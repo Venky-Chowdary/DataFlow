@@ -152,6 +152,10 @@ def test_mysql_and_postgres_batch_readers_use_scan_when_state_provided():
             )
         scan.assert_called_once()
         assert scan.call_args.kwargs["scan_state"] is state
+        if src in ("postgresql", "redshift"):
+            assert scan.call_args.kwargs["source_driver"] == src
+        else:
+            assert "source_driver" not in scan.call_args.kwargs
 
 
 def test_warehouse_batch_readers_use_scan_when_state_provided():

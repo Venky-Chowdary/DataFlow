@@ -154,6 +154,9 @@ def _checkpoint_for_job(run: Any, checkpoint: Any) -> dict[str, Any]:
     side from writing those findings to the DLQ a second time.
     """
     out = checkpoint.to_dict()
+    profile = getattr(run.cfg, "phase_profile", None)
+    if profile is not None:
+        out["phase_profile"] = profile.snapshot()
     summary = run.tally.dest_summary if isinstance(run.tally.dest_summary, dict) else {}
     details = summary.get("rejected_details") or []
     if details and not out.get("rejected_details"):

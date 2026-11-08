@@ -1,5 +1,16 @@
 /** UI icon set */
 
+import { Cloud, Database, File, Folder, FolderOpen, Table2, type LucideIcon } from "lucide-react";
+
+const entityIcons: Record<string, LucideIcon> = {
+  cloud: Cloud,
+  database: Database,
+  file: File,
+  folder: Folder,
+  "folder-open": FolderOpen,
+  table: Table2,
+};
+
 const paths: Record<string, React.ReactNode> = {
   dashboard: (
     <>
@@ -75,13 +86,6 @@ const paths: Record<string, React.ReactNode> = {
     <>
       <path d="M18 8a6 6 0 10-12 0c0 7-3 7-3 7h18s-3 0-3-7" />
       <path d="M13.7 21a2 2 0 003.4 0" />
-    </>
-  ),
-  database: (
-    <>
-      <ellipse cx="12" cy="5" rx="9" ry="3" />
-      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
     </>
   ),
   book: (
@@ -235,15 +239,6 @@ const paths: Record<string, React.ReactNode> = {
       <line x1="8" y1="2" x2="8" y2="6" />
       <line x1="3" y1="10" x2="21" y2="10" />
     </>
-  ),
-  file: (
-    <>
-      <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-      <polyline points="13,2 13,9 20,9" />
-    </>
-  ),
-  cloud: (
-    <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
   ),
   server: (
     <>
@@ -492,12 +487,16 @@ export function DtIcon({
    */
   chrome?: "nav" | "product";
 }) {
-  const known = Object.prototype.hasOwnProperty.call(paths, name);
+  const entityKnown = Object.prototype.hasOwnProperty.call(entityIcons, name);
+  const known = entityKnown || Object.prototype.hasOwnProperty.call(paths, name);
   if (!known && chrome === "product" && typeof console !== "undefined") {
     console.warn(`DtIcon: unknown icon "${name}"`);
   }
   const stroke = chrome === "product" ? (size >= 22 ? 2.4 : 2) : (size >= 18 ? 2.15 : 2);
-  const svg = (
+  const EntityIcon = entityKnown ? entityIcons[name] : (!known && chrome === "nav" ? Database : null);
+  const svg = EntityIcon ? (
+    <EntityIcon size={size} strokeWidth={stroke} aria-hidden="true" />
+  ) : (
     <svg
       width={size}
       height={size}
@@ -509,7 +508,7 @@ export function DtIcon({
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      {known ? paths[name] : chrome === "product" ? null : paths.database}
+      {known ? paths[name] : null}
     </svg>
   );
   if (chrome === "product") return svg;

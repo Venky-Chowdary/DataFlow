@@ -4,8 +4,8 @@ Lexicographic successor predicates and bookmark codecs live here so PostgreSQL,
 MySQL, SQL Server, Oracle, and CDC incremental snapshots cannot disagree on
 composite primary-key page boundaries.
 
-SQL Server refuses row-value ``(a,b) > (x,y)``; every dialect uses the portable
-OR/AND expansion produced by :func:`keyset_successor_predicate`.
+SQL Server refuses row-value ``(a,b) > (x,y)``. Portable OR/AND predicates remain
+the default; SQLAlchemy PostgreSQL seeks can use native row-value comparisons.
 """
 
 from __future__ import annotations
@@ -304,19 +304,24 @@ def sqlalchemy_keyset_clause(
     sa: Any,
     columns: Sequence[Any],
     bookmark: str,
+    *,
+    dialect: str = "",
 ) -> Any:
-    """SQLAlchemy OR/AND clause for ``columns > bookmark`` (MSSQL-safe)."""
+    """Typed lexicographic seek; PostgreSQL tuples, otherwise portable OR/AND."""
     cols = list(columns)
     if not cols:
         raise ValueError("keyset clause requires columns")
     from connectors.cursor_bind import sa_cursor_bind
 
     parts = decode_keyset_bookmark(bookmark, expected_parts=len(cols))
+    if dialect == "postgresql" and len(cols) > 1:
+        markers = [sa_cursor_bind(column, part, dialect=dialect) for column, part in zip(cols, parts)]
+        return sa.tuple_(*cols) > sa.tuple_(*markers)
     or_terms: list[Any] = []
     for i, col in enumerate(cols):
         # D207: a typed bind — never a string the engine parses (Oracle NLS).
-        marker = sa_cursor_bind(col, parts[i])
-        eqs = [cols[j] == sa_cursor_bind(cols[j], parts[j]) for j in range(i)]
+        marker = sa_cursor_bind(col, parts[i], dialect=dialect)
+        eqs = [cols[j] == sa_cursor_bind(cols[j], parts[j], dialect=dialect) for j in range(i)]
         greater = col > marker
         or_terms.append(greater if not eqs else sa.and_(*eqs, greater))
     return sa.or_(*or_terms) if len(or_terms) > 1 else or_terms[0]

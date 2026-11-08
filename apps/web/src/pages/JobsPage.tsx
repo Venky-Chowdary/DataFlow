@@ -318,6 +318,9 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const { confirm } = useConfirm();
   const { setActiveData } = useActiveData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mobileListOpen, setMobileListOpen] = useState(!initialJobId);
+  const mobileBackRef = useRef<HTMLButtonElement>(null);
+  const mobileDetailOpenRef = useRef(false);
   const [liveJob, setLiveJob] = useState<JobDetailRecord | null>(null);
   const [detailNonce, setDetailNonce] = useState(0);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -337,8 +340,21 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
   const [journalsOpen, setJournalsOpen] = useState(false);
   const appliedFocusRef = useRef<string | null>(null);
+  const pinnedJobRef = useRef<string | null>(null);
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
+
+  useEffect(() => {
+    const detailOpen = Boolean(selectedId && !mobileListOpen);
+    const wasDetailOpen = mobileDetailOpenRef.current;
+    mobileDetailOpenRef.current = detailOpen;
+    if (detailOpen === wasDetailOpen || !window.matchMedia("(max-width: 720px)").matches) return;
+    if (detailOpen) {
+      mobileBackRef.current?.focus();
+    } else if (selectedId) {
+      document.getElementById(`job-item-${selectedId}`)?.focus();
+    }
+  }, [mobileListOpen, selectedId]);
 
   const openStudio = useCallback((intent?: JobsStudioIntent) => {
     onStartTransfer?.(intent);
@@ -398,9 +414,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     const ids = jobs.map((j) => j._id);
     if (!shouldApplyInitialJobFocus(initialJobId, appliedFocusRef.current, ids)) return;
     appliedFocusRef.current = initialJobId!;
+    pinnedJobRef.current = initialJobId!;
     setFilter("all");
     setJobSearch("");
     setSelectedId(initialJobId!);
+    setMobileListOpen(false);
     if (initialPanel === "mapping-proof") {
       setDetailTab("mapping");
       setEvidenceDrawer("mapping-proof");
@@ -441,9 +459,9 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     };
   }, [selectedId, liveJob]);
 
-  const pinnedJobRef = useRef<string | null>(null);
   useEffect(() => {
     const pin = pinnedJobRef.current;
+    if (pin && pin === initialJobId && selectedId !== pin) return;
     if (pin && selectedId === pin) {
       if (filtered.some((j) => j._id === pin)) {
         pinnedJobRef.current = null;
@@ -458,7 +476,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     }
     const next = nextListSelection(selectedId, filtered.map((j) => j._id));
     if (next && next !== selectedId) setSelectedId(next);
-  }, [filter, filtered, selectedId]);
+  }, [filter, filtered, selectedId, initialJobId]);
 
   // Feed the selected job into Datawrap Pilot so NL triage uses the real job ID.
   useEffect(() => {
@@ -1052,7 +1070,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
               }
             />
 
-            <div className="df2-jobs-v3-layout">
+            <div className={`df2-jobs-v3-layout${selectedId && !mobileListOpen ? " has-selection" : ""}${mobileListOpen ? " is-mobile-list-open" : ""}`}>
               <aside className="df2-jobs-v3-list" role="list" aria-label="Transfer jobs">
                 {filtered.length === 0 ? (
                   <EmptyState
@@ -1086,7 +1104,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                           isLiveRow ? "is-live" : "",
                         ].filter(Boolean).join(" ")}
                         aria-current={selectedId === job._id ? "true" : undefined}
-                        onClick={() => setSelectedId(job._id)}
+                        onClick={() => {
+                          setSelectedId(job._id);
+                          setMobileListOpen(false);
+                        }}
                       >
                         <span className={`df2-job-row-status is-${job.status}`} aria-hidden>
                           <DtIcon name={statusIcon(job.status)} size={14} />
@@ -1138,6 +1159,16 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
               </aside>
 
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
+                {selectedId && (
+                  <button
+                    ref={mobileBackRef}
+                    type="button"
+                    className="df2-jobs-v3-back"
+                    onClick={() => setMobileListOpen(true)}
+                  >
+                    <DtIcon name="jobs" size={14} /> All jobs
+                  </button>
+                )}
                 {blockingJob && (
                   <p className="df2-job-sync-block" role="status">
                     Already running: <span title={blockingJob.id}>{shortJobId(blockingJob.id)}</span>

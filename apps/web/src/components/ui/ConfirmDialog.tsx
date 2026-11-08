@@ -51,9 +51,10 @@ interface ConfirmContextValue {
 
 const ConfirmContext = createContext<ConfirmContextValue | null>(null);
 
-type Pending =
+type Pending = (
   | (ConfirmOptions & { kind: "confirm"; resolve: (value: boolean) => void })
-  | (AskOptions & { kind: "ask"; resolve: (value: Record<string, string> | null) => void });
+  | (AskOptions & { kind: "ask"; resolve: (value: Record<string, string> | null) => void })
+) & { restoreFocusTo?: HTMLElement | null };
 
 /**
  * In-app confirmation and prompt dialogs.
@@ -82,9 +83,12 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   }, [settle]);
 
   const open = useCallback((next: Pending, fields?: AskField[]) => {
+    const restoreFocusTo = pendingRef.current?.restoreFocusTo
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     if (pendingRef.current) settle(pendingRef.current, false);
-    pendingRef.current = next;
-    setPending(next);
+    const focused = { ...next, restoreFocusTo };
+    pendingRef.current = focused;
+    setPending(focused);
     if (fields) {
       setFieldValues(Object.fromEntries(fields.map((field) => [field.name, field.defaultValue ?? ""])));
     } else {
@@ -116,6 +120,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       {children}
       <Dialog
         open={Boolean(pending)}
+        restoreFocusTo={pending?.restoreFocusTo}
         onClose={() => close(false)}
         size="md"
         ariaLabel={pending?.title || "Confirm"}

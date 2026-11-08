@@ -2,6 +2,419 @@ import { expect, test, type Page } from "@playwright/test";
 import { installHermeticStubs } from "./hermetic";
 import { openStudio } from "./support";
 
+async function schemaReviewHarness(page: Page, origin: string, fixture: string) {
+  const failures: string[] = [];
+  const blocked: string[] = [];
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/*", async route => {
+    const url = new URL(route.request().url());
+    if (url.origin !== origin || url.pathname.startsWith("/api/")) {
+      blocked.push(url.pathname);
+      return route.abort();
+    }
+    if (url.pathname !== "/__qa_schema_review") return route.continue();
+    await route.fulfill({ contentType: "text/html", body: `<!doctype html>
+      <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+      <link rel="stylesheet" href="/src/styles/marketing-base.css?direct">
+      <link rel="stylesheet" href="/src/styles/app-styles.css?direct"></head>
+      <body><main id="root" class="df2-app" style="display:block;min-height:100vh;padding:16px"></main>
+      <script type="module">
+        import RefreshRuntime from '/@react-refresh';
+        RefreshRuntime.injectIntoGlobalHook(window);
+        window.$RefreshReg$ = () => {};
+        window.$RefreshSig$ = () => (type) => type;
+        window.__vite_plugin_react_preamble_installed__ = true;
+        const React = (await import('/node_modules/.vite/deps/react.js')).default;
+        const { createRoot } = (await import('/node_modules/.vite/deps/react-dom_client.js')).default;
+        const { SchemaDriftDialog, schemaDriftReportFromDetails } = await import('/src/components/SchemaDriftDialog.tsx');
+        const { ValidateDashboard } = await import('/src/components/transfer/ValidateDashboard.tsx');
+        const { ToastProvider } = await import('/src/components/Toast.tsx');
+        const { ConfirmProvider } = await import('/src/components/ui/ConfirmDialog.tsx');
+        const { Dialog } = await import('/src/components/ui/Dialog.tsx');
+        const { StructurePreview } = await import('/src/components/ui/StructurePreview.tsx');
+        const element = React.createElement;
+        const fixture = new URL(location.href).searchParams.get('fixture');
+        const hard = new URL(location.href).searchParams.get('hard');
+        const additive = Array.from({ length: 18 }, (_, index) => ({
+          kind: 'add_column', column: 'enterprise_customer_account_' + 'unbroken_identifier_'.repeat(5) + index,
+          new_type: 'ARRAY<STRUCT<' + 'very_long_nested_type_definition_'.repeat(4) + '>>'
+        }));
+        const details = { remediation_kind: 'acknowledge_schema_drift', ack_required: true,
+          schema_evolution: { action: 'manual_review', additive, hard_breaking: [], should_pause: false, compatibility: 'backward' } };
+        if (hard === 'nested') details.schema_evolution.hard_breaking = [{ kind: 'type_change', column: 'customer_id' }];
+        if (hard === 'pause') details.schema_evolution.should_pause = true;
+        if (hard === 'none') details.schema_evolution.compatibility = 'none';
+        if (hard === 'evolution') details.schema_evolution.hard_breaking = [
+          { kind: 'type_change', column: 'amount', old_type: 'DECIMAL(18,2)', new_type: 'TEXT' },
+          { kind: 'key_change', column: 'customer_id' }
+        ];
+        const message = 'Synthetic schema drift requires operator review';
+        const report = schemaDriftReportFromDetails(details, message);
+        const preflight = { passed: false, passed_count: 0, total_gates: 1, readiness_score: 0,
+          run_id: 'isolated-schema-review', gates: [{ id: 'schema_drift', status: 'block', message, details }],
+          blockers: [{ id: 'schema_drift', message, details }] };
+        function Fixture() {
+          const [open, setOpen] = React.useState(false);
+          const [counts, setCounts] = React.useState({ acknowledge: 0, approve: 0, reject: 0, remap: 0 });
+          const record = key => setCounts(previous => ({ ...previous, [key]: previous[key] + 1 }));
+          return element(React.Fragment, null,
+            element('output', { 'data-testid': 'decisions' }, JSON.stringify(counts)),
+            fixture === 'dashboard' ? element(ToastProvider, null, element(ConfirmProvider, null,
+              element(ValidateDashboard, { preflight, running: false,
+                onAcknowledgeSchemaDrift: () => record('acknowledge'), onReviewMappings: () => record('remap') }))) :
+              element(React.Fragment, null,
+                element('button', { onClick: () => setOpen(true) }, 'Open isolated review'),
+                fixture === 'keyboard' ? element(Dialog, { open, onClose: () => setOpen(false), title: 'Structure keyboard review', size: 'lg' },
+                  element(StructurePreview, { columns: Array.from({ length: 30 }, (_, index) => 'field_' + index),
+                    rows: [], expandable: false, showFieldStrip: true })) :
+                  element(SchemaDriftDialog, { open, report, onClose: () => setOpen(false),
+                    onAcknowledge: () => { record('acknowledge'); setOpen(false); },
+                    onApproveAdditive: () => record('approve'), onReject: () => record('reject'),
+                    onRemap: () => { record('remap'); setOpen(false); } })));
+        }
+        createRoot(document.getElementById('root')).render(element(Fixture));
+      </script></body></html>` });
+  });
+  await page.goto(`${origin}/__qa_schema_review?${fixture}`);
+  await expect.poll(async () => {
+    if (failures.length) throw new Error(failures.join("\n"));
+    return page.getByTestId("decisions").count();
+  }).toBe(1);
+  return { failures, blocked };
+}
+
+test.describe("isolated schema review", () => {
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+    for (const scenario of ["dashboard", "layout", "hard", "keyboard", "dashboard-hard-evolution"]) {
+      test(`${scenario} ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
+        const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+        const page = await browser.newPage({ viewport });
+        const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
+        const zero = { acknowledge: 0, approve: 0, reject: 0, remap: 0 };
+        const decisions = () => page.getByTestId("decisions").evaluate(node => JSON.parse(node.textContent || "{}"));
+        try {
+          const evidence = await schemaReviewHarness(page, origin, scenario === "dashboard-hard-evolution"
+            ? "fixture=dashboard&hard=evolution" : `fixture=${scenario === "hard" ? "dialog" : scenario}`);
+          const dialog = page.getByRole("dialog");
+          const trigger = page.getByRole("button", { name: scenario === "dashboard" ? "Review schema change" : "Open isolated review", exact: true });
+          if (scenario === "dashboard") {
+            for (const dismiss of ["Cancel", "Close", "Escape"]) {
+              await trigger.click();
+              await expect(dialog).toBeVisible();
+              expect(await decisions()).toEqual(zero);
+              if (dismiss === "Escape") await page.keyboard.press("Escape");
+              else await dialog.getByRole("button", { name: dismiss, exact: true }).click();
+              await expect(dialog).toHaveCount(0);
+              await expect(trigger).toBeFocused();
+              expect(await decisions()).toEqual(zero);
+            }
+            await trigger.click();
+            await page.screenshot({ path: testInfo.outputPath(`schema-dashboard-${viewport.width}x${viewport.height}.png`), animations: "disabled" });
+            await dialog.getByRole("button", { name: "Acknowledge for this run", exact: true }).click();
+            await expect(dialog).toHaveCount(0);
+            expect(await decisions()).toEqual({ ...zero, acknowledge: 1 });
+            await trigger.click();
+            await dialog.getByRole("button", { name: "Open remapping", exact: true }).click();
+            expect(await decisions()).toEqual({ ...zero, acknowledge: 1, remap: 1 });
+          } else if (scenario === "dashboard-hard-evolution") {
+            const review = page.getByRole("button", { name: "Review breaking change", exact: true });
+            await expect(review).toBeVisible();
+            await expect(page.locator("details[open]")).toHaveCount(0);
+            await expect(page.getByRole("button", { name: "Review schema change", exact: true })).toHaveCount(0);
+            expect(await decisions()).toEqual(zero);
+            await review.click();
+            await expect(dialog).toBeVisible();
+            await expect(dialog).toBeFocused();
+            await expect(dialog.getByRole("status")).toContainText("Mapping review required");
+            await expect(dialog.getByRole("button", { name: /Acknowledge for this run|Approve additive/ })).toHaveCount(0);
+            expect(await decisions()).toEqual(zero);
+            await page.keyboard.press("Tab");
+            await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+            await page.keyboard.press("Shift+Tab");
+            await expect(dialog.getByRole("button", { name: "Open remapping", exact: true })).toBeFocused();
+            const geometry = () => dialog.evaluate(panel => {
+              const header = panel.querySelector(".df2-modal-header")!.getBoundingClientRect();
+              const footer = panel.querySelector(".df2-modal-footer")!.getBoundingClientRect();
+              const body = panel.querySelector(".df2-modal-body")!;
+              const bodyBox = body.getBoundingClientRect();
+              const panelBox = panel.getBoundingClientRect();
+              return { headerTop: header.top, footerTop: footer.top, scrollTop: body.scrollTop,
+                overflow: Math.max(panel.scrollWidth - panel.clientWidth, body.scrollWidth - body.clientWidth, document.documentElement.scrollWidth - innerWidth),
+                contained: panelBox.left >= 0 && panelBox.right <= innerWidth + 1 && panelBox.top >= 0 && panelBox.bottom <= innerHeight + 1,
+                separated: header.bottom <= bodyBox.top + 1 && bodyBox.bottom <= footer.top + 1 };
+            });
+            await dialog.locator(".df2-modal-body").evaluate(body => { body.scrollTop = 0; });
+            const before = await geometry();
+            await page.screenshot({ path: testInfo.outputPath(`schema-dashboard-hard-top-${viewport.width}x${viewport.height}.png`), animations: "disabled" });
+            for (const field of ["amount", "customer_id"]) {
+              const row = dialog.locator("tbody tr").filter({ has: page.getByText(field, { exact: true }) });
+              await row.scrollIntoViewIfNeeded();
+              await expect(row.locator('td[data-label="Field"]')).toHaveText(field);
+              await expect(row.locator('td[data-label="Field"]')).toBeVisible();
+              await expect(row.locator('td[data-label="Change"]')).toHaveText(field === "amount" ? "type change" : "key change");
+              for (const label of ["Current", "Proposed"]) {
+                await expect(row.locator(`td[data-label="${label}"]`)).toBeVisible();
+              }
+              if (field === "amount") {
+                await expect(row.locator('td[data-label="Current"]')).toHaveText("DECIMAL(18,2)");
+                await expect(row.locator('td[data-label="Proposed"]')).toHaveText("TEXT");
+              }
+            }
+            await dialog.locator(".df2-modal-body").evaluate(body => { body.scrollTop = body.scrollHeight; });
+            const after = await geometry();
+            expect(after.scrollTop).toBeGreaterThan(0);
+            expect(after.headerTop).toBeCloseTo(before.headerTop, 0);
+            expect(after.footerTop).toBeCloseTo(before.footerTop, 0);
+            for (const snapshot of [before, after]) {
+              expect(snapshot.overflow).toBeLessThanOrEqual(1);
+              expect(snapshot.contained).toBe(true);
+              expect(snapshot.separated).toBe(true);
+            }
+            await expect(dialog.getByRole("button", { name: "Open remapping", exact: true })).toBeInViewport();
+            await page.screenshot({ path: testInfo.outputPath(`schema-dashboard-hard-bottom-${viewport.width}x${viewport.height}.png`), animations: "disabled" });
+            await page.keyboard.press("Escape");
+            await expect(dialog).toHaveCount(0);
+            await expect(review).toBeFocused();
+            expect(await decisions()).toEqual(zero);
+            await review.click();
+            await dialog.getByRole("button", { name: "Open remapping", exact: true }).click();
+            await expect(dialog).toHaveCount(0);
+            expect(await decisions()).toEqual({ ...zero, remap: 1 });
+            await expect(page.locator("details[open]")).toHaveCount(0);
+          } else if (scenario === "layout") {
+            await trigger.click();
+            await expect(dialog.locator("tbody tr")).toHaveCount(18);
+            await expect(dialog.locator("tbody tr").first()).toContainText("very_long_nested_type_definition");
+            await expect(dialog.getByRole("button", { name: "Approve additive", exact: true })).toHaveCount(0);
+            await page.screenshot({ path: testInfo.outputPath(`schema-dialog-top-${viewport.width}x${viewport.height}.png`), animations: "disabled" });
+            const geometry = () => dialog.evaluate(panel => {
+              const header = panel.querySelector(".df2-modal-header")!.getBoundingClientRect();
+              const footer = panel.querySelector(".df2-modal-footer")!.getBoundingClientRect();
+              const body = panel.querySelector(".df2-modal-body")!;
+              const bodyBox = body.getBoundingClientRect();
+              const panelBox = panel.getBoundingClientRect();
+              const clipped = Array.from(panel.querySelectorAll("td, td code, button, .df2-drift-kind")).filter(node => node.scrollWidth > node.clientWidth + 1).map(node => node.textContent);
+              const overlaps = Array.from(panel.querySelectorAll(".df2-drift-actions button")).some((button, index, buttons) => buttons.slice(index + 1).some(other => {
+                const first = button.getBoundingClientRect(), second = other.getBoundingClientRect();
+                return Math.min(first.right, second.right) - Math.max(first.left, second.left) > 1
+                  && Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top) > 1;
+              }));
+              const code = panel.querySelector("tbody td:nth-child(2) code")!;
+              const range = document.createRange();
+              range.selectNodeContents(code);
+              const proposedRange = document.createRange();
+              proposedRange.selectNodeContents(panel.querySelector('tbody td[data-label="Proposed"] code')!);
+              return { headerTop: header.top, footerTop: footer.top, bodyHeight: body.clientHeight,
+                scrollHeight: body.scrollHeight, scrollTop: body.scrollTop, clipped, overlaps,
+                wrappedLines: range.getClientRects().length, proposedLines: proposedRange.getClientRects().length,
+                overflow: Math.max(panel.scrollWidth - panel.clientWidth, body.scrollWidth - body.clientWidth, document.documentElement.scrollWidth - innerWidth),
+                contained: panelBox.left >= 0 && panelBox.right <= innerWidth + 1 && panelBox.top >= 0 && panelBox.bottom <= innerHeight + 1,
+                separated: header.bottom <= bodyBox.top + 1 && bodyBox.bottom <= footer.top + 1 };
+            });
+            const before = await geometry();
+            await dialog.locator(".df2-modal-body").evaluate(body => { body.scrollTop = body.scrollHeight; });
+            const after = await geometry();
+            await page.screenshot({ path: testInfo.outputPath(`schema-dialog-bottom-${viewport.width}x${viewport.height}.png`), animations: "disabled" });
+            expect(before.scrollHeight).toBeGreaterThan(before.bodyHeight);
+            expect(after.scrollTop).toBeGreaterThan(0);
+            expect(after.headerTop).toBeCloseTo(before.headerTop, 0);
+            expect(after.footerTop).toBeCloseTo(before.footerTop, 0);
+            for (const snapshot of [before, after]) {
+              expect(snapshot.overflow).toBeLessThanOrEqual(1);
+              expect(snapshot.clipped).toEqual([]);
+              expect(snapshot.overlaps).toBe(false);
+              expect(snapshot.contained).toBe(true);
+              expect(snapshot.separated).toBe(true);
+              expect(snapshot.wrappedLines).toBeGreaterThan(1);
+              expect(snapshot.proposedLines).toBeGreaterThan(1);
+            }
+            await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+            expect(await decisions()).toEqual(zero);
+          } else if (scenario === "hard") {
+            for (const hard of ["nested", "pause", "none"]) {
+              await page.goto(`${origin}/__qa_schema_review?fixture=dialog&hard=${hard}`);
+              await trigger.click();
+              await expect(dialog.getByRole("status")).toContainText("Mapping review required");
+              await expect(dialog.getByRole("button", { name: /Acknowledge for this run|Approve additive/ })).toHaveCount(0);
+              await page.screenshot({ path: testInfo.outputPath(`schema-hard-${hard}-${viewport.width}x${viewport.height}.png`), animations: "disabled" });
+              await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+              expect(await decisions()).toEqual(zero);
+              await page.goto(`${origin}/__qa_schema_review?fixture=dashboard&hard=${hard}`);
+              await expect(page.getByTestId("decisions")).toBeVisible();
+              await expect(page.getByRole("button", { name: "Review schema change", exact: true })).toHaveCount(0);
+              await expect(page.getByRole("button", { name: /Acknowledge for this run|Approve additive/ })).toHaveCount(0);
+              expect(await decisions()).toEqual(zero);
+            }
+          } else {
+            await trigger.click();
+            await expect(dialog).toBeFocused();
+            const close = dialog.getByRole("button", { name: "Close", exact: true });
+            const summary = dialog.locator("summary");
+            await expect(dialog.locator("details")).not.toHaveAttribute("open");
+            await expect(dialog.getByRole("button", { name: "+6 more", exact: true })).toBeHidden();
+            await page.keyboard.press("Tab");
+            await expect(close).toBeFocused();
+            await page.keyboard.press("Tab");
+            await expect(summary).toBeFocused();
+            await page.keyboard.press("Tab");
+            await expect(close).toBeFocused();
+            await page.keyboard.press("Shift+Tab");
+            await expect(summary).toBeFocused();
+            await page.screenshot({ path: testInfo.outputPath(`schema-closed-summary-${viewport.width}x${viewport.height}.png`), animations: "disabled" });
+            await page.keyboard.press("Escape");
+            await expect(dialog).toHaveCount(0);
+            await expect(trigger).toBeFocused();
+            expect(await decisions()).toEqual(zero);
+          }
+          expect(evidence.failures).toEqual([]);
+          expect(evidence.blocked.filter(path => path !== "/api/v1/preflight/explain")).toEqual([]);
+        } finally {
+          await browser.close();
+        }
+      });
+    }
+  }
+});
+
+test.describe("isolated real-component entity icons", () => {
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+    test(`entity icons and schema rows ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
+      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+      const page = await browser.newPage({ viewport });
+      const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
+      const failures: string[] = [];
+      page.on("pageerror", (error) => failures.push(error.message));
+      try {
+        await page.route("**/*", async (route) => {
+          const url = new URL(route.request().url());
+          if (url.origin !== origin || url.pathname.startsWith("/api/")) return route.abort();
+          if (url.pathname !== "/__qa_entity_icons") return route.continue();
+          await route.fulfill({ contentType: "text/html", body: `<!doctype html>
+            <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+            <link rel="stylesheet" href="/src/styles/marketing-base.css?direct">
+            <link rel="stylesheet" href="/src/styles/app-styles.css?direct"></head>
+            <body><main id="root" class="df2-app" style="display:block;min-height:100vh;padding:16px"></main>
+            <script type="module">
+              import RefreshRuntime from '/@react-refresh';
+              RefreshRuntime.injectIntoGlobalHook(window);
+              window.$RefreshReg$ = () => {};
+              window.$RefreshSig$ = () => (type) => type;
+              window.__vite_plugin_react_preamble_installed__ = true;
+              const React = (await import('/node_modules/.vite/deps/react.js')).default;
+              const { createRoot } = (await import('/node_modules/.vite/deps/react-dom_client.js')).default;
+              const { DtIcon } = await import('/src/components/DtIcon.tsx');
+              const { StructurePreview } = await import('/src/components/ui/StructurePreview.tsx');
+              const { SchemaBrowser } = await import('/src/components/query/SchemaBrowser.tsx');
+              const element = React.createElement;
+              const names = ['cloud', 'database', 'file', 'folder', 'folder-open', 'table'];
+              const objects = [
+                { name: 'orders', type: 'table', columns: [{ name: 'id', type: 'integer', primaryKey: true, nullable: false }] },
+                { name: 'enterprise_customer_account_archive', type: 'view', columns: [{ name: 'name', type: 'text' }] },
+                { name: 'events', type: 'collection', columns: [{ name: 'payload', type: 'json' }] }
+              ];
+              const noop = () => {};
+              createRoot(document.getElementById('root')).render(element(React.Fragment, null,
+                element('h1', { style: { fontSize: 18 } }, 'Isolated QA fixture: production components, synthetic data'),
+                element('section', { 'data-testid': 'icon-matrix', style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 20 } },
+                  ...names.flatMap(name => [16, 20, 24].flatMap(size => ['nav', 'product'].map(chrome =>
+                    element('div', { key: name + size + chrome, 'data-icon-size': size, 'data-icon-name': name, 'data-chrome': chrome, style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 11, minHeight: 28 } },
+                      element(DtIcon, { name, size, chrome }), element('span', { style: { minWidth: 0, flex: 1, overflowWrap: 'anywhere' } }, name + ' ' + size + ' ' + chrome)))))),
+                element('section', { 'data-testid': 'preview' }, element(StructurePreview, {
+                  title: 'Orders', columns: ['id', 'name'], schema: { id: 'integer', name: 'string' },
+                  rows: [{ id: 1, name: 'QA customer' }, { id: 2, name: 'Synthetic account' }], allowJson: true, expandable: false
+                })),
+                ...['studio', 'query'].map(density => element('section', { key: density, 'data-testid': 'schema-' + density, style: { marginTop: 20 } },
+                  element(SchemaBrowser, { objects, density, connected: true, onExpand: noop, onRefresh: noop, onInsert: noop, onPreview: noop, onUseObject: noop })))
+              ));
+            </script></body></html>` });
+        });
+        await page.goto(`${origin}/__qa_entity_icons`);
+        await expect.poll(async () => {
+          if (failures.length) throw new Error(failures.join("\n"));
+          return page.getByTestId("icon-matrix").locator("svg").count();
+        }).toBe(36);
+        await page.evaluate(() => document.fonts.ready);
+        await page.screenshot({ path: testInfo.outputPath(`entity-icons-${viewport.width}x${viewport.height}.png`), fullPage: true });
+        const matrix = page.getByTestId("icon-matrix");
+        for (const name of ["cloud", "database", "file", "folder", "folder-open", "table"]) {
+          for (const icon of await matrix.locator(`[data-icon-name="${name}"] svg`).all()) {
+            await expect(icon).toHaveClass(/lucide/);
+          }
+        }
+        const sizes = await matrix.locator("svg").evaluateAll((icons) => icons.map((icon) => {
+          const box = icon.getBoundingClientRect();
+          const drawing = (icon as SVGSVGElement).getBBox();
+          return { requested: Number(icon.parentElement?.closest("[data-icon-size]")?.getAttribute("data-icon-size")), width: box.width, height: box.height, inkWidth: drawing.width, inkHeight: drawing.height };
+        }));
+        for (const size of sizes) {
+          expect(size.width).toBe(size.requested);
+          expect(size.height).toBe(size.requested);
+          expect(size.inkWidth).toBeGreaterThan(0);
+          expect(size.inkHeight).toBeGreaterThan(0);
+        }
+        const preview = page.getByTestId("preview");
+        await expect(preview.getByRole("tab", { name: "Table", exact: true }).locator("svg")).toHaveClass(/lucide-table/);
+        await preview.getByRole("tab", { name: "JSON", exact: true }).click();
+        await expect(preview.getByLabel("Sample documents")).toBeVisible();
+        await preview.getByRole("tab", { name: "Table", exact: true }).click();
+        await expect(preview.locator("tbody tr")).toHaveCount(2);
+        for (const density of ["studio", "query"]) {
+          const schema = page.getByTestId(`schema-${density}`);
+          await expect(schema.locator(".df2-qw-node-toggle svg.lucide-table-2")).toHaveCount(2);
+          await schema.locator(".df2-qw-node-toggle").first().click();
+          await expect(schema.locator(".df2-qw-col").first()).toContainText("NOT NULL");
+          await schema.getByRole("textbox", { name: "Filter schema" }).fill("events");
+          await expect(schema.locator(".df2-qw-node-row")).toHaveCount(1);
+          await schema.getByRole("textbox", { name: "Filter schema" }).fill("");
+        }
+        const layout = await page.evaluate(() => {
+          const overlaps: string[] = [];
+          for (const row of document.querySelectorAll(".df2-qw-node-row, .df2-qw-col, .df2-structure-preview-head")) {
+            const children = Array.from(row.children).map(child => child.getBoundingClientRect());
+            for (let index = 1; index < children.length; index++) {
+              const previous = children[index - 1], current = children[index];
+              if (Math.min(previous.right, current.right) - Math.max(previous.left, current.left) > 1 && Math.min(previous.bottom, current.bottom) - Math.max(previous.top, current.top) > 1) overlaps.push(row.className);
+            }
+          }
+          for (const toggle of document.querySelectorAll(".df2-qw-node-toggle")) {
+            const name = toggle.querySelector(".df2-qw-node-name")!.getBoundingClientRect();
+            for (const svg of toggle.querySelectorAll("svg")) {
+              if (svg.getBoundingClientRect().right > name.left + 1) overlaps.push("schema icon/name");
+            }
+          }
+          return { overflow: document.documentElement.scrollWidth - innerWidth, overlaps };
+        });
+        await page.screenshot({ path: testInfo.outputPath(`entity-icons-${viewport.width}x${viewport.height}.png`), fullPage: true });
+        expect(failures).toEqual([]);
+        expect(layout.overflow).toBeLessThanOrEqual(1);
+        expect(layout.overlaps).toEqual([]);
+        const painted = await matrix.locator("svg").evaluateAll(async icons => {
+          const counts: number[] = [];
+          for (const icon of icons) {
+            const clone = icon.cloneNode(true) as SVGSVGElement;
+            clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+            clone.setAttribute("stroke", getComputedStyle(icon).color);
+            const image = new Image();
+            image.src = 'data:image/svg+xml;base64,' + btoa(new XMLSerializer().serializeToString(clone));
+            await image.decode();
+            const canvas = document.createElement("canvas");
+            canvas.width = image.width; canvas.height = image.height;
+            const context = canvas.getContext("2d")!;
+            context.drawImage(image, 0, 0);
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            counts.push(Array.from(pixels).filter((value, index) => index % 4 === 3 && value > 0).length);
+          }
+          return counts;
+        });
+        expect(painted.every(count => count > 8)).toBeTruthy();
+        expect(await matrix.locator("svg").evaluateAll(icons => icons.map(icon => icon.getBoundingClientRect().width))).toEqual(sizes.map(size => size.width));
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+});
+
 /**
  * D-BP-11: a toast must never cover the sticky footer action bar, a primary
  * action, or the step's content card — the "Source profiled" toast painted

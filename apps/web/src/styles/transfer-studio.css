@@ -6848,6 +6848,10 @@ th.df2-type-string .df2-type-badge {
 .df2-theater-v3-bar.is-reconcile .df2-theater-v3-bar-shimmer {
   animation-duration: 1.6s;
 }
+.df2-theater-v3-bar.is-indeterminate .df2-theater-v3-bar-fill {
+  max-width: 34%;
+  animation: df2-theater-progress-indeterminate 1.5s ease-in-out infinite alternate;
+}
 .df2-theater-v3-ring.is-reconcile .fill {
   stroke: #0d9488;
 }
@@ -6865,6 +6869,16 @@ th.df2-type-string .df2-type-badge {
 }
 @keyframes df2-theater-shimmer {
   100% { transform: translateX(100%); }
+}
+@keyframes df2-theater-progress-indeterminate {
+  from { transform: translateX(-12%); }
+  to { transform: translateX(212%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .df2-theater-v3-bar.is-indeterminate .df2-theater-v3-bar-fill {
+    animation: none;
+    transform: translateX(95%);
+  }
 }
 
 .df2-theater-v3-bar-legend {

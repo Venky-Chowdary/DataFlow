@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -193,18 +194,38 @@ def _jsonl_lock(target: Path):
 
     A teardown rewriting the file while another tenant's event was appended
     lost that event (review 4 M2). ``flock`` on a sibling lock file covers the
-    API, worker and scheduler processes; the thread lock covers this process.
+    API, worker and scheduler processes on POSIX. Windows uses a one-byte
+    ``msvcrt`` lock; the thread lock covers this process on every platform.
     """
-    import fcntl
+    try:
+        import fcntl
+    except ImportError:  # Windows
+        fcntl = None
+    try:
+        import msvcrt
+    except ImportError:  # POSIX
+        msvcrt = None
 
     target.parent.mkdir(parents=True, exist_ok=True)
     with _JSONL_THREAD_LOCK:
-        with open(f"{target}.lock", "a", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with open(f"{target}.lock", "a+b") as lock:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                unlock = lambda: fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                lock.seek(0, 2)
+                if lock.tell() == 0:
+                    lock.write(b"\0")
+                    lock.flush()
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+                unlock = lambda: (lock.seek(0), msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1))
+            else:
+                raise RuntimeError("No cross-process file lock implementation is available")
             try:
                 yield
             finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                unlock()
 
 
 def append_dlq_event(
@@ -253,13 +274,32 @@ def _append_jsonl_locked(target: Path, event: dict[str, Any]) -> dict[str, Any]:
             logger.warning("DLQ JSONL rotated to %s (size cap %s bytes)", rotated, _DLQ_MAX_BYTES)
     except OSError as exc:
         logger.warning("DLQ rotation check failed: %s", exc)
-    line = json.dumps(event, default=json_default) + "\n"
+    line = (json.dumps(event, default=json_default) + "\n").encode("utf-8")
+    sync_parent = not target.exists()
     last_exc: Exception | None = None
     for attempt in range(2):
         try:
-            with target.open("a", encoding="utf-8") as fh:
-                fh.write(line)
-                fh.flush()
+            with target.open("a+b") as fh:
+                original_size = fh.seek(0, os.SEEK_END)
+                try:
+                    fh.write(line)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                    if sync_parent and os.name == "posix":
+                        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+                        try:
+                            os.fsync(directory)
+                        finally:
+                            os.close(directory)
+                except OSError:
+                    try:
+                        fh.seek(original_size)
+                        fh.truncate()
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    except OSError as recovery_error:
+                        raise RuntimeError("DLQ append recovery failed") from recovery_error
+                    raise
             return event
         except OSError as exc:
             last_exc = exc

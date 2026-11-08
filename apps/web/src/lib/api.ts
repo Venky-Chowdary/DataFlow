@@ -5365,21 +5365,31 @@ export async function fetchUsageSummary(days = 30): Promise<{
   return res.json();
 }
 
+export interface SchemaDriftChange {
+  kind: string;
+  column?: string;
+  to?: string;
+  from_type?: string;
+  old_type?: string;
+  to_type?: string;
+  new_type?: string;
+}
+
 export interface SchemaDriftReport {
   severity: string;
-  additive: { kind: string; column?: string; to_type?: string; new_type?: string }[];
-  breaking: { kind: string; column?: string; to?: string; to_type?: string; new_type?: string }[];
+  additive: SchemaDriftChange[];
+  breaking: SchemaDriftChange[];
   summary?: string;
   compatibility?: string;
   compatibility_note?: string;
-  hard_breaking?: { kind: string; column?: string; to?: string }[];
+  hard_breaking?: SchemaDriftChange[];
   soft_net_additive?: { kind: string; column?: string; to?: string }[];
   schema_evolution?: {
     action?: string;
     should_pause?: boolean;
     compatibility?: string;
     compatibility_note?: string;
-    hard_breaking?: { kind: string; column?: string }[];
+    hard_breaking?: SchemaDriftChange[];
     soft_net_additive?: { kind: string; column?: string }[];
   };
 }

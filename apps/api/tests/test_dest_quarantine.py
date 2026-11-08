@@ -21,6 +21,25 @@ def test_dlq_table_name_stable():
         assert driver in DEST_DLQ_SUPPORTED or driver == "postgresql"
 
 
+def test_destination_quarantine_preserves_control_plane_diverted_rows():
+    from src.transfer.job_quarantine import align_rejects_to_stored_table, align_reported_rejects
+
+    summary = {
+        "rejected_rows": 3,
+        "rows_diverted": 2,
+        "rejected_details": [
+            {"row": 7, "column": "age", "reason": "invalid integer", "values": {"id": "7"}},
+            {"row": 7, "column": "date", "reason": "invalid date", "values": {"id": "7"}},
+        ],
+    }
+    assert align_reported_rejects(summary) == 3
+
+    align_rejects_to_stored_table(summary, {"ok": True, "rows_written": 2})
+
+    assert summary["rejected_rows"] == 3
+    assert summary["rows_diverted"] == 2
+
+
 def test_write_dest_quarantine_sqlite_and_promote(tmp_path: Path):
     from services.dest_quarantine import (
         count_open_dlq_rows,

@@ -89,6 +89,7 @@ class Cell:
     columns: int = 0
     skipped_columns: dict[str, str] = field(default_factory=dict)
     run_ids: list[str] = field(default_factory=list)
+    run_proofs: list[dict[str, Any]] = field(default_factory=list)
     quarantine_sample: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -243,6 +244,24 @@ def _quarantine_sample(result: TransferResult, limit: int = 3) -> list[dict[str,
     return out[: limit * 2]
 
 
+def _count_refusal_population(dst: Engine, table: str, *, allow_absent: bool) -> int:
+    import sqlite3
+
+    try:
+        return dst.count(table)
+    except Exception as exc:
+        first = exc.args[0] if exc.args else None
+        state = getattr(exc, "sqlstate", None) or getattr(exc, "pgcode", None)
+        missing = (
+            state in ("42P01", "42S02") or first == "42S02" or first == 1146
+            or getattr(first, "code", None) == 942
+            or (isinstance(exc, sqlite3.OperationalError) and str(exc).startswith("no such table:"))
+        )
+        if not allow_absent or not missing:
+            raise
+        return 0
+
+
 class SourceCache:
     """Seeded source tables, one per (engine, projection) — reused across cells."""
 
@@ -317,10 +336,8 @@ def run_data_cell(
         )
     src_table = cache.table(src, columns)
     dst_table = f"{prefix}_dst_{uuid.uuid4().hex[:8]}"
-    runs = 2 if shape == "create_new" else 1
-    cell.expected_rows = (
-        _expected_after_two_runs(mode, rows) if runs == 2 else rows
-    )
+    runs = 2
+    cell.expected_rows = _expected_after_two_runs(mode, rows)
     try:
         if shape == "create_new" and mode == "full_refresh_append":
             # create-new mirrors the source primary key, and a keyed
@@ -346,6 +363,7 @@ def run_data_cell(
             dst.create_table(
                 dst_table,
                 columns,
+                keyless=mode == "full_refresh_append",
                 source_types=cache.source_types(src, columns),
                 source_engine=src.name,
             )
@@ -355,12 +373,14 @@ def run_data_cell(
             dst.create_table(
                 dst_table,
                 [c for c in columns if c != G13_COLUMN],
+                keyless=mode == "full_refresh_append",
                 source_types=cache.source_types(src, columns),
                 source_engine=src.name,
             )
         else:  # pragma: no cover — guarded by DATA_SHAPES
             raise ValueError(f"unknown data shape {shape}")
 
+        want = expected_checksum(rows, columns)
         for attempt in range(runs):
             result, run_id, wall = execute(
                 src.endpoint(src_table),
@@ -383,44 +403,72 @@ def run_data_cell(
                 cell.status = "fail"
                 cell.reason = f"run {attempt + 1} failed: {str(result.error)[:300]}"
                 cell.quarantine_sample = _quarantine_sample(result)
+                proof = {
+                    "run_id": run_id, "outcome": "failed", "proof_kind": "unverified",
+                    "claimed_rows": result.records_transferred, "destination_rows": None,
+                    "preflight_present": bool(result.validation_plan),
+                }
+                cell.run_proofs.append(proof)
+                if shape == "dest_exists_missing_column" and attempt == 0:
+                    from tests.scale.file_matrix import REFUSED, _refused_for_the_stated_reason
+
+                    cell.dest_rows = dst.count(dst_table)
+                    proof["destination_rows"] = cell.dest_rows
+                    named_refusal = all(
+                        _refused_for_the_stated_reason(result, fragments)
+                        for fragments in (
+                            ("schema mismatch", "schema_mismatch", "schemas do not match"),
+                            (G13_COLUMN,), ("missing", "add column", "stay unwritten"),
+                        )
+                    )
+                    if named_refusal and cell.dest_rows == 0 and not result.records_transferred:
+                        cell.status = REFUSED
+                        cell.expected_rows = 0
+                        cell.rows_per_sec = 0.0
+                        cell.notes.append("independent COUNT(*) after schema refusal = 0")
+                        proof.update(outcome="refused", proof_kind="independent_zero_write")
                 return cell
             if not (result.validation_plan or {}):
                 cell.notes.append("validation_plan empty — preflight evidence missing")
 
-        # ---- proof from outside the product -------------------------------
-        cell.dest_rows = dst.count(dst_table)
-        dest_chk = dst.checksum(dst_table, columns)
-        cell.checksum_dest = dest_chk.hex
-        # Under append the destination holds the fixture twice; the aggregate is
-        # order-independent, so the expected value is the sum of both passes.
-        want = expected_checksum(rows, columns)
-        expected_total = (
-            (want.total * 2) % (1 << 64)
-            if cell.expected_rows == rows * 2
-            else want.total
-        )
-        cell.checksum_source = f"{expected_total:016x}"
-        cell.checksum_match = dest_chk.total == expected_total
-        if cell.dest_rows != cell.expected_rows:
-            cell.status = "fail"
-            cell.reason = (
-                f"destination holds {cell.dest_rows}, mode {mode} requires "
-                f"{cell.expected_rows} after {runs} run(s)"
-            )
-        elif not cell.checksum_match:
-            cell.status = "fail"
-            cell.reason = (
-                f"checksum mismatch over {len(columns)} mapped columns "
-                f"(dest {cell.checksum_dest} != source {cell.checksum_source})"
-            )
-        elif cell.coerced_null or cell.rejected or cell.skipped_rows:
-            cell.status = "fail"
-            cell.reason = (
-                f"silent coercion: rejected={cell.rejected} "
-                f"coerced_null={cell.coerced_null} skipped={cell.skipped_rows}"
-            )
-        else:
-            cell.status = "pass"
+            cell.dest_rows = dst.count(dst_table)
+            dest_chk = dst.checksum(dst_table, columns)
+            cell.checksum_dest = dest_chk.hex
+            copies = attempt + 1 if mode == "full_refresh_append" else 1
+            expected_rows = rows * copies
+            expected_total = (want.total * copies) % (1 << 64)
+            cell.checksum_source = f"{expected_total:016x}"
+            cell.checksum_match = dest_chk.total == expected_total
+            if cell.dest_rows != expected_rows:
+                cell.status = "fail"
+                cell.reason = (
+                    f"run {attempt + 1}: destination holds {cell.dest_rows}, mode {mode} "
+                    f"requires {expected_rows}"
+                )
+            elif not cell.checksum_match:
+                cell.status = "fail"
+                cell.reason = (
+                    f"run {attempt + 1}: checksum mismatch over {len(columns)} mapped columns "
+                    f"(dest {cell.checksum_dest} != source {cell.checksum_source})"
+                )
+            elif cell.coerced_null or cell.rejected or cell.quarantined or cell.skipped_rows:
+                cell.status = "fail"
+                cell.reason = (
+                    f"run {attempt + 1}: silent coercion: rejected={cell.rejected} "
+                    f"quarantined={cell.quarantined} coerced_null={cell.coerced_null} skipped={cell.skipped_rows}"
+                )
+            else:
+                cell.status = "pass"
+            cell.run_proofs.append({
+                "run_id": run_id, "outcome": "passed" if cell.status == "pass" else "failed",
+                "proof_kind": "independent_count_and_checksum",
+                "claimed_rows": result.records_transferred, "destination_rows": cell.dest_rows,
+                "expected_rows": expected_rows, "checksum_source": cell.checksum_source,
+                "checksum_dest": cell.checksum_dest, "checksum_match": cell.checksum_match,
+                "preflight_present": bool(result.validation_plan),
+            })
+            if cell.status == "fail":
+                return cell
     except Exception as exc:  # noqa: BLE001 — an exception is a measured result
         cell.status = "fail"
         cell.reason = f"{type(exc).__name__}: {exc}"[:400]
@@ -520,25 +568,38 @@ def run_blocking_cell(
         cell.run_ids.append(run_id)
         _accounting(cell, result)
         cell.quarantine_sample = _quarantine_sample(result)
-        try:
-            cell.dest_rows = dst.count(dst_table) - before
-        except Exception:  # noqa: BLE001 — a refused create-new leaves no table
-            cell.dest_rows = 0
+        proof = {
+            "run_id": run_id, "outcome": "failed", "proof_kind": "unverified",
+            "claimed_rows": result.records_transferred, "destination_rows": None,
+            "preflight_present": bool(result.validation_plan),
+        }
+        cell.run_proofs.append(proof)
+        cell.dest_rows = _count_refusal_population(
+            dst, dst_table, allow_absent=shape == "domain_contract_unsigned",
+        ) - before
+        proof["destination_rows"] = cell.dest_rows
         cell.elapsed_seconds = round(result.elapsed_seconds or 0.0, 3)
         cell.reason = str(result.error or "")[:300]
-        if not result.success and cell.dest_rows == 0:
-            cell.status = "pass"
-            if not cell.reason:
-                cell.reason = "refused (no error text)"
-        elif result.success and cell.dest_rows == 0 and cell.rejected >= rows:
-            # Quarantined every row instead of writing coerced data: also a
-            # refusal, and it is inspectable.
-            cell.status = "pass"
-            cell.reason = f"all {cell.rejected} rows quarantined"
+        from tests.scale.file_matrix import REFUSED, _refused_for_the_stated_reason
+
+        if shape == "dest_exists_narrower":
+            expected_reason = [(narrow_col,), ("width", "precision", "narrow", "truncat", "schema", "overflow", "type")]
+        elif shape == "g13_extra_source_column":
+            expected_reason = [(G13_COLUMN,), ("g13", "unmapped", "not mapped", "mapping", "missing")]
+        elif shape == "g14_dest_notnull_no_default":
+            expected_reason = [(G14_COLUMN,), ("g14", "not null", "not-null", "required", "default")]
+        else:
+            expected_reason = [tuple(contracts), ("contract", "approval", "approved", "unsigned", "risk")]
+        named_refusal = all(_refused_for_the_stated_reason(result, fragments) for fragments in expected_reason)
+        if not result.success and cell.dest_rows == 0 and not result.records_transferred and named_refusal:
+            cell.status = REFUSED
+            cell.notes.append("independent COUNT(*) after contract refusal = 0")
+            proof.update(outcome="refused", proof_kind="independent_zero_write")
         else:
             cell.status = "fail"
             cell.reason = (
-                f"NOT blocked: success={result.success} landed={cell.dest_rows} "
+                f"refusal not proven: success={result.success} landed={cell.dest_rows} "
+                f"claimed={result.records_transferred} named_reason={named_refusal} "
                 f"rejected={cell.rejected} coerced_null={cell.coerced_null} "
                 f"error={cell.reason}"
             )
@@ -648,6 +709,7 @@ def summarize(
         "live_engines": sorted(live),
         "skipped_engines": skipped,
         "pass": sum(1 for c in cells if c.status == "pass"),
+        "refused": sum(1 for c in cells if c.status.startswith("pass (refused")),
         "fail": sum(1 for c in cells if c.status == "fail"),
         "skip": sum(1 for c in cells if c.status == "skip") + len(skipped),
         "slow_routes": [c.as_dict() for c in cells if c.slow],

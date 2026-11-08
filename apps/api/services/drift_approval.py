@@ -141,6 +141,39 @@ def drift_is_breaking(codes: list[str] | tuple[str, ...]) -> bool:
     return False
 
 
+def drift_evidence_is_breaking(evidence: Mapping[str, Any] | None) -> bool:
+    from services.schema_drift import SOFT_NET_ADDITIVE_KINDS
+
+    evidence = evidence or {}
+    sources = [evidence, *(evidence.get("schema_findings") or [])]
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for classification in (source, source.get("schema_evolution"), source.get("classification")):
+            if not isinstance(classification, Mapping):
+                continue
+            if classification.get("hard_breaking") or classification.get("compatibility") == "none":
+                return True
+            for change in classification.get("breaking") or []:
+                if not isinstance(change, Mapping) or change.get("kind") not in SOFT_NET_ADDITIVE_KINDS:
+                    return True
+    return False
+
+
+def schema_evidence_from_preflight(preflight: Mapping[str, Any]) -> list[dict[str, Any]]:
+    findings = []
+    for node in list(preflight.get("gates") or []) + list(preflight.get("blockers") or []):
+        if not isinstance(node, Mapping) or not is_source_drift_code(str(node.get("id") or "")):
+            continue
+        details = node.get("details")
+        if isinstance(details, Mapping):
+            findings.append({
+                key: details[key] for key in ("schema_evolution", "classification", "hard_breaking", "breaking", "compatibility")
+                if key in details
+            })
+    return findings
+
+
 def schedule_id_from_job(job: Mapping[str, Any] | None) -> str:
     doc = job if isinstance(job, Mapping) else {}
     direct = str(doc.get("schedule_id") or "").strip()
@@ -174,7 +207,7 @@ def build_source_drift_approval(
     found = drift_codes(codes)
     if not found:
         return None
-    breaking = drift_is_breaking(found)
+    breaking = drift_is_breaking(found) or drift_evidence_is_breaking(evidence)
     scopes = () if breaking else (SCOPE_SCHEMA_DRIFT,)
     found_evidence = {
         "gate_codes": found,

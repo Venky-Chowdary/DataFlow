@@ -246,6 +246,59 @@ describe("mounted Job Theater stream ordering", () => {
     });
   });
 
+  it("does not present a workflow placeholder as measured verification progress", async () => {
+    const es = await mount("job-a");
+    await emit(es!, jobBody({
+      phase: "reconcile",
+      records_processed: 1_000_000,
+      total_rows: 1_000_000,
+      message: "Verifying the destination",
+    }));
+
+    const { act: unmountAct } = await import("react");
+    try {
+      const bar = host.querySelector('[role="progressbar"]');
+      assert.ok(bar);
+      assert.equal(bar.getAttribute("aria-valuenow"), null);
+      assert.match(bar.getAttribute("aria-valuetext") || "", /verification.*percentage unavailable/i);
+      assert.equal(host.querySelector(".df2-theater-v3-ring strong")?.textContent, "Verify");
+    } finally {
+      await unmountAct(async () => {
+        root.unmount();
+      });
+    }
+  });
+
+  it("shows measured phase timings while a transfer is still running", async () => {
+    const es = await mount("job-a");
+    await emit(es!, jobBody({
+      phase: "load",
+      destination_summary: {
+        phase_profile: {
+          phases: [
+            { phase: "read", label: "Reading source", seconds: 20, calls: 4, rows: 10000, rows_per_second: 500 },
+            { phase: "transform_write", label: "Transforming and writing", seconds: 10, calls: 3, rows: 5000, rows_per_second: 500 },
+          ],
+          busy_seconds: 30,
+          elapsed_seconds: 25,
+          dominant_phase: "read",
+          overlap_factor: 1.2,
+        },
+      },
+    }));
+
+    const { act: unmountAct } = await import("react");
+    try {
+      assert.match(banner(), /Where the time went/);
+      assert.match(banner(), /Reading source took 20\.0s/);
+      assert.match(banner(), /Transforming and writing10\.0s/);
+    } finally {
+      await unmountAct(async () => {
+        root.unmount();
+      });
+    }
+  });
+
   it("a missing job and a workspace change clear the frame; a terminal frame stays terminal", async () => {
     const { setActiveWorkspaceId } = await import("../lib/workspace.js");
     const es = await mount("job-a");
@@ -279,7 +332,8 @@ describe("mounted Job Theater stream ordering", () => {
       records_processed: 10_000,
     }));
     assert.match(banner(), /Transfer complete/);
-    assert.equal(banner().includes("10,000 of 1,000,000"), false);
+    const progressText = host.querySelector(".df2-theater-v3-progress-block")?.textContent || "";
+    assert.equal(progressText.includes("10,000 of 1,000,000"), false);
 
     const { act } = await import("react");
     await act(async () => {

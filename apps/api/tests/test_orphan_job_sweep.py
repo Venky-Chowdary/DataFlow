@@ -20,7 +20,7 @@ import pytest
 
 from services import worker_leases
 from services.mongodb_service import MemoryMongoDBService
-from services.orphan_jobs import owner_signal, sweep_orphan_jobs
+from services.orphan_jobs import owner_signal, settle_orphan, sweep_orphan_jobs
 
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
 STALE = (NOW - timedelta(minutes=30)).isoformat()
@@ -87,6 +87,165 @@ def test_running_job_with_no_owner_is_resumed_from_its_checkpoint() -> None:
     job = store.get_job("j1")
     assert job["status"] == "pending"
     assert job["orphan_reclaims"] == 1
+
+
+def test_persisted_pending_job_without_queue_row_is_resubmitted() -> None:
+    store = _store(
+        {
+            "_id": "j1",
+            "status": "pending",
+            "phase": "queued",
+            "transfer_request": _REQUEST,
+        }
+    )
+
+    out, submitted = _sweep(store)
+
+    assert out == [{"job_id": "j1", "action": "resumed", "reason": "fresh_start"}]
+    assert [(job_id, resume) for job_id, _request, resume in submitted] == [("j1", False)]
+    assert store.get_job("j1")["orphan_reclaims"] == 1
+
+
+def test_competing_sweepers_only_resubmit_a_pending_job_once() -> None:
+    store = _store(
+        {
+            "_id": "j1",
+            "status": "pending",
+            "phase": "queued",
+            "transfer_request": _REQUEST,
+        }
+    )
+    stale_snapshot = store.get_job("j1")
+    submitted: list[tuple[str, bool]] = []
+    resubmit = lambda job_id, _request, resume: submitted.append((job_id, resume))
+
+    first = settle_orphan(store, stale_snapshot, max_reclaims=2, resubmit=resubmit)
+    second = settle_orphan(store, stale_snapshot, max_reclaims=2, resubmit=resubmit)
+
+    assert first.action == "resumed"
+    assert second.action == "skipped"
+    assert submitted == [("j1", False)]
+    assert store.get_job("j1")["orphan_reclaims"] == 1
+
+
+def test_mongo_orphan_recovery_compares_reclaim_count_in_update_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from services.mongodb_service import MongoDBService
+
+    captured: dict[str, Any] = {}
+
+    class _Jobs:
+        def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"status": "pending", "orphan_reclaims": 0}
+
+        def update_one(self, query: dict, update: dict) -> Any:
+            captured["query"] = query
+            captured["update"] = update
+            return SimpleNamespace(matched_count=1, modified_count=1)
+
+    mongo = MongoDBService.__new__(MongoDBService)
+    monkeypatch.setattr(mongo, "get_database", lambda: {"transfer_jobs": _Jobs()})
+
+    assert mongo.update_job_status(
+        "j1",
+        "pending",
+        only_from_status=["pending"],
+        only_if_orphan_reclaims=0,
+        orphan_reclaims=1,
+    )
+
+    query = captured["query"]
+
+    def contains_condition(node: Any, condition: dict[str, Any]) -> bool:
+        if node == condition:
+            return True
+        if isinstance(node, dict):
+            return any(contains_condition(value, condition) for value in node.values())
+        if isinstance(node, list):
+            return any(contains_condition(value, condition) for value in node)
+        return False
+
+    assert contains_condition(query, {"orphan_reclaims": 0})
+    assert contains_condition(query, {"status": {"$in": ["pending"]}})
+    assert captured["update"]["$set"]["orphan_reclaims"] == 1
+
+
+@pytest.mark.parametrize("failure_kind", ["document_too_large", "write_error"])
+@pytest.mark.parametrize("reclaims", [None, 0])
+def test_mongo_orphan_claim_fails_closed_before_a_stale_sweeper_retries(
+    monkeypatch: pytest.MonkeyPatch, failure_kind: str, reclaims: int | None
+) -> None:
+    from types import SimpleNamespace
+
+    from pymongo.errors import DocumentTooLarge
+
+    from services.mongodb_service import MongoDBService
+
+    document: dict[str, Any] = {
+        "_id": "j1", "status": "pending", "transfer_request": _REQUEST
+    }
+    if reclaims is not None:
+        document["orphan_reclaims"] = reclaims
+    stale_snapshot = dict(document)
+    writes: list[dict[str, Any]] = []
+
+    def matches(query: dict[str, Any]) -> bool:
+        for key, value in query.items():
+            if key == "$and":
+                if not all(matches(clause) for clause in value):
+                    return False
+            elif key == "$or":
+                if not any(matches(clause) for clause in value):
+                    return False
+            elif isinstance(value, dict) and "$in" in value:
+                if document.get(key) not in value["$in"]:
+                    return False
+            elif document.get(key) != value:
+                return False
+        return True
+
+    class _Jobs:
+        failed = False
+
+        def find_one(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return dict(document)
+
+        def update_one(self, query: dict, update: dict) -> Any:
+            writes.append(update)
+            if not matches(query):
+                return SimpleNamespace(matched_count=0, modified_count=0)
+            if not self.failed and "orphan_reclaims" in update["$set"]:
+                self.failed = True
+                if failure_kind == "document_too_large":
+                    raise DocumentTooLarge("forced full claim update failure")
+                raise RuntimeError("forced full claim update failure")
+            document.update(update["$set"])
+            return SimpleNamespace(matched_count=1, modified_count=1)
+
+    mongo = MongoDBService.__new__(MongoDBService)
+    collection = _Jobs()
+    monkeypatch.setattr(mongo, "get_database", lambda: {"transfer_jobs": collection})
+    monkeypatch.setattr(worker_leases, "active_fence", lambda _job_id: None)
+    submitted: list[tuple[str, bool]] = []
+    resubmit = lambda job_id, _request, resume: submitted.append((job_id, resume))
+
+    first = settle_orphan(mongo, stale_snapshot, max_reclaims=2, resubmit=resubmit)
+    assert first.action == "skipped"
+    assert submitted == []
+    assert document == stale_snapshot
+    assert len(writes) == 1
+
+    second = settle_orphan(mongo, stale_snapshot, max_reclaims=2, resubmit=resubmit)
+    third = settle_orphan(mongo, stale_snapshot, max_reclaims=2, resubmit=resubmit)
+
+    assert second.action == "resumed"
+    assert third.action == "skipped"
+    assert submitted == [("j1", False)]
+    assert document["orphan_reclaims"] == 1
+    assert all(update["$set"]["orphan_reclaims"] == 1 for update in writes)
 
 
 def test_a_job_with_an_owner_is_left_alone() -> None:

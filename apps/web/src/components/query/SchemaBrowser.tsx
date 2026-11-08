@@ -189,6 +189,11 @@ export function SchemaBrowser({
                         size={studio ? 16 : 12}
                         chrome={studio ? "product" : "nav"}
                       />
+                      <DtIcon
+                        name={object.type === "collection" ? "layers" : "table"}
+                        size={studio ? 16 : 12}
+                        chrome={studio ? "product" : "nav"}
+                      />
                       <span className="df2-qw-node-name" title={object.name}>
                         {object.name}
                       </span>

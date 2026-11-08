@@ -599,6 +599,8 @@ class MongoDBService:
         # Pop fence flags before they leak onto the job document.
         allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
         only_from_status = kwargs.pop("only_from_status", None)
+        only_if_orphan_reclaims = "only_if_orphan_reclaims" in kwargs
+        expected_orphan_reclaims = kwargs.pop("only_if_orphan_reclaims", None)
         # An operator cancel is a control-plane command, not worker progress.
         operator_command = bool(kwargs.pop("operator_command", False))
 
@@ -783,6 +785,8 @@ class MongoDBService:
             # Compare-and-set: a worker that already left the queue must not
             # be cancelled by a schedule slot that only replaces queued work.
             filt = {"$and": [filt, {"status": {"$in": sorted(only_from_allowed)}}]}
+        if only_if_orphan_reclaims:
+            filt = {"$and": [filt, {"orphan_reclaims": expected_orphan_reclaims}]}
         if fence is not None:
             updates["lease_fence"] = fence
             # Fencing tokens are monotonic: a newer lease supersedes the one
@@ -808,7 +812,10 @@ class MongoDBService:
         try:
             from services.job_document_budget import apply_job_update_with_budget
 
-            result = apply_job_update_with_budget(collection, filt, updates)
+            if only_if_orphan_reclaims:
+                result = collection.update_one(filt, {"$set": updates})
+            else:
+                result = apply_job_update_with_budget(collection, filt, updates)
         except Exception as budget_exc:
             logging.getLogger(__name__).error(
                 "transfer_jobs update failed for %s: %s",
@@ -816,6 +823,8 @@ class MongoDBService:
                 budget_exc,
                 exc_info=budget_exc,
             )
+            if only_if_orphan_reclaims:
+                return False
             # Last ditch: status/error only so Theater still shows failure.
             try:
                 from services.job_document_budget import emergency_strip_job_update
@@ -1634,6 +1643,8 @@ class MemoryMongoDBService:
 
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         only_from_status = kwargs.pop("only_from_status", None)
+        only_if_orphan_reclaims = "only_if_orphan_reclaims" in kwargs
+        expected_orphan_reclaims = kwargs.pop("only_if_orphan_reclaims", None)
         operator_command = bool(kwargs.pop("operator_command", False))
         rec = self._jobs.get(job_id)
         if only_from_status is not None and rec is None:
@@ -1671,6 +1682,8 @@ class MemoryMongoDBService:
             }
             if str(previous_status or "").strip().lower() not in allowed:
                 return False
+        if only_if_orphan_reclaims and rec.get("orphan_reclaims") != expected_orphan_reclaims:
+            return False
         for _key, _value in terminal_exit_resets(
             previous_status, status, allow_terminal_exit
         ).items():

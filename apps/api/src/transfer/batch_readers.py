@@ -123,8 +123,10 @@ def _read_batch_unscoped(
         }
 
     # Phase F2 — N-col composite keyset (≥3) on SQLAlchemy dialects goes through
-    # generic_sql so PG/MySQL/Snowflake share the portable OR/AND builder.
-    _key_cols = [c for c in (cursor_key_columns or []) if c]
+    # generic_sql provides native PostgreSQL or portable composite predicates.
+    _key_cols = list(cursor_key_columns or [])
+    if any(not column for column in _key_cols):
+        raise ValueError("Cursor/keyset columns not found: empty key")
     if (
         cursor_column
         and len(_key_cols) >= 3
@@ -151,6 +153,7 @@ def _read_batch_unscoped(
             limit=limit,
             cursor_primary_key=cursor_primary_key,
             cursor_key_columns=_key_cols,
+            source_driver=src_type,
             **connection_options(cfg),
         )
 
@@ -179,6 +182,7 @@ def _read_batch_unscoped(
                 limit=limit,
                 known_total_rows=known_total_rows,
                 scan_state=scan_state,
+                source_driver=src_type,
                 **_scan_filter_kw,
                 **connection_options(cfg),
             )

@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useRef } from "react";
+import { ReactNode, useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
 import { DtIcon } from "../DtIcon";
 import { lockBodyScroll } from "../../lib/bodyScrollLock";
@@ -13,6 +13,7 @@ interface DialogProps {
   size?: "md" | "lg" | "xl" | "full";
   ariaLabel?: string;
   className?: string;
+  restoreFocusTo?: HTMLElement | null;
   children: ReactNode;
 }
 
@@ -30,23 +31,71 @@ export function Dialog({
   ariaLabel,
   className = "",
   children,
+  restoreFocusTo,
 }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const closeRef = useRef(onClose);
+
+  useEffect(() => { closeRef.current = onClose; }, [onClose]);
 
   useEffect(() => {
     if (!open) return;
+    const previousFocus = restoreFocusTo
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      const panel = panelRef.current;
+      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+      if (!panel || dialogs.item(dialogs.length - 1) !== panel) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeRef.current();
+      } else if (e.key === "Tab") {
+        const controls = Array.from(panel.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+        )).filter((element) => {
+          if (element.tabIndex < 0 || element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+          let ancestor: HTMLElement | null = element;
+          while (ancestor && ancestor !== panel) {
+            const style = window.getComputedStyle(ancestor);
+            if (style.display === "none" || style.visibility === "hidden") return false;
+            if (ancestor.tagName === "DETAILS" && !(ancestor as HTMLDetailsElement).open) {
+              const summary = ancestor.querySelector(":scope > summary");
+              if (!summary?.contains(element)) return false;
+            }
+            ancestor = ancestor.parentElement;
+          }
+          return true;
+        });
+        const first = controls[0];
+        const last = controls.at(-1);
+        if (!first || !last) {
+          e.preventDefault();
+          panel.focus();
+        } else if (!panel.contains(document.activeElement) || document.activeElement === panel) {
+          e.preventDefault();
+          (e.shiftKey ? last : first).focus();
+        } else if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     document.addEventListener("keydown", onKey);
     const unlock = lockBodyScroll();
-    const t = window.requestAnimationFrame(() => panelRef.current?.focus());
+    const t = window.requestAnimationFrame(() => {
+      if (!panelRef.current?.contains(document.activeElement)) panelRef.current?.focus();
+    });
     return () => {
       document.removeEventListener("keydown", onKey);
       unlock();
       window.cancelAnimationFrame(t);
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
@@ -66,7 +115,7 @@ export function Dialog({
         className={`df2-modal ${sizeClass} ${className}`.trim()}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={title ? "df2-dialog-title" : undefined}
+        aria-labelledby={title ? titleId : undefined}
         aria-label={title ? undefined : ariaLabel}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
@@ -74,7 +123,7 @@ export function Dialog({
         {(title || subtitle) && (
           <div className="df2-modal-header">
             <div>
-              {title && <h2 id="df2-dialog-title" className="df2-modal-title">{title}</h2>}
+              {title && <h2 id={titleId} className="df2-modal-title">{title}</h2>}
               {subtitle && <p className="df2-modal-subtitle">{subtitle}</p>}
             </div>
             <button

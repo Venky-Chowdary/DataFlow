@@ -127,7 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         progress=_progress,
     )
     print(
-        f"\npass={report['pass']} fail={report['fail']} skip={report['skip']} "
+        f"\npass={report['pass']} refused={report['refused']} fail={report['fail']} skip={report['skip']} "
         f"slow(<{SLOW_ROWS_PER_SEC} rows/s)={len(report['slow_routes'])}"
     )
     for name, reason in report["skipped_engines"].items():

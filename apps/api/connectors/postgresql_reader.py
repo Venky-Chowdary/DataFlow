@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -388,8 +389,9 @@ def read_table_scan_batch(
     scan_state: dict[str, Any],
     filter_column: str = "",
     filter_after: str | None = None,
+    source_driver: str = "postgresql",
 ) -> ReadBatch:
-    """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one session.
+    """Page one server-side ``SELECT … ORDER BY`` — no OFFSET, one session.
 
     ``filter_column`` / ``filter_after`` bound the scan to ``cursor > watermark``
     (COUNT and SELECT alike) and order it by the cursor first — the incremental
@@ -421,8 +423,12 @@ def read_table_scan_batch(
                 connection_string=connection_string,
                 ssl=ssl,
             )
-        cur = shared.cursor()
+        cur = None
+        stream_cur = None
         try:
+            if close_conn:
+                shared.autocommit = False
+            cur = shared.cursor()
             from src.ai.copilot.tool_deadline import remaining_seconds
 
             if known_total_rows is not None:
@@ -478,9 +484,27 @@ def read_table_scan_batch(
                     where_sql,
                     order_sql,
                 )
-            cur.execute(query, params)
+            cursor_name = f"_df_scan_{uuid.uuid4().hex}"
+            if source_driver == "redshift":
+                stream_cur = shared.cursor(name=cursor_name)
+                cur.execute(
+                    sql.SQL("DECLARE {} CURSOR FOR {}").format(sql.Identifier(cursor_name), query),
+                    params,
+                )
+                cur.close()
+                cur = stream_cur
+            else:
+                cur.close()
+                cur = None
+                cur = shared.cursor(name=cursor_name, scrollable=False, withhold=False)
+                cur.execute(query, params)
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
         except Exception:
+            if stream_cur is not None and stream_cur is not cur:
+                try:
+                    stream_cur.close()
+                except Exception:
+                    pass
             try:
                 cur.close()
             except Exception:
@@ -500,8 +524,15 @@ def read_table_scan_batch(
         )
         publish_scan_order(scan_state, order_cols)
     cur = scan_state["cur"]
-    raw = cur.fetchmany(max(1, int(limit)))
+    try:
+        raw = cur.fetchmany(max(1, int(limit)))
+    except Exception:
+        close_table_scan(scan_state)
+        raise
     headers = list(scan_state.get("headers") or [])
+    if not headers and cur.description:
+        headers = [desc[0] for desc in cur.description]
+        scan_state["headers"] = headers
     total = scan_state.get("total")
     if not raw:
         close_table_scan(scan_state)

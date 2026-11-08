@@ -222,17 +222,28 @@ def apply_fidelity_veto(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def _platform_secret() -> bytes:
+    from services.platform_config import is_production
+
+    production = is_production()
     try:
         from services.auth_service import _token_secret
 
         raw = _token_secret()
-        if isinstance(raw, bytes):
-            return raw
-        return str(raw or "").encode("utf-8")
-    except Exception:
+    except Exception as exc:
+        if production:
+            raise RuntimeError(
+                "Proof pack signing secret is unavailable in production"
+            ) from exc
         from services.brand_env import getenv_brand
 
-        return (getenv_brand("AUTH_SECRET", "") or "dev-only-not-for-production").encode("utf-8")
+        raw = getenv_brand("AUTH_SECRET", "") or "dev-only-not-for-production"
+
+    secret = raw if isinstance(raw, bytes) else str(raw or "").encode("utf-8")
+    if production and len(secret) < 32:
+        raise RuntimeError(
+            "Proof pack signing secret must be at least 32 bytes in production"
+        )
+    return secret
 
 
 def _canonical_numbers(value: Any) -> Any:

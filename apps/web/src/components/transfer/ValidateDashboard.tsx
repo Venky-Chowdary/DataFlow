@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ComplianceAdvisories } from "./ComplianceAdvisories";
 import { FkRouteNotices } from "./FkRouteNotices";
 import { DtIcon } from "../DtIcon";
+import { SchemaDriftDialog, schemaDriftReportFromDetails } from "../SchemaDriftDialog";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
 import { useConfirm } from "../ui/ConfirmDialog";
@@ -824,6 +825,8 @@ export function ValidateDashboard({
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
   const [explaining, setExplaining] = useState(false);
   const [repairOpen, setRepairOpen] = useState(false);
+  const [driftReview, setDriftReview] = useState<{ details: Record<string, unknown>; message: string } | null>(null);
+  useEffect(() => { setDriftReview(null); }, [preflight, running]);
   const [repairProposal, setRepairProposal] = useState<RepairProposal | null>(null);
   const [repairBusy, setRepairBusy] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
@@ -3617,11 +3620,11 @@ export function ValidateDashboard({
                         size="sm"
                         variant={dashCta("acknowledge_drift")}
                         leadingIcon={<DtIcon name="shield" size={14} />}
-                        onClick={() => onAcknowledgeSchemaDrift()}
+                        onClick={() => setDriftReview({ details: b.details || {}, message: b.message })}
                         disabled={running}
                         title="Record that you reviewed schema drift and chose to keep existing mappings for this run"
                       >
-                        Acknowledge drift for this run
+                        Review schema change
                       </Button>
                       {onReviewMappings && (
                         <Button
@@ -3640,11 +3643,11 @@ export function ValidateDashboard({
                         size="sm"
                         variant={dashCta("map_open")}
                         leadingIcon={<DtIcon name="layers" size={14} />}
-                        onClick={() => onReviewMappings()}
+                        onClick={() => setDriftReview({ details: b.details || {}, message: b.message })}
                         disabled={running}
-                        title="Hard-breaking schema change — remap or re-sign the contract. Same destination as the footer primary."
+                        title="Review the hard-breaking fields before remapping or re-signing the contract"
                       >
-                        Open Map to fix breaking change
+                        Review breaking change
                       </Button>
                     </div>
                   )}
@@ -3712,6 +3715,16 @@ export function ValidateDashboard({
         </div>
       )}
 
+      <SchemaDriftDialog
+        open={driftReview !== null && !running}
+        report={driftReview ? schemaDriftReportFromDetails(driftReview.details, driftReview.message) : null}
+        onClose={() => setDriftReview(null)}
+        onRemap={onReviewMappings ? () => { setDriftReview(null); onReviewMappings(); } : undefined}
+        onAcknowledge={driftReview && schemaDriftAllowsAcknowledge(driftReview.details) ? () => {
+          setDriftReview(null);
+          onAcknowledgeSchemaDrift?.();
+        } : undefined}
+      />
       <BadDataFixDrawer
         open={badDataOpen}
         onClose={() => setBadDataOpen(false)}

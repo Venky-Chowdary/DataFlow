@@ -2,11 +2,43 @@
 
 from __future__ import annotations
 
+import pytest
+
 from services.signed_proof_pack import (
     build_signed_proof_pack,
     export_proof_pack_for_job,
     verify_signed_proof_pack,
 )
+
+
+@pytest.mark.parametrize("secret", ["", "x" * 31, "dev-only-not-for-production"])
+def test_production_proof_pack_rejects_missing_or_weak_signing_secret(
+    monkeypatch: pytest.MonkeyPatch, secret: str
+) -> None:
+    monkeypatch.setattr("services.platform_config.is_production", lambda: True)
+    monkeypatch.setattr("services.auth_service._token_secret", lambda: secret)
+
+    with pytest.raises(RuntimeError, match="Proof pack signing secret"):
+        build_signed_proof_pack(
+            job_id="job-production-key-check",
+            reconciliation={"passed": True},
+        )
+
+
+def test_production_proof_pack_does_not_fallback_when_auth_secret_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_secret() -> str:
+        raise RuntimeError("secret provider unavailable")
+
+    monkeypatch.setattr("services.platform_config.is_production", lambda: True)
+    monkeypatch.setattr("services.auth_service._token_secret", unavailable_secret)
+
+    with pytest.raises(RuntimeError, match="Proof pack signing secret"):
+        build_signed_proof_pack(
+            job_id="job-production-key-provider-check",
+            reconciliation={"passed": True},
+        )
 
 
 def test_build_and_verify_roundtrip():

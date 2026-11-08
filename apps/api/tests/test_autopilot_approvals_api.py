@@ -31,6 +31,103 @@ ACTOR = "dana.architect@example.com"
 REASON = "Nightly finance load is signed off for the current mapping."
 
 
+@pytest.mark.parametrize("evidence", [
+    {"hard_breaking": [{"kind": "narrow_type", "column": "amount"}]},
+    {"schema_evolution": {"hard_breaking": [{"kind": "primary_key_change", "column": "id"}]}},
+    {"schema_evolution": {"compatibility": "none"}},
+    {"breaking": [{"kind": "unknown_future_change", "column": "amount"}]},
+])
+def test_generic_drift_code_cannot_offer_approval_for_hard_evidence(evidence):
+    from services.drift_approval import build_source_drift_approval
+
+    approval = build_source_drift_approval(
+        message="Schema change requires review", codes=["schema_drift"],
+        job_id="hard-schema", evidence=evidence,
+    )
+
+    assert approval is not None
+    assert approval["requested_scopes"] == []
+    assert approval["approvable"] is False
+
+
+@pytest.mark.parametrize("placement", ["direct", "schema_evolution", "schema_findings"])
+def test_resolver_key_widen_pause_remains_approvable(placement):
+    from services.drift_approval import build_source_drift_approval
+    from services.schema_drift import resolve_schema_evolution
+
+    evolution = resolve_schema_evolution(
+        {"additive": [{"kind": "widen_type", "column": "id", "key": True}], "breaking": []},
+        schema_policy="propagate_columns",
+    )
+    assert evolution["should_pause"] is True
+    assert evolution["hard_breaking"] == []
+    assert evolution["reasons"] == ["key_widen_needs_acknowledgement"]
+    assert evolution["compatibility"] != "none"
+    evidence = evolution
+    if placement == "schema_evolution":
+        evidence = {"schema_evolution": evolution}
+    elif placement == "schema_findings":
+        evidence = {"schema_findings": [{"schema_evolution": evolution}]}
+
+    approval = build_source_drift_approval(
+        message="Key widening requires acknowledgement", codes=["schema_drift"],
+        evidence=evidence,
+    )
+    assert approval is not None
+    assert approval["approvable"] is True
+    assert approval["requested_scopes"] == [SCOPE_SCHEMA_DRIFT]
+
+
+@pytest.mark.parametrize("kind", ["narrow_type", "primary_key_change", "unknown_future_change"])
+def test_resolver_hard_pause_remains_unapprovable(kind):
+    from services.drift_approval import build_source_drift_approval
+    from services.schema_drift import resolve_schema_evolution
+
+    evolution = resolve_schema_evolution(
+        {"additive": [], "breaking": [{"kind": kind, "column": "id"}]},
+        schema_policy="propagate_columns",
+    )
+    assert evolution["should_pause"] is True
+    assert evolution["hard_breaking"]
+    approval = build_source_drift_approval(
+        message="Breaking schema change requires review", codes=["schema_drift"],
+        evidence={"schema_evolution": evolution},
+    )
+    assert approval is not None
+    assert approval["approvable"] is False
+    assert approval["requested_scopes"] == []
+
+
+@pytest.mark.parametrize("kind", ["drop", "rename"])
+def test_generic_drift_keeps_soft_changes_reviewable(kind):
+    from services.drift_approval import build_source_drift_approval
+
+    approval = build_source_drift_approval(
+        message="Mapped source changed", codes=["schema_drift"],
+        evidence={"breaking": [{"kind": kind, "column": "note"}]},
+    )
+    assert approval["approvable"] is True
+    assert approval["requested_scopes"] == [SCOPE_SCHEMA_DRIFT]
+
+
+def test_preflight_schema_evidence_preserves_hard_findings_without_row_samples():
+    from services.drift_approval import build_source_drift_approval, schema_evidence_from_preflight
+
+    findings = schema_evidence_from_preflight({"gates": [
+        {"id": "schema_drift", "details": {"classification": {"additive": [{"kind": "add_column", "column": "note"}]}}},
+        {"id": "schema_drift", "details": {
+            "hard_breaking": [{"kind": "narrow_type", "column": "amount"}],
+            "sample_rows": [{"private": "not evidence"}],
+        }},
+    ]})
+    assert len(findings) == 2
+    assert all("sample_rows" not in finding for finding in findings)
+    approval = build_source_drift_approval(
+        message="Mixed changes", codes=["schema_drift"], evidence={"schema_findings": findings},
+    )
+    assert approval["approvable"] is False
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setattr(store, "STORE_PATH", tmp_path / "schedules_api.json")

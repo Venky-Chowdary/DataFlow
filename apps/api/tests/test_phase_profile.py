@@ -179,3 +179,57 @@ class TestStreamEmitsPhaseProfile:
             assert by_phase[PHASE_READ]["rows"] >= 2000
         assert profile["dominant_phase"]
         assert profile["busy_seconds"] > 0
+
+    def test_checkpoint_job_payload_carries_live_phase_profile(self):
+        from types import SimpleNamespace
+
+        from src.transfer.stream_write_ledger import _checkpoint_for_job
+
+        profile = PhaseProfile()
+        profile.add(PHASE_READ, 3.0, rows=1200)
+        profile.add(PHASE_TRANSFORM_WRITE, 5.0, rows=1000)
+
+        class Checkpoint:
+            def to_dict(self):
+                return {"rows_processed": 1000}
+
+        run = SimpleNamespace(
+            tally=SimpleNamespace(dest_summary={}),
+            cfg=SimpleNamespace(phase_profile=profile),
+        )
+
+        payload = _checkpoint_for_job(run, Checkpoint())
+
+        phases = {phase["phase"]: phase for phase in payload["phase_profile"]["phases"]}
+        assert phases[PHASE_READ]["rows"] == 1200
+        assert phases[PHASE_TRANSFORM_WRITE]["rows"] == 1000
+        assert payload["phase_profile"]["busy_seconds"] == 8.0
+        assert payload["phase_profile"]["dominant_phase"] == PHASE_TRANSFORM_WRITE
+
+    def test_running_checkpoint_summary_preserves_phase_profile(self):
+        from src.transfer.job_quarantine import checkpoint_quarantine_summary
+
+        phase_profile = {
+            "phases": [{
+                "phase": PHASE_READ,
+                "label": "Reading source",
+                "seconds": 3.0,
+                "calls": 1,
+                "rows": 1200,
+                "rows_per_second": 400.0,
+            }],
+            "busy_seconds": 3.0,
+            "elapsed_seconds": 4.0,
+            "dominant_phase": PHASE_READ,
+            "overlap_factor": 0.75,
+        }
+
+        summary = checkpoint_quarantine_summary(
+            {"phase_profile": phase_profile},
+            details=[],
+            preview=[],
+            total=0,
+            truncated=False,
+        )
+
+        assert summary["phase_profile"] == phase_profile

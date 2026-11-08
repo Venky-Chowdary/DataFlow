@@ -7678,6 +7678,94 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: var(--df-surface-muted);
 }
 
+.df2-modal.df2-drift-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-width: min(760px, calc(100vw - 32px));
+  max-height: min(820px, calc(100dvh - 32px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.df2-drift-dialog .df2-modal-header,
+.df2-drift-dialog .df2-modal-footer {
+  flex: 0 0 auto;
+  background: var(--df-surface);
+}
+
+.df2-drift-dialog .df2-modal-header > div { min-width: 0; }
+.df2-drift-dialog .df2-modal-title { letter-spacing: 0; }
+.df2-drift-dialog .df2-modal-subtitle { overflow-wrap: anywhere; }
+.df2-drift-dialog .df2-close-btn { flex: 0 0 32px; width: 32px; height: 32px; }
+.df2-drift-dialog .df2-modal-body { display: block; min-height: 0; }
+
+.df2-drift-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-left: 3px solid currentColor;
+  background: var(--df-surface-muted);
+  font-size: 13px;
+}
+
+.df2-drift-status > .dt-nav-icon { flex: 0 0 auto; }
+.df2-drift-status strong { overflow-wrap: anywhere; }
+.df2-drift-status span { color: var(--df-text-secondary); font-size: 12px; }
+.df2-drift-status.is-blocked { color: var(--df-danger, #b42318); }
+.df2-drift-status.is-additive { color: var(--df-success, #16794b); }
+.df2-drift-status.is-review { color: var(--df-text-secondary); }
+.df2-drift-note { margin: 12px 0; font-size: 12px; line-height: 1.5; color: var(--df-text-secondary); overflow-wrap: anywhere; }
+
+.df2-drift-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin: 0;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-drift-counts dt { color: var(--df-text-secondary); font-size: 12px; }
+.df2-drift-counts dd { margin: 4px 0 0; font-size: 20px; line-height: 1.2; font-weight: 600; font-variant-numeric: tabular-nums; }
+.df2-drift-table-wrap { width: 100%; }
+.df2-drift-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
+.df2-drift-table th { padding: 12px 8px; text-align: left; color: var(--df-text-secondary); font-weight: 500; background: var(--df-surface-muted); }
+.df2-drift-table th:first-child { width: 23%; }
+.df2-drift-table th:nth-child(2) { width: 31%; }
+.df2-drift-table td { padding: 12px 8px; border-bottom: 1px solid var(--df-border); vertical-align: top; overflow-wrap: anywhere; }
+.df2-drift-table code { padding: 0; background: none; border: 0; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.df2-drift-kind { display: inline-flex; align-items: flex-start; gap: 6px; }
+.df2-drift-kind .dt-nav-icon { flex: 0 0 auto; margin-top: 1px; }
+.df2-drift-kind.is-added { color: var(--df-success, #16794b); }
+.df2-drift-kind.is-blocked { color: var(--df-danger, #b42318); }
+.df2-drift-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
+.df2-drift-decisions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.df2-drift-actions button { min-height: 36px; }
+
+@media (max-width: 560px) {
+  .df2-modal-overlay:has(.df2-drift-dialog) { padding: 8px; }
+  .df2-modal.df2-drift-dialog { width: calc(100vw - 16px); max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+  .df2-drift-dialog .df2-modal-header,
+  .df2-drift-dialog .df2-modal-body,
+  .df2-drift-dialog .df2-modal-footer { padding-left: 12px; padding-right: 12px; }
+  .df2-drift-dialog .df2-close-btn { flex-basis: 44px; width: 44px; height: 44px; }
+  .df2-drift-actions { align-items: stretch; }
+  .df2-drift-decisions { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .df2-drift-decisions button { min-width: 0; min-height: 44px; white-space: normal; justify-content: center; }
+  .df2-drift-table th,
+  .df2-drift-table td { padding-left: 5px; padding-right: 5px; }
+  .df2-drift-table thead { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+  .df2-drift-table tbody tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--df-border); }
+  .df2-drift-table td { display: block; padding: 0; border: 0; min-width: 0; }
+  .df2-drift-table td:first-child,
+  .df2-drift-table td:nth-child(2),
+  .df2-drift-table td[colspan] { grid-column: 1 / -1; }
+  .df2-drift-table td[data-label]:not(:first-child)::before { content: attr(data-label); display: block; color: var(--df-text-secondary); font-size: 11px; margin-bottom: 4px; }
+}
+
 @keyframes df2-modal-fade {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -12757,6 +12845,66 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 @media (max-width: 559px) {
   .df2-page-jobs .df2-jobs-v3-summary-metrics article {
     flex: 1 1 100%;
+  }
+}
+
+.df2-jobs-v3-back {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .df2-page-fit.df2-page-jobs .df2-jobs-v3-layout.is-mobile-list-open > .df2-jobs-v3-list {
+    grid-column: 1;
+  }
+
+  .df2-page-fit.df2-page-jobs .df2-jobs-v3-layout.is-mobile-list-open > .df2-jobs-v3-detail {
+    display: none !important;
+  }
+
+  .df2-page-fit.df2-page-jobs .df2-jobs-v3-layout.has-selection {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .df2-page-fit.df2-page-jobs .df2-jobs-v3-layout.has-selection > .df2-jobs-v3-list {
+    display: none !important;
+  }
+
+  .df2-page-fit.df2-page-jobs .df2-jobs-v3-layout.has-selection > .df2-jobs-v3-detail {
+    grid-column: 1;
+    overflow-y: auto !important;
+  }
+
+  .df2-jobs-v3-back {
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
+    gap: 6px;
+    min-height: 32px;
+    margin: 0 0 8px;
+    padding: 0 10px;
+    border: 1px solid var(--df-border);
+    border-radius: var(--df-radius-control, 6px);
+    background: var(--df-surface);
+    color: var(--df-text-secondary);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .df2-theater-v3-header-meta {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .df2-theater-v3-route {
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  }
+
+  .df2-theater-v3-endpoint-copy strong {
+    max-width: 100%;
   }
 }
 
