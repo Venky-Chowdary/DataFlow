@@ -27,6 +27,8 @@ interface ApprovalInboxProps {
   items: ScheduleApprovalInboxItem[];
   /** Render the selected schedule's finding inside its detail drawer. */
   compact?: boolean;
+  /** Remove the page-level inbox; the page toolbar owns its restore control. */
+  onDismiss?: () => void;
   /** Reload schedules after a decision so the row leaves this panel. */
   onDecided: () => void | Promise<void>;
   onOpenSchedule?: (scheduleId: string) => void;
@@ -53,7 +55,7 @@ function isSourceSchemaDrift(item: ScheduleApprovalInboxItem): boolean {
   return code === "SOURCE_SCHEMA_DRIFT" || kind === "source_drift";
 }
 
-export function ApprovalInbox({ items, compact = false, onDecided, onOpenSchedule, onReviewMapping, onOpenStudio, onRunNow }: ApprovalInboxProps) {
+export function ApprovalInbox({ items, compact = false, onDismiss, onDecided, onOpenSchedule, onReviewMapping, onOpenStudio, onRunNow }: ApprovalInboxProps) {
   const { toast } = useToast();
   const authorize = useWriteGate(PERMISSIONS.scheduleAuthorize);
   const manage = useWriteGate(PERMISSIONS.scheduleManage);
@@ -64,7 +66,6 @@ export function ApprovalInbox({ items, compact = false, onDecided, onOpenSchedul
   const [busy, setBusy] = useState(false);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
   const inboxVersion = items
     .map((item) => `${item.schedule_id}:${item.approval.id}:${item.approval.occurrences}:${item.approval.last_seen_at || ""}`)
     .sort()
@@ -72,7 +73,6 @@ export function ApprovalInbox({ items, compact = false, onDecided, onOpenSchedul
 
   useEffect(() => {
     setMinimized(false);
-    setDismissed(false);
   }, [inboxVersion]);
 
   if (items.length === 0) return null;
@@ -171,11 +171,7 @@ export function ApprovalInbox({ items, compact = false, onDecided, onOpenSchedul
     }
   };
 
-  const sectionActions = compact ? undefined : dismissed ? (
-    <Button size="sm" variant="secondary" onClick={() => setDismissed(false)}>
-      Show decisions ({items.length})
-    </Button>
-  ) : (
+  const sectionActions = compact ? undefined : (
     <div className="df2-approval-inbox-controls">
       <Button size="sm" variant="ghost" onClick={() => setMinimized((value) => !value)}>
         {minimized ? "Expand" : "Minimize"}
@@ -184,8 +180,8 @@ export function ApprovalInbox({ items, compact = false, onDecided, onOpenSchedul
         size="sm"
         variant="ghost"
         aria-label="Close waiting on a decision panel"
-        title="Hide this panel; findings remain open"
-        onClick={() => setDismissed(true)}
+        title="Close this panel; findings remain open"
+        onClick={onDismiss}
       >
         <DtIcon name="x" size={14} />
       </Button>
@@ -194,19 +190,15 @@ export function ApprovalInbox({ items, compact = false, onDecided, onOpenSchedul
 
   return (
     <PageSection
-      className={`df2-approval-inbox${compact ? " is-compact" : ""}${dismissed ? " is-dismissed" : ""}`}
-      asCard={!compact && !dismissed}
+      className={`df2-approval-inbox${compact ? " is-compact" : ""}`}
+      asCard={!compact}
       title={compact ? "Decision required" : "Waiting on a decision"}
       subtitle={compact
         ? `${items.length} finding${items.length === 1 ? "" : "s"} currently blocks this schedule.`
         : `${items.length} schedule${items.length === 1 ? "" : "s"} parked on a finding rather than retrying it`}
       actions={sectionActions}
     >
-      {dismissed ? (
-        <p className="df2-approval-dismissed" role="status">
-          The decision inbox is hidden for now. Parked schedules remain open and are shown in their detail drawers.
-        </p>
-      ) : minimized ? (
+      {minimized && !compact ? (
         <p className="df2-approval-minimized" role="status">
           {items.length} open decision{items.length === 1 ? "" : "s"} · select a schedule to inspect its finding and next action.
         </p>

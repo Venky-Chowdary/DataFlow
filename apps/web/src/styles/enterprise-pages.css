@@ -719,21 +719,11 @@
   gap: 4px;
 }
 
-.df2-approval-minimized,
-.df2-approval-dismissed {
+.df2-approval-minimized {
   margin: 0;
   font-size: var(--df-fs-sm);
   line-height: 1.45;
   color: var(--df-text-secondary);
-}
-
-.df2-approval-inbox.is-dismissed {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--df-border);
 }
 
 .df2-approval-inbox.is-compact {

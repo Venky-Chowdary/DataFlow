@@ -98,6 +98,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const [freshnessLag, setFreshnessLag] = useState<Record<string, { lag: number; severity: string }>>({});
   /** Schedules parked on a deterministic finding, waiting on a named decision. */
   const [approvals, setApprovals] = useState<ScheduleApprovalInboxItem[]>([]);
+  const [approvalInboxHidden, setApprovalInboxHidden] = useState(false);
+  const approvalQueueKey = approvals
+    .map((item) => `${item.schedule_id}:${item.approval.id}:${item.approval.occurrences}:${item.approval.last_seen_at || ""}`)
+    .sort()
+    .join("|");
+  useEffect(() => {
+    setApprovalInboxHidden(false);
+  }, [approvalQueueKey]);
 
   /**
    * Refuse in words rather than firing a request the API will reject.
@@ -719,6 +727,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                   }}
                 />
                 <div className="df2-toolbar-actions-cluster" role="group" aria-label="Schedule actions">
+                  {approvalInboxHidden && approvals.length > 0 && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      aria-label={`Show ${approvals.length} schedule decisions`}
+                      onClick={() => setApprovalInboxHidden(false)}
+                    >
+                      Decisions ({approvals.length})
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="ghost"
@@ -802,9 +820,10 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         </div>
       )}
 
-      {!loading && !showForm && approvals.length > 0 && (
+      {!loading && !showForm && !approvalInboxHidden && approvals.length > 0 && (
         <ApprovalInbox
           items={approvals}
+          onDismiss={() => setApprovalInboxHidden(true)}
           onDecided={refreshAfterDecision}
           onOpenSchedule={(id) => openDrawer(id, "Overview")}
           onReviewMapping={(id) => {

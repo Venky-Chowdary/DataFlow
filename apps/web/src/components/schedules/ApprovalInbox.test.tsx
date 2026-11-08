@@ -49,7 +49,7 @@ async function render(
     onOpenStudio?: (scheduleId: string) => void;
   } = {},
 ) {
-  const { act, createElement } = await import("react");
+  const { act, createElement, useState } = await import("react");
   const { createRoot } = await import("react-dom/client");
   const { ToastProvider } = await import("../Toast");
   const { ApprovalInbox } = await import("./ApprovalInbox");
@@ -58,13 +58,21 @@ async function render(
     document.body.appendChild(host);
     root = createRoot(host);
   }
-  await act(async () => root!.render(createElement(ToastProvider, null, createElement(ApprovalInbox, {
-    items,
-    onDecided: () => {},
-    compact: options.compact,
-    onRunNow: options.onRunNow,
-    onOpenStudio: options.onOpenStudio,
-  }))));
+  function InboxHarness() {
+    const [hidden, setHidden] = useState(false);
+    if (hidden) {
+      return createElement("button", { type: "button", onClick: () => setHidden(false) }, `Decisions (${items.length})`);
+    }
+    return createElement(ApprovalInbox, {
+      items,
+      onDecided: () => {},
+      onDismiss: () => setHidden(true),
+      compact: options.compact,
+      onRunNow: options.onRunNow,
+      onOpenStudio: options.onOpenStudio,
+    });
+  }
+  await act(async () => root!.render(createElement(ToastProvider, null, createElement(InboxHarness))));
 }
 
 function button(name: string | RegExp) {
@@ -101,8 +109,9 @@ describe("schedule decision inbox", () => {
     await act(async () => button("Expand").click());
     assert.ok(host!.querySelector(".df2-approval-list"));
     await act(async () => button("Close waiting on a decision panel").click());
-    assert.equal(host!.querySelector(".df2-approval-list"), null);
-    await act(async () => button(/Show decisions/).click());
+    assert.equal(host!.querySelector(".df2-approval-inbox"), null);
+    await act(async () => button(/Decisions \(1\)/).click());
+    assert.ok(host!.querySelector(".df2-approval-inbox"));
     assert.ok(host!.querySelector(".df2-approval-list"));
     assert.match(host!.textContent || "", /Upsert needs a business key/);
   });
