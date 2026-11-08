@@ -180,6 +180,33 @@ test("dest-exists after create-new is Run now, not a signature", () => {
   assert.equal(inboxCorrectiveAction(item), DEST_EXISTS_AFTER_CREATE_NEW_CORRECTIVE);
 });
 
+test("missing upsert business key sends the operator to Studio with a concrete fix", () => {
+  const item = {
+    schedule_id: "orders",
+    schedule_name: "Orders Postgres → orders_feed",
+    workspace_id: "w",
+    source: "orders",
+    destination: "orders_feed",
+    sync_mode: "upsert",
+    enabled: true,
+    approval: {
+      id: "key-needed",
+      status: "open",
+      kind: "run_refused",
+      code: "RUN_REFUSED",
+      finding: "Upsert needs a business key. Declare a primary key, or choose append to allow duplicate rows.",
+      corrective_action: "Open Validate for this job and resolve the blocking check.",
+      approvable: false,
+      requested_scopes: [],
+      occurrences: 2,
+      created_at: "",
+    },
+  } as ScheduleApprovalInboxItem;
+  assert.equal(inboxNeedsStudio(item), true);
+  assert.match(inboxCorrectiveAction(item), /Destination \/ Advanced/);
+  assert.match(inboxCorrectiveAction(item), /Append/);
+});
+
 test("zero-retry budget park still offers Run now", () => {
   const item = {
     schedule_id: "s1",

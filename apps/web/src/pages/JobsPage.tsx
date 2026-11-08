@@ -1291,17 +1291,17 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                         />
                         <div className="df2-jobs-v3-summary-route">
                           <ConnectorIcon id={selected.source_type} size={22} />
-                          <div>
+                          <div className="df2-jobs-v3-summary-endpoint">
                             <span>Source</span>
-                            <strong title={multiStream ? streamNames.join(", ") : undefined}>
+                            <strong title={routeLabels.source}>
                               {routeLabels.source}
                             </strong>
                           </div>
                           <DtIcon name="transfer" size={14} />
                           <ConnectorIcon id={selected.destination_type} size={22} />
-                          <div>
+                          <div className="df2-jobs-v3-summary-endpoint">
                             <span>Destination</span>
-                            <strong title={multiStream ? streamNames.join(", ") : undefined}>
+                            <strong title={routeLabels.dest}>
                               {routeLabels.dest}
                             </strong>
                           </div>
@@ -1385,6 +1385,9 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                   : undefined
                               }
                             />
+                              {(liveJob.cdc_plugin || liveJob.watermark || liveJob.cdc_delivery || liveJob.sync_mode === "cdc") && (
+                                <CdcIncrementalSnapshotPanel jobId={selected._id} enabled />
+                              )}
 
                             <JobsEvidenceList
                               label="Evidence panels"
@@ -1616,10 +1619,6 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               }
                               hideGap={Boolean(liveJob.cdc_cursor_gap)}
                             />
-                            {(liveJob.cdc_plugin || liveJob.watermark || liveJob.cdc_delivery || liveJob.sync_mode === "cdc") && (
-                              <CdcIncrementalSnapshotPanel jobId={selected._id} enabled />
-                            )}
-
                             {isJobSuccess(selected.status) && ((rejectedCount - coercedCount) > 0 || coercedCount > 0) && (
                               <div className="df2-data-integrity" role="note">
                                 <header className="df2-data-integrity-head">

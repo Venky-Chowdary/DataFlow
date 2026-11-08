@@ -303,6 +303,7 @@ import {
   type RuleCompileReport,
 } from "../lib/businessRules";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
+import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../lib/mapBlockers";
 import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
 import {
   applyRecoveryIntent,
@@ -670,6 +671,7 @@ export function TransferPage({
   const mappingReviewCount = columnMappings.filter((m) =>
     needsMappingReview(m, confidenceThreshold),
   ).length;
+  const mapForwardReady = mapCanContinueToValidate(columnMappings, confidenceThreshold);
   const riskAckPendingCount = columnMappings.filter(
     (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
   ).length;
@@ -4244,6 +4246,26 @@ export function TransferPage({
       setStep(STEP_MAP);
       return;
     }
+    const pendingApproval = mapApprovalPendingCount(columnMappings);
+    if (pendingApproval > 0) {
+      toast({
+        title: "Approve column mappings",
+        message: `${pendingApproval} column(s) need approval before validation. Use Approve eligible or approve each row on Map.`,
+        tone: "warning",
+      });
+      setStep(STEP_MAP);
+      return;
+    }
+    if (!mapForwardReady) {
+      const blockers = mapBlockerSummary(columnMappings, confidenceThreshold);
+      toast({
+        title: blockers.headline,
+        message: blockers.detail || "Resolve the remaining Map blockers before Validate.",
+        tone: "warning",
+      });
+      setStep(STEP_MAP);
+      return;
+    }
     if (isMultiStreamSource && mapStreamsDiverge) {
       const active = mapActiveStream || primarySourceStream;
       const merged: Record<string, EditableMapping[]> = {
@@ -6982,6 +7004,10 @@ export function TransferPage({
           steps={STEPS}
           current={step}
           onStepClick={(n) => {
+            if (n === STEP_VALIDATE && !mapForwardReady) {
+              void goToPreflight();
+              return;
+            }
             if (!studioFlags.canvas) {
               setStep(n);
               return;
@@ -7001,7 +7027,7 @@ export function TransferPage({
             (n === STEP_DESTINATION && canConfigureDest && !sourceIntrospecting) ||
             (n === STEP_SHAPE && canRunPreflight) ||
             (n === STEP_MAP && canRunPreflight) ||
-            (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
+            (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0 && mapForwardReady) ||
             (n === STEP_RUN && canExecute)
           }
         />

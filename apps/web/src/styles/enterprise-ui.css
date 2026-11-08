@@ -1757,6 +1757,81 @@
   background: #f8fafc;
 }
 
+.df2-cdc-snapshot-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) max-content;
+  align-items: end;
+  gap: 10px 12px;
+}
+
+.df2-cdc-snapshot-form .df2-field {
+  min-width: 0;
+  margin: 0;
+}
+
+.df2-cdc-snapshot-form .df2-cdc-snapshot-control {
+  display: block;
+  width: 100%;
+  height: 40px;
+  min-height: 40px;
+  box-sizing: border-box;
+}
+
+.df2-app .df2-cdc-snapshot-form input.df2-cdc-snapshot-control:not(.df2-input-sm):not(.df2-select-sm) {
+  height: 40px;
+  min-height: 40px;
+}
+
+.df2-app .df2-cdc-snapshot-form textarea.df2-cdc-snapshot-control {
+  height: 40px;
+  min-height: 40px;
+  field-sizing: fixed;
+  resize: vertical;
+}
+
+.df2-cdc-snapshot-action {
+  display: flex;
+  align-items: flex-end;
+  min-width: 0;
+}
+
+.df2-cdc-snapshot-action > button {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .df2-cdc-snapshot-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .df2-cdc-snapshot-filter-field {
+    grid-column: 1 / -1;
+  }
+
+  .df2-cdc-snapshot-action {
+    grid-column: 2;
+    justify-self: end;
+  }
+}
+
+@media (max-width: 540px) {
+  .df2-cdc-snapshot-form {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .df2-cdc-snapshot-filter-field,
+  .df2-cdc-snapshot-action {
+    grid-column: 1;
+  }
+
+  .df2-cdc-snapshot-action,
+  .df2-cdc-snapshot-action > button {
+    width: 100%;
+  }
+}
+
 .df2-cdc-snapshot-head {
   display: flex;
   align-items: flex-start;
@@ -8265,6 +8340,40 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-jobs-v3-summary-route strong {
   font-size: 14px;
   font-weight: 600;
+}
+
+.df2-jobs-v3-summary-route {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 14px 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 920px;
+  min-width: 0;
+}
+
+.df2-jobs-v3-summary-route .df2-jobs-v3-summary-endpoint {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.df2-jobs-v3-summary-route .df2-jobs-v3-summary-endpoint > span {
+  display: block;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--df-text-tertiary);
+}
+
+.df2-jobs-v3-summary-route .df2-jobs-v3-summary-endpoint > strong {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
 }
 
 .df2-jobs-v3-summary-phases {

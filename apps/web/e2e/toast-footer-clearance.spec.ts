@@ -2128,3 +2128,126 @@ async function runClearanceWalk(page: Page, width: number, mode: string) {
         });
       }
 }
+
+test.describe("Jobs detail route and incremental snapshot layout", () => {
+  for (const viewport of [
+    { width: 1440, height: 1000 },
+    { width: 768, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    test(`long endpoints and aligned snapshot fields ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
+      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+      const page = await browser.newPage({ viewport });
+      const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
+      const failures: string[] = [];
+      page.on("pageerror", (error) => failures.push(error.message));
+      try {
+        await page.route("**/*", async (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname.startsWith("/api/")) {
+            const body = url.pathname === "/api/v1/connectors/jobs/qa-long-route"
+              ? {
+                  _id: "qa-long-route", name: "Snapshot layout review",
+                  source_type: "postgresql",
+                  source_name: "enterprise_primary_warehouse_source_cluster_identifier_region_replica_2026",
+                  destination_type: "snowflake",
+                  destination_database: "regional_analytics_destination_database_customer_archive_2026",
+                  destination_collection: "transactional_orders_versioned_destination_collection",
+                  sync_mode: "cdc", cdc_plugin: "postgresql", status: "completed",
+                  records_processed: 1200, created_at: "2026-11-08T00:00:00Z",
+                }
+              : { signals: [], context: {} };
+            return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+          }
+          if (url.origin !== origin || url.pathname !== "/__qa_job_snapshot_layout") return route.continue();
+          return route.fulfill({ contentType: "text/html", body: `<!doctype html>
+            <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+            <link rel="stylesheet" href="/src/styles/marketing-base.css?direct">
+            <link rel="stylesheet" href="/src/styles/app-styles.css?direct"></head>
+            <body><main id="root" class="df2-app" style="display:block;min-height:100vh;padding:12px"></main>
+            <script type="module">
+              import RefreshRuntime from '/@react-refresh';
+              RefreshRuntime.injectIntoGlobalHook(window);
+              window.$RefreshReg$ = () => {};
+              window.$RefreshSig$ = (type) => type;
+              window.__vite_plugin_react_preamble_installed__ = true;
+              const React = (await import('/node_modules/.vite/deps/react.js')).default;
+              const { createRoot } = (await import('/node_modules/.vite/deps/react-dom_client.js')).default;
+              const { JobsPage } = await import('/src/pages/JobsPage.tsx');
+              const { ToastProvider } = await import('/src/components/Toast.tsx');
+              const { ConfirmProvider } = await import('/src/components/ui/ConfirmDialog.tsx');
+              const source = 'enterprise_primary_warehouse_source_cluster_identifier_region_replica_2026';
+              const database = 'regional_analytics_destination_database_customer_archive_2026';
+              const table = 'transactional_orders_versioned_destination_collection';
+              const jobs = [{ _id: 'qa-long-route', name: 'Snapshot layout review',
+                source_type: 'postgresql', source_name: source,
+                destination_type: 'snowflake', destination_database: database,
+                destination_collection: table, sync_mode: 'cdc', cdc_plugin: { enabled: true },
+                status: 'completed', records_processed: 1200, created_at: '2026-11-08T00:00:00Z' }];
+              const element = React.createElement;
+              createRoot(document.getElementById('root')).render(
+                element(ToastProvider, null, element(ConfirmProvider, null,
+                  element(JobsPage, { jobs, initialJobId: 'qa-long-route' })))
+              );
+            </script></body></html>` });
+        });
+        await page.goto(`${origin}/__qa_job_snapshot_layout`);
+        await expect(page.locator(".df2-jobs-v3-summary-route")).toBeVisible();
+        const snapshotPanel = page.getByRole("region", { name: "CDC incremental snapshot" });
+        await expect(snapshotPanel).toBeVisible();
+        await snapshotPanel.scrollIntoViewIfNeeded();
+        await expect.poll(() => failures).toEqual([]);
+        const layout = await page.evaluate(() => {
+          const route = document.querySelector<HTMLElement>(".df2-jobs-v3-summary-route")!;
+          const names = Array.from(route.querySelectorAll<HTMLElement>(".df2-jobs-v3-summary-endpoint > strong"));
+          const controls = Array.from(document.querySelectorAll<HTMLElement>(".df2-cdc-snapshot-form .df2-cdc-snapshot-control"));
+          return {
+            viewportWidth: window.innerWidth,
+            documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+            routeWidth: route.getBoundingClientRect().width,
+            routeScrollWidth: route.scrollWidth,
+            labels: Array.from(route.querySelectorAll<HTMLElement>(".df2-jobs-v3-summary-endpoint > span"))
+              .map((label) => getComputedStyle(label).display),
+            names: names.map((name) => ({ title: name.title, textOverflow: getComputedStyle(name).textOverflow })),
+            controlBoxes: controls.map((control) => {
+              const rect = control.getBoundingClientRect();
+              return { width: rect.width, height: rect.height };
+            }),
+          };
+        });
+        expect(layout.documentWidth).toBeLessThanOrEqual(viewport.width);
+        expect(layout.routeScrollWidth).toBeLessThanOrEqual(layout.routeWidth + 1);
+        expect(layout.labels).toEqual(["block", "block"]);
+        expect(layout.names.map((name) => name.title)).toEqual([
+          "enterprise_primary_warehouse_source_cluster_identifier_region_replica_2026",
+          "regional_analytics_destination_database_customer_archive_2026.transactional_orders_versioned_destination_collection",
+        ]);
+        expect(layout.names.every((name) => name.textOverflow === "ellipsis")).toBe(true);
+        expect(layout.controlBoxes).toHaveLength(4);
+        expect(layout.controlBoxes.every((box) => Math.abs(box.height - 40) <= 1), JSON.stringify(layout.controlBoxes)).toBe(true);
+        if (viewport.width > 900 || viewport.width <= 540) {
+          const widths = layout.controlBoxes.map((box) => box.width);
+          expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1);
+        } else {
+          const widths = layout.controlBoxes.slice(0, 3).map((box) => box.width);
+          expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1);
+        }
+        const filter = page.locator("#cdc-snap-filter-qa-long-route");
+        await filter.scrollIntoViewIfNeeded();
+        const filterGeometry = await filter.evaluate((control) => {
+          const field = control.getBoundingClientRect();
+          const footer = document.querySelector<HTMLElement>(".df2-jobs-detail-footer")?.getBoundingClientRect();
+          return footer ? { left: field.left, right: field.right, bottom: field.bottom, footerTop: footer.top } : null;
+        });
+        expect(filterGeometry).not.toBeNull();
+        expect(filterGeometry!.left).toBeGreaterThanOrEqual(0);
+        expect(filterGeometry!.right).toBeLessThanOrEqual(viewport.width);
+        expect(filterGeometry!.bottom).toBeLessThanOrEqual(filterGeometry!.footerTop + 1);
+        await testInfo.attach("jobs-route-snapshot-layout", { body: JSON.stringify(layout, null, 2), contentType: "application/json" });
+        await page.screenshot({ path: testInfo.outputPath(`jobs-route-snapshot-${viewport.width}x${viewport.height}.png`), fullPage: true });
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+});

@@ -5,6 +5,7 @@ import { Button } from "./ui/Button";
 import { Drawer } from "./ui/Drawer";
 import { FilterTabs } from "./ui/FilterTabs";
 import { ScheduleRunHistory } from "./schedules/ScheduleRunHistory";
+import { ApprovalInbox } from "./schedules/ApprovalInbox";
 import {
   historyRefreshKey,
   nextRunView,
@@ -40,7 +41,7 @@ import {
   shortHash,
   type ValidateIdentityView,
 } from "../lib/studioValidateIdentity";
-import { Connector, PipelineSchedule, StandingAuthorization, TransferJob } from "../lib/types";
+import { Connector, PipelineSchedule, ScheduleApprovalInboxItem, StandingAuthorization, TransferJob } from "../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 
@@ -75,6 +76,10 @@ interface PipelineDetailDrawerProps {
   onExportYaml?: () => void;
   /** Empty mapping contract — open Studio instead of pretending Run now will invent a map. */
   onOpenStudio?: () => void;
+  /** Findings parked for this schedule. */
+  approvalItems?: ScheduleApprovalInboxItem[];
+  onApprovalDecided?: () => void | Promise<void>;
+  onReviewMapping?: () => void;
   /** QA C9: answer a DESTINATION_CONTINUITY finding (audited, re-arms the schedule). */
   onRecoverDestination?: (action: DestinationRecoveryAction, reason: string) => void | Promise<void>;
 }
@@ -115,8 +120,12 @@ export function PipelineDetailDrawer({
   onResetBreaker,
   onExportYaml,
   onOpenStudio,
+  approvalItems = [],
+  onApprovalDecided,
+  onReviewMapping,
   onRecoverDestination,
 }: PipelineDetailDrawerProps) {
+  const decisionPending = approvalItems.length > 0;
   const [mappingCount, setMappingCount] = useState(0);
   const [mappings, setMappings] = useState<{ source: string; target: string }[]>([]);
   const [lastJob, setLastJob] = useState<TransferJob | null>(null);
@@ -269,7 +278,7 @@ export function PipelineDetailDrawer({
 
   const secondaryActions = () => (
     <>
-      {onFullResync && (
+      {!decisionPending && onFullResync && (
         <Button
           size="sm"
           variant="ghost"
@@ -402,7 +411,7 @@ export function PipelineDetailDrawer({
       footer={
         <div className="df2-drawer-actions">
           <div className="df2-drawer-actions-primary">
-            {onOpenStudio && (
+            {onOpenStudio && !decisionPending && (
               <Button
                 size="sm"
                 variant="primary"
@@ -412,7 +421,7 @@ export function PipelineDetailDrawer({
                 Open Transfer Studio
               </Button>
             )}
-            <Button
+            {!decisionPending && <Button
               size="sm"
               variant={onOpenStudio ? "ghost" : "primary"}
               loading={running}
@@ -429,8 +438,8 @@ export function PipelineDetailDrawer({
               leadingIcon={<DtIcon name="activity" size={14} />}
             >
               {isRunning ? "Running…" : breakerOpen ? "Breaker open" : "Run now"}
-            </Button>
-            {onSync && (
+            </Button>}
+            {!decisionPending && onSync && (
               <Button
                 size="sm"
                 variant="secondary"
@@ -454,6 +463,17 @@ export function PipelineDetailDrawer({
         </div>
       }
     >
+      {decisionPending && (
+        <ApprovalInbox
+          compact
+          items={approvalItems}
+          onDecided={onApprovalDecided ?? (() => {})}
+          onReviewMapping={onReviewMapping}
+          onOpenStudio={onOpenStudio ? () => onOpenStudio() : undefined}
+          onRunNow={onRun}
+        />
+      )}
+
       <div className="df2-drawer-facts" aria-label="Pipeline summary">
         <div className="df2-drawer-fact">
           <span>Cadence</span>

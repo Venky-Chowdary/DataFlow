@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { PageSection } from "../ui/PageSection";
@@ -25,6 +25,8 @@ const MIN_REASON = 8;
 
 interface ApprovalInboxProps {
   items: ScheduleApprovalInboxItem[];
+  /** Render the selected schedule's finding inside its detail drawer. */
+  compact?: boolean;
   /** Reload schedules after a decision so the row leaves this panel. */
   onDecided: () => void | Promise<void>;
   onOpenSchedule?: (scheduleId: string) => void;
@@ -51,7 +53,7 @@ function isSourceSchemaDrift(item: ScheduleApprovalInboxItem): boolean {
   return code === "SOURCE_SCHEMA_DRIFT" || kind === "source_drift";
 }
 
-export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMapping, onOpenStudio, onRunNow }: ApprovalInboxProps) {
+export function ApprovalInbox({ items, compact = false, onDecided, onOpenSchedule, onReviewMapping, onOpenStudio, onRunNow }: ApprovalInboxProps) {
   const { toast } = useToast();
   const authorize = useWriteGate(PERMISSIONS.scheduleAuthorize);
   const manage = useWriteGate(PERMISSIONS.scheduleManage);
@@ -61,6 +63,17 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMappin
   const [days, setDays] = useState(30);
   const [busy, setBusy] = useState(false);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [minimized, setMinimized] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const inboxVersion = items
+    .map((item) => `${item.schedule_id}:${item.approval.id}:${item.approval.occurrences}:${item.approval.last_seen_at || ""}`)
+    .sort()
+    .join("|");
+
+  useEffect(() => {
+    setMinimized(false);
+    setDismissed(false);
+  }, [inboxVersion]);
 
   if (items.length === 0) return null;
 
@@ -158,13 +171,46 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMappin
     }
   };
 
+  const sectionActions = compact ? undefined : dismissed ? (
+    <Button size="sm" variant="secondary" onClick={() => setDismissed(false)}>
+      Show decisions ({items.length})
+    </Button>
+  ) : (
+    <div className="df2-approval-inbox-controls">
+      <Button size="sm" variant="ghost" onClick={() => setMinimized((value) => !value)}>
+        {minimized ? "Expand" : "Minimize"}
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        aria-label="Close waiting on a decision panel"
+        title="Hide this panel; findings remain open"
+        onClick={() => setDismissed(true)}
+      >
+        <DtIcon name="x" size={14} />
+      </Button>
+    </div>
+  );
+
   return (
     <PageSection
-      className="df2-approval-inbox"
-      title="Waiting on a decision"
-      subtitle={`${items.length} schedule${items.length === 1 ? "" : "s"} parked on a finding rather than retrying it`}
+      className={`df2-approval-inbox${compact ? " is-compact" : ""}${dismissed ? " is-dismissed" : ""}`}
+      asCard={!compact && !dismissed}
+      title={compact ? "Decision required" : "Waiting on a decision"}
+      subtitle={compact
+        ? `${items.length} finding${items.length === 1 ? "" : "s"} currently blocks this schedule.`
+        : `${items.length} schedule${items.length === 1 ? "" : "s"} parked on a finding rather than retrying it`}
+      actions={sectionActions}
     >
-      <ul className="df2-approval-list" role="list">
+      {dismissed ? (
+        <p className="df2-approval-dismissed" role="status">
+          The decision inbox is hidden for now. Parked schedules remain open and are shown in their detail drawers.
+        </p>
+      ) : minimized ? (
+        <p className="df2-approval-minimized" role="status">
+          {items.length} open decision{items.length === 1 ? "" : "s"} · select a schedule to inspect its finding and next action.
+        </p>
+      ) : <ul className="df2-approval-list" role="list">
         {items.map((item) => {
           const appr = item.approval;
           const expanded = openId === appr.id;
@@ -176,14 +222,16 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMappin
                   <DtIcon name="alert" size={14} />
                   {appr.code || "RUN_REFUSED"}
                 </span>
-                <button
-                  type="button"
-                  className="df2-approval-name"
-                  onClick={() => onOpenSchedule?.(item.schedule_id)}
-                  title="Open this schedule"
-                >
-                  {item.schedule_name}
-                </button>
+                {onOpenSchedule ? (
+                  <button
+                    type="button"
+                    className="df2-approval-name"
+                    onClick={() => onOpenSchedule(item.schedule_id)}
+                    title="Open this schedule"
+                  >
+                    {item.schedule_name}
+                  </button>
+                ) : <strong className="df2-approval-name">{item.schedule_name}</strong>}
                 <span className="df2-approval-route" title={`${item.source} → ${item.destination}`}>
                   {item.source} → {item.destination}
                 </span>
@@ -348,6 +396,7 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMappin
           );
         })}
       </ul>
+      }
     </PageSection>
   );
 }

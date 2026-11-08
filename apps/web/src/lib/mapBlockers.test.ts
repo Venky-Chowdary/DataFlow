@@ -13,7 +13,7 @@ import {
   mappingRiskChipState,
   type EditableMapping,
 } from "./mapping";
-import { mapBlockerSummary, mappingBlocker } from "./mapBlockers";
+import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate, mappingBlocker } from "./mapBlockers";
 import { isMappingReady, needsMappingReview } from "./columnWorkbench";
 import { isApiPreflight, isLocalPreflight } from "./localPreflight";
 
@@ -178,6 +178,29 @@ describe("mapBlockerSummary explains exactly what holds Continue", () => {
     assert.match(summary.headline, /2/);
     assert.match(summary.detail, /order_amt/);
     assert.match(summary.detail, /ship_city/);
+  });
+});
+
+describe("Map forward gate requires explicit approval", () => {
+  it("keeps safe lossless rows out of Review but blocks Validate until approved", () => {
+    const safeUnapproved: EditableMapping = {
+      source: "order_id",
+      target: "order_id",
+      confidence: 0.99,
+      inferredType: "INTEGER",
+      destType: "INTEGER",
+      existsInDestination: true,
+      transform: "none",
+      fidelity: "preserve",
+      approved: false,
+    };
+    assert.equal(needsMappingReview(safeUnapproved, THRESHOLD), false);
+    assert.equal(mapApprovalPendingCount([safeUnapproved]), 1);
+    assert.equal(mapCanContinueToValidate([safeUnapproved], THRESHOLD), false);
+
+    const approved = { ...safeUnapproved, approved: true };
+    assert.equal(mapApprovalPendingCount([approved]), 0);
+    assert.equal(mapCanContinueToValidate([approved], THRESHOLD), true);
   });
 });
 

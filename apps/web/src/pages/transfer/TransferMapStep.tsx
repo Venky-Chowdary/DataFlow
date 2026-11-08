@@ -17,7 +17,7 @@ import { ruleCensus, ruleMixSummary } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
-import { mapBlockerSummary } from "../../lib/mapBlockers";
+import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../../lib/mapBlockers";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -227,10 +227,14 @@ export function TransferMapStep({
       ? `PK ${primaryKeyField}`
       : `${syncModeLabel || "sync"}`;
 
+  const approvalPendingCount = mapApprovalPendingCount(columnMappings);
+  const canContinueToValidate = mapCanContinueToValidate(columnMappings, confidenceThreshold);
   const mappingFooterLabel = health.falseFriendCount > 0
     ? health.headline
     : mappingReviewCount > 0
       ? `${mappingReviewCount} need review`
+      : approvalPendingCount > 0
+        ? `${approvalPendingCount} need approval`
       : `${approvedCount} ready`;
   const approvedPct = columnMappings.length
     ? Math.round((approvedCount / columnMappings.length) * 100)
@@ -254,10 +258,12 @@ export function TransferMapStep({
       type="button"
       className="df2-btn df2-btn-primary"
       onClick={onContinue}
-      disabled={mappingReviewCount > 0}
+      disabled={!canContinueToValidate}
       title={
         blockerSummary.blockers.length > 0
           ? `${blockerSummary.headline}\n${blockerSummary.detail}`
+          : approvalPendingCount > 0
+            ? `${approvalPendingCount} column(s) need Approve before Validate.`
           : "Continue to Validate"
       }
     >
@@ -276,7 +282,7 @@ export function TransferMapStep({
       )}
       <div
         className="df2-card-head df2-map-step-head"
-        title={`${columnMappings.length} mappings · ${approvedCount} ready${health.falseFriendCount > 0 ? ` · ${health.headline}` : mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}`}
+        title={`${columnMappings.length} mappings · ${approvedCount} ready${health.falseFriendCount > 0 ? ` · ${health.headline}` : mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : approvalPendingCount > 0 ? ` · ${approvalPendingCount} need approval` : ""}`}
       >
         <div className="df2-map-step-head-copy">
           <h3 className="df2-card-title">Map columns</h3>
@@ -516,12 +522,12 @@ export function TransferMapStep({
           <ProgressRing
             value={approvedPct}
             size={36}
-            tone={mappingReviewCount > 0 ? "warn" : "ok"}
+            tone={!canContinueToValidate ? "warn" : "ok"}
             className="df2-map-footer-ring"
           >
             <strong>{approvedPct}</strong>
           </ProgressRing>
-          <span className={mappingReviewCount > 0 ? "is-warn" : "is-ok"} title={health.weak ? health.detail : undefined}>
+          <span className={!canContinueToValidate ? "is-warn" : "is-ok"} title={health.weak ? health.detail : undefined}>
             <strong>Mapping</strong> {mappingFooterLabel}
           </span>
           <span

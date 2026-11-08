@@ -47,7 +47,7 @@ import {
 import { formatSyncModeLabel } from "../lib/transferConstants";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
-import { scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
+import { inboxNeedsStudio, scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
 import { clearStudioRecovery } from "../lib/studioRecovery";
 import { readSession } from "../lib/session";
 import { getActiveWorkspaceId } from "../lib/workspace";
@@ -250,6 +250,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   }, [schedules, selectedId]);
 
   const selectedSchedule = schedules.find((s) => s.id === selectedId) ?? null;
+  const selectedApprovals = selectedSchedule
+    ? approvals.filter((item) => item.schedule_id === selectedSchedule.id)
+    : [];
+
+  const refreshAfterDecision = async () => {
+    await load();
+    void onSchedulesChange?.();
+  };
 
   const openDrawer = (id: string, tab: PipelineTab = "Overview") => {
     setSelectedId(id);
@@ -797,10 +805,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       {!loading && !showForm && approvals.length > 0 && (
         <ApprovalInbox
           items={approvals}
-          onDecided={async () => {
-            await load();
-            void onSchedulesChange?.();
-          }}
+          onDecided={refreshAfterDecision}
           onOpenSchedule={(id) => openDrawer(id, "Overview")}
           onReviewMapping={(id) => {
             const sched = schedules.find((s) => s.id === id);
@@ -917,6 +922,9 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             : null
         }
         onClose={closeDrawer}
+        approvalItems={selectedApprovals}
+        onApprovalDecided={refreshAfterDecision}
+        onReviewMapping={() => selectedSchedule && openEdit(selectedSchedule)}
         onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
         onRecoverDestination={(action, reason) =>
           selectedSchedule ? handleRecoverDestination(selectedSchedule.id, action, reason) : undefined}
@@ -944,7 +952,10 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           onOpenJob?.(jobId);
         }}
         onOpenStudio={
-          selectedSchedule && scheduleNeedsStudio(selectedSchedule)
+          selectedSchedule && (
+            scheduleNeedsStudio(selectedSchedule)
+            || selectedApprovals.some(inboxNeedsStudio)
+          )
             ? () => openStudioFromSchedule(selectedSchedule.id)
             : undefined
         }

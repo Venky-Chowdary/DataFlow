@@ -7,8 +7,9 @@
  * column, the destination-side reason, and the action that actually clears it —
  * including "you cannot clear this from Map" when that is the truth.
  *
- * The blocker set is derived from the same predicate that gates the Continue
- * button, so the reason shown and the reason enforced cannot drift.
+ * Review blockers share the Review filter predicate. The forward gate also
+ * requires explicit approval for every mapping, including safe lossless rows
+ * intentionally omitted from the Review filter.
  */
 import { needsMappingReview } from "./columnWorkbench";
 import {
@@ -201,6 +202,17 @@ export function mapBlockers(
   return mappings
     .map((m) => mappingBlocker(m, threshold))
     .filter((b): b is MapBlocker => b !== null);
+}
+
+export function mapApprovalPendingCount(mappings: EditableMapping[]): number {
+  return mappings.filter((mapping) => mapping.approved !== true).length;
+}
+
+export function mapCanContinueToValidate(
+  mappings: EditableMapping[],
+  threshold: number,
+): boolean {
+  return mapApprovalPendingCount(mappings) === 0 && mapBlockers(mappings, threshold).length === 0;
 }
 
 export interface MapBlockerSummary {

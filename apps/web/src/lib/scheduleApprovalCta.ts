@@ -17,8 +17,12 @@ export function isEmptyMappingFinding(code?: string, finding?: string): boolean 
   return /no persisted column mappings/i.test(finding || "");
 }
 
+function isBusinessKeyFinding(item: ScheduleApprovalInboxItem): boolean {
+  return /(?:upsert|skip duplicates) needs? a business key/i.test(item.approval.finding || "");
+}
+
 export function inboxNeedsStudio(item: ScheduleApprovalInboxItem): boolean {
-  return isEmptyMappingFinding(item.approval.code, item.approval.finding);
+  return isEmptyMappingFinding(item.approval.code, item.approval.finding) || isBusinessKeyFinding(item);
 }
 
 export const DEST_EXISTS_AFTER_CREATE_NEW_CORRECTIVE =
@@ -52,7 +56,15 @@ export function inboxNeedsRunNow(item: ScheduleApprovalInboxItem): boolean {
 
 /** Prefer Studio copy when a stored finding still says "Open Validate for this job". */
 export function inboxCorrectiveAction(item: ScheduleApprovalInboxItem): string {
-  if (inboxNeedsStudio(item)) return EMPTY_MAPPING_STUDIO_CORRECTIVE;
+  if (isEmptyMappingFinding(item.approval.code, item.approval.finding)) {
+    return EMPTY_MAPPING_STUDIO_CORRECTIVE;
+  }
+  if (isBusinessKeyFinding(item)) {
+    return (
+      "Open Transfer Studio → Destination / Advanced to declare a primary key for upsert or skip-duplicates, "
+      + "or choose Append if duplicate rows are intended. Re-run Validate before the next schedule attempt."
+    );
+  }
   if (isCreateNewDestExistsPark(item.approval.code, item.approval.finding)) {
     return DEST_EXISTS_AFTER_CREATE_NEW_CORRECTIVE;
   }

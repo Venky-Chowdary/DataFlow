@@ -167,32 +167,32 @@ export function CdcIncrementalSnapshotPanel({
         </p>
       )}
 
-      <div className="df2-form-row" style={{ gap: "0.5rem", flexWrap: "wrap" }}>
-        <div className="df2-field" style={{ flex: "1 1 8rem" }}>
+      <div className="df2-cdc-snapshot-form">
+        <div className="df2-field">
           <label className="df2-label" htmlFor={`cdc-snap-table-${jobId}`}>Table</label>
           <input
             id={`cdc-snap-table-${jobId}`}
-            className="df2-input"
+            className="df2-input df2-cdc-snapshot-control"
             value={table}
             onChange={(e) => setTable(e.target.value)}
             placeholder="orders"
           />
         </div>
-        <div className="df2-field" style={{ flex: "0 1 6rem" }}>
+        <div className="df2-field">
           <label className="df2-label" htmlFor={`cdc-snap-pk-${jobId}`}>Primary key</label>
           <input
             id={`cdc-snap-pk-${jobId}`}
-            className="df2-input"
+            className="df2-input df2-cdc-snapshot-control"
             value={primaryKey}
             onChange={(e) => setPrimaryKey(e.target.value)}
             placeholder="id"
           />
         </div>
-        <div className="df2-field" style={{ flex: "0 1 5rem" }}>
+        <div className="df2-field">
           <label className="df2-label" htmlFor={`cdc-snap-chunk-${jobId}`}>Chunk</label>
           <input
             id={`cdc-snap-chunk-${jobId}`}
-            className="df2-input"
+            className="df2-input df2-cdc-snapshot-control"
             type="number"
             min={1}
             max={50000}
@@ -200,19 +200,19 @@ export function CdcIncrementalSnapshotPanel({
             onChange={(e) => setChunkSize(Math.max(1, Number(e.target.value) || 1000))}
           />
         </div>
-        <div className="df2-field" style={{ flex: "1 1 16rem" }}>
+        <div className="df2-field df2-cdc-snapshot-filter-field">
           <label className="df2-label" htmlFor={`cdc-snap-filter-${jobId}`}>Row filter (optional)</label>
           <textarea
             id={`cdc-snap-filter-${jobId}`}
-            className="df2-input"
-            rows={2}
+            className="df2-input df2-cdc-snapshot-control"
+            rows={1}
             value={filterText}
             placeholder='{"column": "region", "op": "eq", "value": "EU"}'
             onChange={(e) => setFilterText(e.target.value)}
             disabled={busy}
           />
         </div>
-        {runGate.allowed && <div className="df2-field" style={{ alignSelf: "flex-end" }}>
+        {runGate.allowed && <div className="df2-field df2-cdc-snapshot-action">
           <Button
             variant="primary"
             size="sm"

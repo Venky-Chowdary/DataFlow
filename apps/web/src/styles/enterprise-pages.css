@@ -713,6 +713,52 @@
   border-color: var(--df-warning-border);
 }
 
+.df2-approval-inbox-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.df2-approval-minimized,
+.df2-approval-dismissed {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  line-height: 1.45;
+  color: var(--df-text-secondary);
+}
+
+.df2-approval-inbox.is-dismissed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-approval-inbox.is-compact {
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--df-warning-border);
+  border-left: 4px solid var(--df-warning);
+  border-radius: 8px;
+  background: var(--df-warning-bg);
+}
+
+.df2-approval-inbox.is-compact .df2-section-head {
+  margin: 0;
+  padding: 0 0 8px;
+  border: 0;
+}
+
+.df2-approval-inbox.is-compact .df2-section-body {
+  padding: 0;
+}
+
+.df2-approval-inbox.is-compact .df2-approval-row {
+  background: var(--df-surface);
+}
+
 .df2-approval-list {
   display: flex;
   flex-direction: column;
