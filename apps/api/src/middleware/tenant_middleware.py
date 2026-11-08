@@ -46,6 +46,8 @@ _PUBLIC_PREFIXES = (
     "/api/v1/auth/password/reset",
     "/api/v1/auth/sso",
     "/api/v1/public/form-token",
+    "/api/v1/invites/inspect",
+    "/api/v1/invites/accept",
     "/api/v1/public/email-events",
     "/api/v1/contact-sales",
     "/api/v1/catalog",

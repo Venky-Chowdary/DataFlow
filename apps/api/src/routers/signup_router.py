@@ -281,43 +281,9 @@ async def verify_email(body: VerifyRequest, request: Request, response: Response
         ua=request.headers.get("user-agent", "")[:512],
     )
     session = result.pop("session")
-    # __Host- session cookie — CSRF double-submit lands with P3-1.
-    response.set_cookie(
-        "__Host-dw_session",
-        session["jti"],
-        max_age=int(session["absolute_expires_at"] - session["created_at"]),
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        path="/",
-    )
-    # Double-submit CSRF cookie — JS echoes it back as x-csrf-token on
-    # mutating cookie-authed requests (enforced by AuthMiddleware).
-    response.set_cookie(
-        "dw_csrf",
-        session["csrf"],
-        max_age=int(session["absolute_expires_at"] - session["created_at"]),
-        httponly=False,
-        secure=True,
-        samesite="strict",
-        path="/",
-    )
-    # D153: the web client authenticates every API call with the Bearer token
-    # login issues; the cookie alone left it holding an empty token, so the
-    # first navigation after verifying bounced to sign-in. Issue the same
-    # session payload login returns.
-    from src.services.auth_service import create_token
+    from src.services.browser_session import issue_browser_session
 
-    try:
-        token, expires_at = create_token(result["user"]["email"])
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {
-        **result,
-        "token": token,
-        "expires_at": expires_at,
-        "must_change_password": False,
-    }
+    return {**result, **issue_browser_session(response, session, result["user"]["email"])}
 
 
 def _session_summary(doc: dict, *, current_jti: str = "") -> dict:

@@ -101,6 +101,15 @@ SECURITY_EVENTS: dict[str, str] = {
     "denylist.remove": "A denylist entry was removed.",
     "sales.lead.created": "A contact-sales lead was received.",
     "email.event.received": "An email delivery webhook event was received.",
+    "signup.welcome_queued": "The one-time welcome mail for a new account was queued.",
+    "signup.welcome_failed": "Queueing the welcome mail for a new account failed (signup unaffected).",
+    # Workspace invitations (services.workspace_invites).
+    "team.invite.created": "A workspace admin invited someone to a workspace by email.",
+    "team.invite.resent": "A pending workspace invitation was re-sent with a new link.",
+    "team.invite.revoked": "A pending workspace invitation was revoked.",
+    "team.invite.denied": "An invitation create, resend or revoke was refused.",
+    "team.invite.accepted": "A workspace invitation was accepted and the membership created.",
+    "team.invite.accept_failed": "Accepting a workspace invitation was refused.",
 }
 
 def _register_admin_events() -> None:

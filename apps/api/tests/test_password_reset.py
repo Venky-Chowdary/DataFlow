@@ -569,6 +569,8 @@ def test_provider_timeout_is_bounded_and_send_failed_audited(monkeypatch):
 
     class _StallOnce:
         def send(self, mail):
+            if "password" not in mail.subject.lower():
+                return  # the verified users' welcome mails share the lane
             sends.append(mail.to)
             if len(sends) == 1:
                 # Simulates urllib's timeout firing on a hung provider socket.
@@ -929,8 +931,9 @@ def test_mongo_index_setup_runs_once_and_fails_loud(monkeypatch):
     mail_outbox._database()
     mail_outbox._database()
     mail_outbox._database()
-    # two indexes, created exactly once across the three calls
-    assert len(calls) == 2, calls
+    # three indexes (status, TTL, enqueue_once key), created exactly once
+    # across the three calls
+    assert len(calls) == 3, calls
 
     class _BadColl:
         def create_index(self, *a, **kw):
@@ -1036,8 +1039,9 @@ def test_dead_otp_code_row_is_skipped(monkeypatch, tmp_path):
 
     monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
     before = len(ConsoleEmailSender.OUTBOX)
-    assert signup_service.recover_mail_outbox() == 0
-    assert len(ConsoleEmailSender.OUTBOX) == before
+    # Only the welcome mail verify queued is live; the dead code is skipped.
+    assert signup_service.recover_mail_outbox() == 1
+    assert [m.subject for m in ConsoleEmailSender.OUTBOX[before:]] == ["Welcome to Datawrap"]
     cts = mail_outbox.counts()
     assert cts["superseded"] == len(rows), cts
 

@@ -80,6 +80,7 @@ from .transfer.engine import DuplicateTransferSubmission
 from .routers.transfer_router import router as transfer_router
 from .routers.usage_router import router as usage_router
 from .routers.team_router import router as team_router
+from .routers.invite_router import router as invite_router
 from .routers.workspace_router import router as workspace_router
 from .services.rbac import RBACMiddleware
 
@@ -746,6 +747,7 @@ app.include_router(scim_router, prefix="/api/v1")
 app.include_router(cdc_mapping_review_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(team_router, prefix="/api/v1")
+app.include_router(invite_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")
 app.include_router(fidelity_router, prefix="/api/v1")
 app.include_router(resource_acl_router, prefix="/api/v1")
