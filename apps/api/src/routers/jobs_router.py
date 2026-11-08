@@ -10,7 +10,10 @@ existed, and the RBAC gate refused the unknown path before routing could
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, Request
+from datetime import date
+from typing import Literal
+
+from fastapi import APIRouter, Header, Query, Request
 
 from .connectors_router import get_transfer_job, list_transfer_jobs
 
@@ -21,8 +24,23 @@ router = APIRouter(prefix="/jobs", tags=["Jobs"])
 async def list_jobs(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    status: Literal["all", "running", "completed", "failed"] = Query(default="all"),
+    search: str = Query(default="", max_length=120),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
 ):
-    return await list_transfer_jobs(request, workspace_id)
+    return await list_transfer_jobs(
+        request,
+        workspace_id,
+        limit=limit,
+        offset=offset,
+        status=status,
+        search=search,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
 
 @router.get("/{job_id}")

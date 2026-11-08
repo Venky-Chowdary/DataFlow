@@ -3,7 +3,16 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { uniqueListKey } from "./uiUtils.js";
+import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from "./uiUtils.js";
+
+describe("completed with warnings status", () => {
+  it("matches the server's successful terminal status contract", () => {
+    assert.equal(isJobSuccess("completed_with_warnings"), true);
+    assert.equal(isJobTerminal("completed_with_warnings"), true);
+    assert.equal(jobStatusLabel("completed_with_warnings"), "Completed with warnings");
+    assert.equal(jobStatusBadgeClass("completed_with_warnings"), "df2-badge df2-badge-warn");
+  });
+});
 
 describe("uniqueListKey", () => {
   it("keeps colliding identities distinct by index", () => {

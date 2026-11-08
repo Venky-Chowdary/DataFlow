@@ -6,6 +6,7 @@ Manage connector configurations and data transfers
 import asyncio
 import json
 import logging
+from datetime import date
 from typing import Any, Literal, Optional
 
 from fastapi import (
@@ -15,6 +16,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Request,
     UploadFile,
 )
@@ -591,12 +593,19 @@ def _can_mutate_job(request: Request, job: dict) -> bool:
 async def list_transfer_jobs(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    status: Literal["all", "running", "completed", "failed"] = Query(default="all"),
+    search: str = Query(default="", max_length=120),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
 ):
     """List recent transfer jobs scoped to a workspace, with whole-history counts.
 
-    ``jobs`` is the most recent page; ``total`` and ``status_counts`` are counted
-    over the entire scoped history in the store. Counting the page instead made the
-    Jobs header read "All (50)" for a 90-job history and disagree with Pilot.
+    ``jobs`` is one bounded, queryable page; ``total`` and ``status_counts`` are
+    counted over the entire scoped history. ``filtered_total`` describes the active
+    status/search/date query, so the Jobs page can navigate history without loading
+    it all into the browser.
 
     Degrades gracefully when the job store is unavailable: returns an empty
     list flagged ``degraded`` (HTTP 200) so Job Theater still renders instead
@@ -604,14 +613,36 @@ async def list_transfer_jobs(
     the infrastructure problem is not hidden.
     """
     scope = tenant_scope(request, workspace_id).filter
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail="date_from must be on or before date_to")
     try:
         mongo = get_mongodb_service()
-        jobs = await asyncio.to_thread(mongo.list_jobs, workspace_filter=scope)
+        query = {
+            "status": status,
+            "search": search.strip(),
+            "date_from": date_from,
+            "date_to": date_to,
+        }
+        jobs = await asyncio.to_thread(
+            mongo.list_jobs,
+            limit=limit,
+            offset=offset,
+            workspace_filter=scope,
+            **query,
+        )
         counts = await asyncio.to_thread(mongo.count_jobs, workspace_filter=scope)
+        filtered_total = (
+            counts["total"]
+            if status == "all" and not search.strip() and date_from is None and date_to is None
+            else await asyncio.to_thread(mongo.count_job_matches, workspace_filter=scope, **query)
+        )
         return {
             "jobs": jobs,
             "count": len(jobs),
             "total": int(counts.get("total") or 0),
+            "filtered_total": int(filtered_total or 0),
+            "limit": limit,
+            "offset": offset,
             "status_counts": counts.get("by_status") or {},
             "degraded": False,
         }
@@ -620,6 +651,9 @@ async def list_transfer_jobs(
             "jobs": [],
             "count": 0,
             "total": 0,
+            "filtered_total": 0,
+            "limit": limit,
+            "offset": offset,
             "status_counts": {},
             "degraded": True,
             "persistence": "unavailable",

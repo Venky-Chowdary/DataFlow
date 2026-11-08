@@ -120,6 +120,7 @@ export type JobStatus =
   | "running"
   | "completed"
   | "completed_with_quarantine"
+  | "completed_with_warnings"
   | "failed"
   | "cancelled";
 

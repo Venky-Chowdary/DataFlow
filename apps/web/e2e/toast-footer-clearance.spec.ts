@@ -1578,20 +1578,28 @@ test.describe("pending feature browser QA", () => {
         await expect(page.locator(".df2-toast-dock .dt-toast")).toHaveCount(2);
         await page.evaluate(() => document.fonts.ready);
         const preview = await toasts.evaluateAll(nodes => nodes.map(node => {
+          const title = node.querySelector(".dt-toast-title")!;
+          const titleStyle = getComputedStyle(title);
+          const titleBox = title.getBoundingClientRect();
           const message = node.querySelector(".dt-toast-message")!;
           const style = getComputedStyle(message);
           const box = message.getBoundingClientRect();
           const toastBox = node.getBoundingClientRect();
           const bodyBox = node.querySelector(".dt-toast-body")!.getBoundingClientRect();
           const buttons = Array.from(node.querySelectorAll("button")).map(button => button.getBoundingClientRect());
-          return { clamp: style.webkitLineClamp, height: box.height, lineHeight: parseFloat(style.lineHeight),
+          return { titleWhiteSpace: titleStyle.whiteSpace, titleHeight: titleBox.height,
+            titleLineHeight: parseFloat(titleStyle.lineHeight), titleOverflow: titleStyle.textOverflow,
+            whiteSpace: style.whiteSpace, height: box.height, lineHeight: parseFloat(style.lineHeight),
             contained: toastBox.left >= 0 && toastBox.right <= innerWidth + 1,
             controlsClear: buttons.every(button => button.left >= bodyBox.right - 1),
             clipped: buttons.some(button => button.right > toastBox.right + 1) };
         }));
         for (const snapshot of preview) {
-          expect(snapshot.clamp).toBe("2");
-          expect(snapshot.height).toBeLessThanOrEqual(snapshot.lineHeight * 2 + 1);
+          expect(snapshot.titleWhiteSpace).toBe("nowrap");
+          expect(snapshot.titleHeight).toBeLessThanOrEqual(snapshot.titleLineHeight + 2);
+          expect(snapshot.titleOverflow).toBe("ellipsis");
+          expect(snapshot.whiteSpace).toBe("nowrap");
+          expect(snapshot.height).toBeLessThanOrEqual(snapshot.lineHeight + 2);
           expect(snapshot.contained).toBe(true);
           expect(snapshot.controlsClear).toBe(true);
           expect(snapshot.clipped).toBe(false);
@@ -2147,7 +2155,7 @@ test.describe("Jobs detail route and incremental snapshot layout", () => {
           if (url.pathname.startsWith("/api/")) {
             const body = url.pathname === "/api/v1/connectors/jobs/qa-long-route"
               ? {
-                  _id: "qa-long-route", name: "Snapshot layout review",
+                  _id: "qa-long-route", name: "qa_my_seed → defaultdb.mahi_qa_20261106_1902_schedule",
                   source_type: "postgresql",
                   source_name: "enterprise_primary_warehouse_source_cluster_identifier_region_replica_2026",
                   destination_type: "snowflake",
@@ -2179,7 +2187,7 @@ test.describe("Jobs detail route and incremental snapshot layout", () => {
               const source = 'enterprise_primary_warehouse_source_cluster_identifier_region_replica_2026';
               const database = 'regional_analytics_destination_database_customer_archive_2026';
               const table = 'transactional_orders_versioned_destination_collection';
-              const jobs = [{ _id: 'qa-long-route', name: 'Snapshot layout review',
+              const jobs = [{ _id: 'qa-long-route', name: 'qa_my_seed → defaultdb.mahi_qa_20261106_1902_schedule',
                 source_type: 'postgresql', source_name: source,
                 destination_type: 'snowflake', destination_database: database,
                 destination_collection: table, sync_mode: 'cdc', cdc_plugin: { enabled: true },
@@ -2200,10 +2208,24 @@ test.describe("Jobs detail route and incremental snapshot layout", () => {
         const layout = await page.evaluate(() => {
           const route = document.querySelector<HTMLElement>(".df2-jobs-v3-summary-route")!;
           const names = Array.from(route.querySelectorAll<HTMLElement>(".df2-jobs-v3-summary-endpoint > strong"));
+          const titleLine = document.querySelector<HTMLElement>(".df2-jobs-v3-summary-title-line")!;
+          const jobTitle = titleLine.querySelector<HTMLElement>(".df2-job-name-editor-title")!;
+          const status = titleLine.querySelector<HTMLElement>(".df2-jobs-v3-summary-ids")!;
+          const titleBox = jobTitle.getBoundingClientRect();
+          const statusBox = status.getBoundingClientRect();
           const controls = Array.from(document.querySelectorAll<HTMLElement>(".df2-cdc-snapshot-form .df2-cdc-snapshot-control"));
           return {
             viewportWidth: window.innerWidth,
             documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+            titleLineWidth: titleLine.getBoundingClientRect().width,
+            titleLineScrollWidth: titleLine.scrollWidth,
+            jobTitle: {
+              title: jobTitle.title,
+              textOverflow: getComputedStyle(jobTitle).textOverflow,
+              overlapsStatus: titleBox.right > statusBox.left && titleBox.left < statusBox.right
+                && titleBox.bottom > statusBox.top && titleBox.top < statusBox.bottom,
+            },
+            statusRight: statusBox.right,
             routeWidth: route.getBoundingClientRect().width,
             routeScrollWidth: route.scrollWidth,
             labels: Array.from(route.querySelectorAll<HTMLElement>(".df2-jobs-v3-summary-endpoint > span"))
@@ -2216,6 +2238,11 @@ test.describe("Jobs detail route and incremental snapshot layout", () => {
           };
         });
         expect(layout.documentWidth).toBeLessThanOrEqual(viewport.width);
+        expect(layout.titleLineScrollWidth).toBeLessThanOrEqual(layout.titleLineWidth + 1);
+        expect(layout.jobTitle.title).toBe("qa_my_seed → defaultdb.mahi_qa_20261106_1902_schedule");
+        expect(layout.jobTitle.textOverflow).toBe("ellipsis");
+        expect(layout.jobTitle.overlapsStatus).toBe(false);
+        expect(layout.statusRight).toBeLessThanOrEqual(viewport.width);
         expect(layout.routeScrollWidth).toBeLessThanOrEqual(layout.routeWidth + 1);
         expect(layout.labels).toEqual(["block", "block"]);
         expect(layout.names.map((name) => name.title)).toEqual([
@@ -2245,6 +2272,194 @@ test.describe("Jobs detail route and incremental snapshot layout", () => {
         expect(filterGeometry!.bottom).toBeLessThanOrEqual(filterGeometry!.footerTop + 1);
         await testInfo.attach("jobs-route-snapshot-layout", { body: JSON.stringify(layout, null, 2), contentType: "application/json" });
         await page.screenshot({ path: testInfo.outputPath(`jobs-route-snapshot-${viewport.width}x${viewport.height}.png`), fullPage: true });
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+});
+
+test.describe("Settings responsive navigation and notice layout", () => {
+  for (const viewport of [
+    { width: 1440, height: 1000 },
+    { width: 390, height: 844 },
+  ]) {
+    test(`settings sections and alerts stay contained ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
+      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+      const page = await browser.newPage({ viewport });
+      const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
+      const failures: string[] = [];
+      page.on("pageerror", (error) => failures.push(error.message));
+      try {
+        await page.route("**/*", async (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname.startsWith("/api/")) {
+            return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "Synthetic settings read refusal" }) });
+          }
+          if (url.origin !== origin || url.pathname !== "/__qa_settings_layout") return route.continue();
+          return route.fulfill({ contentType: "text/html", body: `<!doctype html>
+            <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+            <link rel="stylesheet" href="/src/styles/marketing-base.css?direct">
+            <link rel="stylesheet" href="/src/styles/app-styles.css?direct"></head>
+            <body><main id="root" class="df2-app" style="display:block;min-height:100vh;padding:12px"></main>
+            <script type="module">
+              import RefreshRuntime from '/@react-refresh';
+              RefreshRuntime.injectIntoGlobalHook(window);
+              window.$RefreshReg$ = () => {};
+              window.$RefreshSig$ = (type) => type;
+              window.__vite_plugin_react_preamble_installed__ = true;
+              const React = (await import('/node_modules/.vite/deps/react.js')).default;
+              const { createRoot } = (await import('/node_modules/.vite/deps/react-dom_client.js')).default;
+              const { SettingsPage } = await import('/src/pages/SettingsPage.tsx');
+              const { ToastProvider } = await import('/src/components/Toast.tsx');
+              const { ConfirmProvider } = await import('/src/components/ui/ConfirmDialog.tsx');
+              const element = React.createElement;
+              createRoot(document.getElementById('root')).render(
+                element(ToastProvider, null, element(ConfirmProvider, null, element(SettingsPage)))
+              );
+            </script></body></html>` });
+        });
+        await page.goto(`${origin}/__qa_settings_layout`);
+        await expect(page.locator(".df2-settings-layout")).toBeVisible();
+        await expect(page.getByRole("tab", { name: /General/ })).toBeVisible();
+        await expect(page.getByTestId("settings-load-error")).toBeVisible();
+        await expect.poll(() => failures).toEqual([]);
+        const layout = await page.evaluate(() => {
+          const nav = document.querySelector<HTMLElement>(".df2-settings-nav")!;
+          const notice = document.querySelector<HTMLElement>("[data-testid=settings-load-error]")!;
+          const section = notice.closest<HTMLElement>(".df2-settings-section")!;
+          const navBox = nav.getBoundingClientRect();
+          const sectionBox = section.getBoundingClientRect();
+          const noticeBox = notice.getBoundingClientRect();
+          return {
+            viewportWidth: innerWidth,
+            documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+            navDisplay: getComputedStyle(nav).display,
+            navGridColumns: getComputedStyle(nav).gridTemplateColumns,
+            navOverflowX: getComputedStyle(nav).overflowX,
+            navOverflowY: getComputedStyle(nav).overflowY,
+            navClientHeight: nav.clientHeight,
+            navScrollHeight: nav.scrollHeight,
+            navClientWidth: nav.clientWidth,
+            navScrollWidth: nav.scrollWidth,
+            tabWidths: Array.from(nav.querySelectorAll<HTMLElement>("button")).map((button) => ({
+              width: button.getBoundingClientRect().width,
+              minWidth: getComputedStyle(button).minWidth,
+              flex: getComputedStyle(button).flex,
+            })),
+            navRight: navBox.right,
+            sectionLeft: sectionBox.left,
+            noticeLeft: noticeBox.left,
+            noticeRight: noticeBox.right,
+            noticeBottom: noticeBox.bottom,
+            sectionBodyTop: section.querySelector(".df2-settings-section-body")?.getBoundingClientRect().top ?? 0,
+          };
+        });
+        expect(layout.documentWidth).toBeLessThanOrEqual(viewport.width);
+        expect(layout.navScrollHeight).toBeLessThanOrEqual(layout.navClientHeight + 1);
+        expect(layout.noticeLeft).toBeGreaterThanOrEqual(0);
+        expect(layout.noticeRight).toBeLessThanOrEqual(viewport.width + 1);
+        expect(layout.noticeBottom).toBeLessThanOrEqual(layout.sectionBodyTop + 1);
+        if (viewport.width <= 1023) {
+          expect(layout.navRight).toBeLessThanOrEqual(viewport.width + 1);
+          expect(layout.navScrollWidth, JSON.stringify({
+            display: layout.navDisplay, columns: layout.navGridColumns,
+            overflowX: layout.navOverflowX, overflowY: layout.navOverflowY,
+            clientWidth: layout.navClientWidth, scrollWidth: layout.navScrollWidth,
+            tabs: layout.tabWidths,
+          })).toBeLessThanOrEqual(layout.navClientWidth + 1);
+        } else {
+          expect(layout.sectionLeft).toBeGreaterThanOrEqual(layout.navRight);
+        }
+        for (const section of ["General", "Security", "Enterprise", "SSO", "Team", "Notifications", "AI Models", "API Keys", "Audit Logs"]) {
+          await page.getByRole("tab", { name: new RegExp(section) }).click();
+          await expect(page.locator('[role="tabpanel"]')).toHaveAttribute("aria-label", section);
+          const sectionLayout = await page.evaluate(() => {
+            const nav = document.querySelector<HTMLElement>(".df2-settings-nav")!;
+            const panel = document.querySelector<HTMLElement>(".df2-settings-panel")!;
+            const buttons = Array.from(document.querySelectorAll<HTMLElement>(".df2-settings-panel button"));
+            return {
+              documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+              navHeightOverflow: nav.scrollHeight - nav.clientHeight,
+              navWidthOverflow: nav.scrollWidth - nav.clientWidth,
+              panelOverflowY: getComputedStyle(panel).overflowY,
+              buttonsOutsideViewport: buttons.some((button) => {
+                const rect = button.getBoundingClientRect();
+                return rect.width > 0 && (rect.left < -1 || rect.right > innerWidth + 1);
+              }),
+            };
+          });
+          expect(sectionLayout.documentWidth, section).toBeLessThanOrEqual(viewport.width);
+          expect(sectionLayout.navHeightOverflow, section).toBeLessThanOrEqual(1);
+          expect(sectionLayout.navWidthOverflow, section).toBeLessThanOrEqual(1);
+          expect(sectionLayout.panelOverflowY, section).not.toMatch(/auto|scroll/);
+          expect(sectionLayout.buttonsOutsideViewport, section).toBe(false);
+          await page.evaluate(() => window.scrollTo(0, 0));
+        }
+        await testInfo.attach("settings-layout", { body: JSON.stringify(layout, null, 2), contentType: "application/json" });
+        await page.screenshot({ path: testInfo.outputPath(`settings-layout-${viewport.width}x${viewport.height}.png`), fullPage: true });
+      } finally {
+        await browser.close();
+      }
+    });
+  }
+});
+
+test.describe("Contracts lifecycle help stays contextual", () => {
+  for (const viewport of [
+    { width: 1440, height: 1000 },
+    { width: 390, height: 844 },
+  ]) {
+    test(`lifecycle help is collapsed until requested ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
+      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+      const page = await browser.newPage({ viewport });
+      const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
+      const failures: string[] = [];
+      page.on("pageerror", (error) => failures.push(error.message));
+      try {
+        await page.route("**/*", async (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname !== "/__qa_contract_lifecycle") return route.continue();
+          return route.fulfill({ contentType: "text/html", body: `<!doctype html>
+            <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+            <link rel="stylesheet" href="/src/styles/marketing-base.css?direct">
+            <link rel="stylesheet" href="/src/styles/app-styles.css?direct"></head>
+            <body><main id="root" class="df2-app" style="display:block;min-height:100vh;padding:12px"></main>
+            <script type="module">
+              import RefreshRuntime from '/@react-refresh';
+              RefreshRuntime.injectIntoGlobalHook(window);
+              window.$RefreshReg$ = () => {};
+              window.$RefreshSig$ = (type) => type;
+              window.__vite_plugin_react_preamble_installed__ = true;
+              const React = (await import('/node_modules/.vite/deps/react.js')).default;
+              const { createRoot } = (await import('/node_modules/.vite/deps/react-dom_client.js')).default;
+              const { ContractsPage } = await import('/src/pages/ContractsPage.tsx');
+              const { ToastProvider } = await import('/src/components/Toast.tsx');
+              const { ConfirmProvider } = await import('/src/components/ui/ConfirmDialog.tsx');
+              const element = React.createElement;
+              createRoot(document.getElementById('root')).render(
+                element(ToastProvider, null, element(ConfirmProvider, null, element(ContractsPage, { active: false })))
+              );
+            </script></body></html>` });
+        });
+        await page.goto(`${origin}/__qa_contract_lifecycle`);
+        const note = page.locator(".df2-contracts-lifecycle-note");
+        await expect(note).toBeVisible();
+        await expect(note).not.toHaveAttribute("open", "");
+        await expect(note).not.toContainText(/policy graph|MDM product/i);
+        const summary = note.locator("summary");
+        await summary.click();
+        await expect(note).toHaveAttribute("open", "");
+        await expect(note).toContainText("Draft contracts are being prepared");
+        expect(failures).toEqual([]);
+        const geometry = await note.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return { left: bounds.left, right: bounds.right, width: bounds.width, scrollWidth: element.scrollWidth };
+        });
+        expect(geometry.left).toBeGreaterThanOrEqual(0);
+        expect(geometry.right).toBeLessThanOrEqual(viewport.width + 1);
+        expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width + 1);
+        await testInfo.attach("contract-lifecycle-geometry", { body: JSON.stringify(geometry), contentType: "application/json" });
       } finally {
         await browser.close();
       }

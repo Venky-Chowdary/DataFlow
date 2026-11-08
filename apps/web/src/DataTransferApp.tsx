@@ -925,6 +925,7 @@ function AppShell({
                   <JobsPage
                     jobs={jobs}
                     history={jobHistory}
+                    onLoadPage={fetchJobs}
                     onRefresh={loadJobs}
                     onStartTransfer={(intent) => {
                       if (intent && (intent.step || intent.repairProposalId || intent.jobId || intent.mappings?.length)) {

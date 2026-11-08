@@ -37,6 +37,19 @@ def test_list_jobs_sorts_mixed_datetime_and_iso_created_at():
     assert [job["_id"] for job in listed] == ["new", "old", "blank"]
 
 
+def test_list_jobs_breaks_equal_timestamp_ties_by_stable_id():
+    store = MemoryMongoDBService()
+    for job_id in ("job-b", "job-a", "job-c"):
+        store._jobs[job_id] = {
+            "_id": job_id,
+            "created_at": "2026-11-08T00:00:00+00:00",
+            "status": "completed",
+            "workspace_id": "ws",
+        }
+    assert [job["_id"] for job in store.list_jobs(limit=2)] == ["job-c", "job-b"]
+    assert [job["_id"] for job in store.list_jobs(limit=2, offset=2)] == ["job-a"]
+
+
 def test_list_connectors_sorts_mixed_datetime_and_iso_created_at():
     store = MemoryMongoDBService()
     store._connectors["old"] = {

@@ -10,7 +10,7 @@ import os
 from services.brand_env import getenv_brand
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from pymongo import MongoClient
@@ -1298,11 +1298,23 @@ class MongoDBService:
         workspace_id: str | None = None,
         *,
         workspace_filter: WorkspaceFilter | None = None,
+        status: str | None = None,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
     ) -> dict[str, Any]:
         """Job total and per-status breakdown over the whole history, not a page of it."""
+        from services.job_list_filters import mongo_job_list_query
+
         db = self.get_database()
         collection = db["transfer_jobs"]
-        query = self._job_scope_query(workspace_id, workspace_filter)
+        query = mongo_job_list_query(
+            self._job_scope_query(workspace_id, workspace_filter),
+            status=status,
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+        )
         by_status: dict[str, int] = {}
         for row in collection.aggregate(
             ([{"$match": query}] if query else [])
@@ -1311,22 +1323,61 @@ class MongoDBService:
             by_status[str(row.get("_id") or "unknown")] = int(row.get("n") or 0)
         return {"total": sum(by_status.values()), "by_status": by_status}
 
+    def count_job_matches(
+        self,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+        status: str | None = None,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> int:
+        from services.job_list_filters import mongo_job_list_query
+
+        query = mongo_job_list_query(
+            self._job_scope_query(workspace_id, workspace_filter),
+            status=status,
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return int(self.get_database()["transfer_jobs"].count_documents(query))
+
     def list_jobs(
         self,
         limit: int = 50,
         workspace_id: str | None = None,
         *,
         workspace_filter: WorkspaceFilter | None = None,
+        offset: int = 0,
+        status: str | None = None,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
     ) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
         from services.connector_request_limits import bounded_job_list_limit
         from services.job_list_view import slim_job_for_list
+        from services.job_list_filters import mongo_job_list_query
 
         limit = bounded_job_list_limit(limit)
+        if limit < 1:
+            return []
+        try:
+            offset = min(max(int(offset), 0), 1_000_000)
+        except (TypeError, ValueError):
+            offset = 0
         db = self.get_database()
         collection = db["transfer_jobs"]
 
-        query: dict[str, Any] = self._job_scope_query(workspace_id, workspace_filter)
+        query = mongo_job_list_query(
+            self._job_scope_query(workspace_id, workspace_filter),
+            status=status,
+            search=search,
+            date_from=date_from,
+            date_to=date_to,
+        )
         jobs = []
         # Projection drops the heaviest arrays at the Mongo layer when possible.
         projection = {
@@ -1347,7 +1398,7 @@ class MongoDBService:
             "reconciliation.mismatches": 0,
             "reconciliation.sample_mismatches": 0,
         }
-        for doc in collection.find(query, projection).sort("created_at", -1).limit(limit):
+        for doc in collection.find(query, projection).sort([("created_at", -1), ("_id", -1)]).skip(offset).limit(limit):
             doc["_id"] = str(doc["_id"])
             for key in ("created_at", "updated_at", "started_at", "completed_at"):
                 if doc.get(key) and hasattr(doc[key], "isoformat"):
@@ -1924,16 +1975,45 @@ class MemoryMongoDBService:
         workspace_id: str | None = None,
         *,
         workspace_filter: WorkspaceFilter | None = None,
+        status: str | None = None,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
     ) -> dict[str, Any]:
         """Job total and per-status breakdown over the whole history, not a page of it."""
+        from services.job_list_filters import memory_job_matches
+
         scope = job_workspace_filter(workspace_id, workspace_filter)
         by_status: dict[str, int] = {}
         for job in self._jobs.values():
-            if not scope.matches(job.get("workspace_id")):
+            if not scope.matches(job.get("workspace_id")) or not memory_job_matches(
+                job, status=status, search=search, date_from=date_from, date_to=date_to
+            ):
                 continue
             key = str(job.get("status") or "unknown")
             by_status[key] = by_status.get(key, 0) + 1
         return {"total": sum(by_status.values()), "by_status": by_status}
+
+    def count_job_matches(
+        self,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+        status: str | None = None,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> int:
+        from services.job_list_filters import memory_job_matches
+
+        scope = job_workspace_filter(workspace_id, workspace_filter)
+        return sum(
+            1 for job in self._jobs.values()
+            if scope.matches(job.get("workspace_id"))
+            and memory_job_matches(
+                job, status=status, search=search, date_from=date_from, date_to=date_to
+            )
+        )
 
     def list_jobs(
         self,
@@ -1941,18 +2021,36 @@ class MemoryMongoDBService:
         workspace_id: str | None = None,
         *,
         workspace_filter: WorkspaceFilter | None = None,
+        offset: int = 0,
+        status: str | None = None,
+        search: str = "",
+        date_from: date | None = None,
+        date_to: date | None = None,
     ) -> list[dict]:
         from services.connector_request_limits import bounded_job_list_limit
         from services.job_list_view import slim_job_for_list
+        from services.job_list_filters import memory_job_matches
 
         limit = bounded_job_list_limit(limit)
+        if limit < 1:
+            return []
+        try:
+            offset = min(max(int(offset), 0), 1_000_000)
+        except (TypeError, ValueError):
+            offset = 0
         scope = job_workspace_filter(workspace_id, workspace_filter)
         items = sorted(
-            (j for j in self._jobs.values() if scope.matches(j.get("workspace_id"))),
-            key=lambda j: _created_sort_stamp(j.get("created_at")),
+            (
+                j for j in self._jobs.values()
+                if scope.matches(j.get("workspace_id"))
+                and memory_job_matches(
+                    j, status=status, search=search, date_from=date_from, date_to=date_to
+                )
+            ),
+            key=lambda j: (_created_sort_stamp(j.get("created_at")), str(j.get("_id") or "")),
             reverse=True,
         )
-        items = items[:limit]
+        items = items[offset : offset + limit]
         out = []
         for rec in items:
             job = dict(rec)

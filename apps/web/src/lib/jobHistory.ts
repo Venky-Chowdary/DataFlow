@@ -17,8 +17,19 @@ export interface JobHistory {
   jobs: TransferJob[];
   /** Jobs in the whole scoped history, not just the page above. */
   total: number;
+  /** Rows matching the current server-side query. Defaults to total on legacy APIs. */
+  filteredTotal: number;
   /** Per-status counts over that same whole history. */
   statusCounts: JobStatusCounts;
+}
+
+export interface JobHistoryQuery {
+  limit: number;
+  offset: number;
+  status: "all" | "running" | "completed" | "failed";
+  search?: string;
+  dateFrom?: string;
+  dateTo?: string;
 }
 
 export interface JobFilterCounts {
@@ -29,7 +40,7 @@ export interface JobFilterCounts {
   failed: number;
 }
 
-export const EMPTY_JOB_HISTORY: JobHistory = { jobs: [], total: 0, statusCounts: {} };
+export const EMPTY_JOB_HISTORY: JobHistory = { jobs: [], total: 0, filteredTotal: 0, statusCounts: {} };
 
 const RUNNING_STATUSES = new Set(["running", "pending", "queued", "retrying"]);
 
@@ -37,6 +48,7 @@ const RUNNING_STATUSES = new Set(["running", "pending", "queued", "retrying"]);
 export function jobHistoryFromResponse(data: {
   jobs?: TransferJob[];
   total?: number;
+  filtered_total?: number;
   status_counts?: JobStatusCounts;
 }): JobHistory {
   const jobs = data.jobs || [];
@@ -44,7 +56,12 @@ export function jobHistoryFromResponse(data: {
   const statusCounts = data.status_counts && Object.keys(data.status_counts).length
     ? data.status_counts
     : statusCountsFromJobs(jobs);
-  return { jobs, total: counted || jobs.length, statusCounts };
+  return {
+    jobs,
+    total: counted || jobs.length,
+    filteredTotal: Number.isFinite(Number(data.filtered_total)) ? Number(data.filtered_total) : counted || jobs.length,
+    statusCounts,
+  };
 }
 
 /** Per-status counts of the rows in hand — only a fallback for an uncounted response. */

@@ -26,6 +26,7 @@ import {
   jobHistoryFromResponse,
   jobWindowNote,
   type JobHistory,
+  type JobHistoryQuery,
 } from "../lib/jobHistory";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from "../lib/uiUtils";
 import { parseServerTimestampMs } from "../lib/jobTheaterProgress";
@@ -246,6 +247,8 @@ interface JobsPageProps {
   /** Whole-history counts; the table still shows the recent page in `jobs`. */
   history?: JobHistory;
   onRefresh?: () => void;
+  /** Fetch a bounded, server-filtered job page for the Jobs screen. */
+  onLoadPage?: (query: JobHistoryQuery) => Promise<JobHistory>;
   /** Open Transfer Studio — optional intent lands on Validate / Map with repair context. */
   onStartTransfer?: (intent?: JobsStudioIntent) => void;
   initialJobId?: string;
@@ -366,7 +369,7 @@ function JobLineageLinks({
   );
 }
 
-export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
+export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, onLoadPage, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const { setActiveData } = useActiveData();
@@ -382,6 +385,15 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const [resuming, setResuming] = useState(false);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [jobSearch, setJobSearch] = useState("");
+  const [createdFrom, setCreatedFrom] = useState("");
+  const [createdTo, setCreatedTo] = useState("");
+  const [dateFilterOpen, setDateFilterOpen] = useState(false);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageSize, setPageSize] = useState(50);
+  const [pageHistory, setPageHistory] = useState<JobHistory | null>(null);
+  const [pageLoading, setPageLoading] = useState(Boolean(onLoadPage));
+  const [pageError, setPageError] = useState("");
+  const [pageRefresh, setPageRefresh] = useState(0);
   const [detailTab, setDetailTab] = useState<JobDetailTab>("detail");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -394,6 +406,57 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const [journalsOpen, setJournalsOpen] = useState(false);
   const appliedFocusRef = useRef<string | null>(null);
   const pinnedJobRef = useRef<string | null>(null);
+  const pageRequestRef = useRef(0);
+  const jobs = pageHistory?.jobs ?? recentJobs;
+  const history = pageHistory ?? recentHistory;
+  const jobPageQuery = useMemo<JobHistoryQuery>(() => ({
+    limit: pageSize,
+    offset: pageIndex * pageSize,
+    status: filter,
+    search: jobSearch.trim() || undefined,
+    dateFrom: createdFrom || undefined,
+    dateTo: createdTo || undefined,
+  }), [pageIndex, pageSize, filter, jobSearch, createdFrom, createdTo]);
+
+  useEffect(() => {
+    if (!onLoadPage) return;
+    const requestId = ++pageRequestRef.current;
+    if (createdFrom && createdTo && createdFrom > createdTo) {
+      setPageError("Start date must be on or before end date.");
+      setPageLoading(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setPageLoading(true);
+      setPageError("");
+      void onLoadPage(jobPageQuery)
+        .then((result) => {
+          if (pageRequestRef.current !== requestId) return;
+          setPageHistory(result);
+        })
+        .catch((error: unknown) => {
+          if (pageRequestRef.current !== requestId) return;
+          setPageError(error instanceof Error ? error.message : "Could not load this Jobs page.");
+        })
+        .finally(() => {
+          if (pageRequestRef.current === requestId) setPageLoading(false);
+        });
+    }, jobSearch.trim() ? 250 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      if (pageRequestRef.current === requestId) pageRequestRef.current += 1;
+    };
+  }, [onLoadPage, jobPageQuery, pageRefresh, createdFrom, createdTo, jobSearch]);
+
+  const changeFilter = (value: JobFilter) => {
+    setPageIndex(0);
+    setFilter(value);
+  };
+
+  const changeSearch = (value: string) => {
+    setPageIndex(0);
+    setJobSearch(value);
+  };
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
 
@@ -456,12 +519,18 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     );
   }, [jobs, filter, jobSearch, nameOverrides]);
 
-  const windowNote = jobWindowNote({
-    counts,
-    filter,
-    loaded: jobs.length,
-    shown: jobSearch.trim() ? undefined : filtered.length,
-  });
+  const filteredTotal = pageHistory?.filteredTotal ?? filtered.length;
+  const pageCount = Math.max(1, Math.ceil(filteredTotal / pageSize));
+  const pageStart = filtered.length ? pageIndex * pageSize + 1 : 0;
+  const pageEnd = pageIndex * pageSize + filtered.length;
+  const windowNote = onLoadPage
+    ? undefined
+    : jobWindowNote({
+        counts,
+        filter,
+        loaded: jobs.length,
+        shown: jobSearch.trim() ? undefined : filtered.length,
+      });
 
   useEffect(() => {
     const ids = jobs.map((j) => j._id);
@@ -611,6 +680,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
 
   const refreshJobsAndDetail = useCallback(() => {
     onRefresh?.();
+    setPageRefresh((value) => value + 1);
     setDetailNonce((n) => n + 1);
   }, [onRefresh]);
 
@@ -681,8 +751,12 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     pinnedJobRef.current = id;
     setFilter("all");
     setJobSearch("");
+    setCreatedFrom("");
+    setCreatedTo("");
+    setPageIndex(0);
     setSelectedId(id);
     onRefresh?.();
+    setPageRefresh((value) => value + 1);
     window.requestAnimationFrame(() => {
       document.getElementById(`job-item-${id}`)?.scrollIntoView({
         behavior: "smooth",
@@ -1070,7 +1144,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
       description="Live progress, phases, quarantine, and Gate-8 proof for every transfer."
     >
       <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3">
-        {jobs.length === 0 ? (
+        {jobs.length === 0 && (history?.total ?? 0) === 0 && !pageLoading ? (
           <EmptyState
             page
             icon="jobs"
@@ -1092,14 +1166,14 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
           <>
             <PageToolbar
               searchValue={jobSearch}
-              onSearchChange={setJobSearch}
-              searchPlaceholder="Search route, type, status, job id…"
+              onSearchChange={changeSearch}
+              searchPlaceholder="Search all jobs by route, type, status, or ID…"
               filters={
                 <FilterBar variant="inline" ariaLabel="Filter jobs by status">
                   <FilterTabs
                     ariaLabel="Filter jobs by status"
                     value={filter}
-                    onChange={setFilter}
+                    onChange={changeFilter}
                     items={([
                       { id: "all", label: "All", count: counts.all },
                       { id: "running", label: "Running", count: counts.running },
@@ -1111,6 +1185,14 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
               }
               actions={
                 <>
+                  <Button
+                    size="sm"
+                    variant={dateFilterOpen || createdFrom || createdTo ? "secondary" : "ghost"}
+                    aria-expanded={dateFilterOpen}
+                    onClick={() => setDateFilterOpen((value) => !value)}
+                  >
+                    {createdFrom || createdTo ? "Date range active" : "Date range"}
+                  </Button>
                   <Button size="sm" variant="ghost" onClick={() => setJournalsOpen(true)} leadingIcon={<DtIcon name="database" size={14} />}>
                     Journals
                   </Button>
@@ -1123,17 +1205,62 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
               }
             />
 
+            {dateFilterOpen && (
+              <section className="df2-jobs-date-filter" aria-label="Filter jobs by creation date">
+                <label>
+                  <span>Created from (UTC)</span>
+                  <input
+                    type="date"
+                    className="df2-input"
+                    value={createdFrom}
+                    max={createdTo || undefined}
+                    onChange={(event) => { setPageIndex(0); setCreatedFrom(event.target.value); }}
+                  />
+                </label>
+                <label>
+                  <span>Created to (UTC)</span>
+                  <input
+                    type="date"
+                    className="df2-input"
+                    value={createdTo}
+                    min={createdFrom || undefined}
+                    onChange={(event) => { setPageIndex(0); setCreatedTo(event.target.value); }}
+                  />
+                </label>
+                <span className="df2-jobs-date-filter-note">Dates use UTC calendar days.</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={!createdFrom && !createdTo}
+                  onClick={() => { setPageIndex(0); setCreatedFrom(""); setCreatedTo(""); }}
+                >
+                  Clear dates
+                </Button>
+              </section>
+            )}
+
             <div className={`df2-jobs-v3-layout${selectedId && !mobileListOpen ? " has-selection" : ""}${mobileListOpen ? " is-mobile-list-open" : ""}`}>
-              <aside className="df2-jobs-v3-list" role="list" aria-label="Transfer jobs">
-                {filtered.length === 0 ? (
+              <aside className="df2-jobs-v3-list" role="list" aria-label="Transfer jobs" aria-busy={pageLoading || undefined}>
+                {pageLoading && <p className="df2-jobs-page-loading" role="status">Updating job results…</p>}
+                {pageError && (
+                  <p className="df2-jobs-page-error" role="alert">
+                    Could not load this job query: {pageError}{" "}
+                    <Button size="sm" variant="ghost" onClick={() => setPageRefresh((value) => value + 1)}>Retry</Button>
+                  </p>
+                )}
+                {pageError ? (
+                  <EmptyState compact icon="alert" title="Job results unavailable" description="The last query did not complete. Retry to load this page." />
+                ) : filtered.length === 0 ? (
                   <EmptyState
                     compact
                     icon="search"
-                    title={jobSearch ? "No matches" : "No jobs in this view"}
+                    title={jobSearch || createdFrom || createdTo ? "No matches" : "No jobs in this view"}
                     description={
                       jobSearch
                         ? `No jobs match "${jobSearch}".`
-                        : `No ${filter === "all" ? "" : filter} jobs in this filter.`
+                        : createdFrom || createdTo
+                          ? "No jobs were created in this date range."
+                          : `No ${filter === "all" ? "" : filter} jobs in this filter.`
                     }
                   />
                 ) : (
@@ -1209,6 +1336,32 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                   })
                 )}
                 {windowNote && <p className="df2-jobs-v3-window-note">{windowNote}</p>}
+                {onLoadPage && pageHistory && !pageError && (
+                  <nav className="df2-jobs-pagination" aria-label="Job list pages">
+                    <span className="df2-jobs-pagination-range">
+                      {filteredTotal === 0
+                        ? "No matching jobs"
+                        : `Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filteredTotal.toLocaleString()}`}
+                    </span>
+                    <label className="df2-jobs-page-size">
+                      <span>Rows</span>
+                      <select
+                        className="df2-input df2-select"
+                        value={pageSize}
+                        onChange={(event) => { setPageIndex(0); setPageSize(Number(event.target.value)); }}
+                      >
+                        {[25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
+                      </select>
+                    </label>
+                    <Button size="sm" variant="ghost" disabled={pageIndex === 0 || pageLoading} onClick={() => setPageIndex((value) => Math.max(0, value - 1))}>
+                      Previous
+                    </Button>
+                    <span className="df2-jobs-pagination-page">Page {pageIndex + 1} of {pageCount}</span>
+                    <Button size="sm" variant="ghost" disabled={pageIndex + 1 >= pageCount || pageLoading} onClick={() => setPageIndex((value) => value + 1)}>
+                      Next
+                    </Button>
+                  </nav>
+                )}
               </aside>
 
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
@@ -1275,20 +1428,32 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                   <div className={`df2-jobs-v3-summary ${selected.status === "failed" ? "is-failed" : "is-done"}`}>
                     <header className="df2-jobs-v3-summary-head">
                       <div className="df2-jobs-v3-summary-identity">
-                        <JobNameEditor
-                          displayName={jobDisplayName(
-                            { ...selected, name: liveJob.name || selected.name },
-                            nameOverrides[selected._id],
-                          )}
-                          editing={renamingId === selected._id}
-                          draft={renameDraft}
-                          error={renameError}
-                          saving={renameSaving}
-                          onBegin={() => beginRename({ ...selected, name: liveJob.name || selected.name })}
-                          onDraftChange={(v) => onRenameDraftChange(v, selected._id)}
-                          onSave={() => void commitRename(selected._id)}
-                          onCancel={cancelRename}
-                        />
+                        <div className="df2-jobs-v3-summary-title-line">
+                          <JobNameEditor
+                            displayName={jobDisplayName(
+                              { ...selected, name: liveJob.name || selected.name },
+                              nameOverrides[selected._id],
+                            )}
+                            editing={renamingId === selected._id}
+                            draft={renameDraft}
+                            error={renameError}
+                            saving={renameSaving}
+                            onBegin={() => beginRename({ ...selected, name: liveJob.name || selected.name })}
+                            onDraftChange={(v) => onRenameDraftChange(v, selected._id)}
+                            onSave={() => void commitRename(selected._id)}
+                            onCancel={cancelRename}
+                          />
+                          <div className="df2-jobs-v3-summary-ids">
+                            <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
+                            <span
+                              className={`df2-jobs-v3-summary-dest ${destMetricToneClass(destMetric)}`}
+                              title={destMetric.title}
+                            >
+                              {destMetricCompact(destMetric)}
+                            </span>
+                            <CopyIdChip id={selected._id} label="Job" />
+                          </div>
+                        </div>
                         <div className="df2-jobs-v3-summary-route">
                           <ConnectorIcon id={selected.source_type} size={22} />
                           <div className="df2-jobs-v3-summary-endpoint">
@@ -1311,16 +1476,6 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                           childId={liveJob.last_sync_job_id || selected.last_sync_job_id}
                           onOpen={focusJob}
                         />
-                      </div>
-                      <div className="df2-jobs-v3-summary-ids">
-                        <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
-                        <span
-                          className={`df2-jobs-v3-summary-dest ${destMetricToneClass(destMetric)}`}
-                          title={destMetric.title}
-                        >
-                          {destMetricCompact(destMetric)}
-                        </span>
-                        <CopyIdChip id={selected._id} label="Job" />
                       </div>
                     </header>
 

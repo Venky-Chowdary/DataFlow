@@ -1,13 +1,14 @@
 /** Shared UI helpers — single source for status badges and formatting */
 
 /** Success terminal statuses (data landed in the destination). */
-export const JOB_SUCCESS_STATUSES = ["completed", "completed_with_quarantine", "success", "succeeded"] as const;
+export const JOB_SUCCESS_STATUSES = ["completed", "completed_with_quarantine", "completed_with_warnings", "success", "succeeded"] as const;
 
 /** True when the job succeeded — includes the success-with-warnings state. */
 export function isJobSuccess(status: string | undefined): boolean {
   return (
     status === "completed"
     || status === "completed_with_quarantine"
+    || status === "completed_with_warnings"
     || status === "success"
     || status === "succeeded"
   );
@@ -18,6 +19,7 @@ export function isJobTerminal(status: string | undefined): boolean {
   return (
     status === "completed"
     || status === "completed_with_quarantine"
+    || status === "completed_with_warnings"
     || status === "success"
     || status === "succeeded"
     || status === "failed"
@@ -50,6 +52,8 @@ export function jobStatusLabel(status: string): string {
       return "Completed";
     case "completed_with_quarantine":
       return "Completed with quarantine";
+    case "completed_with_warnings":
+      return "Completed with warnings";
     case "failed":
       return "Failed";
     case "running":
@@ -68,7 +72,7 @@ export function jobStatusLabel(status: string): string {
 export function jobStatusBadgeClass(status: string): string {
   if (status === "completed") return "df2-badge df2-badge-live";
   // Success-with-warnings: amber, distinct from clean green and red failure.
-  if (status === "completed_with_quarantine") return "df2-badge df2-badge-warn";
+  if (status === "completed_with_quarantine" || status === "completed_with_warnings") return "df2-badge df2-badge-warn";
   if (status === "failed") return "df2-badge df2-badge-error";
   if (status === "running" || status === "pending") return "df2-badge df2-badge-run";
   // Parked on a decision: not a failure, but nothing moves until someone answers.

@@ -874,12 +874,13 @@
   max-width: 100%;
   padding: 6px 10px;
   border-radius: 8px;
-  border: 1px solid transparent;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
   background: transparent;
   color: var(--df-text-secondary);
   font-size: 12px;
   font-weight: 600;
-  cursor: pointer;
+  white-space: nowrap;
 }
 
 .df2-multistream-tab:hover {
@@ -10643,21 +10644,43 @@ button.df2-vd-assist-toggle:focus-visible {
   min-width: 0;
   max-width: min(300px, 100%);
   flex: 1 1 0;
+  align-items: center;
+  max-height: 48px;
   padding: 5px 8px;
   border-radius: 8px;
   gap: 6px;
 }
 .df2-toast-dock .dt-toast-body {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   overflow: hidden;
+  padding-top: 0;
 }
-.df2-toast-dock .dt-toast-title,
-.df2-toast-dock .dt-toast-message {
+.df2-toast-dock .dt-toast-title {
+  display: block;
+  flex: 0 1 auto;
+  max-width: 44%;
   overflow: hidden;
-  white-space: normal;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-clamp: unset;
+  -webkit-line-clamp: unset;
+  line-height: 1.25;
+}
+.df2-toast-dock .dt-toast-message {
+  display: block;
+  flex: 1 1 0;
+  min-width: 0;
+  max-height: none;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-clamp: unset;
+  -webkit-line-clamp: unset;
+  line-height: 1.25;
 }
 .df2-toast-dock .dt-toast-message {
   font-size: 11px;

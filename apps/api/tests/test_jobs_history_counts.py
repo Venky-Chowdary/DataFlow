@@ -8,6 +8,7 @@ the operator could not tell which number was true.
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 _API_ROOT = Path(__file__).resolve().parents[1]
@@ -90,3 +91,65 @@ def test_empty_history_reports_zero(client):
     assert body["total"] == 0
     assert body["status_counts"] == {}
     assert body["jobs"] == []
+
+
+def test_job_list_pages_searches_filters_and_counts_the_matching_slice(client):
+    mongo = get_mongodb_service()
+    records = [
+        ("needle-orders-0", "completed", 1),
+        ("needle-orders-1", "failed", 2),
+        ("other-orders-2", "failed", 3),
+        ("needle-orders-3", "failed", 4),
+        ("needle-orders-4", "running", 5),
+        ("needle-orders-5", "completed", 6),
+    ]
+    for name, status, day in records:
+        job_id = mongo.create_transfer_job({
+            "name": name,
+            "source_name": name,
+            "source_type": "postgresql",
+            "destination_type": "mysql",
+            "destination_database": "warehouse",
+            "destination_collection": name,
+        })
+        mongo._jobs[job_id]["created_at"] = datetime(2026, 11, day, tzinfo=timezone.utc)
+        mongo.update_job_status(job_id, status)
+
+    page = client.get("/api/v1/connectors/jobs?limit=2&offset=2").json()
+    assert [job["name"] for job in page["jobs"]] == ["needle-orders-3", "other-orders-2"]
+    assert page["total"] == 6
+    assert page["filtered_total"] == 6
+    assert page["limit"] == 2
+    assert page["offset"] == 2
+    assert page["status_counts"]["failed"] == 3
+
+    filtered = client.get(
+        "/api/v1/connectors/jobs?limit=1&offset=1&status=failed&search=needle-orders"
+        "&date_from=2026-11-02&date_to=2026-11-04"
+    ).json()
+    assert filtered["filtered_total"] == 2
+    assert [job["name"] for job in filtered["jobs"]] == ["needle-orders-1"]
+    assert filtered["total"] == 6
+
+
+def test_jobs_alias_forwards_paging_and_filter_parameters(client):
+    mongo = get_mongodb_service()
+    for name, status in (("needle-orders-a", "failed"), ("needle-orders-b", "failed"), ("other-orders", "failed")):
+        mongo.create_transfer_job({
+            "name": name,
+            "source_type": "postgresql",
+            "destination_type": "mysql",
+            "destination_database": "warehouse",
+            "destination_collection": name,
+            "status": status,
+            "created_at": datetime(2026, 11, 8, tzinfo=timezone.utc),
+        })
+
+    query = "?limit=1&offset=1&status=failed&search=needle-orders&date_from=2026-11-08&date_to=2026-11-08"
+    connectors = client.get(f"/api/v1/connectors/jobs{query}")
+    alias = client.get(f"/api/v1/jobs{query}")
+
+    assert connectors.status_code == alias.status_code == 200
+    assert alias.json() == connectors.json()
+    assert alias.json()["filtered_total"] == 2
+    assert len(alias.json()["jobs"]) == 1

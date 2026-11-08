@@ -4,7 +4,7 @@ import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
-import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
+import { JobHistory, JobHistoryQuery, jobHistoryFromResponse } from "./jobHistory";
 import { apiBearerToken, apiUnauthorizedEndsSession, clearSession, getSessionActor, readSession } from "./session";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
@@ -1482,13 +1482,22 @@ export async function fetchConnectors(): Promise<Connector[]> {
 }
 
 /** Recent jobs plus the whole-history counts the operator-visible totals read. */
-export async function fetchJobs(): Promise<JobHistory> {
+export async function fetchJobs(query: Partial<JobHistoryQuery> = {}): Promise<JobHistory> {
+  const params = new URLSearchParams();
+  if (query.limit != null) params.set("limit", String(query.limit));
+  if (query.offset != null) params.set("offset", String(query.offset));
+  if (query.status) params.set("status", query.status);
+  if (query.search?.trim()) params.set("search", query.search.trim());
+  if (query.dateFrom) params.set("date_from", query.dateFrom);
+  if (query.dateTo) params.set("date_to", query.dateTo);
+  const suffix = params.size ? `?${params.toString()}` : "";
   const data = await requestJson<{
     jobs?: TransferJob[];
     total?: number;
+    filtered_total?: number;
     status_counts?: Record<string, number>;
   }>(
-    [`${API_BASE}/connectors/jobs`],
+    [`${API_BASE}/connectors/jobs${suffix}`],
     "Failed to load jobs",
     { timeoutMs: 45_000 },
   );

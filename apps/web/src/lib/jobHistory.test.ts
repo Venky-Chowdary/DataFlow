@@ -51,6 +51,18 @@ test("an uncounted response falls back to the rows it returned", () => {
   assert.equal(counts.all, 3);
 });
 
+test("server-filtered totals preserve zero and remain separate from whole-history totals", () => {
+  const history = jobHistoryFromResponse({
+    jobs: [],
+    total: 240,
+    filtered_total: 0,
+    status_counts: { completed: 240 },
+  });
+  assert.equal(history.total, 240);
+  assert.equal(history.filteredTotal, 0);
+  assert.equal(jobFilterCounts(history).all, 240);
+});
+
 test("an empty history counts zero everywhere", () => {
   const counts = jobFilterCounts(jobHistoryFromResponse({ jobs: [], total: 0, status_counts: {} }));
   assert.deepEqual(counts, { all: 0, running: 0, completed: 0, quarantine: 0, failed: 0 });

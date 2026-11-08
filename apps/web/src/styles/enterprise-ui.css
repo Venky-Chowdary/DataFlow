@@ -5002,6 +5002,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-preflight.is-compact .df2-preflight-step-msg {
   display: -webkit-box;
+  line-clamp: 1;
   -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
@@ -7115,6 +7116,112 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: var(--df-text-muted);
 }
 
+.df2-jobs-date-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 14px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
+}
+
+.df2-jobs-date-filter label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--df-text-secondary);
+}
+
+.df2-jobs-date-filter input[type="date"] {
+  width: 160px;
+  max-width: 100%;
+  height: 36px;
+  min-height: 36px;
+  box-sizing: border-box;
+}
+
+.df2-jobs-date-filter-note {
+  padding-bottom: 8px;
+  font-size: 11px;
+  color: var(--df-text-muted);
+}
+
+.df2-jobs-page-loading,
+.df2-jobs-page-error {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.df2-jobs-page-loading {
+  color: var(--df-text-muted);
+}
+
+.df2-jobs-page-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--df-danger);
+}
+
+.df2-jobs-pagination {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding: 8px;
+  border-top: 1px solid var(--df-border);
+  background: var(--df-surface);
+}
+
+.df2-jobs-pagination-range,
+.df2-jobs-pagination-page {
+  font-size: 11px;
+  color: var(--df-text-secondary);
+}
+
+.df2-jobs-page-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--df-text-secondary);
+}
+
+.df2-jobs-page-size select {
+  width: 68px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 6px;
+}
+
+@media (max-width: 720px) {
+  .df2-jobs-pagination {
+    justify-content: center;
+  }
+
+  .df2-jobs-pagination-range {
+    flex: 1 0 100%;
+    text-align: center;
+  }
+}
+
+.df2-jobs-date-filter,
+.df2-jobs-pagination {
+  min-width: 0;
+  box-sizing: border-box;
+}
+
 /* Query playground — keep editor/results from overlapping */
 .df2-page-query .df2-query-layout,
 .df2-query-page {
@@ -7143,6 +7250,55 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-self: start;
   max-height: calc(100vh - 120px);
   overflow-y: auto;
+}
+
+@media (max-width: 1023px) {
+  .df2-page-settings .df2-settings-nav {
+    position: static;
+    top: auto;
+    max-height: none;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+  }
+}
+
+@media (max-height: 760px) and (min-width: 1024px) {
+  .df2-page-settings .df2-settings-nav {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+@media (max-width: 720px) {
+  .df2-page-settings .df2-settings-section-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding: 14px 16px;
+  }
+
+  .df2-page-settings .df2-settings-section-actions {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .df2-page-settings .df2-alert-banner {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .df2-page-settings .df2-alert-banner-body,
+  .df2-page-settings .df2-alert-banner-actions {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .df2-page-settings .df2-alert-banner-actions {
+    justify-content: flex-start;
+  }
 }
 
 /* Shared toolbar / form size utilities used across pages */
@@ -8307,13 +8463,47 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-jobs-v3-summary-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: block;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--df-border);
+}
+
+.df2-jobs-v3-summary-identity {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+.df2-app .df2-jobs-v3-summary-title-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.df2-app .df2-jobs-v3-summary-title-line .df2-job-name-editor,
+.df2-app .df2-jobs-v3-summary-title-line .df2-job-name-editor.is-view {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.df2-app .df2-jobs-v3-summary-title-line .df2-job-name-editor-title {
+  flex: 1 1 0;
+  max-width: min(100%, 56ch);
+}
+
+.df2-app .df2-jobs-v3-summary-title-line .df2-jobs-v3-summary-ids {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .df2-jobs-v3-summary-route {
@@ -8346,9 +8536,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr) 14px 22px minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  gap: 8px 10px;
   width: 100%;
-  max-width: 920px;
+  max-width: min(100%, 1040px);
   min-width: 0;
 }
 
@@ -8374,6 +8564,22 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .df2-app .df2-jobs-v3-summary-title-line {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+  }
+
+  .df2-app .df2-jobs-v3-summary-title-line .df2-jobs-v3-summary-ids {
+    justify-content: flex-start;
+  }
+
+  .df2-jobs-v3-summary-route {
+    max-width: 100%;
+  }
 }
 
 .df2-jobs-v3-summary-phases {
@@ -8778,6 +8984,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   line-height: 1.4;
   color: var(--df-text-secondary);
   display: -webkit-box;
+  line-clamp: 2;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
@@ -11534,6 +11741,99 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 16px;
   min-height: 0;
   width: 100%;
+}
+
+.df2-contracts-lifecycle-note {
+  align-self: flex-start;
+  max-width: 100%;
+  width: 100%;
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--df-border);
+  color: var(--df-text-secondary);
+}
+
+.df2-contracts-lifecycle-note summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  color: var(--df-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.df2-contracts-lifecycle-note summary svg {
+  color: var(--df-brand-strong);
+}
+
+.df2-contracts-lifecycle-note p {
+  max-width: 80ch;
+  margin: 6px 0 0 22px;
+  color: var(--df-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 1023px) {
+  .df2-app .df2-page-settings .df2-settings-nav {
+    position: static;
+    top: auto;
+    max-height: none;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    overflow: visible;
+  }
+
+  .df2-app .df2-page-settings .df2-settings-nav button {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    min-height: 42px;
+    padding: 8px;
+    gap: 7px;
+  }
+}
+
+@media (max-height: 760px) and (min-width: 1024px) {
+  .df2-app .df2-page-settings .df2-settings-nav {
+    position: static;
+    top: auto;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+@media (max-width: 720px) {
+  .df2-app .df2-page-settings .df2-settings-section-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding: 14px 16px;
+  }
+
+  .df2-app .df2-page-settings .df2-settings-section-actions {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .df2-app .df2-page-settings .df2-alert-banner {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .df2-app .df2-page-settings .df2-alert-banner-body,
+  .df2-app .df2-page-settings .df2-alert-banner-actions {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .df2-app .df2-page-settings .df2-alert-banner-actions {
+    justify-content: flex-start;
+  }
 }
 
 .df2-page-contracts .df2-page-body,

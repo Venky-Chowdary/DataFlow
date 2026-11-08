@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, afterEach, describe, it } from "node:test";
 import { JSDOM } from "jsdom";
 import type { TransferJob } from "../lib/types.js";
+import type { JobHistory, JobHistoryQuery } from "../lib/jobHistory.js";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost/",
@@ -61,7 +62,11 @@ const jobs: TransferJob[] = ["alpha", "beta"].map((name) => ({
 let root: ReturnType<typeof createRoot> | undefined;
 let host: HTMLDivElement;
 
-async function render(list = jobs, initialJobId?: string) {
+async function render(
+  list = jobs,
+  initialJobId?: string,
+  onLoadPage?: (query: JobHistoryQuery) => Promise<JobHistory>,
+) {
   if (!root) {
     host = document.createElement("div");
     document.body.appendChild(host);
@@ -69,7 +74,7 @@ async function render(list = jobs, initialJobId?: string) {
   }
   await act(async () => {
     root!.render(createElement(ToastProvider, null,
-      createElement(ConfirmProvider, null, createElement(JobsPage, { jobs: list, initialJobId })),
+      createElement(ConfirmProvider, null, createElement(JobsPage, { jobs: list, initialJobId, onLoadPage })),
     ));
   });
 }
@@ -285,4 +290,67 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
 after(() => {
   globalThis.fetch = originalFetch;
   dom.window.close();
+});
+
+describe("Jobs server-backed list queries", () => {
+  it("pages through history and sends status, search, and date filters to the API callback", async () => {
+    mobile = false;
+    const queries: JobHistoryQuery[] = [];
+    const loadPage = async (query: JobHistoryQuery): Promise<JobHistory> => {
+      queries.push(query);
+      const resultJob = query.search ? { ...jobs[0], name: `Import ${query.search}` } : jobs[0];
+      return {
+        jobs: [resultJob],
+        total: 120,
+        filteredTotal: query.search || query.dateFrom || query.status !== "all" ? 1 : 120,
+        statusCounts: { completed: 80, failed: 20, running: 20 },
+      };
+    };
+    const settle = async () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+
+    await render([jobs[0]], undefined, loadPage);
+    await settle();
+    assert.equal(queries[0].limit, 50);
+    assert.equal(queries[0].offset, 0);
+
+    const initialRequestCount = queries.length;
+    await render([{ ...jobs[0], records_processed: 11 }], undefined, loadPage);
+    await settle();
+    assert.equal(queries.length, initialRequestCount, "recent-feed updates should not reload the server page");
+
+    const next = Array.from(host.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "Next");
+    assert.ok(next);
+    await click(next);
+    await settle();
+    assert.equal(queries.at(-1)?.offset, 50);
+
+    const dateToggle = Array.from(host.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "Date range");
+    assert.ok(dateToggle);
+    await click(dateToggle);
+    const dateInputs = Array.from(host.querySelectorAll<HTMLInputElement>('input[type="date"]'));
+    assert.equal(dateInputs.length, 2);
+    const setInput = async (input: HTMLInputElement, value: string) => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(input, value);
+      await act(async () => input.dispatchEvent(new dom.window.Event("input", { bubbles: true })));
+      await act(async () => input.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
+    };
+    await setInput(dateInputs[0], "2026-11-01");
+    await setInput(dateInputs[1], "2026-11-08");
+    await settle();
+
+    const search = host.querySelector<HTMLInputElement>('input[type="search"]');
+    assert.ok(search);
+    await setInput(search, "orders_feed");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)); });
+    const latest = queries.at(-1);
+    assert.equal(latest?.offset, 0);
+    assert.equal(latest?.status, "all");
+    assert.equal(latest?.search, "orders_feed");
+    assert.equal(latest?.dateFrom, "2026-11-01");
+    assert.equal(latest?.dateTo, "2026-11-08");
+    assert.match(host.textContent || "", /Showing 1–1 of 1/);
+  });
 });
