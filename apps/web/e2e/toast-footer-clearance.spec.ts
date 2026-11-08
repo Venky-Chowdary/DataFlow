@@ -1481,14 +1481,20 @@ async function pendingFeatureHarness(page: Page, origin: string, fixture: string
         function ToastFixture() {
           const { toast } = useToast();
           const emit = () => {
-            for (let index = 1; index <= 3; index++) toast({ tone: 'warning',
+            const count = params.get('fixture') === 'toast-single' ? 1 : 3;
+            for (let index = 1; index <= count; index++) toast({ tone: 'warning',
               title: 'Synthetic warning ' + index,
               message: ('Order identity requires explicit operator review before any write. ' +
                 'Inspect the full schema policy and destination constraints. ').repeat(8) + 'END-WARNING-' + index });
           };
           return element('section', { className: 'df2-page-transfer-studio' },
+            element('header', { className: 'df2-transfer-studio-chrome' },
+              element('div', { className: 'df2-transfer-studio-chrome-row' },
+                element('div', { className: 'df2-wizard-studio' },
+                  element('div', { className: 'df2-wizard-track' }, 'Source  Destination  Transform  Map  Validate  Run')),
+                element('div', { className: 'df2-route-bar' }, 'Postgres source  →  MySQL destination  ·  5.1k rows'),
+                element('div', { className: 'df2-toast-dock', 'data-df2-toast-dock': '' }))),
             element('button', { onClick: emit }, 'Emit synthetic warnings'),
-            element('div', { className: 'df2-toast-dock', 'data-df2-toast-dock': '' }),
             element('button', null, 'Stable focus target'));
         }
         createRoot(document.getElementById('root')).render(params.get('fixture') === 'drawer'
@@ -1587,7 +1593,8 @@ test.describe("pending feature browser QA", () => {
           const toastBox = node.getBoundingClientRect();
           const bodyBox = node.querySelector(".dt-toast-body")!.getBoundingClientRect();
           const buttons = Array.from(node.querySelectorAll("button")).map(button => button.getBoundingClientRect());
-          return { titleWhiteSpace: titleStyle.whiteSpace, titleHeight: titleBox.height,
+          return { width: toastBox.width, titleWidth: titleBox.width, messageWidth: box.width,
+            titleWhiteSpace: titleStyle.whiteSpace, titleHeight: titleBox.height,
             titleLineHeight: parseFloat(titleStyle.lineHeight), titleOverflow: titleStyle.textOverflow,
             whiteSpace: style.whiteSpace, height: box.height, lineHeight: parseFloat(style.lineHeight),
             contained: toastBox.left >= 0 && toastBox.right <= innerWidth + 1,
@@ -1595,6 +1602,9 @@ test.describe("pending feature browser QA", () => {
             clipped: buttons.some(button => button.right > toastBox.right + 1) };
         }));
         for (const snapshot of preview) {
+          expect(snapshot.width).toBeGreaterThanOrEqual(180);
+          expect(snapshot.titleWidth).toBeGreaterThan(20);
+          expect(snapshot.messageWidth).toBeGreaterThan(20);
           expect(snapshot.titleWhiteSpace).toBe("nowrap");
           expect(snapshot.titleHeight).toBeLessThanOrEqual(snapshot.titleLineHeight + 2);
           expect(snapshot.titleOverflow).toBe("ellipsis");
@@ -1684,6 +1694,28 @@ test.describe("pending feature browser QA", () => {
       }
     });
   }
+
+  test("single Transfer Studio toast has readable width", async ({ playwright, baseURL }) => {
+    const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
+    try {
+      await pendingFeatureHarness(page, origin, "fixture=toast-single");
+      await page.getByRole("button", { name: "Emit synthetic warnings", exact: true }).click();
+      const toast = page.locator(".df2-toast-dock .dt-toast");
+      await expect(toast).toHaveCount(1);
+      const geometry = await toast.evaluate(node => ({
+        width: node.getBoundingClientRect().width,
+        titleWidth: node.querySelector(".dt-toast-title")!.getBoundingClientRect().width,
+        messageWidth: node.querySelector(".dt-toast-message")!.getBoundingClientRect().width,
+      }));
+      expect(geometry.width).toBeGreaterThanOrEqual(180);
+      expect(geometry.titleWidth).toBeGreaterThan(20);
+      expect(geometry.messageWidth).toBeGreaterThan(20);
+    } finally {
+      await browser.close();
+    }
+  });
 });
 
 /**

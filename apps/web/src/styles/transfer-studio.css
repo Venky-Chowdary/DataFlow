@@ -10620,6 +10620,16 @@ button.df2-vd-assist-toggle:focus-visible {
   max-width: min(560px, 44vw);
   overflow: hidden;
 }
+@media (min-width: 1281px) {
+  .df2-page-transfer-studio .df2-toast-dock:has(.dt-toast-host > .dt-toast:only-child) {
+    width: min(300px, 44vw);
+    flex: 0 1 min(300px, 44vw);
+  }
+  .df2-page-transfer-studio .df2-toast-dock:has(.dt-toast-host > .dt-toast:nth-child(2)) {
+    width: min(560px, 44vw);
+    flex: 0 1 min(560px, 44vw);
+  }
+}
 .df2-toast-dock .dt-toast-host {
   position: static;
   display: flex;
