@@ -4202,6 +4202,61 @@ export async function addWorkspaceMember(
   return { membership: data.membership, hasAccount: !!data.has_account, temporaryPassword: data.temporary_password ?? null };
 }
 
+export interface WorkspaceInvite {
+  id: string;
+  workspace_id: string;
+  email: string;
+  name: string;
+  role: WorkspaceRole;
+  status: "pending" | "expired" | "accepted" | "revoked";
+  invited_by: string;
+  invited_by_name: string;
+  created_at: string;
+  last_sent_at: string;
+  expires_at: string;
+  sent_count: number;
+}
+
+export async function fetchWorkspaceInvites(workspaceId: string): Promise<WorkspaceInvite[]> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/invites`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load invitations"));
+  return (await res.json()).invites ?? [];
+}
+
+/** Email a single-use link to join the workspace; nothing is granted until it is accepted. */
+export async function sendWorkspaceInvite(
+  workspaceId: string,
+  email: string,
+  role: WorkspaceRole,
+  name = "",
+): Promise<WorkspaceInvite> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/invites`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, role, name }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to send invitation"));
+  return (await res.json()).invite as WorkspaceInvite;
+}
+
+/** Re-send with a fresh link; the previous link stops working. */
+export async function resendWorkspaceInvite(workspaceId: string, inviteId: string): Promise<WorkspaceInvite> {
+  const res = await apiFetch(
+    `${API_BASE}/team/workspaces/${workspaceId}/invites/${encodeURIComponent(inviteId)}/resend`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to resend invitation"));
+  return (await res.json()).invite as WorkspaceInvite;
+}
+
+export async function revokeWorkspaceInvite(workspaceId: string, inviteId: string): Promise<void> {
+  const res = await apiFetch(
+    `${API_BASE}/team/workspaces/${workspaceId}/invites/${encodeURIComponent(inviteId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke invitation"));
+}
+
 export async function updateWorkspaceMemberRole(
   workspaceId: string,
   email: string,

@@ -96,7 +96,22 @@ export function isResetLinkRoute(pathname: string, hash: string): boolean {
  * header. Returns "" for any other route.
  */
 export function resetLinkToken(pathname: string, hash: string): string {
-  if (pathname !== "/reset-password") return "";
+  return emailedLinkToken("/reset-password", pathname, hash);
+}
+
+/** Workspace invitation links: `/accept-invite#token=…`, then `#/accept-invite`. */
+export function isInviteLinkRoute(pathname: string, hash: string): boolean {
+  return pathname === "/accept-invite"
+    || hash.split("?")[0] === "#/accept-invite";
+}
+
+export function inviteLinkToken(pathname: string, hash: string): string {
+  return emailedLinkToken("/accept-invite", pathname, hash);
+}
+
+/** Token from an emailed `<route>#token=…` link; "" on any other path. */
+function emailedLinkToken(route: string, pathname: string, hash: string): string {
+  if (pathname !== route) return "";
   return new URLSearchParams(hash.replace(/^#/, "")).get("token") ?? "";
 }
 
