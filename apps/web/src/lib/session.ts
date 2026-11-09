@@ -35,6 +35,22 @@ export function apiUnauthorizedEndsSession(session: WorkspaceSession | null = re
   return !isUiPreviewSession(session);
 }
 
+/**
+ * The name to show for the signed-in person: the one they entered at signup
+ * or that their account carries, else the mailbox part of their email.
+ */
+export function sessionDisplayName(
+  session: Pick<WorkspaceSession, "email" | "name"> | null,
+  email: string = session?.email ?? "",
+): string {
+  const sameAccount =
+    session && session.email.trim().toLowerCase() === email.trim().toLowerCase();
+  const name = sameAccount ? (session.name ?? "").trim() : "";
+  if (name) return name;
+  const raw = email ? email.split("@")[0] : "";
+  return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : "User";
+}
+
 export function readSession(): WorkspaceSession | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);

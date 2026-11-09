@@ -725,6 +725,13 @@ def sqlite_user_tables(conn) -> list[str]:
     ]
 
 
+def json_safe_cell(value):
+    """Binary cells as PostgreSQL-style hex text (``\\x…``): JSON cannot carry raw bytes."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "\\x" + bytes(value).hex()
+    return value
+
+
 def list_sqlite_tables(content: bytes) -> list[dict]:
     """Table inventory for the source picker, shaped like the workbook sheet list."""
     try:

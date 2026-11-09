@@ -184,11 +184,14 @@ def stage_sqlite_upload(request: Any, job_id: str = "") -> bool:
     # it is consumed here so the staged database source carries no file window.
     read_options = dict(getattr(request, "read_options", None) or {})
     picked = str(read_options.pop("sheet", "") or "").strip()
+    picked_index = read_options.pop("sheet_index", -1)
     table = (
         (src.table or "").strip()
         or str((src.extra or {}).get("sqlite_table") or "").strip()
         or picked
     )
+    if not table and isinstance(picked_index, int) and 0 <= picked_index < len(tables):
+        table = tables[picked_index]
     if not table:
         if len(tables) != 1:
             _discard(staged)
@@ -210,8 +213,7 @@ def stage_sqlite_upload(request: Any, job_id: str = "") -> bool:
     )
     request.source_content = b""
     request.source_path = ""
-    if picked and hasattr(request, "read_options"):
-        read_options.pop("sheet_index", None)
+    if hasattr(request, "read_options"):
         request.read_options = read_options
     return True
 

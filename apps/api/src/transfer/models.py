@@ -118,6 +118,8 @@ class TransferRequest:
     source_object_uri: str = ""
     sync_mode: str = "full_refresh_append"
     schema_policy: str = "manual_review"
+    # True only when the operator declared schema_policy (the create-new DDL gate).
+    schema_policy_declared: bool = False
     validation_mode: str = "strict"
     backfill_new_fields: bool = False
     # Load into {table}_df_staging first; promote only clean rows to primary.
@@ -343,6 +345,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "source_filename": request.source_filename,
         "sync_mode": request.sync_mode,
         "schema_policy": request.schema_policy,
+        "schema_policy_declared": bool(request.schema_policy_declared),
         "validation_mode": request.validation_mode,
         "backfill_new_fields": request.backfill_new_fields,
         "write_via_staging": request.write_via_staging,
@@ -577,6 +580,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         source_object_uri=str(data.get("source_object_uri") or "").strip(),
         sync_mode=data.get("sync_mode") or "full_refresh_append",
         schema_policy=data.get("schema_policy") or "manual_review",
+        schema_policy_declared=bool(data.get("schema_policy_declared")),
         validation_mode=data.get("validation_mode") or "strict",
         backfill_new_fields=bool(data.get("backfill_new_fields")),
         write_via_staging=bool(data.get("write_via_staging")),

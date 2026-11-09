@@ -19,7 +19,7 @@ import { PERMISSIONS, PermissionsProvider, useWriteGate } from "./lib/Permission
 import { StudioActionsProvider } from "./lib/StudioActionsContext";
 import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { EMPTY_JOB_HISTORY, type JobHistory } from "./lib/jobHistory";
-import { clearSession, readSession, writeSession } from "./lib/session";
+import { clearSession, readSession, sessionDisplayName, writeSession } from "./lib/session";
 import { loadStudioRecovery } from "./lib/studioRecovery";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "./lib/workspace";
 import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
@@ -505,11 +505,7 @@ function AppShell({
   }, [searchFocus]);
 
   const userInitial = userEmail ? userEmail.charAt(0).toUpperCase() : "U";
-  const userShort = (() => {
-    const raw = userEmail ? userEmail.split("@")[0] : "User";
-    if (!raw) return "User";
-    return raw.charAt(0).toUpperCase() + raw.slice(1);
-  })();
+  const userShort = sessionDisplayName(readSession(), userEmail);
 
   /** Refuse in words: a viewer must never see a silent no-op. */
   const refuseConnectorWrite = () => {

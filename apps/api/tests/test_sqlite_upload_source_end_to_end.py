@@ -204,3 +204,40 @@ def test_uploaded_db_validate_artifact_executes_without_source_drift(tmp_path):
             cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
         conn.commit()
         conn.close()
+
+
+def test_staging_honours_sheet_index_table_pick(tmp_path):
+    from src.transfer.endpoint_kind import stage_sqlite_upload
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="sqlite"),
+        source_filename="shop.db",
+        source_content=_sqlite_bytes(tmp_path, extra_table=True),
+        read_options={"sheet_index": 1},
+        destination=EndpointConfig(kind="database", format="postgresql", table="t"),
+    )
+    assert stage_sqlite_upload(request, "idx") is True
+    try:
+        # Tables are listed by name (audit, orders), as the profile picker lists them.
+        assert request.source.table == "orders"
+        assert "sheet_index" not in (request.read_options or {})
+    finally:
+        os.remove(request.source.database)
+
+
+def test_binary_blob_preview_is_json_serializable(tmp_path):
+    import json
+
+    from fastapi.encoders import jsonable_encoder
+
+    from src.routers.connectors_router import profile_file_upload
+
+    path = tmp_path / "blob.db"
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute("CREATE TABLE files (id INTEGER PRIMARY KEY, body BLOB)")
+        conn.execute("INSERT INTO files VALUES (1, ?)", (b"\xff\x00\xfe",))
+    out = profile_file_upload(path.read_bytes(), "blob.db")
+    assert out.get("success") is True, out
+    json.dumps(jsonable_encoder(out))
+    assert out["data"][0]["body"] == "\\xff00fe"

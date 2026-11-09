@@ -2992,7 +2992,12 @@ def profile_file_upload(
     except Exception:
         profile = None
     sample_cap = 100
-    sample = result.data[:sample_cap]
+    from services.file_parser import json_safe_cell
+
+    sample = [
+        {k: json_safe_cell(v) for k, v in r.items()} if isinstance(r, dict) else r
+        for r in result.data[:sample_cap]
+    ]
 
     validation_report = None
     if result.file_type in ("csv", "tsv"):

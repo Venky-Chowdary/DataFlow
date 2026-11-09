@@ -97,7 +97,10 @@ def refuse_unapproved_create(request: Any, table_exists: bool | None) -> None:
     Only an operator-declared policy gates: ``manual_review`` is also the
     request default, and a default-policy create-new is the golden path.
     """
-    if "schema_policy" not in (getattr(request, "model_fields_set", None) or set()):
+    declared = bool(getattr(request, "schema_policy_declared", False)) or (
+        "schema_policy" in (getattr(request, "model_fields_set", None) or set())
+    )
+    if not declared:
         return
     if create_ddl_approval_required(
         schema_policy=getattr(request, "schema_policy", None),
