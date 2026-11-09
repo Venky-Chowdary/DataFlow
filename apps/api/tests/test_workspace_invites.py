@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -28,8 +30,46 @@ ADMIN_PASSWORD = "Bootstrap-Admin-2026"
 PASSWORD = "a-long-invitee-password-2026"
 
 
+MONGO_URI = "mongodb://localhost:27017/?directConnection=true"
+
+
+def _live_mongo_client():
+    from pymongo import MongoClient
+    from pymongo.errors import PyMongoError
+
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=1500)
+    try:
+        client.admin.command("ping")
+    except PyMongoError:
+        client.close()
+        return None
+    return client
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
+    yield from _world(tmp_path, monkeypatch, db=None)
+
+
+@pytest.fixture
+def mongo_env(tmp_path, monkeypatch):
+    """The same world with invites, members, accounts and the mail outbox on a
+    live MongoDB replica set — the production tier."""
+    client = _live_mongo_client()
+    if client is None:
+        pytest.skip(f"live MongoDB replica set not reachable at {MONGO_URI}")
+    db = client[f"invite_race_{uuid.uuid4().hex[:10]}"]
+    for cache in (invite_store._PREPARED, team_store._PREPARED_DATABASES, user_store._CANONICAL_INDEXED):
+        cache.discard(db.name)
+    monkeypatch.setattr(mail_outbox, "_INDEXES_READY", False)
+    try:
+        yield from _world(tmp_path, monkeypatch, db=db)
+    finally:
+        client.drop_database(db.name)
+        client.close()
+
+
+def _world(tmp_path, monkeypatch, *, db):
     from src.main import app
 
     monkeypatch.setenv("DATAFLOW_TEAM_STORE", str(tmp_path / "teams.json"))
@@ -47,7 +87,7 @@ def env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tenant_store, "STORE_PATH", tmp_path / "tenants.json")
     for mod in (team_store, user_store, invite_store, mail_outbox):
-        monkeypatch.setattr(mod, "mongo_database", lambda: None)
+        monkeypatch.setattr(mod, "mongo_database", lambda: db)
     monkeypatch.setattr(user_store, "_store_path", lambda: tmp_path / "users.json")
     monkeypatch.setattr(user_store, "_BACKFILLED", False)
     from services import auth_state, email_quota
@@ -291,15 +331,15 @@ def test_cross_workspace_invite_ids_are_not_reachable(env):
     assert res.status_code == 404
 
 
-def test_concurrent_accepts_of_one_token_yield_exactly_one_membership(env):
-    import threading
-
+def _race_one_token(world, email: str, racers: int = 2) -> None:
+    """``racers`` clients accept one token at the same instant: exactly one
+    wins, the rest see invite_accepted, and one membership exists."""
     from src.main import app
 
-    client, admin, ws, tmp_path = env
-    _invite(client, admin, ws, "race@example.com", role="editor")
-    token = _token_for("race@example.com")
-    racers = 2
+    client, admin, ws, tmp_path = world
+    _invite(client, admin, ws, email, role="editor")
+    token = _token_for(email)
+    accepted_before = _actions(tmp_path).count("team.invite.accepted")
     barrier = threading.Barrier(racers)
     results: list[int] = []
     errors: list[str] = []
@@ -318,12 +358,22 @@ def test_concurrent_accepts_of_one_token_yield_exactly_one_membership(env):
     for t in threads:
         t.join(timeout=30)
 
-    assert sorted(results) == [200, 410], (results, errors)
-    assert errors == ["invite_accepted"]
-    assert team_store.get_workspace_role(workspace_id=ws, email="race@example.com") == "editor"
+    assert sorted(results) == [200] + [410] * (racers - 1), (results, errors)
+    assert errors == ["invite_accepted"] * (racers - 1)
+    assert team_store.get_workspace_role(workspace_id=ws, email=email) == "editor"
     members = client.get(f"/api/v1/team/workspaces/{ws}/members", headers=admin).json()["members"]
-    assert [m["email"] for m in members].count("race@example.com") == 1
+    assert [m["email"] for m in members].count(email) == 1
     record, _ = invite_store.find_by_token(token)
     assert record is not None and record["status"] == "accepted"
-    assert invite_store.list_for_workspace(ws) == []
-    assert _actions(tmp_path).count("team.invite.accepted") == 1
+    assert all(i["email"] != email for i in invite_store.list_for_workspace(ws))
+    assert _actions(tmp_path).count("team.invite.accepted") == accepted_before + 1
+
+
+def test_concurrent_accepts_of_one_token_yield_exactly_one_membership(env):
+    _race_one_token(env, "race@example.com")
+
+
+def test_concurrent_accepts_are_atomic_on_live_mongodb(mongo_env):
+    assert invite_store._database() is not None, "invite store must be on the Mongo tier"
+    for round_no in range(3):
+        _race_one_token(mongo_env, f"race{round_no}@example.com", racers=2 + round_no)
