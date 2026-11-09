@@ -3170,6 +3170,7 @@ class KeyCensusAccumulator:
         self._pending_reabsent: list[tuple[Any, ...]] = []
         self._pending_reinserts: list[tuple[Any, ...]] = []
         self._tomb_unique = 0
+        self._held_out = 0
 
     def begin_live_batch(self) -> None:
         """Close the previous batch's reverse window without dropping its keys."""
@@ -3206,6 +3207,36 @@ class KeyCensusAccumulator:
         if self._inserts < 0:
             self._failed = True
         self.begin_live_batch()
+
+    def withdraw_rejected(
+        self, keys: Sequence[tuple[Any, ...]], stored: set[tuple[Any, ...]]
+    ) -> int:
+        """Take keys the last batch's writer refused out of the census.
+
+        The probe ran before the write, so a refused key was counted as an
+        insert (absent) or an update (``stored``). Neither happened. Only keys
+        this batch first observed are withdrawn; a key an earlier batch wrote
+        stays counted, and the ledger stays unproven for it.
+        """
+        if not self._pending_open or self._failed:
+            return 0
+        pending = set(self._pending_new)
+        reabsent = set(self._pending_reabsent)
+        withdrawn = 0
+        for key in dict.fromkeys(map(self._norm, keys)):
+            if key not in pending or key in reabsent:
+                continue
+            pending.discard(key)
+            self._pending_new.remove(key)
+            self._seen.discard(key)
+            if key not in stored:
+                self._inserts -= 1
+                self._pending_added -= 1
+            withdrawn += 1
+        if self._inserts < 0:
+            self._failed = True
+        self._held_out += withdrawn
+        return withdrawn
 
     def unseen_live(self, keys: Sequence[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
         return self._unseen(keys, self._seen - self._absent)
@@ -3316,6 +3347,7 @@ class KeyCensusAccumulator:
             tombstones=self._tombstones,
             unique_tombstone_keys=unique_tombs,
             events_read=self._events or None,
+            held_out_keys=self._held_out,
         )
 
 

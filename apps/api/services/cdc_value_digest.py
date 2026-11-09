@@ -288,6 +288,8 @@ def prove_cdc_values(
     dest_types: dict[str, str] | None = None,
     window: Any = None,
     key_columns: list[str] | None = None,
+    held_out_keys: set[str] | None = None,
+    held_out_column: str = "",
 ) -> CdcValueProof | None:
     """Scan both tables.
 
@@ -301,6 +303,10 @@ def prove_cdc_values(
     not this run's to prove. Only in-window rows must be on the destination;
     the rows before the window are compared by ``key_columns`` and returned as
     out-of-window drift, which the caller reports instead of failing (D188).
+
+    ``held_out_keys`` (on destination column ``held_out_column``) are source
+    rows this run quarantined for their own values: their open DLQ finding is
+    their proof, and they are not expected on the destination.
     """
     if not source_table or not dest_table:
         raise CdcValueScanIncomplete(
@@ -322,6 +328,7 @@ def prove_cdc_values(
         raise CdcValueScanIncomplete(
             "CDC value scan did not finish. Row count is not a cell proof."
         )
+    source_rows = _without_held_out(source_rows, pairs, held_out_keys, held_out_column)
     carries = _declared_carries(mappings)
     before: list[dict[str, Any]] = []
     later: list[dict[str, Any]] = []
@@ -370,6 +377,24 @@ def prove_cdc_values(
         skip_keys=owned,
     )
     return replace(proof, drift=drift) if drift else proof
+
+
+def _without_held_out(
+    rows: list[dict[str, Any]],
+    pairs: list[tuple[str, str]],
+    held_out_keys: set[str] | None,
+    held_out_column: str,
+) -> list[dict[str, Any]]:
+    """Source rows minus the keys the writer quarantined on their own values."""
+    if not held_out_keys or not held_out_column:
+        return rows
+    to_source = {dest.lower(): src for src, dest in pairs}
+    column = to_source.get(str(held_out_column).lower())
+    if not column:
+        return rows
+    from services.verification_ladder import _pk_key
+
+    return [r for r in rows if _pk_key(r.get(column)) not in held_out_keys]
 
 
 def _window_readable(window: Any, source_columns: list[str]) -> bool:
