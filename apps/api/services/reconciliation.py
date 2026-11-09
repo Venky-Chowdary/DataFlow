@@ -4241,9 +4241,14 @@ def sample_compare_rows(
     inserted_keys: set[str] | list[str] | None = None,
     source_locale: str = "",
     history_keys: bool = False,
+    held_out_keys: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
+
+    ``held_out_keys`` are the keys of rows the writer quarantined. Such a row
+    never landed, so on an upsert the read-back for its key is the row stored
+    before this run; comparing the two reports the old value as corruption.
 
     ``history_keys`` is for append routes, where the destination keeps every
     version of a key: a key's read-back holds this batch's row and earlier
@@ -4681,6 +4686,7 @@ def sample_compare_rows(
             "alignment": "keyed" if keyed else "paired_by_caller",
         }
 
+    held_out = {str(normalize_cell(k) or "") for k in (held_out_keys or [])} - {""}
     for idx, src in enumerate(source_sorted):
         key = ""
         if _row_write_refused(src):
@@ -4690,6 +4696,9 @@ def sample_compare_rows(
             key = normalize_cell(src.get(source_sort_key) if source_sort_key else None)
             if not key and sort_key:
                 key = normalize_cell(src.get(sort_key))
+            if key and str(key) in held_out:
+                rows_excluded_quarantined += 1
+                continue
             tgt = target_by_key.get(key) if key else None
             if tgt is None:
                 # This key is not in the destination read-back window. That is a

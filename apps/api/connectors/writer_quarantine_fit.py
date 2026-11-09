@@ -15,6 +15,34 @@ from connectors.writer_common import (
     varchar_overflow_suggested_type,
 )
 
+def varchar_overflow_reason(
+    value: Any,
+    type_str: str,
+    *,
+    dialect_label: str = "VARCHAR",
+) -> str | None:
+    """The write-quarantine reason for a value a bounded string carrier cannot hold.
+
+    ``None`` when the carrier is unbounded or the value fits. Validate's cell
+    preview and the writer share it, so a value the writer holds out is the one
+    the preview names.
+    """
+    from services.ddl_compatibility import parse_varchar_width
+
+    width = parse_varchar_width(type_str or "")
+    if width is None or _unfit_cell_absent([value], 0):
+        return None
+    if type(value) is str and len(value) <= width and value.isascii():
+        return None
+    if fits_varchar(value, width, type_str, dialect_label=dialect_label):
+        return None
+    units = string_storage_units(value, type_str, dialect_label=dialect_label)
+    return (
+        f"value length {units} exceeds {dialect_label}({width}) "
+        "— quarantined (would truncate on write)"
+    )
+
+
 def quarantine_unfit_strings(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -53,20 +81,12 @@ def quarantine_unfit_strings(
             for col_idx, width, typ in width_cols:
                 if _unfit_cell_absent(cells, col_idx):
                     continue
-                cell = cells[col_idx]
-                # ASCII text spends one unit per character under every length
-                # rule (code points, UTF-8 bytes, UTF-16 units), so a short
-                # ASCII value fits without resolving the dialect unit.
-                if type(cell) is str and len(cell) <= width and cell.isascii():
-                    continue
-                if fits_varchar(
-                    cells[col_idx], width, typ, dialect_label=dialect_label
-                ):
-                    continue
-                sample = cell_to_string(cells[col_idx])[:120]
-                units = string_storage_units(
+                reason = varchar_overflow_reason(
                     cells[col_idx], typ, dialect_label=dialect_label
                 )
+                if reason is None:
+                    continue
+                sample = cell_to_string(cells[col_idx])[:120]
                 suggested_type = varchar_overflow_suggested_type(
                     cells[col_idx], typ, dest_db=dest_db
                 )
@@ -86,10 +106,7 @@ def quarantine_unfit_strings(
                         "column": target_cols[col_idx],
                         "target": target_cols[col_idx],
                         "value": sample,
-                        "reason": (
-                        f"value length {units} exceeds {dialect_label}({width}) "
-                        "— quarantined (would truncate on write)"
-                        ),
+                        "reason": reason,
                         "policy": "write_quarantine",
                         "suggested_fix": suggested_fix,
                         "suggested_target_type": suggested_type,

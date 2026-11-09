@@ -4340,6 +4340,7 @@ def _name_row_on_checksum_only_failure(
             dest_types=ctx.get("dest_types"),
             duplicate_policy=str(ctx.get("duplicate_policy") or ""),
             source_locale=str(ctx.get("source_locale") or ""),
+            held_out_keys=ctx.get("held_out_keys"),
         )
     except Exception as exc:  # noqa: BLE001 — naming never changes the verdict
         _logger.warning("Gate-8 full keyed compare unavailable: %s", exc)
@@ -5965,6 +5966,29 @@ def _value_decided_refusal(reason: str) -> bool:
     from services.decision_kernel.findings import classify_transform_failure
 
     return classify_transform_failure(str(reason or "")).value in _VALUE_DECIDED_REFUSALS
+
+
+def _held_out_keys(dest_summary: dict[str, Any], sort_key: str | None) -> set[str]:
+    """Keys of the rows the writer quarantined on a value it could not store.
+
+    The finding's own value is masked and truncated for display, so it cannot
+    be matched back to the source row; the key it names can. A UNIQUE / FK /
+    CHECK refusal is about one copy of a key that may also have landed, so it
+    never holds the key out.
+    """
+    if not sort_key:
+        return set()
+    keys: set[str] = set()
+    for detail in dest_summary.get("rejected_details") or []:
+        if not isinstance(detail, dict):
+            continue
+        reason = str(detail.get("reason") or detail.get("failure_reason") or "").lower()
+        if any(marker in reason for marker in _ROW_DECIDED_MARKERS):
+            continue
+        key = _rejected_key(detail, [sort_key])
+        if key and key[0] not in (None, ""):
+            keys.add(str(key[0]))
+    return keys
 
 
 def _without_held_out_cells(
@@ -7912,6 +7936,7 @@ def _run_reconciliation_impl(
                 inserted_keys=dest_summary.get("inserted_keys"),
                 source_locale=str(dest_summary.get("number_locale") or ""),
                 history_keys=history_keys,
+                held_out_keys=_held_out_keys(dest_summary, sort_key),
             )
             full_compare_ctx.update(
                 db_type=db_type, cfg=cfg, schema=schema, table_name=table_name,
@@ -7920,6 +7945,7 @@ def _run_reconciliation_impl(
                 duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
                 source_locale=str(dest_summary.get("number_locale") or ""),
                 source_endpoint=source_endpoint,
+                held_out_keys=_held_out_keys(dest_summary, sort_key),
             )
 
     # CDC delete proof: stashed PKs must be absent on destination read-back.
