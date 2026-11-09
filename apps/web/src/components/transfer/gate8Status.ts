@@ -264,13 +264,23 @@ export function gate8SampleDeclinedReason(report: Gate8Reconciliation): string {
     || "No identity key to align the read-back sample against the source.";
 }
 
+/**
+ * True when the digest covers the whole transfer. CDC source-image fingerprints,
+ * keyed batches and last-stream digests are narrower — never "full checksum".
+ */
+export function isGate8WholeTableScope(report: { checksum_scope?: unknown } | null | undefined): boolean {
+  return ["", "whole_table", "verify_time_population_digest"].includes(
+    String(report?.checksum_scope || "").toLowerCase(),
+  );
+}
+
 export function isGate8FullChecksumProof(report: Gate8Reconciliation): boolean {
   const source = String(report.source_checksum || "").trim();
   const target = String(report.target_checksum || "").trim();
   return report.passed === true && Boolean(source) && source === target
     && report.checksum_match !== false
     && ["", "full_checksum"].includes(String(report.coverage || "").toLowerCase())
-    && ["", "whole_table", "verify_time_population_digest"].includes(String(report.checksum_scope || "").toLowerCase())
+    && isGate8WholeTableScope(report)
     && report.source_checksum_provenance === "independent_source_reread"
     && !isGate8IdentityUnproven(report) && !isGate8CellFidelityUnproven(report)
     && !isGate8PreWriteSimulation(report) && !isGate8WriterAckOnly(report)

@@ -59,7 +59,7 @@ import { readSession } from "../lib/session";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { blockerTitle } from "../lib/preflightGates";
 import { reconcileBarPercent } from "../lib/progressRing";
-import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
+import { deepLinkPending, nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { EmbeddingUsageSummary } from "../components/transfer/EmbeddingUsageSummary";
@@ -582,6 +582,9 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   }, [selectedId, liveJob]);
 
   useEffect(() => {
+    // A deep link owns the selection: while the requested job has not reached
+    // the list, do not auto-pick the newest job in its place.
+    if (deepLinkPending(initialJobId, appliedFocusRef.current)) return;
     const pin = pinnedJobRef.current;
     if (pin && pin === initialJobId && selectedId !== pin) return;
     if (pin && selectedId === pin) {

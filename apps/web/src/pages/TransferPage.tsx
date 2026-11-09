@@ -3164,7 +3164,7 @@ export function TransferPage({
     if (!ACCEPTED_UPLOAD_EXTENSIONS.has(ext)) {
       toast({
         title: "Unsupported file type",
-        message: "Use CSV, TSV, JSON, JSONL, Excel (.xlsx), or Parquet for this transfer flow.",
+        message: "Use CSV, TSV, JSON, JSONL, Excel (.xlsx), Parquet, or a SQLite database (.db, .sqlite) for this transfer flow.",
         tone: "warning",
       });
       return;
@@ -7363,7 +7363,7 @@ export function TransferPage({
               <HiddenFileInput
                 id="df2-source-file"
                 ref={fileInputRef}
-                accept=".json,.csv,.jsonl,.tsv,.parquet,.pdf,.docx,.html,.htm,.xlsx,.xls,.xml"
+                accept=".json,.csv,.jsonl,.tsv,.parquet,.pdf,.docx,.html,.htm,.xlsx,.xls,.xml,.db,.sqlite,.sqlite3"
                 disabled={uploading}
                 onChange={handleFileSelect}
               />
