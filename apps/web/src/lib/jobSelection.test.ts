@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { deepLinkPending, nextListSelection, shouldApplyInitialJobFocus } from "./jobSelection.js";
+import { deepLinkPending, latchDeepLink, nextListSelection, shouldApplyInitialJobFocus } from "./jobSelection.js";
 
 describe("jobSelection", () => {
   it("applies a deep-link once, not again on list poll", () => {
@@ -29,5 +29,16 @@ describe("jobSelection", () => {
     assert.equal(nextListSelection("b", ["a", "c"]), "a");
     assert.equal(nextListSelection(null, ["a", "c"]), "a");
     assert.equal(nextListSelection("b", []), "b");
+  });
+});
+
+describe("deep link survives the shell clearing its transient focus", () => {
+  it("latches the requested job until a new one arrives", () => {
+    const first = latchDeepLink({}, "older", "quarantine");
+    assert.deepEqual(first, { jobId: "older", panel: "quarantine" });
+    const cleared = latchDeepLink(first, undefined, undefined);
+    assert.equal(cleared.jobId, "older");
+    assert.equal(deepLinkPending(cleared.jobId, null), true);
+    assert.deepEqual(latchDeepLink(cleared, "other", undefined), { jobId: "other", panel: undefined });
   });
 });

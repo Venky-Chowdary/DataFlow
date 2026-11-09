@@ -151,9 +151,20 @@ export function signedInHelpArticleFromHash(hash: string): HelpDocId | "help" | 
   return "help";
 }
 
+/**
+ * Hash to normalise to for ``screen``. A replace (boot / sign-in normalisation)
+ * keeps a ``?jobId=…&panel=…`` focus already on the same screen, so a fresh
+ * ``#/jobs?jobId=<id>`` load is not rewritten to ``#/jobs`` before it is read.
+ */
+export function normalizedAppHash(screen: Screen, currentHash: string, replace: boolean): string {
+  const focus = replace ? focusFromHash(currentHash) : null;
+  if (focus?.screen === screen) return hashForScreen(screen, focus);
+  return hashForScreen(screen);
+}
+
 export function writeAppHash(screen: Screen, replace = false) {
   if (typeof window === "undefined") return;
-  const next = hashForScreen(screen);
+  const next = normalizedAppHash(screen, window.location.hash, replace);
   if (window.location.hash === next) return;
   if (replace) {
     window.history.replaceState(null, "", next);

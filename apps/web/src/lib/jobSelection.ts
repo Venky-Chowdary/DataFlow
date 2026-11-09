@@ -18,6 +18,21 @@ export function deepLinkPending(initialJobId: string | undefined, lastApplied: s
   return Boolean(initialJobId) && lastApplied !== initialJobId;
 }
 
+export interface JobDeepLink {
+  jobId?: string;
+  panel?: string;
+}
+
+/**
+ * The deep link the Jobs page is still honouring. The shell's focus prop is
+ * transient (cleared ~800ms after navigate) and can vanish before the job list
+ * loads, so the last requested id is latched until a new one arrives.
+ */
+export function latchDeepLink(prev: JobDeepLink, jobId: string | undefined, panel: string | undefined): JobDeepLink {
+  if (!jobId || jobId === prev.jobId) return prev;
+  return { jobId, panel };
+}
+
 /** Keep the current pick when it is still in the filtered list. */
 export function nextListSelection(
   selectedId: string | null,

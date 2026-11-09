@@ -141,7 +141,12 @@ function AppShell({
   const [mobileShell, setMobileShell] = useState(() => window.matchMedia("(max-width: 1023px)").matches);
   const [sidebarNavCompact, setSidebarNavCompact] = useState(() => loadSidebarNavCompact());
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(null);
+  const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(() => {
+    const focus = focusFromHash(window.location.hash);
+    return focus?.jobId || focus?.panel
+      ? { screen: focus.screen, jobId: focus.jobId, panel: focus.panel }
+      : null;
+  });
   const [connectorsViewToken, setConnectorsViewToken] = useState(0);
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
   /** Bump to remount Transfer Studio and clear prior job/source/map cache. */
