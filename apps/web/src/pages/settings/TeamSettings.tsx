@@ -524,7 +524,10 @@ export function TeamSettings() {
           />
         ) : (
           <>
-            <div className="df2-team-block">
+            {/* Invite and pending-invite tools exist only for someone who can use
+                them; the read-only notice above explains why they are absent. */}
+            {membership.allowed && (
+            <div className="df2-team-block" data-testid="team-invite-form">
               <div className="df2-team-block-head">
                 <div>
                   <h3>Invite a member</h3>
@@ -631,8 +634,9 @@ export function TeamSettings() {
                 </Button>
               </div>
             </div>
+            )}
 
-            {invites.length > 0 && (
+            {membership.allowed && invites.length > 0 && (
               <div className="df2-team-block" data-testid="team-invite-block">
                 <div className="df2-team-block-head">
                   <div>
