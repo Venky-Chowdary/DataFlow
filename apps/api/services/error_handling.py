@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from services.brand_env import getenv_brand
+from services.cdc_capability import CAUSE_SLOT_QUOTA, SLOT_QUOTA_SIGNALS
+from services.cdc_capability import _remedy as _cdc_remedy
 
 
 class TransferCancelled(Exception):
@@ -318,6 +320,18 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
                 "or Force-release the lease in Job Theater (fencing generation advances), then "
                 "Resume / re-run. Never run two consumers on the same slot or server_id."
             ),
+        },
+    ),
+    (
+        # Before the cursor-gap rule: its "replication slot" needle also matches
+        # "all replication slots are in use", which is a quota, not lost history.
+        SLOT_QUOTA_SIGNALS,
+        {
+            "code": CAUSE_SLOT_QUOTA,
+            "category": "source_cdc",
+            "confidence": "high",
+            "title": "Replication slot quota reached",
+            "fix": _cdc_remedy("postgresql", CAUSE_SLOT_QUOTA),
         },
     ),
     (
