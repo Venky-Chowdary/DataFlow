@@ -84,6 +84,21 @@ def test_f1_sweeper_never_double_sends_a_due_row(file_outbox):
     assert len(file_outbox.sent) == 1
 
 
+def test_f1_repeated_sweeps_do_not_pile_duplicate_lane_tasks(file_outbox, monkeypatch):
+    row = mail_outbox.enqueue(
+        to="slow@example.com", subject="s", text="t", html="<p>t</p>",
+        idempotency_key="welcome:slow@example.com", purpose="welcome",
+        quota_counted=True)
+    lane: list = []  # a slow provider: queued tasks have not run yet
+    monkeypatch.setattr(signup_service, "_deliver_later", lane.append)
+    signup_service.recover_mail_outbox()
+    signup_service.recover_mail_outbox()
+    signup_service.recover_mail_outbox()
+    assert len(lane) == 1
+    lane.pop()()
+    assert _row_status(row["id"]) == "sent" and len(file_outbox.sent) == 1
+
+
 def _invite(workspace: str) -> dict:
     return render_email("workspace_invite", {
         "inviter_name": "Sam Signup", "inviter_email": "sam@example.com",

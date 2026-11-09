@@ -352,9 +352,31 @@ def recover_mail_outbox() -> int:
     """Startup hook: re-queue persisted 'queued' rows so a restart cannot
     silently drop mail. Rows whose reset link is already dead are marked
     expired/superseded and never sent. Returns how many rows re-queued."""
-    return mail_outbox.drain_queued(
-        lambda row: _deliver_later(lambda: _deliver_outbox_row(row)),
-        skip_reason=_outbox_dead_link_status)
+    return mail_outbox.drain_queued(_submit_outbox_row_once,
+                                    skip_reason=_outbox_dead_link_status)
+
+
+_PENDING_ROWS: set[str] = set()
+_PENDING_LOCK = threading.Lock()
+
+
+def _submit_outbox_row_once(row: dict[str, Any]) -> None:
+    """Queue a row on the lane unless an earlier sweep already queued it, so a
+    slow provider cannot pile duplicate tasks ahead of fresh mail."""
+    rid = str(row.get("id") or "")
+    with _PENDING_LOCK:
+        if rid in _PENDING_ROWS:
+            return
+        _PENDING_ROWS.add(rid)
+
+    def _run() -> None:
+        try:
+            _deliver_outbox_row(row)
+        finally:
+            with _PENDING_LOCK:
+                _PENDING_ROWS.discard(rid)
+
+    _deliver_later(_run)
 
 
 _SWEEP_STOP = threading.Event()
