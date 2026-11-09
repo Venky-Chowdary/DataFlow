@@ -52,6 +52,8 @@ from services.preflight_file_plan import (
     _plan_in_file_dedupe,
 )
 from services.coercion_gate_reconcile import reconcile_coercion_report
+from services.create_ddl_gate import create_ddl_gate as build_create_ddl_gate
+from services.preflight_policy_gates import blockers_from_gates
 from services.preflight_file_phases import (
     apply_constraint_findings,
     apply_schema_drift_gate,
@@ -2251,44 +2253,20 @@ def run_file_preflight(
     except Exception as exc:  # noqa: BLE001 — unmeasured, never a false pass
         logger.warning("NULL-cursor gate probe skipped: %s", exc, exc_info=exc)
 
-    from services.create_ddl_gate import create_ddl_gate as _create_ddl_gate
-
-    # The request default is manual_review too; only an operator-declared
-    # policy gates create-new (a default create-new is the golden path).
-    create_ddl_gate = _create_ddl_gate(
+    # Only an operator-declared manual_review gates create-new (the default is the golden path).
+    create_ddl_gate = build_create_ddl_gate(
         schema_policy=schema_policy if schema_policy_explicit else None,
         table_exists=dest_table_exists,
-        can_create=dest_can_create,
-        acknowledged=bool(ddl_changes_acknowledged),
-        destination_table=str(destination_table or ""),
-        mappings=write_maps,
+        can_create=dest_can_create, acknowledged=bool(ddl_changes_acknowledged),
+        destination_table=str(destination_table or ""), mappings=write_maps,
     )
-    if create_ddl_gate and create_ddl_gate.get("status") == "block":
-        enriched_blockers.append(
-            {
-                "id": create_ddl_gate["id"],
-                "message": create_ddl_gate["message"],
-                "details": dict(create_ddl_gate["details"]),
-                "suggested_actions": list(create_ddl_gate["suggested_actions"]),
-            }
-        )
     null_cursor_blocked = bool(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )
-    upsert_ddl_blocked = bool(
-        upsert_ddl_gate and upsert_ddl_gate.get("status") == "block"
+    upsert_ddl_blocked = bool(upsert_ddl_gate and upsert_ddl_gate.get("status") == "block")
+    enriched_blockers.extend(
+        blockers_from_gates((create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"))
     )
-    if upsert_ddl_blocked:
-        enriched_blockers.append(
-            {
-                "id": "g_upsert_dest_key",
-                "message": str(upsert_ddl_gate.get("message") or ""),
-                "details": dict(upsert_ddl_gate.get("details") or {}),
-                "suggested_actions": list(
-                    upsert_ddl_gate.get("suggested_actions") or []
-                ),
-            }
-        )
     extra_gates: list[dict[str, Any]] = (
         ([fit_gate] if fit_gate else [])
         + ([null_cursor_gate] if null_cursor_gate else [])
