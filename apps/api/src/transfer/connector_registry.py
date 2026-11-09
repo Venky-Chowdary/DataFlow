@@ -686,6 +686,47 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
     return f"Connection failed: {_driver_snippet(raw_s)}"
 
 
+def locate_connector_file(
+    *,
+    connection_string: str = "",
+    database: str = "",
+    host: str = "",
+    extra: dict[str, Any] | None = None,
+) -> str:
+    """Path Test should open for a file or embedded-database connector.
+
+    A path that already exists on this server wins. Otherwise an upload
+    attached in Configure (``extra.uploaded_file_id``) is the file. A URI is
+    left for the probe to refuse — Test does not download it. When nothing
+    resolves, the first typed value is returned so the error names what the
+    operator entered.
+    """
+    typed = [
+        str(connection_string or "").strip(),
+        str(database or "").strip(),
+        str(host or "").strip(),
+    ]
+    # A URI is the operator's remote location. Test refuses to download it;
+    # an earlier upload must not silently replace that refusal with a local file.
+    for text in typed:
+        if text and "://" in text:
+            return text
+    for text in typed:
+        if text and os.path.exists(text):
+            return text
+    file_id = str((extra or {}).get("uploaded_file_id") or "").strip()
+    if file_id:
+        from services.file_parser import resolve_attached_upload_path
+
+        stored = resolve_attached_upload_path(file_id)
+        if stored:
+            return stored
+    for text in typed:
+        if text:
+            return text
+    return ""
+
+
 def probe_file_source(fmt: str, path: str) -> tuple[bool, str]:
     """Honest file Test — catalog support is not a successful connection."""
     kind = (fmt or "").strip().lower()

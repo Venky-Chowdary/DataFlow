@@ -416,6 +416,184 @@ def identity_source_columns(
     return out
 
 
+# Elasticsearch document ids are explicit. A lone ``order_id`` is not one:
+# inventing ``_id`` from the only ``*_id`` column collides rows the operator
+# never keyed, and Validate must not green-light a key the writer will refuse.
+_ELASTICSEARCH_KINDS = frozenset({
+    "elasticsearch",
+    "opensearch",
+    "amazon_elasticsearch",
+    "elastic_cloud",
+})
+
+
+def _is_elasticsearch_kind(dest_kind: str | None) -> bool:
+    raw = (dest_kind or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if raw in _ELASTICSEARCH_KINDS:
+        return True
+    return _identity_dest_kind(dest_kind) in _ELASTICSEARCH_KINDS
+
+
+def _flagged_identity_names(mappings: Iterable[Any] | None) -> list[str]:
+    """Source names a Map row flagged as identity, in mapping order.
+
+    ``primary_key`` / ``is_primary_key`` / ``identity``. Omitted rows are not a key.
+    """
+    names: list[str] = []
+    for item in mappings or []:
+        if isinstance(item, dict):
+            if item.get("intentional_omit") or item.get("omit"):
+                continue
+            flagged = (
+                item.get("primary_key")
+                or item.get("is_primary_key")
+                or item.get("identity")
+            )
+            name = str(item.get("source") or item.get("target") or "").strip()
+        else:
+            if getattr(item, "intentional_omit", None) or getattr(item, "omit", None):
+                continue
+            flagged = (
+                getattr(item, "primary_key", None)
+                or getattr(item, "is_primary_key", None)
+                or getattr(item, "identity", None)
+            )
+            name = str(getattr(item, "source", "") or getattr(item, "target", "") or "").strip()
+        if not flagged or not name or name in names:
+            continue
+        names.append(name)
+    return names
+
+
+def _extra_identity_names(extra: Any) -> list[str]:
+    """Operator identity on the destination endpoint.
+
+    ``primary_key`` / ``primary_keys`` only. ``primary_key_columns`` is catalog
+    evidence and is not read here — adopting it would invent a document id.
+    """
+    if not isinstance(extra, dict):
+        return []
+    raw = extra.get("primary_key")
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        raw = extra.get("primary_keys")
+    if isinstance(raw, (list, tuple)):
+        parts = [str(item).strip() for item in raw if str(item or "").strip()]
+    else:
+        text = str(raw or "").strip()
+        parts = (
+            [p.strip() for p in text.replace(";", ",").split(",") if p.strip()]
+            if text
+            else []
+        )
+    out: list[str] = []
+    for name in parts:
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def explicit_identity_target_columns(
+    mappings: Iterable[Any] | None,
+    *,
+    conflict_columns: Sequence[str] | None = None,
+    stream_contracts: Iterable[Any] | None = None,
+    contract_primary_key: str | None = None,
+    destination_extra: Any = None,
+    stream_name: str = "",
+) -> tuple[list[str], str | None]:
+    """Target columns an operator named as document identity.
+
+    Each source is optional:
+
+    * ``conflict_columns`` — the write key the stream already resolved.
+    * stream contract / ``contract_primary_key`` — Advanced settings and the
+      Map step's identity field (one contract).
+    * ``destination.extra.primary_key`` — the same identity stored on the endpoint.
+    * mapping ``primary_key`` / ``is_primary_key`` / ``identity`` — a Map-row flag.
+
+    Returns ``([], None)`` when nothing was named. Does not invent ``id`` or
+    ``*_id``. When two named sources disagree, returns ``([], message)``.
+    """
+    mapping_list = list(mappings or [])
+
+    def _targets(names: list[str]) -> list[str]:
+        return _map_identity_names_to_target(names, mappings=mapping_list)
+
+    named: list[tuple[str, list[str]]] = []
+    conflict = [str(c).strip() for c in (conflict_columns or []) if str(c or "").strip()]
+    if conflict:
+        named.append(("write key", _targets(conflict)))
+    contract_names = extract_contract_primary_key_columns(
+        stream_contracts,
+        stream_name=stream_name,
+        fallback_first=not bool((stream_name or "").strip()),
+    )
+    raw_contract = str(contract_primary_key or "").strip()
+    if not contract_names and raw_contract:
+        contract_names = [
+            p.strip() for p in raw_contract.replace(";", ",").split(",") if p.strip()
+        ]
+    if contract_names:
+        named.append(("Advanced identity", _targets(contract_names)))
+    extra_names = _extra_identity_names(destination_extra)
+    if extra_names:
+        named.append(("destination identity", _targets(extra_names)))
+    flagged = _flagged_identity_names(mapping_list)
+    if flagged:
+        named.append(("Map primary key", _targets(flagged)))
+
+    chosen: list[str] | None = None
+    chosen_key: tuple[str, ...] | None = None
+    labels: list[str] = []
+    for label, cols in named:
+        if not cols:
+            continue
+        key = tuple(c.casefold() for c in cols)
+        labels.append(f"{label} ({', '.join(cols)})")
+        if chosen is None:
+            chosen = cols
+            chosen_key = key
+            continue
+        if key != chosen_key:
+            return [], (
+                "Elasticsearch document identity disagrees — "
+                + "; ".join(labels)
+                + ". Set one key on Map or in Advanced settings."
+            )
+    return list(chosen or []), None
+
+
+def bind_explicit_elasticsearch_identity(
+    dest_kind: str | None,
+    mappings: Iterable[Any] | None,
+    current_targets: Sequence[str] | None,
+    *,
+    stream_contracts: Iterable[Any] | None = None,
+    contract_primary_key: str | None = None,
+    destination_extra: Any = None,
+    stream_name: str = "",
+) -> list[str]:
+    """Fold explicit identity into the Elasticsearch write key.
+
+    Other destinations keep ``current_targets``. A disagreement raises
+    ``ValueError`` before any document is indexed.
+    """
+    current = [str(c).strip() for c in (current_targets or []) if str(c or "").strip()]
+    if not _is_elasticsearch_kind(dest_kind):
+        return current
+    cols, err = explicit_identity_target_columns(
+        mappings,
+        conflict_columns=current,
+        stream_contracts=stream_contracts,
+        contract_primary_key=contract_primary_key,
+        destination_extra=destination_extra,
+        stream_name=stream_name,
+    )
+    if err:
+        raise ValueError(err)
+    return cols or current
+
+
 def _mapping_pairs(mappings: Iterable[Any]) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     for m in mappings or []:
@@ -544,6 +722,28 @@ def resolve_identity_key(
         if matched_tgt:
             return src_by_tgt.get(matched_tgt, matched_tgt), matched_tgt
         return contract, contract
+
+    # Elasticsearch is key-addressed but does not derive ``_id`` from a lone
+    # ``*_id`` column. The operator names the key (contract or Map flag), or a
+    # mapped field is literally ``_id`` / ``id`` / ``pk``.
+    if _is_elasticsearch_kind(dest_kind):
+        flagged = _flagged_identity_names(mappings)
+        if len(flagged) == 1:
+            mapped = _map_identity_names_to_target(flagged, mappings=list(mappings or []))
+            tgt = mapped[0] if mapped else flagged[0]
+            src = src_lower.get(flagged[0].lower()) or src_by_tgt.get(tgt) or flagged[0]
+            return src, tgt
+        if len(flagged) > 1:
+            return None, None
+        for key in ("_id", "id", "pk"):
+            for t in tgts:
+                if t.lower() == key:
+                    src = next((s for s, tt in pairs if tt == t), key)
+                    return src, t
+            for s in srcs:
+                if s.lower() == key:
+                    return s, tgt_by_src.get(s, s)
+        return None, None
 
     # Redis: key-value identity (not Mongo _id-only).
     if kind == "redis":
@@ -803,6 +1003,20 @@ def resolve_primary_key_source_columns(
             return mapped
 
     # 4. Single-column stream/contract / resolver fallback.
+    # Elasticsearch Map-row flags are an explicit key when the contract is empty.
+    # They are not consulted once a contract names a key — the contract wins,
+    # and the writer refuses the pair when the flag names a different column.
+    if (
+        _is_elasticsearch_kind(dest_kind)
+        and not contract_cols
+        and not str(contract_primary_key or "").strip()
+    ):
+        flagged = _flagged_identity_names(mappings)
+        if flagged:
+            return _map_identity_names_to_source(
+                flagged, mappings=mappings, source_columns=source_columns
+            )
+
     if len(contract_cols) == 1:
         mapped = _map_identity_names_to_source(
             contract_cols, mappings=mappings, source_columns=source_columns

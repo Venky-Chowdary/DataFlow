@@ -718,6 +718,8 @@ export interface ParsedUpload {
   columns: string[];
   /** Persisted upload id — Validate scans this population, not just the preview. */
   file_id?: string;
+  /** Server path of the stored upload. Configure writes this into the connector. */
+  path?: string;
   file_type?: string;
   /** Sheet inventory for workbooks, so a sheet is picked from the real names. */
   sheets?: WorkbookSheet[];

@@ -160,6 +160,10 @@ def detect_format(filename: str, content: bytes) -> str:
         return "yaml"
     if lower.endswith(".fwf"):
         return "fixed_width"
+    if lower.endswith(".duckdb"):
+        return "duckdb"
+    if lower.endswith((".sqlite", ".sqlite3")) or content[:16] == b"SQLite format 3\x00":
+        return "sqlite"
     if content[:1] == b"{" or content[:1] == b"[":
         return "json"
     if b"\n{" in content[:2048]:
@@ -415,6 +419,12 @@ def store_upload(filename: str, content: bytes) -> dict:
 
         require_xlsx(filename)
         headers, rows, row_count = parse_excel_preview(content)
+    elif fmt in {"sqlite", "duckdb"}:
+        # The bytes are the database. Profiling runs in FileParser; this path
+        # only has to keep the file where Test and transfer can open it.
+        headers, rows = [], []
+        row_count = 0
+        columns_override = []
     elif fmt == "parquet":
         headers, rows, row_count, arrow_schema = _parse_parquet_preview(content)
     elif fmt in {"avro", "orc"}:
@@ -490,6 +500,47 @@ def _upload_workspace() -> str:
     from services.workspace_filter import current_workspace_stamp
 
     return current_workspace_stamp() or ""
+
+
+def publish_upload_path(path: str) -> str:
+    """Absolute upload path safe to hand back to Test, or ``""``.
+
+    Only a file that already lives under the upload directory is published.
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    try:
+        resolved = Path(raw).resolve()
+        root = Path(upload_dir()).resolve()
+    except OSError:
+        return ""
+    if resolved != root and root not in resolved.parents:
+        return ""
+    if not resolved.is_file():
+        return ""
+    return str(resolved)
+
+
+def resolve_attached_upload_path(file_id: str) -> str:
+    """Server path for a Configure-dialog upload, or ``""``.
+
+    Another workspace's upload reads as missing. The path stays inside the
+    upload directory.
+    """
+    fid = str(file_id or "").strip()
+    if not fid:
+        return ""
+    record = get_file(fid)
+    if not record:
+        return ""
+    owner = str(record.get("workspace_id") or "")
+    if owner:
+        from services.workspace_filter import bound_allows
+
+        if not bound_allows(owner):
+            return ""
+    return publish_upload_path(str(record.get("path") or ""))
 
 
 def get_file(file_id: str) -> dict | None:

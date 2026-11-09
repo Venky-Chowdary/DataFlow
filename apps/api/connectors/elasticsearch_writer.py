@@ -436,6 +436,32 @@ def write_mapped_rows(
     tgt_types: list[str] = []
 
     conflict = [c for c in (conflict_columns or []) if c]
+    # Map primary key, Advanced identity, and destination.extra.primary_key are
+    # one document id. A caller that already resolved the stream contract passes
+    # it as conflict_columns; flags and endpoint identity still count when that
+    # list is empty. Disagreement writes nothing. A lone ``*_id`` column is not
+    # a document id.
+    from services.primary_key import explicit_identity_target_columns
+
+    identity_cols, identity_err = explicit_identity_target_columns(
+        list(mappings or []),
+        conflict_columns=conflict,
+        stream_contracts=_kwargs.get("stream_contracts"),
+        contract_primary_key=_kwargs.get("contract_primary_key"),
+        destination_extra=_kwargs.get("destination_extra"),
+    )
+    if identity_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=index,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=identity_err,
+        )
+    if identity_cols:
+        conflict = identity_cols
     mode = (write_mode or "insert").lower()
     # Elasticsearch is key-addressed: auto-generated ids break idempotent retry /
     # upsert / CDC and hide collisions. Always require resolvable document identity.
@@ -893,7 +919,8 @@ def write_mapped_rows(
             if identity_missing and written == 0:
                 err_msg = (
                     f"elasticsearch blocked: {identity_missing} row(s) "
-                    "lack document identity — set Primary key on Map"
+                    "lack document identity — set Primary key on Map or "
+                    "Identity key in Advanced settings"
                 )
             elif _final_abort:
                 err_msg = _final_abort

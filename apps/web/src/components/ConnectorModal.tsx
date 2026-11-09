@@ -3,9 +3,16 @@ import { ConnectorCatalogPanel } from "./ConnectorCatalogPanel";
 import { ButtonLoader } from "./LoadingState";
 import { DtIcon } from "./DtIcon";
 import { useToast } from "./Toast";
+import { HiddenFileInput } from "./ui/HiddenFileInput";
 import type { CatalogConnector } from "../lib/api";
 import type { Connector } from "../lib/types";
-import { saveConnector, testConnection, updateConnector } from "../lib/api";
+import { saveConnector, testConnection, updateConnector, uploadFile } from "../lib/api";
+import {
+  connectorAcceptsUpload,
+  connectorFieldsFromUpload,
+  connectorUploadAccept,
+  uploadedFileMatchesConnector,
+} from "../lib/connectorFileUpload";
 import {
   connectorListenPort,
   getConnectorDefaults,
@@ -52,13 +59,6 @@ const DEDICATED_EXTRA_KEYS = new Set([
   "host_key_policy",
   "trust_server_certificate",
 ]);
-
-function isFileFormat(type: string): boolean {
-  return [
-    "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel",
-    "avro", "orc", "xml", "pdf", "docx", "html",
-  ].includes(type);
-}
 
 function normalizeSqlDsn(connectionString: string, type: string): string {
   const raw = connectionString.trim();
@@ -144,6 +144,12 @@ export function ConnectorModal({
     Boolean((editing as { extra?: Record<string, unknown> } | null)?.extra?.trust_server_certificate)
   );
   const [authMode, setAuthMode] = useState<AuthMode>(inferConnectorAuthMode(editing, startType));
+  const [uploadedFileId, setUploadedFileId] = useState(
+    String((editing as { extra?: Record<string, unknown> } | null)?.extra?.uploaded_file_id ?? ""),
+  );
+  const [uploadNote, setUploadNote] = useState("");
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [uploadDragOver, setUploadDragOver] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   // SaaS/SDK connectors ask for fields outside the canonical set (site, email,
   // api_token, board_id, dc, ...). Without this map those inputs were dead
@@ -421,6 +427,9 @@ export function ConnectorModal({
       if (v === "" || v === null || v === undefined) continue;
       extra[k] = v;
     }
+    if (uploadedFileId.trim()) {
+      extra.uploaded_file_id = uploadedFileId.trim();
+    }
     if (Object.keys(extra).length > 0) {
       payload.extra = extra;
     }
@@ -525,6 +534,7 @@ export function ConnectorModal({
         break;
       case "database":
         setDatabase(value as string);
+        if (!String(value ?? "").trim()) setUploadedFileId("");
         break;
       case "username":
         setUsername(value as string);
@@ -534,6 +544,7 @@ export function ConnectorModal({
         break;
       case "connection_string":
         setConnectionString(value as string);
+        if (!String(value ?? "").trim()) setUploadedFileId("");
         break;
       case "schema":
         setSchema(value as string);
@@ -575,6 +586,44 @@ export function ConnectorModal({
         // Connector-specific field (SaaS email/site/api_token/board ids, …).
         setCustomValues((v) => ({ ...v, [key]: String(value ?? "") }));
         break;
+    }
+  };
+
+  const handleConnectorFile = async (selected: File | undefined) => {
+    if (!selected) return;
+    setUploadingFile(true);
+    setFieldError(null);
+    setTestResult(null);
+    try {
+      const profile = await uploadFile(selected);
+      const fileType = String(profile.file_type || "");
+      if (!uploadedFileMatchesConnector(resolvedType, fileType, selected.name)) {
+        setFieldError(
+          `${selected.name} profiled as ${fileType || "an unknown type"}. This connection accepts ${connectorUploadAccept(resolvedType) || resolvedType}.`,
+        );
+        return;
+      }
+      const storedPath = String(profile.path || "").trim();
+      if (!storedPath) {
+        setFieldError("Upload did not store a file this server can open. Try the file again.");
+        return;
+      }
+      const fields = connectorFieldsFromUpload({
+        type: resolvedType,
+        authMode,
+        path: storedPath,
+        fileId: String(profile.file_id || ""),
+      });
+      if (fields.connectionString != null) setConnectionString(fields.connectionString);
+      if (fields.database != null) setDatabase(fields.database);
+      setUploadedFileId(fields.uploadedFileId);
+      const rows = Number(profile.row_count || 0);
+      const cols = profile.columns?.length ?? 0;
+      setUploadNote(`${selected.name} · ${rows.toLocaleString()} rows · ${cols} columns`);
+    } catch (e) {
+      setFieldError(e instanceof Error && e.message ? e.message : "Upload failed");
+    } finally {
+      setUploadingFile(false);
     }
   };
 
@@ -726,8 +775,8 @@ export function ConnectorModal({
                   <div>
                     <p className="df2-conn-setup-type">{catalogItem?.label ?? formConfig.label ?? type}</p>
                     <p className="df2-conn-setup-type-hint">
-                      {isFileFormat(resolvedType)
-                        ? "Path or URL only — no database host."
+                      {connectorAcceptsUpload(resolvedType)
+                        ? "Attach a file, or enter a path this server can read."
                         : "Pick the login method your admin issued."}
                     </p>
                   </div>
@@ -782,6 +831,47 @@ export function ConnectorModal({
                     {currentAuthMode ? authDetail(currentAuthMode) : "Enter the login fields."}
                   </p>
                 </div>
+                {connectorAcceptsUpload(resolvedType) && (
+                  <div className="df2-field is-full">
+                    <span className="df2-label" id="df2-connector-file-label">Upload file</span>
+                    <HiddenFileInput
+                      id="df2-connector-file"
+                      accept={connectorUploadAccept(resolvedType)}
+                      disabled={uploadingFile}
+                      onChange={(e) => {
+                        const selected = e.target.files?.[0];
+                        e.target.value = "";
+                        void handleConnectorFile(selected);
+                      }}
+                    />
+                    <label
+                      htmlFor="df2-connector-file"
+                      className={`df2-upload df2-upload-studio${uploadDragOver ? " drag-over" : ""}${uploadingFile ? " is-loading" : ""}`}
+                      onDragOver={(e) => { e.preventDefault(); setUploadDragOver(true); }}
+                      onDragLeave={() => setUploadDragOver(false)}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setUploadDragOver(false);
+                        void handleConnectorFile(e.dataTransfer.files?.[0]);
+                      }}
+                    >
+                      <div className="df2-upload-icon">
+                        <DtIcon name="upload" size={22} />
+                      </div>
+                      <p className="df2-upload-title">
+                        {uploadingFile ? "Uploading file…" : "Drop your data file here"}
+                      </p>
+                      <p className="df2-upload-hint">
+                        {uploadingFile
+                          ? "Storing the file where Test can open it"
+                          : "or click to browse · the path below is filled from the stored file"}
+                      </p>
+                    </label>
+                    {uploadNote && (
+                      <p className="df2-label-hint" role="status">{uploadNote}</p>
+                    )}
+                  </div>
+                )}
                 {currentAuthMode && (
                   <div className="df2-conn-setup-fields">
                     {currentAuthMode.fields.map((field) => (

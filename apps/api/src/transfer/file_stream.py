@@ -1727,6 +1727,16 @@ def stream_file_to_database(
             if col
         ]
         pk_target_cols = [c for c in pk_target_cols if c]
+    if resolve_driver_type(dest_type) == "elasticsearch":
+        from services.primary_key import bind_explicit_elasticsearch_identity
+
+        pk_target_cols = bind_explicit_elasticsearch_identity(
+            dest_type,
+            mappings,
+            pk_target_cols,
+            stream_contracts=stream_contracts,
+            destination_extra=getattr(destination, "extra", None),
+        )
     # Object-store destinations (S3/GCS/ADLS) write a single object per call, so
     # row-level upsert keys are not required and the object is overwritten.
     object_store = dest_type in ("s3", "gcs", "adls")

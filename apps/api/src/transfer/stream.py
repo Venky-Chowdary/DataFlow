@@ -589,6 +589,22 @@ def _stream_database_transfer_impl(
                 (_src_rich_catalog[2] or {}).get("primary_key_columns"),
                 run.cfg.mappings,
             )
+    if resolve_driver_type(run.cfg.dest_type) == "elasticsearch":
+        from services.primary_key import bind_explicit_elasticsearch_identity
+
+        run.cfg.pk_target_cols = bind_explicit_elasticsearch_identity(
+            run.cfg.dest_type,
+            run.cfg.mappings,
+            run.cfg.pk_target_cols,
+            stream_contracts=stream_contracts,
+            destination_extra=getattr(run.cfg.destination, "extra", None),
+        )
+        if run.cfg.pk_target_cols and not run.cfg.pk_source_cols:
+            from services.primary_key import identity_source_columns
+
+            run.cfg.pk_source_cols = identity_source_columns(
+                run.cfg.pk_target_cols, run.cfg.mappings
+            )
     if requires_upsert(run.cfg.effective_sync) and not run.cfg.pk_target_cols:
         raise ValueError(
             f"Sync mode `{run.cfg.effective_sync}` requires primary_key for upsert; "

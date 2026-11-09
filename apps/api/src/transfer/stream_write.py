@@ -553,6 +553,15 @@ def _write_batch(
             "destination_column_nullability": dest_nullability,
             "destination_column_types": dest_column_types,
         }
+        if dest_type == "elasticsearch":
+            # Redis, Dynamo, and the vector sinks already receive the write key.
+            # Elasticsearch was the exception: Map / Advanced identity arrived as
+            # conflict_columns and was dropped, so every order_id row lacked _id.
+            kwargs["write_mode"] = write_mode
+            kwargs["conflict_columns"] = list(conflict_columns or [])
+            extra = getattr(dest, "extra", None) or {}
+            if isinstance(extra, dict):
+                kwargs["destination_extra"] = dict(extra)
         if dest_type == "redis":
             kwargs["write_mode"] = write_mode
             kwargs["conflict_columns"] = conflict_columns

@@ -271,7 +271,11 @@ async def test_connection(request: TestConnectionRequest, http_request: Request)
 async def _test_connection_impl(request: TestConnectionRequest, op):
     """Test a connector configuration before saving"""
     from ..transfer.connector_capabilities import file_source_types
-    from ..transfer.connector_registry import humanize_connection_error, probe_file_source
+    from ..transfer.connector_registry import (
+        humanize_connection_error,
+        locate_connector_file,
+        probe_file_source,
+    )
 
     try:
         driver = resolve_driver_type(request.type)
@@ -280,7 +284,12 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
         # check. Checking the raw tile id skipped probe_file_source and claimed
         # "No connectivity probe" for Excel/CSV upload aliases.
         if (request.type or "").lower() in file_source_types() or driver in file_source_types():
-            path = (request.connection_string or request.host or request.database or "").strip()
+            path = locate_connector_file(
+                connection_string=request.connection_string or "",
+                database=request.database or "",
+                host=request.host or "",
+                extra=request.extra if isinstance(request.extra, dict) else None,
+            )
             kind = driver if driver in file_source_types() else (request.type or "")
             ok, msg = probe_file_source(kind, path)
             return {
@@ -367,6 +376,24 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             "trust_server_certificate": bool(request.trust_server_certificate),
         }
         cfg.update(extra_flat)
+        if driver in {"sqlite", "duckdb"}:
+            located = locate_connector_file(
+                connection_string=str(cfg.get("connection_string") or ""),
+                database=str(cfg.get("database") or ""),
+                host=str(cfg.get("host") or ""),
+                extra=extra_flat,
+            )
+            if located and "://" not in located:
+                # A typed path that is already on disk wins. An attached upload
+                # fills a blank or missing database file.
+                import os
+
+                db = str(cfg.get("database") or "")
+                cs = str(cfg.get("connection_string") or "")
+                if not db or ("://" not in db and not os.path.exists(db)):
+                    cfg["database"] = located
+                if cs and "://" not in cs and not os.path.exists(cs):
+                    cfg["connection_string"] = located
         ok, msg = run_probe(driver, cfg)
         payload: dict[str, Any] = {
             "success": ok,
@@ -3033,19 +3060,27 @@ def profile_file_upload(
         sheets = list_sqlite_tables(content)
 
     stored_file_id = file_id
+    stored_path = ""
+    from services.file_parser import get_file, publish_upload_path, store_upload
+
     if not stored_file_id:
         try:
-            from services.file_parser import store_upload
-
             stored = store_upload(filename or "upload.csv", content)
             stored_file_id = str(stored.get("file_id") or "")
+            stored_path = str(stored.get("path") or "")
         except Exception:
             stored_file_id = ""
+    else:
+        record = get_file(stored_file_id)
+        stored_path = str((record or {}).get("path") or "")
 
     return {
         "success": True,
         "filename": filename,
         "file_id": stored_file_id or None,
+        # Server path Test opens. Empty when the bytes were not stored under
+        # the upload directory — the client must not invent a path.
+        "path": publish_upload_path(stored_path) or None,
         "file_type": result.file_type,
         "sheets": sheets,
         "read_options": read_options.to_wire(),
