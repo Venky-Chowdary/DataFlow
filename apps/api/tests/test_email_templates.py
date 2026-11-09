@@ -24,6 +24,13 @@ _CTX = {
     "company": "Acme",
     "email": "ada@acme.example",
     "reset_url": "https://www.datawrap.io/reset-password#token=test-token",
+    "workspace_name": "Acme Analytics",
+    "app_url": "https://www.datawrap.io/",
+    "inviter_name": "Grace Hopper",
+    "inviter_email": "grace@acme.example",
+    "role": "editor",
+    "accept_url": "https://www.datawrap.io/accept-invite#token=test-token",
+    "expires_days": 7,
 }
 
 
@@ -39,6 +46,8 @@ def test_all_templates_render_html_and_text():
         "password_changed_notice",
         "sales_acknowledgement",
         "sales_lead_internal",
+        "welcome",
+        "workspace_invite",
     }
     for name in template_names():
         mail = render_email(name, dict(_CTX))
@@ -50,7 +59,10 @@ def test_all_templates_render_html_and_text():
 def test_no_remote_images_or_tracking_pixels():
     for name in template_names():
         mail = render_email(name, dict(_CTX))
-        assert "<img" not in mail.html.lower(), name
+        # The only image is the app's static first-party logo (no query string).
+        assert re.findall(r'<img src="([^"]*)"', mail.html) == [
+            "https://www.datawrap.io/brand/datawrap-mark-256.png"], name
+        assert mail.html.lower().count("<img") == 1, name
         assert "url(" not in mail.html, name
         # No third-party URL anywhere; only first-party links are allowed
         # (reset_link carries one — required for the flow) and they are
@@ -92,5 +104,47 @@ def test_snapshot_markers(name):
     """Deterministic structural snapshot per template."""
     mail = render_email(name, dict(_CTX))
     assert mail.html.count("Datawrap") >= 2  # wordmark + footer
-    assert 'border-bottom:3px solid #2dd4bf' in mail.html  # brand rule
+    assert "background:#072B29;border-bottom:3px solid #2DD4BF" in mail.html  # Night header, teal rule
     assert "contact@datawrap.io" in mail.html  # reply path
+    assert "Move the data" not in mail.html  # tagline is an unapproved proposal
+    assert "Keep the proof" not in mail.text
+
+
+def test_brand_palette_and_fonts_follow_the_brand_pack():
+    html = render_email("welcome", dict(_CTX)).html
+    for token in ("#072B29", "#0A3D3A", "#2DD4BF", "#0F766E", "#0F172A", "#475569", "#F6FAF9"):
+        assert token in html, token
+    for font in ("Plus Jakarta Sans", "Inter", "IBM Plex Mono"):
+        assert font in html, font
+    # Amber is quarantine-only: it lives inside the mark image, never in markup.
+    assert "#F59E0B" not in html
+    # Signal teal never colours text on a light ground.
+    assert "color:#2DD4BF" not in html
+
+
+def test_workspace_invite_names_inviter_address_and_role():
+    mail = render_email("workspace_invite", dict(_CTX))
+    assert mail.subject == "Grace Hopper invited you to Acme Analytics on Datawrap"
+    for part in (mail.html, mail.text):
+        assert "grace@acme.example" in part  # display name can't pass for us alone
+        assert "Editor" in part
+        assert "7 days" in part
+    assert 'href="https://www.datawrap.io/accept-invite#token=test-token"' in mail.html
+
+
+def test_subject_values_cannot_inject_headers():
+    mail = render_email("workspace_invite", {
+        **_CTX, "inviter_name": "Eve\r\nBcc: victim@example.com",
+        "workspace_name": "Acme\nX-Evil: 1"})
+    assert "\r" not in mail.subject and "\n" not in mail.subject
+    assert "\nBcc:" not in mail.text and "\nX-Evil" not in mail.text
+
+
+def test_welcome_variants_and_no_exclamation_marks():
+    created = render_email("welcome", dict(_CTX))
+    joined = render_email("welcome", {**_CTX, "joined": True, "role": "viewer"})
+    assert "You are its admin" in created.text
+    assert "joined Acme Analytics as Viewer" in joined.text
+    for mail in (created, joined):
+        assert "!" not in mail.subject + mail.text  # brand voice: calm
+        assert 'href="https://www.datawrap.io/"' in mail.html

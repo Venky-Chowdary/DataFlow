@@ -33,6 +33,7 @@ from services.value_serializer import (
     json_default,
     load_http_json,
 )
+from services.vector_sync import VECTOR_SYNC_METADATA_KEYS
 
 # Writer bookkeeping + opaque embeddings. Business payload (id/amount/code)
 # is the unique-engine fixture. Pair mappings also G13-omit these names so a
@@ -46,7 +47,7 @@ QDRANT_OMIT_PAYLOAD_KEYS = frozenset(
         "source_id",
         "qdrant_id",
     }
-)
+) | VECTOR_SYNC_METADATA_KEYS
 
 
 def _cell(value: Any) -> str:

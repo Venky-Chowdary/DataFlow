@@ -38,6 +38,7 @@ from bson import json_util
 from services.brand_env import getenv_brand
 from services.cdc_cursor_gap import CdcCursorGapError, CdcOplogGapError
 from services.cdc_engine import ChangeBatch
+from services.cdc_net_effect import CdcTxnEvent, coalesce_cdc_txn_events
 
 from connectors.mongodb_common import _new_mongo_client
 from connectors.mongodb_reader import (
@@ -129,6 +130,28 @@ def _doc_to_record(doc: dict[str, Any], columns: list[str] | None) -> dict[str, 
     return out
 
 
+def _token_optime(token: Any) -> tuple[int, int] | None:
+    """``(seconds, increment)`` of a v1 resume token (``_data`` = ``82`` + Timestamp)."""
+    data = str(token.get("_data") or "") if isinstance(token, dict) else ""
+    if len(data) < 18 or not data.lower().startswith("82"):
+        return None
+    try:
+        return int(data[2:10], 16), int(data[10:18], 16)
+    except ValueError:
+        return None
+
+
+def _caught_up(token: Any, head: tuple[int, int] | None) -> bool:
+    """An empty batch whose resume token reached the start-of-poll oplog head.
+
+    Change streams deliver in oplog order, so every event committed before the
+    poll began has been returned; waiting out ``max_wait_seconds`` adds nothing
+    for a bounded run (it made each idle Mongo CDC run cost 30 s).
+    """
+    pos = _token_optime(token) if head is not None else None
+    return pos is not None and pos >= head
+
+
 class MongodbChangeStreamCdc:
     """Log-based CDC for MongoDB: snapshot + change-stream tail."""
 
@@ -200,7 +223,7 @@ class MongodbChangeStreamCdc:
         # pipeline keyed on a business column can only name the deleted row from
         # the collection's pre-image, so ask for one whenever the key is not
         # ``_id`` — and refuse the delete rather than drop it if none arrives.
-        self._needs_pre_image = self.primary_key != "_id"
+        self._needs_pre_image = self.primary_key.strip() != "_id"
         self._pre_images_enabled: bool | None = None
         self._pre_images_probed = False
 
@@ -327,6 +350,14 @@ class MongodbChangeStreamCdc:
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots (_id or configured PK)."""
         pk = sig.primary_key or self.primary_key or "_id"
+        from services.cdc_snapshot_window import _pk_columns
+
+        if len(_pk_columns(pk)) > 1:
+            raise ValueError(
+                f"incremental snapshot signal on {self.db_name}.{self.collection} is keyed on "
+                f"composite '{pk}'; Mongo signal chunks page on one field — key the signal "
+                "on _id or a single unique field"
+            )
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
         query: dict[str, Any] = {}
@@ -531,15 +562,66 @@ class MongodbChangeStreamCdc:
             "mongodb",
         )
 
+    def _pk_columns(self) -> list[str]:
+        from services.cdc_snapshot_window import _pk_columns
+
+        return _pk_columns(self.primary_key)
+
     def _pk_value(self, doc: dict[str, Any]) -> str:
+        """Business key in the shared CDC key space (composite joined by ``_PK_SEP``).
+
+        Reading ``region,id`` as one field name made every event keyless.
+        """
+        from services.cdc_snapshot_window import _PK_SEP
         from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
 
-        value = doc.get(self.primary_key)
-        if value is None and "documentKey" in doc:
-            value = doc["documentKey"].get(self.primary_key)
-        if value is None:
-            return SQL_NULL_SENTINEL
-        return cell_to_string(value, preserve_sql_null=True)
+        parts: list[str] = []
+        for col in self._pk_columns():
+            value = doc.get(col)
+            if value is None and "documentKey" in doc:
+                value = doc["documentKey"].get(col)
+            if value is None:
+                return SQL_NULL_SENTINEL
+            parts.append(cell_to_string(value, preserve_sql_null=True))
+        return _PK_SEP.join(parts)
+
+    def _row_events(
+        self, change: dict[str, Any], op: str, record: dict[str, Any]
+    ) -> list[CdcTxnEvent]:
+        """Ordered events for one insert/update/replace.
+
+        A business-key change must retire the old key (Debezium emits delete +
+        create); applying only the after-image left the old row at the
+        destination. The old key lives only in the pre-image, so a key-changing
+        ``update`` (or any ``replace``) without one fails closed like an
+        unkeyed delete.
+        """
+        new = self._pk_value(record)
+        new_pk = new if _has_key(new) else ""
+        if op == "insert":
+            return [CdcTxnEvent(op="i", pk=new_pk, row=record)]
+        out: list[CdcTxnEvent] = []
+        before = change.get("fullDocumentBeforeChange")
+        if isinstance(before, dict):
+            old = self._pk_value(before)
+            if _has_key(old) and old != new:
+                out.append(CdcTxnEvent(op="d", pk=old, row=None))
+        elif self._needs_pre_image and op in ("update", "replace"):
+            # A replace has no updateDescription: any replace may move the key.
+            desc = change.get("updateDescription") or {}
+            touched = set(desc.get("updatedFields") or {}) | set(desc.get("removedFields") or [])
+            if op == "replace" or touched.intersection(self._pk_columns()):
+                from services.cdc_capability import (
+                    LogCaptureUnavailable,
+                    mongo_key_change_refusal,
+                )
+
+                raise LogCaptureUnavailable(
+                    mongo_key_change_refusal(self.db_name, self.collection, self.primary_key),
+                    "mongodb",
+                )
+        out.append(CdcTxnEvent(op="u", pk=new_pk, row=record))
+        return out
 
     def _full_doc(self, change: dict[str, Any]) -> dict[str, Any] | None:
         return change.get("fullDocument") or change.get("documentKey")
@@ -605,7 +687,9 @@ class MongodbChangeStreamCdc:
                         events.append({"op": "u", "row": _doc_to_record(doc, self.columns)})
                     elif op == "delete":
                         pk = self._delete_key(change)
-                        events.append({"op": "d", "pk": pk, "row": {self.primary_key: pk}})
+                        from services.cdc_snapshot_window import _pk_row_dict
+
+                        events.append({"op": "d", "pk": pk, "row": _pk_row_dict(self.primary_key, pk)})
                     elif op == "invalidate":
                         from services.cdc_retention_probe import classify_mongo_oplog_retention
 
@@ -659,10 +743,9 @@ class MongodbChangeStreamCdc:
 
         try:
             with self.coll.watch(pipeline, **watch_kwargs) as stream:
-                inserts: list[dict[str, Any]] = []
-                updates: list[dict[str, Any]] = []
-                deletes: list[str] = []
+                events: list[CdcTxnEvent] = []
                 start = time.monotonic()
+                head = self._cluster_head()
                 last_token: Any = None
                 while time.monotonic() - start < self.max_wait_seconds:
                     change = stream.try_next()
@@ -672,6 +755,8 @@ class MongodbChangeStreamCdc:
                     if token is not None:
                         last_token = token
                     if change is None:
+                        if _caught_up(last_token, head):
+                            break
                         continue
                     op = change.get("operationType")
                     doc = self._full_doc(change)
@@ -679,12 +764,9 @@ class MongodbChangeStreamCdc:
                         if not doc:
                             continue
                         record = _doc_to_record(doc, self.columns)
-                        if op == "insert":
-                            inserts.append(record)
-                        else:
-                            updates.append(record)
+                        events.extend(self._row_events(change, op, record))
                     elif op == "delete":
-                        deletes.append(self._delete_key(change))
+                        events.append(CdcTxnEvent(op="d", pk=self._delete_key(change), row=None))
                     elif op == "invalidate":
                         from services.cdc_retention_probe import classify_mongo_oplog_retention
 
@@ -693,11 +775,12 @@ class MongodbChangeStreamCdc:
                         )
                         self._raise_oplog_gap(probe, invalidated=True)
 
-                    if len(inserts) + len(updates) + len(deletes) >= self.batch_size:
+                    if len(events) >= self.batch_size:
                         break
 
                 # Empty DML + token is a position-only heartbeat (PG idle-slot
                 # identity). Apply persists the watermark; lag is not 0.
+                inserts, updates, deletes = coalesce_cdc_txn_events(events)
                 if inserts or updates or deletes or last_token is not None:
                     yield ChangeBatch(
                         inserts=inserts,
@@ -729,6 +812,14 @@ class MongodbChangeStreamCdc:
                 )
                 self._raise_oplog_gap(probe, history_lost=True)
             raise
+
+    def _cluster_head(self) -> tuple[int, int] | None:
+        """Oplog position at poll start; ``None`` keeps the full wait."""
+        try:
+            ts = self.client.admin.command("hello").get("operationTime")
+        except Exception:  # noqa: BLE001 - optimisation only; wait-out is the safe path
+            return None
+        return (int(ts.time), int(ts.inc)) if ts is not None else None
 
     def is_available(self) -> bool:
         """Return True if the deployment supports change streams."""

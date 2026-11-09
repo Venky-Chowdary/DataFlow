@@ -1,4 +1,5 @@
 import type { ProgressAbsence, ProgressDelivery } from "./jobProgressGate";
+import type { RouteCertification, RouteCertificationStatus } from "./routeCertification";
 import { streamDropNotice, streamSilenceNeedsCatchUp } from "./jobStreamLiveness";
 import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
@@ -192,6 +193,53 @@ async function parseApiError(res: Response, fallback: string): Promise<string> {
   return (await readApiRefusal(res, fallback)).detail;
 }
 
+/**
+ * Browsers open at most 6 HTTP/1.1 connections per host. When the API is slow,
+ * the shell's own calls filled all 6 and a lazy screen's module requests sat in
+ * the browser queue until those calls timed out ("Loading Settings…" for ~15 s).
+ * Capping in-flight API requests below that keeps sockets free for chunk loads.
+ */
+export const API_MAX_IN_FLIGHT = 4;
+let apiInFlight = 0;
+const apiSlotWaiters: Array<() => void> = [];
+
+function releaseApiSlot(): void {
+  const next = apiSlotWaiters.shift();
+  if (next) next();
+  else apiInFlight = Math.max(apiInFlight - 1, 0);
+}
+
+/** FIFO slot under the cap; a waiter whose signal aborts leaves the queue. */
+function acquireApiSlot(signal: AbortSignal): Promise<() => void> {
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    releaseApiSlot();
+  };
+  if (apiInFlight < API_MAX_IN_FLIGHT && apiSlotWaiters.length === 0) {
+    apiInFlight += 1;
+    return Promise.resolve(release);
+  }
+  return new Promise((resolve, reject) => {
+    const grant = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(release);
+    };
+    const onAbort = () => {
+      const index = apiSlotWaiters.indexOf(grant);
+      if (index >= 0) apiSlotWaiters.splice(index, 1);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    apiSlotWaiters.push(grant);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** Authenticated fetch (Bearer + X-Workspace-Id + CSRF); shared by the lib/*Api modules. */
 export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
   const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal, ...requestInit } = init;
@@ -235,7 +283,9 @@ export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit 
     signal?.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
+  let releaseSlot: (() => void) | null = null;
   try {
+    releaseSlot = await acquireApiSlot(controller.signal);
     const res = await fetch(input, { ...mergedInit, signal: controller.signal });
     if (res.status === 401 && apiUnauthorizedEndsSession(session)) {
       notifyAuthRequired(typeof input === "string" ? input : String(input));
@@ -248,6 +298,7 @@ export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit 
     throw error;
   } finally {
     window.clearTimeout(timeout);
+    releaseSlot?.();
   }
 }
 
@@ -467,6 +518,8 @@ export async function runPreflight(payload: {
   schema_drift_acknowledged?: boolean;
   /** Operator acknowledged destination FK mapping risk (schema coverage only). */
   fk_risk_acknowledged?: boolean;
+  /** Operator approved the destination DDL Validate disclosed (e.g. a unique index). */
+  ddl_changes_acknowledged?: boolean;
   /** Module 11 — opt-in full-table population orphan scan (only path to RI proven). */
   run_population_orphan_scan?: boolean;
   /** Who acknowledged (email / display name). */
@@ -571,6 +624,8 @@ export async function previewQuarantineCells(payload: {
   /** Typed sources read their own numbers canonically — same owner as Validate/Execute. */
   source_kind?: string;
   source_type?: string;
+  /** Destination engine: VARCHAR(n) overflow is counted the way its writer counts. */
+  dest_db?: string;
 }): Promise<CellPreviewResult> {
   const res = await apiFetch(`${API_BASE}/preflight/preview-cells`, {
     method: "POST",
@@ -2977,6 +3032,8 @@ export type PreflightAcknowledgments = {
   compliance_acknowledged?: boolean;
   schema_drift_acknowledged?: boolean;
   fk_risk_acknowledged?: boolean;
+  /** Operator approved the destination DDL Validate disclosed (e.g. a unique index). */
+  ddl_changes_acknowledged?: boolean;
   acknowledgment_actor?: string;
   acknowledgment_reason?: string;
 };
@@ -3097,6 +3154,7 @@ export async function preflightTransferPlan(
       compliance_acknowledged: acknowledgments.compliance_acknowledged ?? false,
       schema_drift_acknowledged: acknowledgments.schema_drift_acknowledged ?? false,
       fk_risk_acknowledged: acknowledgments.fk_risk_acknowledged ?? false,
+      ddl_changes_acknowledged: acknowledgments.ddl_changes_acknowledged ?? false,
       acknowledgment_actor: acknowledgments.acknowledgment_actor ?? "",
       acknowledgment_reason: acknowledgments.acknowledgment_reason ?? "",
       shape_recipe: shapeRecipe ?? null,
@@ -3227,6 +3285,7 @@ export async function runUniversalTransfer(options: {
   complianceAcknowledged?: boolean;
   schemaDriftAcknowledged?: boolean;
   fkRiskAcknowledged?: boolean;
+  ddlChangesAcknowledged?: boolean;
   acknowledgmentActor?: string;
   acknowledgmentReason?: string;
   /** Phase C11 — 64-hex Decision Artifact content_hash from last green Validate. */
@@ -3261,6 +3320,8 @@ export async function runUniversalTransfer(options: {
   formData.append("dest_schema", options.destSchema || "");
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
+  // Studio's policy is the operator's choice: manual review gates create-new DDL.
+  formData.append("schema_policy_declared", "true");
   formData.append("validation_mode", options.validationMode || "strict");
   formData.append(
     "delivery_guarantee",
@@ -3351,6 +3412,10 @@ export async function runUniversalTransfer(options: {
   formData.append(
     "fk_risk_acknowledged",
     options.fkRiskAcknowledged === true ? "true" : "false",
+  );
+  formData.append(
+    "ddl_changes_acknowledged",
+    options.ddlChangesAcknowledged === true ? "true" : "false",
   );
   if (options.acknowledgmentActor) {
     formData.append("acknowledgment_actor", options.acknowledgmentActor);
@@ -3467,6 +3532,7 @@ export async function executeTransferJson(payload: {
   complianceAcknowledged?: boolean;
   schemaDriftAcknowledged?: boolean;
   fkRiskAcknowledged?: boolean;
+  ddlChangesAcknowledged?: boolean;
   acknowledgmentActor?: string;
   acknowledgmentReason?: string;
   approvedDecisionArtifactHash?: string;
@@ -3499,6 +3565,7 @@ export async function executeTransferJson(payload: {
       compliance_acknowledged: payload.complianceAcknowledged === true,
       schema_drift_acknowledged: payload.schemaDriftAcknowledged === true,
       fk_risk_acknowledged: payload.fkRiskAcknowledged === true,
+      ddl_changes_acknowledged: payload.ddlChangesAcknowledged === true,
       acknowledgment_actor: payload.acknowledgmentActor || undefined,
       acknowledgment_reason: payload.acknowledgmentReason || undefined,
       approved_decision_artifact_hash:
@@ -3555,6 +3622,8 @@ export async function transferFile(
   formData.append("dest_type", options.destType || "mongodb");
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
+  // Studio's policy is the operator's choice: manual review gates create-new DDL.
+  formData.append("schema_policy_declared", "true");
   formData.append("validation_mode", options.validationMode || "strict");
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
   if (options.connectorId) formData.append("connector_id", options.connectorId);
@@ -4202,6 +4271,61 @@ export async function addWorkspaceMember(
   return { membership: data.membership, hasAccount: !!data.has_account, temporaryPassword: data.temporary_password ?? null };
 }
 
+export interface WorkspaceInvite {
+  id: string;
+  workspace_id: string;
+  email: string;
+  name: string;
+  role: WorkspaceRole;
+  status: "pending" | "expired" | "accepted" | "revoked";
+  invited_by: string;
+  invited_by_name: string;
+  created_at: string;
+  last_sent_at: string;
+  expires_at: string;
+  sent_count: number;
+}
+
+export async function fetchWorkspaceInvites(workspaceId: string): Promise<WorkspaceInvite[]> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/invites`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load invitations"));
+  return (await res.json()).invites ?? [];
+}
+
+/** Email a single-use link to join the workspace; nothing is granted until it is accepted. */
+export async function sendWorkspaceInvite(
+  workspaceId: string,
+  email: string,
+  role: WorkspaceRole,
+  name = "",
+): Promise<WorkspaceInvite> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/invites`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, role, name }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to send invitation"));
+  return (await res.json()).invite as WorkspaceInvite;
+}
+
+/** Re-send with a fresh link; the previous link stops working. */
+export async function resendWorkspaceInvite(workspaceId: string, inviteId: string): Promise<WorkspaceInvite> {
+  const res = await apiFetch(
+    `${API_BASE}/team/workspaces/${workspaceId}/invites/${encodeURIComponent(inviteId)}/resend`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to resend invitation"));
+  return (await res.json()).invite as WorkspaceInvite;
+}
+
+export async function revokeWorkspaceInvite(workspaceId: string, inviteId: string): Promise<void> {
+  const res = await apiFetch(
+    `${API_BASE}/team/workspaces/${workspaceId}/invites/${encodeURIComponent(inviteId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke invitation"));
+}
+
 export async function updateWorkspaceMemberRole(
   workspaceId: string,
   email: string,
@@ -4513,7 +4637,9 @@ export interface QuarantineInfo {
   /** write = load-time rejects; preflight = Validate/Run integrity findings */
   source?: "write" | "preflight" | "none" | string;
   quarantine: {
-    row?: number;
+    /** Source row number; a transform divert carries the diverted record here. */
+    row?: number | Record<string, unknown>;
+    source_row_index?: number;
     column?: string;
     target?: string;
     value?: string | null;
@@ -4969,6 +5095,12 @@ export type ProofLedger = {
     production_sku_driver_missing?: number;
     production_sku_refused?: number;
     production_sku_note?: string;
+    route_certification?: {
+      artifact: string | null;
+      generated_at: string | null;
+      routes_by_status: Partial<Record<RouteCertificationStatus, number>>;
+      tests: { tests_passed: number; tests_failed: number; tests_skipped: number } | null;
+    };
     customer_handover_sold?: number;
     customer_handover_eligible?: number;
     fidelity_proofs_on_disk: number;
@@ -4987,6 +5119,7 @@ export type ProofLedger = {
     customer_handover_eligible?: boolean;
     validate_ok?: boolean;
     driver_gap?: string | null;
+    certification?: RouteCertification | null;
   }[];
   recent_proofs: {
     id: string;

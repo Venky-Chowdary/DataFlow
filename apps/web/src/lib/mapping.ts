@@ -158,6 +158,11 @@ export interface EditableMapping {
    * Alone this is NOT an execution contract — see riskContract.
    */
   riskAcknowledged?: boolean;
+  /** Grading in force before a live source-type drift re-graded this row lossy. */
+  sourceTypeDriftPrior?: Pick<
+    EditableMapping,
+    "inferredType" | "fidelity" | "fidelityReason" | "typeNarrowing" | "requiresReview"
+  >;
   /**
    * Signed Migration Risk Contract (or draft fields signed on Validate).
    * Execute-approve requires a continue-policy contract — boolean ack is incomplete.
@@ -2830,4 +2835,51 @@ export function mappingHealthSummary(
     headline,
     detail,
   };
+}
+
+/**
+ * Re-grade mapped rows when the live source schema changes a column's type.
+ * Map otherwise keeps the type it was graded on, and calls a drifted
+ * DECIMAL(14,6) → existing DECIMAL(12,4) "safe" while Validate blocks it.
+ */
+export function reconcileLiveSourceTypes(
+  rows: EditableMapping[],
+  schema: Record<string, string> | null | undefined,
+): EditableMapping[] {
+  if (!schema) return rows;
+  let changed = false;
+  const out = rows.map((m) => {
+    const live = String(schema[m.source] ?? "").trim();
+    const prior = String(m.inferredType ?? "").trim();
+    if (!live || !prior || !m.destType || live.toLowerCase() === prior.toLowerCase()) return m;
+    const liveRisky = declaredCarrierFidelityRisk(live, m.destType);
+    if (!liveRisky && m.sourceTypeDriftPrior) {
+      // The drift that made this row lossy is gone: restore its prior grading.
+      changed = true;
+      const { sourceTypeDriftPrior: restored, ...rest } = m;
+      return { ...rest, ...restored, inferredType: live };
+    }
+    if (!liveRisky || declaredCarrierFidelityRisk(prior, m.destType)) {
+      return m;
+    }
+    changed = true;
+    return {
+      ...m,
+      sourceTypeDriftPrior: m.sourceTypeDriftPrior ?? {
+        inferredType: m.inferredType,
+        fidelity: m.fidelity,
+        fidelityReason: m.fidelityReason,
+        typeNarrowing: m.typeNarrowing,
+        requiresReview: m.requiresReview,
+      },
+      inferredType: live,
+      approved: false,
+      riskAcknowledged: false,
+      fidelity: "lossy_cast",
+      fidelityReason: `Source type changed to ${live}; destination ${m.destType} may collapse fidelity`,
+      typeNarrowing: true,
+      requiresReview: true,
+    };
+  });
+  return changed ? out : rows;
 }

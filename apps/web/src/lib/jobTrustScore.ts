@@ -3,6 +3,11 @@
  * Prefer server `job.trust` when present; otherwise compute client-side.
  */
 
+import {
+  isGate8FullChecksumProof,
+  type Gate8Reconciliation,
+} from "../components/transfer/gate8Status";
+
 export type JobTrustFactor = {
   id: string;
   label: string;
@@ -125,6 +130,8 @@ function isAppendDeltaProof(recon: Record<string, unknown> | null | undefined): 
   );
 }
 
+const KEYED_DUPLICATE_POLICIES = new Set(["dedupe_skip", "skip_duplicates", "upsert", "merge"]);
+
 export function computeJobTrustScore(job: TrustJobInput | null | undefined): JobTrustScore {
   if (job?.trust && typeof job.trust.score === "number") {
     return job.trust;
@@ -179,7 +186,12 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
   }
   factors.push({ id: "completeness", label: "Completeness", score: outcome, weight: 0.25, note: outcomeNote });
 
-  const denom = Math.max(processed, rejected, historicalRejected, 1);
+  // Rows read is the population a hold-out was taken from; rows written alone
+  // made 2 rejected of 3 read print as 100%.
+  const ledgerRead = (job?.destination_summary?.row_accounting as { rows_read?: unknown } | null | undefined)
+    ?.rows_read;
+  const rowsRead = num(ledgerRead ?? job?.destination_summary?.source_row_count);
+  const denom = Math.max(rowsRead, processed, rejected, historicalRejected, 1);
   const rejectRate = Math.min(1, rejected / denom);
   const quarantineScore = rejected <= 0 ? 100 : Math.max(0, 100 - rejectRate * 400);
   const quarantineNote =
@@ -187,7 +199,7 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       ? `${historicalRejected.toLocaleString()} original hold-out(s) remediations landed (child Gate-8) — not a rewrite of the parent checksum.`
       : rejected <= 0
         ? "No quarantined rows."
-        : `${rejected.toLocaleString()} open quarantined (${(rejectRate * 100).toFixed(1)}% of processed).`;
+        : `${rejected.toLocaleString()} open quarantined (${(rejectRate * 100).toFixed(1)}% of ${rowsRead > 0 ? "rows read" : "processed"}).`;
   factors.push({
     id: "quarantine",
     label: "Quarantine",
@@ -233,23 +245,11 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     const lastStream =
       String(recon.checksum_scope || "").toLowerCase() === "last_stream"
       || assurance === "per_stream_checksum";
-    const fullChecksum =
-      !lastStream
-      && (
-        assurance === "full_checksum"
-        || (
-          passed === true
-          && Boolean(recon.source_checksum)
-          && Boolean(recon.target_checksum)
-          && String(recon.source_checksum) === String(recon.target_checksum)
-          && !writerAck
-          && !sample
-          && !writePass
-          && !unproven
-          && !appendDelta
-          && String(recon.checksum_scope || "").toLowerCase() !== "last_stream"
-        )
-      );
+    // Same scope rule as the Gate-8 evidence tile: a CDC source-image or
+    // batch digest is never reported as a full checksum pass.
+    // One verdict with the Gate-8 tile and the server proof classifier: credit
+    // only a positively proven full checksum (independent source re-read).
+    const fullChecksum = !lastStream && isGate8FullChecksumProof(recon as Gate8Reconciliation);
     const preWrite =
       preview
       || phase.includes("pre_write")
@@ -364,26 +364,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     score = Math.min(score, 28);
   }
   // Never grade-A without independent full checksum proof (mirrors job_trust.py).
-  const assurance = String(recon?.assurance_level || recon?.coverage || "").toLowerCase();
-  const phase = String(recon?.phase || "").toLowerCase();
-  const fullProof =
-    assurance === "full_checksum"
-    || (
-      recon?.passed === true
-      && Boolean(recon?.source_checksum)
-      && Boolean(recon?.target_checksum)
-      && String(recon?.source_checksum) === String(recon?.target_checksum)
-      && !phase.includes("writer_ack")
-      && !phase.includes("sample")
-      && !phase.includes("skipped")
-      && recon?.unproven !== true
-      && recon?.skipped_readback !== true
-      && assurance !== "row_count"
-      && assurance !== "per_stream_checksum"
-      && !phase.includes("row_count")
-      && String(recon?.checksum_scope || "").toLowerCase() !== "whole_table_not_comparable"
-      && String(recon?.checksum_scope || "").toLowerCase() !== "last_stream"
-    );
+  const fullProof = Boolean(recon)
+    && String(recon?.checksum_scope || "").toLowerCase() !== "last_stream"
+    && isGate8FullChecksumProof(recon as Gate8Reconciliation);
   if (!recon) {
     score = Math.min(score, 84);
   } else if (!fullProof) {
@@ -431,7 +414,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
         ? {
             code: "append_delta",
             label: "Append delta closed — not a dest replace",
-            detail: "Dest grew by this run. Overwrite to replace existing rows, or add a PK and upsert.",
+            detail: KEYED_DUPLICATE_POLICIES.has(String(job?.destination_summary?.duplicate_policy ?? "").trim().toLowerCase())
+              ? "New keys were inserted; stored keys were kept or updated by the Duplicate rows choice. Overwrite to replace existing rows."
+              : "Dest grew by this run. Overwrite to replace existing rows, or add a PK and upsert.",
           }
         : recon?.passed === true && (writerAckNow || writePassNow)
           ? {

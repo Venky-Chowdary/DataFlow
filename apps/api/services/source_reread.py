@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES
+from src.transfer.engine_family import SQL_DUPLEX_FAMILIES
 
 #: Destinations that can independently SELECT the written population.
 WAREHOUSE_VERIFY_DESTS: Final[frozenset[str]] = SNAPSHOT_SCAN_SOURCES
@@ -90,8 +91,9 @@ def _env_reread_mode() -> str:
 #: offset, but which are not snapshot-scan sources. Outside a resume they stay
 #: on the write-pass digest. A resumed pass that wrote only the tail has no
 #: population digest without a re-read, so for these the tail re-read runs
-#: (QA D213: SQL Server -> MySQL resume failed Gate-8 on 31 correct rows).
-_PARTIAL_PASS_REREAD_FAMILIES: Final[frozenset[str]] = frozenset({"sqlserver"})
+#: (QA D213: SQL Server -> MySQL resume failed Gate-8 on 31 correct rows;
+#: Oracle -> PostgreSQL failed the same way).
+_PARTIAL_PASS_REREAD_FAMILIES: Final[frozenset[str]] = SQL_DUPLEX_FAMILIES
 
 
 def reread_loop_supports(src_type: str, *, partial_write_pass: bool = False) -> bool:

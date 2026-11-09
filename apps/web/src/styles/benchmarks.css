@@ -202,3 +202,21 @@
 @keyframes df2-spin {
   to { transform: rotate(360deg); }
 }
+
+.df2-page-benchmarks-cert summary {
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.df2-page-benchmarks-cert summary:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+.df2-page-benchmarks-cert-modes {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-size: var(--df-fs-body);
+  line-height: 1.4;
+  color: var(--df-text-secondary);
+}

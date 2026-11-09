@@ -22,6 +22,12 @@ import {
   type ForeignKeysMode,
 } from "../../lib/foreignKeysMode";
 import {
+  DUPLICATE_ROWS_OPTIONS,
+  isAppendSyncMode,
+  normalizeDuplicateRowsMode,
+  type DuplicateRowsMode,
+} from "../../lib/duplicatePolicy";
+import {
   CURSOR_SEMANTICS,
   CURSOR_SEMANTICS_LABELS,
   evaluateCursorSemantics,
@@ -145,6 +151,9 @@ interface DestinationAdvancedDrawerProps {
   /** Source foreign keys on this route (round 11): carry | guard | ignore. */
   foreignKeysMode?: ForeignKeysMode;
   onForeignKeysModeChange?: (mode: ForeignKeysMode) => void;
+  /** Append: insert every row, or resolve keys already stored (skip / update). */
+  duplicateRowsMode?: DuplicateRowsMode;
+  onDuplicateRowsModeChange?: (mode: DuplicateRowsMode) => void;
   /** Priority-first sync: sort source by this column before write. */
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc";
@@ -301,6 +310,8 @@ export function DestinationAdvancedDrawer({
   onMirrorDeleteModeChange,
   foreignKeysMode = "carry",
   onForeignKeysModeChange,
+  duplicateRowsMode = "insert",
+  onDuplicateRowsModeChange,
   priorityColumn = "",
   priorityDirection = "desc",
   rowLimit = 0,
@@ -585,6 +596,27 @@ export function DestinationAdvancedDrawer({
             {FOREIGN_KEYS_MODE_OPTIONS.find((o) => o.id === foreignKeysMode)?.detail}
           </p>
         </div>
+
+        {isAppendSyncMode(syncMode) && (
+          <div className="df2-field df2-adv-duplicate-rows-field">
+            <label className="df2-label" htmlFor="df2-adv-duplicate-rows">Duplicate rows</label>
+            <select
+              id="df2-adv-duplicate-rows"
+              className="df2-input df2-select"
+              value={duplicateRowsMode}
+              onChange={(e) => onDuplicateRowsModeChange?.(normalizeDuplicateRowsMode(e.target.value))}
+              disabled={!onDuplicateRowsModeChange}
+              aria-describedby="df2-adv-duplicate-rows-hint"
+            >
+              {DUPLICATE_ROWS_OPTIONS.map((o) => (
+                <option key={o.id} value={o.id}>{o.label}</option>
+              ))}
+            </select>
+            <p className="df2-label-hint" id="df2-adv-duplicate-rows-hint">
+              {DUPLICATE_ROWS_OPTIONS.find((o) => o.id === duplicateRowsMode)?.detail}
+            </p>
+          </div>
+        )}
 
         {syncMode === "cdc" && (
           <div className="df2-field df2-adv-snapshot-field">

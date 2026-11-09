@@ -52,6 +52,8 @@ from services.preflight_file_plan import (
     _plan_in_file_dedupe,
 )
 from services.coercion_gate_reconcile import reconcile_coercion_report
+from services.create_ddl_gate import create_ddl_gate as build_create_ddl_gate
+from services.preflight_policy_gates import blockers_from_gates
 from services.preflight_file_phases import (
     apply_constraint_findings,
     apply_schema_drift_gate,
@@ -365,6 +367,7 @@ def run_file_preflight(
     # Operator approved the DDL DataFlow disclosed for this run (e.g. the
     # unique index an upsert needs on an existing destination table — D101).
     ddl_changes_acknowledged: bool = False,
+    schema_policy_explicit: bool = False,
     # Operator chose to empty a populated destination from a 0-row source (D56).
     empty_source_overwrite_acknowledged: bool = False,
     acknowledgment_actor: str = "",
@@ -373,6 +376,9 @@ def run_file_preflight(
     resume: bool = False,
     # The resumed run only verifies: every batch was already committed.
     resume_write_complete: bool = False,
+    # A resumed keyset read starts past this cursor (its committed prefix).
+    resume_cursor_column: str = "",
+    resume_cursor_value: Any = None,
     source_encoding: dict[str, Any] | None = None,
     population_rows: Iterable[Mapping[str, Any]] | None = None,
     population_replay: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None,
@@ -1482,6 +1488,8 @@ def run_file_preflight(
         source_table=source_table,
         resume=resume,
         resume_write_complete=resume_write_complete,
+        resume_cursor_column=resume_cursor_column,
+        resume_cursor_value=resume_cursor_value,
         source_key_columns=append_identity_source_key(
             sync_mode=sync_mode, stream_contracts=stream_contracts,
             contract_primary_key=contract_primary_key, source_key_groups=source_key_groups,
@@ -1508,9 +1516,31 @@ def run_file_preflight(
         # key by design — a unique constraint on the key would be wrong, and the
         # writer keys current-row lookup on (key, is_current), never needing the
         # index this gate exists to disclose.
-        _upsert_constraint_mode = _requires_upsert(sync_mode) and _nsm(
+        from services.sync_cursor import is_overwrite_sync as _is_overwrite
+
+        # An append that chose dedupe_skip / upsert keys its write like an
+        # upsert does, so the same key evidence and DDL disclosure apply.
+        _keyed_policy = (
+            ""
+            if _requires_upsert(sync_mode) or _is_overwrite(sync_mode)
+            else _plan_duplicate_policy(source_config, destination_config)
+        )
+        if _keyed_policy not in {"dedupe_skip", "upsert"}:
+            _keyed_policy = ""
+        _upsert_constraint_mode = (_requires_upsert(sync_mode) or bool(_keyed_policy)) and _nsm(
             sync_mode, default=""
         ) != "scd2"
+        _policy_keys: list[str] = []
+        if _keyed_policy:
+            from services.duplicate_policy import keyed_policy_key_columns, keyed_policy_no_key_gate
+
+            _policy_keys = keyed_policy_key_columns(
+                contract_primary_key=contract_primary_key,
+                destination_pk_columns=destination_pk_columns,
+                mappings=mappings,
+            )
+            if not _policy_keys:
+                upsert_ddl_gate = keyed_policy_no_key_gate(_keyed_policy)
         # Non-relational destinations (SaaS REST, object stores, schemaless,
         # Kafka/vector) are natively keyed upserts — DataFlow never runs
         # CREATE UNIQUE INDEX on them, so there is no DDL to disclose. Blocking
@@ -1542,6 +1572,8 @@ def run_file_preflight(
                 destination_table=destination_table,
             )
             _uk_cols = [t for _s, t in _uk_pairs]
+            if _keyed_policy:
+                _uk_cols = list(_policy_keys)
             if _uk_cols and not dest_unique_covering_columns(
                 destination_pk_columns, destination_unique_keys, _uk_cols
             ):
@@ -2221,27 +2253,25 @@ def run_file_preflight(
     except Exception as exc:  # noqa: BLE001 — unmeasured, never a false pass
         logger.warning("NULL-cursor gate probe skipped: %s", exc, exc_info=exc)
 
+    # Only an operator-declared manual_review gates create-new (the default is the golden path).
+    create_ddl_gate = build_create_ddl_gate(
+        schema_policy=schema_policy if schema_policy_explicit else None,
+        table_exists=dest_table_exists,
+        can_create=dest_can_create, acknowledged=bool(ddl_changes_acknowledged),
+        destination_table=str(destination_table or ""), mappings=write_maps,
+    )
     null_cursor_blocked = bool(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )
-    upsert_ddl_blocked = bool(
-        upsert_ddl_gate and upsert_ddl_gate.get("status") == "block"
+    upsert_ddl_blocked = bool(upsert_ddl_gate and upsert_ddl_gate.get("status") == "block")
+    enriched_blockers.extend(
+        blockers_from_gates((create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"))
     )
-    if upsert_ddl_blocked:
-        enriched_blockers.append(
-            {
-                "id": "g_upsert_dest_key",
-                "message": str(upsert_ddl_gate.get("message") or ""),
-                "details": dict(upsert_ddl_gate.get("details") or {}),
-                "suggested_actions": list(
-                    upsert_ddl_gate.get("suggested_actions") or []
-                ),
-            }
-        )
     extra_gates: list[dict[str, Any]] = (
         ([fit_gate] if fit_gate else [])
         + ([null_cursor_gate] if null_cursor_gate else [])
         + ([upsert_ddl_gate] if upsert_ddl_gate else [])
+        + ([create_ddl_gate] if create_ddl_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])
     )

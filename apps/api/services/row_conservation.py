@@ -232,6 +232,11 @@ class KeyCensus:
     #: job-level delta Gate-8 compares includes them; this pass's probe sees
     #: them as pre-existing (D134).
     prior_pass_inserts: int = 0
+    #: Stored keys a ``dedupe_skip`` write left untouched. They are
+    #: pre-existing keys that were skipped, not updated.
+    kept_existing: int = 0
+    #: Keys the writer quarantined, already taken out of both terms above.
+    held_out_keys: int = 0
 
     @property
     def inserts(self) -> int:
@@ -239,7 +244,8 @@ class KeyCensus:
 
     @property
     def updates(self) -> int:
-        return min(int(self.dest_preexisting), int(self.unique_batch_keys))
+        held = min(int(self.dest_preexisting), int(self.unique_batch_keys))
+        return max(held - max(int(self.kept_existing), 0), 0)
 
     @property
     def deletes(self) -> int:
@@ -262,6 +268,8 @@ class KeyCensus:
             "deletes": self.deletes,
             "expected_delta": self.expected_delta,
             "prior_pass_inserts": self.prior_pass_inserts,
+            "kept_existing": self.kept_existing,
+            "held_out_keys": self.held_out_keys,
         }
 
     @classmethod
@@ -277,13 +285,17 @@ class KeyCensus:
             events_raw = data.get("events_read")
             events = int(events_raw) if events_raw is not None and events_raw != "" else None
             prior = int(data.get("prior_pass_inserts") or 0)
+            kept = int(data.get("kept_existing") or 0)
+            held = int(data.get("held_out_keys") or 0)
         except (TypeError, ValueError):
             return None
-        if unique < 0 or preexisting < 0 or tombs < 0 or tomb_keys < 0 or prior < 0:
+        if unique < 0 or preexisting < 0 or tombs < 0 or tomb_keys < 0 or prior < 0 or kept < 0:
+            return None
+        if held < 0:
             return None
         if events is not None and events < 0:
             return None
-        if preexisting > unique:
+        if preexisting > unique or kept > preexisting:
             return None
         if tombs > tomb_keys and tomb_keys > 0:
             return None
@@ -294,6 +306,8 @@ class KeyCensus:
             unique_tombstone_keys=max(tomb_keys, tombs),
             events_read=events,
             prior_pass_inserts=prior,
+            kept_existing=kept,
+            held_out_keys=held,
         )
 
 
@@ -316,12 +330,17 @@ def extract_batch_keys(
     seen: set[tuple[Any, ...]] = set()
     for rec in records or []:
         row = dict(rec or {})
+        # Oracle/Snowflake fold unquoted names to upper case: a mapping on
+        # ``id`` reads the record's ``ID``, as the writer does.
+        folded = {str(k).casefold(): v for k, v in row.items()}
         tup_vals: list[Any] = []
         skip = False
         for col in cols:
             val = row.get(col)
             if val is None and col in tgt_to_src:
                 val = row.get(tgt_to_src[col])
+            if val is None:
+                val = folded.get(tgt_to_src.get(col, col).casefold(), folded.get(col.casefold()))
             if val is None:
                 skip = True
                 break
@@ -555,6 +574,34 @@ def parse_delete_keys(
         seen.add(tup)
         out.append(tup)
     return out
+
+
+def composite_delete_keys_present(
+    db_type: str,
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    key_columns: Sequence[str],
+    keys: Sequence[str],
+) -> int:
+    """How many CDC-deleted composite keys the destination still holds.
+
+    A single-column ``IN`` probe sent the joined ``eu\x1f1`` key to ``id`` and
+    the delete proof failed on every composite stream. Raises
+    ``TargetSampleUnavailable`` when the probe cannot run (never "absent").
+    """
+    from services.dest_precount import destination_key_hits
+    from services.reconciliation import TargetSampleUnavailable
+
+    cols = [str(c) for c in key_columns]
+    hits = destination_key_hits(
+        db_type, dict(cfg), schema=schema, table_name=table_name,
+        key_columns=cols, keys=parse_delete_keys(list(keys), len(cols)),
+    )
+    if hits is None:
+        raise TargetSampleUnavailable(f"composite key probe on {table_name!r} could not run")
+    return int(hits)
 
 
 def apply_hard_deletes(
@@ -944,6 +991,7 @@ def conservation_kind(
     *,
     dest_count_before: int | None,
     dest_key_addressed: bool = False,
+    keyed_policy: bool = False,
 ) -> str:
     """Which cardinality identity this run is allowed to close.
 
@@ -973,7 +1021,9 @@ def conservation_kind(
     if is_overwrite_sync(sync_mode):
         return KIND_OVERWRITE
     if is_append_sync(sync_mode):
-        if dest_key_addressed:
+        # ``keyed_policy``: the route chose dedupe_skip / upsert, so a stored
+        # key is skipped or replaced on that key, exactly as on a key store.
+        if dest_key_addressed or keyed_policy:
             return KIND_OVERWRITE if dest_count_before == 0 else KIND_KEYED
         return KIND_APPEND_DELTA
     if dest_count_before == 0:
@@ -1248,7 +1298,13 @@ def _account_keyed(
             writer_ack_delta=None,
             events_read=census.events_read,
         )
-    if quarantined or skipped:
+    # Keys a dedupe_skip write left in place are classified: the census
+    # measured them as stored keys. Only other skips stay unclassified.
+    unclassified_skips = max(int(skipped) - int(census.kept_existing), 0)
+    # Hold-outs are classified when the census already took exactly the
+    # quarantined keys out of inserts/updates; any other count stays unproven.
+    unclassified_holds = 0 if int(quarantined) == int(census.held_out_keys) else int(quarantined)
+    if unclassified_holds or unclassified_skips:
         return ConservationLedger(
             **base,
             rows_written=None,
@@ -1282,6 +1338,16 @@ def _account_keyed(
             "update(s) did not change COUNT(*). Writer acknowledgements "
             "count updates; they are not dest population."
         )
+        if census.kept_existing:
+            note += (
+                f" {census.kept_existing} stored key(s) were kept unchanged "
+                "(Duplicate rows: skip keys already stored)."
+            )
+        if census.held_out_keys:
+            note += (
+                f" {census.held_out_keys} quarantined key(s) did not land and "
+                "are not counted as inserts or updates."
+            )
         events = census.events_read
         if events is not None and events > census.unique_batch_keys:
             note += (
@@ -2539,9 +2605,15 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     recipe_hash = str(
         recon.get("shape_recipe_hash") or dest.get("shape_recipe_hash") or ""
     )
+    from services.duplicate_policy import summary_keyed_duplicate_policy
+
     ledger = account_population(
+        # A route-chosen dedupe_skip / upsert resolves stored keys on the key,
+        # so the population closes by key census, as on a key-addressed store.
         dest_key_addressed=bool(
-            dest.get(KEY_ADDRESSED_KEY) or recon.get(KEY_ADDRESSED_KEY)
+            dest.get(KEY_ADDRESSED_KEY)
+            or recon.get(KEY_ADDRESSED_KEY)
+            or summary_keyed_duplicate_policy(dest)
         ),
         rows_shaped_out=shaped_out,
         rows_source_filtered=source_filtered,
@@ -3052,6 +3124,15 @@ def record_stream_health(
     return entry
 
 
+def census_for_duplicate_policy(census: KeyCensus, policy: str | None) -> KeyCensus:
+    """A ``dedupe_skip`` write keeps every stored key: none of them is an update."""
+    from services.duplicate_policy import normalize_duplicate_policy
+
+    if normalize_duplicate_policy(str(policy or "")) != "dedupe_skip":
+        return census
+    return replace(census, kept_existing=int(census.dest_preexisting))
+
+
 class KeyCensusAccumulator:
     """Per-batch dest hits, reconstructed as a run-level census.
 
@@ -3067,7 +3148,9 @@ class KeyCensusAccumulator:
 
     Tombstone dest-hits sum independently, keyed uniquely across batches.
     A key that this run inserted and later deleted stays in the live unique
-    set so ``inserts - deletes`` still equals dest COUNT(*) delta.
+    set so ``inserts - deletes`` still equals dest COUNT(*) delta. A key
+    deleted and then re-inserted in a later batch is absent at the
+    destination, so the re-insert counts as an insert again.
     """
 
     def __init__(self) -> None:
@@ -3081,12 +3164,26 @@ class KeyCensusAccumulator:
         self._pending_new: list[tuple[Any, ...]] = []
         self._pending_added = 0
         self._pending_open = False
+        #: Keys this run tombstoned that are now absent at the destination.
+        self._absent: set[tuple[Any, ...]] = set()
+        self._reinserts = 0
+        self._pending_reabsent: list[tuple[Any, ...]] = []
+        self._pending_reinserts: list[tuple[Any, ...]] = []
+        self._tomb_unique = 0
+        #: Refused images per key that has not landed since; a later batch
+        #: that writes the key supersedes its findings, so it leaves here.
+        self._held_out: dict[tuple[Any, ...], int] = {}
 
     def begin_live_batch(self) -> None:
         """Close the previous batch's reverse window without dropping its keys."""
+        if self._pending_open:
+            for key in self._pending_new:
+                self._held_out.pop(key, None)
         self._pending_open = False
         self._pending_new = []
         self._pending_added = 0
+        self._pending_reabsent = []
+        self._pending_reinserts = []
 
     def keep_last_live_batch(self) -> None:
         """The batch committed rows, so its keys stay in the census."""
@@ -3102,30 +3199,75 @@ class KeyCensusAccumulator:
         if not self._pending_open or self._failed:
             self._pending_open = False
             return
+        reabsent = set(self._pending_reabsent)
+        reinserts = set(self._pending_reinserts)
         for key in self._pending_new:
-            self._seen.discard(key)
+            if key in reabsent:
+                self._absent.add(key)
+                self._tomb_seen.add(key)
+            if key not in reinserts:
+                self._seen.discard(key)
+        self._reinserts -= len(reinserts)
         self._inserts -= self._pending_added
         if self._inserts < 0:
             self._failed = True
+        self._pending_open = False
         self.begin_live_batch()
 
+    def withdraw_rejected(
+        self, keys: Sequence[tuple[Any, ...]], stored: set[tuple[Any, ...]]
+    ) -> int:
+        """Take keys the last batch's writer refused out of the census.
+
+        The probe ran before the write, so a refused key was counted as an
+        insert (absent) or an update (``stored``). Neither happened. Only keys
+        this batch first observed are withdrawn; a key an earlier batch wrote
+        stays counted, and the ledger stays unproven for it.
+        """
+        if not self._pending_open or self._failed:
+            return 0
+        pending = set(self._pending_new)
+        reabsent = set(self._pending_reabsent)
+        withdrawn = 0
+        for key in dict.fromkeys(map(self._norm, keys)):
+            if key not in pending or key in reabsent:
+                continue
+            pending.discard(key)
+            self._pending_new.remove(key)
+            self._seen.discard(key)
+            if key not in stored:
+                self._inserts -= 1
+                self._pending_added -= 1
+            withdrawn += 1
+            self._held_out[key] = self._held_out.get(key, 0) + 1
+        if self._inserts < 0:
+            self._failed = True
+        return withdrawn
+
     def unseen_live(self, keys: Sequence[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
-        return self._unseen(keys, self._seen)
+        return self._unseen(keys, self._seen - self._absent)
 
     def unseen_tombstones(self, keys: Sequence[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
         return self._unseen(keys, self._tomb_seen)
 
     @staticmethod
+    def _norm(key: tuple[Any, ...]) -> tuple[Any, ...]:
+        """One identity for a key: CDC deletes parse ``2`` where rows carry ``'2'``."""
+        return tuple(None if v is None else str(v) for v in key)
+
+    @classmethod
     def _unseen(
+        cls,
         keys: Sequence[tuple[Any, ...]],
         already: set[tuple[Any, ...]],
     ) -> list[tuple[Any, ...]]:
         out: list[tuple[Any, ...]] = []
         seen_here: set[tuple[Any, ...]] = set()
         for key in keys:
-            if key in seen_here or key in already:
+            norm = cls._norm(key)
+            if norm in seen_here or norm in already:
                 continue
-            seen_here.add(key)
+            seen_here.add(norm)
             out.append(key)
         return out
 
@@ -3139,12 +3281,16 @@ class KeyCensusAccumulator:
             return
         batch: list[tuple[Any, ...]] = []
         seen_batch: set[tuple[Any, ...]] = set()
-        for key in keys:
+        for key in map(self._norm, keys):
             if key in seen_batch:
                 continue
             seen_batch.add(key)
             batch.append(key)
-        unseen = [k for k in batch if k not in self._seen]
+        unseen = [k for k in batch if k not in self._seen or k in self._absent]
+        reabsent = [k for k in unseen if k in self._absent]
+        # Only a key already in the live set adds a second unique entry; a
+        # stored key deleted then re-inserted enters the live set once.
+        reinserts = [k for k in reabsent if k in self._seen]
         hits = int(dest_hits)
         if hits > len(unseen):
             # Caller probed a wider set than unseen live keys — refuse to invent inserts.
@@ -3154,6 +3300,12 @@ class KeyCensusAccumulator:
         added = max(len(unseen) - hits, 0)
         self._inserts += added
         self._seen.update(batch)
+        self._reinserts += len(reinserts)
+        self._absent.difference_update(reabsent)
+        # A re-inserted key can be deleted again; that delete must count.
+        self._tomb_seen.difference_update(reabsent)
+        self._pending_reabsent = reabsent
+        self._pending_reinserts = reinserts
         self._pending_new = list(unseen)
         self._pending_added = added
         self._pending_open = True
@@ -3170,13 +3322,17 @@ class KeyCensusAccumulator:
             return
         hits = max(int(dest_hits), 0)
         if keys is not None:
+            keys = [self._norm(k) for k in keys]
             unseen = self.unseen_tombstones(keys)
             if hits > len(unseen):
                 self._failed = True
                 return
             self._tombstones += hits
             for key in keys:
+                if key not in self._tomb_seen:
+                    self._tomb_unique += 1
                 self._tomb_seen.add(key)
+            self._absent.update(keys)
             return
         self._tombstones += hits
         self._unique_tombstone_fallback += max(int(unique_keys), 0)
@@ -3184,10 +3340,10 @@ class KeyCensusAccumulator:
     def to_census(self) -> KeyCensus | None:
         if self._failed:
             return None
-        unique_tombs = len(self._tomb_seen) or self._unique_tombstone_fallback
+        unique_tombs = self._tomb_unique or self._unique_tombstone_fallback
         if not self._seen and self._tombstones == 0 and unique_tombs == 0:
             return None
-        unique = len(self._seen)
+        unique = len(self._seen) + self._reinserts
         preexisting = unique - self._inserts
         if preexisting < 0:
             return None
@@ -3197,6 +3353,7 @@ class KeyCensusAccumulator:
             tombstones=self._tombstones,
             unique_tombstone_keys=unique_tombs,
             events_read=self._events or None,
+            held_out_keys=sum(self._held_out.values()),
         )
 
 

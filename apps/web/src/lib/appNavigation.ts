@@ -96,7 +96,22 @@ export function isResetLinkRoute(pathname: string, hash: string): boolean {
  * header. Returns "" for any other route.
  */
 export function resetLinkToken(pathname: string, hash: string): string {
-  if (pathname !== "/reset-password") return "";
+  return emailedLinkToken("/reset-password", pathname, hash);
+}
+
+/** Workspace invitation links: `/accept-invite#token=…`, then `#/accept-invite`. */
+export function isInviteLinkRoute(pathname: string, hash: string): boolean {
+  return pathname === "/accept-invite"
+    || hash.split("?")[0] === "#/accept-invite";
+}
+
+export function inviteLinkToken(pathname: string, hash: string): string {
+  return emailedLinkToken("/accept-invite", pathname, hash);
+}
+
+/** Token from an emailed `<route>#token=…` link; "" on any other path. */
+function emailedLinkToken(route: string, pathname: string, hash: string): string {
+  if (pathname !== route) return "";
   return new URLSearchParams(hash.replace(/^#/, "")).get("token") ?? "";
 }
 
@@ -136,9 +151,20 @@ export function signedInHelpArticleFromHash(hash: string): HelpDocId | "help" | 
   return "help";
 }
 
+/**
+ * Hash to normalise to for ``screen``. A replace (boot / sign-in normalisation)
+ * keeps a ``?jobId=…&panel=…`` focus already on the same screen, so a fresh
+ * ``#/jobs?jobId=<id>`` load is not rewritten to ``#/jobs`` before it is read.
+ */
+export function normalizedAppHash(screen: Screen, currentHash: string, replace: boolean): string {
+  const focus = replace ? focusFromHash(currentHash) : null;
+  if (focus?.screen === screen) return hashForScreen(screen, focus);
+  return hashForScreen(screen);
+}
+
 export function writeAppHash(screen: Screen, replace = false) {
   if (typeof window === "undefined") return;
-  const next = hashForScreen(screen);
+  const next = normalizedAppHash(screen, window.location.hash, replace);
   if (window.location.hash === next) return;
   if (replace) {
     window.history.replaceState(null, "", next);

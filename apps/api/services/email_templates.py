@@ -3,28 +3,56 @@
 Every email renders branded HTML plus a plain-text part from
 ``render_email(name, context)``. Hard rules from the handover:
 
-- No tracking pixels, no link rewriting, no remote images — the HTML
-  contains zero ``<img>`` and zero external URLs other than the optional
-  ``action_url`` the template itself was given.
+- No tracking pixels, no link rewriting, no third-party assets — the only
+  ``<img>`` is the app's static first-party logo, and the only other URL is
+  the first-party action URL the template itself was given.
 - From ``Datawrap <noreply@datawrap.io>``, Reply-To contact@datawrap.io
   (envelope concern of ``email_sender``); the footer names datawrap.io only.
-- All dynamic values are HTML-escaped at render time.
-- Logo palette: ink #0f766e, arrow #2dd4bf, tile #0a3d3a (tokens.css).
+- All dynamic values are HTML-escaped at render time; subjects are folded to
+  one line so a value can never inject a header.
+
+Brand (Datawrap brand pack v1.0): Night ground #072B29, Deep tile #0A3D3A,
+Signal teal #2DD4BF (rules and accents only — never text on a light ground),
+Teal 700 #0F766E for links on light, Ink #0F172A headings, Slate #475569 body,
+Paper #F6FAF9 page. Amber is the quarantine colour; it appears only inside
+the mark image. Type: Plus Jakarta Sans (headings), Inter (body), IBM Plex Mono
+(codes, labels) — named with system fallbacks, never loaded remotely.
+
+The pack's email-header PNG is deliberately not used: it would have to be a
+remote image (forbidden), a data: URI (stripped by Gmail) or a CID part
+(``email_sender`` sends no multipart/related), and it carries the unapproved
+tagline. The header uses the app's own mark image plus a live-text wordmark,
+so it matches the logo operators see in the product.
 """
 
 from __future__ import annotations
 
 import html as _html
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-_INK = "#0f766e"      # --df-logo-ink
-_ARROW = "#2dd4bf"    # --df-logo-arrow
-_TILE = "#0a3d3a"     # --df-logo-tile
-_SLATE = "#334155"
-_MUTED = "#64748b"
-_BORDER = "#e2e8f0"
-_BG = "#f8fafc"
+_NIGHT = "#072B29"
+_DEEP = "#0A3D3A"
+_TEAL = "#2DD4BF"
+_TEAL_700 = "#0F766E"
+_INK = "#0F172A"
+_SLATE = "#475569"
+_PAPER = "#F6FAF9"
+_LINE = "#D7E3E1"
+_WHITE = "#F8FAFC"
+_ON_NIGHT = "#8FB5B0"  # source-line grey on Night, 6.8:1
+
+_FONT_HEAD = "'Plus Jakarta Sans','Segoe UI',Helvetica,Arial,sans-serif"
+_FONT_BODY = "Inter,'Segoe UI',Helvetica,Arial,sans-serif"
+_FONT_MONO = "'IBM Plex Mono',Consolas,'Courier New',monospace"
+
+ROLE_LABELS = {"admin": "Admin", "editor": "Editor", "viewer": "Viewer"}
+ROLE_SUMMARIES = {
+    "admin": "full workspace access, including members and roles",
+    "editor": "run transfers, edit connectors and schedules",
+    "viewer": "read jobs, connectors and proofs",
+}
 
 
 @dataclass(frozen=True)
@@ -38,25 +66,53 @@ def _esc(value: Any) -> str:
     return _html.escape(str(value or ""), quote=True)
 
 
+_SUBJECT_UNSAFE = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _subject_value(value: Any, limit: int = 80) -> str:
+    """A context value made safe for a subject line: one line, bounded."""
+    text = " ".join(_SUBJECT_UNSAFE.sub(" ", str(value or "")).split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
+
+
+def _mark() -> str:
+    """The app's Datawrap mark (``apps/web/public/brand/datawrap-mark-256.png``,
+    the raster ``DtLogo`` uses). One static first-party asset: no query string,
+    nothing per-recipient, so it cannot act as a tracking pixel."""
+    from services.brand_env import getenv_brand
+
+    base = (getenv_brand("APP_URL") or "https://www.datawrap.io").rstrip("/")
+    return (f'<img src="{_esc(base)}/brand/datawrap-mark-256.png" width="36" height="36" '
+            f'alt="Datawrap" style="display:block;width:36px;height:36px;border:0;'
+            f'border-radius:9px;">')
+
+
 def _shell(title: str, body: str, *, preheader: str = "") -> str:
     """Branded HTML shell — table layout, inline CSS, no remote assets."""
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">
 <title>{_esc(title)}</title></head>
-<body style="margin:0;padding:0;background:{_BG};font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:{_SLATE};">
-<div style="display:none;max-height:0;overflow:hidden;">{_esc(preheader)}</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{_BG};padding:32px 16px;">
+<body style="margin:0;padding:0;background:{_PAPER};font-family:{_FONT_BODY};color:{_SLATE};">
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">{_esc(preheader)}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{_PAPER};padding:32px 16px;">
 <tr><td align="center">
-<table role="presentation" width="520" cellpadding="0" cellspacing="0" style="max-width:520px;width:100%;background:#ffffff;border:1px solid {_BORDER};border-radius:12px;overflow:hidden;">
-<tr><td style="padding:24px 32px;border-bottom:3px solid {_ARROW};">
-  <span style="font-size:20px;font-weight:700;color:{_TILE};letter-spacing:-0.3px;">Data<span style="color:{_INK};">wrap</span></span>
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#FFFFFF;border:1px solid {_LINE};border-radius:12px;overflow:hidden;">
+<tr><td bgcolor="{_NIGHT}" style="padding:22px 32px;background:{_NIGHT};border-bottom:3px solid {_TEAL};">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+    <td style="vertical-align:middle;padding-right:12px;">{_mark()}</td>
+    <td style="vertical-align:middle;">
+      <div style="font-family:{_FONT_HEAD};font-size:20px;line-height:24px;font-weight:700;color:{_WHITE};letter-spacing:-0.3px;">Datawrap</div>
+      <div style="font-family:{_FONT_MONO};font-size:10px;line-height:16px;font-weight:600;letter-spacing:1.6px;text-transform:uppercase;color:{_ON_NIGHT};">Governed data transfer</div>
+    </td>
+  </tr></table>
 </td></tr>
 <tr><td style="padding:32px;">
 {body}
 </td></tr>
-<tr><td style="padding:20px 32px;border-top:1px solid {_BORDER};font-size:12px;color:{_MUTED};line-height:1.6;">
-  Datawrap &middot; datawrap.io<br>
+<tr><td style="padding:20px 32px;background:{_PAPER};border-top:1px solid {_LINE};font-size:12px;color:{_SLATE};line-height:1.6;">
+  <span style="font-family:{_FONT_HEAD};font-weight:700;color:{_DEEP};">Datawrap</span> &middot; <span style="font-family:{_FONT_MONO};color:{_TEAL_700};">datawrap.io</span><br>
   Questions? Reply to this email or write to contact@datawrap.io.<br>
   You received this because of activity on a Datawrap account.
 </td></tr>
@@ -66,33 +122,65 @@ def _shell(title: str, body: str, *, preheader: str = "") -> str:
 
 
 def _h1(text: str) -> str:
-    return f'<h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:{_TILE};">{_esc(text)}</h1>'
+    return (f'<h1 style="margin:0 0 12px;font-family:{_FONT_HEAD};font-size:22px;line-height:28px;'
+            f'font-weight:700;letter-spacing:-0.3px;color:{_INK};">{_esc(text)}</h1>')
 
 
 def _p(text: str) -> str:
-    return f'<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:{_SLATE};">{_esc(text)}</p>'
+    return f'<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:{_SLATE};">{_esc(text)}</p>'
+
+
+def _eyebrow(text: str) -> str:
+    return (f'<p style="margin:0 0 8px;font-family:{_FONT_MONO};font-size:11px;font-weight:600;'
+            f'letter-spacing:1.4px;text-transform:uppercase;color:{_TEAL_700};">{_esc(text)}</p>')
 
 
 def _code_box(code: str) -> str:
     return (
         f'<div style="margin:20px 0;padding:16px;text-align:center;'
-        f'font-size:32px;font-weight:700;letter-spacing:8px;color:{_TILE};'
-        f'background:{_BG};border:1px solid {_BORDER};border-radius:8px;'
-        f'font-family:ui-monospace,Menlo,Consolas,monospace;">{_esc(code)}</div>'
+        f'font-size:32px;font-weight:700;letter-spacing:8px;color:{_INK};'
+        f'background:{_PAPER};border:1px solid {_LINE};border-radius:8px;'
+        f'font-family:{_FONT_MONO};">{_esc(code)}</div>'
     )
 
 
 def _link_button(url: str, label: str) -> str:
+    """Bulletproof button: the colour sits on the table cell, so Outlook
+    (which ignores padding on links) still paints a solid target."""
     return (
-        f'<div style="margin:24px 0;text-align:center;"><a href="{_esc(url)}" '
-        f'style="display:inline-block;padding:12px 28px;background:{_TILE};'
-        f'color:#ffffff;border-radius:8px;text-decoration:none;font-size:15px;'
-        f'font-weight:600;">{_esc(label)}</a></div>'
+        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">'
+        f'<tr><td bgcolor="{_DEEP}" style="background:{_DEEP};border-radius:8px;">'
+        f'<a href="{_esc(url)}" style="display:inline-block;padding:12px 28px;'
+        f'font-family:{_FONT_BODY};color:{_WHITE};border-radius:8px;text-decoration:none;'
+        f'font-size:15px;font-weight:600;">{_esc(label)}</a></td></tr></table>'
     )
 
 
+def _facts(rows: list[tuple[str, str]]) -> str:
+    """A receipt-style key/value panel: mono labels, ink values."""
+    cells = "".join(
+        f'<tr><td style="padding:6px 16px 6px 0;font-family:{_FONT_MONO};font-size:11px;'
+        f'letter-spacing:1px;text-transform:uppercase;color:{_SLATE};vertical-align:top;white-space:nowrap;">'
+        f'{_esc(k)}</td><td style="padding:6px 0;font-size:14px;line-height:1.5;color:{_INK};">{_esc(v)}</td></tr>'
+        for k, v in rows if v
+    )
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="margin:4px 0 8px;padding:12px 16px;background:{_PAPER};border:1px solid {_LINE};'
+            f'border-left:3px solid {_TEAL};border-radius:8px;">{cells}</table>')
+
+
+def _steps(items: list[str]) -> str:
+    rows = "".join(
+        f'<tr><td style="padding:6px 12px 6px 0;font-family:{_FONT_MONO};font-size:13px;font-weight:600;'
+        f'color:{_TEAL_700};vertical-align:top;">{i:02d}</td>'
+        f'<td style="padding:6px 0;font-size:15px;line-height:1.55;color:{_SLATE};">{_esc(text)}</td></tr>'
+        for i, text in enumerate(items, start=1)
+    )
+    return f'<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 8px;">{rows}</table>'
+
+
 def _muted(text: str) -> str:
-    return f'<p style="margin:0 0 8px;font-size:12px;line-height:1.6;color:{_MUTED};">{_esc(text)}</p>'
+    return f'<p style="margin:0 0 8px;font-size:12px;line-height:1.6;color:{_SLATE};">{_esc(text)}</p>'
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +369,7 @@ def _sales_acknowledgement(ctx: dict[str, Any]) -> RenderedEmail:
 def _sales_lead_internal(ctx: dict[str, Any]) -> RenderedEmail:
     subject = f"Sales lead: {ctx.get('company') or 'unknown company'} ({ctx.get('email') or 'no email'})"
     rows = "".join(
-        f"<tr><td style='padding:4px 12px 4px 0;color:{_MUTED};font-size:13px;vertical-align:top;'>{_esc(k)}</td>"
+        f"<tr><td style='padding:4px 12px 4px 0;color:{_SLATE};font-size:13px;vertical-align:top;'>{_esc(k)}</td>"
         f"<td style='padding:4px 0;font-size:13px;color:{_SLATE};'>{_esc(v)}</td></tr>"
         for k, v in ctx.items()
         if v
@@ -289,6 +377,114 @@ def _sales_lead_internal(ctx: dict[str, Any]) -> RenderedEmail:
     body = _h1("New sales lead") + f"<table role='presentation' cellpadding='0' cellspacing='0'>{rows}</table>"
     text = "New sales lead\n\n" + "\n".join(f"{k}: {v}" for k, v in ctx.items() if v) + "\n\nDatawrap - datawrap.io"
     return RenderedEmail(subject, text, _shell(subject, body))
+
+
+def _role_line(role: str) -> str:
+    key = str(role or "viewer").strip().lower()
+    return f"{ROLE_LABELS.get(key, key.title())} \u2014 {ROLE_SUMMARIES.get(key, '')}".rstrip(" \u2014")
+
+
+def _welcome(ctx: dict[str, Any]) -> RenderedEmail:
+    """Sent once per new account, after the address is verified (signup) or
+    proven by an accepted invitation. Copy follows the brand voice: specific,
+    calm, no exclamation marks, no claims."""
+    name = _subject_value(ctx.get("name"), 128) or "there"
+    workspace = _subject_value(ctx.get("workspace_name") or "your workspace", 128)
+    url = str(ctx.get("app_url", ""))
+    joined = bool(ctx.get("joined"))
+    role = str(ctx.get("role") or "admin")
+    subject = "Welcome to Datawrap"
+    if joined:
+        lead = (f"Hi {name}, your Datawrap account is ready and you joined "
+                f"{workspace} as {ROLE_LABELS.get(role, role)}.")
+        steps = [
+            "Open the workspace to see its connectors, pipelines and recent jobs.",
+            "Every transfer runs preflight first: if a gate blocks, nothing moves and you get the reason.",
+            "Proofs show what each run checked \u2014 row counts, checksums and quarantined rows.",
+        ]
+    else:
+        lead = (f"Hi {name}, your Datawrap account is verified and {workspace} is set up. "
+                "You are its admin.")
+        steps = [
+            "Connect a source and a destination from Connectors.",
+            "Run preflight: if a gate blocks, nothing moves and you get the reason.",
+            "Invite your team from Settings \u2192 Team & access.",
+        ]
+    body = (
+        _eyebrow("Account ready")
+        + _h1("Welcome to Datawrap")
+        + _p(lead)
+        + _p("Where to start:")
+        + _steps(steps)
+        + (_link_button(url, "Open Datawrap") if url else "")
+        + _muted("This is a one-time welcome email for the account created with this address. "
+                 "If you didn't create it, write to contact@datawrap.io.")
+    )
+    text = (
+        "Welcome to Datawrap\n\n"
+        f"{lead}\n\n"
+        "Where to start:\n"
+        + "".join(f"  {i:02d}  {line}\n" for i, line in enumerate(steps, start=1))
+        + (f"\nOpen Datawrap: {url}\n" if url else "")
+        + "\nThis is a one-time welcome email for the account created with this address. "
+        "If you didn't create it, write to contact@datawrap.io.\n\n"
+        "Datawrap - datawrap.io"
+    )
+    return RenderedEmail(subject, text, _shell(subject, body, preheader=f"Your Datawrap account is ready \u2014 {workspace}"))
+
+
+
+def _invited_line(who: str, workspace: str) -> str:
+    """"invited you to the Acme workspace" — without doubling the noun when the
+    name already ends in it (every self-serve default: "Sam's workspace")."""
+    if workspace.strip().lower().endswith("workspace"):
+        return f"{who} invited you to {workspace}."
+    return f"{who} invited you to the {workspace} workspace."
+
+def _workspace_invite(ctx: dict[str, Any]) -> RenderedEmail:
+    """A workspace admin's invitation. The inviter's address is always shown
+    next to their display name, so a name like "Datawrap Security" cannot
+    pass for us. The accept link carries its token in the URL fragment."""
+    inviter = _subject_value(ctx.get("inviter_name"), 128)
+    inviter_email = _subject_value(ctx.get("inviter_email"), 254)
+    who = f"{inviter} ({inviter_email})" if inviter and inviter_email and inviter != inviter_email \
+        else (inviter_email or inviter or "A workspace admin")
+    workspace = _subject_value(ctx.get("workspace_name") or "a workspace", 128)
+    role = str(ctx.get("role") or "viewer").strip().lower()
+    url = str(ctx.get("accept_url", ""))
+    days = int(ctx.get("expires_days", 7))
+    subject = (f"{_subject_value(inviter or inviter_email or 'A workspace admin', 60)} invited you to "
+               f"{_subject_value(workspace, 60)} on Datawrap")
+    body = (
+        _eyebrow("Workspace invitation")
+        + _h1(f"Join {workspace} on Datawrap")
+        + _p(_invited_line(who, workspace))
+        + _facts([
+            ("Workspace", workspace),
+            ("Role", _role_line(role)),
+            ("Invited by", who),
+            ("Expires", f"in {days} days"),
+        ])
+        + _link_button(url, "Accept invitation")
+        + _p(f"The link works once and expires in {days} days. If you don't have a Datawrap "
+             "account yet, you'll create one when you accept.")
+        + _muted("Not expecting this? Ignore this email \u2014 nothing happens until the link is used. "
+                 "No tracking links are used.")
+    )
+    text = (
+        f"Join {workspace} on Datawrap\n\n"
+        f"{_invited_line(who, workspace)}\n\n"
+        f"  Workspace:  {workspace}\n"
+        f"  Role:       {_role_line(role)}\n"
+        f"  Invited by: {who}\n\n"
+        "Accept the invitation (the link works once):\n\n"
+        f"    {url}\n\n"
+        f"The link expires in {days} days. If you don't have a Datawrap account yet, "
+        "you'll create one when you accept.\n\n"
+        "Not expecting this? Ignore this email - nothing happens until the link is used.\n\n"
+        "Datawrap - datawrap.io"
+    )
+    return RenderedEmail(subject, text, _shell(subject, body, preheader=f"{who} invited you to {workspace}"))
 
 
 _TEMPLATES: dict[str, Callable[[dict[str, Any]], RenderedEmail]] = {
@@ -302,6 +498,8 @@ _TEMPLATES: dict[str, Callable[[dict[str, Any]], RenderedEmail]] = {
     "signin_alert": _signin_alert,
     "sales_acknowledgement": _sales_acknowledgement,
     "sales_lead_internal": _sales_lead_internal,
+    "welcome": _welcome,
+    "workspace_invite": _workspace_invite,
 }
 
 

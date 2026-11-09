@@ -1886,6 +1886,7 @@ def write_mapped_rows(
                 ensure_vector_extension(cursor, target_types, engine=engine)  # R11
             fidelity_plan = None
             from services.schema_fidelity import (
+                create_key_inputs,
                 empty_unsupported_report,
                 render_create_column_defs,
                 resolve_create_fidelity_plan,
@@ -1921,11 +1922,7 @@ def write_mapped_rows(
                         dest_tablespaces=list_destination_tablespaces(
                             "postgresql", cursor
                         ),
-                        carry_keys=write_mode != "insert"
-                        or bool(_kwargs.get("carry_source_keys")),
-                        operator_key_columns=(
-                            list(conflict_columns or []) if write_mode == "upsert" else None
-                        ),
+                        **create_key_inputs(write_mode=write_mode, conflict_columns=conflict_columns, carry_source_keys=bool(_kwargs.get("carry_source_keys"))),
                     )
                     if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                         target_cols[:] = list(fidelity_plan.dest_columns)
@@ -2325,6 +2322,30 @@ def write_mapped_rows(
                     table_existed = cur.fetchone() is not None
             except Exception:
                 table_existed = not create_table
+
+            if table_existed and backfill_new_fields:
+                from connectors.writer_common import additive_ddl_would_write_nothing
+                from services.batch_progress import mappings_require_dest_widen
+
+                if not mappings_require_dest_widen(mappings):
+                    _scan = _pg_scan_finished_bundles(**_pg_finish_kwargs)
+                    if additive_ddl_would_write_nothing(
+                        rejected_details=list(_scan[0].rejected_details),
+                        policy=policy,
+                        source_row_count=_scan[1],
+                    ):
+                        _cleanup_spool()
+                        return WriteResult(
+                            ok=True,
+                            rows_written=0,
+                            table_name=table_name,
+                            target_schema=schema,
+                            checksum="",
+                            chunks_completed=0,
+                            rejected_rows=_scan[1],
+                            rejected_details=list(_scan[0].rejected_details),
+                            warnings=list(_scan[0].transform_errors),
+                        )
 
             # Bind before CREATE/setup commits. A new table used to commit the
             # first 20k-row chunk, then the next batch tried to store the
@@ -3071,9 +3092,10 @@ def write_mapped_rows(
             chunks = chunk_idx
             from connectors.sql_write_materialize import accounted_rejected_rows
 
+            # Keys a dedupe_skip write left stored were decided, not rejected.
             rejected_rows = _rejected_row_count(
                 data_rows,
-                [()] * write_acc.accepted_row_count,
+                [()] * (write_acc.accepted_row_count + len(skipped_identity_keys)),
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,

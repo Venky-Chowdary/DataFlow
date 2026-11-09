@@ -611,4 +611,38 @@ describe("studio recovery refuses the wrong tenant and missing auth", () => {
     assert.equal(decision.missingSource, false);
     assert.equal(decision.missingDest, false);
   });
+  it("an explicit no-key choice is not refilled by the id-like heuristic", () => {
+    const next = keepDeclaredCursorKey({
+      cursorField: "",
+      primaryKeyField: "",
+      columns: ["id", "label"],
+      cursorCandidate: "",
+      primaryKeyCandidate: "id",
+      declaredCursor: "",
+      declaredPrimaryKey: "",
+      primaryKeyCleared: true,
+    });
+    assert.equal(next.primaryKeyField, "");
+    const streams = applyDeclaredStreamFields(
+      ["src"],
+      { src: { cursorField: "", primaryKeyField: "" } },
+      "",
+      "id",
+      ["id", "label"],
+      "",
+      "",
+      true,
+    );
+    assert.equal(streams.src?.primaryKeyField, "");
+    const refilled = keepDeclaredCursorKey({
+      cursorField: "",
+      primaryKeyField: "",
+      columns: ["id", "label"],
+      cursorCandidate: "",
+      primaryKeyCandidate: "id",
+      declaredCursor: "",
+      declaredPrimaryKey: "",
+    });
+    assert.equal(refilled.primaryKeyField, "id");
+  });
 });

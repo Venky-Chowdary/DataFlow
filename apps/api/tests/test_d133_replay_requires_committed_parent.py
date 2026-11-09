@@ -104,3 +104,17 @@ def test_replay_parent_guard_allows_completed_statuses():
         assert replay_parent_not_committed({"status": status}) is None
     for status in ("failed", "cancelled", "running", ""):
         assert replay_parent_not_committed({"status": status, "job_id": "j1"})
+
+
+def test_quarantine_view_next_action_matches_failed_parent_refusal(tmp_path: Path):
+    from src.main import app
+
+    job_id, dest = _quarantining_parent(tmp_path)
+    _fail_and_roll_back(job_id, dest)
+
+    body = TestClient(app).get(f"/api/v1/connectors/jobs/{job_id}/quarantine").json()
+    closure = body["quarantine_closure"]
+    assert closure["open_count"] >= 1
+    assert "Re-run the parent job first" in closure["next_action"], closure
+    assert "Promote / Replay" not in closure["next_action"]
+    assert body["replay_block_reason"] == closure["next_action"]

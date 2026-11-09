@@ -20,6 +20,19 @@ from services.checkpoint_service import Checkpoint
 logger = logging.getLogger(__name__)
 
 
+def restarts_from_start(sync_mode: str | None) -> bool:
+    """Whether a resume of this sync mode runs as a fresh start.
+
+    Clear-and-reload converges, so an overwrite never seeks past a checkpoint.
+    Its checkpoint can count rows of a load transaction the cancel rolled back,
+    and a resumed pass skipped the rows it believed an earlier pass committed
+    after the clear had removed them (D261 is the reclaim side of this rule).
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    return is_overwrite_sync(sync_mode)
+
+
 def resolve_resume_checkpoint(
     *,
     job_id: str,
@@ -37,6 +50,9 @@ def resolve_resume_checkpoint(
         ExecutionContractError,
         assert_resume_allowed,
     )
+    if restarts_from_start(sync_mode):
+        logger.info("resume job=%s: overwrite restarts from the first row", job_id)
+        return Checkpoint(job_id=job_id)
 
     try:
         checkpoint = checkpoint_service.load(job_id)
@@ -108,6 +124,17 @@ def write_pass_complete(checkpoint: Any) -> bool:
         + int(getattr(checkpoint, "offset", 0) or 0)
         > 0
     )
+
+
+def resume_read_cursor(resume: bool, checkpoint: Any) -> dict[str, Any]:
+    """The keyset cursor a resumed read seeks past (preflight keyword args)."""
+    if not resume or checkpoint is None:
+        return {}
+    column = str(getattr(checkpoint, "cursor_column", "") or "")
+    value = getattr(checkpoint, "cursor_value", None)
+    if not column or value is None:
+        return {}
+    return {"resume_cursor_column": column, "resume_cursor_value": value}
 
 
 def resumes_at_reconcile(resume: bool, checkpoint: Any) -> bool:

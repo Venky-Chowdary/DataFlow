@@ -14,6 +14,7 @@ from services.acknowledgment_contract import (
     audit_acknowledgments,
     resolve_acknowledgments,
 )
+from services.duplicate_policy import with_duplicate_route_option
 from services.fk_parent_preflight import with_fk_route_option
 from services.preflight_cursor_gate import resolve_read_scope
 from services.shape_preflight import (
@@ -602,6 +603,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             rows_are_population=stored_population is not None,
             shape_recipe=body.shape_recipe,
             schema_policy=body.schema_policy,
+            schema_policy_explicit="schema_policy" in body.model_fields_set,
             backfill_new_fields=body.backfill_new_fields,
             contract_primary_key=contract_pk,
             destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
@@ -611,8 +613,11 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             destination_indexes_meta=dest_meta.get("indexes_meta"),
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
             destination_check_constraints=dest_meta.get("check_constraints") or [],
-            destination_config=with_fk_route_option(
-                dest_meta.get("_probe_cfg"), (body.dest_extra or {}).get("foreign_keys_mode")
+            destination_config=with_duplicate_route_option(
+                with_fk_route_option(
+                    dest_meta.get("_probe_cfg"), (body.dest_extra or {}).get("foreign_keys_mode")
+                ),
+                dict(body.dest_extra or {}),
             ),
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
@@ -908,6 +913,8 @@ class CellPreviewRequest(BaseModel):
     # canonically (WIRE) when the operator declared no locale.
     source_kind: str = "file"
     source_type: str | None = None
+    # Destination engine, so a VARCHAR(n) width counts units the way its writer does.
+    dest_db: str = ""
 
 
 @router.post("/preview-cells")
@@ -963,6 +970,7 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
             )
             file_source = resolved_kind == "file"
             result = _preview(
+                dest_db=body.dest_db,
                 headers=headers,
                 sample_rows=rows,
                 mappings=body.mappings,

@@ -200,6 +200,7 @@ from connectors.writer_common import (
     _is_nullish_conflict_key,
     _rejected_row_count,
     compare_lsn,
+    drop_stored_key_dicts,
     early_array_strategy_gate,
     flush_normalized_child_batches,
     materialize_missing_as_null_for_dense_write,
@@ -5750,7 +5751,7 @@ def write_mapped_rows(
                     from services.physical_placement_ddl import (
                         list_destination_tablespaces,
                     )
-                    from services.schema_fidelity import resolve_create_fidelity_plan
+                    from services.schema_fidelity import create_key_inputs, resolve_create_fidelity_plan
 
                     fidelity_plan = resolve_create_fidelity_plan(
                         source_schema_catalog=_kwargs.get("source_schema_catalog"),
@@ -5766,13 +5767,7 @@ def write_mapped_rows(
                         dest_tablespaces=list_destination_tablespaces(
                             _fidelity_dialect(dest_db, dialect_name), conn
                         ),
-                        carry_keys=write_mode != "insert"
-                        or bool(_kwargs.get("carry_source_keys")),
-                        operator_key_columns=(
-                            list(conflict_columns or [])
-                            if write_mode == "upsert"
-                            else None
-                        ),
+                        **create_key_inputs(write_mode=write_mode, conflict_columns=conflict_columns, carry_source_keys=bool(_kwargs.get("carry_source_keys"))),
                     )
                     placement_suffix = fidelity_plan.create_suffix
                     table_obj = _build_table_for_write(
@@ -5787,8 +5782,7 @@ def write_mapped_rows(
                         # An overwrite rebuilds the table from one snapshot, so
                         # the planner's carried key must reach the CREATE
                         # (SQL Server overwrite dropped it, D144).
-                        declare_key=write_mode != "insert"
-                        or bool(_kwargs.get("carry_source_keys")),
+                        declare_key=create_key_inputs(write_mode=write_mode, conflict_columns=conflict_columns, carry_source_keys=bool(_kwargs.get("carry_source_keys")))["carry_keys"],
                     )
                     _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                 except Exception as exc:
@@ -6099,7 +6093,12 @@ def write_mapped_rows(
                             chunk_idx += 1
                             continue
                         chunk_written = 0
-                        if write_mode == "upsert" and conflict_columns:
+                        keyed_chunk = write_mode == "upsert" and bool(conflict_columns)
+                        if keyed_chunk:
+                            rows_skipped += drop_stored_key_dicts(
+                                conn, table_obj, conflict_columns, batch, write_acc.skipped_identity_keys
+                            )
+                        if keyed_chunk and batch:
                             chunk_written = _upsert_batch(
                                 conn,
                                 table_obj,
@@ -6114,7 +6113,7 @@ def write_mapped_rows(
                                 rows_skipped += len(batch) - chunk_written
                             else:
                                 chunk_written = len(batch)
-                        else:
+                        elif not keyed_chunk:
                             result = conn.execute(table_obj.insert(), batch)
                             chunk_written = _insert_rows_written(
                                 result, len(batch), dialect_name

@@ -46,16 +46,13 @@ def test_unresolved_identity_is_unknown(monkeypatch):
     assert dest_object_missing("postgresql", _REFUSED_PG, "t") is None
 
 
-def test_catalog_says_absent_is_still_missing(monkeypatch):
-    import connectors.generic_sql as generic_sql
-    import services.sql_object_identity as soi
+def test_catalog_says_absent_is_still_missing(tmp_path):
+    # A real catalog that has no such table, confirmed by the server itself.
+    import sqlite3
 
-    monkeypatch.setattr(generic_sql, "_engine", lambda cfg: object())
-    monkeypatch.setattr(
-        soi, "resolve_object_identity",
-        lambda engine, table, schema=None, **kw: soi.ObjectIdentity(schema, table, False),
-    )
-    assert dest_object_missing("postgresql", _REFUSED_PG, "t") is True
+    db = tmp_path / "d266.db"
+    sqlite3.connect(db).close()
+    assert dest_object_missing("sqlite", {"type": "sqlite", "database": str(db)}, "gone_t") is True
 
 
 def test_blip_wording_is_unreadable_not_dropped(monkeypatch):

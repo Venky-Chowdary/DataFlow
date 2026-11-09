@@ -378,7 +378,7 @@ def dest_object_missing(
     try:
         from connectors.generic_sql import _engine
         from connectors.sql_identifiers import split_qualified_table
-        from services.sql_object_identity import resolve_object_identity
+        from services.sql_object_identity import confirm_absent, resolve_object_identity
 
         engine = _engine(dest_cfg)
         schema, table = split_qualified_table(
@@ -389,7 +389,10 @@ def dest_object_missing(
             # The catalog did not answer (connection refused, DNS blip, timeout):
             # that is "unknown", never "dropped" (D266).
             return None
-        return ident.known_missing
+        if not ident.known_missing:
+            return False
+        # A privilege-filtered catalog hides a table the login cannot read.
+        return confirm_absent(engine, table, schema)
     except Exception:  # noqa: BLE001 — unknown stays unknown
         return None
 

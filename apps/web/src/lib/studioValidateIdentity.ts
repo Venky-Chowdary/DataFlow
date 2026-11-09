@@ -57,6 +57,8 @@ export type ValidateContractInput = {
   shapeSteps?: ValidateShapeStepIdentity[];
   multiSubnetFailover?: boolean;
   cdcRowFilter?: string;
+  /** Story 2: duplicate rows on append (only dedupe_skip / upsert are sent). */
+  duplicatePolicy?: string;
   schemaDriftAcknowledged?: boolean;
 };
 
@@ -127,6 +129,7 @@ export function buildValidateContractKey(input: ValidateContractInput): string {
     shape: shapeFingerprint(input),
     multiSubnetFailover: Boolean(input.multiSubnetFailover),
     cdcRowFilter: input.cdcRowFilter || "all",
+    ...(input.duplicatePolicy ? { duplicatePolicy: input.duplicatePolicy } : {}),
     schemaDriftAcknowledged: Boolean(input.schemaDriftAcknowledged),
   });
 }

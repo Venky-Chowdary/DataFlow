@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from connectors.oracle_tstz import pin_oracle_timestamp_binds
 from services.cancel_check import cancel_checkpoint
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action
@@ -284,6 +285,8 @@ def copy_sqlserver_to_oracle(
         for item in to_copy:
             clause = str(item.get("predicate") or "")
             params = list(item.get("params") or [])
+            # executemany binds datetime as DATE unless pinned right before it.
+            pin_oracle_timestamp_binds(dst_cur, oracle_ddls)
             _select_into_oracle(
                 source_conn,
                 dst_cur,

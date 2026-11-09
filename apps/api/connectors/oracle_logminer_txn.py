@@ -148,7 +148,7 @@ class _OpenTxn:
     rows: list[OracleTxnRow] = field(default_factory=list)
     nbytes: int = 0
     first_seen: float = 0.0
-    rowid_pks: dict[tuple[str, str], tuple[str, Any]] = field(default_factory=dict)
+    rowid_pks: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
 
 def _row_bytes(op: str, table: str, row: dict[str, Any], row_id: str = "") -> int:
@@ -294,10 +294,10 @@ class OracleTxnBuffer:
         row_id_value = str(row_id or row_values.get("ROWID") or "")
         primary_key_name = str(primary_key or "")
         table_key = str(table or "").upper()
-        if primary_key_name and primary_key_name not in row_values:
+        if primary_key_name and _key_image(row_values, primary_key_name) is None:
             cached_pk = open_txn.rowid_pks.get((table_key, row_id_value))
             if cached_pk is not None:
-                row_values[cached_pk[0]] = cached_pk[1]
+                row_values.update(cached_pk)
             else:
                 row_values = {
                     "_df_rejected": {
@@ -314,16 +314,9 @@ class OracleTxnBuffer:
         for column in tuple(row_values):
             if column.upper() == "ROWID":
                 row_values.pop(column)
-        if (
-            primary_key_name
-            and row_id_value
-            and primary_key_name in row_values
-            and row_values[primary_key_name] is not None
-        ):
-            open_txn.rowid_pks[(table_key, row_id_value)] = (
-                primary_key_name,
-                row_values[primary_key_name],
-            )
+        key_image = _key_image(row_values, primary_key_name) if primary_key_name else None
+        if row_id_value and key_image is not None:
+            open_txn.rowid_pks[(table_key, row_id_value)] = key_image
         record = OracleTxnRow(
             scn=int(scn or 0),
             rs_id=str(rs_id or ""),
@@ -389,3 +382,12 @@ def chunk_txn_rows(rows: list[OracleTxnRow], batch_size: int) -> list[list[Oracl
     if not rows:
         return []
     return [rows[i : i + size] for i in range(0, len(rows), size)]
+
+
+def _key_image(row: dict[str, Any], primary_key: str) -> dict[str, Any] | None:
+    """Stored key columns of a redo row (composite ``REGION,ID`` included), or None."""
+    from services.cdc_snapshot_window import _pk_columns
+
+    wanted = {c.upper() for c in _pk_columns(primary_key)}
+    image = {c: v for c, v in row.items() if str(c).upper() in wanted and v is not None}
+    return image if len(image) == len(wanted) else None

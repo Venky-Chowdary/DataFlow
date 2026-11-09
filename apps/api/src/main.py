@@ -80,6 +80,7 @@ from .transfer.engine import DuplicateTransferSubmission
 from .routers.transfer_router import router as transfer_router
 from .routers.usage_router import router as usage_router
 from .routers.team_router import router as team_router
+from .routers.invite_router import router as invite_router
 from .routers.workspace_router import router as workspace_router
 from .services.rbac import RBACMiddleware
 
@@ -175,9 +176,14 @@ async def lifespan(app: FastAPI):
     # Durable mail outbox: a restart can leave 'queued' rows behind —
     # re-queue them through the send lane so no reset/OTP mail is lost.
     try:
-        from services.signup_service import recover_mail_outbox
+        from services.signup_service import (
+            recover_mail_outbox,
+            start_mail_outbox_sweeper,
+        )
 
         recover_mail_outbox()
+        # A row in retry backoff at restart is not due yet; keep sweeping.
+        start_mail_outbox_sweeper()
     except Exception as oe:  # pragma: no cover - recovery must not block boot
         print(f"[!] Mail outbox drain warning: {oe}")
     os.environ.setdefault("DATAFLOW_VECTOR_STORE_DIR", str(vector_store_dir()))
@@ -746,6 +752,7 @@ app.include_router(scim_router, prefix="/api/v1")
 app.include_router(cdc_mapping_review_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(team_router, prefix="/api/v1")
+app.include_router(invite_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")
 app.include_router(fidelity_router, prefix="/api/v1")
 app.include_router(resource_acl_router, prefix="/api/v1")

@@ -42,6 +42,15 @@ describe("typeCarrierFidelity", () => {
     assert.equal(decimalWouldCollapse("DECIMAL(38,0)", "DECIMAL(10,0)"), true);
   });
 
+  it("QA1: proven DECIMAL(4,2) -> unbounded NUMERIC is not lossy; bare DECIMAL/NUMBER still is", () => {
+    assert.equal(decimalWouldCollapse("DECIMAL(4,2)", "NUMERIC"), false);
+    assert.equal(declaredCarrierFidelityRisk("DECIMAL(4,2)", "NUMERIC"), false);
+    assert.equal(declaredCarrierFidelityRisk("decimal(4,2)", "numeric"), false);
+    assert.equal(decimalWouldCollapse("DECIMAL(4,2)", "DECIMAL"), true);
+    assert.equal(decimalWouldCollapse("NUMBER(18,6)", "NUMBER"), true);
+    assert.equal(decimalWouldCollapse("DECIMAL(10,2)", "NUMERIC(4,2)"), true);
+  });
+
   it("applies Stripe SaaS defaults when destType is bare string", () => {
     assert.equal(saasDefaultCarrier("stripe", "email"), "VARCHAR(512)");
     assert.equal(saasDefaultCarrier("stripe", "phone"), "VARCHAR(20)");

@@ -81,6 +81,10 @@ def pytest_configure(config):
         "fake_mongo: leftover MERGE uses an in-memory collection (no live Mongo)",
     )
     config.addinivalue_line("markers", "live: optional live vendor smoke test")
+    config.addinivalue_line(
+        "markers",
+        "route_cert(route, sync_mode): attribute this test to a route certification cell",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -751,6 +755,9 @@ def pytest_collection_finish(session):
 def pytest_collection_modifyitems(config, items):
     """Skip live-service tests when emulators are absent or unauthenticated."""
     _select_ci_shard(config, items)
+    from services.route_certification import declare_marked_items
+
+    declare_marked_items(items)
     if not _is_mongo_reachable():
         skip_mongo = pytest.mark.skip(reason="MongoDB not reachable on this runner")
         for item in items:

@@ -109,6 +109,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import pii_guard
 
+from services.create_ddl_gate import refuse_unapproved_create
 from services.file_export_append import land_export_bytes
 
 from .adapters import (
@@ -458,10 +459,7 @@ def resolve_read_options(request: TransferRequest) -> ReadOptions:
         )
     from services.file_parser import FileParser, unsupported_read_options
 
-    file_type = FileParser.detect_file_type(
-        request.source_filename or "upload.csv",
-        request.source_content or None,
-    )
+    file_type = FileParser.detect_request_file_type(request)
     refusal = unsupported_read_options(options, file_type)
     if refusal:
         raise ReadOptionsError(refusal)
@@ -555,6 +553,7 @@ from .engine_identity import (  # noqa: E402,F401 — re-export
     _enforce_ddl_identity,
     _enforce_decision_artifact,
     _inline_stamp_ddl_identity,
+    decision_artifact_source,
     _operator_contract_maps,
     _request_decision_artifact_payload,
     execute_preflight_progress_message,
@@ -1514,17 +1513,16 @@ class UniversalTransferEngine:
         mongo = get_mongodb_service()
         checkpoint_service = CheckpointService(mongo)
         _forget_cached_table_shapes(request.source, request.destination)
+        contract = resolve_sync_contract(request.stream_contracts) if resume else None
+        resume_mode = resolve_effective_sync_mode(request.sync_mode, contract.sync_mode if contract else None)
+        resume = resume and not _resume_state.restarts_from_start(resume_mode)
         if resume:
-            contract = resolve_sync_contract(request.stream_contracts)
             checkpoint = resolve_resume_checkpoint(
                 job_id=job_id,
                 mongo=mongo,
                 checkpoint_service=checkpoint_service,
                 has_progress=_checkpoint_has_progress,
-                sync_mode=resolve_effective_sync_mode(
-                    request.sync_mode,
-                    contract.sync_mode if contract else None,
-                ),
+                sync_mode=resume_mode,
             )
         else:
             checkpoint = Checkpoint(job_id=job_id)
@@ -1791,6 +1789,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
+            refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -1864,16 +1863,14 @@ class UniversalTransferEngine:
                     map_source_to_target(c, mappings)
                     for c in declared_identity_columns(request)
                 ]
+            from services.duplicate_policy import route_keyed_duplicate_policy
+            if not conflict_columns and (
+                requires_upsert(effective_sync) or route_keyed_duplicate_policy(request)
+            ):
+                # The destination's own declared key is catalog evidence, not a
+                # guess (Validate's collision probe resolves on it too).
+                conflict_columns = _declared_destination_key(request.destination, mappings)
             if requires_upsert(effective_sync):
-                if not conflict_columns:
-                    # The destination's own declared key is catalog evidence, not
-                    # a guess — use it when every key column is mapped. Refusing
-                    # here while the table itself declares the key made upsert
-                    # unusable on any route where the operator had not also typed
-                    # the key into the stream contract.
-                    conflict_columns = _declared_destination_key(
-                        request.destination, mappings
-                    )
                 if not conflict_columns:
                     raise ValueError(
                         f"Sync mode `{effective_sync}` requires primary_key for upsert; "
@@ -1949,13 +1946,9 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=_preflight_sample_rows(records),
-                    # The whole batch is already in memory — decide bounded
-                    # destination carriers here instead of letting the writer
-                    # discover an unfit value mid-load. A just-approved Studio
-                    # Validate already asked that question; write-time fit
-                    # still binds every row.
-                    # An empty batch stays the population even on a reused
-                    # Validate: it is what proves a header-only file is empty.
+                    # The batch is in memory: decide bounded carriers here, not
+                    # mid-load. A reused Studio Validate skips the walk, but an
+                    # empty batch stays the population (proves a header-only file).
                     population_rows=None if reuse_fit and records else records,
                     rows_are_population=not reuse_fit or not records,
                     skip_population_fit=reuse_fit,
@@ -2088,8 +2081,7 @@ class UniversalTransferEngine:
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
                 source_column_types=schema,
-                source_kind=str(getattr(request.source, "kind", "") or ""),
-                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
+                **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
             )
             if art_err:
@@ -2206,6 +2198,7 @@ class UniversalTransferEngine:
                     chunks=chunks,
                 )
                 update = dict(
+                    phase="writing",  # D230: a source wait re-labels the job "reading"
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
@@ -3149,6 +3142,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
                 error=display,
                 error_details=error_details,
+                row_accounting=error_details.get("row_accounting") or {},
                 operation=request.operation,
                 contract_id=contract_id,
             )
@@ -3303,6 +3297,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
+            refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -3437,6 +3432,7 @@ class UniversalTransferEngine:
                         number_locale=getattr(request, "number_locale", "") or "",
                         resume=resume,
                         resume_write_complete=_resume_state.resumes_at_reconcile(resume, checkpoint),
+                        **_resume_state.resume_read_cursor(resume, checkpoint),
                         **parity,
                     )
                     pf = attach_budget_findings(pf, _budget)
@@ -3532,8 +3528,7 @@ class UniversalTransferEngine:
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
                 source_column_types=schema,
-                source_kind=str(getattr(request.source, "kind", "") or ""),
-                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
+                **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
             )
             if art_err:
@@ -3654,6 +3649,7 @@ class UniversalTransferEngine:
                     chunks=chunks,
                 )
                 update = dict(
+                    phase="writing",
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
@@ -4373,6 +4369,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
                 error=display,
                 error_details=error_details,
+                row_accounting=error_details.get("row_accounting") or {},
                 operation=request.operation,
                 contract_id=contract_id,
             )
@@ -4479,6 +4476,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
+            refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -4534,13 +4532,10 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=_preflight_sample_rows(sample_rows),
-                    # Second read-only pass over the same bytes the writer is
-                    # about to stream: a narrowing destination carrier is decided
-                    # before the first batch, not at row 431 with the load
-                    # half-done. Lazy — nothing is re-read when no mapped column
-                    # can exceed its destination carrier by declaration.
-                    # A just-approved Studio Validate already walked this file;
-                    # do not spend minutes asking the same question again.
+                    # Second read-only pass over the bytes the writer will stream:
+                    # a narrowing carrier is decided before the first batch, not at
+                    # row 431. Lazy — skipped when no mapped column can exceed its
+                    # carrier, or when a just-approved Studio Validate walked it.
                     population_rows=(
                         None
                         if reuse_fit and sample_rows
@@ -4686,8 +4681,7 @@ class UniversalTransferEngine:
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
                 source_column_types=schema,
-                source_kind=str(getattr(request.source, "kind", "") or ""),
-                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
+                **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
             )
             if art_err:
@@ -4793,6 +4787,7 @@ class UniversalTransferEngine:
                     chunks=chunks,
                 )
                 update = dict(
+                    phase="writing",
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
@@ -5208,6 +5203,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
                 error=display,
                 error_details=error_details,
+                row_accounting=error_details.get("row_accounting") or {},
                 operation=request.operation,
                 contract_id=contract_id,
             )

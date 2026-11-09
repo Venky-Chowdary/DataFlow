@@ -9,6 +9,7 @@ from ``api_key`` / ``password``. Delivery is at-least-once upsert by ``id``.
 from __future__ import annotations
 
 import importlib.util
+import base64
 import json
 import re
 from collections.abc import Iterator, Mapping
@@ -721,6 +722,31 @@ def milvus_query_entities_page(
     if not isinstance(rows, list):
         raise ValueError("Milvus query returned no data")
     return [row for row in rows if isinstance(row, dict)]
+
+
+def milvus_json_field(value: Any) -> dict[str, Any]:
+    """Decode a JSON field from entities/query.
+
+    Milvus 2.4 REST returns JSON fields base64-encoded; newer servers return
+    the object or its JSON text.
+    """
+    if isinstance(value, Mapping):
+        return dict(value)
+    if not isinstance(value, str) or not value:
+        return {}
+    candidates = [value]
+    try:
+        candidates.append(base64.b64decode(value, validate=True).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        pass
+    for text in candidates:
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(parsed, Mapping):
+            return dict(parsed)
+    return {}
 
 
 def milvus_count_in_filter(

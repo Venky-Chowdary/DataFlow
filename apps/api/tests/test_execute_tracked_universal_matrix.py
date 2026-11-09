@@ -220,6 +220,11 @@ for _param in EMULATOR_CASES:
         _DB_TEMPLATES[_fmt] = _ep
 
 
+_PINECONE_INDEX_HOST = os.environ.get(
+    "DATAFLOW_TEST_PINECONE_INDEX_HOST", "http://127.0.0.1:5082"
+)
+
+
 def _build_db_endpoint(
     driver: str,
     tmp_path: Path,
@@ -475,16 +480,18 @@ def _build_db_endpoint(
             port=8080,
             table="PaymentsWeaviate",
         ),
-        # Pinecone Local index emulator (desktop-extended). Dim 32 matches
+        # Pinecone Local index emulator (desktop-extended). The writer needs the
+        # index host (control plane 5081 lists it; the first index gets 5082).
+        # Dim 32 matches
         # pytest ``DATAFLOW_EMBEDDING_MODEL=hash/32``. Not a customer tenant.
         "pinecone": EndpointConfig(
             kind="database",
             format="pinecone",
-            host="http://127.0.0.1:5081",
-            port=5081,
+            host=_PINECONE_INDEX_HOST,
+            port=int(_PINECONE_INDEX_HOST.rsplit(":", 1)[-1]),
             password="pclocal",
             api_key="pclocal",
-            connection_string="http://127.0.0.1:5081",
+            connection_string=_PINECONE_INDEX_HOST,
             table="sku_ns",
             extra={"embedding_model": "hash/32", "local_emulator_not_customer_tenant": True},
         ),

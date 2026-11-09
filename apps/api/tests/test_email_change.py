@@ -95,8 +95,9 @@ def test_request_sends_code_to_new_address_and_notice_to_old():
     resp = _request_change(c, "ada2@example.com")
     assert resp.status_code == 202
     assert resp.json()["challenge_id"]
-    # signup code + change code (the old-address notice goes out at confirm)
-    assert len(ConsoleEmailSender.OUTBOX) == 2
+    # signup code + change code (the old-address notice goes out at confirm);
+    # the one-time welcome mail from verify is not part of this flow.
+    assert len([m for m in ConsoleEmailSender.OUTBOX if m.subject != "Welcome to Datawrap"]) == 2
     assert ConsoleEmailSender.OUTBOX[-1].to == "ada2@example.com"
     assert "new Datawrap email" in ConsoleEmailSender.OUTBOX[-1].subject \
         or "Confirm" in ConsoleEmailSender.OUTBOX[-1].subject

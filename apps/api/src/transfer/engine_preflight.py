@@ -141,13 +141,15 @@ def _execute_preflight_parity_kwargs(
         extra["table_exists"] = table_exists
     if privilege_probe:
         extra["privilege_probe"] = privilege_probe
-    from services.duplicate_policy import route_duplicate_options
+    from services.duplicate_policy import request_duplicate_option, route_duplicate_options
 
     # One duplicate choice for Validate and the writer (QA C2 remedies).
     # The source is read the way every other field here is (getattr): a
     # destination-only parity call carries no source endpoint.
     duplicate_options = route_duplicate_options(
-        dict(getattr(getattr(request, "source", None), "extra", None) or {}), dict(extra)
+        dict(getattr(getattr(request, "source", None), "extra", None) or {}),
+        dict(extra),
+        request_duplicate_option(request),
     )
     extra.update(duplicate_options)
     dest.extra = extra

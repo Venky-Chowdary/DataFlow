@@ -135,10 +135,14 @@ def test_qdrant_reader_emits_payload_not_vectors():
                 "source_id": "1",
                 "chunk_index": 0,
                 "embedding": [0.1, 0.2],
+                "_df_doc_hash": "h",
+                "_df_chunk_count": 1,
+                "_df_metadata_hash": "m",
             },
         }
     )
     assert row["id"] == 1
+    assert sorted(row) == ["amount", "code", "id"]
     assert row["amount"] == "1000.00"
     assert row["code"] == "USD"
     for omitted in QDRANT_OMIT_PAYLOAD_KEYS:

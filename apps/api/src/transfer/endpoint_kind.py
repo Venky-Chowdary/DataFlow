@@ -180,7 +180,18 @@ def stage_sqlite_upload(request: Any, job_id: str = "") -> bool:
     except Exception:
         _discard(staged)
         raise
-    table = (src.table or "").strip() or str((src.extra or {}).get("sqlite_table") or "").strip()
+    # The Studio's table picker declares the table as the read window's sheet;
+    # it is consumed here so the staged database source carries no file window.
+    read_options = dict(getattr(request, "read_options", None) or {})
+    picked = str(read_options.pop("sheet", "") or "").strip()
+    picked_index = read_options.pop("sheet_index", -1)
+    table = (
+        (src.table or "").strip()
+        or str((src.extra or {}).get("sqlite_table") or "").strip()
+        or picked
+    )
+    if not table and isinstance(picked_index, int) and 0 <= picked_index < len(tables):
+        table = tables[picked_index]
     if not table:
         if len(tables) != 1:
             _discard(staged)
@@ -202,6 +213,8 @@ def stage_sqlite_upload(request: Any, job_id: str = "") -> bool:
     )
     request.source_content = b""
     request.source_path = ""
+    if hasattr(request, "read_options"):
+        request.read_options = read_options
     return True
 
 
@@ -211,6 +224,21 @@ def _discard(path: str) -> None:
         os.remove(path)
     except OSError:
         pass
+
+
+def artifact_source_identity(src: Any, fallback_format: str = "") -> tuple[str, str]:
+    """``(kind, format)`` the Decision Artifact was bound to at Validate.
+
+    Validate saw an uploaded SQLite database as a file, whose inferred types are
+    not fingerprinted; Execute reads it as the staged ``database/sqlite`` copy.
+    Binding the staged copy as a catalog source would read as source drift.
+    """
+    if (getattr(src, "extra", None) or {}).get("staged_sqlite_upload"):
+        return "file", "sqlite"
+    return (
+        str(getattr(src, "kind", "") or ""),
+        str(getattr(src, "format", None) or fallback_format or ""),
+    )
 
 
 def discard_staged_upload(request: Any) -> None:

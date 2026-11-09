@@ -96,3 +96,56 @@ test("a stale recovered cursor is blank and can be replaced from the loaded sche
     dom.window.close();
   }
 });
+
+test("append shows a labelled Duplicate rows choice that defaults to insert", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
+    url: "http://localhost/", pretendToBeVisual: true,
+  });
+  Object.assign(globalThis, {
+    window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
+  const { act, createElement } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { DestinationAdvancedDrawer } = await import("./DestinationAdvancedDrawer");
+  const root = createRoot(document.getElementById("root")!);
+  const chosen: string[] = [];
+  const noop = () => {};
+  const props = (syncMode: string, duplicateRowsMode: "insert" | "dedupe_skip" | "upsert") => ({
+    open: true, onClose: noop, syncModes: SYNC_MODES, schemaPolicies: SCHEMA_POLICIES,
+    validationModes: VALIDATION_MODES, dateLocales: DATE_LOCALES, numberLocales: NUMBER_LOCALES,
+    syncMode, schemaPolicy: "manual_review", validationMode: "strict",
+    dateLocale: "", numberLocale: "", backfillNewFields: false,
+    streamNames: [], streamFields: {}, defaultCursor: "", defaultPrimaryKey: "",
+    sourceColumns: ["id"], sourceSchema: { id: "INTEGER" },
+    syncModeLabel: syncMode, schemaPolicyLabel: "Manual approval", requiresCursor: false,
+    requiresPrimaryKey: false, streamNeedsReview: false,
+    onSyncModeChange: noop, onSchemaPolicyChange: noop,
+    onValidationModeChange: noop, onDateLocaleChange: noop, onNumberLocaleChange: noop,
+    onBackfillChange: noop, onStreamCursorChange: noop, onStreamCursorSemanticsChange: noop,
+    onStreamPrimaryKeyChange: noop,
+    syncHonestyLine: syncModeHonestyLine(syncMode, false, "postgresql"),
+    duplicateRowsMode,
+    onDuplicateRowsModeChange: (m: string) => chosen.push(m),
+  });
+  try {
+    await act(async () => root.render(createElement(DestinationAdvancedDrawer, props("full_refresh_append", "insert"))));
+    const select = document.getElementById("df2-adv-duplicate-rows") as HTMLSelectElement | null;
+    assert.ok(select, "append exposes the choice");
+    assert.equal(select.value, "insert");
+    assert.equal(select.options.length, 3);
+    const label = document.querySelector('label[for="df2-adv-duplicate-rows"]');
+    assert.equal(label?.textContent, "Duplicate rows");
+    const hint = document.getElementById(select.getAttribute("aria-describedby") || "");
+    assert.match(hint?.textContent || "", /another copy on every rerun/);
+    select.value = "dedupe_skip";
+    await act(async () => select.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
+    assert.deepEqual(chosen, ["dedupe_skip"]);
+    await act(async () => root.render(createElement(DestinationAdvancedDrawer, props("full_refresh_overwrite", "insert"))));
+    assert.equal(document.getElementById("df2-adv-duplicate-rows"), null, "overwrite has no duplicate choice");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});

@@ -320,8 +320,13 @@ def persist_rejected_rows(
     workspace_id: str = "",
     source: str = "transfer",
     connector: str = "",
+    pipeline_key: str = "",
+    dest_table: str = "",
 ) -> dict[str, Any] | None:
     """Persist rejected/quarantined rows to the DLQ. Returns summary event or None.
+
+    CDC passes its ``pipeline_key`` (cursor key) and ``dest_table`` so a later
+    run's deletes can find these findings (`open_pipeline_quarantine_findings`).
 
     Module 9 / GA: normalize to quarantine row contract and fail closed without
     job_id. Chunk appends so row bodies are never silently truncated to 500.
@@ -404,6 +409,7 @@ def persist_rejected_rows(
                 "chunk_count": len(chunks),
                 "total_rejected": len(rows),
                 "skipped_contract": skip_n,
+                **({"pipeline_key": pipeline_key, "dest_table": dest_table} if pipeline_key else {}),
             },
         )
     out = {
@@ -506,16 +512,27 @@ def quarantine_details_from_dlq(
     allowed = {"quarantine", "quarantine_chunk"}
     if include_skip_audit:
         allowed.add("skip_audit")
+    # A CDC image a later change to the same key replaced (in this run) closes;
+    # a finding persisted after that supersession is a new image and stays.
+    superseded_at: dict[str, str] = {}
+    for ev in events:
+        if str(ev.get("action") or "") == "quarantine_superseded":
+            for ident in (ev.get("details") or {}).get("identities") or []:
+                superseded_at[str(ident)] = str(ev.get("ts") or "")
     out: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for ev in events:
         if str(ev.get("action") or "") not in allowed:
             continue
+        ev_ts = str(ev.get("ts") or "")
         chunk = (ev.get("details") or {}).get("rejected_details") or []
         for d in chunk:
             if not isinstance(d, dict):
                 continue
             d = _unwire_quarantine_detail(d)
+            closed_at = superseded_at.get(replay_row_identity(d)) if superseded_at else None
+            if closed_at is not None and ev_ts <= closed_at:
+                continue
             row = d.get("row")
             # The row is a record (dict/list), not a scalar — dedupe on its
             # canonical serialization; an unhashable member made every read
@@ -1574,3 +1591,302 @@ def delete_workspace_events(workspace_id: str, *, dry_run: bool = False) -> int:
             if hit and not dry_run:
                 _atomic_rewrite(path, kept)
     return removed
+
+
+REPLAY_STALE_CDC_CODE = "REPLAY_STALE_CDC_IMAGE"
+#: The destination already holds this key at the quarantined LSN or a newer one.
+REASON_STALE_DEST_NEWER = "cdc_replay_stale_destination_newer"
+#: A newer quarantined image of the same key is in this replay set.
+REASON_SUPERSEDED_IN_LEDGER = "cdc_replay_superseded_in_ledger"
+#: A later run deleted this key at or after the quarantined LSN (DLQ tombstone).
+REASON_DELETED_AFTER = "deleted_after"
+#: No tombstone covers this key, the destination has no row, and a later run of
+#: the same pipeline applied deletes: it may have been deleted. Held open, not closed.
+REASON_POSSIBLY_DELETED_AFTER = "possibly_deleted_after"
+#: Reasons that close the finding; ``possibly_deleted_after`` stays open for the operator.
+CLOSING_STALE_REASONS = frozenset(
+    {REASON_STALE_DEST_NEWER, REASON_SUPERSEDED_IN_LEDGER, REASON_DELETED_AFTER}
+)
+CDC_KEY_DELETED_ACTION = "cdc_key_deleted"
+
+
+def _detail_cdc_lsn(detail: dict[str, Any]) -> str:
+    """The ``_df_lsn`` the CDC writer stamped on this quarantined image, or ''."""
+    from connectors.lsn_guards import DF_LSN_COL
+
+    for bag_name in ("values", "source_values"):
+        bag = detail.get(bag_name)
+        if isinstance(bag, dict):
+            raw = bag.get(DF_LSN_COL)
+            if raw is not None and str(raw).strip():
+                return str(raw).strip()
+    return ""
+
+
+def _detail_key(detail: dict[str, Any], key_columns: list[str]) -> tuple[str, ...] | None:
+    for bag_name in ("values", "source_values"):
+        bag = detail.get(bag_name)
+        if isinstance(bag, dict) and all(c in bag for c in key_columns):
+            return tuple(str(bag[c]) for c in key_columns)
+    return None
+
+
+def partition_stale_cdc_replay(
+    details: list[dict[str, Any]],
+    *,
+    key_columns: list[str],
+    destination_lsns: Callable[[list[tuple[str, ...]]], dict[tuple[str, ...], Any]],
+    tombstones: dict[str, str] | None = None,
+    deleted_after_unproven: Callable[[str], bool] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split replay findings into (replayable, stale) for CDC images.
+
+    A quarantined CDC image carries the ``_df_lsn`` it was read at. Replay is a
+    keyed upsert, so landing it over a destination row a later run already
+    wrote at a newer position regresses that key (cross-run; same-run images
+    are closed by ``cdc_transfer._supersede_rejected_images``). The test is
+    the writer's own monotonic guard, ``lsn_is_newer``: equal or incomparable
+    positions are refused, never invented newer. Findings without a stamped
+    LSN (non-CDC routes) are untouched. ``destination_lsns`` maps key tuples
+    to the destination ``_df_lsn``; a key it omits holds no row and replays.
+
+    Deletes leave no destination row, so they are judged from history:
+    ``tombstones`` maps replay identity to the newest ``cdc_key_deleted`` LSN
+    (refused when it is at or past the image), and ``deleted_after_unproven``
+    answers, for an absent key no tombstone covers, whether a later run of the
+    pipeline applied deletes it did not record per key (refused, held open).
+    """
+    from connectors.lsn_guards import lsn_is_newer
+
+    if not key_columns:
+        return list(details), []
+    cdc: list[tuple[dict[str, Any], tuple[str, ...], str]] = []
+    keep: list[dict[str, Any]] = []
+    for d in details:
+        lsn = _detail_cdc_lsn(d) if isinstance(d, dict) else ""
+        key = _detail_key(d, key_columns) if lsn else None
+        if lsn and key is not None:
+            cdc.append((d, key, lsn))
+        else:
+            keep.append(d)
+    if not cdc:
+        return keep, []
+    newest: dict[tuple[str, ...], str] = {}
+    for _d, key, lsn in cdc:
+        if key not in newest or lsn_is_newer(lsn, newest[key]):
+            newest[key] = lsn
+    found = destination_lsns(sorted(newest))
+    stale: list[dict[str, Any]] = []
+    for d, key, lsn in cdc:
+        dest_lsn = found.get(key)
+        named = dict(zip(key_columns, key))
+        present = dest_lsn is not None and str(dest_lsn).strip() != ""
+        ident = replay_row_identity(d)
+        tomb = (tombstones or {}).get(ident)
+        if present and not lsn_is_newer(lsn, dest_lsn):
+            reason = REASON_STALE_DEST_NEWER
+        elif tomb and not lsn_is_newer(lsn, tomb):
+            reason = REASON_DELETED_AFTER
+        elif key not in found and not tomb and deleted_after_unproven and deleted_after_unproven(lsn):
+            reason = REASON_POSSIBLY_DELETED_AFTER
+        elif lsn != newest[key]:
+            reason = REASON_SUPERSEDED_IN_LEDGER
+        else:
+            keep.append(d)
+            continue
+        stale.append({
+            "identity": ident,
+            "key": named,
+            "reason": reason,
+            "quarantined_lsn": lsn,
+            "destination_lsn": "" if dest_lsn is None else str(dest_lsn),
+            "newest_quarantined_lsn": newest[key],
+            **({"deleted_lsn": tomb} if reason == REASON_DELETED_AFTER else {}),
+        })
+    return keep, stale
+
+
+def read_destination_cdc_lsns(
+    dest_cfg: dict[str, Any],
+    *,
+    dest_kind: str,
+    schema: str,
+    table: str,
+    key_columns: list[str],
+    keys: list[tuple[str, ...]],
+) -> dict[tuple[str, ...], Any]:
+    """``{key: _df_lsn}`` the destination holds for ``keys`` (absent = no row).
+
+    Raises when the read cannot run: replay must not guess that a key is not
+    newer on the destination.
+    """
+    import sqlalchemy as sa
+
+    from connectors.lsn_guards import DF_LSN_COL
+    from services.dest_precount import warehouse_sql_engine, warehouse_sql_table_ref
+
+    out: dict[tuple[str, ...], Any] = {}
+    if not keys or not key_columns:
+        return out
+    ref = warehouse_sql_table_ref(dest_kind, dest_cfg, schema, table)
+    with warehouse_sql_engine(dest_kind, dest_cfg) as engine:
+        quote = engine.dialect.identifier_preparer.quote
+        cols = ", ".join(quote(c) for c in key_columns)
+        with engine.connect() as conn:
+            for start in range(0, len(keys), 200):
+                chunk = keys[start : start + 200]
+                params: dict[str, Any] = {}
+                clauses = []
+                for i, key in enumerate(chunk):
+                    parts = []
+                    for j, col in enumerate(key_columns):
+                        params[f"k{i}_{j}"] = key[j]
+                        parts.append(f"{quote(col)} = :k{i}_{j}")
+                    clauses.append("(" + " AND ".join(parts) + ")")
+                stmt = (
+                    f"SELECT {cols}, {quote(DF_LSN_COL)} FROM {ref} "  # nosec B608 — quoted identifiers, bound values
+                    f"WHERE {' OR '.join(clauses)}"
+                )
+                for row in conn.execute(sa.text(stmt), params):
+                    out[tuple(str(v) for v in row[: len(key_columns)])] = row[len(key_columns)]
+    return out
+
+
+def replay_stale_cdc_refusal(table: str, stale: list[dict[str, Any]]) -> dict[str, Any]:
+    """The typed 409 when every replayable finding is a stale CDC image."""
+    return {
+        "code": REPLAY_STALE_CDC_CODE,
+        "message": (
+            f"Replay refused: all {len(stale)} quarantined CDC image(s) are older than "
+            f"what destination table '{table}' already holds for the same key. "
+            "Upserting them would regress those keys to stale values."
+        ),
+        "table": table,
+        "stale_refused": stale,
+        "next_action": (
+            "No replay is needed for these keys: a later CDC change already landed. "
+            "Inspect the destination row; if it is wrong, fix the source and let CDC deliver it."
+        ),
+    }
+
+
+def _pipeline_dlq_events(pipeline_key: str, dest_table: str, actions: set[str]) -> list[dict[str, Any]]:
+    """Every DLQ event of ``actions`` tagged with this CDC pipeline and table.
+
+    Raises when the store cannot be read: callers judge deletes from this
+    history and must not read an outage as "no history".
+    """
+    out: list[dict[str, Any]] = []
+    coll = _dlq_coll()
+    if coll is not None:
+        try:
+            docs = coll.find({
+                "action": {"$in": sorted(actions)},
+                "details.pipeline_key": pipeline_key,
+                "details.dest_table": dest_table,
+            })
+            out = [{k: v for k, v in dict(d).items() if k != "_id"} for d in docs]
+        except Exception as exc:  # noqa: BLE001 — any Mongo failure falls back to JSONL
+            logger.warning("DLQ Mongo pipeline scan failed, falling back to JSONL: %s", exc)
+    if not DLQ_PATH.exists():
+        return out
+    # Events appended during a Mongo outage live only in JSONL; a recovered
+    # Mongo must not hide them (a lost tombstone resurrects a deleted key).
+    seen = {str(e.get("id") or "") for e in out} - {""}
+    for line in DLQ_PATH.read_text(encoding="utf-8").splitlines():
+        ev = load_dlq_event(line.strip()) if line.strip() else None
+        if not ev or str(ev.get("action") or "") not in actions or str(ev.get("id") or "") in seen:
+            continue
+        det = ev.get("details") or {}
+        if det.get("pipeline_key") == pipeline_key and det.get("dest_table") == dest_table:
+            out.append(ev)
+    return out
+
+
+def open_pipeline_quarantine_findings(pipeline_key: str, dest_table: str) -> list[dict[str, Any]]:
+    """Non-superseded quarantine findings any run of this pipeline persisted for ``dest_table``."""
+    if not pipeline_key:
+        return []
+    events = _pipeline_dlq_events(pipeline_key, dest_table, {"quarantine", "quarantine_chunk"})
+    out: list[dict[str, Any]] = []
+    for jid in sorted({str(e.get("job_id") or "") for e in events} - {""}):
+        out.extend(quarantine_details_from_dlq(jid, include_skip_audit=False))
+    return out
+
+
+def record_cdc_key_deletes(
+    *, job_id: str, pipeline_key: str, dest_table: str, identities: list[str], lsn: str
+) -> dict[str, Any]:
+    """Durable tombstone for quarantined keys a CDC window deleted at ``lsn``."""
+    return append_dlq_event(
+        job_id=job_id,
+        action=CDC_KEY_DELETED_ACTION,
+        rows=len(identities),
+        details={
+            "pipeline_key": pipeline_key,
+            "dest_table": dest_table,
+            "identities": sorted(identities),
+            "lsn": lsn,
+        },
+    )
+
+
+def cdc_key_tombstones(pipeline_key: str, dest_table: str) -> dict[str, str]:
+    """``{replay identity: newest delete LSN}`` recorded for this pipeline and table."""
+    from connectors.lsn_guards import lsn_is_newer
+
+    out: dict[str, str] = {}
+    if not pipeline_key:
+        return out
+    for ev in _pipeline_dlq_events(pipeline_key, dest_table, {CDC_KEY_DELETED_ACTION}):
+        det = ev.get("details") or {}
+        lsn = str(det.get("lsn") or "").strip()
+        for ident in det.get("identities") or []:
+            prev = out.get(str(ident))
+            if prev is None or lsn_is_newer(lsn, prev):
+                out[str(ident)] = lsn
+    return out
+
+
+def job_quarantine_pipeline_tagged(job_id: str) -> bool:
+    """Whether this job's quarantine was persisted with its pipeline tag."""
+    # A CDC run also persists untagged copies through the generic path; one
+    # tagged chunk proves the run recorded tombstones for its pipeline.
+    return any(
+        str(ev.get("action") or "") in {"quarantine", "quarantine_chunk"}
+        and bool((ev.get("details") or {}).get("pipeline_key"))
+        for ev in list_dlq_events(job_id=job_id, limit=500)
+    )
+
+
+def later_untracked_deletes(
+    jobs: list[dict[str, Any]], *, parent_job_id: str, pipeline_key: str, parent_tagged: bool
+) -> Callable[[str], bool]:
+    """``f(lsn)``: did a later run of the pipeline apply deletes no tombstone covers?
+
+    A run counts when it shares ``pipeline_key``, applied deletes, and its
+    watermark is past ``lsn`` (or not comparable — never assume earlier). A run
+    that tracked tombstones (``cdc.quarantine_tombstones``) covers the parent's
+    findings only when the parent's quarantine carries the pipeline tag.
+    """
+    from connectors.lsn_guards import extract_cdc_lsn, lsn_is_newer
+
+    marks: list[str] = []
+    for job in jobs:
+        jid = str(job.get("id") or job.get("_id") or job.get("job_id") or "")
+        ds = job.get("destination_summary") or {}
+        cdc = ds.get("cdc") or {}
+        if jid == parent_job_id or str(ds.get("cursor_key") or cdc.get("cursor_key") or "") != pipeline_key:
+            continue
+        # ``deletes`` is rows affected: a delete of a quarantined key the
+        # destination never held affects none, yet the source deleted it.
+        if max(int(cdc.get("deletes") or 0), int(cdc.get("delete_events") or 0)) <= 0:
+            continue
+        if parent_tagged and cdc.get("quarantine_tombstones"):
+            continue
+        marks.append(str(extract_cdc_lsn(cdc.get("watermark")) or ""))
+
+    def _check(lsn: str) -> bool:
+        return any(not mark or not lsn_is_newer(lsn, mark) for mark in marks)
+
+    return _check

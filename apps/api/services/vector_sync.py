@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import hashlib
 import logging
 from collections.abc import Mapping, Sequence
@@ -117,6 +118,13 @@ def vector_chunk_identity(source_id: Any, chunk_index: Any) -> str:
     if not source:
         return ""
     return hashlib.sha256(f"{source}\x1f{index}".encode("utf-8")).hexdigest()
+
+
+#: Idempotency stamps the vector sync writes into point metadata; engine
+#: bookkeeping, never business payload.
+VECTOR_SYNC_METADATA_KEYS: frozenset[str] = frozenset(
+    {"_df_doc_hash", "_df_chunk_count", "_df_metadata_hash"}
+)
 
 
 def vector_document_hash(text: str, fingerprint_digest: str) -> str:
@@ -925,6 +933,7 @@ def _m6_engine_rows(
             _requests_session,
             _headers,
             iter_milvus_query_pages,
+            milvus_json_field,
             milvus_pk_info_from_describe_data,
         )
 
@@ -991,14 +1000,7 @@ def _m6_engine_rows(
                     filter_expr=filter_expr,
                 ):
                     for entity in page:
-                        metadata = entity.get("metadata")
-                        if isinstance(metadata, str):
-                            try:
-                                metadata = json.loads(metadata)
-                            except (TypeError, ValueError):
-                                metadata = {}
-                        if not isinstance(metadata, Mapping):
-                            metadata = {}
+                        metadata = milvus_json_field(entity.get("metadata"))
                         rows.append(
                             {
                                 "id": str(entity.get(pk_name, entity.get("id", ""))),
@@ -1139,6 +1141,28 @@ def _m6_delete_ids(
     raise ValueError(f"unsupported vector sync engine {engine!r}")
 
 
+# Milvus 2.4 does not show an upsert/delete to the next query at once; a
+# verification read polls a bounded window before it calls the write unverified.
+_EVENTUAL_READ_ENGINES = frozenset({"milvus"})
+_EVENTUAL_READ_WINDOW_S = 10.0
+
+
+def _read_states_settled(
+    engine: str,
+    cfg: Mapping[str, Any],
+    target: str,
+    keys: Sequence[str],
+    settled: Any,
+) -> dict[str, Any]:
+    window = _EVENTUAL_READ_WINDOW_S if engine in _EVENTUAL_READ_ENGINES else 0.0
+    deadline = time.monotonic() + window
+    while True:
+        states = vector_engine_read_document_states(engine, cfg, target, keys)
+        if settled(states) or time.monotonic() >= deadline:
+            return states
+        time.sleep(0.25)
+
+
 def vector_engine_delete_doc_keys(
     engine: str,
     cfg: Mapping[str, Any],
@@ -1158,7 +1182,13 @@ def vector_engine_delete_doc_keys(
             }
         )
         deleted = _m6_delete_ids(engine, cfg, target, ids)
-        remaining = vector_engine_read_document_states(engine, cfg, target, keys)
+        remaining = _read_states_settled(
+            engine,
+            cfg,
+            target,
+            keys,
+            lambda st: not any(int(v.get("actual_chunk_count") or 0) for v in st.values()),
+        )
         count = sum(int(state.get("actual_chunk_count") or 0) for state in remaining.values())
         if count:
             raise VectorDeleteUnverifiedError(target, count)
@@ -1188,7 +1218,14 @@ def vector_engine_delete_stale_chunks(
             }
         )
         deleted = _m6_delete_ids(engine, cfg, target, stale_ids)
-        after = vector_engine_read_document_states(engine, cfg, target, keys)
+        def _matches_keep(states: Mapping[str, Any]) -> bool:
+            return all(
+                set((states.get(sid) or {}).get("chunk_ids") or set())
+                == set(keep.get(sid) or set())
+                for sid in keys
+            )
+
+        after = _read_states_settled(engine, cfg, target, keys, _matches_keep)
         for source_id in keys:
             actual = set((after.get(source_id) or {}).get("chunk_ids") or set())
             expected = set(keep.get(source_id) or set())

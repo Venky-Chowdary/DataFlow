@@ -39,6 +39,7 @@ def _run(
     resume: bool = False,
     contract_primary_key: str = "",
     destination_unique_keys: list[dict[str, Any]] | None = None,
+    duplicate_policy: str = "",
 ) -> dict[str, Any]:
     from services.preflight_service import run_file_preflight
 
@@ -63,7 +64,10 @@ def _run(
         destination_table="jobs",
         destination_table_exists=destination_table_exists,
         destination_pk_columns=destination_pk_columns,
-        destination_config=_dest_cfg(db_path),
+        destination_config={
+            **_dest_cfg(db_path),
+            **({"duplicate_policy": duplicate_policy} if duplicate_policy else {}),
+        },
         destination_column_types={"id": "TEXT", "name": "TEXT"},
         validation_mode="strict",
         resume=resume,
@@ -495,3 +499,211 @@ def test_a_clean_probe_names_every_key_it_checked(tmp_path: Path) -> None:
     g6 = _gate(result, "g6_target_ddl")
     assert g6["status"] == "pass", g6
     assert "name, id values, no collision" in g6["message"], g6
+
+
+_WEB_DUPLICATE_POLICY = (
+    Path(__file__).resolve().parents[2] / "web" / "src" / "lib" / "duplicatePolicy.ts"
+)
+
+
+def test_collision_rule_id_is_the_one_the_transfer_ui_keys_its_fix_on(tmp_path: Path) -> None:
+    """The UI opens Duplicate rows only for this rule id: Validate must emit it."""
+    import re
+
+    ui_rule = re.search(
+        r'APPEND_KEY_COLLISION_RULE_ID = "([^"]+)"', _WEB_DUPLICATE_POLICY.read_text()
+    )
+    assert ui_rule, "duplicatePolicy.ts no longer names the G6 collision rule"
+    db_path = _seed_destination(tmp_path, [("a", "A")])
+    g6 = _gate(
+        _run(
+            db_path=db_path,
+            sample_rows=[{"id": "a", "name": "A2"}],
+            sync_mode="full_refresh_append",
+            destination_pk_columns=["id"],
+        ),
+        "g6_target_ddl",
+    )
+    assert g6["status"] == "block", g6
+    assert (g6.get("details") or {}).get("rule_id") == ui_rule.group(1), g6
+
+
+@pytest.mark.parametrize("policy", ["dedupe_skip", "upsert"])
+def test_a_chosen_duplicate_policy_resolves_an_enforced_key_collision(
+    tmp_path: Path, policy: str
+) -> None:
+    db_path = _seed_destination(tmp_path, [("a", "A")])
+    result = _run(
+        db_path=db_path,
+        sample_rows=[{"id": "a", "name": "A2"}, {"id": "z", "name": "Z"}],
+        sync_mode="full_refresh_append",
+        destination_pk_columns=["id"],
+        duplicate_policy=policy,
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    details = g6.get("details") or {}
+    assert g6["status"] == "pass", g6
+    assert details.get("rule_id") == "g6_target_ddl.append_key_collision_resolved", g6
+    assert details.get("duplicate_policy") == policy, g6
+
+
+def _seed_heap(tmp_path: Path) -> str:
+    db_path = tmp_path / "heap.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE jobs (id TEXT, name TEXT)")
+    conn.execute("INSERT INTO jobs VALUES ('a', 'A')")
+    conn.commit()
+    conn.close()
+    return str(db_path)
+
+
+@pytest.mark.parametrize("policy", ["dedupe_skip", "upsert"])
+def test_a_chosen_policy_resolves_a_declared_key_the_destination_does_not_enforce(
+    tmp_path: Path, policy: str
+) -> None:
+    """G6 names the resolution; the key gate owns how the write is keyed."""
+    result = _run(
+        db_path=_seed_heap(tmp_path),
+        sample_rows=[{"id": "a", "name": "A2"}],
+        sync_mode="full_refresh_append",
+        destination_pk_columns=[],
+        contract_primary_key="id",
+        duplicate_policy=policy,
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "pass", g6
+    assert (g6.get("details") or {}).get("rule_id") == "g6_target_ddl.append_key_collision_resolved"
+    assert "does not enforce this key" in g6["message"], g6
+    key_gate = _gate(result, "g_upsert_dest_key")
+    # SQLite keys the write itself (no unique index to disclose); the probe
+    # found no duplicate stored keys, so the key is usable.
+    assert key_gate["status"] == "pass", key_gate
+    assert key_gate["details"]["upsert_key_columns"] == ["id"], key_gate
+
+
+@pytest.mark.parametrize("policy", ["dedupe_skip", "upsert"])
+def test_a_chosen_policy_with_no_declared_key_is_refused_at_validate(
+    tmp_path: Path, policy: str
+) -> None:
+    """Execute's writer refuses a keyed policy with no key; Validate must say so first."""
+    result = _run(
+        db_path=_seed_heap(tmp_path),
+        sample_rows=[{"id": "a", "name": "A2"}],
+        sync_mode="full_refresh_append",
+        destination_pk_columns=[],
+        duplicate_policy=policy,
+    )
+    key_gate = _gate(result, "g_upsert_dest_key")
+    assert key_gate["status"] == "block", key_gate
+    assert key_gate["details"]["rule_id"] == "g_upsert_dest_key.keyed_policy_no_key"
+    assert key_gate["details"]["remediation_kind"] == "declare_key"
+    assert result["passed"] is False
+
+
+def test_a_heap_holding_duplicate_keys_refuses_a_keyed_policy(tmp_path: Path) -> None:
+    db_path = _seed_heap(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("INSERT INTO jobs VALUES ('a', 'A again')")
+    conn.commit()
+    conn.close()
+    key_gate = _gate(
+        _run(
+            db_path=db_path,
+            sample_rows=[{"id": "b", "name": "B"}],
+            sync_mode="full_refresh_append",
+            destination_pk_columns=[],
+            contract_primary_key="id",
+            duplicate_policy="upsert",
+        ),
+        "g_upsert_dest_key",
+    )
+    assert key_gate["status"] == "block", key_gate
+    assert key_gate["details"]["duplicate_key_count"] == 1, key_gate
+
+
+def test_insert_every_row_needs_no_key_gate(tmp_path: Path) -> None:
+    result = _run(
+        db_path=_seed_heap(tmp_path),
+        sample_rows=[{"id": "a", "name": "A"}],
+        sync_mode="full_refresh_append",
+        destination_pk_columns=[],
+    )
+    assert "g_upsert_dest_key" not in {g["id"] for g in result["gates"]}
+
+
+def _rows_unreadable():
+    """Catalog readable (the key is known enforced), stored rows are not (no SELECT)."""
+    from unittest.mock import patch
+
+    def _denied(*_a: Any, **_k: Any) -> Any:
+        raise PermissionError("permission denied for table jobs")
+
+    return patch("services.destination_key_collision_probe._sql_existing_keys", _denied)
+
+
+def test_unreadable_enforced_key_blocks_insert_every_row(tmp_path: Path) -> None:
+    """Audit repro: a write-only role (no SELECT) on a PK table approved Validate.
+
+    The collision probe errored, yet G6 only warned 'Execute re-probes it' and
+    Execute unlocked. An unresolved check on an enforced key must not authorize
+    an insert-every-row append.
+    """
+    import re
+
+    with _rows_unreadable():
+        result = _run(
+            db_path=_seed_destination(tmp_path, [("a", "A")]),
+            sample_rows=[{"id": "a", "name": "A"}],
+            sync_mode="full_refresh_append",
+            destination_pk_columns=["id"],
+        )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "block", g6
+    details = g6.get("details") or {}
+    assert details.get("rule_id") == "g6_target_ddl.append_collision_unreadable", g6
+    assert (details.get("collision_probe") or {}).get("status") == "error", g6
+    assert "could not be checked" in g6["message"]
+    ui_rule = re.search(
+        r'APPEND_COLLISION_UNREADABLE_RULE_ID = "([^"]+)"', _WEB_DUPLICATE_POLICY.read_text()
+    )
+    assert ui_rule and ui_rule.group(1) == details.get("rule_id")
+
+
+@pytest.mark.parametrize("policy", ["dedupe_skip", "upsert"])
+def test_unreadable_enforced_key_is_not_refused_when_a_keyed_policy_is_chosen(
+    tmp_path: Path, policy: str
+) -> None:
+    with _rows_unreadable():
+        result = _run(
+            db_path=_seed_destination(tmp_path, [("a", "A")]),
+            sample_rows=[{"id": "a", "name": "A"}],
+            sync_mode="full_refresh_append",
+            destination_pk_columns=["id"],
+            duplicate_policy=policy,
+        )
+    g6 = _gate(result, "g6_target_ddl")
+    assert (g6.get("details") or {}).get("rule_id") != "g6_target_ddl.append_collision_unreadable", g6
+    assert "refuses the run" not in g6["message"], g6
+    assert "resolves stored keys" in g6["message"], g6
+
+
+def test_unreadable_probe_reason_drops_driver_sql(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    def _denied(*_a: Any, **_k: Any) -> Any:
+        raise PermissionError(
+            "(psycopg2.errors.InsufficientPrivilege) permission denied for table jobs\n\n"
+            '[SQL: SELECT "id" FROM "jobs" WHERE "id" IN (%(id_1_1)s)]\n'
+            "[parameters: {'id_1_1': 1}]"
+        )
+
+    with patch("services.destination_key_collision_probe._sql_existing_keys", _denied):
+        result = _run(
+            db_path=_seed_destination(tmp_path, [("a", "A")]),
+            sample_rows=[{"id": "a", "name": "A"}],
+            sync_mode="full_refresh_append",
+            destination_pk_columns=["id"],
+        )
+    g6 = _gate(result, "g6_target_ddl")
+    assert "permission denied for table jobs" in g6["message"], g6
+    assert "[SQL:" not in g6["message"] and "parameters:" not in g6["message"], g6

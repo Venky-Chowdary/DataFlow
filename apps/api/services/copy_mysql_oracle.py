@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from connectors.oracle_tstz import pin_oracle_timestamp_binds
 from services.cancel_check import cancel_checkpoint
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action
@@ -316,6 +317,8 @@ def copy_mysql_to_oracle(
                     to_copy = [_select_sql(table_q, source_cols, "")]
 
         for sql in to_copy:
+            # executemany binds datetime as DATE unless pinned right before it.
+            pin_oracle_timestamp_binds(dst_cur, oracle_ddls)
             _select_into_oracle(
                 source_conn,
                 dst_cur,

@@ -264,7 +264,8 @@ def test_live_sqlserver_sqlite_empty_string_and_null_preserved(tmp_path):
         _drop_ss(ss_mid)
 
 
-def test_live_sqlserver_sqlite_skip_when_dest_count_matches(tmp_path):
+def test_live_sqlserver_sqlite_occupied_equal_count_declines(tmp_path):
+    """Equal COUNT is not proof: an append rerun must reach the row path."""
     tag = uuid.uuid4().hex[:8]
     src = tmp_path / "src.db"
     ss_mid = f"ss_sqlite_skip_{tag}"
@@ -283,17 +284,17 @@ def test_live_sqlserver_sqlite_skip_when_dest_count_matches(tmp_path):
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_sqlserver_to_sqlite(
-            source_cfg=_ss_cfg(),
-            source_schema="dbo",
-            source_table=ss_mid,
-            dest_cfg=_sqlite_cfg(dest_db, dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            sqlite_ddls=["INTEGER", "TEXT"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
+        with pytest.raises(FastPathUnavailable, match="occupied SQLite dest"):
+            copy_sqlserver_to_sqlite(
+                source_cfg=_ss_cfg(),
+                source_schema="dbo",
+                source_table=ss_mid,
+                dest_cfg=_sqlite_cfg(dest_db, dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                sqlite_ddls=["INTEGER", "TEXT"],
+                replace_destination=False,
+            )
         assert _sqlite_count(dest_db, dest) == 800
     finally:
         _drop_ss(ss_mid)

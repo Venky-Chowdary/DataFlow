@@ -33,6 +33,7 @@ export type ValidateActionFamily =
   | "acknowledge_pii"
   | "acknowledge_drift"
   | "acknowledge_fk"
+  | "approve_ddl"
   | "hold_out"
   | "approve_mappings"
   | "remap_column"
@@ -67,7 +68,7 @@ export interface ValidateStudioPrimary {
 }
 
 export type PromotedPrimaryFix = {
-  destination: "map" | "connectors" | "ack_drift" | "ack_pii" | "ack_fk";
+  destination: "map" | "connectors" | "ack_drift" | "ack_pii" | "ack_fk" | "ack_ddl";
   label: string;
 };
 
@@ -225,12 +226,71 @@ export function resolveValidateStudioPrimary(
   };
 }
 
+type GateLike = { id?: string; details?: Record<string, unknown> | null };
+
+/** Gates that disclose destination DDL (upsert unique key, create-new table) for approval. */
+const DDL_APPROVAL_GATE_IDS = new Set(["g_upsert_dest_key", "g_create_dest_ddl"]);
+
+/**
+ * The g_upsert_dest_key gate behind a blocker, whether the blocker is the gate
+ * itself or the root cause that absorbed it (kind ``upsert_dest_ddl``).
+ */
+export function ddlApprovalGate(
+  blocker: GateLike | null | undefined,
+  gates?: GateLike[] | null,
+): GateLike | null {
+  if (!blocker) return null;
+  if (blocker.id && DDL_APPROVAL_GATE_IDS.has(blocker.id)) return blocker;
+  const details = (blocker.details ?? {}) as Record<string, unknown>;
+  const impacted = Array.isArray(details.impacted_gates) ? details.impacted_gates.map(String) : [];
+  if (details.kind !== "upsert_dest_ddl" && !impacted.includes("g_upsert_dest_key")) return null;
+  return (gates ?? []).find((g) => g?.id === "g_upsert_dest_key") ?? null;
+}
+
+/** A block whose only remedy the operator can give here is approving DDL Validate disclosed. */
+export function ddlApprovalPending(
+  blocker: GateLike | null | undefined,
+  gates?: GateLike[] | null,
+): boolean {
+  const gate = ddlApprovalGate(blocker, gates);
+  const details = (gate?.details ?? null) as Record<string, unknown> | null;
+  return (
+    details?.remediation_kind === "approve_ddl_or_dedupe"
+    && details?.requires_approval === true
+    && !Number(details?.duplicate_key_count ?? 0)
+    && typeof details?.planned_ddl === "string"
+    && String(details.planned_ddl).trim().length > 0
+  );
+}
+
+/**
+ * The blocked g_upsert_dest_key gate awaiting approval of the DDL it disclosed.
+ * Engine root causes absorb the gate into a source-less display item, so the
+ * Validate surfaces read the gate itself rather than the blocker.
+ */
+export function pendingDdlApproval(
+  pf: { gates?: Array<GateLike & { status?: string }> } | null | undefined,
+): GateLike | null {
+  const gate = (pf?.gates ?? []).find((g) => DDL_APPROVAL_GATE_IDS.has(g?.id ?? "") && g.status === "block");
+  return gate && ddlApprovalPending(gate) ? gate : null;
+}
+
+/** Validate recorded the operator's approval of the DDL it disclosed. */
+export function ddlApprovalRecorded(
+  pf: { gates?: Array<{ id?: string; details?: Record<string, unknown> | null }> } | null | undefined,
+): boolean {
+  return (pf?.gates ?? []).some(
+    (g) => DDL_APPROVAL_GATE_IDS.has(g?.id ?? "") && g.details?.acknowledged === true,
+  );
+}
+
 /**
  * When suggested_actions is empty, still put a real destination on the rail
  * so the dashboard never has to invent a second teal.
  */
 export function promoteBlockedPrimaryFix(
   firstBlocker: DisplayBlocker | undefined,
+  gates?: GateLike[] | null,
 ): PromotedPrimaryFix {
   if (!firstBlocker) return { destination: "map", label: "Open Map to fix" };
   const details = (firstBlocker.source?.details ?? null) as Record<string, unknown> | null;
@@ -242,6 +302,9 @@ export function promoteBlockedPrimaryFix(
   }
   if (details?.compliance_ack_required === true) {
     return { destination: "ack_pii", label: "Approve PII for this transfer" };
+  }
+  if (ddlApprovalPending(firstBlocker.source, gates)) {
+    return { destination: "ack_ddl", label: "Approve destination DDL" };
   }
   const blob = [
     firstBlocker.message,

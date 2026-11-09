@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isReplayable, quarantineEvidenceSource } from "./quarantineReplay";
+import { isReplayable, quarantineEvidenceSource, quarantineSourceRow } from "./quarantineReplay";
 
 describe("isReplayable", () => {
   it("accepts a finding that names the bad cell", () => {
@@ -56,5 +56,17 @@ describe("quarantineEvidenceSource", () => {
       quarantineEvidenceSource([{ column: "phone", value: "x", policy: "quarantine" }]),
       "job",
     );
+  });
+});
+
+describe("quarantineSourceRow", () => {
+  it("reads the row number of a write reject", () => {
+    assert.equal(quarantineSourceRow({ row: 4 }), 4);
+  });
+
+  it("never hands a transform-divert record to a table cell", () => {
+    // shape_apply.divert_details: ``row`` is the diverted record (QA #380 crash).
+    assert.equal(quarantineSourceRow({ row: { id: 2, amt: "BAD" }, source_row_index: 2 }), 2);
+    assert.equal(quarantineSourceRow({ row: { id: 2, amt: "BAD" } }), null);
   });
 });

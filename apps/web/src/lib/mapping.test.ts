@@ -1491,3 +1491,42 @@ describe("G21 control total wire", () => {
     assert.equal(isCodeCrosswalkCandidate(omitted), false);
   });
 });
+
+import { reconcileLiveSourceTypes as __reconcileLive } from "./mapping";
+describe("reconcileLiveSourceTypes (Map/Validate parity on source drift)", () => {
+  const row = {
+    source: "amount",
+    target: "amount",
+    confidence: 0.99,
+    inferredType: "DECIMAL(12,4)",
+    destType: "DECIMAL(12,4)",
+    approved: true,
+    fidelity: "preserve",
+    existsInDestination: true,
+  } as Parameters<typeof __reconcileLive>[0][number];
+
+  it("re-grades a drifted narrowing as lossy and drops the approval", () => {
+    const [m] = __reconcileLive([row], { amount: "DECIMAL(14,6)" });
+    assert.equal(m.inferredType, "DECIMAL(14,6)");
+    assert.equal(m.fidelity, "lossy_cast");
+    assert.equal(m.typeNarrowing, true);
+    assert.equal(m.approved, false);
+  });
+
+  it("restores the prior grading once the drift is corrected", () => {
+    const [drifted] = __reconcileLive([row], { amount: "DECIMAL(14,6)" });
+    const [m] = __reconcileLive([drifted], { amount: "DECIMAL(12,4)" });
+    assert.equal(m.inferredType, "DECIMAL(12,4)");
+    assert.equal(m.fidelity, "preserve");
+    assert.equal(m.typeNarrowing, undefined);
+    assert.equal(m.requiresReview, undefined);
+    assert.equal(m.sourceTypeDriftPrior, undefined);
+    assert.equal(m.approved, false);
+  });
+
+  it("leaves rows alone when the live type still fits", () => {
+    const rows = [row];
+    assert.equal(__reconcileLive(rows, { amount: "DECIMAL(12,4)" }), rows);
+    assert.equal(__reconcileLive(rows, { amount: "DECIMAL(10,2)" }), rows);
+  });
+});

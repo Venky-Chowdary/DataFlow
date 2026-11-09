@@ -189,6 +189,39 @@ def _undo_failed_write(run: Any, exc: BaseException) -> BaseException:
     return exc
 
 
+def _stamp_all_held_out_ledger(
+    run: Any, exc: BaseException, *, removed_on_read: int = 0
+) -> BaseException:
+    """Stamp the counted read on a run that held out every row; return ``exc``.
+
+    The failure path rebuilt the ledger from a result with no read count, so
+    the Run page read "source not measured · held out 0" while the DLQ held
+    every row (QA1). The rows were read and judged: the read is measured, no
+    row was committed, and destination COUNT(*) was not taken.
+    """
+    from dataclasses import replace
+
+    from services.row_conservation import write_refused_ledger
+
+    held = max(int(run.tally.rejected_total or 0), 0)
+    removed = max(int(removed_on_read or 0), 0)
+    read = held + removed
+    note = (
+        f"{read:,} source row(s) were read and {held:,} held out to quarantine "
+        "with a named finding, so no row was committed and destination "
+        "COUNT(*) was not taken. The read is measured."
+    )
+    if removed:
+        note += f" {removed:,} row(s) were removed on read by the declared recipe or filter."
+    ledger = write_refused_ledger(
+        rows_read=read,
+        quarantined_rows=held,
+        sync_mode=str(getattr(run.cfg, "effective_sync", "") or ""),
+    )
+    setattr(exc, "row_accounting", replace(ledger, note=note).to_dict())
+    return exc
+
+
 def _fk_orphans_fail_closed(validation_mode: str) -> bool:
     return str(validation_mode or "").strip().lower() in {"strict", "maximum"}
 

@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.duplicate_policy import summary_keyed_duplicate_policy
+
 from services.reconcile_coverage import (
     LAST_STREAM_CHECKSUM,
-    NO_OP_DEST_UNCHANGED,
-    PER_STREAM_CHECKSUM,
 )
 
 _TERMINAL = frozenset({
@@ -67,30 +67,14 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
     scope = str(recon.get("checksum_scope") or "").strip().lower()
     if scope == LAST_STREAM_CHECKSUM:
         return False
-    assurance = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
-    if assurance == "full_checksum":
-        return True
-    if assurance in {
-        "row_count",
-        "writer_ack",
-        "sample",
-        "write_pass_dest_readback",
-        PER_STREAM_CHECKSUM,
-        NO_OP_DEST_UNCHANGED,
-        "none",
-    }:
-        return False
-    provenance = str(recon.get("source_checksum_provenance") or "").strip().lower()
-    if provenance in {"writer_ack", "write_pass_fingerprints"}:
-        return False
-    phase = str(recon.get("phase") or "").strip().lower()
-    if "writer_ack" in phase or "sample" in phase or "skipped" in phase or "row_count" in phase:
-        return False
-    if recon.get("unproven") is True or recon.get("skipped_readback") is True:
-        return False
-    src = str(recon.get("source_checksum") or "").strip()
-    tgt = str(recon.get("target_checksum") or "").strip()
-    return bool(src and tgt and src == tgt and recon.get("passed") is True)
+    # One verdict with the signed proof pack and the Gate-8 tile. Credit is an
+    # allow-list: only a report the proof classifier positively files as
+    # full_checksum (independent source re-read, whole-table digest match)
+    # earns it. A stored assurance_level=full_checksum over an engine-computed
+    # digest classifies as ``none`` and is not a full-checksum pass (QA4).
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    return classify_post_write_assurance(recon).get("claim_level") == "full_checksum"
 
 
 def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
@@ -251,6 +235,15 @@ def open_quarantine_count(job: dict[str, Any] | None) -> float:
     return rejected
 
 
+def rows_read_population(job: dict[str, Any] | None) -> float:
+    """Source rows the run read, from the conservation ledger when stamped."""
+    summary = (job or {}).get("destination_summary") or {}
+    ledger = summary.get("row_accounting") if isinstance(summary, dict) else None
+    if isinstance(ledger, dict) and ledger.get("rows_read") is not None:
+        return _num(ledger.get("rows_read"), 0)
+    return _num(summary.get("source_row_count") if isinstance(summary, dict) else 0, 0)
+
+
 def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
     """Compute a 0–100 trust score from persisted job fields."""
     j = job if isinstance(job, dict) else {}
@@ -312,7 +305,10 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
     })
 
     # Quarantine / violation rate — open hold-outs, not historical rejects.
-    denom = max(processed, rejected, historical_rejected, 1)
+    # Rows read is the population the hold-outs came from; rows written alone
+    # printed 2 rejected of 3 read as 100%.
+    rows_read = rows_read_population(j)
+    denom = max(rows_read, processed, rejected, historical_rejected, 1)
     reject_rate = min(1.0, rejected / denom)
     quarantine_score = max(0.0, 100.0 - reject_rate * 400.0)
     closure = _quarantine_closure(j)
@@ -327,7 +323,8 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         quarantine_score = 100.0
         q_note = "No quarantined rows."
     else:
-        q_note = f"{int(rejected):,} open quarantined ({reject_rate * 100:.1f}% of processed)."
+        basis = "rows read" if rows_read > 0 else "processed"
+        q_note = f"{int(rejected):,} open quarantined ({reject_rate * 100:.1f}% of {basis})."
     factors.append({
         "id": "quarantine",
         "label": "Quarantine",
@@ -490,6 +487,7 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         rejected=rejected,
         recon=recon if recon else None,
         quarantine_verdict=verdict,
+        keyed_policy=summary_keyed_duplicate_policy((job or {}).get("destination_summary")),
     )
 
     return {
@@ -538,6 +536,7 @@ def _next_action(
     rejected: float,
     recon: dict[str, Any] | None = None,
     quarantine_verdict: str = "",
+    keyed_policy: bool = False,
 ) -> dict[str, str]:
     if cursor_gap:
         from services.cdc_snapshot_mode import snapshot_mode_recovers_gap
@@ -608,7 +607,10 @@ def _next_action(
                 "code": "append_delta",
                 "label": "Append delta closed — not a dest replace",
                 "detail": (
-                    "Dest grew by this run. Overwrite to replace existing rows, "
+                    "New keys were inserted; stored keys were kept or updated by "
+                    "the Duplicate rows choice. Overwrite to replace existing rows."
+                    if keyed_policy
+                    else "Dest grew by this run. Overwrite to replace existing rows, "
                     "or add a PK and upsert."
                 ),
             }

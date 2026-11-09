@@ -284,8 +284,33 @@ def _redact_text(text: str) -> str:
                 text,
             )
         else:
-            text = pattern.sub(lambda m: _mask_matched_token(m.group(0)), text)
+            text = pattern.sub(
+                lambda m: m.group(0)
+                if _inside_decimal_literal(m)
+                else _mask_matched_token(m.group(0)),
+                text,
+            )
     return text
+
+
+_NUMERIC_TOKEN = re.compile(r"[-+]?[\d.]+(?:[eE][-+]?\d+)?")
+
+
+def _inside_decimal_literal(match: re.Match[str]) -> bool:
+    """A phone/SSN shape that is only the digits of a decimal literal.
+
+    ``pii_findings`` already exempts a whole-value decimal (X-26); inside a
+    message ("the given value is '99999999999.999999'") the phone pattern still
+    masked the integer part to ``99*******99.999999`` (D265).
+    """
+    text = match.string
+    start, end = match.start(), match.end()
+    while start > 0 and (text[start - 1].isdigit() or text[start - 1] in ".-+"):
+        start -= 1
+    while end < len(text) and (text[end].isdigit() or text[end] in ".eE-+"):
+        end += 1
+    token = _NUMERIC_TOKEN.fullmatch(text[start:end].strip(".-+"))
+    return token is not None and _is_decimal_literal(token.group(0))
 
 
 def _sensitive_source_columns(mappings: list[dict]) -> set[str]:

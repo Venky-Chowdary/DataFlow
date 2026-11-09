@@ -967,6 +967,7 @@ def write_mapped_rows(
         if create_table:
             from services.identity_carry import dbapi_percent_fetchall
             from services.schema_fidelity import (
+                create_key_inputs,
                 empty_unsupported_report,
                 plan_covers_unique,
                 render_create_column_defs,
@@ -985,11 +986,7 @@ def write_mapped_rows(
                     table_already_exists=bool(table_existed),
                     dest_table=table_name,
                     dest_schema="",
-                    carry_keys=write_mode != "insert"
-                    or bool(_kwargs.get("carry_source_keys")),
-                    operator_key_columns=(
-                        list(conflict_columns or []) if write_mode == "upsert" else None
-                    ),
+                    **create_key_inputs(write_mode=write_mode, conflict_columns=conflict_columns, carry_source_keys=bool(_kwargs.get("carry_source_keys"))),
                 )
             except Exception as exc:  # noqa: BLE001 — planner failure is types-only + certificate
                 logger.warning(
@@ -1479,7 +1476,31 @@ def write_mapped_rows(
                     rejected_details=rejected_details,
                     warnings=transform_errors,
                 )
-            if not table_existed and create_table and write_mode == "upsert":
+            if table_existed and backfill_new_fields:
+                from connectors.writer_common import additive_ddl_would_write_nothing
+                from services.batch_progress import mappings_require_dest_widen
+
+                _scan = None
+                if not mappings_require_dest_widen(mappings):
+                    _scan = _mysql_scan_finished_bundles(**_mysql_finish_kwargs)
+                if _scan is not None and additive_ddl_would_write_nothing(
+                    rejected_details=list(_scan[0].rejected_details),
+                    policy=policy,
+                    source_row_count=_scan[1],
+                ):
+                    _cleanup_spool()
+                    return WriteResult(
+                        ok=True,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=database,
+                        checksum="",
+                        chunks_completed=0,
+                        rejected_rows=_scan[1],
+                        rejected_details=list(_scan[0].rejected_details),
+                        warnings=list(_scan[0].transform_errors),
+                    )
+            if not table_existed and create_table and (write_mode == "upsert" or conflict_columns):
                 from services.schema_fidelity import mysql_key_compatible_types
 
                 target_types, key_refusal = mysql_key_compatible_types(
@@ -1612,6 +1633,7 @@ def write_mapped_rows(
                     )
 
             rows_skipped = 0
+            skipped_identity_keys: list[str] = []
 
             def _chunk_may_load_data() -> bool:
                 if not use_load_data or not load_session_ok:
@@ -1875,6 +1897,21 @@ def write_mapped_rows(
                                     except ValueError:
                                         continue
                                 dense_nums = kept_nums
+                        from connectors.writer_common import drop_stored_key_rows
+
+                        dense, kept_keys, dense_nums = drop_stored_key_rows(
+                            cur,
+                            table_name,
+                            None,
+                            conflict_cols,
+                            dense,
+                            target_cols,
+                            quote="`",
+                            placeholder="%s",
+                            row_numbers=dense_nums,
+                        )
+                        rows_skipped += len(kept_keys)
+                        skipped_identity_keys.extend(kept_keys)
                     for offset in range(0, len(dense), chunk_size) if dense else []:
                         sub = dense[offset : offset + chunk_size]
                         sub_nums = (
@@ -1892,9 +1929,10 @@ def write_mapped_rows(
             chunks = chunk_idx
             from connectors.sql_write_materialize import accounted_rejected_rows
 
+            # Keys a dedupe_skip write left stored were decided, not rejected.
             rejected_rows = _rejected_row_count(
                 data_rows,
-                [()] * write_acc.accepted_row_count,
+                [()] * (write_acc.accepted_row_count + len(skipped_identity_keys)),
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,
@@ -2003,6 +2041,11 @@ def write_mapped_rows(
             meta=writer_meta_with_source_rows(
                 {
                     **write_acc.gate8_meta(conflict_columns=write_acc.conflict_columns or None),
+                    **(
+                        {"skipped_identity_keys": list(skipped_identity_keys)}
+                        if skipped_identity_keys
+                        else {}
+                    ),
                     **(
                         {"schema_fidelity": _kwargs["_schema_fidelity_report"]}
                         if isinstance(_kwargs.get("_schema_fidelity_report"), dict)

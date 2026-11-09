@@ -161,6 +161,10 @@ def copy_mongo_to_oracle(
             projection["_id"] = 0
         cursor = coll.find({}, projection, session=session, no_cursor_timeout=False)
         copied = 0
+        from connectors.oracle_tstz import pin_oracle_timestamp_binds
+
+        # executemany binds datetime as DATE unless pinned right before it.
+        pin_oracle_timestamp_binds(dst_cur, oracle_ddls)
         batch: list[tuple[Any, ...]] = []
         while True:
             docs = list(islice(cursor, _FIND_BATCH))

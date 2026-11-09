@@ -2594,9 +2594,18 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     # Append into a table that already enforces this key: the write aborts on the
     # first stored key, so the verdict belongs here, not in a duplicate-key error
     # after Execute has started.
+    _raw_choice = str(getattr(ctx.plan, "duplicate_policy", "") or "").strip().lower()
+    keyed_choice = (
+        "skip keys already stored"
+        if _raw_choice in {"dedupe_skip", "skip_duplicates"}
+        else "update keys already stored"
+        if _raw_choice in {"upsert", "merge"}
+        else ""
+    )
     collision = getattr(ctx, "destination_collision", None)
     collision_proven = ""
     collision_unproven = ""
+    collision_unreadable = False
     collision_evidence: dict[str, Any] = {}
     if collision is not None:
         collision_evidence = {
@@ -2623,17 +2632,43 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     f"Target DDL compatible — append batch probed against stored "
                     f"{keys} values, no collision"
                 )
-            elif getattr(collision, "key_enforced", True):
+            elif getattr(collision, "key_enforced", True) and collision_evidence[
+                "status"
+            ] in {"error", "timed_out"} and str(
+                getattr(ctx.plan, "duplicate_policy", "") or ""
+            ).strip().lower() not in {"dedupe_skip", "skip_duplicates", "upsert", "merge"}:
+                # The stored keys could not be read (permission, missing
+                # relation, timeout). Insert-every-row onto an enforced key
+                # then either aborts mid-run or depends on a re-probe that
+                # hits the same wall — an unresolved check never authorizes.
+                collision_unreadable = True
                 collision_unproven = (
-                    f"Append key collision on {key} was not probed "
-                    f"({getattr(collision, 'message', '') or collision_evidence['status']}) "
-                    "— the destination enforces this key, so Execute re-probes it "
-                    "and refuses the run if a stored key repeats."
+                    f"Append key collision on {key} could not be checked "
+                    f"({_probe_reason(collision, collision_evidence)}). "
+                    "The destination enforces this key, so a stored key that repeats "
+                    "aborts the insert. Grant read (SELECT) on the destination table "
+                    "and re-run Validate, or choose Duplicate rows: skip or update "
+                    "keys already stored."
                 )
+            elif getattr(collision, "key_enforced", True):
+                if keyed_choice:
+                    collision_unproven = (
+                        f"Append key collision on {key} was not probed "
+                        f"({_probe_reason(collision, collision_evidence)}) — Duplicate "
+                        f"rows: {keyed_choice} resolves stored keys on the destination's "
+                        "enforced key, so a repeated key does not abort the run."
+                    )
+                else:
+                    collision_unproven = (
+                        f"Append key collision on {key} was not probed "
+                        f"({_probe_reason(collision, collision_evidence)}) — the "
+                        "destination enforces this key, so Execute re-probes it and "
+                        "refuses the run if a stored key repeats."
+                    )
             else:
                 collision_unproven = (
                     f"Append duplicate check on {key} did not run "
-                    f"({getattr(collision, 'message', '') or collision_evidence['status']}). "
+                    f"({_probe_reason(collision, collision_evidence)}). "
                     "A second copy of a stored row would land. Re-run Validate once "
                     "the destination can be read."
                 )
@@ -2670,6 +2705,52 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         delta_scope = getattr(collision, "delta_scope", {}) or {}
         enforced = bool(getattr(collision, "key_enforced", True))
         collision_count = len(found)
+        chosen = str(getattr(ctx.plan, "duplicate_policy", "") or "")
+        if (
+            chosen in {"dedupe_skip", "upsert"}
+            and getattr(collision, "identity_basis", "") != "full_row"
+        ):
+            # The operator chose how a stored key resolves. Whether the writer
+            # can key the write is the upsert dest-key gate's call: it passes an
+            # enforced key, discloses the unique index an ON CONFLICT engine
+            # needs (approval required), and refuses a policy with no key.
+            outcome = (
+                "the stored rows stay and only new keys insert"
+                if chosen == "dedupe_skip"
+                else "the stored rows update and new keys insert"
+            )
+            enforcement = (
+                ""
+                if enforced
+                else (
+                    " The destination does not enforce this key, so the key "
+                    "gate decides how the write is keyed."
+                )
+            )
+            return _pass(
+                GateId.G6_TARGET_DDL,
+                (
+                    f"{collision_count} key(s) in this batch are already stored on "
+                    f"{key}. Duplicate policy {chosen} resolves them on that key: "
+                    f"{outcome}.{enforcement}"
+                ),
+                start,
+                _scope(
+                    {
+                        "sample_collisions": found[:5],
+                        "collision_count": collision_count,
+                        "key_enforced": enforced,
+                        "primary_key": {"target": key},
+                        "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+                        "duplicate_policy": chosen,
+                        "rule_id": "g6_target_ddl.append_key_collision_resolved",
+                        "probe_status": getattr(collision, "status", ""),
+                        "values_probed": getattr(collision, "values_probed", 0),
+                    },
+                    coverage="sample",
+                    note="Destination key collision probe on append batch",
+                ),
+            )
         if delta_scope:
             # The collision is inside the delta this cursor will re-read, so the
             # operator needs to know the key returns with a newer cursor value —
@@ -2753,14 +2834,19 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                 ),
             )
         if collision_unproven:
-            return _warn(
+            return (_block if collision_unreadable else _warn)(
                 GateId.G6_TARGET_DDL,
                 collision_unproven,
                 start,
                 _scope(
                     {
                         "scrubbed_drift_issues": scrubbed,
-                        "rule_id": "g6_target_ddl.append_collision_unproven",
+                        "rule_id": (
+                            "g6_target_ddl.append_collision_unreadable"
+                            if collision_unreadable
+                            else "g6_target_ddl.append_collision_unproven"
+                        ),
+                        **({"remediation_kind": "choose_duplicate_rows"} if collision_unreadable else {}),
                         "collision_probe": collision_evidence,
                     },
                     coverage="none",
@@ -2811,14 +2897,19 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         # The probe that Execute will run could not run here. Claiming "Target DDL
         # compatible" turns that gap into a green Validate the run then refuses,
         # so say what is unknown instead of implying it was checked.
-        return _warn(
+        return (_block if collision_unreadable else _warn)(
             GateId.G6_TARGET_DDL,
             collision_unproven,
             start,
             _scope(
                 {
                     "scrubbed_drift_issues": scrubbed,
-                    "rule_id": "g6_target_ddl.append_collision_unproven",
+                    "rule_id": (
+                        "g6_target_ddl.append_collision_unreadable"
+                        if collision_unreadable
+                        else "g6_target_ddl.append_collision_unproven"
+                    ),
+                    **({"remediation_kind": "choose_duplicate_rows"} if collision_unreadable else {}),
                     "collision_probe": collision_evidence,
                 },
                 coverage="none",
@@ -4177,3 +4268,13 @@ def _block(gate_id: GateId, message: str, start: float, details: dict | None = N
         details=details or {},
         duration_ms=(time.perf_counter() - start) * 1000,
     )
+
+
+def _probe_reason(collision: Any, evidence: dict[str, Any]) -> str:
+    """The probe failure's first line: driver SQL and bind lists are not operator copy."""
+    raw = str(getattr(collision, "message", "") or "").strip()
+    first = raw.splitlines()[0].strip() if raw else ""
+    first = first.split("[SQL:")[0].strip()
+    if len(first) > 200:
+        first = first[:197].rstrip() + "..."
+    return first or str(evidence.get("status") or "unavailable")

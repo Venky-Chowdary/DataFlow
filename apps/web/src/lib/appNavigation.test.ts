@@ -6,9 +6,12 @@ import { describe, it } from "node:test";
 import {
   focusFromHash,
   hashForScreen,
+  inviteLinkToken,
+  isInviteLinkRoute,
   isResetLinkRoute,
   resetLinkToken,
   isSignedInHelpHash,
+  normalizedAppHash,
   screenFromHash,
   signedInHelpArticleFromHash,
   signedInScreenFromHash,
@@ -95,4 +98,33 @@ describe("resetLinkToken", () => {
 it("the Transform Library survives a reload and a shared link", () => {
   assert.equal(screenFromHash(hashForScreen("transform-library")), "transform-library");
   assert.equal(screenFromHash("#/library"), "transform-library");
+});
+
+describe("workspace invitation links", () => {
+  it("reads the token from the fragment of /accept-invite only", () => {
+    assert.equal(inviteLinkToken("/accept-invite", "#token=abc_DEF-123"), "abc_DEF-123");
+    assert.equal(inviteLinkToken("/reset-password", "#token=abc"), "");
+    assert.equal(inviteLinkToken("/accept-invite", ""), "");
+    assert.equal(resetLinkToken("/accept-invite", "#token=abc"), "");
+  });
+
+  it("keeps the stripped #/accept-invite route on the invite stage", () => {
+    assert.equal(isInviteLinkRoute("/accept-invite", "#token=x"), true);
+    assert.equal(isInviteLinkRoute("/", "#/accept-invite"), true);
+    assert.equal(isInviteLinkRoute("/", "#/reset-password"), false);
+  });
+});
+
+describe("boot hash normalisation keeps a jobs deep link (fresh-load race)", () => {
+  it("replace on the same screen keeps ?jobId", () => {
+    assert.equal(normalizedAppHash("jobs", "#/jobs?jobId=older", true), "#/jobs?jobId=older");
+    assert.equal(
+      normalizedAppHash("jobs", "#/jobs?jobId=older&panel=quarantine", true),
+      "#/jobs?jobId=older&panel=quarantine",
+    );
+  });
+  it("navigating or switching screens drops the focus", () => {
+    assert.equal(normalizedAppHash("jobs", "#/jobs?jobId=older", false), "#/jobs");
+    assert.equal(normalizedAppHash("dashboard", "#/jobs?jobId=older", true), "#/overview");
+  });
 });

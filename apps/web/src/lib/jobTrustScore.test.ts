@@ -15,6 +15,7 @@ describe("computeJobTrustScore", () => {
       reconciliation: {
         passed: true,
         assurance_level: "full_checksum",
+        source_checksum_provenance: "independent_source_reread",
         source_checksum: "aaa",
         target_checksum: "aaa",
         phase: "post_write_verified",
@@ -217,6 +218,42 @@ describe("computeJobTrustScore", () => {
     assert.ok(factor?.note.toLowerCase().includes("unproven"));
   });
 
+  it("an engine-computed digest labelled full_checksum earns no full-checksum credit (QA4)", () => {
+    const score = computeJobTrustScore({
+      status: "completed",
+      sync_mode: "cdc",
+      destination_type: "postgresql",
+      reconciliation: {
+        passed: true,
+        phase: "post_write",
+        assurance_level: "full_checksum",
+        source_checksum: "9c41",
+        target_checksum: "9c41",
+        source_checksum_provenance: "engine_population",
+      },
+    });
+    const reconcile = score.factors.find((f) => f.id === "reconcile");
+    assert.doesNotMatch(String(reconcile?.note), /full checksum reconcile passed/i);
+    assert.notEqual(score.grade, "A");
+  });
+
+  it("CDC source-image reconcile is not a full checksum pass (same verdict as the Gate-8 tile)", () => {
+    const score = computeJobTrustScore({
+      status: "completed",
+      sync_mode: "cdc",
+      reconciliation: {
+        passed: true,
+        assurance_level: "full_checksum",
+        checksum_scope: "cdc_source_image_values",
+        source_checksum: "f1e2d3",
+        target_checksum: "f1e2d3",
+      },
+    });
+    const reconcile = score.factors.find((f) => f.id === "reconcile");
+    assert.ok(reconcile);
+    assert.doesNotMatch(reconcile.note, /full checksum reconcile passed/i);
+  });
+
   it("does not treat append dest-before delta as full checksum Verified", () => {
     const append = computeJobTrustScore({
       status: "completed",
@@ -243,6 +280,27 @@ describe("computeJobTrustScore", () => {
     assert.doesNotMatch(append.next_action.label, /investigate/i);
   });
 
+  it("keyed append delta does not claim the destination grew", () => {
+    const keyed = computeJobTrustScore({
+      status: "completed",
+      records_processed: 3,
+      rejected_rows: 0,
+      destination_summary: { duplicate_policy: "dedupe_skip" },
+      reconciliation: {
+        passed: true,
+        phase: "post_write_row_count",
+        assurance_level: "row_count",
+        coverage: "row_count",
+        checksum_scope: "whole_table_not_comparable",
+        checksum_match: false,
+        migration_proven: false,
+      },
+    });
+    assert.equal(keyed.next_action.code, "append_delta");
+    assert.doesNotMatch(keyed.next_action.detail, /grew/i);
+    assert.match(keyed.next_action.detail, /Duplicate rows/);
+  });
+
   it("closed quarantine ledger does not keep Review quarantine as next action", () => {
     const t = computeJobTrustScore({
       status: "completed_with_quarantine",
@@ -252,6 +310,7 @@ describe("computeJobTrustScore", () => {
       reconciliation: {
         passed: true,
         assurance_level: "full_checksum",
+        source_checksum_provenance: "independent_source_reread",
         source_checksum: "a",
         target_checksum: "a",
       },
@@ -259,5 +318,25 @@ describe("computeJobTrustScore", () => {
     const q = t.factors.find((f) => f.id === "quarantine");
     assert.equal(q?.score, 100);
     assert.equal(t.next_action.code, "quarantine_closed");
+  });
+  it("states quarantine share of rows read, not of rows written", () => {
+    const t = computeJobTrustScore({
+      status: "completed_with_quarantine",
+      records_processed: 1,
+      rejected_rows: 2,
+      destination_summary: { source_row_count: 3, rows_written: 1, rejected_rows: 2 },
+    });
+    const q = t.factors.find((f) => f.id === "quarantine");
+    assert.match(String(q?.note), /2 open quarantined \(66\.7% of rows read\)/);
+  });
+  it("states quarantine share of rows read, not of rows written (conservation ledger rows_read)", () => {
+    const t = computeJobTrustScore({
+      status: "completed_with_quarantine",
+      records_processed: 1,
+      rejected_rows: 2,
+      destination_summary: { rows_written: 1, rejected_rows: 2, row_accounting: { rows_read: 3, rows_quarantined: 2 } },
+    });
+    const q = t.factors.find((f) => f.id === "quarantine");
+    assert.match(String(q?.note), /2 open quarantined \(66\.7% of rows read\)/);
   });
 });

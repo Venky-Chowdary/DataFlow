@@ -1629,7 +1629,13 @@ async def get_job_quarantine(job_id: str, request: Request):
             "migration_proven": False,
         }
     open_n = int(closure.get("open_count") or 0)
-    from services.quarantine_dlq import count_finding_rows
+    from services.quarantine_dlq import count_finding_rows, replay_parent_not_committed
+
+    parent_refusal = replay_parent_not_committed(job) if open_n else None
+    if parent_refusal:
+        # Replay refuses a failed parent (D133); the next action must say so.
+        replay_block_reason = parent_refusal
+        closure = {**closure, "next_action": parent_refusal}
 
     finding_rows = count_finding_rows(details) or len(details)
     rejected_rows = int(
@@ -1971,8 +1977,13 @@ def _quarantine_details_to_records(details: list[dict], transform_overrides: Opt
                 order.append(row_num)
         # Prefer explicit source_values when dual-stamped (Wave 32).
         base = detail.get("source_values") if isinstance(detail.get("source_values"), dict) else None
+        values = detail.get("values") if isinstance(detail.get("values"), dict) else {}
         if not base:
-            base = detail.get("values") if isinstance(detail.get("values"), dict) else {}
+            base = values
+        elif "_df_lsn" in values and "_df_lsn" not in base:
+            # The stale-CDC guard matches replay rows by key + _df_lsn; source
+            # values never carry the LSN the writer stamped.
+            base = {**base, "_df_lsn": values["_df_lsn"]}
         if base:
             from connectors.writer_common import quarantine_cell_wire
 
@@ -2088,6 +2099,133 @@ def _refuse_incomplete_quarantine_replay(
                     "``values``, then edit and replay."
                 ),
             )
+
+
+def _pipeline_job_history(pipeline_key: str) -> list[dict]:
+    """Jobs of one CDC pipeline (cursor key) with their CDC summary. Raises when unreadable."""
+    mongo = get_mongodb_service()
+    store = getattr(mongo, "_jobs", None)
+    if not isinstance(store, dict):
+        store = getattr(mongo, "jobs", None)
+    if isinstance(store, dict):
+        return [{"id": jid, **(doc or {})} for jid, doc in store.items()]
+    coll = mongo.get_database()["transfer_jobs"]
+    return list(coll.find(
+        {"$or": [
+            {"destination_summary.cursor_key": pipeline_key},
+            {"destination_summary.cdc.cursor_key": pipeline_key},
+        ]},
+        {"destination_summary.cursor_key": 1, "destination_summary.cdc": 1},
+    ))
+
+
+async def _drop_stale_cdc_replay_images(
+    job_id: str,
+    job: dict,
+    details: list[dict],
+    records: list[dict],
+    mappings: list[dict],
+    *,
+    dest_cfg: dict,
+    dest_kind: str,
+    schema: str,
+    table: str,
+    key_columns: list[str],
+) -> tuple[list[dict], list[dict], list[dict[str, Any]]]:
+    """Drop quarantined CDC images the destination already holds newer.
+
+    Each refused finding is named with its reason and closed in the DLQ as
+    superseded, so it neither replays nor stays open. Raises 409 when nothing
+    replayable is left, and fails closed when the destination cannot be read.
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    from services.quarantine_dlq import (
+        CLOSING_STALE_REASONS,
+        append_dlq_event,
+        cdc_key_tombstones,
+        job_quarantine_pipeline_tagged,
+        later_untracked_deletes,
+        partition_stale_cdc_replay,
+        read_destination_cdc_lsns,
+        replay_row_identity,
+        replay_stale_cdc_refusal,
+    )
+
+    def _lookup(keys: list[tuple[str, ...]]) -> dict[tuple[str, ...], Any]:
+        return read_destination_cdc_lsns(
+            dest_cfg, dest_kind=dest_kind, schema=schema, table=table,
+            key_columns=key_columns, keys=keys,
+        )
+
+    summary = job.get("destination_summary") or {}
+    pipeline_key = str(summary.get("cursor_key") or (summary.get("cdc") or {}).get("cursor_key") or "")
+
+    def _partition():
+        tombstones: dict[str, str] = {}
+        unproven = None
+        if pipeline_key:
+            tombstones = cdc_key_tombstones(pipeline_key, table)
+            unproven = later_untracked_deletes(
+                _pipeline_job_history(pipeline_key),
+                parent_job_id=job_id,
+                pipeline_key=pipeline_key,
+                parent_tagged=job_quarantine_pipeline_tagged(job_id),
+            )
+        return partition_stale_cdc_replay(
+            details,
+            key_columns=key_columns,
+            destination_lsns=_lookup,
+            tombstones=tombstones,
+            deleted_after_unproven=unproven,
+        )
+
+    try:
+        keep, stale = await run_in_threadpool(_partition)
+    except Exception as exc:
+        logger.warning("quarantine replay %s: CDC staleness read failed: %s", job_id, exc, exc_info=exc)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Quarantine replay refused: could not read the destination _df_lsn or the CDC "
+                f"delete history for the quarantined keys ({type(exc).__name__}), so a stale "
+                "image cannot be told from a pending one. Check destination access, then replay."
+            ),
+        ) from exc
+    if not stale:
+        return details, records, []
+    closing = [s for s in stale if s["reason"] in CLOSING_STALE_REASONS]
+    identities = sorted({s["identity"] for s in closing} - {replay_row_identity(d) for d in keep})
+    if identities:
+        append_dlq_event(
+            job_id=job_id,
+            action="quarantine_superseded",
+            rows=len(identities),
+            workspace_id=str(job.get("workspace_id") or ""),
+            details={
+                "identities": identities,
+                "reason": "replay: a later CDC change or delete of the same key already landed",
+                "stale_refused": closing[:200],
+            },
+        )
+    if not keep:
+        raise HTTPException(status_code=409, detail=replay_stale_cdc_refusal(table, stale))
+    tgt_to_src = {
+        str(m.get("target") or m.get("target_column") or ""): str(m.get("source") or m.get("source_column") or "")
+        for m in mappings
+    }
+    src_keys = [tgt_to_src.get(c) or c for c in key_columns]
+    dropped = {
+        (tuple(str(s["key"][c]) for c in key_columns), s["quarantined_lsn"]) for s in stale
+    }
+
+    def _record_stale(rec: dict) -> bool:
+        lsn = str(rec.get("_df_lsn") or "").strip()
+        if not lsn or not all(k in rec for k in src_keys):
+            return False
+        return (tuple(str(rec[k]) for k in src_keys), lsn) in dropped
+
+    return keep, [r for r in records if not _record_stale(r)], stale
 
 
 @router.post("/jobs/{job_id}/quarantine/replay")
@@ -2367,6 +2505,21 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
         if dup_refusal:
             raise HTTPException(status_code=409, detail=dup_refusal)
+
+    stale_refused: list[dict[str, Any]] = []
+    if not parent_appends and dest.kind == "database" and dest.table:
+        details, records, stale_refused = await _drop_stale_cdc_replay_images(
+            job_id,
+            job,
+            details,
+            records,
+            mappings,
+            dest_cfg=dest_cfg,
+            dest_kind=resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
+            schema=str(dest.schema or dest_cfg.get("schema") or ""),
+            table=str(dest.table),
+            key_columns=list(conflict_columns),
+        )
 
     engine = get_transfer_engine()
     # Child job: upsert remediations (never full-refresh overwrite).
@@ -2657,6 +2810,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             "destination_summary": dest_summary,
             "dest_dlq_promoted": promote_meta,
             "reconciliation": recon,
+            "stale_refused": stale_refused,
             "quarantine_closure": {
                 "verdict": compact.get("verdict"),
                 "open_count": compact.get("open_count"),
@@ -2774,6 +2928,26 @@ async def delete_connector(connector_id: str, request: Request):
 # FILE UPLOAD & TRANSFER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _default_sqlite_table(content: bytes, filename: str, read_options):
+    """Profile a multi-table SQLite upload's first table and say so in ``read_options``.
+
+    The Source step needs a preview to render the table picker; echoing the
+    table in the returned window keeps the run on the table the operator saw.
+    """
+    if read_options.sheet or read_options.sheet_index >= 0:
+        return read_options
+    if FileParser.detect_file_type(filename, content) != "sqlite":
+        return read_options
+    from services.file_parser import list_sqlite_tables
+
+    tables = list_sqlite_tables(content)
+    if len(tables) < 2:
+        return read_options
+    import dataclasses
+
+    return dataclasses.replace(read_options, sheet=str(tables[0]["name"]))
+
+
 def profile_file_upload(
     content: bytes, filename: str, *, use_ocr: bool = False, read_options=None, file_id: str = "",
 ) -> dict:
@@ -2786,6 +2960,7 @@ def profile_file_upload(
         from services.read_options import parse_read_options_payload
 
         read_options = parse_read_options_payload("")
+    read_options = _default_sqlite_table(content, filename, read_options)
     result = FileParser.parse(
         content,
         filename,
@@ -2816,8 +2991,24 @@ def profile_file_upload(
         schema = merge_profiler_schema(schema, profile["schema"])
     except Exception:
         profile = None
+    if result.file_type == "sqlite" and result.column_meta:
+        # A declared schema (SQLite affinity) is the type Execute reads the
+        # staged source with; sample digits never override it (QA1 S12).
+        schema = {
+            **schema,
+            **{
+                str(c["name"]): str(c["inferred_type"])
+                for c in result.column_meta
+                if isinstance(c, dict) and c.get("name") and c.get("inferred_type")
+            },
+        }
     sample_cap = 100
-    sample = result.data[:sample_cap]
+    from services.file_parser import json_safe_cell
+
+    sample = [
+        {k: json_safe_cell(v) for k, v in r.items()} if isinstance(r, dict) else r
+        for r in result.data[:sample_cap]
+    ]
 
     validation_report = None
     if result.file_type in ("csv", "tsv"):
@@ -2836,6 +3027,10 @@ def profile_file_upload(
         from services.excel_parser import list_excel_sheets
 
         sheets = list_excel_sheets(content)
+    elif result.file_type == "sqlite":
+        from services.file_parser import list_sqlite_tables
+
+        sheets = list_sqlite_tables(content)
 
     stored_file_id = file_id
     if not stored_file_id:

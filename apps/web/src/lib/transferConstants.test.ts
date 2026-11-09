@@ -164,6 +164,8 @@ describe("syncModeHonestyLine", () => {
     assert.match(line, /does not CREATE/i);
     assert.match(line, /does not ALTER/i);
     assert.match(line, /empty leftover/i);
+    assert.match(line, /rerun stores another copy/i);
+    assert.match(line, /upsert, deduped append or overwrite/i);
   });
 
   it("names missing tables as create-new on Full append", () => {

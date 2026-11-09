@@ -19,12 +19,19 @@ import pytest
 
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import TransferRequest
+from services.route_certification import RouteEvidence
 from src.transfer.registry import PRODUCTION_SKU
+
+try:
+    from route_cert_readback import canonical_rows, read_back
+except ImportError:  # pragma: no cover - fallback if import path differs
+    from tests.route_cert_readback import canonical_rows, read_back
 
 try:
     from test_execute_tracked_universal_matrix import (
         _NO_INDEPENDENT_VERIFIER,
         DESTINATION_NUMERIC_SOURCE_OVERRIDES,
+        RECORDS,
         _build_destination,
         _build_source,
         _endpoint_reachable,
@@ -36,6 +43,7 @@ except Exception:  # pragma: no cover - fallback if import path differs
     from tests.test_execute_tracked_universal_matrix import (
         _NO_INDEPENDENT_VERIFIER,
         DESTINATION_NUMERIC_SOURCE_OVERRIDES,
+        RECORDS,
         _build_destination,
         _build_source,
         _endpoint_reachable,
@@ -116,18 +124,33 @@ _STUB_SOURCE_OMITS = {
 }
 
 
+def _sku_sync_mode(route: tuple[str, str, str, str]) -> str:
+    # A Kafka topic is append-only: published messages are final, so the
+    # destination refuses overwrite/dedupe/merge by design.
+    return "full_refresh_append" if route[3] == "kafka" else "full_refresh_overwrite"
+
+
 @pytest.mark.parametrize(
     "route",
-    PRODUCTION_SKU,
-    ids=lambda r: f"{r[0]}_{r[1]}_to_{r[2]}_{r[3]}",
+    [
+        pytest.param(
+            route,
+            marks=pytest.mark.route_cert(route=route, sync_mode=_sku_sync_mode(route)),
+            id=f"{route[0]}_{route[1]}_to_{route[2]}_{route[3]}",
+        )
+        for route in PRODUCTION_SKU
+    ],
 )
 def test_production_sku_transfer(
     route: tuple[str, str, str, str],
     tmp_path: Path,
     local_object_store: str,
     local_sftp: Any,
+    record_property: Any,
 ) -> None:
     src_kind, src_fmt, dst_kind, dst_fmt = route
+    sync_mode = _sku_sync_mode(route)
+    evidence = RouteEvidence(record_property, route, sync_mode)
     suffix = uuid.uuid4().hex[:12]
 
     source, source_content, source_filename = _build_source(
@@ -174,9 +197,7 @@ def test_production_sku_transfer(
         destination=destination,
         source_content=source_content,
         source_filename=source_filename,
-        # A Kafka topic is append-only: published messages are final, so the
-        # destination refuses overwrite/dedupe/merge by design.
-        sync_mode="full_refresh_append" if dst_fmt == "kafka" else "full_refresh_overwrite",
+        sync_mode=sync_mode,
         # Preflight ON — PRODUCTION_SKU proves Validate + transfer, not write-only.
         skip_preflight=False,
         validation_mode=validation_mode,
@@ -219,6 +240,31 @@ def test_production_sku_transfer(
         assert result.destination_summary.get("filename"), (
             f"{route}: no exported filename in destination_summary"
         )
+    evidence.prove("preflight", "write")
+
+    columns = ["id", "amount"]
+    key_field = "_id" if dst_fmt == "mongodb" else "id"
+    # SaaS stubs publish their own fixture, not the reference rows.
+    if src_fmt in saas_sources:
+        return
+    expected = canonical_rows(RECORDS, columns)
+    at_rest = read_back(destination, columns, key_field=key_field)
+    if at_rest is None:
+        return
+    assert canonical_rows(at_rest, columns) == expected, (
+        f"{route}: destination holds {at_rest}, source has {RECORDS}"
+    )
+    evidence.prove("independent_readback")
+
+    # Overwrite converges: the same request again leaves exactly the source.
+    rerun = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+    assert rerun.success, f"{route} rerun: {rerun.error}"
+    assert rerun.records_transferred == 2, f"{route} rerun: {rerun.records_transferred}"
+    again = read_back(destination, columns, key_field=key_field)
+    assert canonical_rows(again or [], columns) == expected, (
+        f"{route} rerun: destination holds {again}"
+    )
+    evidence.prove("rerun")
 
 
 def _numeric_risk_route(

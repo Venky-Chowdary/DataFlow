@@ -19,6 +19,7 @@ def test_clean_completed_job_high_trust() -> None:
         "reconciliation": {
             "passed": True,
             "assurance_level": "full_checksum",
+            "source_checksum_provenance": "independent_source_reread",
             "coverage": "full_checksum",
             "phase": "post_write_verified",
             "source_checksum": "aaa",
@@ -168,6 +169,15 @@ def test_has_full_checksum_proof() -> None:
     assert has_full_checksum_proof({
         "passed": True,
         "assurance_level": "full_checksum",
+        "source_checksum_provenance": "independent_source_reread",
+        "source_checksum": "x",
+        "target_checksum": "x",
+    })
+    # A stored full_checksum label over a digest nobody re-read from the
+    # source is not credit — the proof classifier files it under ``none``.
+    assert not has_full_checksum_proof({
+        "passed": True,
+        "assurance_level": "full_checksum",
         "source_checksum": "x",
         "target_checksum": "x",
     })
@@ -296,6 +306,7 @@ def test_closed_quarantine_ledger_does_not_keep_review_cta() -> None:
         "reconciliation": {
             "passed": True,
             "assurance_level": "full_checksum",
+            "source_checksum_provenance": "independent_source_reread",
             "source_checksum": "a",
             "target_checksum": "a",
         },
@@ -330,6 +341,7 @@ def test_attach_trust_only_on_terminal() -> None:
         "reconciliation": {
             "passed": True,
             "assurance_level": "full_checksum",
+            "source_checksum_provenance": "independent_source_reread",
             "source_checksum": "a",
             "target_checksum": "a",
         },
@@ -337,3 +349,43 @@ def test_attach_trust_only_on_terminal() -> None:
     attach_trust_to_updates("completed", done)
     assert done["trust_score"] >= 90
     assert done["trust"]["grade"] == "A"
+
+
+def test_quarantine_rate_uses_rows_read_not_rows_written() -> None:
+    from services.job_trust import compute_job_trust
+
+    job = {
+        "status": "completed_with_quarantine",
+        "records_processed": 1,
+        "rejected_rows": 2,
+        "destination_summary": {
+            "rows_written": 1,
+            "rejected_rows": 2,
+            "row_accounting": {"rows_read": 3, "rows_quarantined": 2},
+        },
+    }
+    trust = compute_job_trust(job)
+    note = next(f["note"] for f in trust["factors"] if f["id"] == "quarantine")
+    assert note == "2 open quarantined (66.7% of rows read).", note
+
+
+def test_keyed_append_delta_does_not_claim_the_destination_grew() -> None:
+    trust = compute_job_trust({
+        "status": "completed",
+        "records_processed": 3,
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "destination_summary": {"duplicate_policy": "dedupe_skip"},
+        "reconciliation": {
+            "passed": True,
+            "phase": "post_write_row_count",
+            "assurance_level": "row_count",
+            "coverage": "row_count",
+            "checksum_scope": "whole_table_not_comparable",
+            "checksum_match": False,
+            "migration_proven": False,
+        },
+    })
+    assert trust["next_action"]["code"] == "append_delta"
+    assert "grew" not in trust["next_action"]["detail"].lower()
+    assert "duplicate rows" in trust["next_action"]["detail"].lower()

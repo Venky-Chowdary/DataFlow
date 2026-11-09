@@ -25,6 +25,8 @@ from typing import Any
 from services.platform_config import data_dir
 
 PROOF_DIR = data_dir() / "proofs"
+#: Written by ``scripts/route_certification_report.py`` from a pytest JUnit run.
+ROUTE_MATRIX_FILENAME = "route_certification_matrix.json"
 
 # Same rich fixture as test_engine_proof_harness — unicode, nulls, decimals, JSON.
 FIDELITY_COLUMNS = [
@@ -175,8 +177,11 @@ def build_proof_ledger() -> dict[str, Any]:
 
     from services.sku_honesty import classify_production_sku, sku_honesty_summary
 
+    from services.route_certification import load_route_matrix, route_certification_rollup
+
     sku_classified = classify_production_sku()
     sku_summary = sku_honesty_summary(sku_classified)
+    route_matrix = load_route_matrix(PROOF_DIR / ROUTE_MATRIX_FILENAME)
     sku_routes = [
         {
             "source_kind": row["source_kind"],
@@ -190,9 +195,14 @@ def build_proof_ledger() -> dict[str, Any]:
             "sold": row["sold"],
             "customer_handover": bool(row.get("customer_handover")),
             "customer_handover_eligible": bool(row.get("customer_handover_eligible")),
+            "certification": route_certification_rollup(route_matrix, row["route"]),
         }
         for row in sku_classified
     ]
+    cert_counts = {
+        status: sum(1 for r in sku_routes if r["certification"]["status"] == status)
+        for status in ("verified", "partial", "failed", "skipped", "unverified")
+    }
 
     proofs = _list_proof_files()
     fidelity_proofs = [p for p in proofs if p.get("tier") == "fidelity"]
@@ -217,6 +227,19 @@ def build_proof_ledger() -> dict[str, Any]:
             "production_sku_driver_missing": sku_summary["production_sku_driver_missing"],
             "production_sku_refused": sku_summary["production_sku_refused"],
             "production_sku_note": sku_summary["note"],
+            "route_certification": {
+                "artifact": ROUTE_MATRIX_FILENAME if route_matrix else None,
+                "generated_at": (route_matrix or {}).get("generated_at"),
+                "routes_by_status": cert_counts,
+                "tests": (
+                    {
+                        k: route_matrix["summary"][k]
+                        for k in ("tests_passed", "tests_failed", "tests_skipped")
+                    }
+                    if route_matrix
+                    else None
+                ),
+            },
             "customer_handover_sold": sku_summary.get("customer_handover_sold") or 0,
             "customer_handover_eligible": sku_summary.get("customer_handover_eligible") or 0,
             "fidelity_proofs_on_disk": len(fidelity_proofs),
@@ -235,6 +258,7 @@ def build_proof_ledger() -> dict[str, Any]:
             "Open Job Theater after a transfer — quarantine rows and Gate-8 checksum must match.",
             "Catalog badges: Certified = full transfer; Source-only = read path; Planned = roadmap.",
             "Sell only routes with status=sold (validate_transfer + driver present). driver_missing is an environment gap, not Planned.",
+            "Sold is availability, not proof. A route is certified only when its route_certification status is verified: preflight, write, independent destination read-back and rerun all passed for every assessed sync mode (scripts/route_certification_report.py --junit <pytest junit>).",
             "Customer handover is sqlite/PostgreSQL/MySQL/file SKU with dest COUNT proof. Warehouse, SaaS, and vector PRODUCTION_SKU on this host is desktop-lab, not a tenant cutover.",
             "CI exercises PRODUCTION_SKU when local emulators are up (test_production_sku_matrix).",
         ],

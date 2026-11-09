@@ -692,6 +692,67 @@ async def delete_member(workspace_id: str, email: str, request: Request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Email invitations (services.workspace_invites owns the rules and the audit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class InviteBody(BaseModel):
+    email: str = Field(..., max_length=254)
+    role: str = Field(default="viewer", pattern="^(admin|editor|viewer)$")
+    name: str = Field(default="", max_length=128)
+
+
+def _client_ip(request: Request) -> str:
+    from services.client_ip import client_ip_from_request
+
+    return client_ip_from_request(request) or ""
+
+
+@router.get("/workspaces/{workspace_id}/invites")
+async def get_invites(workspace_id: str, request: Request):
+    """Pending invitations — readable by any member, like the member list."""
+    from services.workspace_invites import list_invites
+
+    if not get_workspace(workspace_id):
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not _principal(request, workspace_id).member_role:
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+    return {"invites": list_invites(workspace_id)}
+
+
+@router.post("/workspaces/{workspace_id}/invites")
+async def post_invite(workspace_id: str, body: InviteBody, request: Request):
+    """Email someone a single-use link to join this workspace with ``role``."""
+    from services.workspace_invites import create_invite
+
+    invite = create_invite(
+        workspace_id=workspace_id, email=body.email, role=body.role, name=body.name,
+        principal=_principal(request, workspace_id), ip=_client_ip(request))
+    return {"invite": invite}
+
+
+@router.post("/workspaces/{workspace_id}/invites/{invite_id}/resend")
+async def post_invite_resend(workspace_id: str, invite_id: str, request: Request):
+    """Send a fresh link; the previous one stops working."""
+    from services.workspace_invites import resend_invite
+
+    invite = resend_invite(
+        workspace_id=workspace_id, invite_id=invite_id,
+        principal=_principal(request, workspace_id), ip=_client_ip(request))
+    return {"invite": invite}
+
+
+@router.delete("/workspaces/{workspace_id}/invites/{invite_id}")
+async def delete_invite(workspace_id: str, invite_id: str, request: Request):
+    from services.workspace_invites import revoke_invite
+
+    invite = revoke_invite(
+        workspace_id=workspace_id, invite_id=invite_id,
+        principal=_principal(request, workspace_id), ip=_client_ip(request))
+    return {"invite": invite}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Break-glass recovery
 # ─────────────────────────────────────────────────────────────────────────────
 

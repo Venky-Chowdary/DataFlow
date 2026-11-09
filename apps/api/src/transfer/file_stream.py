@@ -96,6 +96,7 @@ from services.dialect_profiles import schema_from_cfg
 from services.primary_key import dest_is_key_addressed
 from services.row_conservation import (
     CENSUS_KEY,
+    census_for_duplicate_policy,
     KEY_ADDRESSED_KEY,
     KeyCensusAccumulator,
     observe_keyed_batch,
@@ -2044,6 +2045,9 @@ def stream_file_to_database(
         # already merges on the key, so only a keyed policy on an insert sync
         # mode has to take the row writer.
         keyed_insert_copy = write_mode == "upsert" and not requires_upsert(copy_sync)
+        # Identity COPY creates the table without a key. A key the operator
+        # declared ("Use sku as the key") must land in that CREATE TABLE, and
+        # only the row path's fidelity planner renders it.
         csv_fast = None if (
             in_file_dedupe == "keep_last" or hold_manifest or keyed_insert_copy
         ) else try_copy_local_csv(
@@ -2066,6 +2070,11 @@ def stream_file_to_database(
             shape_runner=shape_runner,
             resumed=resumed,
             read_options=read_options,
+            # "Use sku as the key": a table this COPY creates declares it.
+            # duplicate_policy=append keeps every copy, so no key is declared.
+            create_key_columns=[]
+            if incremental or normalize_duplicate_policy(duplicate_policy) == "append"
+            else list(pk_target_cols or []),
         )
     finally:
         reset_copy_decline_capture(copy_decline_token)
@@ -2442,32 +2451,11 @@ def stream_file_to_database(
         return local_warnings
 
     def _without_skipped(mapped_rows: list, skipped: set[str]) -> list:
-        if not skipped or not pk_target_cols:
-            return mapped_rows
-        indexes = []
-        for col in pk_target_cols:
-            if col not in target_cols:
-                return mapped_rows
-            indexes.append(target_cols.index(col))
-        kept = []
-        for row in mapped_rows:
-            if isinstance(row, dict):
-                values = tuple(
-                    None if row.get(col) is None else str(row.get(col)).strip()
-                    for col in pk_target_cols
-                )
-            else:
-                values = tuple(
-                    None if index >= len(row) or row[index] is None else str(row[index]).strip()
-                    for index in indexes
-                )
-            marker = values[0] if len(values) == 1 else "\x1f".join(
-                "" if value is None else value for value in values
-            )
-            if str(marker) in skipped:
-                continue
-            kept.append(row)
-        return kept
+        from services.duplicate_policy import rows_without_kept_keys
+
+        return rows_without_kept_keys(
+            mapped_rows, list(target_cols or []), list(pk_target_cols or []), skipped
+        )
 
     def _spool_aligned(
         spool: Any, skipped: set[str] | None = None
@@ -3381,6 +3369,7 @@ def stream_file_to_database(
     if keyed_census_acc is not None:
         census = keyed_census_acc.to_census()
         if census is not None:
+            census = census_for_duplicate_policy(census, dest_summary.get("duplicate_policy"))
             dest_summary[CENSUS_KEY] = census.to_dict()
     if pk_target_cols:
         dest_summary["conflict_columns"] = list(pk_target_cols)

@@ -9,14 +9,19 @@ import {
   addWorkspaceMember,
   createWorkspace,
   fetchPlatformUsers,
+  fetchWorkspaceInvites,
   fetchWorkspaceMembers,
   fetchWorkspaces,
   removeWorkspaceMember,
+  resendWorkspaceInvite,
   resetPlatformUserPassword,
+  revokeWorkspaceInvite,
+  sendWorkspaceInvite,
   updatePlatformUser,
   updateWorkspaceMemberRole,
   type PlatformUser,
   type Workspace,
+  type WorkspaceInvite,
   type WorkspaceMember,
   type WorkspaceRole,
 } from "../../lib/api";
@@ -33,7 +38,7 @@ import { useVisibleRefresh } from "../../lib/visibleRefresh";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import { isLastWorkspaceAdmin, LAST_ADMIN_PROTECTED } from "../../lib/workspaceAdmin";
-import { INVITE_DEFAULTS } from "../../lib/teamInvite";
+import { INVITE_DEFAULTS, inviteExpiryLabel, isInviteExpired, type InviteMode } from "../../lib/teamInvite";
 import { IssuedPasswordNotice } from "../../components/team/IssuedPasswordNotice";
 
 const ROLE_LABELS: Record<string, string> = {
@@ -88,6 +93,9 @@ export function TeamSettings() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [platformAdmin, setPlatformAdmin] = useState(false);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [invites, setInvites] = useState<WorkspaceInvite[]>([]);
+  const [inviteMode, setInviteMode] = useState<InviteMode>(INVITE_DEFAULTS.mode);
+  const [busyInvite, setBusyInvite] = useState<string | null>(null);
   const [users, setUsers] = useState<PlatformUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string>("");
@@ -128,10 +136,13 @@ export function TeamSettings() {
   const refreshMembers = useCallback(async (workspaceId: string) => {
     if (!workspaceId) {
       setMembers([]);
+      setInvites([]);
       return;
     }
     try {
       setMembers(await fetchWorkspaceMembers(workspaceId));
+      // Pending invitations are secondary: an unreadable list must not hide members.
+      setInvites(await fetchWorkspaceInvites(workspaceId).catch(() => []));
       setLoadError("");
       setUpdatedAt(Date.now());
     } catch (err) {
@@ -214,6 +225,28 @@ export function TeamSettings() {
       return;
     }
     setInviting(true);
+    if (inviteMode === "email") {
+      try {
+        const sent = await sendWorkspaceInvite(activeWorkspace, email, inviteRole, inviteName.trim());
+        setInviteEmail("");
+        setInviteName("");
+        toast({
+          title: "Invitation sent",
+          message: `${sent.email} gets a link to join as ${ROLE_LABELS[sent.role]}. ${inviteExpiryLabel(sent.expires_at)}.`,
+          tone: "success",
+        });
+        await refreshMembers(activeWorkspace);
+      } catch (err) {
+        toast({
+          title: "Invitation not sent",
+          message: err instanceof Error ? err.message : "Could not send the invitation.",
+          tone: "error",
+        });
+      } finally {
+        setInviting(false);
+      }
+      return;
+    }
     try {
       const result = await addWorkspaceMember(activeWorkspace, email, inviteRole, {
         // Minting a login is the workspace admin's (RB3); an editor adds members only.
@@ -249,6 +282,44 @@ export function TeamSettings() {
       });
     } finally {
       setInviting(false);
+    }
+  };
+
+  const resendInvite = async (inv: WorkspaceInvite) => {
+    if (!membership.allowed) return void refuse(membership.reason);
+    if (!activeWorkspace) return;
+    setBusyInvite(inv.id);
+    try {
+      const next = await resendWorkspaceInvite(activeWorkspace, inv.id);
+      toast({ title: "Invitation re-sent", message: `The earlier link to ${next.email} no longer works.`, tone: "success" });
+      await refreshMembers(activeWorkspace);
+    } catch (err) {
+      toast({ title: "Resend failed", message: err instanceof Error ? err.message : "Request failed.", tone: "error" });
+    } finally {
+      setBusyInvite(null);
+    }
+  };
+
+  const revokeInvite = async (inv: WorkspaceInvite) => {
+    if (!membership.allowed) return void refuse(membership.reason);
+    if (!activeWorkspace) return;
+    const ok = await confirm({
+      title: `Revoke the invitation to ${inv.email}?`,
+      message: "The link in their email stops working. You can invite them again later.",
+      confirmLabel: "Revoke invitation",
+      cancelLabel: "Keep invitation",
+      tone: "danger",
+    });
+    if (!ok) return;
+    setBusyInvite(inv.id);
+    try {
+      await revokeWorkspaceInvite(activeWorkspace, inv.id);
+      toast({ title: "Invitation revoked", tone: "info" });
+      await refreshMembers(activeWorkspace);
+    } catch (err) {
+      toast({ title: "Revoke failed", message: err instanceof Error ? err.message : "Request failed.", tone: "error" });
+    } finally {
+      setBusyInvite(null);
     }
   };
 
@@ -453,16 +524,47 @@ export function TeamSettings() {
           />
         ) : (
           <>
-            <div className="df2-team-block">
+            {/* Invite and pending-invite tools exist only for someone who can use
+                them; the read-only notice above explains why they are absent. */}
+            {membership.allowed && (
+            <div className="df2-team-block" data-testid="team-invite-form">
               <div className="df2-team-block-head">
                 <div>
                   <h3>Invite a member</h3>
                   <p>
-                    {workspaceName ? `Add someone to ${workspaceName}.` : "Add someone to this workspace."}{" "}
+                    {workspaceName ? `Bring someone into ${workspaceName}.` : "Bring someone into this workspace."}{" "}
                     Viewer / Editor / Admin are the product roles — there is no Owner role.
                   </p>
                 </div>
               </div>
+              <fieldset className="df2-team-mode" data-testid="team-invite-mode" aria-label="How to add them">
+                <label className="df2-team-mode-option">
+                  <input
+                    type="radio"
+                    name="df2-team-invite-mode"
+                    value="email"
+                    checked={inviteMode === "email"}
+                    onChange={() => setInviteMode("email")}
+                  />
+                  <div>
+                    <strong>Email an invitation</strong>
+                    <span>They get a single-use link and join when they accept. Nothing is granted before that.</span>
+                  </div>
+                </label>
+                <label className="df2-team-mode-option">
+                  <input
+                    type="radio"
+                    name="df2-team-invite-mode"
+                    value="direct"
+                    checked={inviteMode === "direct"}
+                    onChange={() => setInviteMode("direct")}
+                  />
+                  <div>
+                    <strong>Add directly</strong>
+                    <span>Membership now, no email — for existing logins or deployments without mail.</span>
+                  </div>
+                </label>
+              </fieldset>
               <div className="df2-team-invite-grid">
                 <div className="df2-settings-field">
                   <label htmlFor="df2-team-email">Email address</label>
@@ -505,6 +607,9 @@ export function TeamSettings() {
                 </div>
               </div>
               <div className="df2-team-invite-footer">
+                {inviteMode === "email" ? (
+                  <span className="df2-cell-meta">The link expires in 7 days and works once.</span>
+                ) : (
                 <label className="df2-team-check" htmlFor="df2-team-create-login">
                   <input
                     id="df2-team-create-login"
@@ -515,19 +620,79 @@ export function TeamSettings() {
                   />
                   Create a login (one-time password){canGrantAdmin ? "" : " — workspace admin only"}
                 </label>
+                )}
                 <Button
                   variant="primary"
                   disabled={inviting || !membership.allowed}
                   title={membership.reason || undefined}
                   loading={inviting}
-                  loadingLabel="Adding…"
+                  loadingLabel={inviteMode === "email" ? "Sending…" : "Adding…"}
                   leadingIcon={<DtIcon name="plus" size={14} />}
                   onClick={() => void invite()}
                 >
-                  Add member
+                  {inviteMode === "email" ? "Send invite" : "Add member"}
                 </Button>
               </div>
             </div>
+            )}
+
+            {membership.allowed && invites.length > 0 && (
+              <div className="df2-team-block" data-testid="team-invite-block">
+                <div className="df2-team-block-head">
+                  <div>
+                    <h3>Pending invitations</h3>
+                    <p>Resend sends a fresh link and retires the old one. Revoke stops the link working.</p>
+                  </div>
+                  <span className="df2-cell-meta">{invites.length} pending</span>
+                </div>
+                <div className="df2-team-list" data-testid="team-invite-list">
+                  <div className="df2-team-list-head df2-team-list-head--invites">
+                    <span>Person</span>
+                    <span>Role</span>
+                    <span>Link</span>
+                    <span>Actions</span>
+                  </div>
+                  {invites.map((inv) => (
+                    <div className="df2-team-member-row df2-team-member-row--invites" data-testid="team-invite-row" key={inv.id}>
+                      <div className="df2-team-identity">
+                        <span className="df2-team-avatar" aria-hidden>
+                          {memberInitials(inv.name, inv.email)}
+                        </span>
+                        <div className="df2-team-identity-text">
+                          <strong>{inv.name || inv.email}</strong>
+                          <span>{inv.name ? `${inv.email} · ` : ""}invited by {inv.invited_by_name || inv.invited_by}</span>
+                        </div>
+                      </div>
+                      <span className="df2-badge df2-badge-muted">{ROLE_LABELS[inv.role] ?? inv.role}</span>
+                      <span className={`df2-cell-meta${isInviteExpired(inv.expires_at) ? " df2-text-warn" : ""}`}>
+                        {inviteExpiryLabel(inv.expires_at)} · sent {relativeTime(inv.last_sent_at)}
+                        {inv.sent_count > 1 ? ` (${inv.sent_count}×)` : ""}
+                      </span>
+                      <div className="df2-team-row-actions">
+                        <Button
+                          size="sm"
+                          disabled={busyInvite === inv.id || !membership.allowed}
+                          title={membership.reason || undefined}
+                          loading={busyInvite === inv.id}
+                          onClick={() => void resendInvite(inv)}
+                        >
+                          Resend
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          disabled={busyInvite === inv.id || !membership.allowed}
+                          title={membership.reason || undefined}
+                          onClick={() => void revokeInvite(inv)}
+                        >
+                          Revoke
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="df2-team-block">
               <div className="df2-team-block-head">

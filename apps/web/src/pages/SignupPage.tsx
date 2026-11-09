@@ -3,6 +3,10 @@ import { AuthBrandPanel } from "../components/AuthBrandPanel";
 import { DtIcon } from "../components/DtIcon";
 import { useToast } from "../components/Toast";
 import {
+  acceptInvite,
+  type AcceptedInvite,
+  type InviteDetails,
+  inspectInvite,
   fetchFormToken,
   fetchSignupConfig,
   forgotPassword,
@@ -614,6 +618,186 @@ export function ResetPasswordPage({ token, onSignIn, onSendNewLink }: {
               Sign in
             </AuthButton>
           </div>
+        )}
+      </div>
+    </AuthShell>
+  );
+}
+
+
+const INVITE_ROLE_LABELS: Record<string, string> = {
+  admin: "Admin — full workspace access, including members and roles",
+  editor: "Editor — run transfers, edit connectors and schedules",
+  viewer: "Viewer — read jobs, connectors and proofs",
+};
+
+const INVITE_STATUS_COPY: Record<string, { title: string; body: string }> = {
+  expired: { title: "This invitation has expired", body: "Ask the workspace admin to send a new one." },
+  revoked: { title: "This invitation was withdrawn", body: "The workspace admin revoked it. Ask them if you still need access." },
+  accepted: { title: "This invitation was already used", body: "Sign in to open the workspace." },
+  superseded: { title: "A newer invitation was sent", body: "Use the link in the most recent invitation email." },
+  invalid: { title: "This invitation link isn't valid", body: "Check that you opened the whole link from the email." },
+};
+
+/** Landing page for an emailed workspace invitation (`/accept-invite#token=…`). */
+export function AcceptInvitePage({ token, signedInEmail, onSignIn, onSignOut, onAccepted, onBack }: {
+  token: string;
+  signedInEmail: string;
+  onSignIn: () => void;
+  onSignOut: () => void;
+  onAccepted: (result: AcceptedInvite) => void;
+  onBack: () => void;
+}) {
+  const { toast } = useToast();
+  const [details, setDetails] = useState<InviteDetails | null>(null);
+  const [status, setStatus] = useState<string>("checking");
+  const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    // Same hygiene as the reset link: the token leaves the address bar at once.
+    window.history.replaceState({}, "", "/#/accept-invite");
+    let live = true;
+    setStatus("checking");
+    inspectInvite(token)
+      .then((d) => { if (live) { setDetails(d); setStatus(d.ok ? "ok" : d.status); } })
+      .catch(() => { if (live) setStatus("invalid"); });
+    return () => { live = false; };
+  }, [token, signedInEmail]);
+
+  const isNew = details?.account === "new";
+  const passwordOk = password.length >= 12;
+  const passwordError = submitted && isNew && !passwordOk ? "Use at least 12 characters." : "";
+
+  const accept = async (e?: FormEvent) => {
+    e?.preventDefault();
+    setSubmitted(true);
+    setError("");
+    if (isNew && !signedInEmail && !passwordOk) { focusFirstInvalid(cardRef.current); return; }
+    setBusy(true);
+    try {
+      const result = await acceptInvite({ token, name: name.trim(), password: isNew ? password : "" });
+      toast({
+        title: result.alreadyMember ? "You're already a member" : `You joined ${result.workspaceName}`,
+        message: result.alreadyMember ? "Opening the workspace." : "Opening the workspace now.",
+        tone: "success",
+      });
+      onAccepted(result);
+    } catch (err) {
+      if (err instanceof SignupApiError && err.code.startsWith("invite_") && err.code !== "invite_email_mismatch") {
+        setStatus(err.code.replace(/^invite_/, ""));
+      } else if (err instanceof SignupApiError && err.code === "sign_in_required") {
+        onSignIn();
+      } else {
+        setError(codeEntryError(
+          err instanceof SignupApiError ? err : { message: err instanceof Error ? err.message : "" },
+          "Couldn't accept the invitation. Try again.",
+        ));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const failure = INVITE_STATUS_COPY[status] ?? (status !== "ok" && status !== "checking" ? INVITE_STATUS_COPY.invalid : null);
+  const wrongAccount = Boolean(signedInEmail) && details?.ok && !details.signedInAsInvitee;
+
+  return (
+    <AuthShell title="Join a workspace" sub="Accept your invitation to a Datawrap workspace." onBack={onBack}>
+      <div ref={cardRef}>
+        {status === "checking" && (
+          <div className="lp-login-auth-head">
+            <p className="lp-login-auth-kicker">Workspace invitation</p>
+            <h2>Checking your invitation…</h2>
+          </div>
+        )}
+        {failure && (
+          <div className="lp-login-auth-head" data-testid="invite-status">
+            <p className="lp-login-auth-kicker">Workspace invitation</p>
+            <h2>{failure.title}</h2>
+            <p className="lp-login-auth-sub">{failure.body}</p>
+            <AuthButton size="lg" block className="lp-login-submit lp-login-cta-spaced" onClick={onSignIn}
+              trailingIcon={<DtIcon name="arrow-right" size={16} />}>
+              Sign in
+            </AuthButton>
+          </div>
+        )}
+        {status === "ok" && details && (
+          <>
+            <div className="lp-login-auth-head">
+              <p className="lp-login-auth-kicker">Workspace invitation</p>
+              <h2>Join {details.workspaceName}</h2>
+              <p className="lp-login-auth-sub">
+                {details.inviterName ? `${details.inviterName} (${details.inviterEmail})` : details.inviterEmail} invited {details.email}.
+              </p>
+            </div>
+            <dl className="lp-invite-facts" data-testid="invite-facts">
+              <div><dt>Workspace</dt><dd>{details.workspaceName}</dd></div>
+              <div><dt>Role</dt><dd>{INVITE_ROLE_LABELS[details.role] ?? details.role}</dd></div>
+              <div><dt>Expires</dt><dd>{details.expiresAt ? new Date(details.expiresAt).toLocaleString() : "—"}</dd></div>
+            </dl>
+            {error && (
+              <div className="lp-login-alert lp-login-alert--warn" role="alert">
+                <DtIcon name="alert" size={18} />
+                <div><strong>Couldn't accept the invitation</strong><p>{error}</p></div>
+              </div>
+            )}
+            {details.account === "disabled" ? (
+              <p className="lp-login-auth-sub" role="alert">Sign-in is disabled for {details.email}. Contact your workspace admin.</p>
+            ) : wrongAccount ? (
+              <>
+                <p className="lp-login-auth-sub">
+                  You're signed in as {signedInEmail}. This invitation is for {details.email}.
+                </p>
+                <AuthButton size="lg" block className="lp-login-submit" onClick={onSignOut}
+                  trailingIcon={<DtIcon name="arrow-right" size={16} />}>
+                  Sign out and continue
+                </AuthButton>
+              </>
+            ) : signedInEmail ? (
+              <AuthButton size="lg" block className="lp-login-submit" loading={busy} loadingLabel="Joining…"
+                onClick={() => void accept()} trailingIcon={<DtIcon name="arrow-right" size={16} />}>
+                Accept and join
+              </AuthButton>
+            ) : details.account === "existing" ? (
+              <>
+                <p className="lp-login-auth-sub">{details.email} already has a Datawrap account. Sign in to accept.</p>
+                <AuthButton size="lg" block className="lp-login-submit" onClick={onSignIn}
+                  trailingIcon={<DtIcon name="arrow-right" size={16} />}>
+                  Sign in as {details.email}
+                </AuthButton>
+              </>
+            ) : (
+              <form className="lp-login-form" onSubmit={accept} noValidate>
+                <div className="lp-field">
+                  <label className="lp-label" htmlFor="invite-name">Full name</label>
+                  <input id="invite-name" className="lp-input" value={name} autoComplete="name"
+                    onChange={(e) => setName(e.target.value)} placeholder="Optional" />
+                </div>
+                <div className={`lp-field ${passwordError ? "is-error" : ""}`}>
+                  <label className="lp-label" htmlFor="invite-password">Choose a password</label>
+                  <div className="lp-input-password">
+                    <input id="invite-password" className="lp-input" type={showPassword ? "text" : "password"}
+                      value={password} onChange={(e) => setPassword(e.target.value)}
+                      autoComplete="new-password" placeholder="At least 12 characters"
+                      aria-invalid={Boolean(passwordError)}
+                      aria-describedby={passwordError ? "invite-password-error" : undefined} />
+                    <PasswordToggle show={showPassword} onToggle={() => setShowPassword((v) => !v)} />
+                  </div>
+                  {passwordError && <small id="invite-password-error" className="lp-field-error">{passwordError}</small>}
+                </div>
+                <AuthButton type="submit" size="lg" block className="lp-login-submit" loading={busy} loadingLabel="Creating account…"
+                  trailingIcon={<DtIcon name="arrow-right" size={16} />}>
+                  Create account and join
+                </AuthButton>
+              </form>
+            )}
+          </>
         )}
       </div>
     </AuthShell>

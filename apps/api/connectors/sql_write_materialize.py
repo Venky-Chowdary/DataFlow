@@ -219,6 +219,8 @@ class SqlWriteAccumulator:
         # Set by upsert writers before add_accepted. Empty means first-50,
         # which is correct for append (duplicate keys are real rows).
         self.conflict_columns: list[str] = []
+        # dedupe_skip: stored keys held back, in reconcile marker form.
+        self.skipped_identity_keys: list[str] = []
         self._sample_index: dict[tuple, int] = {}
         self._survivor_fp: dict[tuple, tuple[str, str]] = {}
         self._loose_fp: list[tuple[str, str]] = []
@@ -353,6 +355,8 @@ class SqlWriteAccumulator:
         meta["source_row_count"] = self.accepted_row_count
         if self.collapsed_duplicate_rows:
             meta["collapsed_duplicate_rows"] = self.collapsed_duplicate_rows
+        if self.skipped_identity_keys:
+            meta["skipped_identity_keys"] = list(self.skipped_identity_keys)
         return meta
 
     def abort_error(

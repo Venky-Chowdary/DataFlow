@@ -54,6 +54,23 @@ function basePreflight(over: Partial<PreflightResult> = {}): PreflightResult {
 }
 
 describe("findDuplicateKeyRoot", () => {
+  it("leaves a stored-key collision or unreadable collision to Duplicate rows", () => {
+    for (const rule_id of ["g6_target_ddl.append_key_collision", "g6_target_ddl.append_collision_unreadable"]) {
+      const pf = basePreflight({
+        gates: [
+          {
+            id: "g6_target_ddl",
+            status: "block",
+            message: "Stored keys on id could not be checked; a duplicate key would abort the insert",
+            duration_ms: 3,
+            details: { rule_id, primary_key: "id", remediation_kind: "choose_duplicate_rows" },
+          },
+        ],
+      });
+      assert.equal(findDuplicateKeyRoot(pf, "full_refresh_append"), null, rule_id);
+    }
+  });
+
   it("collapses G9 + G6 + G8 duplicate blockers into one root", () => {
     const pf = basePreflight({
       gates: [
@@ -683,4 +700,22 @@ describe("rankAndDedupeSuggestedActions", () => {
       ["run_population_orphan_scan", "fix_orphans", "review_mappings"],
     );
   });
+});
+
+
+describe("upsert key gate remedies are not duplicate rows (guard)", () => {
+  const pf = (details: Record<string, unknown>, message: string): PreflightResult =>
+    ({ passed: false, gates: [{ id: "g_upsert_dest_key", status: "block", message, details }], blockers: [] } as unknown as PreflightResult);
+
+  it("a missing key or a disclosed index does not mint a duplicate-key root", () => {
+    assert.equal(findDuplicateKeyRoot(pf(
+      { rule_id: "g_upsert_dest_key.keyed_policy_no_key", remediation_kind: "declare_key" },
+      "Duplicate rows is set to 'Skip keys already stored', but no key is declared",
+    )), null);
+    assert.equal(findDuplicateKeyRoot(pf(
+      { remediation_kind: "approve_ddl_or_dedupe", requires_approval: true, planned_ddl: "CREATE UNIQUE INDEX u ON t (id)" },
+      "Upsert into existing 't' needs a unique constraint on (id).",
+    )), null);
+  });
+
 });

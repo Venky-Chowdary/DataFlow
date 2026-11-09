@@ -311,3 +311,19 @@ def test_row_after_watermark_typed_compare():
     assert row_after_watermark({"id": 101}, "id", "100") is True
     assert row_after_watermark({"id": None}, "id", "100") is None
     assert row_after_watermark({"id": 1}, "id", None) is True
+
+
+def test_map_source_to_target_folds_a_catalog_spelled_key() -> None:
+    from services.sync_cursor import map_source_to_target
+
+    mappings = [{"source": "id", "target": "id"}, {"source": "qty", "target": "qty"}]
+    assert map_source_to_target("ID", mappings) == "id"
+    assert map_source_to_target("id", mappings) == "id"
+    assert map_source_to_target("other", mappings) == "other"
+
+
+def test_map_source_to_target_keeps_an_ambiguous_case_fold() -> None:
+    from services.sync_cursor import map_source_to_target
+
+    mappings = [{"source": "id", "target": "a"}, {"source": "Id", "target": "b"}]
+    assert map_source_to_target("ID", mappings) == "ID"

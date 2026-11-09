@@ -9,6 +9,20 @@ from services.blocker_titles import is_schema_drift_echo
 from services.db_type_utils import normalize_dest_kind
 
 
+def blockers_from_gates(*gates: tuple[dict[str, Any] | None, str | None]) -> list[dict[str, Any]]:
+    """Blocker rows for each ``(gate, id_override)`` whose gate status is ``block``."""
+    return [
+        {
+            "id": gate_id or str(gate.get("id") or ""),
+            "message": str(gate.get("message") or ""),
+            "details": dict(gate.get("details") or {}),
+            "suggested_actions": list(gate.get("suggested_actions") or []),
+        }
+        for gate, gate_id in gates
+        if gate and gate.get("status") == "block"
+    ]
+
+
 def is_compliance_block_message(message: object) -> bool:
     """True when this blocker text is a PII/compliance review, not a data defect."""
     text = str(message or "")

@@ -198,11 +198,35 @@ def test_replay_duplicate_probe_is_bounded_without_a_tool_deadline(client, monke
         h.drop_table("postgresql", dst)
 
 
+def _primary_key_columns(dst: str) -> list[str]:
+    rows = h.query(
+        "postgresql",
+        "SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid "
+        "AND a.attnum = ANY(i.indkey) WHERE i.indisprimary "
+        f"AND i.indrelid = 'public.\"{dst}\"'::regclass",  # nosec B608
+    )
+    return [str(r[0]) for r in rows]
+
+
+def _drop_primary_key(dst: str) -> None:
+    (name,) = h.query(
+        "postgresql",
+        "SELECT conname FROM pg_constraint WHERE contype = 'p' "
+        f"AND conrelid = 'public.\"{dst}\"'::regclass",  # nosec B608
+    )[0]
+    h.execute("postgresql", f'ALTER TABLE public."{dst}" DROP CONSTRAINT "{name}"')  # nosec B608
+
+
 @pytest.mark.parametrize("remedy", ["delete_extra_copies", "rerun_parent_keep_last"])
 def test_each_replay_409_remedy_then_lands(client, remedy):
     dst = f"r14r9_{uuid.uuid4().hex[:6]}"
     try:
         job_id = _run_file(client, dst, _bad_price_csv())
+        # Create-new declares the operator's key (sku), so the table refuses an
+        # extra copy outright. The 409 is about a destination that already
+        # holds copies, i.e. one without that key: model exactly that.
+        assert _primary_key_columns(dst) == ["sku"]
+        _drop_primary_key(dst)
         h.execute("postgresql", f"INSERT INTO public.\"{dst}\" (sku, name, price) VALUES ('SKU-00007', 'dup item', 9.99)")  # nosec B608
         refused = client.post(f"/api/v1/connectors/jobs/{job_id}/quarantine/replay", json={"rows": EDIT})
         assert refused.status_code == 409, refused.text[:600]

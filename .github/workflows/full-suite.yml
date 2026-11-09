@@ -266,6 +266,23 @@ jobs:
           path: /tmp/pytest-junit.xml
           if-no-files-found: error
 
+      - name: Route certification matrix
+        if: always()
+        working-directory: apps/api
+        # Grades every PRODUCTION_SKU route × sync mode from this run's results.
+        # Exits non-zero when a cell failed.
+        run: |
+          python scripts/route_certification_report.py --junit /tmp/pytest-junit.xml \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload route certification matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: route-certification-${{ github.run_id }}
+          path: apps/api/data/proofs/route_certification_matrix.json
+          if-no-files-found: warn
+
   web:
     name: Web lint + tests + build
     runs-on: ubuntu-latest

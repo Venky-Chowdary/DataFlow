@@ -77,6 +77,8 @@ interface TransferMapStepProps {
   uniqueKeySuggestions?: UniqueKeySuggestion[];
   compositeKeySuggestions?: Array<{ columns: string[]; uniqueCount: number; sampleRows: number }>;
   onApplyPrimaryKey?: (column: string) => void;
+  /** Clears the operator-chosen identity so create-new declares no key on it. */
+  onClearPrimaryKey?: () => void;
   /** Dest-exists extras the operator must remap or omit — never silent drop. */
   extraSourceColumns?: string[];
   destShapeHeadline?: string;
@@ -138,6 +140,7 @@ export function TransferMapStep({
   uniqueKeySuggestions = [],
   compositeKeySuggestions = [],
   onApplyPrimaryKey,
+  onClearPrimaryKey,
   extraSourceColumns = [],
   destShapeHeadline = "",
   onReloadDestSchema,
@@ -574,6 +577,18 @@ export function TransferMapStep({
           )}
         </div>
         <div className="df2-map-footer-actions">
+          {/* Not inside .df2-map-footer-status: compact widths hide that strip. */}
+          {primaryKeyField && onClearPrimaryKey ? (
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost"
+              data-testid="map-clear-primary-key"
+              title={`Stop using ${primaryKeyField} as the key — a new table is created without it`}
+              onClick={onClearPrimaryKey}
+            >
+              Clear key
+            </button>
+          ) : null}
           {onOpenIdentitySettings && (
             <button
               type="button"

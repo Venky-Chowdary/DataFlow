@@ -236,21 +236,24 @@ export function applyDeclaredStreamFields(
   sourceColumns: string[],
   declaredCursor: string,
   declaredPrimaryKey: string,
+  primaryKeyCleared = false,
 ): Record<string, StreamFieldContract> {
   const seeded = seedStreamFieldsFromCandidates(
     streamNames,
     prev,
     declaredCursor || cursorCandidate,
-    declaredPrimaryKey || primaryKeyCandidate,
+    primaryKeyCleared ? "" : declaredPrimaryKey || primaryKeyCandidate,
     sourceColumns,
   );
-  if (!declaredCursor && !declaredPrimaryKey) return seeded;
+  if (!declaredCursor && !declaredPrimaryKey && !primaryKeyCleared) return seeded;
   const next = { ...seeded };
   let changed = seeded !== prev;
   for (const name of streamNames) {
     const cur = next[name] ?? { cursorField: "", primaryKeyField: "" };
     const cursorField = declaredCursor || cur.cursorField;
-    const primaryKeyField = declaredPrimaryKey || cur.primaryKeyField;
+    const primaryKeyField = primaryKeyCleared && name === streamNames[0]
+      ? ""
+      : declaredPrimaryKey || cur.primaryKeyField;
     if (cursorField !== cur.cursorField || primaryKeyField !== cur.primaryKeyField || !next[name]) {
       next[name] = { ...cur, cursorField, primaryKeyField, cursorSemantics: cur.cursorSemantics ?? "" };
       changed = true;

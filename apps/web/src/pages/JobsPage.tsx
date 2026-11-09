@@ -59,7 +59,15 @@ import { readSession } from "../lib/session";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { blockerTitle } from "../lib/preflightGates";
 import { reconcileBarPercent } from "../lib/progressRing";
-import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
+import {
+  absentEvidenceLabel,
+  deepLinkPending,
+  JOB_DETAIL_RETRY_MS,
+  type JobDetailRead,
+  latchDeepLink,
+  nextListSelection,
+  shouldApplyInitialJobFocus,
+} from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { EmbeddingUsageSummary } from "../components/transfer/EmbeddingUsageSummary";
@@ -99,7 +107,16 @@ const evidenceIcons: Record<string, LucideIcon> = {
   streams: Network,
 };
 
-function JobsEvidenceList({ label, items }: { label: string; items: JobEvidenceLaunchItem[] }) {
+function JobsEvidenceList({
+  label,
+  items,
+  absentLabel = "Not captured",
+}: {
+  label: string;
+  items: JobEvidenceLaunchItem[];
+  /** Status for a disabled item — "Not captured" only once the job record was read. */
+  absentLabel?: string;
+}) {
   const listId = useId();
   return (
     <section className="df2-jobs-evidence-list" aria-label={label}>
@@ -116,7 +133,7 @@ function JobsEvidenceList({ label, items }: { label: string; items: JobEvidenceL
                 <span id={descriptionId}>{item.description}</span>
               </div>
               <span className={`df2-jobs-evidence-list-status tone-${item.disabled ? "default" : item.tone || "default"}`}>
-                {item.disabled ? "Not captured" : item.meta || "Recorded"}
+                {item.disabled ? absentLabel : item.meta || "Recorded"}
               </span>
               <button
                 type="button"
@@ -125,7 +142,7 @@ function JobsEvidenceList({ label, items }: { label: string; items: JobEvidenceL
                 onClick={item.onOpen}
                 aria-label={`Open ${item.title}`}
                 aria-describedby={descriptionId}
-                title={item.disabled ? `${item.title}: not captured` : `Open ${item.title}`}
+                title={item.disabled ? `${item.title}: ${absentLabel}` : `Open ${item.title}`}
               >
                 <PanelRightOpen size={16} aria-hidden="true" />
               </button>
@@ -380,6 +397,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   const [liveJob, setLiveJob] = useState<JobDetailRecord | null>(null);
   const [detailNonce, setDetailNonce] = useState(0);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailRead, setDetailRead] = useState<{ id: string | null; state: JobDetailRead }>({ id: null, state: "pending" });
   const [retrying, setRetrying] = useState(false);
   const [blockingJob, setBlockingJob] = useState<{ id: string; status: string; createdAt: string } | null>(null);
   const [resuming, setResuming] = useState(false);
@@ -405,6 +423,10 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
   const [journalsOpen, setJournalsOpen] = useState(false);
   const appliedFocusRef = useRef<string | null>(null);
+  const deepLinkRef = useRef(latchDeepLink({}, initialJobId, initialPanel));
+  deepLinkRef.current = latchDeepLink(deepLinkRef.current, initialJobId, initialPanel);
+  const focusJobId = deepLinkRef.current.jobId;
+  const focusPanel = deepLinkRef.current.panel;
   const pinnedJobRef = useRef<string | null>(null);
   const pageRequestRef = useRef(0);
   const jobs = pageHistory?.jobs ?? recentJobs;
@@ -534,28 +556,28 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
 
   useEffect(() => {
     const ids = jobs.map((j) => j._id);
-    if (!shouldApplyInitialJobFocus(initialJobId, appliedFocusRef.current, ids)) return;
-    appliedFocusRef.current = initialJobId!;
-    pinnedJobRef.current = initialJobId!;
+    if (!shouldApplyInitialJobFocus(focusJobId, appliedFocusRef.current, ids)) return;
+    appliedFocusRef.current = focusJobId!;
+    pinnedJobRef.current = focusJobId!;
     setFilter("all");
     setJobSearch("");
-    setSelectedId(initialJobId!);
+    setSelectedId(focusJobId!);
     setMobileListOpen(false);
-    if (initialPanel === "mapping-proof") {
+    if (focusPanel === "mapping-proof") {
       setDetailTab("mapping");
       setEvidenceDrawer("mapping-proof");
       setMappingProofOpen(true);
-    } else if (initialPanel === "quarantine") {
+    } else if (focusPanel === "quarantine") {
       setDetailTab("quarantine");
       setEvidenceDrawer("quarantine");
     }
     window.requestAnimationFrame(() => {
-      document.getElementById(`job-item-${initialJobId}`)?.scrollIntoView({
+      document.getElementById(`job-item-${focusJobId}`)?.scrollIntoView({
         behavior: "smooth",
         block: "nearest",
       });
     });
-  }, [initialJobId, initialPanel, jobs]);
+  }, [focusJobId, focusPanel, jobs]);
 
   useEffect(() => {
     if (!selectedId || !liveJob) {
@@ -582,8 +604,11 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   }, [selectedId, liveJob]);
 
   useEffect(() => {
+    // A deep link owns the selection: while the requested job has not reached
+    // the list, do not auto-pick the newest job in its place.
+    if (deepLinkPending(focusJobId, appliedFocusRef.current)) return;
     const pin = pinnedJobRef.current;
-    if (pin && pin === initialJobId && selectedId !== pin) return;
+    if (pin && pin === focusJobId && selectedId !== pin) return;
     if (pin && selectedId === pin) {
       if (filtered.some((j) => j._id === pin)) {
         pinnedJobRef.current = null;
@@ -598,7 +623,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     }
     const next = nextListSelection(selectedId, filtered.map((j) => j._id));
     if (next && next !== selectedId) setSelectedId(next);
-  }, [filter, filtered, selectedId, initialJobId]);
+  }, [filter, filtered, selectedId, focusJobId]);
 
   // Feed the selected job into Datawrap Pilot so NL triage uses the real job ID.
   useEffect(() => {
@@ -647,15 +672,23 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
       setLiveJob((prev) => (prev && prev._id === selectedId ? prev : null));
       setDetailLoading(true);
     }
-    fetchJob(selectedId)
+    setDetailRead({ id: selectedId, state: "pending" });
+    const readDetail = () => fetchJob(selectedId);
+    readDetail()
+      .catch(() => new Promise<void>((resolve) => window.setTimeout(resolve, JOB_DETAIL_RETRY_MS)).then(() => {
+        if (cancelled) throw new Error("selection changed");
+        return readDetail();
+      }))
       .then((job) => {
         if (cancelled) return;
         setLiveJob(job);
+        setDetailRead({ id: selectedId, state: "read" });
       })
       .catch(() => {
         if (cancelled) return;
         // Keep list snapshot if detail endpoint fails (workspace/isolation edge cases).
         if (!listed) setLiveJob(null);
+        setDetailRead({ id: selectedId, state: "failed" });
       })
       .finally(() => {
         if (cancelled) return;
@@ -977,6 +1010,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     liveJob?.sync_mode || liveJob?.transfer_request?.sync_mode,
   );
   const jobPreflight = liveJob?.preflight;
+  const absentLabel = absentEvidenceLabel(detailRead.id === selectedId ? detailRead.state : "pending");
   /**
    * Jobs → Studio for the selected job. Only that job's own record seeds the
    * intent: a detail still loading for it must not lend another job's gates
@@ -1545,6 +1579,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                               )}
 
                             <JobsEvidenceList
+                              absentLabel={absentLabel}
                               label="Evidence panels"
                               items={[
                                 {
@@ -1833,6 +1868,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                               </div>
                             </div>
                             <JobsEvidenceList
+                              absentLabel={absentLabel}
                               label="Mapping evidence"
                               items={[
                                 {
@@ -1902,6 +1938,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                         {detailTab === "log" && (
                           <div className="df2-jobs-detail-pane">
                             <JobsEvidenceList
+                              absentLabel={absentLabel}
                               label="Logs"
                               items={[
                                 {

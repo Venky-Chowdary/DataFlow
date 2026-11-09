@@ -1935,7 +1935,7 @@ class PostgreSqlChangeStreamCdc:
             )
             raise
 
-        from services.cdc_snapshot_window import _pk_columns, _pk_row_dict
+        from services.cdc_snapshot_window import _pk_columns, _pk_row_dict, _retired_key_events
 
         pk_cols = _pk_columns(sig.primary_key or self.primary_keys.get(
             (getattr(sig, "table", "") or "").strip() or self.table, self.primary_key
@@ -1969,6 +1969,10 @@ class PostgreSqlChangeStreamCdc:
                     if change.op == "insert" and change.new_tuple:
                         events.append({"op": "c", "row": dict(change.new_tuple)})
                     elif change.op == "update" and change.new_tuple:
+                        events.extend(_retired_key_events(
+                            self._pk_value(change.old_tuple or {}, table=sig_table),
+                            self._pk_value(change.new_tuple, table=sig_table), pk_cols,
+                        ))
                         events.append({"op": "u", "row": dict(change.new_tuple)})
                     elif change.op == "delete" and change.old_tuple:
                         # Must key off sig_table's PK columns. Defaulting to
@@ -1999,6 +2003,10 @@ class PostgreSqlChangeStreamCdc:
             if op == "insert" and new_tuple:
                 events.append({"op": "c", "row": dict(new_tuple)})
             elif op == "update" and new_tuple:
+                events.extend(_retired_key_events(
+                    self._pk_value(old_key or {}, table=sig_table),
+                    self._pk_value(new_tuple, table=sig_table), pk_cols,
+                ))
                 events.append({"op": "u", "row": dict(new_tuple)})
             elif op == "delete" and old_key:
                 pk = self._pk_value(old_key, table=sig_table)
@@ -2113,7 +2121,8 @@ class PostgreSqlChangeStreamCdc:
                             (change.relation or "").lower(), change.relation or self.table
                         )
                         pk = self._pk_value(change.new_tuple, table=tbl)
-                        buf.update(tbl, change.new_tuple, pk=pk or None, lsn=lsn)
+                        old = self._pk_value(change.old_tuple, table=tbl) if change.old_tuple else ""
+                        buf.update(tbl, change.new_tuple, pk=pk or None, lsn=lsn, old_pk=old or None)
                     elif change.op == "delete" and change.old_tuple:
                         tbl = table_by_lower.get(
                             (change.relation or "").lower(), change.relation or self.table
@@ -2163,7 +2172,8 @@ class PostgreSqlChangeStreamCdc:
                     buf.insert(tbl, new_tuple, pk=pk or None, lsn=lsn)
                 elif op == "update" and new_tuple:
                     pk = self._pk_value(new_tuple, table=tbl)
-                    buf.update(tbl, new_tuple, pk=pk or None, lsn=lsn)
+                    old = self._pk_value(old_key, table=tbl) if old_key else ""
+                    buf.update(tbl, new_tuple, pk=pk or None, lsn=lsn, old_pk=old or None)
                 elif op == "delete" and old_key:
                     pk = self._pk_value(old_key, table=tbl)
                     if pk:

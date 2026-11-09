@@ -7928,7 +7928,7 @@ def test_oracle_composite_key_hits_use_and_or_not_tuple_in(monkeypatch: pytest.M
     )
     assert census is not None
     assert census["dest_count"] == 2
-    hit_sql = [sql for sql in engine.sql if "_df_key_hits" in sql or "_DF_KEY_HITS" in sql.upper()]
+    hit_sql = [sql for sql in engine.sql if "df_key_hits" in sql.lower()]
     assert hit_sql
     compact = hit_sql[0].replace(" ", "")
     assert "IN((" not in compact
@@ -8944,3 +8944,120 @@ def test_job_rollup_does_not_name_one_recipe_when_the_streams_ran_two():
     assert ledger.rows_shaped_out == 2
     assert ledger.shape_recipe_hash == ""
     assert ledger.balanced is True
+
+
+def test_keyed_census_dedupe_skip_counts_kept_keys_as_skipped_not_updated():
+    from services.row_conservation import KeyCensus, census_for_duplicate_policy
+
+    census = census_for_duplicate_policy(
+        KeyCensus(unique_batch_keys=3, dest_preexisting=1), "skip_duplicates"
+    )
+    assert KeyCensus.from_mapping(census.to_dict()) == census
+    ledger = account_population(
+        rows_read=3,
+        dest_count=4,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=2,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=1,
+        writer_ack=2,
+        sync_mode="full_refresh_append",
+        census=census,
+        dest_key_addressed=True,
+    )
+    assert ledger.inserts == 2
+    assert ledger.updates == 0
+    assert ledger.rows_written == 2
+    assert ledger.dest_delta == 2
+    assert ledger.balanced is True
+    assert "than the census" not in ledger.note
+    assert "1 stored key(s) were kept unchanged" in ledger.note
+
+
+def test_keyed_census_skips_beyond_kept_keys_stay_unproven():
+    from services.row_conservation import KeyCensus, census_for_duplicate_policy
+
+    census = census_for_duplicate_policy(
+        KeyCensus(unique_batch_keys=3, dest_preexisting=1), "dedupe_skip"
+    )
+    ledger = account_population(
+        rows_read=4,
+        dest_count=4,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=2,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=2,
+        writer_ack=2,
+        sync_mode="full_refresh_append",
+        census=census,
+        dest_key_addressed=True,
+    )
+    assert ledger.balanced is False
+    assert ledger.rows_written is None
+
+
+def test_upsert_census_still_counts_stored_keys_as_updates():
+    from services.row_conservation import KeyCensus, census_for_duplicate_policy
+
+    census = census_for_duplicate_policy(KeyCensus(unique_batch_keys=3, dest_preexisting=1), "upsert")
+    assert census.kept_existing == 0
+    assert census.updates == 1
+
+
+def test_key_census_counts_reinsert_and_redelete_across_batches() -> None:
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    # dest holds keys 1 and 2; separate CDC transactions on the same keys.
+    for kind, key, hits in [
+        ("live", 2, 1), ("tomb", 2, 1), ("live", 2, 0),
+        ("live", 4, 0), ("tomb", 4, 1), ("live", 1, 1),
+        ("tomb", 2, 1), ("live", 2, 0),
+    ]:
+        acc.begin_live_batch()
+        if kind == "live":
+            probe = acc.unseen_live([(str(key),)])
+            acc.add_batch([(str(key),)], hits if probe else 0)
+        else:
+            # CDC deletes parse the key as typed; rows carry it as text.
+            acc.add_tombstones(hits, keys=[(int(key),)])
+    census = acc.to_census()
+    inserts = census.unique_batch_keys - census.dest_preexisting
+    assert census.dest_preexisting == 2
+    assert inserts - census.tombstones == 0  # dest still holds 1 and 2
+    assert census.tombstones == 3
+
+
+def test_key_census_stored_key_deleted_reinserted_deleted_again() -> None:
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    # dest holds key 5 before the run: delete, re-insert, delete again → -1.
+    for kind, hits in [("tomb", 1), ("live", 0), ("tomb", 1)]:
+        acc.begin_live_batch()
+        if kind == "live":
+            probe = acc.unseen_live([("5",)])
+            acc.add_batch([("5",)], hits if probe else 0)
+        else:
+            acc.add_tombstones(hits, keys=[(5,)])
+    census = acc.to_census()
+    assert census.inserts - census.deletes == -1
+
+
+def test_key_census_reversed_reinsert_restores_absent_key() -> None:
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    acc.begin_live_batch()
+    acc.add_batch([("1",)], 0)
+    acc.keep_last_live_batch()
+    acc.begin_live_batch()
+    acc.add_tombstones(1, keys=[(1,)])
+    acc.begin_live_batch()
+    acc.add_batch([("1",)], 0)
+    acc.reverse_last_live_batch()  # the re-insert batch rolled back
+    census = acc.to_census()
+    assert census.inserts - census.deletes == 0  # inserted once, deleted once
+    assert acc.unseen_live([("1",)]) == [("1",)]  # still absent at the dest

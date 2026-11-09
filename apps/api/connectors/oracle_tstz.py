@@ -63,6 +63,22 @@ def pin_oracle_timestamp_format(dbapi_conn: Any) -> None:
         cur.close()
 
 
+def pin_oracle_timestamp_binds(cur: Any, ddls: Sequence[str]) -> None:
+    """Bind ``datetime`` as TIMESTAMP for zoneless TIMESTAMP columns.
+
+    ``executemany`` binds a ``datetime`` as DATE, so TIMESTAMP(6) loses its
+    fractional seconds. The input sizes hold for every later ``executemany``
+    on this cursor.
+    """
+    upper = [str(d or "").upper() for d in ddls]
+    stamped = [d.startswith("TIMESTAMP") and "ZONE" not in d for d in upper]
+    if not any(stamped):
+        return
+    import oracledb
+
+    cur.setinputsizes(*[oracledb.DB_TYPE_TIMESTAMP if hit else None for hit in stamped])
+
+
 def oracle_tz_kind(type_name: Any) -> str | None:
     """``"tz"`` / ``"ltz"`` for an Oracle zone-bearing TIMESTAMP type name, else ``None``.
 

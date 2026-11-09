@@ -252,6 +252,9 @@ _PUBLIC_PATHS = {
     "/api/v1/auth/password/reset",
     "/api/v1/auth/password/reset/inspect",
     "/api/v1/auth/sso/route",
+    # Workspace invitation landing + accept (services.workspace_invites).
+    "/api/v1/invites/inspect",
+    "/api/v1/invites/accept",
     "/auth/signup",
     "/auth/verify-email",
     "/auth/resend",

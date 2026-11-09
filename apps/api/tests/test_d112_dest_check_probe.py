@@ -100,3 +100,16 @@ def test_run_file_preflight_surfaces_dest_check_finding():
     assert probe.get("violating_count") == 1
     codes = {f.get("code") for f in out.get("constraint_findings") or []}
     assert "dest_check_violation" in codes
+
+
+def test_mysql_catalog_spelling_is_probed_not_skipped():
+    """``information_schema.check_clause`` escapes quotes and adds charset introducers."""
+    report = probe_dest_check_constraints(
+        rows=[{"name": "bad"}, {"name": "ok"}],
+        mappings=[{"source": "name", "target": "name"}],
+        check_constraints=[{"name": "ck", "predicate": "`name` <> _utf8mb4\\'bad\\'"}],
+        dest_dialect="mysql",
+    )
+    assert report["evaluated"] == 1, report
+    assert report["violating_count"] == 1
+    assert report["violations"][0]["row_index"] == 0

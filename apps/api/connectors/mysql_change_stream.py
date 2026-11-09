@@ -1639,6 +1639,7 @@ class MySqlChangeStreamCdc:
         from services.cdc_snapshot_window import (
             _pk_columns,
             _pk_row_dict,
+            _retired_key_events,
             _pk_value,
         )
 
@@ -1715,6 +1716,12 @@ class MySqlChangeStreamCdc:
                 elif isinstance(binlog_event, UpdateRowsEvent):
                     for row in getattr(binlog_event, "rows", []):
                         after = row.get("after_values") if isinstance(row, dict) else getattr(row, "after_values", {})
+                        before = row.get("before_values") if isinstance(row, dict) else getattr(row, "before_values", {})
+                        events.extend(_retired_key_events(
+                            _pk_value(self._row_to_record(before or {}, table=peek_table), peek_pk_cols),
+                            _pk_value(self._row_to_record(after, table=peek_table), peek_pk_cols),
+                            peek_pk_cols,
+                        ))
                         events.append(
                             {
                                 "op": "u",
@@ -1961,9 +1968,17 @@ class MySqlChangeStreamCdc:
                             if isinstance(row, dict)
                             else getattr(row, "after_values", {})
                         )
+                        before = (
+                            row.get("before_values")
+                            if isinstance(row, dict)
+                            else getattr(row, "before_values", {})
+                        )
                         rec = self._row_to_record(after, table=tbl)
                         pk = self._pk_value(after, table=tbl)
-                        buf.update(tbl, rec, pk=pk or None, lsn=str(stream.log_pos or ""))
+                        old = self._pk_value(before, table=tbl) if before else ""
+                        buf.update(
+                            tbl, rec, pk=pk or None, lsn=str(stream.log_pos or ""), old_pk=old or None
+                        )
                         event_count += 1
                 elif isinstance(binlog_event, DeleteRowsEvent):
                     for row in getattr(binlog_event, "rows", []):

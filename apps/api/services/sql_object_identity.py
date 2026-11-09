@@ -54,6 +54,50 @@ class ObjectIdentity:
         return not self.resolved
 
 
+#: Driver codes that mean "no such relation" — nothing else does. A privilege
+#: refusal (MySQL 1142, SQL Server 229, PG 42501) or a dropped connection is
+#: "could not ask", never "absent" (D266).
+_MISSING_RELATION_SQLSTATES = frozenset({"42P01", "3F000", "42S02"})
+_MISSING_RELATION_CODES = frozenset({1146, 208})
+
+
+def is_missing_relation_error(exc: BaseException) -> bool:
+    """True only when the server said the table (or its schema) does not exist."""
+    orig = getattr(exc, "orig", None) or exc
+    for attr in ("pgcode", "sqlstate"):
+        if str(getattr(orig, attr, "") or "").upper() in _MISSING_RELATION_SQLSTATES:
+            return True
+    args = getattr(orig, "args", ()) or ()
+    if args:
+        head = args[0]
+        if isinstance(head, int) and head in _MISSING_RELATION_CODES:
+            return True
+        if str(head).upper() in _MISSING_RELATION_SQLSTATES:
+            return True
+    text = str(orig).lower()
+    return "no such table" in text and "permission" not in text
+
+
+def confirm_absent(engine: Any, table: str, schema: str | None = None) -> bool | None:
+    """Re-ask the server directly after the catalog listed no such object.
+
+    Catalog listings are filtered by privilege on SQL Server (metadata
+    visibility) and MySQL (``SHOW TABLES``), so a login that lost its grant
+    sees an existing table as absent. A zero-row SELECT tells them apart:
+    ``True`` only for a missing-relation error, ``False`` when the object
+    answers, ``None`` for anything else (D266).
+    """
+    import sqlalchemy as sa
+
+    stmt = sa.select(sa.literal_column("1")).select_from(sa.table(table, schema=schema)).where(sa.false())
+    try:
+        with _connection(engine) as conn:
+            conn.execute(stmt).fetchall()
+    except Exception as exc:  # noqa: BLE001 — classified below
+        return True if is_missing_relation_error(exc) else None
+    return False
+
+
 def _pick(candidates: list[str], wanted: str) -> str | None:
     """Exact spelling first, then a unique case-insensitive match."""
     if wanted in candidates:
