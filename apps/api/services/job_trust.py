@@ -15,8 +15,6 @@ from services.duplicate_policy import summary_keyed_duplicate_policy
 
 from services.reconcile_coverage import (
     LAST_STREAM_CHECKSUM,
-    NO_OP_DEST_UNCHANGED,
-    PER_STREAM_CHECKSUM,
 )
 
 _TERMINAL = frozenset({
@@ -57,17 +55,6 @@ def is_append_delta_proof(recon: dict[str, Any] | None) -> bool:
     )
 
 
-_NARROWER_CLAIMS = frozenset({
-    "cdc_source_image_values",
-    "per_stream_checksum",
-    "row_count",
-    "writer_ack",
-    "sample",
-    "pre_write_only",
-    "failed",
-})
-
-
 def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
     """True only for independent source↔dest digest match (not writer-ack/sample)."""
     if not isinstance(recon, dict) or not recon:
@@ -80,37 +67,14 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
     scope = str(recon.get("checksum_scope") or "").strip().lower()
     if scope == LAST_STREAM_CHECKSUM:
         return False
-    # One verdict with the signed proof pack and the Gate-8 tile: a digest the
-    # proof classifier files under a narrower claim (CDC source-image values,
-    # per-stream, row-count delta) is never a full-checksum pass on Trust.
+    # One verdict with the signed proof pack and the Gate-8 tile. Credit is an
+    # allow-list: only a report the proof classifier positively files as
+    # full_checksum (independent source re-read, whole-table digest match)
+    # earns it. A stored assurance_level=full_checksum over an engine-computed
+    # digest classifies as ``none`` and is not a full-checksum pass (QA4).
     from services.signed_proof_pack import classify_post_write_assurance
 
-    if classify_post_write_assurance(recon).get("claim_level") in _NARROWER_CLAIMS:
-        return False
-    assurance = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
-    if assurance == "full_checksum":
-        return True
-    if assurance in {
-        "row_count",
-        "writer_ack",
-        "sample",
-        "write_pass_dest_readback",
-        PER_STREAM_CHECKSUM,
-        NO_OP_DEST_UNCHANGED,
-        "none",
-    }:
-        return False
-    provenance = str(recon.get("source_checksum_provenance") or "").strip().lower()
-    if provenance in {"writer_ack", "write_pass_fingerprints"}:
-        return False
-    phase = str(recon.get("phase") or "").strip().lower()
-    if "writer_ack" in phase or "sample" in phase or "skipped" in phase or "row_count" in phase:
-        return False
-    if recon.get("unproven") is True or recon.get("skipped_readback") is True:
-        return False
-    src = str(recon.get("source_checksum") or "").strip()
-    tgt = str(recon.get("target_checksum") or "").strip()
-    return bool(src and tgt and src == tgt and recon.get("passed") is True)
+    return classify_post_write_assurance(recon).get("claim_level") == "full_checksum"
 
 
 def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
