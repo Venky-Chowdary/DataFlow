@@ -308,7 +308,8 @@ def test_live_oracle_sqlite_null_stays_null(tmp_path):
         _drop_ora(ora_mid)
 
 
-def test_live_oracle_sqlite_skip_when_dest_count_matches(tmp_path):
+def test_live_oracle_sqlite_occupied_equal_count_declines(tmp_path):
+    """Equal COUNT is not proof: an append rerun must reach the row path."""
     tag = uuid.uuid4().hex[:8]
     src = tmp_path / "src.db"
     ora_mid = f"ora_sqlite_skip_{tag}"
@@ -327,17 +328,17 @@ def test_live_oracle_sqlite_skip_when_dest_count_matches(tmp_path):
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_oracle_to_sqlite(
-            source_cfg=_ora_cfg(),
-            source_schema="DATAFLOW",
-            source_table=ora_mid,
-            dest_cfg=_sqlite_cfg(dest_db, dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            sqlite_ddls=["INTEGER", "TEXT"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
+        with pytest.raises(FastPathUnavailable, match="occupied SQLite dest"):
+            copy_oracle_to_sqlite(
+                source_cfg=_ora_cfg(),
+                source_schema="DATAFLOW",
+                source_table=ora_mid,
+                dest_cfg=_sqlite_cfg(dest_db, dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                sqlite_ddls=["INTEGER", "TEXT"],
+                replace_destination=False,
+            )
         assert _sqlite_count(dest_db, dest) == 800
     finally:
         _drop_ora(ora_mid)

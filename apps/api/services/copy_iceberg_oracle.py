@@ -193,6 +193,11 @@ def copy_iceberg_to_oracle(
             )
         pa_table = pa_table.rename_columns(target_cols)
 
+        from connectors.oracle_tstz import pin_oracle_timestamp_binds
+
+        # executemany binds datetime as DATE unless pinned right before it.
+        pin_oracle_timestamp_binds(dst_cur, oracle_ddls)
+
         copied = _arrow_into_oracle(
             dst_cur, pa_table, insert_sql, converters, batch_size
         )

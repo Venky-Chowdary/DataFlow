@@ -826,6 +826,7 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
     # Tombstones are already stripped: hashing deleted keys as writes would
     # fail Gate-8 after a correct hard DELETE.
     inline_fps: list[Any] = []
+    fp_rows: list[Any] = []
     witness = getattr(tally, "keyed_write_witness", None)
     if witness is not None and router_step is not None:
         witness._give_up("routed_write_not_witnessed")
@@ -853,16 +854,9 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
                     mapped_fp = dedupe_rows(
                         list(mapped_fp), list(cfg.pk_target_cols), list(cfg.target_cols)
                     )
-            if mapped_fp and witness is not None:
-                # The witness renders with its own encoder (the same parameters).
-                witness.add_rows(list(mapped_fp))
-            elif mapped_fp:
-                inline_fps = row_fingerprints(
-                    mapped_fp,
-                    cfg.target_cols,
-                    dest_db_type=cfg.dest_bind_dialect,
-                    dest_types=cfg.digest_dest_types,
-                )
+            # Hashed after the write: a dedupe_skip write names the stored keys
+            # it left in place, and those rows are not this run's write.
+            fp_rows = list(mapped_fp or [])
         except Exception as exc:
             if witness is not None:
                 # A chunk the witness did not see must not look witnessed.
@@ -953,8 +947,35 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
         if tally.keyed_census_acc is not None:
             tally.keyed_census_acc.reverse_last_live_batch()
         raise
+    if fp_rows:
+        from services.duplicate_policy import rows_without_kept_keys
+
+        fp_rows = rows_without_kept_keys(
+            fp_rows, list(cfg.target_cols or []), list(cfg.pk_target_cols or []),
+            chunk_summary.get("skipped_identity_keys"),
+        )
+        try:
+            if witness is not None:
+                # The witness renders with its own encoder (the same parameters).
+                witness.add_rows(fp_rows)
+            elif fp_rows:
+                inline_fps = row_fingerprints(
+                    fp_rows,
+                    cfg.target_cols,
+                    dest_db_type=cfg.dest_bind_dialect,
+                    dest_types=cfg.digest_dest_types,
+                )
+        except Exception as exc:
+            if witness is not None:
+                witness._give_up("chunk_not_witnessed")
+            _stream.logger.warning(
+                "Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc
+            )
     if tally.keyed_census_acc is not None:
-        if int(batch_written or 0) == 0:
+        # Keys a dedupe_skip write kept stored were resolved by the batch, so
+        # its census stands even when nothing new landed.
+        kept_keys = bool(chunk_summary.get("skipped_identity_keys"))
+        if int(batch_written or 0) == 0 and not kept_keys:
             tally.keyed_census_acc.reverse_last_live_batch()
         else:
             tally.keyed_census_acc.keep_last_live_batch()

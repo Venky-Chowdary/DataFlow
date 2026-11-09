@@ -50,7 +50,7 @@ import {
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
 import { buildValidateHonestyControls, dateLocaleValidateAction, numberLocaleValidateAction, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
-import { dashboardCtaVariant, type ValidateStudioPrimary } from "../../lib/validateStudioPrimary";
+import { dashboardCtaVariant, pendingDdlApproval, type ValidateStudioPrimary } from "../../lib/validateStudioPrimary";
 import { uniqueListKey } from "../../lib/uiUtils";
 import { isFkOrphanBlockerText, isFkOrphanCtaKind } from "../../lib/fkOrphanCta";
 import {
@@ -313,6 +313,10 @@ interface ValidateDashboardProps {
   onAcknowledgeFkRisk?: () => void;
   /** The FK-risk acknowledgment Validate already carries for this run. */
   fkRiskAcknowledged?: boolean;
+  /** Re-runs Validate approving the destination DDL it disclosed (ddl_changes_acknowledged). */
+  onApproveDdlChanges?: () => void;
+  /** The DDL approval Validate already recorded for this run. */
+  ddlChangesAcknowledged?: boolean;
   /**
    * Module 16 — opt-in full-table population orphan scan (only path to RI proven).
    * Expensive; default off. Sample Validate never equals population RI.
@@ -805,6 +809,8 @@ export function ValidateDashboard({
   onAcknowledgeSchemaDrift,
   onAcknowledgeFkRisk,
   fkRiskAcknowledged = false,
+  onApproveDdlChanges,
+  ddlChangesAcknowledged = false,
   runPopulationOrphanScan = false,
   onRunPopulationOrphanScanChange,
   repairMappings = [],
@@ -820,6 +826,7 @@ export function ValidateDashboard({
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const dashCta = dashboardCtaVariant;
+  const ddlGate = pendingDdlApproval(preflight);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [revealCount, setRevealCount] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
@@ -3509,12 +3516,30 @@ export function ValidateDashboard({
 
               // Root kinds have no `source` payload. Fail closed — never read
               // `.details` on undefined (Transfer Studio crash).
+              const ddlAction = ddlGate && onApproveDdlChanges && !ddlChangesAcknowledged
+                && (item.source?.id === "g_upsert_dest_key"
+                  || item.gateChips?.some((chip) => chip.id === "g_upsert_dest_key")) ? (
+                  <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                    <code className="df2-vd-planned-ddl">{String(ddlGate.details?.planned_ddl ?? "")}</code>
+                    <Button
+                      size="sm"
+                      variant={dashCta("approve_ddl")}
+                      leadingIcon={<DtIcon name="shield" size={14} />}
+                      onClick={() => onApproveDdlChanges()}
+                      disabled={running}
+                      title="Approve this statement; Execute runs it before the first write"
+                    >
+                      Approve destination DDL
+                    </Button>
+                  </div>
+                ) : null;
               const b = item.source;
               if (!b) {
                 return (
                   <li key={item.key}>
                     <strong>{item.title}</strong>
                     <span>{item.message}</span>
+                    {ddlAction}
                     {item.fix && (
                       <p className="df2-vd-blocker-fix-note">{item.fix}</p>
                     )}
@@ -3651,6 +3676,7 @@ export function ValidateDashboard({
                       </Button>
                     </div>
                   )}
+                  {ddlAction}
                   {(
                     b.id === "constraint_fk"
                     || b.details?.remediation_kind === "acknowledge_fk_risk"

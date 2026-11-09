@@ -373,6 +373,9 @@ def run_file_preflight(
     resume: bool = False,
     # The resumed run only verifies: every batch was already committed.
     resume_write_complete: bool = False,
+    # A resumed keyset read starts past this cursor (its committed prefix).
+    resume_cursor_column: str = "",
+    resume_cursor_value: Any = None,
     source_encoding: dict[str, Any] | None = None,
     population_rows: Iterable[Mapping[str, Any]] | None = None,
     population_replay: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None,
@@ -1482,6 +1485,8 @@ def run_file_preflight(
         source_table=source_table,
         resume=resume,
         resume_write_complete=resume_write_complete,
+        resume_cursor_column=resume_cursor_column,
+        resume_cursor_value=resume_cursor_value,
         source_key_columns=append_identity_source_key(
             sync_mode=sync_mode, stream_contracts=stream_contracts,
             contract_primary_key=contract_primary_key, source_key_groups=source_key_groups,
@@ -1508,9 +1513,31 @@ def run_file_preflight(
         # key by design — a unique constraint on the key would be wrong, and the
         # writer keys current-row lookup on (key, is_current), never needing the
         # index this gate exists to disclose.
-        _upsert_constraint_mode = _requires_upsert(sync_mode) and _nsm(
+        from services.sync_cursor import is_overwrite_sync as _is_overwrite
+
+        # An append that chose dedupe_skip / upsert keys its write like an
+        # upsert does, so the same key evidence and DDL disclosure apply.
+        _keyed_policy = (
+            ""
+            if _requires_upsert(sync_mode) or _is_overwrite(sync_mode)
+            else _plan_duplicate_policy(source_config, destination_config)
+        )
+        if _keyed_policy not in {"dedupe_skip", "upsert"}:
+            _keyed_policy = ""
+        _upsert_constraint_mode = (_requires_upsert(sync_mode) or bool(_keyed_policy)) and _nsm(
             sync_mode, default=""
         ) != "scd2"
+        _policy_keys: list[str] = []
+        if _keyed_policy:
+            from services.duplicate_policy import keyed_policy_key_columns, keyed_policy_no_key_gate
+
+            _policy_keys = keyed_policy_key_columns(
+                contract_primary_key=contract_primary_key,
+                destination_pk_columns=destination_pk_columns,
+                mappings=mappings,
+            )
+            if not _policy_keys:
+                upsert_ddl_gate = keyed_policy_no_key_gate(_keyed_policy)
         # Non-relational destinations (SaaS REST, object stores, schemaless,
         # Kafka/vector) are natively keyed upserts — DataFlow never runs
         # CREATE UNIQUE INDEX on them, so there is no DDL to disclose. Blocking
@@ -1542,6 +1569,8 @@ def run_file_preflight(
                 destination_table=destination_table,
             )
             _uk_cols = [t for _s, t in _uk_pairs]
+            if _keyed_policy:
+                _uk_cols = list(_policy_keys)
             if _uk_cols and not dest_unique_covering_columns(
                 destination_pk_columns, destination_unique_keys, _uk_cols
             ):

@@ -243,6 +243,27 @@ describe("computeJobTrustScore", () => {
     assert.doesNotMatch(append.next_action.label, /investigate/i);
   });
 
+  it("keyed append delta does not claim the destination grew", () => {
+    const keyed = computeJobTrustScore({
+      status: "completed",
+      records_processed: 3,
+      rejected_rows: 0,
+      destination_summary: { duplicate_policy: "dedupe_skip" },
+      reconciliation: {
+        passed: true,
+        phase: "post_write_row_count",
+        assurance_level: "row_count",
+        coverage: "row_count",
+        checksum_scope: "whole_table_not_comparable",
+        checksum_match: false,
+        migration_proven: false,
+      },
+    });
+    assert.equal(keyed.next_action.code, "append_delta");
+    assert.doesNotMatch(keyed.next_action.detail, /grew/i);
+    assert.match(keyed.next_action.detail, /Duplicate rows/);
+  });
+
   it("closed quarantine ledger does not keep Review quarantine as next action", () => {
     const t = computeJobTrustScore({
       status: "completed_with_quarantine",
@@ -259,5 +280,25 @@ describe("computeJobTrustScore", () => {
     const q = t.factors.find((f) => f.id === "quarantine");
     assert.equal(q?.score, 100);
     assert.equal(t.next_action.code, "quarantine_closed");
+  });
+  it("states quarantine share of rows read, not of rows written", () => {
+    const t = computeJobTrustScore({
+      status: "completed_with_quarantine",
+      records_processed: 1,
+      rejected_rows: 2,
+      destination_summary: { source_row_count: 3, rows_written: 1, rejected_rows: 2 },
+    });
+    const q = t.factors.find((f) => f.id === "quarantine");
+    assert.match(String(q?.note), /2 open quarantined \(66\.7% of rows read\)/);
+  });
+  it("states quarantine share of rows read, not of rows written (conservation ledger rows_read)", () => {
+    const t = computeJobTrustScore({
+      status: "completed_with_quarantine",
+      records_processed: 1,
+      rejected_rows: 2,
+      destination_summary: { rows_written: 1, rejected_rows: 2, row_accounting: { rows_read: 3, rows_quarantined: 2 } },
+    });
+    const q = t.factors.find((f) => f.id === "quarantine");
+    assert.match(String(q?.note), /2 open quarantined \(66\.7% of rows read\)/);
   });
 });

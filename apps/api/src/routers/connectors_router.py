@@ -1629,7 +1629,13 @@ async def get_job_quarantine(job_id: str, request: Request):
             "migration_proven": False,
         }
     open_n = int(closure.get("open_count") or 0)
-    from services.quarantine_dlq import count_finding_rows
+    from services.quarantine_dlq import count_finding_rows, replay_parent_not_committed
+
+    parent_refusal = replay_parent_not_committed(job) if open_n else None
+    if parent_refusal:
+        # Replay refuses a failed parent (D133); the next action must say so.
+        replay_block_reason = parent_refusal
+        closure = {**closure, "next_action": parent_refusal}
 
     finding_rows = count_finding_rows(details) or len(details)
     rejected_rows = int(

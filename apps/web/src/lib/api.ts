@@ -1,4 +1,5 @@
 import type { ProgressAbsence, ProgressDelivery } from "./jobProgressGate";
+import type { RouteCertification, RouteCertificationStatus } from "./routeCertification";
 import { streamDropNotice, streamSilenceNeedsCatchUp } from "./jobStreamLiveness";
 import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
@@ -467,6 +468,8 @@ export async function runPreflight(payload: {
   schema_drift_acknowledged?: boolean;
   /** Operator acknowledged destination FK mapping risk (schema coverage only). */
   fk_risk_acknowledged?: boolean;
+  /** Operator approved the destination DDL Validate disclosed (e.g. a unique index). */
+  ddl_changes_acknowledged?: boolean;
   /** Module 11 — opt-in full-table population orphan scan (only path to RI proven). */
   run_population_orphan_scan?: boolean;
   /** Who acknowledged (email / display name). */
@@ -2977,6 +2980,8 @@ export type PreflightAcknowledgments = {
   compliance_acknowledged?: boolean;
   schema_drift_acknowledged?: boolean;
   fk_risk_acknowledged?: boolean;
+  /** Operator approved the destination DDL Validate disclosed (e.g. a unique index). */
+  ddl_changes_acknowledged?: boolean;
   acknowledgment_actor?: string;
   acknowledgment_reason?: string;
 };
@@ -3097,6 +3102,7 @@ export async function preflightTransferPlan(
       compliance_acknowledged: acknowledgments.compliance_acknowledged ?? false,
       schema_drift_acknowledged: acknowledgments.schema_drift_acknowledged ?? false,
       fk_risk_acknowledged: acknowledgments.fk_risk_acknowledged ?? false,
+      ddl_changes_acknowledged: acknowledgments.ddl_changes_acknowledged ?? false,
       acknowledgment_actor: acknowledgments.acknowledgment_actor ?? "",
       acknowledgment_reason: acknowledgments.acknowledgment_reason ?? "",
       shape_recipe: shapeRecipe ?? null,
@@ -3227,6 +3233,7 @@ export async function runUniversalTransfer(options: {
   complianceAcknowledged?: boolean;
   schemaDriftAcknowledged?: boolean;
   fkRiskAcknowledged?: boolean;
+  ddlChangesAcknowledged?: boolean;
   acknowledgmentActor?: string;
   acknowledgmentReason?: string;
   /** Phase C11 — 64-hex Decision Artifact content_hash from last green Validate. */
@@ -3352,6 +3359,10 @@ export async function runUniversalTransfer(options: {
     "fk_risk_acknowledged",
     options.fkRiskAcknowledged === true ? "true" : "false",
   );
+  formData.append(
+    "ddl_changes_acknowledged",
+    options.ddlChangesAcknowledged === true ? "true" : "false",
+  );
   if (options.acknowledgmentActor) {
     formData.append("acknowledgment_actor", options.acknowledgmentActor);
   }
@@ -3467,6 +3478,7 @@ export async function executeTransferJson(payload: {
   complianceAcknowledged?: boolean;
   schemaDriftAcknowledged?: boolean;
   fkRiskAcknowledged?: boolean;
+  ddlChangesAcknowledged?: boolean;
   acknowledgmentActor?: string;
   acknowledgmentReason?: string;
   approvedDecisionArtifactHash?: string;
@@ -3499,6 +3511,7 @@ export async function executeTransferJson(payload: {
       compliance_acknowledged: payload.complianceAcknowledged === true,
       schema_drift_acknowledged: payload.schemaDriftAcknowledged === true,
       fk_risk_acknowledged: payload.fkRiskAcknowledged === true,
+      ddl_changes_acknowledged: payload.ddlChangesAcknowledged === true,
       acknowledgment_actor: payload.acknowledgmentActor || undefined,
       acknowledgment_reason: payload.acknowledgmentReason || undefined,
       approved_decision_artifact_hash:
@@ -4969,6 +4982,12 @@ export type ProofLedger = {
     production_sku_driver_missing?: number;
     production_sku_refused?: number;
     production_sku_note?: string;
+    route_certification?: {
+      artifact: string | null;
+      generated_at: string | null;
+      routes_by_status: Partial<Record<RouteCertificationStatus, number>>;
+      tests: { tests_passed: number; tests_failed: number; tests_skipped: number } | null;
+    };
     customer_handover_sold?: number;
     customer_handover_eligible?: number;
     fidelity_proofs_on_disk: number;
@@ -4987,6 +5006,7 @@ export type ProofLedger = {
     customer_handover_eligible?: boolean;
     validate_ok?: boolean;
     driver_gap?: string | null;
+    certification?: RouteCertification | null;
   }[];
   recent_proofs: {
     id: string;

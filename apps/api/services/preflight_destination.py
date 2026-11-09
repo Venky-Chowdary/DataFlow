@@ -137,7 +137,12 @@ def inspect_destination_for_preflight(
         # cannot print the destination password. The privilege probe below still
         # reads the real values through the mapping interface.
         out["_saved_cfg"] = RedactedConfig(cfg)
-        out["_probe_cfg"] = RedactedConfig(cfg)
+        # The probe reads the table the operator chose. A saved connector's
+        # default schema (public) disclosed DDL and probed keys on the wrong
+        # table when the Studio picked another schema.
+        out["_probe_cfg"] = RedactedConfig(
+            {**cfg, "schema": dest_schema} if str(dest_schema or "").strip() else cfg
+        )
         if not ok:
             out["connected"] = False
             out["message"] = msg or "Destination unreachable"

@@ -161,13 +161,16 @@ class TransactionBuffer:
         *,
         pk: str | None = None,
         lsn: str | None = None,
+        old_pk: str | None = None,
     ) -> None:
+        """``old_pk`` is the before-image key; when it differs the old key is deleted."""
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC transaction buffer is not open after update")
-        self._open.events.append(
-            CdcTxnEvent(op="u", pk=infer_row_pk(row, explicit=pk), row=dict(row), lsn=lsn)
-        )
+        new_pk = infer_row_pk(row, explicit=pk)
+        if old_pk and str(old_pk) != new_pk:
+            self._open.events.append(CdcTxnEvent(op="d", pk=str(old_pk), row=None, lsn=lsn))
+        self._open.events.append(CdcTxnEvent(op="u", pk=new_pk, row=dict(row), lsn=lsn))
         self._after_dml()
 
     def delete(self, pk: str, *, lsn: str | None = None) -> None:

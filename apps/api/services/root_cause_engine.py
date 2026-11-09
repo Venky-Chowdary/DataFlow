@@ -593,6 +593,15 @@ def _is_upsert_ddl_signal(details: dict[str, Any] | None) -> bool:
     return str(details.get("rule_id") or "") == "g_upsert_dest_key"
 
 
+def _is_collision_unreadable_signal(details: dict[str, Any] | None) -> bool:
+    """The collision probe could not read stored keys: no duplicate was found.
+
+    Folding it into duplicate_identity told the operator the uniqueness check
+    failed on data; the gate's own message names the missing read access.
+    """
+    return str((details or {}).get("rule_id") or "") == "g6_target_ddl.append_collision_unreadable"
+
+
 def _is_destination_collision_signal(details: dict[str, Any] | None) -> bool:
     """True for a key the destination already stores, not a duplicate in the source.
 
@@ -668,6 +677,15 @@ def _is_duplicate_signal(
     # ``primary.?key`` in ``_DUP_RE`` and minted a phantom "Duplicate identity
     # keys" root that hid the real missing-key/cursor message (QA T11/T08).
     if str(gate_id or "") == "g9_sync_contract":
+        return False
+    # The upsert key gate's own remedies (declare a key, approve the disclosed
+    # unique index, pick an indexable key) are not duplicate rows: only its
+    # duplicate-value probe finding is.
+    if (
+        str(gate_id or "") == "g_upsert_dest_key"
+        and details.get("remediation_kind") in {"declare_key", "approve_ddl_or_dedupe", "choose_indexable_key"}
+        and not details.get("duplicate_key_count")
+    ):
         return False
     if re.search(r"sync mode contract incomplete", str(message or ""), re.I):
         return False
@@ -2105,6 +2123,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         if g.get("status") == "block"
         and not _is_destination_collision_signal(g.get("details") or {})
         and not _is_upsert_ddl_signal(g.get("details") or {})
+        and not _is_collision_unreadable_signal(g.get("details") or {})
         and not _is_uniqueness_probe_signal(
             str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
         )
@@ -2115,6 +2134,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         for b in _raw_signal_blockers(blockers)
         if not _is_destination_collision_signal(b.get("details") or {})
         and not _is_upsert_ddl_signal(b.get("details") or {})
+        and not _is_collision_unreadable_signal(b.get("details") or {})
         and not _is_uniqueness_probe_signal(
             str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
         )

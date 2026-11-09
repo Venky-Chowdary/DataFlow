@@ -572,23 +572,48 @@ def _drop_destination_table(
     alive until then.
     """
     if mongo is None or not job_id or destination.kind != "database":
-        return _clear_destination_table(
+        cleared = _clear_destination_table(
             destination, mappings=mappings, checkpoint=checkpoint,
             checkpoint_service=checkpoint_service, mongo=mongo, job_id=job_id,
         )
-    from connectors.write_resilience import destination_lock_wait_seconds
+    else:
+        from connectors.write_resilience import destination_lock_wait_seconds
 
-    with _engine._job_phase_heartbeat(
-        mongo,
-        job_id,
-        phase="writing",
-        message="Preparing destination — clearing table for full refresh…",
-        interval_s=max(0.25, min(15.0, destination_lock_wait_seconds() / 4)),
-    ):
-        return _clear_destination_table(
-            destination, mappings=mappings, checkpoint=checkpoint,
-            checkpoint_service=checkpoint_service, mongo=mongo, job_id=job_id,
-        )
+        with _engine._job_phase_heartbeat(
+            mongo,
+            job_id,
+            phase="writing",
+            message="Preparing destination — clearing table for full refresh…",
+            interval_s=max(0.25, min(15.0, destination_lock_wait_seconds() / 4)),
+        ):
+            cleared = _clear_destination_table(
+                destination, mappings=mappings, checkpoint=checkpoint,
+                checkpoint_service=checkpoint_service, mongo=mongo, job_id=job_id,
+            )
+    if cleared:
+        _forget_cleared_batches(destination, job_id)
+    return cleared
+
+
+def _forget_cleared_batches(destination: EndpointConfig, job_id: str) -> None:
+    """Drop this job's write-ledger rows once its destination was cleared.
+
+    The ledger marks batches as committed so a retry skips them. After the
+    clear those rows are gone, so a restarted overwrite with the same job id
+    skipped its first batches and loaded 25 of 30 rows.
+    """
+    if not job_id or destination.kind != "database":
+        return
+    from connectors.write_resilience import cleanup_write_ledger
+
+    from .adapters import resolve_connector_config
+    from .connector_capabilities import resolve_driver_type
+
+    cleanup_write_ledger(
+        dest_type=resolve_driver_type(destination.format),
+        cfg=resolve_connector_config(destination),
+        job_id=job_id,
+    )
 
 
 def _clear_destination_table(

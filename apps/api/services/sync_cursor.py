@@ -1706,9 +1706,19 @@ def requires_upsert(sync_mode: str) -> bool:
 
 
 def map_source_to_target(column: str, mappings: list[dict[str, Any]]) -> str:
+    """The mapped target of ``column``; a case-only spelling falls back once.
+
+    Oracle and Snowflake resolve a contract key to the catalog spelling (``ID``)
+    while the mapping keeps the operator's spelling (``id``). Without the
+    fallback the key kept the source spelling and every destination key probe
+    on a case-sensitive engine named a column that does not exist.
+    """
     for m in mappings:
         if str(m.get("source") or "") == column:
             return str(m.get("target") or column)
+    folded = [m for m in mappings if str(m.get("source") or "").casefold() == column.casefold()]
+    if len(folded) == 1:
+        return str(folded[0].get("target") or column)
     return column
 
 

@@ -7,6 +7,7 @@ from services.connector_auth import resolve_api_key
 import hashlib
 import json
 import logging
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -16,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 _PGVECTOR_SIDECAR = "_df_vector_collections"
 _QDRANT_SIDECAR = "_df_vector_collections"
+# Milvus refuses FloatVector dim < 2; the sidecar stores metadata only, so its
+# placeholder vector is a fixed unit vector (COSINE refuses an all-zero one).
+_MILVUS_READBACK_WINDOW_S = 10.0
+_MILVUS_SIDECAR_VECTOR = (1.0, 0.0)
 _FINGERPRINT_STATUSES = frozenset({"created", "verified", "adopted_unverified"})
 
 
@@ -940,7 +945,12 @@ def _enforce_milvus(
     vector_id = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
     try:
         _ensure_collection(
-            session, base_url, headers, sidecar, dimension=1, db_name=db_name
+            session,
+            base_url,
+            headers,
+            sidecar,
+            dimension=len(_MILVUS_SIDECAR_VECTOR),
+            db_name=db_name,
         )
         rows = _m6_engine_rows("milvus", cfg, sidecar)
         stored_row = next(
@@ -980,7 +990,7 @@ def _enforce_milvus(
             status = "adopted_unverified"
         entity = {
             "id": vector_id,
-            "vector": [0.0],
+            "vector": list(_MILVUS_SIDECAR_VECTOR),
             "content": "",
             "source_id": str(target)[:256],
             "chunk_index": 0,
@@ -1007,17 +1017,23 @@ def _enforce_milvus(
         body = written.json() if written.content else {}
         if not _ok_response(body if isinstance(body, dict) else {}, written.status_code):
             raise RuntimeError(f"Milvus fingerprint write failed: {written.status_code}")
-        reread = _m6_engine_rows("milvus", cfg, sidecar)
-        stored_row = next(
-            (
-                row
-                for row in reread
-                if str(row.get("source_id") or "") == str(target)
-            ),
-            None,
-        )
-        if not stored_row:
-            raise RuntimeError("Milvus fingerprint write could not be read back")
+        # Milvus 2.4 REST query does not see an upsert at once (it ignores
+        # consistencyLevel); poll a bounded window before calling it lost.
+        stored_row = None
+        deadline = time.monotonic() + _MILVUS_READBACK_WINDOW_S
+        while stored_row is None:
+            stored_row = next(
+                (
+                    row
+                    for row in _m6_engine_rows("milvus", cfg, sidecar)
+                    if str(row.get("source_id") or "") == str(target)
+                ),
+                None,
+            )
+            if stored_row is None:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Milvus fingerprint write could not be read back")
+                time.sleep(0.25)
         metadata = stored_row.get("metadata") or {}
         _check_existing_fingerprint(
             json.loads(str(metadata.get("fingerprint") or "{}")),

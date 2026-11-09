@@ -106,3 +106,12 @@ def test_engine_and_identity_columns_are_regenerated_not_emptied():
         identity=["row_id"],
     )
     assert _gate(result) is None
+
+
+@pytest.mark.parametrize("dest_db", ["elasticsearch", "opensearch"])
+def test_search_document_id_is_not_an_emptied_column(dest_db):
+    """``_id`` is hit metadata the writer reassigns; a real unmapped field still blocks."""
+    only_id = _overwrite(dest_db, dest_types={**_TYPES, "_id": "keyword"})
+    assert _gate(only_id) is None or _gate(only_id)["status"] != "block"
+    with_note = _overwrite(dest_db, dest_types={**_TYPES, "_id": "keyword", "note": "text"})
+    assert _gate(with_note)["details"]["columns"] == ["note"]

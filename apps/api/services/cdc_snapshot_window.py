@@ -76,6 +76,18 @@ def _pk_row_dict(primary_key: str | Sequence[str], key: str) -> dict[str, Any]:
     return {cols[i]: (parts[i] if i < len(parts) else None) for i in range(len(cols))}
 
 
+def _retired_key_events(
+    old_key: str, new_key: str, primary_key: str | Sequence[str]
+) -> list[dict[str, Any]]:
+    """A key-changing UPDATE retires its old key (Debezium emits delete + create).
+
+    Applying only the after-image left the old key's row in the destination.
+    """
+    if not old_key or not new_key or old_key == new_key:
+        return []
+    return [{"op": "d", "pk": old_key, "row": _pk_row_dict(primary_key, old_key)}]
+
+
 @dataclass
 class WindowRow:
     pk: str

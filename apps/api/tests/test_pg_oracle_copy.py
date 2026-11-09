@@ -40,6 +40,37 @@ def test_number_38_0_stays_integer():
     assert conv_scale("1.5") == 1.5
 
 
+def test_number_with_scale_binds_exact_decimal():
+    """NUMBER(18,6) through float stored 99999999999.999999 as 1E+11."""
+    from decimal import Decimal
+
+    conv = converter_for_ora_ddl("NUMBER(18,6)", [0])
+    assert conv("99999999999.999999") == Decimal("99999999999.999999")
+    assert isinstance(conv("0.000001"), Decimal)
+
+
+def test_zoneless_timestamp_columns_bind_as_timestamp():
+    """executemany binds datetime as DATE: TIMESTAMP(6) lost its microseconds."""
+    import oracledb
+
+    from connectors.oracle_tstz import pin_oracle_timestamp_binds
+
+    class _Cur:
+        sizes: tuple = ()
+
+        def setinputsizes(self, *sizes):
+            self.sizes = sizes
+
+    cur = _Cur()
+    pin_oracle_timestamp_binds(
+        cur, ["NUMBER(38,0)", "TIMESTAMP(6)", "TIMESTAMP(6) WITH TIME ZONE", "DATE"]
+    )
+    assert cur.sizes == (None, oracledb.DB_TYPE_TIMESTAMP, None, None)
+    untouched = _Cur()
+    pin_oracle_timestamp_binds(untouched, ["NUMBER(38,0)", "VARCHAR2(10)"])
+    assert untouched.sizes == ()
+
+
 def _oracle_password() -> str:
     env = (os.environ.get("DATAFLOW_ORACLE_PASSWORD") or os.environ.get("ORA_PASSWORD") or "").strip()
     if env:

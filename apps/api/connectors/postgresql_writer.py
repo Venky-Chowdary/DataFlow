@@ -3071,9 +3071,10 @@ def write_mapped_rows(
             chunks = chunk_idx
             from connectors.sql_write_materialize import accounted_rejected_rows
 
+            # Keys a dedupe_skip write left stored were decided, not rejected.
             rejected_rows = _rejected_row_count(
                 data_rows,
-                [()] * write_acc.accepted_row_count,
+                [()] * (write_acc.accepted_row_count + len(skipped_identity_keys)),
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,

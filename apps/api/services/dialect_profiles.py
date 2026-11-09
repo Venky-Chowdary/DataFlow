@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Literal
+from functools import lru_cache
+from typing import Any, Literal
 
 FoldMode = Literal["lower", "upper", "none"]
 QuoteStyle = Literal["double", "backtick", "bracket", "none"]
@@ -461,9 +462,29 @@ def stored_identifier(driver: str | None, name: str) -> str:
     the logical ``"id"`` never matched the stored ``ID`` (D47). It is also the
     spelling a rerun reads back, so anything keyed by column name (the SCD2
     row hash) stays stable across runs. It takes the same fold the writer
-    applies; every other engine keeps the verbatim name.
+    applies. Oracle stores what SQLAlchemy emits unquoted folded too
+    (``is_current`` lands as ``IS_CURRENT``, so a quoted ``"is_current"`` is
+    ORA-00904), but a name it must quote (``_deleted``, reserved words) keeps
+    its spelling. Every other engine keeps the verbatim name.
     """
-    return fold_identifier(driver, name) if normalize_driver(driver) == "snowflake" else name
+    kind = normalize_driver(driver)
+    if kind == "snowflake":
+        return fold_identifier(driver, name)
+    if kind == "oracle" and name == name.lower() and not _oracle_requires_quotes(name):
+        return name.upper()
+    return name
+
+
+@lru_cache(maxsize=1)
+def _oracle_preparer() -> Any:
+    from sqlalchemy.dialects import oracle
+
+    return oracle.dialect().identifier_preparer
+
+
+def _oracle_requires_quotes(name: str) -> bool:
+    """SQLAlchemy's own rule for quoting an Oracle identifier it creates."""
+    return _oracle_preparer().quote(name) != name
 
 
 def quote_stored_identifier(driver: str | None, name: str) -> str:
@@ -506,3 +527,31 @@ def sql_bool_true_literal(driver: str | None) -> str:
 
 def sql_bool_false_literal(driver: str | None) -> str:
     return "0" if stores_boolean_as_numeric(driver) else "FALSE"
+
+
+#: Oracle catalog spelling of a table's columns (bind ``t`` table, ``o`` owner).
+ORACLE_CATALOG_COLUMNS_SQL = (
+    "SELECT column_name FROM all_tab_columns "
+    "WHERE UPPER(table_name) = UPPER(:t) AND owner = UPPER(:o)"
+)
+
+
+def match_stored_names(stored: Any, names: Any) -> list[str]:
+    """The catalog spelling of each logical name.
+
+    An exact catalog hit wins, else the single case-insensitive match (Oracle
+    stores ``UPDATED_AT`` for an unquoted ``updated_at``), else the name is
+    returned unchanged so the engine still reports the real error.
+    """
+    exact = {str(n) for n in stored}
+    folded: dict[str, list[str]] = {}
+    for n in exact:
+        folded.setdefault(n.casefold(), []).append(n)
+
+    def _one(name: str) -> str:
+        if name in exact:
+            return name
+        hits = folded.get(name.casefold()) or []
+        return hits[0] if len(hits) == 1 else name
+
+    return [_one(str(n)) for n in names]

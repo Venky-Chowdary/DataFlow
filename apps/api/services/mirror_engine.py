@@ -994,6 +994,9 @@ def apply_inferred_soft_deletes(
     target_cols = _target_columns(columns, mappings, schema)
     engine = get_sqlalchemy_engine(cfg)
     engine_dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "")
+    from connectors.generic_sql import _resolve_physical_table_ident
+
+    table, schema_name = _resolve_physical_table_ident(engine, table, schema_name)
     qualified = _qualified_name(table, schema_name, engine_dialect)
     stg_name = _staging_table_name()
     stg_qualified = _qualified_name(stg_name, schema_name, engine_dialect)

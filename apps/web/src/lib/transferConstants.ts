@@ -253,7 +253,10 @@ export function syncModeHonestyLine(
       return (
         "Inserts into the existing table. Live destination types bind — Full append "
         + "does not CREATE a new table and does not ALTER NUMBER/VARCHAR widths. "
-        + "An empty leftover table still exists. Existing destination key constraints still apply."
+        + "An empty leftover table still exists. Existing destination key constraints still apply. "
+        + "Each run inserts its full snapshot again: on a table with no enforced key, a rerun "
+        + "stores another copy of every row already there (Validate counts them). Use upsert, "
+        + "deduped append or overwrite to keep one copy."
       );
     }
     if (destTableExists === false) {

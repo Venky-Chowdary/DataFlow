@@ -168,13 +168,18 @@ class MultiTableTransactionBuffer:
         *,
         pk: str | None = None,
         lsn: str | None = None,
+        old_pk: str | None = None,
     ) -> None:
+        """``old_pk`` is the before-image key; when it differs the old key is deleted."""
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC multi-table buffer is not open after update")
-        self._bucket(table).events.append(
-            CdcTxnEvent(op="u", pk=infer_row_pk(row, explicit=pk), row=dict(row), lsn=lsn)
-        )
+        new_pk = infer_row_pk(row, explicit=pk)
+        bucket = self._bucket(table)
+        if old_pk and str(old_pk) != new_pk:
+            bucket.events.append(CdcTxnEvent(op="d", pk=str(old_pk), row=None, lsn=lsn))
+            self._open.event_count += 1
+        bucket.events.append(CdcTxnEvent(op="u", pk=new_pk, row=dict(row), lsn=lsn))
         self._open.event_count += 1
         self._maybe_overflow()
 

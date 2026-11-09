@@ -14,6 +14,7 @@ from services.acknowledgment_contract import (
     audit_acknowledgments,
     resolve_acknowledgments,
 )
+from services.duplicate_policy import with_duplicate_route_option
 from services.fk_parent_preflight import with_fk_route_option
 from services.preflight_cursor_gate import resolve_read_scope
 from services.shape_preflight import (
@@ -611,8 +612,11 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             destination_indexes_meta=dest_meta.get("indexes_meta"),
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
             destination_check_constraints=dest_meta.get("check_constraints") or [],
-            destination_config=with_fk_route_option(
-                dest_meta.get("_probe_cfg"), (body.dest_extra or {}).get("foreign_keys_mode")
+            destination_config=with_duplicate_route_option(
+                with_fk_route_option(
+                    dest_meta.get("_probe_cfg"), (body.dest_extra or {}).get("foreign_keys_mode")
+                ),
+                dict(body.dest_extra or {}),
             ),
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,

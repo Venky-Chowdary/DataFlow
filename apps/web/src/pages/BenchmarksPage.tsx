@@ -10,6 +10,12 @@ import { StatCard } from "../components/ui/StatCard";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { useToast } from "../components/Toast";
 import { compareThroughput } from "../lib/benchmarkCompare";
+import {
+  certificationBadgeClass,
+  certificationLabel,
+  certificationModeDetail,
+  routeCertificationOf,
+} from "../lib/routeCertification";
 import { createPoller, type Poller } from "../lib/poller";
 import {
   downloadBenchmarkRunReport,
@@ -467,10 +473,15 @@ export function BenchmarksPage() {
                     </div>
 
                     <div className="df2-page-benchmarks-section">
-                      <h3>PRODUCTION_SKU — sold vs claimed</h3>
+                      <h3>PRODUCTION_SKU — availability and test evidence</h3>
                       <p className="df2-page-benchmarks-note">
                         {metrics?.production_sku_note
                           || `Sold ${metrics?.production_sku_sold ?? 0} of ${ledger.production_sku.length} claimed routes on this host. Catalog tiles are not this list.`}
+                      </p>
+                      <p className="df2-page-benchmarks-note" data-testid="route-cert-summary">
+                        {metrics?.route_certification?.tests
+                          ? `Evidence: ${metrics.route_certification.routes_by_status.verified ?? 0} of ${ledger.production_sku.length} routes verified in every assessed sync mode (preflight, write, independent read-back, rerun). Tests: ${metrics.route_certification.tests.tests_passed} passed, ${metrics.route_certification.tests.tests_failed} failed, ${metrics.route_certification.tests.tests_skipped} skipped.`
+                          : "Evidence: no route certification run on this host, so no route is certified here. Sold means available, not verified."}
                       </p>
                       <div className="df2-page-benchmarks-table-wrap">
                         <table className="df2-page-benchmarks-table">
@@ -479,7 +490,8 @@ export function BenchmarksPage() {
                               <th>Route</th>
                               <th>Source</th>
                               <th>Destination</th>
-                              <th>Status</th>
+                              <th>Availability</th>
+                              <th>Evidence</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -505,6 +517,27 @@ export function BenchmarksPage() {
                                         ? "driver missing"
                                         : "refused"}
                                   </span>
+                                </td>
+                                <td>
+                                  {(() => {
+                                    const cert = routeCertificationOf(r);
+                                    const badge = (
+                                      <span className={certificationBadgeClass(cert.status)}>
+                                        {certificationLabel(cert.status)}
+                                      </span>
+                                    );
+                                    if (!cert.modes.length) return badge;
+                                    return (
+                                      <details className="df2-page-benchmarks-cert">
+                                        <summary>{badge}</summary>
+                                        <ul className="df2-page-benchmarks-cert-modes">
+                                          {cert.modes.map((m) => (
+                                            <li key={m.sync_mode}>{certificationModeDetail(m)}</li>
+                                          ))}
+                                        </ul>
+                                      </details>
+                                    );
+                                  })()}
                                 </td>
                               </tr>
                             ))}

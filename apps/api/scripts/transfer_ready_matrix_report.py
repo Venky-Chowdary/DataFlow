@@ -34,7 +34,9 @@ def main() -> int:
                 "source_format": src_fmt,
                 "dest_kind": dst_kind,
                 "dest_format": dst_fmt,
-                "certification": "PRODUCTION_SKU",
+                # Membership is intent, not proof: route_certification_matrix.json
+                # grades each route × sync mode from test results.
+                "listed_in": "PRODUCTION_SKU",
             }
         )
 

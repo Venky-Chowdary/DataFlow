@@ -487,6 +487,8 @@ export function keepDeclaredCursorKey(input: {
   primaryKeyCandidate: string;
   declaredCursor: string;
   declaredPrimaryKey: string;
+  /** Operator explicitly chose no identity key. */
+  primaryKeyCleared?: boolean;
 }): { cursorField: string; primaryKeyField: string } {
   const nextField = (
     current: string,
@@ -501,7 +503,9 @@ export function keepDeclaredCursorKey(input: {
   };
   return {
     cursorField: nextField(input.cursorField, input.cursorCandidate, input.declaredCursor),
-    primaryKeyField: nextField(input.primaryKeyField, input.primaryKeyCandidate, input.declaredPrimaryKey),
+    primaryKeyField: input.primaryKeyCleared
+      ? ""
+      : nextField(input.primaryKeyField, input.primaryKeyCandidate, input.declaredPrimaryKey),
   };
 }
 

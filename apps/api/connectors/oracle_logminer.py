@@ -247,6 +247,31 @@ def sql_redo_reject_detail(
     }
 
 
+BEFORE_IMAGE_KEY = "_df_before"
+
+
+def pop_retired_key(row: dict[str, Any], pk: str) -> str | None:
+    """Old key of a key-changing UPDATE, from the SQL_REDO ``WHERE`` image.
+
+    Applying only the after-image left the old key's row at the destination
+    (Debezium emits delete + create for a key change).
+    """
+    before = row.pop(BEFORE_IMAGE_KEY, None)
+    if not isinstance(before, dict) or not pk:
+        return None
+    old = redo_key(before, pk)
+    if not old or old == redo_key(row, pk):
+        return None
+    return old
+
+
+def redo_key(row: dict[str, Any], pk: str) -> str:
+    """Pipeline key of a redo row; composite ``REGION,ID`` joins like snapshots."""
+    from services.cdc_snapshot_window import _pk_value as composite_pk_value
+
+    return (composite_pk_value(row, pk) or "") if pk else ""
+
+
 def classify_sql_redo(
     sql_redo: str,
     *,
@@ -263,6 +288,10 @@ def classify_sql_redo(
             parsed, op=op, sql_redo=sql_redo, table=table
         )
     parsed = _parse_sql_redo(sql_redo or "", op=op)
+    if op == "update" and not is_unparsed_sql_redo(parsed):
+        before = _parse_sql_redo(re.sub(r"\bSET\s+.+?\s+(?=WHERE\b)", "", sql_redo, flags=re.I | re.S), op="delete")
+        if before and not is_unparsed_sql_redo(before):
+            parsed[BEFORE_IMAGE_KEY] = before
     if is_unparsed_sql_redo(parsed):
         if sql_redo and not parsed.get("_df_sql_redo"):
             parsed["_df_sql_redo"] = str(sql_redo)[:2000]
@@ -2871,7 +2900,7 @@ class OracleLogMinerCdc:
                         if kind == "unparsed":
                             # Refuse stream-wins on unparsed redo — do not invent a row.
                             continue
-                        key = parsed.get(self.primary_key, "")
+                        key = redo_key(parsed, self.primary_key)
                         if op == "delete" and key:
                             events.append(
                                 {
@@ -2894,6 +2923,18 @@ class OracleLogMinerCdc:
                                 }
                             )
                         else:
+                            retired = pop_retired_key(parsed, self.primary_key)
+                            if retired:
+                                events.append(
+                                    {
+                                        "op": "d",
+                                        "table": self.table,
+                                        "xid": self._logminer_row_xid(row),
+                                        "position": (scn, rs_id, ssn),
+                                        "pk": retired,
+                                        "row": {self.primary_key: retired},
+                                    }
+                                )
                             events.append(
                                 {
                                     "op": "u",
@@ -3125,7 +3166,7 @@ class OracleLogMinerCdc:
                             # never upsert an unparsed row.
                             rejected.append(parsed)
                             continue
-                        key = parsed.get(self.primary_key, "")
+                        key = redo_key(parsed, self.primary_key)
                         if op == "delete":
                             if key:
                                 events.append(
@@ -3186,11 +3227,12 @@ class OracleLogMinerCdc:
         updates = [
             event["row"] for event in events if event.get("op") == "update"
         ]
+        retired = [pop_retired_key(row, self.primary_key) for row in updates]
         deletes = [
             str(event["row"].get(self.primary_key) or "")
             for event in events
             if event.get("op") == "delete" and event["row"].get(self.primary_key)
-        ]
+        ] + [key for key in retired if key]
         self._advance_offset(
             last_scn=last_scn,
             last_rs_id=last_rs_id,
@@ -3579,17 +3621,7 @@ class OracleLogMinerCdc:
                         rejected.append(dict(event.row.get("_df_rejected") or event.row))
                         continue
                     pk = self.primary_keys.get(event.table, self.primary_key)
-                    key_value = event.row.get(pk) if pk else None
-                    if key_value is None and pk:
-                        key_value = next(
-                            (
-                                value
-                                for column, value in event.row.items()
-                                if column.upper() == pk.upper()
-                            ),
-                            None,
-                        )
-                    key = str(key_value) if key_value is not None else ""
+                    key = redo_key(event.row, pk)
                     if event.op == "delete":
                         if key:
                             txn_buf.delete(event.table, key, lsn=str(txn.commit_scn))
@@ -3641,6 +3673,7 @@ class OracleLogMinerCdc:
                             event.row,
                             pk=key if pk else None,
                             lsn=str(txn.commit_scn),
+                            old_pk=pop_retired_key(event.row, pk),
                         )
                 batches = txn_buf.commit(
                     lsn=str(txn.commit_scn),
@@ -3974,14 +4007,17 @@ class OracleLogMinerCdc:
                     shared_rejected.append(row)
                     continue
                 pk = self.primary_keys.get(table_name, self.primary_key)
-                key = row.get(pk, "")
+                key = redo_key(row, pk)
                 if op == "delete":
                     if key:
-                        buf.delete(table_name, str(key), lsn=str(scn))
+                        buf.delete(table_name, key, lsn=str(scn))
                 elif op == "insert":
-                    buf.insert(table_name, row, lsn=str(scn))
+                    buf.insert(table_name, row, pk=key or None, lsn=str(scn))
                 else:
-                    buf.update(table_name, row, lsn=str(scn))
+                    buf.update(
+                        table_name, row, pk=key or None, lsn=str(scn),
+                        old_pk=pop_retired_key(row, pk),
+                    )
             self.scn = last_scn
             self.rs_id = last_rs_id
             self.ssn = last_ssn

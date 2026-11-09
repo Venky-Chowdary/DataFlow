@@ -1096,6 +1096,119 @@ def filter_stale_lsn_rows(
     return to_write, skipped
 
 
+
+def identity_marker(values: tuple) -> str:
+    """The ``skipped_identity_keys`` marker reconcile reads (composite: ``\x1f``)."""
+    if len(values) == 1:
+        return "" if values[0] is None else str(values[0]).strip()
+    return "\x1f".join("" if value is None else str(value).strip() for value in values)
+
+
+def drop_stored_key_rows(
+    cursor: Any,
+    table_name: str,
+    schema: str | None,
+    conflict_cols: list[str],
+    rows: list[tuple],
+    target_cols: list[str],
+    *,
+    quote: str = '"',
+    placeholder: str = "%s",
+    row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[str], list[int] | None]:
+    """dedupe_skip: hold back rows whose key the destination already stores.
+
+    An ignore-on-conflict insert leaves the stored cells in place. Counting
+    those rows as written makes reconcile grade the source values against
+    cells the policy refused to change. Returns ``(rows_to_write,
+    kept_key_markers, row_numbers)``; new keys still insert. Any policy other
+    than skip, or a key not fully mapped, returns the batch unchanged.
+    """
+    from services.duplicate_policy import current_match_action
+
+    if (
+        current_match_action() != "skip"
+        or not rows
+        or not conflict_cols
+        or any(c not in target_cols for c in conflict_cols)
+    ):
+        return rows, [], row_numbers
+    q = quote_sql_identifier
+    qualified = (
+        f"{q(schema, quote)}.{q(table_name, quote)}" if schema else q(table_name, quote)
+    )
+    idxs = [target_cols.index(c) for c in conflict_cols]
+    select_cols = ", ".join(q(c, quote) for c in conflict_cols)
+    stored: set[tuple] = set()
+    for start in range(0, len(rows), LSN_LOOKUP_MAX_KEYS):
+        params: list[Any] = []
+        clauses: list[str] = []
+        for row in rows[start : start + LSN_LOOKUP_MAX_KEYS]:
+            if any(_is_nullish_conflict_key(row[i]) for i in idxs):
+                continue
+            clauses.append(
+                "(" + " AND ".join(f"{q(c, quote)} = {placeholder}" for c in conflict_cols) + ")"
+            )
+            params.extend(row[i] for i in idxs)
+        if not clauses:
+            continue
+        cursor.execute(
+            f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses),  # nosec B608
+            params,
+        )
+        for found in cursor.fetchall():
+            stored.add(tuple(None if v is None else str(v).strip() for v in found))
+    if not stored:
+        return rows, [], row_numbers
+    keep: list[tuple] = []
+    keep_nums: list[int] = []
+    markers: list[str] = []
+    for pos, row in enumerate(rows):
+        key = tuple(None if row[i] is None else str(row[i]).strip() for i in idxs)
+        if key in stored:
+            markers.append(identity_marker(key))
+            continue
+        keep.append(row)
+        if row_numbers and pos < len(row_numbers):
+            keep_nums.append(row_numbers[pos])
+    return keep, markers, (keep_nums if row_numbers else row_numbers)
+
+
+def drop_stored_key_dicts(
+    conn: Any, table_obj: Any, conflict_columns: list[str], batch: list[dict], kept: list[str]
+) -> int:
+    """dedupe_skip on a SQLAlchemy route: hold back rows whose key is stored.
+
+    The MERGE leaves a stored key's cells unchanged; counting that row as
+    written made reconcile grade the source values against cells the policy
+    refused to change (Oracle / SQL Server PK destinations). Removes those
+    rows from ``batch`` in place, appends their ``identity_marker`` to
+    ``kept`` (the ``drop_stored_key_rows`` contract) and returns how many.
+    """
+    from sqlalchemy import and_, or_, select
+
+    from services.duplicate_policy import current_match_action
+
+    cols = [c for c in conflict_columns if c in table_obj.c]
+    if current_match_action() != "skip" or not batch or len(cols) != len(conflict_columns):
+        return 0
+
+    def _key(row: dict) -> tuple:
+        return tuple(None if row.get(c) is None else str(row.get(c)).strip() for c in cols)
+
+    stored: set[tuple] = set()
+    probe = [r for r in batch if all(r.get(c) not in (None, "") for c in cols)]
+    for start in range(0, len(probe), 500):
+        chunk = probe[start : start + 500]
+        clause = or_(*(and_(*(table_obj.c[c] == r[c] for c in cols)) for r in chunk))
+        for found in conn.execute(select(*(table_obj.c[c] for c in cols)).where(clause)):
+            stored.add(tuple(None if v is None else str(v).strip() for v in found))
+    held = [r for r in batch if _key(r) in stored]
+    kept.extend(identity_marker(_key(r)) for r in held)
+    batch[:] = [r for r in batch if _key(r) not in stored]
+    return len(held)
+
+
 def row_fingerprints(
     rows: list[Any],
     columns: list[str] | None = None,

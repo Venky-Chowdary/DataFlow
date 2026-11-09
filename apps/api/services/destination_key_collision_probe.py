@@ -410,6 +410,28 @@ def rows_a_cursor_read_will_deliver(
     return delta
 
 
+def rows_a_resumed_read_will_deliver(
+    sample_rows: list[dict[str, Any]] | None,
+    cursor_column: str,
+    cursor_value: Any,
+) -> list[dict[str, Any]]:
+    """Drop the committed prefix a resumed keyset read will not re-read.
+
+    A cancelled append resumes past its checkpoint cursor, so the rows it
+    committed before the cancel are its own, not a collision. Rows past the
+    cursor (a batch committed after the last checkpoint) are still probed, so
+    a heap that would store them twice still blocks. A composite or missing
+    cursor keeps every row.
+    """
+    from services.keyset_pagination import KEYSET_SEP
+
+    rows = list(sample_rows or [])
+    text = None if cursor_value is None else str(cursor_value)
+    if not cursor_column or not text or KEYSET_SEP in text or _LEGACY_SEP in text:
+        return rows
+    return rows_a_cursor_read_will_deliver(rows, cursor_column=cursor_column, watermark=text)
+
+
 def probe_append_key_collisions(
     *,
     mappings: list[dict[str, Any]] | None,
@@ -429,6 +451,8 @@ def probe_append_key_collisions(
     source_table: str = "",
     resume: bool = False,
     resume_write_complete: bool = False,
+    resume_cursor_column: str = "",
+    resume_cursor_value: Any = None,
     incremental_cursor_column: str = "",
     incremental_watermark: str | None = None,
     incremental_tiebreak_column: str = "",
@@ -464,6 +488,10 @@ def probe_append_key_collisions(
     )
     if not identities:
         return None
+    if resume:
+        sample_rows = rows_a_resumed_read_will_deliver(
+            sample_rows, resume_cursor_column, resume_cursor_value
+        )
     # Every identity is probed. A collision on a key the destination enforces
     # aborts the insert, so it is the verdict even when an unenforced contract
     # key also collides (that one only warns). With no collision, the first

@@ -9,6 +9,9 @@ import type { DisplayBlocker } from "./validateIssueGrouping.ts";
 import {
   actionFamilyFromLabel,
   dashboardCtaVariant,
+  ddlApprovalPending,
+  ddlApprovalRecorded,
+  pendingDdlApproval,
   promoteBlockedPrimaryFix,
   resolveValidateStudioPrimary,
   studioPrimaryIsSingular,
@@ -215,5 +218,68 @@ describe("validateStudioPrimary", () => {
       },
     });
     assert.equal(fk?.destination, "ack_fk");
+  });
+});
+
+
+describe("destination DDL approval (g_upsert_dest_key)", () => {
+  const ddlGate = {
+    id: "g_upsert_dest_key",
+    message: "Upsert into existing 'orders' needs a unique constraint on (id).",
+    details: {
+      remediation_kind: "approve_ddl_or_dedupe",
+      requires_approval: true,
+      planned_ddl: 'CREATE UNIQUE INDEX "uidx_orders_id" ON "public"."orders" ("id")',
+    },
+  };
+
+  it("promotes an approvable disclosed DDL to the rail as Approve destination DDL", () => {
+    const promoted = promoteBlockedPrimaryFix({
+      key: "g_upsert_dest_key", kind: "blocker", title: "Upsert key", message: ddlGate.message,
+      source: ddlGate as DisplayBlocker["source"],
+    });
+    assert.equal(promoted.destination, "ack_ddl");
+    assert.equal(promoted.label, "Approve destination DDL");
+  });
+
+  it("does not offer approval for a missing key, duplicate values or an empty statement", () => {
+    assert.equal(ddlApprovalPending(ddlGate), true);
+    assert.equal(ddlApprovalPending({ ...ddlGate, details: { remediation_kind: "declare_key" } }), false);
+    assert.equal(
+      ddlApprovalPending({ ...ddlGate, details: { ...ddlGate.details, requires_approval: undefined } }),
+      false,
+    );
+    assert.equal(ddlApprovalPending({ ...ddlGate, details: { ...ddlGate.details, planned_ddl: " " } }), false);
+  });
+
+  it("finds the gate behind the root-cause blocker that absorbed it", () => {
+    const root = {
+      id: "rc-upsert-dest-ddl-1",
+      details: { root_cause: true, kind: "upsert_dest_ddl", impacted_gates: ["g_upsert_dest_key"] },
+    };
+    assert.equal(ddlApprovalPending(root), false, "no gate list, no approval claim");
+    assert.equal(ddlApprovalPending(root, [ddlGate]), true);
+    const promoted = promoteBlockedPrimaryFix(
+      { key: root.id, kind: "blocker", title: "Upsert key", message: "m", source: root as DisplayBlocker["source"] },
+      [ddlGate],
+    );
+    assert.equal(promoted.destination, "ack_ddl");
+    assert.equal(
+      ddlApprovalPending(root, [{ ...ddlGate, details: { ...ddlGate.details, duplicate_key_count: 2 } }]),
+      false,
+      "stored duplicate keys need dedupe first, not an approval",
+    );
+  });
+
+  it("reads the pending approval from the blocked gate, not the display blocker", () => {
+    assert.equal(pendingDdlApproval({ gates: [{ ...ddlGate, status: "block" }] })?.id, "g_upsert_dest_key");
+    assert.equal(pendingDdlApproval({ gates: [{ ...ddlGate, status: "pass" }] }), null);
+    assert.equal(pendingDdlApproval(null), null);
+  });
+
+  it("counts an approval only when Validate recorded it", () => {
+    assert.equal(ddlApprovalRecorded(null), false);
+    assert.equal(ddlApprovalRecorded({ gates: [{ id: "g_upsert_dest_key", details: { ddl_acknowledged: true } }] }), false);
+    assert.equal(ddlApprovalRecorded({ gates: [{ id: "g_upsert_dest_key", details: { acknowledged: true } }] }), true);
   });
 });

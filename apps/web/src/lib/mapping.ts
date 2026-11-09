@@ -2831,3 +2831,36 @@ export function mappingHealthSummary(
     detail,
   };
 }
+
+/**
+ * Re-grade mapped rows when the live source schema changes a column's type.
+ * Map otherwise keeps the type it was graded on, and calls a drifted
+ * DECIMAL(14,6) → existing DECIMAL(12,4) "safe" while Validate blocks it.
+ */
+export function reconcileLiveSourceTypes(
+  rows: EditableMapping[],
+  schema: Record<string, string> | null | undefined,
+): EditableMapping[] {
+  if (!schema) return rows;
+  let changed = false;
+  const out = rows.map((m) => {
+    const live = String(schema[m.source] ?? "").trim();
+    const prior = String(m.inferredType ?? "").trim();
+    if (!live || !prior || !m.destType || live.toLowerCase() === prior.toLowerCase()) return m;
+    if (!declaredCarrierFidelityRisk(live, m.destType) || declaredCarrierFidelityRisk(prior, m.destType)) {
+      return m;
+    }
+    changed = true;
+    return {
+      ...m,
+      inferredType: live,
+      approved: false,
+      riskAcknowledged: false,
+      fidelity: "lossy_cast",
+      fidelityReason: `Source type changed to ${live}; destination ${m.destType} may collapse fidelity`,
+      typeNarrowing: true,
+      requiresReview: true,
+    };
+  });
+  return changed ? out : rows;
+}

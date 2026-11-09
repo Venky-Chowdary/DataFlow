@@ -102,6 +102,119 @@ def route_duplicate_options(*extras: Any) -> dict[str, str]:
     return out
 
 
+def request_duplicate_option(request: Any) -> dict[str, str]:
+    """The request-level ``duplicate_policy`` / ``allow_duplicates`` as a route extra."""
+    policy = normalize_duplicate_policy(str(getattr(request, "duplicate_policy", "") or ""))
+    if not policy and bool(getattr(request, "allow_duplicates", False)):
+        policy = "append"
+    return {"duplicate_policy": policy} if policy else {}
+
+
+def route_keyed_duplicate_policy(request: Any) -> bool:
+    """The route chose ``dedupe_skip`` / ``upsert``: a stored key resolves on the key."""
+    extra = getattr(getattr(request, "destination", None), "extra", None) or {}
+    policy = normalize_duplicate_policy(
+        str(extra.get("duplicate_policy") or getattr(request, "duplicate_policy", "") or "")
+    )
+    return policy in {"dedupe_skip", "upsert"}
+
+
+def summary_keyed_duplicate_policy(summary: Any) -> bool:
+    """The write resolved stored keys by the route's dedupe_skip / upsert choice."""
+    raw = (summary or {}).get("duplicate_policy") if isinstance(summary, dict) else ""
+    return normalize_duplicate_policy(str(raw or "")) in {"dedupe_skip", "upsert"}
+
+
+def keyed_policy_key_columns(
+    *,
+    contract_primary_key: str | None,
+    destination_pk_columns: list[str] | None,
+    mappings: list[dict] | None,
+) -> list[str]:
+    """Destination columns a dedupe_skip / upsert append matches stored rows on.
+
+    The engine's order: the stream contract's declared key (source names, mapped
+    to their targets), else the key the destination table itself declares. A
+    name-inferred or whole-row identity is not a key the writer can match on.
+    """
+    targets = {
+        str(m.get("source") or "").strip().casefold(): str(m.get("target") or "").strip()
+        for m in (mappings or [])
+        if isinstance(m, dict) and m.get("source") and m.get("target")
+    }
+    declared = [
+        part.strip()
+        for part in str(contract_primary_key or "").replace(";", ",").split(",")
+        if part.strip()
+    ]
+    if declared:
+        mapped = [targets.get(col.casefold(), "") for col in declared]
+        return mapped if all(mapped) else []
+    mapped_targets = set(targets.values())
+    dest_keys = [str(c).strip() for c in (destination_pk_columns or []) if str(c).strip()]
+    return dest_keys if dest_keys and all(c in mapped_targets for c in dest_keys) else []
+
+
+SKIPPED_IDENTITY_KEYS_CAP = 100_000
+
+
+def merge_skipped_identity_keys(prev: Any, incoming: Any) -> dict[str, Any]:
+    """Every batch's kept keys (dedupe_skip), not only the last batch's.
+
+    Past the cap the list is marked truncated: reconcile then cannot exclude
+    every kept key and grades the run on what it has (fails closed).
+    """
+    prev = prev if isinstance(prev, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    keys = [*(prev.get("skipped_identity_keys") or []), *(incoming.get("skipped_identity_keys") or [])]
+    if not keys:
+        return {}
+    out: dict[str, Any] = {"skipped_identity_keys": [str(k) for k in keys[:SKIPPED_IDENTITY_KEYS_CAP]]}
+    if len(keys) > SKIPPED_IDENTITY_KEYS_CAP or prev.get("skipped_identity_keys_truncated"):
+        out["skipped_identity_keys_truncated"] = True
+    return out
+
+
+def rows_without_kept_keys(
+    rows: list, target_cols: list[str], key_cols: list[str] | None, kept: Any
+) -> list:
+    """Drop rows whose key a dedupe_skip write left stored (writer key markers)."""
+    kept_set = kept if isinstance(kept, (set, frozenset)) else {str(k) for k in (kept or [])}
+    keys = list(key_cols or [])
+    if not kept_set or not keys or any(c not in target_cols for c in keys):
+        return rows
+    indexes = [target_cols.index(c) for c in keys]
+    out = []
+    for row in rows:
+        if isinstance(row, dict):
+            values = [row.get(c) for c in keys]
+        else:
+            values = [row[i] if i < len(row) else None for i in indexes]
+        parts = ["" if v is None else str(v).strip() for v in values]
+        marker = parts[0] if len(parts) == 1 else "\x1f".join(parts)
+        if marker not in kept_set:
+            out.append(row)
+    return out
+
+
+def with_duplicate_route_option(probe_cfg: Any, *extras: Any) -> Any:
+    """Destination probe config carrying the route's duplicate choice.
+
+    Validate reads the plan's duplicate policy from this config, so the choice
+    Studio/MCP sent in the destination options must ride on it, exactly as the
+    engine stamps it before Execute's own preflight.
+    """
+    if not probe_cfg:
+        return probe_cfg or None
+    options = route_duplicate_options(*[dict(e) for e in extras if isinstance(e, dict)])
+    if not options:
+        return probe_cfg
+    from services.secret_config import RedactedConfig
+
+    merged = {**dict(probe_cfg), **options}
+    return RedactedConfig(merged) if isinstance(probe_cfg, RedactedConfig) else merged
+
+
 def keep_last_reads_whole(request: Any) -> bool:
     """A record-batch source (file, S3/GCS/ADLS/SFTP object) asked for keep_last.
 
@@ -446,3 +559,27 @@ def order_wins(incoming: object, kept: object) -> bool:
         return float(incoming) >= float(kept)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return str(incoming) >= str(kept)
+
+
+def keyed_policy_no_key_gate(policy: str) -> dict[str, Any]:
+    """Validate blocker: a skip/update append that has no key to match on."""
+    label = "Skip keys already stored" if policy == "dedupe_skip" else "Update keys already stored"
+    return {
+        "id": "g_upsert_dest_key",
+        "status": "block",
+        "message": (
+            f"Duplicate rows is set to '{label}', but no key is declared "
+            "to match stored rows on. Declare a primary key for this "
+            "stream, or set Duplicate rows to 'Insert every row'."
+        ),
+        "duration_ms": 0,
+        "details": {
+            "rule_id": "g_upsert_dest_key.keyed_policy_no_key",
+            "remediation_kind": "declare_key",
+            "duplicate_policy": policy,
+        },
+        "suggested_actions": [
+            "Declare a primary key for this stream",
+            "Set Duplicate rows to Insert every row",
+        ],
+    }

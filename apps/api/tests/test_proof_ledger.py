@@ -60,3 +60,52 @@ def test_proof_ledger_endpoints(monkeypatch):
         data = resp.json()
         assert "metrics" in data
         assert "integrity_comparison" in data
+
+
+def test_sold_route_without_test_evidence_is_not_certified(tmp_path, monkeypatch):
+    """``sold`` is availability. Without a route matrix every route is unverified."""
+    import services.proof_ledger as proof_ledger
+
+    monkeypatch.setattr(proof_ledger, "PROOF_DIR", tmp_path)
+    ledger = proof_ledger.build_proof_ledger()
+    sold = [r for r in ledger["production_sku"] if r["status"] == "sold"]
+    assert sold
+    assert all(r["certification"]["status"] == "unverified" for r in sold)
+    cert = ledger["metrics"]["route_certification"]
+    assert cert["artifact"] is None
+    assert cert["tests"] is None
+    assert cert["routes_by_status"]["unverified"] == len(ledger["production_sku"])
+
+
+def test_route_matrix_artifact_grades_routes_from_test_results(tmp_path, monkeypatch):
+    import json
+
+    import services.proof_ledger as proof_ledger
+    from services.route_certification import REQUIRED_CHECKS, build_route_matrix
+    from src.transfer.registry import PRODUCTION_SKU
+
+    pg_mysql = ("database", "postgresql", "database", "mysql")
+    pg_sqlite = ("database", "postgresql", "database", "sqlite")
+    assert pg_mysql in PRODUCTION_SKU and pg_sqlite in PRODUCTION_SKU
+
+    def rec(route, mode, checks=()):
+        return {"route": list(route), "sync_mode": mode, "checks": list(checks), "cases": []}
+
+    tests = [
+        {"test": "t::ok", "outcome": "passed", "message": "",
+         "records": [rec(pg_mysql, m, REQUIRED_CHECKS)
+                     for m in ("full_refresh_overwrite", "full_refresh_append", "upsert")]},
+        {"test": "t::bad", "outcome": "failed", "message": "boom",
+         "records": [rec(pg_sqlite, "full_refresh_overwrite")]},
+    ]
+    matrix = build_route_matrix(tests)
+    (tmp_path / proof_ledger.ROUTE_MATRIX_FILENAME).write_text(json.dumps(matrix), encoding="utf-8")
+    monkeypatch.setattr(proof_ledger, "PROOF_DIR", tmp_path)
+
+    ledger = proof_ledger.build_proof_ledger()
+    by_route = {r["route"]: r for r in ledger["production_sku"]}
+    assert by_route["database/postgresql → database/mysql"]["certification"]["status"] == "verified"
+    assert by_route["database/postgresql → database/sqlite"]["certification"]["status"] == "failed"
+    cert = ledger["metrics"]["route_certification"]
+    assert cert["tests"] == {"tests_passed": 1, "tests_failed": 1, "tests_skipped": 0}
+    assert cert["routes_by_status"]["verified"] == 1

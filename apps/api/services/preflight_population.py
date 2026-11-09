@@ -258,6 +258,10 @@ def _apply_overwrite_emptied_gate(
         # The reader's key/type envelope is not stored data: an overwrite
         # rebuilds every key under the prefix, so there is no value to lose.
         skip |= set(REDIS_ENVELOPE_COLUMNS)
+    elif normalize_dest_kind(dest_kind) in {"elasticsearch", "opensearch"}:
+        # ``_id`` is the hit's document identity, assigned by the writer on
+        # every reload — not a stored field a mapping could leave empty.
+        skip.add("_id")
     emptied = [
         c for c in overwrite_emptied_columns(live_dest_columns, mappings)
         if c.casefold() not in skip

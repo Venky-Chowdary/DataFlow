@@ -9,6 +9,7 @@ export type AcknowledgmentFlags = {
   compliance?: boolean;
   schemaDrift?: boolean;
   fkRisk?: boolean;
+  ddlChanges?: boolean;
 };
 
 export function standingAcknowledgmentReason(flags: AcknowledgmentFlags): string {
@@ -16,6 +17,7 @@ export function standingAcknowledgmentReason(flags: AcknowledgmentFlags): string
     flags.compliance ? "PII/compliance acknowledged on Validate" : "",
     flags.schemaDrift ? "Schema drift acknowledged on Validate" : "",
     flags.fkRisk ? "FK risk acknowledged on Validate" : "",
+    flags.ddlChanges ? "Destination DDL approved on Validate" : "",
   ]
     .filter(Boolean)
     .join("; ");

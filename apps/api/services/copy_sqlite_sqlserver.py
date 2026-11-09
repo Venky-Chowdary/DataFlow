@@ -181,37 +181,10 @@ def copy_sqlite_to_sqlserver(
             dest_count_before = _ss_count(dst_cur, dest_ref)
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
-            # Identity INSERT would duplicate a complete snapshot. Equal COUNT
-            # is skip; a different COUNT still declines so the row path can
-            # append with a measured target_rows_before.
-            if dest_count_before == source_count:
-                try:
-                    source_conn.commit()
-                except Exception:
-                    logger.debug("SQLite source commit skipped", exc_info=True)
-                try:
-                    dest_conn.commit()
-                except Exception:
-                    logger.debug("SQL Server dest commit skipped", exc_info=True)
-                proof = f"dest_count:{dest_count_before}"
-                return FastPathResult(
-                    rows_copied=source_count,
-                    source_rows=source_count,
-                    source_checksum=proof,
-                    target_rows=dest_count_before,
-                    target_checksum=proof,
-                    source_snapshot={
-                        "copy_workers": 1,
-                        "copy_split": "skip",
-                        "copy_partitions": 1,
-                        "partitions_skipped": 1,
-                        "partitions_loaded": 0,
-                        "shard_mode": "table",
-                        "sqlite_read": "select",
-                        "sqlserver_write": "skip",
-                    },
-                    proof_scope="dest_count_equals_source_snapshot_count",
-                )
+            # An occupied destination is never skipped on an equal COUNT: Full
+            # refresh · Append stores another copy every run, and equal counts
+            # do not prove the values match. The row path appends with a
+            # measured target_rows_before and honours the duplicate policy.
             raise FastPathUnavailable(
                 "append into occupied SQL Server dest stays on the row path "
                 "(identity COPY would duplicate)"

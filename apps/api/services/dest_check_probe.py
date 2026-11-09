@@ -417,6 +417,7 @@ def probe_dest_check_constraints(
     check_constraints: list[Any],
     coverage: str = "sample_check_probe",
     max_named: int = _MAX_NAMED,
+    dest_dialect: str = "",
 ) -> dict[str, Any]:
     """Evaluate dest CHECK predicates over source-keyed rows.
 
@@ -444,6 +445,12 @@ def probe_dest_check_constraints(
     compiled: list[tuple[str, str, Any, dict[str, str]]] = []
     for item in check_constraints:
         name, pred = _constraint_predicate(item)
+        if pred and dest_dialect:
+            # MySQL's catalog spelling (``_utf8mb4\'bad\'``) never parsed, so
+            # every MySQL CHECK went unprobed and failed only at write time.
+            from services.check_constraints import normalize_source_predicate
+
+            pred = normalize_source_predicate(pred, dest_dialect)
         if not pred:
             out["checks"].append({"name": name, "status": "not_evaluated",
                                   "reason": "no predicate text in catalog entry"})

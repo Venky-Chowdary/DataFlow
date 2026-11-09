@@ -289,6 +289,22 @@ def mongo_delete_key_refusal(
     )
 
 
+def mongo_key_change_refusal(
+    database: str, collection: str, primary_key: str
+) -> LogCaptureRefusal:
+    """Refusal for a business-key UPDATE whose old key needs a missing pre-image.
+
+    Applying only the after-image would leave the old key's row at the
+    destination next to the new one.
+    """
+    return LogCaptureRefusal(
+        CAUSE_MONGO_PREIMAGE_DISABLED,
+        f"update on {database}.{collection} changed the pipeline key "
+        f"'{primary_key}', and without a pre-image the old key's row cannot be "
+        "retired at the destination",
+        _remedy("mongodb", CAUSE_MONGO_PREIMAGE_DISABLED, collection=collection),
+    )
+
 def _remedy(dialect: str, cause: str, *, collection: str = "") -> str:
     d = (dialect or "").strip().lower()
     if cause == CAUSE_MONGO_PREIMAGE_DISABLED:

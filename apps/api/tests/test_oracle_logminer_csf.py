@@ -201,6 +201,8 @@ def test_two_fragment_insert_and_update_are_reassembled_and_parsed_once() -> Non
         ]
 
     assert len(fetched) == 2
+    # The UPDATE's WHERE image is the before-image a key change retires.
+    assert parsed[1][1].pop("_df_before") == {"ID": "1"}
     assert [item[1] for item in parsed] == [
         {"ID": "1", "V": "inserted"},
         {"ID": "1", "V": "updated"},

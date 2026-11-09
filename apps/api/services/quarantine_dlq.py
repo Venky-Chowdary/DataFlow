@@ -506,16 +506,27 @@ def quarantine_details_from_dlq(
     allowed = {"quarantine", "quarantine_chunk"}
     if include_skip_audit:
         allowed.add("skip_audit")
+    # A CDC image a later change to the same key replaced (in this run) closes;
+    # a finding persisted after that supersession is a new image and stays.
+    superseded_at: dict[str, str] = {}
+    for ev in events:
+        if str(ev.get("action") or "") == "quarantine_superseded":
+            for ident in (ev.get("details") or {}).get("identities") or []:
+                superseded_at[str(ident)] = str(ev.get("ts") or "")
     out: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for ev in events:
         if str(ev.get("action") or "") not in allowed:
             continue
+        ev_ts = str(ev.get("ts") or "")
         chunk = (ev.get("details") or {}).get("rejected_details") or []
         for d in chunk:
             if not isinstance(d, dict):
                 continue
             d = _unwire_quarantine_detail(d)
+            closed_at = superseded_at.get(replay_row_identity(d)) if superseded_at else None
+            if closed_at is not None and ev_ts <= closed_at:
+                continue
             row = d.get("row")
             # The row is a record (dict/list), not a scalar — dedupe on its
             # canonical serialization; an unhashable member made every read

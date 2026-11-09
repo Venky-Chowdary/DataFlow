@@ -685,6 +685,7 @@ class CdcState:
     accumulated_rejected_details: list[dict[str, Any]] = field(default_factory=list)
     accumulated_rejected_rows: int = 0
     accumulated_coerced_null_rows: int = 0
+    superseded_rejected_details: list[dict[str, Any]] = field(default_factory=list)
     #: Per destination table — keys from orders and users must not mix.
     census_accs: dict[str, Any] = field(default_factory=dict)
     #: Dest COUNT(*) before the first write to each table this run.
@@ -701,12 +702,99 @@ class CdcState:
         return acc
 
 
+def _applied_change_keys(change: ChangeBatch, key_cols: list[str]) -> set[tuple[str, ...]]:
+    """Whole keys this window upserted or deleted, spelled as the ladder spells them."""
+    from services.verification_ladder import _pk_key
+
+    from .reconcile_step import _ladder_key
+
+    keys: set[tuple[str, ...]] = set()
+    for record in [*(change.inserts or []), *(change.updates or [])]:
+        key = _ladder_key(record, key_cols)
+        if key is not None:
+            keys.add(key)
+    for raw in change.deletes or []:
+        if isinstance(raw, dict):
+            key = _ladder_key(raw, key_cols)
+        elif isinstance(raw, (list, tuple)) and len(raw) == len(key_cols):
+            parts = tuple(_pk_key(v) for v in raw)
+            key = None if any(p is None for p in parts) else parts  # type: ignore[assignment]
+        elif len(key_cols) == 1 and not isinstance(raw, (list, tuple)):
+            part = _pk_key(raw)
+            key = (part,) if part is not None else None
+        else:
+            key = None
+        if key is not None:
+            keys.add(key)
+    return keys
+
+
+def _supersede_rejected_images(
+    state: CdcState,
+    change: ChangeBatch | None,
+    key_cols: list[str],
+    new_details: list[dict[str, Any]],
+    job_id: str,
+) -> None:
+    """Close earlier quarantined images of keys a later window applied.
+
+    A rejected CDC image whose key a later change then wrote (or deleted) is
+    history, not pending work: left open, Gate-8 excluded the key from the
+    source side while the destination held its newer row (false failure), and
+    a replay would regress the key to the stale image. The DLQ records the
+    supersession so Inspect and replay drop those findings too.
+    """
+    if change is None or not key_cols or not job_id or not state.accumulated_rejected_details:
+        return
+    from .reconcile_step import _rejected_key
+
+    applied = _applied_change_keys(change, key_cols)
+    applied -= {k for k in (_rejected_key(d, key_cols) for d in new_details) if k is not None}
+    if not applied:
+        return
+    superseded = [
+        d for d in state.accumulated_rejected_details if _rejected_key(d, key_cols) in applied
+    ]
+    if not superseded:
+        return
+    from services.quarantine_dlq import append_dlq_event, count_finding_rows, replay_row_identity
+
+    identities = sorted({replay_row_identity(d) for d in superseded})
+    try:
+        append_dlq_event(
+            job_id=str(job_id),
+            action="quarantine_superseded",
+            rows=len(identities),
+            details={
+                "identities": identities,
+                "reason": "a later change to the same key was applied in this run",
+            },
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "CDC quarantine supersession could not be recorded — refuse watermark "
+            f"advance (a stale image would stay replayable): {exc}"
+        ) from exc
+    gone = {id(d) for d in superseded}
+    state.accumulated_rejected_details = [
+        d for d in state.accumulated_rejected_details if id(d) not in gone
+    ]
+    state.accumulated_rejected_rows = max(
+        0, int(state.accumulated_rejected_rows) - count_finding_rows(superseded)
+    )
+    state.superseded_rejected_details.extend(
+        {**d, "superseded": True} for d in superseded
+    )
+
+
 def _merge_cdc_dest_summary(
     state: CdcState,
     dest_summary: dict[str, Any] | None,
     *,
     job_id: str = "",
     destination: Any = None,
+    change: ChangeBatch | None = None,
+    key_cols: list[str] | None = None,
 ) -> dict[str, Any]:
     """Merge batch quarantine into CDC state and persist DLQ before watermark.
 
@@ -751,6 +839,7 @@ def _merge_cdc_dest_summary(
                 f"(rows cannot disappear): {qexc}"
             ) from qexc
 
+    _supersede_rejected_images(state, change, list(key_cols or []), new_details, str(job_id or ""))
     state.accumulated_rejected_details.extend(new_details)
     state.accumulated_rejected_rows += int(incoming.get("rejected_rows") or 0) or len(
         new_details
@@ -762,6 +851,9 @@ def _merge_cdc_dest_summary(
     merged["rejected_rows"] = int(state.accumulated_rejected_rows)
     merged["coerced_null_rows"] = int(state.accumulated_coerced_null_rows)
     merged["rejected_details_total"] = len(state.accumulated_rejected_details)
+    if state.superseded_rejected_details:
+        merged["superseded_rejected_details"] = list(state.superseded_rejected_details)
+        merged["superseded_rejected_rows"] = len(state.superseded_rejected_details)
     if incoming.get("quarantine_durable"):
         merged["quarantine_dlq_persisted_count"] = len(state.accumulated_rejected_details)
     state.last_dest_summary = merged
@@ -1332,7 +1424,9 @@ def _align_inherited_batch(
     return list(mappings), list(headers), pk_target_col, note
 
 
-def _stash_reconcile_evidence(dest_summary: dict[str, Any], change: Any) -> None:
+def _stash_reconcile_evidence(
+    dest_summary: dict[str, Any], change: Any, pk_target_col: str = ""
+) -> None:
     """Stash the bounded source sample / delete keys Gate-8 reads back.
 
     Every delivery branch must leave this evidence, or the streaming write has
@@ -1345,6 +1439,11 @@ def _stash_reconcile_evidence(dest_summary: dict[str, Any], change: Any) -> None
         # PK tombstones for post-write absence proof (not full after-images).
         dest_summary["reconcile_deletes"] = [str(k) for k in change.deletes[:50]]
         dest_summary["reconcile_delete_count"] = len(change.deletes)
+        if pk_target_col:
+            from services.cdc_snapshot_window import _pk_columns
+
+            # Composite tombstones are unit-separator joins; the proof needs every column.
+            dest_summary["reconcile_delete_key_columns"] = _pk_columns(pk_target_col)
 
 
 def _apply_change_batch(
@@ -1448,7 +1547,7 @@ def _apply_change_batch(
         # The exactly-once branch used to return before the stash below, so
         # Gate-8 refused every SQL Server change-tracking run as "no
         # reconcile_sample" although the destination equalled the source (D173).
-        _stash_reconcile_evidence(dest_summary, change)
+        _stash_reconcile_evidence(dest_summary, change, pk_target_col or "")
         return rows, checksum, _note_inherited_map(
             _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
             inherit_note,
@@ -1633,7 +1732,7 @@ def _apply_change_batch(
     # rows we just wrote against a read-back of the destination.
     if dest_summary is None:
         dest_summary = {}
-    _stash_reconcile_evidence(dest_summary, change)
+    _stash_reconcile_evidence(dest_summary, change, pk_target_col or "")
     if census_payload:
         from services.row_conservation import CENSUS_KEY
 
@@ -2505,6 +2604,8 @@ def _run_cdc_shared_multi_table(
                 dest_summary,
                 job_id=str(job_id or ""),
                 destination=destination,
+                change=change,
+                key_cols=list(pk_source or []),
             )
         _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
 
@@ -3674,6 +3775,8 @@ def _run_cdc_single_stream(
                 dest_summary,
                 job_id=str(job_id or ""),
                 destination=destination,
+                change=change,
+                key_cols=list(pk_source_cols or []),
             )
         if result_out is not None:
             result_out.update(

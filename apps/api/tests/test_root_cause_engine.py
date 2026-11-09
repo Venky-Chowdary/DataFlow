@@ -626,3 +626,40 @@ def test_run_file_preflight_emits_root_causes_for_text_to_int():
     # Operator blockers must not re-list absorbed gate ids
     for b in result.get("blockers") or []:
         assert b.get("id") not in absorbed or (b.get("details") or {}).get("root_cause")
+
+
+def _upsert_key_gate(details: dict, message: str) -> dict:
+    return {
+        "passed": False,
+        "row_count": 2,
+        "gates": [{"id": "g_upsert_dest_key", "status": "block", "message": message, "details": details}],
+        "blockers": [],
+    }
+
+
+def test_upsert_key_gate_remedies_are_not_a_duplicate_identity_root():
+    """Declare-a-key and approve-the-index refusals name their own remedy."""
+    for details, message in (
+        (
+            {"rule_id": "g_upsert_dest_key.keyed_policy_no_key", "remediation_kind": "declare_key"},
+            "Duplicate rows is set to 'Skip keys already stored', but no key is declared",
+        ),
+        (
+            {"remediation_kind": "approve_ddl_or_dedupe", "requires_approval": True,
+             "planned_ddl": 'CREATE UNIQUE INDEX "u" ON "t" ("id")', "duplicate_key_count": 0},
+            "Upsert into existing 't' needs a unique constraint on (id).",
+        ),
+    ):
+        roots = build_root_causes(_upsert_key_gate(details, message))
+        assert not [r for r in roots if r.kind == "duplicate_identity"], roots
+
+
+def test_upsert_key_gate_duplicate_probe_is_still_a_duplicate_identity_root():
+    roots = build_root_causes(
+        _upsert_key_gate(
+            {"remediation_kind": "approve_ddl_or_dedupe", "duplicate_key_count": 3,
+             "upsert_key_columns": ["id"]},
+            "Destination 't' holds 3 duplicate upsert-key value(s) on (id)",
+        )
+    )
+    assert [r for r in roots if r.kind == "duplicate_identity"], roots

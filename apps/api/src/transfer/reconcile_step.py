@@ -1222,6 +1222,22 @@ def _transform_applied_proof_impl(
     # the write consumed. A key whose re-read hash matches is pinned and
     # judged strictly (dest != expected fails naming the step); a moved,
     # new or missing key is drift -> unverifiable with counts.
+    from services.duplicate_policy import normalize_duplicate_policy as _ndp
+
+    # dedupe_skip left these stored rows in place: they are not this run's
+    # recipe output, so neither side of them is graded against the recipe.
+    _kept_markers = (
+        {str(k) for k in dest_summary.get("skipped_identity_keys") or []}
+        if _ndp(str(dest_summary.get("duplicate_policy") or "")) == "dedupe_skip"
+        else set()
+    )
+
+    def _is_kept(row: dict[str, Any], cols: list[str]) -> bool:
+        if not _kept_markers or not cols:
+            return False
+        parts = ["" if row.get(c) is None else str(row.get(c)).strip() for c in cols]
+        return (parts[0] if len(parts) == 1 else "\x1f".join(parts)) in _kept_markers
+
     pin_meta = dest_summary.get("shape_raw_ledger")
     pin_store: _PinStore | None = None
     pin_key_cols: list[str] = []
@@ -1345,6 +1361,8 @@ def _transform_applied_proof_impl(
                     map_source_to_target(k, mappings): v
                     for k, v in row.items()
                 }
+                if _is_kept(trow, pin_key_cols):
+                    continue
                 _fpm_buf.append(("r", _fph(trow)))
                 for sc in raw_src_cols:
                     _cv_buf.append(
@@ -1370,6 +1388,8 @@ def _transform_applied_proof_impl(
                     map_source_to_target(k, mappings): v
                     for k, v in out.items()
                 }
+                if _is_kept(orow, pin_key_cols):
+                    continue
                 _fpm_buf.append(("e", _fph(orow)))
                 if keyed:
                     _exp_buf.append(
@@ -1716,6 +1736,8 @@ def _transform_applied_proof_impl(
                 nonlocal actual_rows
                 for batch in batches:
                     for r in batch:
+                        if _is_kept(r, pin_key_cols):
+                            continue
                         if scope_keys is not None and (
                             "\x1f".join(
                                 _key_norm(r.get(c)) for c in scope_pk
@@ -3125,6 +3147,25 @@ def _ladder_key(row: Any, key_cols: list[str]) -> tuple[str, ...] | None:
     return None if any(p is None for p in parts) else parts  # type: ignore[return-value]
 
 
+def dedupe_skip_kept_keys(dest_summary: Any, key_cols: list[str]) -> set[tuple[str, ...]]:
+    """Ladder keys of stored rows a dedupe_skip write left in place."""
+    from services.duplicate_policy import normalize_duplicate_policy
+    from services.verification_ladder import _pk_key
+
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    if not key_cols or normalize_duplicate_policy(str(summary.get("duplicate_policy") or "")) != "dedupe_skip":
+        return set()
+    kept: set[tuple[str, ...]] = set()
+    for marker in summary.get("skipped_identity_keys") or []:
+        parts = str(marker).split("\x1f") if len(key_cols) > 1 else [str(marker)]
+        if len(parts) != len(key_cols):
+            continue
+        key = tuple(_pk_key(p) for p in parts)
+        if all(k is not None for k in key):
+            kept.add(key)  # type: ignore[arg-type]
+    return kept
+
+
 def _rejected_key(detail: dict[str, Any], key_cols: list[str]) -> tuple[str, ...] | None:
     """The whole key a quarantine finding names, or ``None`` when it names none.
 
@@ -3385,7 +3426,13 @@ def _maybe_attach_verification_ladder(
         conservation_kind,
     )
 
-    kind = conservation_kind(sync_mode, dest_count_before=dest_before)
+    from services.duplicate_policy import summary_keyed_duplicate_policy
+
+    kind = conservation_kind(
+        sync_mode,
+        dest_count_before=dest_before,
+        keyed_policy=summary_keyed_duplicate_policy(dest_summary),
+    )
     census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
     keyed = kind == KIND_KEYED
     # M3: a bounded source re-read stamps the exact [seed, max_seen] window
@@ -3528,6 +3575,18 @@ def _maybe_attach_verification_ladder(
                 for r in source_rows
                 if not isinstance(r, dict) or _ladder_key(r, key_cols) not in _rej_keys
             ]
+    # dedupe_skip kept the stored row for a key that was already there: that row
+    # is not this run's write, so neither side of it is graded against the source.
+    _kept_keys = dedupe_skip_kept_keys(dest_summary, key_cols)
+    if _kept_keys:
+        source_rows = [
+            r for r in source_rows
+            if not isinstance(r, dict) or _ladder_key(r, key_cols) not in _kept_keys
+        ]
+        target_rows = [
+            r for r in target_rows
+            if not isinstance(r, dict) or _ladder_key(r, key_cols) not in _kept_keys
+        ]
     # D205 — an append into an occupied table: grade the written batch, not
     # the rows earlier runs wrote (see ladder_batch_scope).
     ladder_scope = str(report.get("checksum_scope") or "")
@@ -4715,6 +4774,19 @@ def _culprit_table_ref(eng: str, cfg: dict[str, Any], table: str) -> str:
     )
 
 
+def _oracle_stored_columns(
+    conn: Any, cfg: dict[str, Any], table: str, key_cols: list[str], cols: list[str]
+) -> tuple[list[str], list[str]]:
+    """Oracle folds unquoted names: quote the spelling the catalog stores."""
+    from services.dialect_profiles import ORACLE_CATALOG_COLUMNS_SQL, match_stored_names
+
+    owner = str(cfg.get("schema") or cfg.get("username") or cfg.get("user") or "")
+    cur = conn.cursor()
+    cur.execute(ORACLE_CATALOG_COLUMNS_SQL, t=table, o=owner)
+    stored = [name for (name,) in cur.fetchall()]
+    return match_stored_names(stored, key_cols), match_stored_names(stored, cols)
+
+
 def _generic_key_census(
     *,
     source_endpoint: Any,
@@ -4744,7 +4816,7 @@ def _generic_key_census(
         for c in (summary.get("primary_key_columns") or [])
         if str(c or "").strip()
     ]
-    if len(pk_cols) != 1:
+    if not pk_cols:
         pk_cols = [
             str(c)
             for c in (summary.get("conflict_columns") or [])
@@ -4758,7 +4830,7 @@ def _generic_key_census(
         for m in (mappings or [])
         if isinstance(m, dict) and str(m.get("source") or "").strip()
     ]
-    if len(pk_cols) != 1 and pairs:
+    if not pk_cols and pairs:
         # The census needs the key the writer joined on — engine-copy
         # summaries may not carry ``primary_key_columns`` even when the run's
         # mappings declare one (X-42: id was a single-column PK yet the
@@ -4777,12 +4849,11 @@ def _generic_key_census(
                 pk_cols = [str(_tgt_pk)]
         except Exception:  # noqa: BLE001 — naming is best-effort, never fatal
             pass
-    if len(pk_cols) != 1:
+    if not pk_cols:
         return [], [], [], (
-            "the run recorded no single-column primary key to join the "
-            "destination key census on"
+            "the run recorded no primary key to join the destination key "
+            "census on"
         )
-    pk = pk_cols[0]
     src_tbl = str(getattr(source_endpoint, "table", "") or "").strip()
     dst_tbl = str(getattr(endpoint, "table", "") or "").strip()
     if not src_tbl or not dst_tbl:
@@ -4791,9 +4862,14 @@ def _generic_key_census(
         )
     if not pairs:
         return [], [], [], "no column mappings were recorded for the census"
-    src_pk = next((s for s, t in pairs if t.lower() == pk.lower()), pk)
-    src_cols = [s for s, _t in pairs if s.lower() != src_pk.lower()]
-    dst_cols = [t for s, t in pairs if s.lower() != src_pk.lower() and str(t or "").strip()]
+    # A composite key joins on every column: census on its first column alone
+    # folds (eu, 1) and (us, 1) into one key and reports both as changed.
+    src_pks = [
+        next((s for s, t in pairs if t.lower() == pk.lower()), pk) for pk in pk_cols
+    ]
+    src_key_set = {k.lower() for k in src_pks}
+    src_cols = [s for s, _t in pairs if s.lower() not in src_key_set]
+    dst_cols = [t for s, t in pairs if s.lower() not in src_key_set and str(t or "").strip()]
     if len(src_cols) != len(dst_cols) or not dst_cols:
         return [], [], [], (
             "the recorded column mappings do not pair source and target "
@@ -4839,18 +4915,23 @@ def _generic_key_census(
 
             ref_table_name = (src_tbl, dst_tbl)
 
-            def _load(conn_info, cfg, eng, ref_table, pk_col, cols, side):
+            def _load(conn_info, cfg, eng, ref_table, key_cols, cols, side):
                 e2, conn = conn_info
                 q = '"' if e2 != "mysql" else "`"
                 from connectors.sql_identifiers import quote_sql_identifier as _qi
 
+                width = len(key_cols)
                 if e2 == "snowflake":
                     stmt = _snowflake_census_select(
-                        conn, cfg, ref_table_name[side], [pk_col, *cols]
+                        conn, cfg, ref_table_name[side], [*key_cols, *cols]
                     )
                 else:
+                    if e2 == "oracle":
+                        key_cols, cols = _oracle_stored_columns(
+                            conn, cfg, ref_table_name[side], key_cols, cols
+                        )
                     sel = ", ".join(
-                        [_qi(pk_col, q)] + [_qi(c, q) for c in cols]
+                        [_qi(k, q) for k in key_cols] + [_qi(c, q) for c in cols]
                     )
                     stmt = f"SELECT {sel} FROM {ref_table}"  # nosec B608
                 try:
@@ -4865,11 +4946,12 @@ def _generic_key_census(
                             (
                                 (
                                     side,
-                                    str(r[0]),
+                                    str(r[0]) if width == 1
+                                    else "\x1f".join(str(v) for v in r[:width]),
                                     hashlib.md5(
                                         "\x1f".join(
                                             normalize_cell(v, engine=dst_eng)
-                                            for v in r[1:]
+                                            for v in r[width:]
                                         ).encode("utf-8", "replace"),
                                         usedforsecurity=False,
                                     ).hexdigest(),
@@ -4889,7 +4971,7 @@ def _generic_key_census(
                 src_cfg,
                 src_eng,
                 _culprit_table_ref(src_eng, src_cfg, src_tbl),
-                src_pk,
+                src_pks,
                 src_cols,
                 0,
             )
@@ -4898,7 +4980,7 @@ def _generic_key_census(
                 dst_cfg,
                 dst_eng,
                 _culprit_table_ref(dst_eng, dst_cfg, dst_tbl),
-                pk,
+                pk_cols,
                 dst_cols,
                 1,
             )
@@ -7091,6 +7173,14 @@ def _run_reconciliation_impl(
                 )
                 if x is not None and str(x) != ""
             ] or None
+    # dedupe_skip kept these stored keys unchanged: the source side already
+    # drops them (rows_without_kept_keys), so the keyed re-read must too, or
+    # the stored cells are graded against values the policy refused to write.
+    if written_ids and dedupe_skip_kept_keys(dest_summary, list(pk_cols)):
+        _kept = {
+            str(k).strip() for k in dest_summary.get("skipped_identity_keys") or []
+        }
+        written_ids = [x for x in written_ids if x.strip() not in _kept] or None
 
     # Both digests computed by the engines when they will render identically —
     # the same population coverage at a fraction of the cost, since neither side
@@ -7832,9 +7922,15 @@ def _run_reconciliation_impl(
     ]
     if delete_pks and table_name and target_cols and strict_checksum:
         sort_key = _sort_key_for_columns(target_cols, mapping_dicts)
-        if sort_key:
+        del_cols = list(dest_summary.get("reconcile_delete_key_columns") or pk_cols)
+        if sort_key or len(del_cols) > 1:
             try:
-                still_present = _read_target_sample_retrying(
+                from services.row_conservation import composite_delete_keys_present
+
+                still_present = [None] * composite_delete_keys_present(
+                    db_type, cfg, schema=schema, table_name=table_name,
+                    key_columns=del_cols, keys=delete_pks,
+                ) if len(del_cols) > 1 else _read_target_sample_retrying(
                     "delete proof",
                     db_type,
                     cfg,
@@ -8309,11 +8405,17 @@ def _run_reconciliation_impl(
     keyed_delta: int | None = None
     if allow_extra and not keyed_scope:
         from services.row_conservation import KIND_KEYED, KeyCensus, conservation_kind
+        from services.duplicate_policy import summary_keyed_duplicate_policy
 
         census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
         if (
             census is not None
-            and conservation_kind(sync_mode, dest_count_before=rows_before) == KIND_KEYED
+            and conservation_kind(
+                sync_mode,
+                dest_count_before=rows_before,
+                keyed_policy=summary_keyed_duplicate_policy(dest_summary),
+            )
+            == KIND_KEYED
         ):
             keyed_delta = int(census.expected_delta)
 

@@ -248,6 +248,7 @@ def apply_constraint_findings(
                     if check_rows is not None
                     else "sample_check_probe"
                 ),
+                dest_dialect=str(destination_db_type or ""),
             )
             viol = int(check_report.get("violating_count") or 0)
             if viol:

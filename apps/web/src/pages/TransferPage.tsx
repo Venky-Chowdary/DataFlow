@@ -187,6 +187,7 @@ import {
   mappingsFromAnalysis,
   type EditableMapping,
   type MappingTransform,
+  reconcileLiveSourceTypes,
 } from "../lib/mapping";
 import {
   liveCarrierIsDoomedOnThisRun,
@@ -258,6 +259,8 @@ import {
   promoteBlockedPrimaryFix,
   resolveValidateStudioPrimary,
   type PromotedPrimaryFix,
+  ddlApprovalRecorded,
+  pendingDdlApproval,
 } from "../lib/validateStudioPrimary";
 import { planFkOrphanSuggestedAction, resolvePopulationOrphanScanFlag } from "../lib/fkOrphanCta";
 import { createNewFitWidenActions, createNewFitWidenLabel } from "../lib/populationFit";
@@ -274,6 +277,11 @@ import type { MirrorDeleteMode } from "../lib/mirrorDeleteMode";
 import { fileSourceIssueHold, isCalendarHoldoutFinding, type FileSourceIssueHold } from "../lib/fileSourceIssueHold";
 import { FileSourceIssuePanel } from "../components/transfer/FileSourceIssuePanel";
 import { foreignKeysDestExtra, type ForeignKeysMode } from "../lib/foreignKeysMode";
+import {
+  appendKeyCollisionBlocked,
+  duplicateRowsDestExtra,
+  type DuplicateRowsMode,
+} from "../lib/duplicatePolicy";
 import type { TransferPageProps } from "./transfer/TransferPageProps";
 import {
   ACCEPTED_UPLOAD_EXTENSIONS,
@@ -363,6 +371,8 @@ export function TransferPage({
   /** Schedule/job declaration. Column heuristics must not replace these. */
   const declaredCursorRef = useRef("");
   const declaredPrimaryKeyRef = useRef("");
+  /** Operator chose "no identity key"; the id-like heuristic must not refill it. */
+  const primaryKeyClearedRef = useRef(false);
   /** Recovery owns the shape program until the operator edits it. */
   const shapeOwnedByRecovery = useRef(false);
   /** Last applied Connectors→Studio seed token (prevents re-seeding on connectors refresh). */
@@ -538,6 +548,7 @@ export function TransferPage({
   const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
   const [schemaDriftAcknowledged, setSchemaDriftAcknowledged] = useState(false);
   const [fkRiskAcknowledged, setFkRiskAcknowledged] = useState(false);
+  const [ddlChangesAcknowledged, setDdlChangesAcknowledged] = useState(false);
   /** Module 16 — opt-in population orphan scan (only path to RI proven). */
   const [runPopulationOrphanScan, setRunPopulationOrphanScan] = useState(false);
   const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
@@ -593,6 +604,8 @@ export function TransferPage({
   const [mirrorDeleteMode, setMirrorDeleteMode] = useState<MirrorDeleteMode>("soft");
   // Round 11: route option for source foreign keys (carry | guard | ignore).
   const [foreignKeysMode, setForeignKeysMode] = useState<ForeignKeysMode>("carry");
+  // Story 2: append into a table that already stores these keys — insert, skip or update.
+  const [duplicateRowsMode, setDuplicateRowsMode] = useState<DuplicateRowsMode>("insert");
   const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
     CDC_DELIVERY_AT_LEAST_ONCE,
   );
@@ -797,6 +810,7 @@ export function TransferPage({
           : {}),
         ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
         ...foreignKeysDestExtra(foreignKeysMode),
+        ...duplicateRowsDestExtra(duplicateRowsMode, syncMode),
         ...(isVector
           ? {
               ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
@@ -1147,6 +1161,12 @@ export function TransferPage({
     sourceKind === "file" ? samplePreviewRows : connectorSampleRows
   ) as Record<string, unknown>[];
   const currentSourceColumnsKey = currentSourceColumns.join("|");
+  const currentSourceSchemaKey = JSON.stringify(currentSourceSchema);
+
+  useEffect(() => {
+    setColumnMappings((prev) => reconcileLiveSourceTypes(prev, currentSourceSchema));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSourceSchemaKey]);
 
   useEffect(() => {
     if (step !== STEP_VALIDATE) return;
@@ -1380,6 +1400,7 @@ export function TransferPage({
   const applyPrimaryKeySuggestion = useCallback(
     (column: string) => {
       if (!column) return;
+      primaryKeyClearedRef.current = false;
       setPrimaryKeyField(column);
       const stream = primarySourceStream || sourceStreamName;
       if (stream) {
@@ -2285,6 +2306,7 @@ export function TransferPage({
       primaryKeyCandidate,
       declaredCursor: declaredCursorRef.current,
       declaredPrimaryKey: declaredPrimaryKeyRef.current,
+      primaryKeyCleared: primaryKeyClearedRef.current,
     });
     if (next.cursorField !== cursorField) setCursorField(next.cursorField);
     if (next.primaryKeyField !== primaryKeyField) setPrimaryKeyField(next.primaryKeyField);
@@ -2297,6 +2319,7 @@ export function TransferPage({
         currentSourceColumns,
         declaredCursorRef.current,
         declaredPrimaryKeyRef.current,
+        primaryKeyClearedRef.current,
       ),
     );
   }, [
@@ -2327,6 +2350,7 @@ export function TransferPage({
   const resetSourceContractForUserChange = useCallback(() => {
     declaredCursorRef.current = "";
     declaredPrimaryKeyRef.current = "";
+    primaryKeyClearedRef.current = false;
     setCursorField("");
     setPrimaryKeyField("");
     setCursorSemantics("");
@@ -2721,6 +2745,7 @@ export function TransferPage({
         setCursorField(state.cursorColumn);
         declaredCursorRef.current = state.cursorColumn;
         declaredPrimaryKeyRef.current = state.primaryKey;
+        primaryKeyClearedRef.current = false;
         setShapeSteps(Array.isArray(state.shapeSteps) ? state.shapeSteps as ShapeStepWire[] : []);
         applyRecoveredBinds(state);
         shapeOwnedByRecovery.current = true;
@@ -4923,6 +4948,24 @@ export function TransferPage({
     }
   };
 
+  // The approval is bound to the DDL Validate disclosed for this key, table and
+  // policy: any change to those drops it, and the next Validate re-discloses.
+  useEffect(() => {
+    setDdlChangesAcknowledged(false);
+  }, [primaryKeyField, targetCollection, destSchema, syncMode, duplicateRowsMode]);
+
+  function approveDisclosedDdl() {
+    toast({
+      title: "Submitting DDL approval",
+      message: "Re-running Validate with approval for the destination DDL it disclosed.",
+      tone: "info",
+    });
+    void executePreflight(undefined, undefined, {
+      ddlChangesAcknowledged: true,
+      acknowledgmentReason: "Approve the destination DDL Validate disclosed for this transfer",
+    });
+  }
+
   const executePreflight = async (
     overrideMappings?: EditableMapping[],
     validationOverride?: ValidationMode,
@@ -4930,6 +4973,7 @@ export function TransferPage({
       complianceAcknowledged?: boolean;
       schemaDriftAcknowledged?: boolean;
       fkRiskAcknowledged?: boolean;
+      ddlChangesAcknowledged?: boolean;
       acknowledgmentReason?: string;
       runPopulationOrphanScan?: boolean;
       stayOnReview?: boolean;
@@ -4940,15 +4984,18 @@ export function TransferPage({
     const ackCompliance = opts?.complianceAcknowledged ?? complianceAcknowledged;
     const ackSchemaDrift = opts?.schemaDriftAcknowledged ?? schemaDriftAcknowledged;
     const ackFkRisk = opts?.fkRiskAcknowledged ?? fkRiskAcknowledged;
+    const ackDdl = opts?.ddlChangesAcknowledged ?? ddlChangesAcknowledged;
     const ackActor = readSession()?.email || readSession()?.name || "";
     const ackReason = (opts?.acknowledgmentReason || "").trim()
       || standingAcknowledgmentReason({
         compliance: ackCompliance,
         schemaDrift: ackSchemaDrift,
         fkRisk: ackFkRisk,
+        ddlChanges: ackDdl,
       });
     if (
-      (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged)
+      (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged
+        || opts?.ddlChangesAcknowledged)
       && (!ackActor || ackActor.length < 2)
     ) {
       toast({
@@ -4959,7 +5006,8 @@ export function TransferPage({
       return;
     }
     if (
-      (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged)
+      (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged
+        || opts?.ddlChangesAcknowledged)
       && ackReason.trim().length < 8
     ) {
       toast({
@@ -4972,7 +5020,8 @@ export function TransferPage({
     const ackClaimed = Boolean(
       opts?.complianceAcknowledged
       || opts?.schemaDriftAcknowledged
-      || opts?.fkRiskAcknowledged,
+      || opts?.fkRiskAcknowledged
+      || opts?.ddlChangesAcknowledged,
     );
     // An attestation sticks only when the API says it recorded one. Claiming it
     // optimistically shows "PII approved" over a run that is still blocked.
@@ -5012,6 +5061,23 @@ export function TransferPage({
           });
       }
       if (opts?.fkRiskAcknowledged) setFkRiskAcknowledged(Boolean(pf));
+      if (opts?.ddlChangesAcknowledged) {
+        const recorded = ddlApprovalRecorded(pf);
+        setDdlChangesAcknowledged(recorded);
+        toast(recorded
+          ? {
+            title: "Destination DDL approved",
+            message: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve"
+              ? "Execute runs the disclosed statement before the first write."
+              : "The approval is recorded. Remaining blockers still hold Execute.",
+            tone: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve" ? "success" : "warning",
+          }
+          : {
+            title: "DDL approval not recorded",
+            message: "Validate did not accept the approval — Execute stays locked.",
+            tone: "error",
+          });
+      }
     };
     const stampValidatedContract = (
       maps: EditableMapping[],
@@ -5198,6 +5264,7 @@ export function TransferPage({
               compliance_acknowledged: ackCompliance,
               schema_drift_acknowledged: ackSchemaDrift,
               fk_risk_acknowledged: ackFkRisk,
+              ddl_changes_acknowledged: ackDdl,
               acknowledgment_actor: ackActor,
               acknowledgment_reason: ackReason,
             },
@@ -5337,6 +5404,7 @@ export function TransferPage({
           dest_extra: {
             allow_append_only: allowAppendOnly,
             ...foreignKeysDestExtra(foreignKeysMode),
+            ...duplicateRowsDestExtra(duplicateRowsMode, syncMode),
             ...(destWriteMode === "procedure"
               ? {
                   dest_write_mode: "procedure",
@@ -5373,6 +5441,7 @@ export function TransferPage({
           compliance_acknowledged: ackCompliance,
           schema_drift_acknowledged: ackSchemaDrift,
           fk_risk_acknowledged: ackFkRisk,
+          ddl_changes_acknowledged: ackDdl,
           run_population_orphan_scan: resolvePopulationOrphanScanFlag(
             opts?.runPopulationOrphanScan,
             runPopulationOrphanScan,
@@ -5505,6 +5574,14 @@ export function TransferPage({
   };
 
   const primaryFix = useMemo(() => {
+    // G6: the destination already stores these keys. Duplicate rows (Advanced)
+    // owns that choice; it is not a source-identity fix.
+    if (pendingDdlApproval(preflight) && !ddlChangesAcknowledged) {
+      return { onPrimaryFix: approveDisclosedDdl, primaryFixLabel: "Approve destination DDL" };
+    }
+    if (appendKeyCollisionBlocked(preflight)) {
+      return { onPrimaryFix: openIdentitySettings, primaryFixLabel: "Choose duplicate rows" };
+    }
     if (duplicateKeyRoot) {
       return {
         onPrimaryFix: openIdentitySettings,
@@ -5567,6 +5644,8 @@ export function TransferPage({
             },
             primaryFixLabel: promoted.label,
           };
+        case "ack_ddl":
+          return { onPrimaryFix: approveDisclosedDdl, primaryFixLabel: promoted.label };
         case "ack_fk":
           return {
             onPrimaryFix: () => {
@@ -5600,7 +5679,7 @@ export function TransferPage({
       || (g15Cta
         ? { kind: g15Cta.kind, label: g15Cta.label, column: g15Cta.column }
         : undefined);
-    if (!action) return applyPromoted(promoteBlockedPrimaryFix(firstBlocker));
+    if (!action) return applyPromoted(promoteBlockedPrimaryFix(firstBlocker, preflight?.gates));
 
     switch (action.kind) {
       case "review_mappings":
@@ -5718,9 +5797,9 @@ export function TransferPage({
         };
       }
       default:
-        return applyPromoted(promoteBlockedPrimaryFix(firstBlocker));
+        return applyPromoted(promoteBlockedPrimaryFix(firstBlocker, preflight?.gates));
     }
-  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast, columnMappings]);
+  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast, columnMappings, ddlChangesAcknowledged]);
 
   const executeTransfer = async () => {
     if (!jobRun.allowed) {
@@ -5945,6 +6024,7 @@ export function TransferPage({
             extra.allow_append_only = true;
           }
           Object.assign(extra, foreignKeysDestExtra(foreignKeysMode));
+          Object.assign(extra, duplicateRowsDestExtra(duplicateRowsMode, syncMode));
           if (destWriteMode === "procedure") {
             extra.dest_write_mode = "procedure";
             extra.dest_procedure_call = destProcedureCall.trim();
@@ -6018,11 +6098,13 @@ export function TransferPage({
         complianceAcknowledged,
         schemaDriftAcknowledged,
         fkRiskAcknowledged,
+        ddlChangesAcknowledged,
         acknowledgmentActor: readSession()?.email || readSession()?.name || undefined,
         acknowledgmentReason: standingAcknowledgmentReason({
           compliance: complianceAcknowledged,
           schemaDrift: schemaDriftAcknowledged,
           fkRisk: fkRiskAcknowledged,
+          ddlChanges: ddlChangesAcknowledged,
         }) || undefined,
         approvedDecisionArtifactHash: approvedDecisionArtifactHash || undefined,
         approvedDdlIdentityHash: approvedDdlIdentityHash || undefined,
@@ -6497,6 +6579,7 @@ export function TransferPage({
         shapeSteps,
         multiSubnetFailover,
         cdcRowFilter,
+        duplicatePolicy: duplicateRowsDestExtra(duplicateRowsMode, syncMode).duplicate_policy,
         schemaDriftAcknowledged: overrides?.schemaDriftAcknowledged ?? schemaDriftAcknowledged,
       }),
     [
@@ -6526,6 +6609,7 @@ export function TransferPage({
       shapeSteps,
       multiSubnetFailover,
       cdcRowFilter,
+      duplicateRowsMode,
       schemaDriftAcknowledged,
     ],
   );
@@ -6936,6 +7020,7 @@ export function TransferPage({
     setPreflightError("");
     setComplianceAcknowledged(false);
     setSchemaDriftAcknowledged(false);
+    setDdlChangesAcknowledged(false);
     setValidatedContractKey(null);
     setCellPreview(null);
     setAnalyzing(false);
@@ -8722,6 +8807,8 @@ export function TransferPage({
                 acknowledgmentReason: "Keep existing mappings for this run; ignore new/changed columns",
               });
             }}
+            ddlChangesAcknowledged={ddlChangesAcknowledged}
+            onApproveDdlChanges={approveDisclosedDdl}
             fkRiskAcknowledged={fkRiskAcknowledged}
             onAcknowledgeFkRisk={() => {
               toast({
@@ -9321,6 +9408,8 @@ export function TransferPage({
         onMirrorDeleteModeChange={setMirrorDeleteMode}
         foreignKeysMode={foreignKeysMode}
         onForeignKeysModeChange={setForeignKeysMode}
+        duplicateRowsMode={duplicateRowsMode}
+        onDuplicateRowsModeChange={setDuplicateRowsMode}
         deliveryGuarantee={deliveryGuarantee}
         onDeliveryGuaranteeChange={setDeliveryGuarantee}
         exactlyOnceWired={exactlyOnceWiredDest(destDriverType || destType)}
@@ -9460,6 +9549,7 @@ export function TransferPage({
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
             setPrimaryKeyField(value);
             if (value !== declaredPrimaryKeyRef.current) declaredPrimaryKeyRef.current = "";
+            primaryKeyClearedRef.current = value === "";
           }
         }}
         onStreamDestProcedureChange={

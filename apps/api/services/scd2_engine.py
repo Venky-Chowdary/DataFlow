@@ -26,6 +26,7 @@ from collections.abc import Iterator
 from datetime import date, datetime, timezone
 from typing import Any
 
+from connectors.generic_sql import _resolve_physical_table_ident
 from services.dialect_profiles import quote_stored_identifier, stored_identifier
 from services.engine_pool import release_engine
 
@@ -550,7 +551,22 @@ def _insert_rows(conn: Any, table_obj: Any, rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
     result = conn.execute(sa.insert(table_obj), rows)
-    return result.rowcount or len(rows)
+    # Oracle executemany reports rowcount -1 (unknown); it is not a count.
+    rowcount = result.rowcount
+    return rowcount if rowcount is not None and rowcount >= 0 else len(rows)
+
+
+def _oracle_stamp_bind(stamp: datetime) -> tuple[str, str]:
+    """``(param, sql)`` binding ``stamp`` to Oracle with its microseconds."""
+    if stamp.tzinfo is None:
+        return (
+            stamp.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "TO_TIMESTAMP(:ts, 'YYYY-MM-DD HH24:MI:SS.FF6')",
+        )
+    return (
+        stamp.strftime("%Y-%m-%d %H:%M:%S.%f %z")[:-2] + ":" + stamp.strftime("%z")[-2:],
+        "TO_TIMESTAMP_TZ(:ts, 'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM')",
+    )
 
 
 def _expire_rows(
@@ -593,9 +609,15 @@ def _expire_rows(
                 column_types=column_types,
             )
             params["ts"] = stamp
+            ts_sql = ":ts"
+            if dialect_name == "oracle" and isinstance(stamp, datetime):
+                # python-oracledb binds a datetime as DATE and drops the
+                # microseconds, so valid_to stops matching the run stamp the
+                # new version opened at. Bind the exact text instead.
+                params["ts"], ts_sql = _oracle_stamp_bind(stamp)
             sql = (
                 f"UPDATE {qualified} "  # nosec B608
-                f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
+                f"SET {valid_to_quoted} = {ts_sql}, {current_quoted} = {false_lit} "
                 f"WHERE {where_keys} AND {current_pred}"
             )
             result = conn.execute(sa.text(sql), params)
@@ -717,13 +739,17 @@ def close_versions_missing_from_snapshot(
     closed_n = int(closed or 0)
     stamp = timestamp or _now_utc()
     if closed_n:
+        ts_param: Any = stamp
+        ts_sql = ":ts"
+        if dialect == "oracle":
+            ts_param, ts_sql = _oracle_stamp_bind(stamp)
         conn.execute(
             sa.text(
                 f"UPDATE {target_qualified} "  # nosec B608
-                f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
+                f"SET {valid_to_quoted} = {ts_sql}, {current_quoted} = {false_lit} "
                 f"WHERE {missing_pred}"
             ),
-            {"ts": stamp},
+            {"ts": ts_param},
         )
     return {"closed_missing_rows": closed_n, "run_stamp": stamp.isoformat()}
 
@@ -1424,7 +1450,7 @@ def apply_scd2(
             type1_total = 0
             closed_missing = 0
             source_keys: set[str] = set()
-            qualified = _qualified_name(table, schema_name, dialect_name)
+            qualified = _qualified_name(table_obj.name, schema_name, dialect_name)
             # close_missing=off on a complete snapshot: the run's own rows
             # are the only honest source-side digest for the source-keyed
             # scope (the writer ack covers the whole current set, which
@@ -1642,7 +1668,8 @@ def verify_scd2_history(
     try:
         engine = get_sqlalchemy_engine(cfg)
         dialect_name = engine.dialect.name if engine.dialect else ""
-        qualified = _qualified_name(table_name, schema or None, dialect_name)
+        phys_table, phys_schema = _resolve_physical_table_ident(engine, table_name, schema or None)
+        qualified = _qualified_name(phys_table, phys_schema, dialect_name)
         select_cols = list(
             dict.fromkeys(
                 list(pk_columns)
@@ -1929,7 +1956,8 @@ def preview_scd2_merge(
         table = endpoint.table or endpoint.collection or "dt_import"
         engine = get_sqlalchemy_engine(cfg)
         dialect_name = engine.dialect.name if engine.dialect else ""
-        qualified = _qualified_name(table, schema_name, dialect_name)
+        phys_table, phys_schema = _resolve_physical_table_ident(engine, table, schema_name)
+        qualified = _qualified_name(phys_table, phys_schema, dialect_name)
 
         tracked = list(cols.get("tracked") or [])
         tracked_set = set(tracked) if tracked else None

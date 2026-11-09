@@ -557,6 +557,10 @@ def stream_scd2_mirror_transfer(
                     "Mirror requires an explicit primary_key on the stream contract; "
                     "refuse inventing a conflict key from the first mapped column"
                 )
+            # Reconcile reads the key from here; unstamped it re-infers one
+            # Map column and scopes a composite mirror by ``id`` alone.
+            dest_summary["conflict_columns"] = list(pk_cols)
+            dest_summary["primary_key_columns"] = list(pk_cols)
             with engine.connect() as conn:
                 dest_summary.update(
                     apply_inferred_deletes_via_staging(

@@ -100,3 +100,23 @@ def test_real_source_duplicates_still_raise_the_duplicate_root() -> None:
     kinds = [r.kind for r in roots]
     assert "destination_key_collision" not in kinds
     assert any("duplicate" in k for k in kinds)
+
+
+def test_unreadable_collision_is_not_a_source_duplicate_root() -> None:
+    details = {
+        "primary_key": {"target": "id"},
+        "rule_id": "g6_target_ddl.append_collision_unreadable",
+        "remediation_kind": "choose_duplicate_rows",
+        "collision_probe": {"identity_basis": "contract", "status": "error", "key_column": "id", "values_probed": 3},
+    }
+    message = "Append key collision on id could not be checked (Destination collision probe skipped: (psycopg2.errors.InsufficientPrivilege) permission denied for table restricted\n\n[SQL: SELECT \"id\" \nFROM \"qa_s2_audit_1108\".\"restricted\" \nWHERE \"id\" IN (%(id_1_1)s, %(id_1_2)s, %(id_1_3)s) \n LIMIT %(param_1)s]\n[parameters: {'param_1': 500, 'id_1_1': 1, 'id_1_2': 2, 'id_1_3': 3}]\n(Background on this error at: https://sqlalche.me/e/20/f405)). The destination enforces this key, so a stored key that repeats aborts the insert. Grant read (SELECT) on the destination table and re-run Validate, or choose Duplicate rows: skip or update keys already stored."
+    pf = {
+        "gates": [{"id": "g6_target_ddl", "status": "block", "message": message, "details": dict(details)}],
+        "blockers": [{"id": "g6_target_ddl", "message": message, "details": dict(details)}],
+        "row_count": 3,
+    }
+    roots = build_root_causes(pf)
+    kinds = [r.kind for r in roots]
+    assert "duplicate_identity" not in kinds, [(r.kind, r.title) for r in roots]
+    assert "destination_key_collision" not in kinds
+    assert all("Duplicate identity" not in (r.title or "") for r in roots)

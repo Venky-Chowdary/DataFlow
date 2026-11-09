@@ -395,3 +395,48 @@ def test_live_mysql_oracle_stream_load_method(monkeypatch):
         ora.commit()
         my.close()
         ora.close()
+
+
+def test_live_mysql_oracle_keeps_timestamp_microseconds():
+    """executemany bound datetime as DATE: TIMESTAMP(6) lost its microseconds."""
+    from datetime import datetime
+
+    my = _mysql_connect()
+    ora = _ora_connect()
+    tag = uuid.uuid4().hex[:8].upper()
+    src = f"my_ora_ts_{tag.lower()}"
+    dest = f"MY_ORA_TS_{tag}"
+    try:
+        with my.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE `{src}` (id INT PRIMARY KEY, at DATETIME(6) NULL)"
+            )
+            cur.execute(
+                f"INSERT INTO `{src}` VALUES (1, '2024-02-29 23:59:59.123456'), (2, NULL)"
+            )
+        my.commit()
+        ora_cur = ora.cursor()
+        _drop_ora(ora_cur, dest)
+        ora.commit()
+        result = copy_mysql_to_oracle(
+            source_cfg=_mysql_cfg(),
+            source_table=src,
+            dest_cfg=_ora_cfg(),
+            dest_table=dest,
+            pairs=[("id", "id"), ("at", "at")],
+            oracle_ddls=["NUMBER(10,0)", "TIMESTAMP(6)"],
+            replace_destination=True,
+        )
+        assert result.target_rows == 2
+        ora_cur.execute(f"SELECT ID, AT FROM {dest} ORDER BY ID")
+        assert ora_cur.fetchall() == [
+            (1, datetime(2024, 2, 29, 23, 59, 59, 123456)),  # noqa: DTZ001
+            (2, None),
+        ]
+    finally:
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{src}`")
+        _drop_ora(ora.cursor(), dest)
+        ora.commit()
+        my.close()
+        ora.close()

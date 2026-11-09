@@ -125,6 +125,8 @@ function isAppendDeltaProof(recon: Record<string, unknown> | null | undefined): 
   );
 }
 
+const KEYED_DUPLICATE_POLICIES = new Set(["dedupe_skip", "skip_duplicates", "upsert", "merge"]);
+
 export function computeJobTrustScore(job: TrustJobInput | null | undefined): JobTrustScore {
   if (job?.trust && typeof job.trust.score === "number") {
     return job.trust;
@@ -179,7 +181,12 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
   }
   factors.push({ id: "completeness", label: "Completeness", score: outcome, weight: 0.25, note: outcomeNote });
 
-  const denom = Math.max(processed, rejected, historicalRejected, 1);
+  // Rows read is the population a hold-out was taken from; rows written alone
+  // made 2 rejected of 3 read print as 100%.
+  const ledgerRead = (job?.destination_summary?.row_accounting as { rows_read?: unknown } | null | undefined)
+    ?.rows_read;
+  const rowsRead = num(ledgerRead ?? job?.destination_summary?.source_row_count);
+  const denom = Math.max(rowsRead, processed, rejected, historicalRejected, 1);
   const rejectRate = Math.min(1, rejected / denom);
   const quarantineScore = rejected <= 0 ? 100 : Math.max(0, 100 - rejectRate * 400);
   const quarantineNote =
@@ -187,7 +194,7 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       ? `${historicalRejected.toLocaleString()} original hold-out(s) remediations landed (child Gate-8) — not a rewrite of the parent checksum.`
       : rejected <= 0
         ? "No quarantined rows."
-        : `${rejected.toLocaleString()} open quarantined (${(rejectRate * 100).toFixed(1)}% of processed).`;
+        : `${rejected.toLocaleString()} open quarantined (${(rejectRate * 100).toFixed(1)}% of ${rowsRead > 0 ? "rows read" : "processed"}).`;
   factors.push({
     id: "quarantine",
     label: "Quarantine",
@@ -431,7 +438,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
         ? {
             code: "append_delta",
             label: "Append delta closed — not a dest replace",
-            detail: "Dest grew by this run. Overwrite to replace existing rows, or add a PK and upsert.",
+            detail: KEYED_DUPLICATE_POLICIES.has(String(job?.destination_summary?.duplicate_policy ?? "").trim().toLowerCase())
+              ? "New keys were inserted; stored keys were kept or updated by the Duplicate rows choice. Overwrite to replace existing rows."
+              : "Dest grew by this run. Overwrite to replace existing rows, or add a PK and upsert.",
           }
         : recon?.passed === true && (writerAckNow || writePassNow)
           ? {

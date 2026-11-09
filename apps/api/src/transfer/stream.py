@@ -53,8 +53,10 @@ from services.source_reread import (
     should_reread_source,
 )
 from services.primary_key import dest_is_key_addressed
+from services.duplicate_policy import merge_skipped_identity_keys, rows_without_kept_keys
 from services.row_conservation import (
     CENSUS_KEY,
+    census_for_duplicate_policy,
     KEY_ADDRESSED_KEY,
     KeyCensusAccumulator,
     live_rows_for_digest,
@@ -494,10 +496,15 @@ def _stream_database_transfer_impl(
             run.cfg.pk_target_cols = [
                 map_source_to_target(c, run.cfg.mappings) for c in run.cfg.pk_source_cols
             ]
-    if requires_upsert(run.cfg.effective_sync) and not run.cfg.pk_target_cols:
+    from services.duplicate_policy import route_keyed_duplicate_policy
+
+    keyed_dup_policy = route_keyed_duplicate_policy(SimpleNamespace(destination=run.cfg.destination))
+    if not run.cfg.pk_target_cols and (
+        requires_upsert(run.cfg.effective_sync) or keyed_dup_policy
+    ):
         # No contract key, but the destination table may declare one. That is
-        # catalog evidence, not a guess, so an upsert keyed on it resolves rows
-        # on the same identity the destination already enforces.
+        # catalog evidence, not a guess, so an upsert or dedupe_skip keyed on it
+        # resolves rows on the same identity the destination already enforces.
         run.cfg.pk_source_cols, run.cfg.pk_target_cols = _declared_destination_key_columns(
             run.cfg.dest_type,
             run.cfg.dest_cfg,
@@ -713,7 +720,9 @@ def _stream_database_transfer_impl(
     # (ON DUPLICATE KEY). The row writer discloses, and once approved runs, the
     # CREATE UNIQUE INDEX that merge needs; send those runs there.
     keyless_merge_target = False
-    if run.cfg.write_mode == "upsert" and run.cfg.pk_target_cols:
+    # A dedupe_skip / upsert append resolves stored keys on that index too, so
+    # an empty first load must not COPY past the approved index.
+    if run.cfg.pk_target_cols and (run.cfg.write_mode == "upsert" or keyed_dup_policy):
         try:
             from services.upsert_ddl_gate import existing_merge_target_lacks_unique_key
 
@@ -806,6 +815,9 @@ def _stream_database_transfer_impl(
     if fast is not None:
         rows_copied, run.cfg.ddl_log, run.tally.dest_summary, run.cfg.columns = fast
         run.tally.dest_summary["copy_fast_path"] = "used"
+        if run.cfg.pk_target_cols:
+            run.tally.dest_summary.setdefault("conflict_columns", list(run.cfg.pk_target_cols))
+            run.tally.dest_summary.setdefault("primary_key_columns", list(run.cfg.pk_target_cols))
         if copy_route_backups:
             run.tally.dest_summary["route_backups"] = dict(copy_route_backups)
         _copy_profile.add(
@@ -1818,7 +1830,7 @@ def _stream_database_transfer_impl(
     dest_key_addressed = dest_is_key_addressed(run.cfg.dest_type, run.cfg.pk_target_cols)
     if dest_key_addressed:
         run.tally.dest_summary[KEY_ADDRESSED_KEY] = True
-    keyed_upsert_scope = run.cfg.write_mode == "upsert" and bool(run.cfg.pk_target_cols)
+    keyed_upsert_scope = bool(run.cfg.pk_target_cols) and (run.cfg.write_mode == "upsert" or keyed_dup_policy)
     # D111 — strict keyed upsert on a populated PG destination: row-copy the
     # pre-run table to __dfbak_<job> so a failed verification restores the
     # exact prior state (DELETE + INSERT FROM backup) instead of leaving the
@@ -2476,6 +2488,7 @@ def _stream_database_transfer_impl(
             expanded_total += int(incoming.get("rows_expanded") or 0)
             page_skips["skipped"] += int(incoming.get("rows_skipped") or 0)
             page_skips["collapsed"] += int(incoming.get("collapsed_duplicate_rows") or 0)
+            skipped_keys = merge_skipped_identity_keys(prev, incoming)
             run.tally.dest_summary = {
                 **prev,
                 **incoming,
@@ -2487,6 +2500,7 @@ def _stream_database_transfer_impl(
                 "rows_expanded": expanded_total,
                 # A collapsed image is skipped once, as the file path counts it.
                 "rows_skipped": page_skips["skipped"] + page_skips["collapsed"],
+                **skipped_keys,
             }
             if page_skips["collapsed"]:
                 run.tally.dest_summary["collapsed_duplicate_rows"] = page_skips["collapsed"]
@@ -2858,7 +2872,10 @@ def _stream_database_transfer_impl(
             pass
         return 0, run.cfg.ddl_log, run.tally.dest_summary, run.cfg.columns
 
-    if run.tally.written == 0:
+    # A dedupe_skip rerun that finds every key already stored wrote nothing by
+    # decision; reconcile grades it like any other run.
+    kept_every_key = bool(run.tally.dest_summary.get("skipped_identity_keys"))
+    if run.tally.written == 0 and not kept_every_key:
         details = "; ".join(filter(None, warning_samples[:10]))
         if details and not run.tally.rejected_total:
             raise _undo_failed_write(
@@ -3094,6 +3111,15 @@ def _stream_database_transfer_impl(
             for c in (run.cfg.pk_target_cols or [])
             if c in run.cfg.target_cols
         ]
+        from services.duplicate_policy import normalize_duplicate_policy
+
+        _reread_kept_keys = (
+            {str(k) for k in run.tally.dest_summary.get("skipped_identity_keys") or []}
+            if normalize_duplicate_policy(
+                str((run.cfg.destination.extra or {}).get("duplicate_policy") or "")
+            ) == "dedupe_skip"
+            else set()
+        )
         # Versions of one key the re-read saw, in read order; collapsed to the
         # last one per key (duplicate_policy.collapse_keep_last) for an upsert.
         reread_versions: list[dict[str, Any]] | None = (
@@ -3256,6 +3282,13 @@ def _stream_database_transfer_impl(
                         destination_pk_columns=list(run.cfg.pk_target_cols or []) or None,
                     )
                     reread_holdouts.extend(reread_rejected or [])
+                    if mapped and _reread_kept_keys:
+                        # Stored rows a dedupe_skip write left in place are not
+                        # this run's write: the source digest leaves them out.
+                        mapped = rows_without_kept_keys(
+                            mapped, list(run.cfg.target_cols or []),
+                            list(run.cfg.pk_target_cols or []), _reread_kept_keys,
+                        )
                     if mapped:
                         _fps = row_fingerprints(
                             mapped,
@@ -3523,6 +3556,10 @@ def _stream_database_transfer_impl(
         run.tally.dest_summary["warnings_suppressed"] = suppressed_warnings
     run.tally.dest_summary["error_policy"] = "quarantine" if (run.tally.rejected_total or coerced_null_total) else "none"
     run.tally.dest_summary["sync_mode"] = run.cfg.effective_sync
+    if run.cfg.pk_target_cols and keyed_dup_policy:
+        run.tally.dest_summary["duplicate_policy"] = str(
+            (run.cfg.destination.extra or {}).get("duplicate_policy") or ""
+        )
     stamp_overwrite_source_keys(run.tally.dest_summary, run.tally.overwrite_keys_acc)
     if run.tally.keyed_census_acc is not None:
         census = run.tally.keyed_census_acc.to_census()
@@ -3533,6 +3570,9 @@ def _stream_database_transfer_impl(
                 census = dataclasses.replace(
                     census, prior_pass_inserts=max(_resume_held - _job_before, 0)
                 )
+            census = census_for_duplicate_policy(
+                census, run.tally.dest_summary.get("duplicate_policy")
+            )
             run.tally.dest_summary[CENSUS_KEY] = census.to_dict()
     if run.cfg.pk_target_cols:
         run.tally.dest_summary.setdefault("conflict_columns", list(run.cfg.pk_target_cols))

@@ -8,6 +8,7 @@
  * do not invent bare VARCHAR for UUID/ObjectId/DECIMAL/temporal blockers.
  */
 import { blockerTitle, GATE_CATALOG, gateLabel, isInternalGateId, isSchemaDriftEcho } from "./preflightGates.js";
+import { isDuplicateRowsFixRule } from "./duplicatePolicy.js";
 import type {
   CoercionColumn,
   CoercionSampleFailure,
@@ -437,6 +438,9 @@ export function isDuplicateIdentitySignal(
   details?: Record<string, unknown> | null,
   gateId?: string,
 ): boolean {
+  // Stored keys colliding with (or unreadable in) the destination are not
+  // duplicate source identities; Duplicate rows owns that fix.
+  if (isDuplicateRowsFixRule(details)) return false;
   const blob = textBlob(message, details);
   if (DUPLICATE_RE.test(blob)) return true;
   if (gateId && DUPLICATE_GATE_IDS.has(gateId)) {

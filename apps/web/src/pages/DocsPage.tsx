@@ -364,7 +364,7 @@ const PREFLIGHT_RULES = [
     id: "G8",
     title: "Target DDL Compatibility",
     icon: "shield",
-    desc: "Will the target table or collection accept the data? Existing schemas, PKs, and required fields are checked.",
+    desc: "Will the target table or collection accept the data? Existing schemas, PKs, and required fields are checked. Append inserts every row again: a table with no enforced key stores another copy on each rerun, and a table that enforces the key refuses the run before anything is written. To resolve keys already stored, set Duplicate rows to skip or update them, or use upsert or overwrite.",
   },
 ];
 

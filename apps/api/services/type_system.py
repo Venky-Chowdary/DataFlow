@@ -4963,8 +4963,29 @@ def bounded_string_sink_would_truncate(
     # width holds the offset. Every other tight string stays a truncation.
     if mysql_offset_text_preserves(source_type, target_type, dest_db=dest_db):
         return False
+    # VARCHAR only: a fixed CHAR(n) pads "7" to "7   " and changes the value.
+    fixed = re.match(r"^\s*(N?CHAR|CHARACTER|BPCHAR)\b(?!\s+VARYING)", target_type.upper())
+    if (
+        src_l == LOGICAL_INTEGER
+        and not fixed
+        and tgt_w >= integer_max_text_width(source_type)
+    ):
+        return False
     # Non-string → tight sink — fail closed (Accept risk).
     return True
+
+
+def integer_max_text_width(source_type: str) -> int:
+    """Longest decimal text of an integer carrier, sign included.
+
+    ``BIGINT`` renders at most 20 chars (``-9223372036854775808``), so
+    ``BIGINT→VARCHAR(32)`` keeps every value. An ambiguous ``INTEGER`` is read
+    as 64-bit, the width create-new invents for it.
+    """
+    bits = integer_bit_width(source_type) or 64
+    if bits % 2:  # UNSIGNED carriers report bits + 1
+        return len(str(2 ** (bits - 1) - 1))
+    return len(str(-(2 ** (bits - 1))))
 
 
 def string_width_would_narrow(
@@ -5150,12 +5171,22 @@ def oracle_char_byte_unit(inferred: str | None) -> str | None:
 
 
 def oracle_char_byte_polarity_loss(source_type: str, target_type: str) -> bool:
-    """True when VARCHAR2(n CHAR) ↔ VARCHAR2(n BYTE) changes multibyte budget."""
+    """True when VARCHAR2(n CHAR) ↔ VARCHAR2(m BYTE) can lose a value.
+
+    A character is 1–4 bytes in AL32UTF8, so ``n BYTE`` holds at most ``n``
+    characters and fits ``m CHAR`` when ``m >= n``; ``n CHAR`` fits ``m BYTE``
+    only when ``m >= 4n``. An unreadable width stays fail-closed.
+    """
     src_u = oracle_char_byte_unit(source_type)
     tgt_u = oracle_char_byte_unit(target_type)
-    if not src_u or not tgt_u:
+    if not src_u or not tgt_u or src_u == tgt_u:
         return False
-    return src_u != tgt_u
+    src_w = _STRING_WIDTH_RE.search(strip_identity_qualifier(source_type) or "")
+    tgt_w = _STRING_WIDTH_RE.search(strip_identity_qualifier(target_type) or "")
+    if not src_w or not tgt_w:
+        return True
+    per_char = 4 if src_u == "CHAR" else 1
+    return int(tgt_w.group(1)) < int(src_w.group(1)) * per_char
 
 
 def is_oracle_long_text_carrier(inferred: str | None) -> bool:

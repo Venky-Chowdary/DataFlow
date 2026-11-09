@@ -1066,6 +1066,7 @@ def write_mapped_rows(
     chunks = 0
     written = 0
     rows_skipped = 0
+    skipped_identity_keys: list[str] = []
     transform_errors: list[str] = []
     rejected_details: list[dict] = []
     conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
@@ -1631,6 +1632,20 @@ def write_mapped_rows(
                             source_row_numbers=list(finished.dense_row_numbers or [])
                             or None,
                         )
+                        from connectors.writer_common import drop_stored_key_rows
+
+                        dense, kept_keys, _ = drop_stored_key_rows(
+                            conn.cursor(),
+                            table_name,
+                            schema or None,
+                            [c for c in conflict_cols if c in target_cols],
+                            dense,
+                            target_cols,
+                            quote='"',
+                            placeholder="?",
+                        )
+                        rows_skipped += len(kept_keys)
+                        skipped_identity_keys.extend(kept_keys)
                     for offset in range(0, len(dense), CHUNK_SIZE) if dense else []:
                         batch = dense[offset : offset + CHUNK_SIZE]
                         start = row_offset + offset
@@ -1711,9 +1726,10 @@ def write_mapped_rows(
 
             from connectors.sql_write_materialize import accounted_rejected_rows
 
+            # Keys a dedupe_skip write left stored were decided, not rejected.
             rejected_rows = _rejected_row_count(
                 data_rows,
-                [()] * write_acc.accepted_row_count,
+                [()] * (write_acc.accepted_row_count + len(skipped_identity_keys)),
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,
@@ -1753,6 +1769,8 @@ def write_mapped_rows(
                 )
                 table_name = live_table_name
             meta_out = write_acc.gate8_meta(conflict_columns=conflict_cols or None)
+            if skipped_identity_keys:
+                meta_out["skipped_identity_keys"] = list(skipped_identity_keys)
             fid_report = _kwargs.get("_schema_fidelity_report")
             if isinstance(fid_report, dict):
                 meta_out = dict(meta_out or {})

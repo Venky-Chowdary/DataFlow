@@ -1995,11 +1995,16 @@ def _warehouse_sql_key_list(
 
     qchar = quote_char_for(dialect) or '"'
     table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
-    col_sql = ", ".join(quote_sql_identifier(c, qchar) for c in cols)
-    sql = f"SELECT {col_sql} FROM {table_ref}"  # nosec B608
     try:
         with warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
+                stored = (
+                    _oracle_catalog_names(conn, cfg, schema, table_name, cols)
+                    if dialect == "oracle"
+                    else cols
+                )
+                col_sql = ", ".join(quote_sql_identifier(c, qchar) for c in stored)
+                sql = f"SELECT {col_sql} FROM {table_ref}"  # nosec B608
                 rows = conn.execute(sa.text(sql)).fetchall() or []
     except Exception as exc:
         if _is_missing_warehouse_relation(exc, dialect):
@@ -2014,6 +2019,25 @@ def _warehouse_sql_key_list(
             continue
         out.append(tup)
     return out
+
+
+def _oracle_catalog_names(
+    conn: Any, cfg: Mapping[str, Any], schema: str, table_name: str, cols: list[str]
+) -> list[str]:
+    """Stored spelling of ``cols``: a quoted logical ``"id"`` is ORA-00904 on ``ID``."""
+    import sqlalchemy as sa
+
+    from services.dialect_profiles import (
+        ORACLE_CATALOG_COLUMNS_SQL,
+        match_stored_names,
+        normalize_schema,
+    )
+
+    owner = normalize_schema("oracle", schema or cfg.get("schema"), username=cfg.get("username"))
+    rows = conn.execute(
+        sa.text(ORACLE_CATALOG_COLUMNS_SQL), {"t": table_name, "o": str(owner or "")}
+    ).fetchall()
+    return match_stored_names([r[0] for r in rows], cols)
 
 
 def _warehouse_sql_key_hits(
@@ -2049,6 +2073,12 @@ def _warehouse_sql_key_hits(
                     coerce_key_tuples,
                     key_column_types_sqlalchemy,
                 )
+                if dialect == "oracle":
+                    qcols = [
+                        quote_sql_identifier(c, qchar)
+                        for c in _oracle_catalog_names(conn, cfg, schema, table_name, cols)
+                    ]
+                    col_sql = ", ".join(qcols)
 
                 keys, dropped = coerce_key_tuples(
                     keys,
@@ -2086,7 +2116,7 @@ def _warehouse_sql_key_hits(
                             f"SELECT COUNT(*) FROM ("  # nosec B608
                             f"SELECT DISTINCT {col_sql} FROM {table_ref} "
                             f"WHERE {' OR '.join(clauses)}"
-                            f") _df_key_hits"
+                            f") df_key_hits"
                         )
                     n = conn.execute(sa.text(sql), params).scalar()
                     total += int(n or 0)
@@ -2350,7 +2380,7 @@ def _sum_distinct_hits(
                 f"SELECT COUNT(*) FROM ("  # nosec B608
                 f"SELECT DISTINCT {col_sql} FROM {table_ref} "
                 f"WHERE ({col_sql}) IN ({in_sql})"
-                f") _df_key_hits"
+                f") df_key_hits"
             )
             params = tuple(v for row in chunk for v in row)
         cur = conn.cursor()

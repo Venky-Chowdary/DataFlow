@@ -1514,17 +1514,16 @@ class UniversalTransferEngine:
         mongo = get_mongodb_service()
         checkpoint_service = CheckpointService(mongo)
         _forget_cached_table_shapes(request.source, request.destination)
+        contract = resolve_sync_contract(request.stream_contracts) if resume else None
+        resume_mode = resolve_effective_sync_mode(request.sync_mode, contract.sync_mode if contract else None)
+        resume = resume and not _resume_state.restarts_from_start(resume_mode)
         if resume:
-            contract = resolve_sync_contract(request.stream_contracts)
             checkpoint = resolve_resume_checkpoint(
                 job_id=job_id,
                 mongo=mongo,
                 checkpoint_service=checkpoint_service,
                 has_progress=_checkpoint_has_progress,
-                sync_mode=resolve_effective_sync_mode(
-                    request.sync_mode,
-                    contract.sync_mode if contract else None,
-                ),
+                sync_mode=resume_mode,
             )
         else:
             checkpoint = Checkpoint(job_id=job_id)
@@ -1864,16 +1863,14 @@ class UniversalTransferEngine:
                     map_source_to_target(c, mappings)
                     for c in declared_identity_columns(request)
                 ]
+            from services.duplicate_policy import route_keyed_duplicate_policy
+            if not conflict_columns and (
+                requires_upsert(effective_sync) or route_keyed_duplicate_policy(request)
+            ):
+                # The destination's own declared key is catalog evidence, not a
+                # guess (Validate's collision probe resolves on it too).
+                conflict_columns = _declared_destination_key(request.destination, mappings)
             if requires_upsert(effective_sync):
-                if not conflict_columns:
-                    # The destination's own declared key is catalog evidence, not
-                    # a guess — use it when every key column is mapped. Refusing
-                    # here while the table itself declares the key made upsert
-                    # unusable on any route where the operator had not also typed
-                    # the key into the stream contract.
-                    conflict_columns = _declared_destination_key(
-                        request.destination, mappings
-                    )
                 if not conflict_columns:
                     raise ValueError(
                         f"Sync mode `{effective_sync}` requires primary_key for upsert; "
@@ -3437,6 +3434,7 @@ class UniversalTransferEngine:
                         number_locale=getattr(request, "number_locale", "") or "",
                         resume=resume,
                         resume_write_complete=_resume_state.resumes_at_reconcile(resume, checkpoint),
+                        **_resume_state.resume_read_cursor(resume, checkpoint),
                         **parity,
                     )
                     pf = attach_budget_findings(pf, _budget)

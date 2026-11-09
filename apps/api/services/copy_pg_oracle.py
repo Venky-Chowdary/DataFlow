@@ -67,6 +67,7 @@ from services.copy_pg_sqlserver import (
     _CopyExecutemanySink,
     _as_date,
     _as_datetime,
+    _as_decimal,
     _as_float,
     _as_int,
     _identity,
@@ -110,7 +111,7 @@ def converter_for_ora_ddl(
             inside = (ddl or "")[(ddl or "").find("(") + 1 : (ddl or "").find(")")]
             parts = [p.strip() for p in inside.split(",")]
             if len(parts) == 2 and parts[1] not in {"0", ""}:
-                return _as_float
+                return _as_decimal
         return _as_int
     if base in {"FLOAT", "BINARY_FLOAT", "BINARYFLOAT", "BINARY_DOUBLE", "BINARYDOUBLE"}:
         return _as_float
@@ -140,7 +141,11 @@ def _copy_into_oracle(
     copy_sql: str,
     insert_sql: str,
     converters: list[Callable[[str | None], Any]],
+    oracle_ddls: list[str] | None = None,
 ) -> int:
+    from connectors.oracle_tstz import pin_oracle_timestamp_binds
+
+    pin_oracle_timestamp_binds(dst_cur, oracle_ddls or [])
     sink = _CopyExecutemanySink(
         dst_cur,
         insert_sql,
@@ -399,6 +404,7 @@ def copy_postgres_to_oracle(
                     copy_sql=sql,
                     insert_sql=insert_sql,
                     converters=converters,
+                    oracle_ddls=oracle_ddls,
                 )
                 dest_conn.commit()
 

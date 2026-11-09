@@ -1462,6 +1462,8 @@ def delete_by_primary_keys(
         return _dynamodb_delete_keys(
             cfg, table_name=table_name, cols=pk_cols, keys=work_keys
         )
+    if dt == "oracle":
+        pk_cols = _oracle_stored_names(cfg, schema, table_name, list(pk_cols))
     if len(pk_cols) > 1:
         return _delete_composite(dt, cfg, table_name, pk_cols, work_keys, schema)
     if dt in ("postgresql", "redshift"):
@@ -1510,6 +1512,8 @@ def _fetch_pk_lsn_map(
     pk_cols = _pk_columns(primary_key_column)
     existing: dict[str, Any] = {str(k): None for k in keys}
     dt = (db_type or "").lower().strip()
+    if dt == "oracle":
+        *pk_cols, lsn_column = _oracle_stored_names(cfg, schema, table_name, [*pk_cols, lsn_column])
     if len(pk_cols) > 1:
         return _fetch_composite_pk_lsn_map(
             dt, cfg, table_name, pk_cols, keys, schema, lsn_column=lsn_column
@@ -1592,6 +1596,21 @@ def _fetch_pk_lsn_map(
         f"LSN delete fetch is not wired for destination type {dt!r}; "
         "refusing to invent existing_lsn=None (would always apply deletes)"
     )
+
+
+def _oracle_stored_names(
+    cfg: dict[str, Any], schema: str | None, table_name: str, cols: list[str]
+) -> list[str]:
+    """Oracle stores ``id`` as ``ID`` and quoted ``_DF_LSN``; quote what is stored."""
+    from connectors.generic_sql import _engine, release_engine
+    from services.dest_precount import _oracle_catalog_names
+
+    engine = _engine(_generic_sql_cfg(cfg, "oracle"))
+    try:
+        with engine.connect() as conn:
+            return _oracle_catalog_names(conn, cfg, str(schema or ""), table_name, cols)
+    finally:
+        release_engine(engine)
 
 
 def _fetch_pk_lsn_map_mongodb(

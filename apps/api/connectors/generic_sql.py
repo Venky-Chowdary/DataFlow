@@ -200,6 +200,7 @@ from connectors.writer_common import (
     _is_nullish_conflict_key,
     _rejected_row_count,
     compare_lsn,
+    drop_stored_key_dicts,
     early_array_strategy_gate,
     flush_normalized_child_batches,
     materialize_missing_as_null_for_dense_write,
@@ -6099,7 +6100,12 @@ def write_mapped_rows(
                             chunk_idx += 1
                             continue
                         chunk_written = 0
-                        if write_mode == "upsert" and conflict_columns:
+                        keyed_chunk = write_mode == "upsert" and bool(conflict_columns)
+                        if keyed_chunk:
+                            rows_skipped += drop_stored_key_dicts(
+                                conn, table_obj, conflict_columns, batch, write_acc.skipped_identity_keys
+                            )
+                        if keyed_chunk and batch:
                             chunk_written = _upsert_batch(
                                 conn,
                                 table_obj,
@@ -6114,7 +6120,7 @@ def write_mapped_rows(
                                 rows_skipped += len(batch) - chunk_written
                             else:
                                 chunk_written = len(batch)
-                        else:
+                        elif not keyed_chunk:
                             result = conn.execute(table_obj.insert(), batch)
                             chunk_written = _insert_rows_written(
                                 result, len(batch), dialect_name

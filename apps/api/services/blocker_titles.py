@@ -31,22 +31,26 @@ def collapse_operator_message(message: object) -> str:
     text = str(message or "").strip()
     if not text:
         return text
+    # ``;`` stays on its clause: "after Confirm; fix …" must not read "Confirm fix".
     parts = [
         part.strip()
-        for part in re.split(r"\s*(?:\n+|;|(?<=[.!])\s+)", text)
-        if part.strip()
+        for part in re.split(r"\s*\n+\s*|(?<=;)\s*|(?<=[.!])\s+", text)
+        if part.strip().rstrip(";").strip()
     ]
     kept: list[str] = []
+    seen: set[str] = set()
     saw_drift = False
     for part in parts:
-        if part in kept:
+        bare = part.rstrip(";").strip()
+        if bare in seen:
             continue
-        if is_schema_drift_echo(part):
+        if is_schema_drift_echo(bare):
             if saw_drift:
                 continue
             saw_drift = True
+        seen.add(bare)
         kept.append(part)
-    collapsed = " ".join(kept)
+    collapsed = " ".join(kept).rstrip(";").strip()
     half = len(collapsed) // 2
     if half and collapsed[:half].strip() == collapsed[half:].strip():
         return collapsed[:half].strip()
