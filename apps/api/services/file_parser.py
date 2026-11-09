@@ -767,6 +767,24 @@ class FileParser:
     ]
 
     @staticmethod
+    def detect_request_file_type(request: Any) -> str:
+        """File type of a transfer request's upload: in-memory bytes, else the durable path.
+
+        A rerun or Sync now child carries only ``source_path`` (bytes are never
+        persisted), so the name alone would leave a ``.db`` upload "unknown".
+        """
+        head = bytes(getattr(request, "source_content", b"") or b"")[:4096]
+        path = str(getattr(request, "source_path", "") or "")
+        if not head and path:
+            try:
+                with open(path, "rb") as fh:
+                    head = fh.read(4096)
+            except OSError:
+                head = b""
+        name = str(getattr(request, "source_filename", "") or "") or "upload.csv"
+        return FileParser.detect_file_type(name, head or None)
+
+    @staticmethod
     def detect_file_type(filename: str, content: bytes | None = None) -> str:
         """Detect file type from filename, with content sniffing as fallback.
 
