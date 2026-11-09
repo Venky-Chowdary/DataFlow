@@ -603,6 +603,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             rows_are_population=stored_population is not None,
             shape_recipe=body.shape_recipe,
             schema_policy=body.schema_policy,
+            schema_policy_explicit="schema_policy" in body.model_fields_set,
             backfill_new_fields=body.backfill_new_fields,
             contract_primary_key=contract_pk,
             destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
@@ -969,6 +970,7 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
             )
             file_source = resolved_kind == "file"
             result = _preview(
+                dest_db=body.dest_db,
                 headers=headers,
                 sample_rows=rows,
                 mappings=body.mappings,
@@ -976,7 +978,6 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
                 sample_size=body.sample_size,
                 empty_cells_as_null=file_source,
                 database_extract=resolved_kind == "database",
-                dest_db=body.dest_db,
             )
             if image.applied:
                 result["transform_image"] = {

@@ -967,6 +967,7 @@ def write_mapped_rows(
         if create_table:
             from services.identity_carry import dbapi_percent_fetchall
             from services.schema_fidelity import (
+                create_key_inputs,
                 empty_unsupported_report,
                 plan_covers_unique,
                 render_create_column_defs,
@@ -985,11 +986,7 @@ def write_mapped_rows(
                     table_already_exists=bool(table_existed),
                     dest_table=table_name,
                     dest_schema="",
-                    carry_keys=write_mode != "insert"
-                    or bool(_kwargs.get("carry_source_keys")),
-                    operator_key_columns=(
-                        list(conflict_columns or []) if write_mode == "upsert" else None
-                    ),
+                    **create_key_inputs(write_mode=write_mode, conflict_columns=conflict_columns, carry_source_keys=bool(_kwargs.get("carry_source_keys"))),
                 )
             except Exception as exc:  # noqa: BLE001 — planner failure is types-only + certificate
                 logger.warning(
@@ -1479,7 +1476,31 @@ def write_mapped_rows(
                     rejected_details=rejected_details,
                     warnings=transform_errors,
                 )
-            if not table_existed and create_table and write_mode == "upsert":
+            if table_existed and backfill_new_fields:
+                from connectors.writer_common import additive_ddl_would_write_nothing
+                from services.batch_progress import mappings_require_dest_widen
+
+                _scan = None
+                if not mappings_require_dest_widen(mappings):
+                    _scan = _mysql_scan_finished_bundles(**_mysql_finish_kwargs)
+                if _scan is not None and additive_ddl_would_write_nothing(
+                    rejected_details=list(_scan[0].rejected_details),
+                    policy=policy,
+                    source_row_count=_scan[1],
+                ):
+                    _cleanup_spool()
+                    return WriteResult(
+                        ok=True,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=database,
+                        checksum="",
+                        chunks_completed=0,
+                        rejected_rows=_scan[1],
+                        rejected_details=list(_scan[0].rejected_details),
+                        warnings=list(_scan[0].transform_errors),
+                    )
+            if not table_existed and create_table and (write_mode == "upsert" or conflict_columns):
                 from services.schema_fidelity import mysql_key_compatible_types
 
                 target_types, key_refusal = mysql_key_compatible_types(

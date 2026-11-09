@@ -3517,8 +3517,8 @@ export function ValidateDashboard({
               // Root kinds have no `source` payload. Fail closed — never read
               // `.details` on undefined (Transfer Studio crash).
               const ddlAction = ddlGate && onApproveDdlChanges && !ddlChangesAcknowledged
-                && (item.source?.id === "g_upsert_dest_key"
-                  || item.gateChips?.some((chip) => chip.id === "g_upsert_dest_key")) ? (
+                && (item.source?.id === ddlGate.id
+                  || item.gateChips?.some((chip) => chip.id === ddlGate.id)) ? (
                   <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                     <code className="df2-vd-planned-ddl">{String(ddlGate.details?.planned_ddl ?? "")}</code>
                     <Button

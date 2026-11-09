@@ -123,6 +123,7 @@ import {
   launchDescribesCurrentVerdict,
   runResultDescribesRoute,
 } from "../lib/runRouteScope";
+import { theaterReturnToValidate } from "../lib/theaterReturn";
 import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
@@ -502,6 +503,8 @@ export function TransferPage({
   const destSchemaTableKeyRef = useRef("");
   const lastNewTableToastRef = useRef("");
   const [preflighting, setPreflighting] = useState(false);
+  /** A rerun from the Run page: Validate re-runs on the render that shows it. */
+  const [freshValidatePending, setFreshValidatePending] = useState(false);
   const [validateProgress, setValidateProgress] = useState<ValidateProgress | null>(null);
   const [savingContract, setSavingContract] = useState(false);
   const [boundContractId, setBoundContractId] = useState("");
@@ -1424,6 +1427,22 @@ export function TransferPage({
     },
     [primarySourceStream, sourceStreamName, toast],
   );
+
+  const clearPrimaryKey = useCallback(() => {
+    primaryKeyClearedRef.current = true;
+    declaredPrimaryKeyRef.current = "";
+    setPrimaryKeyField("");
+    const stream = primarySourceStream || sourceStreamName;
+    if (stream) {
+      setStreamFields((prev) => ({
+        ...prev,
+        [stream]: {
+          ...(prev[stream] || { cursorField: "", primaryKeyField: "" }),
+          primaryKeyField: "",
+        },
+      }));
+    }
+  }, [primarySourceStream, sourceStreamName]);
 
   const buildSourceEndpoint = () => {
     if (sourceKind === "file") {
@@ -6311,15 +6330,24 @@ export function TransferPage({
    * ask for a fresh preflight, not show the old green verdict beside the dead
    * run's "Open live progress".
    */
-  const runFailed = result?.success === false;
   const backFromTheaterToValidate = useCallback(() => {
-    if (runFailed) {
-      setTransferLaunch(null);
+    const back = theaterReturnToValidate(result);
+    if (back.clearLaunch) setTransferLaunch(null);
+    if (back.clearVerdict) {
       setPreflight(null);
       setValidatedContractKey(null);
     }
+    if (back.rerunValidate) setFreshValidatePending(true);
     leaveTheaterToValidate();
-  }, [runFailed, leaveTheaterToValidate]);
+  }, [result, leaveTheaterToValidate]);
+
+  useEffect(() => {
+    if (!freshValidatePending || step !== STEP_VALIDATE || preflight || preflighting) return;
+    setFreshValidatePending(false);
+    void executePreflight();
+    // executePreflight is re-created every render; the pending flag gates the call.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [freshValidatePending, step, preflight, preflighting]);
 
   const replayJournalFromTheater = (journalId: string, stream: string) => {
     setTransferLaunch(null);
@@ -7283,6 +7311,7 @@ export function TransferPage({
           uniqueKeySuggestions={uniqueKeySuggestions}
           compositeKeySuggestions={compositeKeySuggestions}
           onApplyPrimaryKey={applyPrimaryKeySuggestion}
+          onClearPrimaryKey={clearPrimaryKey}
           sampleRows={(samplePreviewRows as Record<string, unknown>[]) || []}
         />
       )}
@@ -9065,7 +9094,7 @@ export function TransferPage({
             <button
               type="button"
               className="df2-btn"
-              onClick={() => setStep(STEP_VALIDATE)}
+              onClick={() => (result ? backFromTheaterToValidate() : setStep(STEP_VALIDATE))}
             >
               ← Back
             </button>
@@ -9297,7 +9326,7 @@ export function TransferPage({
             <button
               type="button"
               className="df2-btn"
-              onClick={() => setStep(STEP_VALIDATE)}
+              onClick={() => (result ? backFromTheaterToValidate() : setStep(STEP_VALIDATE))}
             >
               ← Back
             </button>

@@ -1791,6 +1791,9 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
+            from services.create_ddl_gate import refuse_unapproved_create
+
+            refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -3302,6 +3305,9 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
+            from services.create_ddl_gate import refuse_unapproved_create
+
+            refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -4480,6 +4486,9 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
+            from services.create_ddl_gate import refuse_unapproved_create
+
+            refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(

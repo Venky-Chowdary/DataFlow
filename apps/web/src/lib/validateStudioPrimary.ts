@@ -228,6 +228,9 @@ export function resolveValidateStudioPrimary(
 
 type GateLike = { id?: string; details?: Record<string, unknown> | null };
 
+/** Gates that disclose destination DDL (upsert unique key, create-new table) for approval. */
+const DDL_APPROVAL_GATE_IDS = new Set(["g_upsert_dest_key", "g_create_dest_ddl"]);
+
 /**
  * The g_upsert_dest_key gate behind a blocker, whether the blocker is the gate
  * itself or the root cause that absorbed it (kind ``upsert_dest_ddl``).
@@ -237,7 +240,7 @@ export function ddlApprovalGate(
   gates?: GateLike[] | null,
 ): GateLike | null {
   if (!blocker) return null;
-  if (blocker.id === "g_upsert_dest_key") return blocker;
+  if (blocker.id && DDL_APPROVAL_GATE_IDS.has(blocker.id)) return blocker;
   const details = (blocker.details ?? {}) as Record<string, unknown>;
   const impacted = Array.isArray(details.impacted_gates) ? details.impacted_gates.map(String) : [];
   if (details.kind !== "upsert_dest_ddl" && !impacted.includes("g_upsert_dest_key")) return null;
@@ -268,7 +271,7 @@ export function ddlApprovalPending(
 export function pendingDdlApproval(
   pf: { gates?: Array<GateLike & { status?: string }> } | null | undefined,
 ): GateLike | null {
-  const gate = (pf?.gates ?? []).find((g) => g?.id === "g_upsert_dest_key" && g.status === "block");
+  const gate = (pf?.gates ?? []).find((g) => DDL_APPROVAL_GATE_IDS.has(g?.id ?? "") && g.status === "block");
   return gate && ddlApprovalPending(gate) ? gate : null;
 }
 
@@ -277,7 +280,7 @@ export function ddlApprovalRecorded(
   pf: { gates?: Array<{ id?: string; details?: Record<string, unknown> | null }> } | null | undefined,
 ): boolean {
   return (pf?.gates ?? []).some(
-    (g) => g?.id === "g_upsert_dest_key" && g.details?.acknowledged === true,
+    (g) => DDL_APPROVAL_GATE_IDS.has(g?.id ?? "") && g.details?.acknowledged === true,
   );
 }
 

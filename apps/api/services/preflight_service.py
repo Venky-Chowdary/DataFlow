@@ -365,6 +365,7 @@ def run_file_preflight(
     # Operator approved the DDL DataFlow disclosed for this run (e.g. the
     # unique index an upsert needs on an existing destination table — D101).
     ddl_changes_acknowledged: bool = False,
+    schema_policy_explicit: bool = False,
     # Operator chose to empty a populated destination from a 0-row source (D56).
     empty_source_overwrite_acknowledged: bool = False,
     acknowledgment_actor: str = "",
@@ -2250,6 +2251,27 @@ def run_file_preflight(
     except Exception as exc:  # noqa: BLE001 — unmeasured, never a false pass
         logger.warning("NULL-cursor gate probe skipped: %s", exc, exc_info=exc)
 
+    from services.create_ddl_gate import create_ddl_gate as _create_ddl_gate
+
+    # The request default is manual_review too; only an operator-declared
+    # policy gates create-new (a default create-new is the golden path).
+    create_ddl_gate = _create_ddl_gate(
+        schema_policy=schema_policy if schema_policy_explicit else None,
+        table_exists=dest_table_exists,
+        can_create=dest_can_create,
+        acknowledged=bool(ddl_changes_acknowledged),
+        destination_table=str(destination_table or ""),
+        mappings=write_maps,
+    )
+    if create_ddl_gate and create_ddl_gate.get("status") == "block":
+        enriched_blockers.append(
+            {
+                "id": create_ddl_gate["id"],
+                "message": create_ddl_gate["message"],
+                "details": dict(create_ddl_gate["details"]),
+                "suggested_actions": list(create_ddl_gate["suggested_actions"]),
+            }
+        )
     null_cursor_blocked = bool(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )
@@ -2271,6 +2293,7 @@ def run_file_preflight(
         ([fit_gate] if fit_gate else [])
         + ([null_cursor_gate] if null_cursor_gate else [])
         + ([upsert_ddl_gate] if upsert_ddl_gate else [])
+        + ([create_ddl_gate] if create_ddl_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])
     )
