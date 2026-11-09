@@ -912,6 +912,8 @@ class CellPreviewRequest(BaseModel):
     # canonically (WIRE) when the operator declared no locale.
     source_kind: str = "file"
     source_type: str | None = None
+    # Destination engine, so a VARCHAR(n) width counts units the way its writer does.
+    dest_db: str = ""
 
 
 @router.post("/preview-cells")
@@ -974,6 +976,7 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
                 sample_size=body.sample_size,
                 empty_cells_as_null=file_source,
                 database_extract=resolved_kind == "database",
+                dest_db=body.dest_db,
             )
             if image.applied:
                 result["transform_image"] = {
