@@ -267,6 +267,33 @@ def rotate_token(invite_id: str, *, ttl: timedelta) -> tuple[str, dict[str, Any]
     return token, out
 
 
+def restore_token(invite_id: str, *, failed: dict[str, Any], previous: dict[str, Any]) -> bool:
+    """Undo a resend whose mail never queued: the emailed link must keep working.
+
+    Compare-and-set on the rotated hash, so an accept, revoke or newer resend
+    that landed in between is never reverted.
+    """
+    fields = {k: previous.get(k) for k in ("token_hash", "superseded_hashes", "sent_count",
+                                           "last_sent_at", "expires_at")}
+    if not fields["token_hash"] or not failed.get("token_hash"):
+        return False
+    db = _database()
+    if db is not None:
+        expires = previous.get("expires_at")
+        if expires:
+            fields["purge_at"] = _purge_at(datetime.fromisoformat(str(expires)))
+        done = db[COLLECTION].update_one(
+            {"_id": invite_id, "status": "pending", "token_hash": failed["token_hash"]},
+            {"$set": fields})
+        return bool(done.modified_count)
+    with json_doc_transaction(_path(), {"invites": {}}) as data:
+        row = data.setdefault("invites", {}).get(invite_id)
+        if row is None or row.get("status") != "pending" or row.get("token_hash") != failed["token_hash"]:
+            return False
+        row.update(fields)
+    return True
+
+
 def transition(invite_id: str, *, to_status: str, require_unexpired: bool = False,
                token_hash: str = "", **fields: Any) -> dict[str, Any] | None:
     """Compare-and-set ``pending`` → ``to_status``. Exactly one caller wins;
