@@ -1534,33 +1534,48 @@ def _census_without_rejected_keys(
     dest_type: str,
     dest_cfg: dict[str, Any],
     dest_table: str,
+    change: ChangeBatch | None = None,
 ) -> dict[str, Any] | None:
     """Withdraw the keys this batch's writer quarantined from the run census.
 
     A key held out for its own values (width, type, CHECK) did not land; a
     UNIQUE / FK refusal may concern one copy of a key that did, so it stays
     counted and the ledger stays unproven. A key whose post-write probe fails
-    stays counted too.
+    stays counted too. So does a key the batch also wrote another image of:
+    that image landed, so the key is an insert or update, not a hold-out.
     """
+    from collections import Counter
+
     from services.dest_precount import destination_key_hits
     from services.row_conservation import coerce_pk_part
 
-    from .reconcile_step import _ROW_DECIDED_MARKERS, _rejected_key
+    from .reconcile_step import _ROW_DECIDED_MARKERS, _ladder_key, _rejected_key
 
     def _bind(part: str) -> Any:
         value = coerce_pk_part(part)
         return value if str(value) == part else part
 
     keys: list[tuple[str, ...]] = []
+    refused: Counter[tuple[str, ...]] = Counter()
     for detail in dest_summary.get("rejected_details") or []:
         if not isinstance(detail, dict) or detail.get("disposition") == "coerced_null":
             continue
+        rejected = _rejected_key(detail, key_cols)
+        if rejected is not None:
+            refused[rejected] += 1
         reason = str(detail.get("reason") or detail.get("failure_reason") or "").lower()
         if any(marker in reason for marker in _ROW_DECIDED_MARKERS):
             continue
         key = _rejected_key(detail, key_cols)
         if key is not None and key not in keys:
             keys.append(key)
+    if change is not None:
+        images = Counter(
+            k for k in (_ladder_key(r, key_cols)
+                        for r in [*(change.inserts or []), *(change.updates or [])])
+            if k is not None
+        )
+        keys = [k for k in keys if images[k] <= refused[k]]
     if not keys:
         return None
     stored: set[tuple[str, ...]] = set()
@@ -1905,6 +1920,7 @@ def _apply_change_batch(
             dest_type=dest_type,
             dest_cfg=dest_cfg,
             dest_table=dest_table,
+            change=change,
         ) or census_payload
     if census_payload:
         from services.row_conservation import CENSUS_KEY
