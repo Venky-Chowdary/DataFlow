@@ -148,6 +148,10 @@ def _job_name_key(name: str) -> str:
     return (name or "").strip().casefold()
 
 
+#: Rounds of insert / read / takeover before a claim gives up as contended.
+_CLAIM_CONTEND_ATTEMPTS = 5
+
+
 def _is_duplicate_key(exc: BaseException) -> bool:
     """Whether an insert failed because the key was already taken.
 
@@ -1047,35 +1051,43 @@ class MongoDBService:
             "claimed_at": now,
             "expires_at": expires_at,
         }
-        try:
-            claims.insert_one(doc)
-            # Mirror into the local registry so this process keeps deduping
-            # even if the shared store later drops out mid-run.
-            self._LOCAL_CLAIMS[key] = (job_id, expires_at)
-            return True, "", ""
-        except Exception as exc:
-            if not _is_duplicate_key(exc):
-                # A claim store problem must not block data movement; the
-                # same-process registry still dedupes within this worker.
-                logger.warning("idempotency claim failed for %s: %s", key, exc)
-                acquired, holder = self._local_claim(
-                    key, job_id, expires_at, self._job_status
-                )
-                if not acquired:
-                    return False, holder, self._job_status(holder)
+        holder_id = holder_status = ""
+        # The previous run releases its claim (delete_one) as it finishes. That
+        # can land between our failed insert and the read, or between the read
+        # and the takeover. A vanished claim is a free slot, so contend again
+        # instead of answering "duplicate" with no holder (D-2).
+        for _attempt in range(_CLAIM_CONTEND_ATTEMPTS):
+            try:
+                claims.insert_one(doc)
+                # Mirror into the local registry so this process keeps deduping
+                # even if the shared store later drops out mid-run.
+                self._LOCAL_CLAIMS[key] = (job_id, expires_at)
                 return True, "", ""
+            except Exception as exc:
+                if not _is_duplicate_key(exc):
+                    # A claim store problem must not block data movement; the
+                    # same-process registry still dedupes within this worker.
+                    logger.warning("idempotency claim failed for %s: %s", key, exc)
+                    acquired, holder = self._local_claim(
+                        key, job_id, expires_at, self._job_status
+                    )
+                    if not acquired:
+                        return False, holder, self._job_status(holder)
+                    return True, "", ""
 
-        existing = claims.find_one({"_id": key}) or {}
-        holder_id = str(existing.get("job_id") or "")
-        holder_status = self._job_status(holder_id) if holder_id else ""
-        expires_raw = existing.get("expires_at")
-        expired = isinstance(expires_raw, datetime) and _as_utc(expires_raw) <= now
-
-        if not claim_still_blocks(
-            holder_id=holder_id,
-            holder_status=holder_status,
-            expired=expired,
-        ):
+            existing = claims.find_one({"_id": key})
+            if not existing:
+                continue
+            holder_id = str(existing.get("job_id") or "")
+            holder_status = self._job_status(holder_id) if holder_id else ""
+            expires_raw = existing.get("expires_at")
+            expired = isinstance(expires_raw, datetime) and _as_utc(expires_raw) <= now
+            if claim_still_blocks(
+                holder_id=holder_id,
+                holder_status=holder_status,
+                expired=expired,
+            ):
+                return False, holder_id, holder_status
             # Take over: either the previous run finished, or it died without
             # releasing and its claim has aged out.
             result = claims.update_one(
@@ -1084,11 +1096,14 @@ class MongoDBService:
             )
             if result.matched_count:
                 return True, "", ""
-            # Lost a race to another taker; fall through and report the winner.
-            existing = claims.find_one({"_id": key}) or {}
-            holder_id = str(existing.get("job_id") or "")
-            holder_status = self._job_status(holder_id) if holder_id else ""
+            # The claim changed under us (released, or taken by another
+            # submit); read it again and decide on what is there now.
 
+        logger.warning(
+            "idempotency claim for %s still contended after %d attempts",
+            key,
+            _CLAIM_CONTEND_ATTEMPTS,
+        )
         return False, holder_id, holder_status
 
     def bind_job_idempotency(
