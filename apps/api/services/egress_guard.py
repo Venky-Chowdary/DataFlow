@@ -978,6 +978,11 @@ def pinned_egress(
 def _cfg_dial_values(cfg: Any, extra: Sequence[str]) -> list[str]:
     values: list[str] = []
     if isinstance(cfg, dict):
+        from services.dial_target import reconcile_dial_host
+
+        # Drop a placeholder loopback host when the URI names the real target
+        # before the values are classified. A loopback-only config is unchanged.
+        reconcile_dial_host(cfg)
         for key in ("host", "endpoint_url", "connection_string", "base_url", "url"):
             raw = cfg.get(key)
             if isinstance(raw, str) and raw.strip():

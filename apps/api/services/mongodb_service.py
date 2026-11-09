@@ -791,6 +791,14 @@ class MongoDBService:
             filt = {"$and": [filt, {"status": {"$in": sorted(only_from_allowed)}}]}
         if only_if_orphan_reclaims:
             filt = {"$and": [filt, {"orphan_reclaims": expected_orphan_reclaims}]}
+        # A cancel that lands after this method's snapshot must still win.
+        # The filter is the compare-and-set; the snapshot check above is
+        # only the fast path.
+        from services.job_status import cancel_status_write_filter
+
+        cancel_guard = cancel_status_write_filter(status)
+        if cancel_guard:
+            filt = {"$and": [filt, cancel_guard]}
         if fence is not None:
             updates["lease_fence"] = fence
             # Fencing tokens are monotonic: a newer lease supersedes the one
@@ -1769,6 +1777,21 @@ class MemoryMongoDBService:
             if existing_fence is not None and int(existing_fence) > int(fence):
                 return False
             kwargs["lease_fence"] = fence
+
+        # Re-read the cancel flag immediately before the write. A cancel that
+        # arrived after the snapshot at the top of this method must not be
+        # overwritten by a late "completed".
+        from services.job_status import cancel_blocks_status_write
+
+        if cancel_blocks_status_write(status) and (
+            rec.get("cancel_requested") or rec.get("status") == "cancelled"
+        ):
+            logging.getLogger(__name__).info(
+                "Ignoring %s update for job %s: cancel_requested",
+                status,
+                job_id,
+            )
+            return False
 
         _terminal_message_over_progress(status, kwargs, rec)
         try:

@@ -17,6 +17,7 @@ import {
   resolveDisplayRole,
 } from "../lib/topologyUtils";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { connectorEndpointLabel } from "../lib/connectorEndpoint";
 import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 
 interface ConnectorDetailDrawerProps {
@@ -57,7 +58,7 @@ export function ConnectorDetailDrawer({
   const healthy = connectorLooksHealthy(c);
   const neverTested = connectorTestHealth(c) === "never_tested";
   const healthBadge = connectorHealthBadgeLabel(c);
-  const endpoint = c.host ? `${c.host}${c.port ? `:${c.port}` : ""}` : "Managed endpoint";
+  const endpoint = connectorEndpointLabel(c) || "Managed endpoint";
   const relatedJobs = workbench?.relatedJobs ?? [];
   const relatedSchedules = workbench?.relatedSchedules ?? [];
   const displayRole = resolveDisplayRole(c, relatedJobs, relatedSchedules);

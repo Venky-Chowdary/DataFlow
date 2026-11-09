@@ -1369,6 +1369,17 @@ def _redact_response_value(value: Any) -> Any:
 
 def mask_connector(c: SavedConnector) -> dict[str, Any]:
     d = c.to_dict()
+    from services.dial_target import displayed_dial
+
+    # Computed from the plaintext URI before it is masked. The card must show
+    # the host that will be dialed, including a loopback that is really loopback.
+    dial_host, dial_loop = displayed_dial(
+        str(d.get("host") or ""),
+        str(d.get("connection_string") or ""),
+        str(d.get("endpoint_url") or ""),
+    )
+    d["dial_host"] = dial_host
+    d["dial_host_loopback"] = dial_loop
     if d.get("password"):
         d["password"] = "****"  # nosec B105
     if d.get("connection_string"):

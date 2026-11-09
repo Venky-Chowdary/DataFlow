@@ -59,6 +59,9 @@ _LIST_KEEP_KEYS = frozenset({
     # Join keys for Connectors "last used" — never the full transfer_request.
     "source_connector_id",
     "dest_connector_id",
+    # A late "completed" write must not paint a canceled run green. The list
+    # badge reads this flag when status and the operator's cancel disagree.
+    "cancel_requested",
 })
 
 

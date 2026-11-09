@@ -596,7 +596,11 @@ def resolve_connector_config(
     # Apply driver defaults for fields that are still missing.
     # Never invent localhost when a connection string already carries host/auth —
     # that caused Validate to AUTH against the wrong endpoint while Connectors Test
-    # still passed via the URI.
+    # still passed via the URI. A saved host of localhost next to an Atlas URI
+    # is the catalog default, not the dial target.
+    from services.dial_target import reconcile_dial_host
+
+    reconcile_dial_host(cfg)
     if not (cfg.get("connection_string") or "").strip():
         # HTTP SDK sources take their endpoint from the manifest; a stamped
         # loopback host would replace it and fail as a non-URL base_url.

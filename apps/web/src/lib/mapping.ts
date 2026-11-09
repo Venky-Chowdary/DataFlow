@@ -1,5 +1,6 @@
 import type { ColumnAnalysis } from "./types";
 import { declaredCarrierFidelityRisk } from "./typeCarrierFidelity";
+import { preserveSourceDecimalPrecision } from "./typeDisplay";
 
 /**
  * Studio MappingTransform vocabulary — must stay aligned with
@@ -2520,6 +2521,9 @@ export function editableFromPipelineMappings(
     // destType from source_type (false-green Map before write fail-close).
     const destSchemaLoaded = Object.keys(destSchema || {}).length > 0;
     let destType = liveDestType || m.target_type || undefined;
+    if (!liveDestType) {
+      destType = preserveSourceDecimalPrecision(sourceType, destType, false) || destType;
+    }
     // Never echo the source type back as the destination type when the
     // destination schema is pending: that produced "loses fidelity
     // (VARCHAR(16777216) \u2192 VARCHAR(16777216))" on 10 columns whose destination
