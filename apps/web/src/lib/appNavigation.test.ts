@@ -11,6 +11,7 @@ import {
   isResetLinkRoute,
   resetLinkToken,
   isSignedInHelpHash,
+  normalizedAppHash,
   screenFromHash,
   signedInHelpArticleFromHash,
   signedInScreenFromHash,
@@ -111,5 +112,19 @@ describe("workspace invitation links", () => {
     assert.equal(isInviteLinkRoute("/accept-invite", "#token=x"), true);
     assert.equal(isInviteLinkRoute("/", "#/accept-invite"), true);
     assert.equal(isInviteLinkRoute("/", "#/reset-password"), false);
+  });
+});
+
+describe("boot hash normalisation keeps a jobs deep link (fresh-load race)", () => {
+  it("replace on the same screen keeps ?jobId", () => {
+    assert.equal(normalizedAppHash("jobs", "#/jobs?jobId=older", true), "#/jobs?jobId=older");
+    assert.equal(
+      normalizedAppHash("jobs", "#/jobs?jobId=older&panel=quarantine", true),
+      "#/jobs?jobId=older&panel=quarantine",
+    );
+  });
+  it("navigating or switching screens drops the focus", () => {
+    assert.equal(normalizedAppHash("jobs", "#/jobs?jobId=older", false), "#/jobs");
+    assert.equal(normalizedAppHash("dashboard", "#/jobs?jobId=older", true), "#/overview");
   });
 });

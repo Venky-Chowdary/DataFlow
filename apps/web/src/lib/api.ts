@@ -4583,7 +4583,9 @@ export interface QuarantineInfo {
   /** write = load-time rejects; preflight = Validate/Run integrity findings */
   source?: "write" | "preflight" | "none" | string;
   quarantine: {
-    row?: number;
+    /** Source row number; a transform divert carries the diverted record here. */
+    row?: number | Record<string, unknown>;
+    source_row_index?: number;
     column?: string;
     target?: string;
     value?: string | null;

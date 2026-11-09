@@ -59,7 +59,7 @@ import { readSession } from "../lib/session";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { blockerTitle } from "../lib/preflightGates";
 import { reconcileBarPercent } from "../lib/progressRing";
-import { deepLinkPending, nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
+import { deepLinkPending, latchDeepLink, nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { EmbeddingUsageSummary } from "../components/transfer/EmbeddingUsageSummary";
@@ -405,6 +405,10 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
   const [journalsOpen, setJournalsOpen] = useState(false);
   const appliedFocusRef = useRef<string | null>(null);
+  const deepLinkRef = useRef(latchDeepLink({}, initialJobId, initialPanel));
+  deepLinkRef.current = latchDeepLink(deepLinkRef.current, initialJobId, initialPanel);
+  const focusJobId = deepLinkRef.current.jobId;
+  const focusPanel = deepLinkRef.current.panel;
   const pinnedJobRef = useRef<string | null>(null);
   const pageRequestRef = useRef(0);
   const jobs = pageHistory?.jobs ?? recentJobs;
@@ -534,28 +538,28 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
 
   useEffect(() => {
     const ids = jobs.map((j) => j._id);
-    if (!shouldApplyInitialJobFocus(initialJobId, appliedFocusRef.current, ids)) return;
-    appliedFocusRef.current = initialJobId!;
-    pinnedJobRef.current = initialJobId!;
+    if (!shouldApplyInitialJobFocus(focusJobId, appliedFocusRef.current, ids)) return;
+    appliedFocusRef.current = focusJobId!;
+    pinnedJobRef.current = focusJobId!;
     setFilter("all");
     setJobSearch("");
-    setSelectedId(initialJobId!);
+    setSelectedId(focusJobId!);
     setMobileListOpen(false);
-    if (initialPanel === "mapping-proof") {
+    if (focusPanel === "mapping-proof") {
       setDetailTab("mapping");
       setEvidenceDrawer("mapping-proof");
       setMappingProofOpen(true);
-    } else if (initialPanel === "quarantine") {
+    } else if (focusPanel === "quarantine") {
       setDetailTab("quarantine");
       setEvidenceDrawer("quarantine");
     }
     window.requestAnimationFrame(() => {
-      document.getElementById(`job-item-${initialJobId}`)?.scrollIntoView({
+      document.getElementById(`job-item-${focusJobId}`)?.scrollIntoView({
         behavior: "smooth",
         block: "nearest",
       });
     });
-  }, [initialJobId, initialPanel, jobs]);
+  }, [focusJobId, focusPanel, jobs]);
 
   useEffect(() => {
     if (!selectedId || !liveJob) {
@@ -584,9 +588,9 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   useEffect(() => {
     // A deep link owns the selection: while the requested job has not reached
     // the list, do not auto-pick the newest job in its place.
-    if (deepLinkPending(initialJobId, appliedFocusRef.current)) return;
+    if (deepLinkPending(focusJobId, appliedFocusRef.current)) return;
     const pin = pinnedJobRef.current;
-    if (pin && pin === initialJobId && selectedId !== pin) return;
+    if (pin && pin === focusJobId && selectedId !== pin) return;
     if (pin && selectedId === pin) {
       if (filtered.some((j) => j._id === pin)) {
         pinnedJobRef.current = null;
@@ -601,7 +605,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     }
     const next = nextListSelection(selectedId, filtered.map((j) => j._id));
     if (next && next !== selectedId) setSelectedId(next);
-  }, [filter, filtered, selectedId, initialJobId]);
+  }, [filter, filtered, selectedId, focusJobId]);
 
   // Feed the selected job into Datawrap Pilot so NL triage uses the real job ID.
   useEffect(() => {
