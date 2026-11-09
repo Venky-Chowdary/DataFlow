@@ -678,6 +678,8 @@ class CdcState:
     inserts: int = 0
     updates: int = 0
     deletes: int = 0
+    #: Delete events applied, including keys the destination never held.
+    delete_events: int = 0
     ddl_log: list[str] = field(default_factory=list)
     last_dest_summary: dict[str, Any] = field(default_factory=dict)
     last_checksum: str = ""
@@ -2458,7 +2460,7 @@ def _run_cdc_shared_multi_table(
         )
 
     total_rows = 0
-    cycle_counts = {"upserts": 0, "deletes": 0}
+    cycle_counts = {"upserts": 0, "deletes": 0, "delete_events": 0}
     if progress is not None:
         progress["counts"] = cycle_counts
     stream_health: dict[str, dict[str, Any]] = {
@@ -2662,6 +2664,7 @@ def _run_cdc_shared_multi_table(
         total_rows += rows_written + deleted
         cycle_counts["upserts"] += int(rows_written or 0)
         cycle_counts["deletes"] += int(deleted or 0)
+        cycle_counts["delete_events"] += len(change.deletes or [])
         stream_health[stream]["records_processed"] = (
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
@@ -2893,6 +2896,7 @@ def _run_cdc_shared_multi_table(
         "watermark": shared_watermark,
         "cursor_key": shared_key,
         "deletes": cycle_counts["deletes"],
+        "delete_events": cycle_counts["delete_events"],
         "quarantine_tombstones": True,
         **lag_fields,
     }
@@ -3841,6 +3845,7 @@ def _run_cdc_single_stream(
         state.inserts += len(change.inserts)
         state.updates += len(change.updates)
         state.deletes += deleted
+        state.delete_events += len(change.deletes or [])
         state.last_checksum = last_checksum or state.last_checksum
         _record_quarantined_key_deletes(
             state, change, list(pk_source_cols or []), str(job_id or ""), destination
@@ -4479,6 +4484,7 @@ def _run_cdc_single_stream(
             "inserts": state.inserts,
             "updates": state.updates,
             "deletes": state.deletes,
+            "delete_events": state.delete_events,
             "watermark": final_watermark,
             "cursor_key": cursor_key,
             "quarantine_tombstones": True,

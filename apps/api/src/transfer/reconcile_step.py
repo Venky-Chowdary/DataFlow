@@ -5980,7 +5980,8 @@ def _held_out_keys(dest_summary: dict[str, Any], sort_key: str | None) -> set[st
         return set()
     keys: set[str] = set()
     for detail in dest_summary.get("rejected_details") or []:
-        if not isinstance(detail, dict):
+        # A coerce_null finding's row landed with a NULL cell; its other values are compared.
+        if not isinstance(detail, dict) or detail.get("disposition") == "coerced_null":
             continue
         reason = str(detail.get("reason") or detail.get("failure_reason") or "").lower()
         if any(marker in reason for marker in _ROW_DECIDED_MARKERS):
