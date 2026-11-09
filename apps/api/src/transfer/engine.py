@@ -459,10 +459,7 @@ def resolve_read_options(request: TransferRequest) -> ReadOptions:
         )
     from services.file_parser import FileParser, unsupported_read_options
 
-    file_type = FileParser.detect_file_type(
-        request.source_filename or "upload.csv",
-        request.source_content or None,
-    )
+    file_type = FileParser.detect_request_file_type(request)
     refusal = unsupported_read_options(options, file_type)
     if refusal:
         raise ReadOptionsError(refusal)

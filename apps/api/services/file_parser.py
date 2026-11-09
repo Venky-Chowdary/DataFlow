@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import csv
 import dataclasses
 import gzip
 import io
@@ -768,6 +767,24 @@ class FileParser:
     ]
 
     @staticmethod
+    def detect_request_file_type(request: Any) -> str:
+        """File type of a transfer request's upload: in-memory bytes, else the durable path.
+
+        A rerun or Sync now child carries only ``source_path`` (bytes are never
+        persisted), so the name alone would leave a ``.db`` upload "unknown".
+        """
+        head = bytes(getattr(request, "source_content", b"") or b"")[:4096]
+        path = str(getattr(request, "source_path", "") or "")
+        if not head and path:
+            try:
+                with open(path, "rb") as fh:
+                    head = fh.read(4096)
+            except OSError:
+                head = b""
+        name = str(getattr(request, "source_filename", "") or "") or "upload.csv"
+        return FileParser.detect_file_type(name, head or None)
+
+    @staticmethod
     def detect_file_type(filename: str, content: bytes | None = None) -> str:
         """Detect file type from filename, with content sniffing as fallback.
 
@@ -1204,12 +1221,21 @@ class FileParser:
                 cur = conn.execute(f"SELECT * FROM {quoted} LIMIT ?", (max_rows,))
                 columns = [str(d[0]) for d in cur.description or ()]
                 records = [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+                # Types come from the declared affinity — the rule Execute reads
+                # the staged copy with — never from sample digits alone (a REAL
+                # column of 0.5–4.0 is DOUBLE, not a sample-guessed DECIMAL(2,1)).
+                from services.schema_introspect import sqlite_profile_columns
+
+                pcur = conn.cursor()
+                info_rows = pcur.execute(f"PRAGMA table_info({quoted})").fetchall()
+                column_meta = sqlite_profile_columns(pcur, table, quoted, info_rows)
         except ValueError as exc:
             return ParseResult(
                 success=False, data=[], columns=[], row_count=0, error=str(exc), file_type="sqlite"
             )
         return ParseResult(
-            success=True, data=records, columns=columns, row_count=total, file_type="sqlite"
+            success=True, data=records, columns=columns, row_count=total, file_type="sqlite",
+            column_meta=column_meta or None,
         )
 
     @staticmethod
