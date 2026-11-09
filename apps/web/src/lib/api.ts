@@ -3270,6 +3270,8 @@ export async function runUniversalTransfer(options: {
   formData.append("dest_schema", options.destSchema || "");
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
+  // Studio's policy is the operator's choice: manual review gates create-new DDL.
+  formData.append("schema_policy_declared", "true");
   formData.append("validation_mode", options.validationMode || "strict");
   formData.append(
     "delivery_guarantee",
@@ -3570,6 +3572,8 @@ export async function transferFile(
   formData.append("dest_type", options.destType || "mongodb");
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
+  // Studio's policy is the operator's choice: manual review gates create-new DDL.
+  formData.append("schema_policy_declared", "true");
   formData.append("validation_mode", options.validationMode || "strict");
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
   if (options.connectorId) formData.append("connector_id", options.connectorId);

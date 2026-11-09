@@ -543,17 +543,6 @@ export function TransferMapStep({
           >
             <strong>Identity</strong> {identityFooterLabel}
           </span>
-          {primaryKeyField && onClearPrimaryKey ? (
-            <button
-              type="button"
-              className="df2-btn df2-btn-sm"
-              data-testid="map-clear-primary-key"
-              title={`Stop using ${primaryKeyField} as the key — a new table is created without it`}
-              onClick={onClearPrimaryKey}
-            >
-              Clear key
-            </button>
-          ) : null}
           {showPkSuggest && (
             <details className="df2-map-pk-details">
               <summary>Try PK</summary>
@@ -588,6 +577,18 @@ export function TransferMapStep({
           )}
         </div>
         <div className="df2-map-footer-actions">
+          {/* Not inside .df2-map-footer-status: compact widths hide that strip. */}
+          {primaryKeyField && onClearPrimaryKey ? (
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost"
+              data-testid="map-clear-primary-key"
+              title={`Stop using ${primaryKeyField} as the key — a new table is created without it`}
+              onClick={onClearPrimaryKey}
+            >
+              Clear key
+            </button>
+          ) : null}
           {onOpenIdentitySettings && (
             <button
               type="button"

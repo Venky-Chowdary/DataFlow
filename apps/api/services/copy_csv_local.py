@@ -975,6 +975,7 @@ def copy_csv_to_sqlite(
     source_count: int,
     replace_destination: bool,
     declared_types: list[str] | None = None,
+    create_key: list[str] | None = None,
 ) -> FastPathResult:
     """Mapped local CSV into SQLite executemany. Dest COUNT(*) is the proof."""
     from services.copy_sqlite_common import (
@@ -1043,7 +1044,9 @@ def copy_csv_to_sqlite(
                         f"dest column {col!r} type {declared} is not SQLite COPY-safe"
                     )
         else:
-            dest_conn.execute(sqlite_create_sql(dest_table, pairs, sqlite_ddls))
+            dest_conn.execute(
+                sqlite_create_sql(dest_table, pairs, sqlite_ddls, list(create_key or []))
+            )
             created_here = True
 
         pending: list[tuple[Any, ...]] = []
@@ -1112,6 +1115,7 @@ def copy_csv_to_postgres(
     pg_ddls: list[str],
     source_count: int,
     replace_destination: bool,
+    create_key: list[str] | None = None,
 ) -> FastPathResult:
     """Mapped local CSV into PostgreSQL COPY FROM STDIN. Dest COUNT(*) is the proof."""
     from services.copy_fast_path import _quote, _table_ref
@@ -1190,7 +1194,7 @@ def copy_csv_to_postgres(
                 )
         else:
             dst_cur.execute(
-                _pg_create_sql(dest_schema_n, dest_table, pairs, pg_ddls, [])
+                _pg_create_sql(dest_schema_n, dest_table, pairs, pg_ddls, list(create_key or []))
             )
             dest_conn.commit()
             created_here = True
@@ -1258,6 +1262,7 @@ def copy_csv_to_mysql(
     mysql_ddls: list[str],
     source_count: int,
     replace_destination: bool,
+    create_key: list[str] | None = None,
 ) -> FastPathResult:
     """Mapped local CSV into MySQL STRICT LOAD DATA. Dest COUNT(*) is the proof."""
     from connectors.write_resilience import is_public_proxy_host
@@ -1305,7 +1310,9 @@ def copy_csv_to_mysql(
                     "(identity COPY would duplicate)"
                 )
         else:
-            dst_cur.execute(_mysql_create_sql(dest_table, pairs, mysql_ddls, []))
+            dst_cur.execute(
+                _mysql_create_sql(dest_table, pairs, mysql_ddls, list(create_key or []))
+            )
             dest_conn.commit()
             created_here = True
 
@@ -1868,6 +1875,12 @@ def _format_csv_copy(
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
+_MYSQL_UNKEYABLE = frozenset({
+    "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "BLOB", "TINYBLOB",
+    "MEDIUMBLOB", "LONGBLOB", "JSON",
+})
+
+
 def try_copy_local_csv(
     *,
     content: bytes | str | os.PathLike,
@@ -1887,8 +1900,13 @@ def try_copy_local_csv(
     shape_runner: Any = None,
     resumed: bool = False,
     read_options: Any = None,
+    create_key_columns: list[str] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
-    """Identity local CSV COPY, or None to keep the row path."""
+    """Identity local CSV COPY, or None to keep the row path.
+
+    ``create_key_columns`` are destination columns the operator declared as the
+    key: a table this COPY creates declares them, as the row path would.
+    """
     if not csv_local_copy_enabled():
         return None
     if (dest_cfg or {}).get("vector_layout") == "table":
@@ -1934,6 +1952,18 @@ def try_copy_local_csv(
     except FastPathUnavailable as exc:
         logger.info("CSV COPY declined: %s", exc)
         return None
+    targets = {t for _s, t in pairs}
+    create_key = [c for c in (create_key_columns or []) if c]
+    if any(c not in targets for c in create_key):
+        logger.info("CSV COPY declined: declared key %s is not a mapped column", create_key)
+        return None
+    if create_key and dest_n in {"mysql", "mariadb"}:
+        ddl_of = {t: str(d or "").strip().upper() for (_s, t), d in zip(pairs, ddls)}
+        if any(ddl_of.get(c, "").split("(")[0] in _MYSQL_UNKEYABLE for c in create_key):
+            # MySQL cannot key TEXT/BLOB without a prefix (1170); the row
+            # writer resizes the key column, so it creates this table.
+            logger.info("CSV COPY declined: MySQL key %s is an unkeyable TEXT/BLOB", create_key)
+            return None
 
     try:
         if incremental:
@@ -2012,6 +2042,7 @@ def try_copy_local_csv(
                         pg_ddls=ddls,
                         source_count=source_count,
                         replace_destination=replace_destination,
+                        create_key=create_key,
                     )
                 elif dest_n in {"mysql", "mariadb"}:
                     result = copy_csv_to_mysql(
@@ -2023,6 +2054,7 @@ def try_copy_local_csv(
                         mysql_ddls=ddls,
                         source_count=source_count,
                         replace_destination=replace_destination,
+                        create_key=create_key,
                     )
                 else:
                     result = copy_csv_to_sqlite(
@@ -2035,6 +2067,7 @@ def try_copy_local_csv(
                         source_count=source_count,
                         replace_destination=replace_destination,
                         declared_types=declared_types,
+                        create_key=create_key,
                     )
             identity_digest = write_pass.identity_digest()
             fingerprint_rows = int(write_pass.total)
