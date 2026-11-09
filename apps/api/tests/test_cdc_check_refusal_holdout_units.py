@@ -6,7 +6,7 @@ from services.cdc_engine import ChangeBatch
 from services.cdc_value_digest import _without_held_out
 from services.row_conservation import KeyCensusAccumulator
 from src.transfer import cdc_transfer as ct
-from src.transfer.reconcile_step import _held_out_keys
+from src.transfer.reconcile_step import _held_out_key_tuples, _held_out_keys
 
 PG_CHECK = 'new row for relation "t" violates check constraint "ck_t"'
 MYSQL_CHECK = "(3819, \"Check constraint 'ck_t' is violated.\")"
@@ -106,3 +106,19 @@ def test_oracle_foreign_key_refusal_is_not_withdrawn_from_the_census():
     assert ct._census_without_rejected_keys(
         _Acc(), summary, key_cols=["id"], dest_type="oracle", dest_cfg={}, dest_table="t",
     ) is None
+
+
+def test_composite_held_out_keys_are_whole_keys():
+    def comp(region: str, key: str, reason: str) -> dict:
+        return {"row": 1, "source_pk": [region, key], "reason": reason,
+                "values": {"region": region, "id": key}}
+
+    summary = {"rejected_details": [
+        comp("eu", "3", PG_CHECK), comp("us", "4", MYSQL_CHECK), comp("us", "6", PG_UNIQUE),
+    ]}
+    assert _held_out_key_tuples(summary, ["region", "id"]) == {("eu", "3"), ("us", "4")}
+    rows = [{"REGION": "eu", "ID": 3}, {"REGION": "us", "ID": 3}, {"REGION": "us", "ID": 4}]
+    pairs = [("REGION", "region"), ("ID", "id")]
+    kept = _without_held_out(rows, pairs, {("eu", "3"), ("us", "4")}, ["region", "id"])
+    assert kept == [{"REGION": "us", "ID": 3}]
+    assert _without_held_out(rows, pairs, {("eu", "3")}, ["region", "other"]) == rows
