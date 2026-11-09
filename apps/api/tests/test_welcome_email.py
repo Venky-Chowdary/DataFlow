@@ -76,7 +76,7 @@ def test_verify_sends_one_branded_welcome():
     [mail] = _welcomes()
     assert "Ada's workspace is set up" in mail.text and "You are its admin" in mail.text
     assert mail.idempotency_key == "welcome:ada@example.com"
-    assert "#072B29" in mail.html and "<img" not in mail.html.lower()
+    assert "#072B29" in mail.html and "/brand/datawrap-mark-256.png" in mail.html
 
 
 def test_welcome_is_once_per_account_even_if_queued_again():

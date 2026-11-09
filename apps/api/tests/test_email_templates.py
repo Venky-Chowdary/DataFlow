@@ -59,7 +59,10 @@ def test_all_templates_render_html_and_text():
 def test_no_remote_images_or_tracking_pixels():
     for name in template_names():
         mail = render_email(name, dict(_CTX))
-        assert "<img" not in mail.html.lower(), name
+        # The only image is the app's static first-party logo (no query string).
+        assert re.findall(r'<img src="([^"]*)"', mail.html) == [
+            "https://www.datawrap.io/brand/datawrap-mark-256.png"], name
+        assert mail.html.lower().count("<img") == 1, name
         assert "url(" not in mail.html, name
         # No third-party URL anywhere; only first-party links are allowed
         # (reset_link carries one — required for the flow) and they are
@@ -113,8 +116,8 @@ def test_brand_palette_and_fonts_follow_the_brand_pack():
         assert token in html, token
     for font in ("Plus Jakarta Sans", "Inter", "IBM Plex Mono"):
         assert font in html, font
-    # Amber is quarantine-only: the sole use is the lane inside the mark.
-    assert html.count("#F59E0B") == 2
+    # Amber is quarantine-only: it lives inside the mark image, never in markup.
+    assert "#F59E0B" not in html
     # Signal teal never colours text on a light ground.
     assert "color:#2DD4BF" not in html
 

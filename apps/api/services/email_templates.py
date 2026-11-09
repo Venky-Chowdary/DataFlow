@@ -3,9 +3,9 @@
 Every email renders branded HTML plus a plain-text part from
 ``render_email(name, context)``. Hard rules from the handover:
 
-- No tracking pixels, no link rewriting, no remote images — the HTML
-  contains zero ``<img>`` and zero external URLs other than the optional
-  first-party action URL the template itself was given.
+- No tracking pixels, no link rewriting, no third-party assets — the only
+  ``<img>`` is the app's static first-party logo, and the only other URL is
+  the first-party action URL the template itself was given.
 - From ``Datawrap <noreply@datawrap.io>``, Reply-To contact@datawrap.io
   (envelope concern of ``email_sender``); the footer names datawrap.io only.
 - All dynamic values are HTML-escaped at render time; subjects are folded to
@@ -15,14 +15,14 @@ Brand (Datawrap brand pack v1.0): Night ground #072B29, Deep tile #0A3D3A,
 Signal teal #2DD4BF (rules and accents only — never text on a light ground),
 Teal 700 #0F766E for links on light, Ink #0F172A headings, Slate #475569 body,
 Paper #F6FAF9 page. Amber is the quarantine colour; it appears only inside
-the mark. Type: Plus Jakarta Sans (headings), Inter (body), IBM Plex Mono
+the mark image. Type: Plus Jakarta Sans (headings), Inter (body), IBM Plex Mono
 (codes, labels) — named with system fallbacks, never loaded remotely.
 
 The pack's email-header PNG is deliberately not used: it would have to be a
 remote image (forbidden), a data: URI (stripped by Gmail) or a CID part
 (``email_sender`` sends no multipart/related), and it carries the unapproved
-tagline. The header is rebuilt in HTML instead: the mark from table cells,
-exactly as the pack's own ``signature.html`` does, plus a live-text wordmark.
+tagline. The header uses the app's own mark image plus a live-text wordmark,
+so it matches the logo operators see in the product.
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ _NIGHT = "#072B29"
 _DEEP = "#0A3D3A"
 _TEAL = "#2DD4BF"
 _TEAL_700 = "#0F766E"
-_AMBER = "#F59E0B"
 _INK = "#0F172A"
 _SLATE = "#475569"
 _PAPER = "#F6FAF9"
@@ -76,26 +75,16 @@ def _subject_value(value: Any, limit: int = 80) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
 
 
-def _cell(width: int, height: int, color: str) -> str:
-    return (f'<td width="{width}" height="{height}" style="width:{width}px;height:{height}px;'
-            f'background:{color};font-size:0;line-height:0;">&nbsp;</td>')
-
-
 def _mark() -> str:
-    """The Datawrap mark from table cells — gate (white), lane (amber),
-    checkpoint (teal) on the Deep tile. No image, so nothing is fetched."""
-    rows = (
-        (_DEEP, _WHITE, _DEEP, 12),
-        (_AMBER, _TEAL, _AMBER, 6),
-        (_DEEP, _WHITE, _DEEP, 12),
-    )
-    body = "".join(
-        "<tr>" + _cell(12, h, a) + _cell(6, h, b) + _cell(12, h, c) + "</tr>"
-        for a, b, c, h in rows
-    )
-    return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
-            f'style="border-collapse:separate;background:{_DEEP};border:1px solid {_TEAL_700};'
-            f'border-radius:9px;padding:6px;">{body}</table>')
+    """The app's Datawrap mark (``apps/web/public/brand/datawrap-mark-256.png``,
+    the raster ``DtLogo`` uses). One static first-party asset: no query string,
+    nothing per-recipient, so it cannot act as a tracking pixel."""
+    from services.brand_env import getenv_brand
+
+    base = (getenv_brand("APP_URL") or "https://www.datawrap.io").rstrip("/")
+    return (f'<img src="{_esc(base)}/brand/datawrap-mark-256.png" width="36" height="36" '
+            f'alt="Datawrap" style="display:block;width:36px;height:36px;border:0;'
+            f'border-radius:9px;">')
 
 
 def _shell(title: str, body: str, *, preheader: str = "") -> str:
