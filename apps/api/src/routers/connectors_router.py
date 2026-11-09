@@ -2096,6 +2096,90 @@ def _refuse_incomplete_quarantine_replay(
             )
 
 
+async def _drop_stale_cdc_replay_images(
+    job_id: str,
+    job: dict,
+    details: list[dict],
+    records: list[dict],
+    mappings: list[dict],
+    *,
+    dest_cfg: dict,
+    dest_kind: str,
+    schema: str,
+    table: str,
+    key_columns: list[str],
+) -> tuple[list[dict], list[dict], list[dict[str, Any]]]:
+    """Drop quarantined CDC images the destination already holds newer.
+
+    Each refused finding is named with its reason and closed in the DLQ as
+    superseded, so it neither replays nor stays open. Raises 409 when nothing
+    replayable is left, and fails closed when the destination cannot be read.
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    from services.quarantine_dlq import (
+        append_dlq_event,
+        partition_stale_cdc_replay,
+        read_destination_cdc_lsns,
+        replay_row_identity,
+        replay_stale_cdc_refusal,
+    )
+
+    def _lookup(keys: list[tuple[str, ...]]) -> dict[tuple[str, ...], Any]:
+        return read_destination_cdc_lsns(
+            dest_cfg, dest_kind=dest_kind, schema=schema, table=table,
+            key_columns=key_columns, keys=keys,
+        )
+
+    try:
+        keep, stale = await run_in_threadpool(
+            partition_stale_cdc_replay, details, key_columns=key_columns, destination_lsns=_lookup
+        )
+    except Exception as exc:
+        logger.warning("quarantine replay %s: CDC staleness read failed: %s", job_id, exc, exc_info=exc)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Quarantine replay refused: could not read the destination _df_lsn for the "
+                f"quarantined CDC keys ({type(exc).__name__}), so a stale image cannot be told "
+                "from a pending one. Check destination access, then replay."
+            ),
+        ) from exc
+    if not stale:
+        return details, records, []
+    identities = sorted({s["identity"] for s in stale} - {replay_row_identity(d) for d in keep})
+    if identities:
+        append_dlq_event(
+            job_id=job_id,
+            action="quarantine_superseded",
+            rows=len(identities),
+            workspace_id=str(job.get("workspace_id") or ""),
+            details={
+                "identities": identities,
+                "reason": "replay: the destination holds a newer CDC image of the same key",
+                "stale_refused": stale[:200],
+            },
+        )
+    if not keep:
+        raise HTTPException(status_code=409, detail=replay_stale_cdc_refusal(table, stale))
+    tgt_to_src = {
+        str(m.get("target") or m.get("target_column") or ""): str(m.get("source") or m.get("source_column") or "")
+        for m in mappings
+    }
+    src_keys = [tgt_to_src.get(c) or c for c in key_columns]
+    dropped = {
+        (tuple(str(s["key"][c]) for c in key_columns), s["quarantined_lsn"]) for s in stale
+    }
+
+    def _record_stale(rec: dict) -> bool:
+        lsn = str(rec.get("_df_lsn") or "").strip()
+        if not lsn or not all(k in rec for k in src_keys):
+            return False
+        return (tuple(str(rec[k]) for k in src_keys), lsn) in dropped
+
+    return keep, [r for r in records if not _record_stale(r)], stale
+
+
 @router.post("/jobs/{job_id}/quarantine/replay")
 async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, request: Request):
     """Rewrite quarantined (optionally edited) rows through the destination with the original mapping.
@@ -2373,6 +2457,21 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
         if dup_refusal:
             raise HTTPException(status_code=409, detail=dup_refusal)
+
+    stale_refused: list[dict[str, Any]] = []
+    if not parent_appends and dest.kind == "database" and dest.table:
+        details, records, stale_refused = await _drop_stale_cdc_replay_images(
+            job_id,
+            job,
+            details,
+            records,
+            mappings,
+            dest_cfg=dest_cfg,
+            dest_kind=resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
+            schema=str(dest.schema or dest_cfg.get("schema") or ""),
+            table=str(dest.table),
+            key_columns=list(conflict_columns),
+        )
 
     engine = get_transfer_engine()
     # Child job: upsert remediations (never full-refresh overwrite).
@@ -2663,6 +2762,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             "destination_summary": dest_summary,
             "dest_dlq_promoted": promote_meta,
             "reconciliation": recon,
+            "stale_refused": stale_refused,
             "quarantine_closure": {
                 "verdict": compact.get("verdict"),
                 "open_count": compact.get("open_count"),
