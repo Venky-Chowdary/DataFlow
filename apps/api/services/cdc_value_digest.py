@@ -394,7 +394,12 @@ def _without_held_out(
         return rows
     from services.verification_ladder import _pk_key
 
-    return [r for r in rows if _pk_key(r.get(column)) not in held_out_keys]
+    wanted = column.lower()
+    return [
+        r for r in rows
+        if _pk_key(next((v for k, v in r.items() if str(k).lower() == wanted), None))
+        not in held_out_keys
+    ]
 
 
 def _window_readable(window: Any, source_columns: list[str]) -> bool:
