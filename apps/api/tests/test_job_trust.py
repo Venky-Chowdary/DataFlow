@@ -19,6 +19,7 @@ def test_clean_completed_job_high_trust() -> None:
         "reconciliation": {
             "passed": True,
             "assurance_level": "full_checksum",
+            "source_checksum_provenance": "independent_source_reread",
             "coverage": "full_checksum",
             "phase": "post_write_verified",
             "source_checksum": "aaa",
@@ -168,6 +169,15 @@ def test_has_full_checksum_proof() -> None:
     assert has_full_checksum_proof({
         "passed": True,
         "assurance_level": "full_checksum",
+        "source_checksum_provenance": "independent_source_reread",
+        "source_checksum": "x",
+        "target_checksum": "x",
+    })
+    # A stored full_checksum label over a digest nobody re-read from the
+    # source is not credit — the proof classifier files it under ``none``.
+    assert not has_full_checksum_proof({
+        "passed": True,
+        "assurance_level": "full_checksum",
         "source_checksum": "x",
         "target_checksum": "x",
     })
@@ -296,6 +306,7 @@ def test_closed_quarantine_ledger_does_not_keep_review_cta() -> None:
         "reconciliation": {
             "passed": True,
             "assurance_level": "full_checksum",
+            "source_checksum_provenance": "independent_source_reread",
             "source_checksum": "a",
             "target_checksum": "a",
         },
@@ -330,6 +341,7 @@ def test_attach_trust_only_on_terminal() -> None:
         "reconciliation": {
             "passed": True,
             "assurance_level": "full_checksum",
+            "source_checksum_provenance": "independent_source_reread",
             "source_checksum": "a",
             "target_checksum": "a",
         },

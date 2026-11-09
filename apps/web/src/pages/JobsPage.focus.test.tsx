@@ -39,7 +39,27 @@ dom.window.matchMedia = (query) => ({
   dispatchEvent: () => true,
 });
 const originalFetch = globalThis.fetch;
-globalThis.fetch = async () => new Response("{}", { status: 404 });
+/** Full job records the detail endpoint serves; list rows stay slim like the API's. */
+const detailRecords = new Map<string, unknown>();
+let detailGate: Promise<void> | null = null;
+globalThis.fetch = async (input: RequestInfo | URL) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  const id = url.match(/\/connectors\/jobs\/([^/?]+)$/)?.[1];
+  if (id && detailRecords.has(id)) {
+    if (detailGate) await detailGate;
+    return new Response(JSON.stringify(detailRecords.get(id)), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  return new Response("{}", { status: 404 });
+};
+
+async function settle(ms = 20) {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  });
+}
 
 const { act, createElement } = await import("react");
 const { createRoot } = await import("react-dom/client");
@@ -97,6 +117,8 @@ async function click(element: HTMLButtonElement) {
 }
 
 afterEach(async () => {
+  detailRecords.clear();
+  detailGate = null;
   await act(async () => root?.unmount());
   root = undefined;
   document.body.replaceChildren();
@@ -196,7 +218,9 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
 
   it("shows absent evidence as unavailable rather than hiding it or implying a valid proof", async () => {
     mobile = false;
+    detailRecords.set(jobs[0]._id, jobs[0]);
     await render([jobs[0]]);
+    await settle();
     assert.equal(evidenceSection().querySelectorAll("li").length, 9);
     for (const label of ["Gate-8 reconcile", "Validate / preflight", "Writer & throughput", "Mapping proof", "DDL & stream log", "Pipeline explanation"]) {
       const button = evidenceAction(label);
@@ -210,6 +234,38 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
     await click(evidenceAction("Run metadata"));
     assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Run metadata/);
     await closeDrawer();
+  });
+
+  function evidenceStatus(label: string) {
+    return evidenceAction(label).closest("li")!.querySelector(".df2-jobs-evidence-list-status")?.textContent;
+  }
+
+  it("reads saved proof on first open instead of calling the slim list row Not captured", async () => {
+    mobile = false;
+    let release!: () => void;
+    detailGate = new Promise<void>((resolve) => { release = resolve; });
+    detailRecords.set(jobs[0]._id, {
+      ...jobs[0],
+      reconciliation: { passed: true, source_rows: 10, target_rows: 10, verification_method: "batch" },
+      preflight: { passed: false, passed_count: 19, total_gates: 24, readiness_score: 79,
+        gates: [{ id: "synthetic_gate", status: "warn", message: "Synthetic gate warned" }] },
+    });
+    await render([jobs[0]]);
+    assert.equal(evidenceStatus("Gate-8 reconcile"), "Loading…");
+    assert.equal(evidenceStatus("Validate / preflight"), "Loading…");
+    release();
+    await settle();
+    assert.equal(evidenceAction("Gate-8 reconcile").disabled, false);
+    assert.notEqual(evidenceStatus("Gate-8 reconcile"), "Not captured");
+    assert.match(evidenceStatus("Validate / preflight") || "", /^19\/24/);
+  });
+
+  it("reports an unreadable job record as unavailable, not as proof that was never captured", async () => {
+    mobile = false;
+    await render([jobs[1]]);
+    await settle(1700);
+    assert.equal(evidenceStatus("Gate-8 reconcile"), "Detail unavailable — Refresh");
+    assert.equal(evidenceAction("Gate-8 reconcile").disabled, true);
   });
 
   it("labels the existing mapping-table fallback honestly and keeps proof unavailable in Mapping", async () => {

@@ -3,7 +3,10 @@
  * Prefer server `job.trust` when present; otherwise compute client-side.
  */
 
-import { isGate8WholeTableScope } from "../components/transfer/gate8Status";
+import {
+  isGate8FullChecksumProof,
+  type Gate8Reconciliation,
+} from "../components/transfer/gate8Status";
 
 export type JobTrustFactor = {
   id: string;
@@ -244,24 +247,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       || assurance === "per_stream_checksum";
     // Same scope rule as the Gate-8 evidence tile: a CDC source-image or
     // batch digest is never reported as a full checksum pass.
-    const fullChecksum =
-      !lastStream
-      && isGate8WholeTableScope(recon)
-      && (
-        assurance === "full_checksum"
-        || (
-          passed === true
-          && Boolean(recon.source_checksum)
-          && Boolean(recon.target_checksum)
-          && String(recon.source_checksum) === String(recon.target_checksum)
-          && !writerAck
-          && !sample
-          && !writePass
-          && !unproven
-          && !appendDelta
-          && String(recon.checksum_scope || "").toLowerCase() !== "last_stream"
-        )
-      );
+    // One verdict with the Gate-8 tile and the server proof classifier: credit
+    // only a positively proven full checksum (independent source re-read).
+    const fullChecksum = !lastStream && isGate8FullChecksumProof(recon as Gate8Reconciliation);
     const preWrite =
       preview
       || phase.includes("pre_write")
@@ -376,26 +364,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     score = Math.min(score, 28);
   }
   // Never grade-A without independent full checksum proof (mirrors job_trust.py).
-  const assurance = String(recon?.assurance_level || recon?.coverage || "").toLowerCase();
-  const phase = String(recon?.phase || "").toLowerCase();
-  const fullProof =
-    assurance === "full_checksum"
-    || (
-      recon?.passed === true
-      && Boolean(recon?.source_checksum)
-      && Boolean(recon?.target_checksum)
-      && String(recon?.source_checksum) === String(recon?.target_checksum)
-      && !phase.includes("writer_ack")
-      && !phase.includes("sample")
-      && !phase.includes("skipped")
-      && recon?.unproven !== true
-      && recon?.skipped_readback !== true
-      && assurance !== "row_count"
-      && assurance !== "per_stream_checksum"
-      && !phase.includes("row_count")
-      && String(recon?.checksum_scope || "").toLowerCase() !== "whole_table_not_comparable"
-      && String(recon?.checksum_scope || "").toLowerCase() !== "last_stream"
-    );
+  const fullProof = Boolean(recon)
+    && String(recon?.checksum_scope || "").toLowerCase() !== "last_stream"
+    && isGate8FullChecksumProof(recon as Gate8Reconciliation);
   if (!recon) {
     score = Math.min(score, 84);
   } else if (!fullProof) {

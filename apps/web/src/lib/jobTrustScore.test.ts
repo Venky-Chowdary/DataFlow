@@ -15,6 +15,7 @@ describe("computeJobTrustScore", () => {
       reconciliation: {
         passed: true,
         assurance_level: "full_checksum",
+        source_checksum_provenance: "independent_source_reread",
         source_checksum: "aaa",
         target_checksum: "aaa",
         phase: "post_write_verified",
@@ -217,6 +218,25 @@ describe("computeJobTrustScore", () => {
     assert.ok(factor?.note.toLowerCase().includes("unproven"));
   });
 
+  it("an engine-computed digest labelled full_checksum earns no full-checksum credit (QA4)", () => {
+    const score = computeJobTrustScore({
+      status: "completed",
+      sync_mode: "cdc",
+      destination_type: "postgresql",
+      reconciliation: {
+        passed: true,
+        phase: "post_write",
+        assurance_level: "full_checksum",
+        source_checksum: "9c41",
+        target_checksum: "9c41",
+        source_checksum_provenance: "engine_population",
+      },
+    });
+    const reconcile = score.factors.find((f) => f.id === "reconcile");
+    assert.doesNotMatch(String(reconcile?.note), /full checksum reconcile passed/i);
+    assert.notEqual(score.grade, "A");
+  });
+
   it("CDC source-image reconcile is not a full checksum pass (same verdict as the Gate-8 tile)", () => {
     const score = computeJobTrustScore({
       status: "completed",
@@ -290,6 +310,7 @@ describe("computeJobTrustScore", () => {
       reconciliation: {
         passed: true,
         assurance_level: "full_checksum",
+        source_checksum_provenance: "independent_source_reread",
         source_checksum: "a",
         target_checksum: "a",
       },
