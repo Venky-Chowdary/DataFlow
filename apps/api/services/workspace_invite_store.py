@@ -273,13 +273,18 @@ def restore_token(invite_id: str, *, failed: dict[str, Any], previous: dict[str,
     Compare-and-set on the rotated hash, so an accept, revoke or newer resend
     that landed in between is never reverted.
     """
-    fields = {k: previous.get(k) for k in ("token_hash", "superseded_hashes", "sent_count",
-                                           "last_sent_at", "expires_at")}
-    if not fields["token_hash"] or not failed.get("token_hash"):
+    swapped = list(failed.get("superseded_hashes") or [])
+    if not swapped or not failed.get("token_hash"):
         return False
+    # Restore the hash this rotation replaced, never the caller's earlier read:
+    # an overlapping resend may already have mailed a newer link.
+    fields: dict[str, Any] = {"token_hash": swapped[0], "superseded_hashes": swapped[1:],
+                              "sent_count": max(int(failed.get("sent_count") or 1) - 1, 1)}
+    if previous.get("token_hash") == swapped[0]:
+        fields.update(last_sent_at=previous.get("last_sent_at"), expires_at=previous.get("expires_at"))
     db = _database()
     if db is not None:
-        expires = previous.get("expires_at")
+        expires = fields.get("expires_at")
         if expires:
             fields["purge_at"] = _purge_at(datetime.fromisoformat(str(expires)))
         done = db[COLLECTION].update_one(

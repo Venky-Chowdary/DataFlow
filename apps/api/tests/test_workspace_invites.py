@@ -394,3 +394,20 @@ def test_failed_resend_keeps_the_emailed_link_working(world, request, monkeypatc
     assert res.status_code == 503 and res.json()["error"]["code"] == "email_send_failed"
     assert client.post("/api/v1/invites/inspect", json={"token": first}).json()["ok"] is True
     assert _accept(client, first, name="Fay", password=PASSWORD).status_code == 200
+
+
+@pytest.mark.parametrize("world", ["env", "mongo_env"])
+def test_failed_overlapping_resend_never_revives_an_older_link(world, request):
+    from datetime import timedelta
+
+    from services import workspace_invite_store as store
+
+    client, admin, ws, _ = request.getfixturevalue(world)
+    invite = _invite(client, admin, ws, "gus@example.com")["invite"]
+    stale_read = store.get(invite["id"])
+    mailed, _ = store.rotate_token(invite["id"], ttl=timedelta(days=7))
+    _, failed = store.rotate_token(invite["id"], ttl=timedelta(days=7))
+    assert store.restore_token(invite["id"], failed=failed, previous=stale_read)
+    assert store.get(invite["id"])["token_hash"] == store.hash_token(mailed)
+    assert client.post("/api/v1/invites/inspect", json={"token": mailed}).json()["ok"] is True
+    assert client.post("/api/v1/invites/inspect", json={"token": _token_for("gus@example.com")}).json()["ok"] is False
