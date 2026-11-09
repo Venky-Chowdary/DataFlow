@@ -1345,6 +1345,8 @@ async def run_universal_transfer(
     schema_drift_acknowledged: str = Form("false"),
     fk_risk_acknowledged: str = Form("false"),
     ddl_changes_acknowledged: str = Form("false"),
+    # Studio declares its schema policy; the create-new DDL gate applies to it.
+    schema_policy_declared: str = Form("false"),
     acknowledgment_actor: str = Form(""),
     acknowledgment_reason: str = Form(""),
     approved_decision_artifact_hash: str = Form(""),
@@ -1591,6 +1593,7 @@ async def run_universal_transfer(
         schema_drift_acknowledged=schema_drift_acknowledged.lower() in ("true", "1", "yes"),
         fk_risk_acknowledged=fk_risk_acknowledged.lower() in ("true", "1", "yes"),
         ddl_changes_acknowledged=ddl_changes_acknowledged.lower() in ("true", "1", "yes"),
+        schema_policy_declared=schema_policy_declared.lower() in ("true", "1", "yes"),
         acknowledgment_actor=(acknowledgment_actor or "").strip() or _actor_email(request),
         acknowledgment_reason=(acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=(approved_decision_artifact_hash or "").strip(),

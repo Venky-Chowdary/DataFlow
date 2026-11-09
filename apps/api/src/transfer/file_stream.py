@@ -2045,6 +2045,9 @@ def stream_file_to_database(
         # already merges on the key, so only a keyed policy on an insert sync
         # mode has to take the row writer.
         keyed_insert_copy = write_mode == "upsert" and not requires_upsert(copy_sync)
+        # Identity COPY creates the table without a key. A key the operator
+        # declared ("Use sku as the key") must land in that CREATE TABLE, and
+        # only the row path's fidelity planner renders it.
         csv_fast = None if (
             in_file_dedupe == "keep_last" or hold_manifest or keyed_insert_copy
         ) else try_copy_local_csv(
@@ -2067,6 +2070,8 @@ def stream_file_to_database(
             shape_runner=shape_runner,
             resumed=resumed,
             read_options=read_options,
+            # "Use sku as the key": a table this COPY creates declares it.
+            create_key_columns=[] if incremental else list(pk_target_cols or []),
         )
     finally:
         reset_copy_decline_capture(copy_decline_token)

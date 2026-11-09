@@ -459,6 +459,8 @@ def run_plan_preflight(
         source_table=source_table,
         destination_table=dest_table,
         schema_policy=policies.get("schema_policy", "manual_review"),
+        # Studio declares its policy, so a manual-review create-new is gated.
+        schema_policy_explicit=bool(policies.get("schema_policy_declared")),
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
         # Drift compares against the revision's declared-source fingerprint, so
         # it must see the declared source — an approved transform is not drift.

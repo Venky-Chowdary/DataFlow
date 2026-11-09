@@ -1512,6 +1512,8 @@ export function TransferPage({
     policies: {
       sync_mode: syncMode,
       schema_policy: schemaPolicy,
+      // The operator's policy, not a default: manual review gates create-new DDL.
+      schema_policy_declared: true,
       validation_mode: validationMode,
       date_locale: dateLocale,
       number_locale: numberLocale,
