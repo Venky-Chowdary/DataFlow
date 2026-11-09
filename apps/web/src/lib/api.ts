@@ -574,6 +574,8 @@ export async function previewQuarantineCells(payload: {
   /** Typed sources read their own numbers canonically — same owner as Validate/Execute. */
   source_kind?: string;
   source_type?: string;
+  /** Destination dialect: the writer's DECIMAL(p,s) fit test runs on the preview too. */
+  dest_db?: string;
 }): Promise<CellPreviewResult> {
   const res = await apiFetch(`${API_BASE}/preflight/preview-cells`, {
     method: "POST",

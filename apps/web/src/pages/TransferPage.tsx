@@ -1199,6 +1199,7 @@ export function TransferPage({
       number_locale: numberLocale,
       source_kind: sourceKind,
       source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
+      dest_db: destDriverType || undefined,
     })
       .then((res) => {
         if (!cancelled) setCellPreview(res);
@@ -1209,7 +1210,7 @@ export function TransferPage({
     return () => {
       cancelled = true;
     };
-  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps, dateLocale, numberLocale, sourceKind, sourceConnector?.type]);
+  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps, dateLocale, numberLocale, sourceKind, sourceConnector?.type, destDriverType]);
 
   // A name-matched column is a starting point for the operator, never a claim
   // about the column's behaviour — the declaration beside it carries that.
@@ -1423,6 +1424,22 @@ export function TransferPage({
     },
     [primarySourceStream, sourceStreamName, toast],
   );
+
+  const clearPrimaryKey = useCallback(() => {
+    primaryKeyClearedRef.current = true;
+    declaredPrimaryKeyRef.current = "";
+    setPrimaryKeyField("");
+    const stream = primarySourceStream || sourceStreamName;
+    if (stream) {
+      setStreamFields((prev) => ({
+        ...prev,
+        [stream]: {
+          ...(prev[stream] || { cursorField: "", primaryKeyField: "" }),
+          primaryKeyField: "",
+        },
+      }));
+    }
+  }, [primarySourceStream, sourceStreamName]);
 
   const buildSourceEndpoint = () => {
     if (sourceKind === "file") {
@@ -7282,6 +7299,7 @@ export function TransferPage({
           uniqueKeySuggestions={uniqueKeySuggestions}
           compositeKeySuggestions={compositeKeySuggestions}
           onApplyPrimaryKey={applyPrimaryKeySuggestion}
+          onClearPrimaryKey={clearPrimaryKey}
           sampleRows={(samplePreviewRows as Record<string, unknown>[]) || []}
         />
       )}

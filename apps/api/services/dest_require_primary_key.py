@@ -171,7 +171,14 @@ def planned_create_primary_key(
         except DuplicatePolicyError:
             return []
         write_mode = decision.write_mode
-    carry = mode != "scd2" and (write_mode != "insert" or is_overwrite_sync(mode))
+    from services.schema_fidelity import create_key_inputs
+
+    key_inputs = create_key_inputs(
+        write_mode=write_mode,
+        conflict_columns=keys if mode != "scd2" else None,
+        carry_source_keys=is_overwrite_sync(mode),
+    )
+    carry = mode != "scd2" and key_inputs["carry_keys"]
     plan = resolve_create_fidelity_plan(
         source_schema_catalog=source_schema_catalog,
         mappings=maps,
@@ -182,7 +189,7 @@ def planned_create_primary_key(
         target_types=["VARCHAR(255)"] * len(targets),
         dest_dialect="mysql",
         carry_keys=carry,
-        operator_key_columns=keys if write_mode == "upsert" else None,
+        operator_key_columns=key_inputs["operator_key_columns"],
     )
     if plan.primary_key:
         return list(plan.primary_key)

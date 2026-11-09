@@ -650,6 +650,26 @@ def _synthesized_primary_key(
     return []
 
 
+def create_key_inputs(
+    *,
+    write_mode: str,
+    conflict_columns: list[str] | None,
+    carry_source_keys: bool = False,
+) -> dict[str, Any]:
+    """Key inputs every SQL writer hands :func:`resolve_create_fidelity_plan`.
+
+    Upsert and overwrite carry keys. Plain append withholds the source key,
+    but an identity the operator declared ("Use sku as the key") is the new
+    table's key on any write mode: dropping it left the table without the
+    constraint the operator chose.
+    """
+    keys = [str(c) for c in (conflict_columns or []) if str(c or "").strip()]
+    return {
+        "carry_keys": write_mode != "insert" or bool(carry_source_keys) or bool(keys),
+        "operator_key_columns": keys or None,
+    }
+
+
 def resolve_create_fidelity_plan(
     *,
     source_schema_catalog: Any,

@@ -603,6 +603,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             rows_are_population=stored_population is not None,
             shape_recipe=body.shape_recipe,
             schema_policy=body.schema_policy,
+            schema_policy_explicit="schema_policy" in body.model_fields_set,
             backfill_new_fields=body.backfill_new_fields,
             contract_primary_key=contract_pk,
             destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
@@ -912,6 +913,8 @@ class CellPreviewRequest(BaseModel):
     # canonically (WIRE) when the operator declared no locale.
     source_kind: str = "file"
     source_type: str | None = None
+    # Destination dialect for the carrier fit (DECIMAL(p,s)) the writer applies.
+    dest_db: str = ""
 
 
 @router.post("/preview-cells")
@@ -967,6 +970,7 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
             )
             file_source = resolved_kind == "file"
             result = _preview(
+                dest_db=body.dest_db,
                 headers=headers,
                 sample_rows=rows,
                 mappings=body.mappings,
