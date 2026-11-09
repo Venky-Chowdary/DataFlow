@@ -13853,7 +13853,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 12px 14px;
   border: 1px solid var(--df-border);
   border-left: 3px solid var(--df-brand-arrow);
-  border-radius: 10px;
+  border-radius: var(--df-radius-lg);
   background: var(--df-surface-subtle);
 }
 
