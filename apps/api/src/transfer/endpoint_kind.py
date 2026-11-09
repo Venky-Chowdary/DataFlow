@@ -224,6 +224,21 @@ def _discard(path: str) -> None:
         pass
 
 
+def artifact_source_identity(src: Any, fallback_format: str = "") -> tuple[str, str]:
+    """``(kind, format)`` the Decision Artifact was bound to at Validate.
+
+    Validate saw an uploaded SQLite database as a file, whose inferred types are
+    not fingerprinted; Execute reads it as the staged ``database/sqlite`` copy.
+    Binding the staged copy as a catalog source would read as source drift.
+    """
+    if (getattr(src, "extra", None) or {}).get("staged_sqlite_upload"):
+        return "file", "sqlite"
+    return (
+        str(getattr(src, "kind", "") or ""),
+        str(getattr(src, "format", None) or fallback_format or ""),
+    )
+
+
 def discard_staged_upload(request: Any) -> None:
     src = getattr(request, "source", None)
     if src is not None and (getattr(src, "extra", None) or {}).get("staged_sqlite_upload"):

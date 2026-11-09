@@ -125,3 +125,82 @@ def test_uploaded_db_file_transfers_to_postgres_and_reads_back(tmp_path):
             cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
         conn.commit()
         conn.close()
+
+
+@pytest.mark.skipif(not pg_up(), reason="PostgreSQL not reachable")
+def test_uploaded_db_validate_artifact_executes_without_source_drift(tmp_path):
+    """Validate binds the upload as a file; Execute stages it as database/sqlite.
+
+    QA (PR #380 browser run): Studio Validate passed, Execute failed with
+    "Decision Artifact source schema drifted since Validate" and wrote no rows.
+    """
+    import psycopg2
+
+    from services.file_parser import FileParser
+    from services.preflight_service import run_file_preflight
+    from services.read_options import ReadOptions
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    content = _sqlite_bytes(tmp_path, extra_table=True)
+    parsed = FileParser.parse(content, "shop.db", read_options=ReadOptions(sheet="orders"))
+    assert parsed.success, parsed.error
+    schema = FileParser.infer_schema(parsed.data)
+    types = {c: str(schema[c]) for c in parsed.columns}
+    mappings = [
+        {"source": c, "target": c, "source_type": types[c], "target_type": types[c], "confidence": 1.0}
+        for c in parsed.columns
+    ]
+    c = pg_creds()
+    table = f"qa1_sqlite_va_{uuid.uuid4().hex[:8]}"
+    def _validate(maps):
+        out = run_file_preflight(
+            columns=parsed.columns, column_types=types, row_count=parsed.row_count,
+            mappings=maps, destination_connected=True, source_kind="file",
+            source_format="sqlite", sync_mode="full_refresh_overwrite",
+            sample_rows=parsed.data, destination_db_type="postgresql",
+            destination_table=table, destination_table_exists=False,
+            source_filename="shop.db",
+        )
+        return out, (out.get("proof_bundle") or {}).get("decision_artifact") or {}
+
+    # Map as Studio does: the target types are the DDL Validate settles on.
+    validate, artifact = _validate(mappings)
+    ddl = (artifact.get("ddl") or {}).get("column_ddl") or {}
+    mappings = [{**m, "target_type": ddl.get(m["target"], m["target_type"])} for m in mappings]
+    validate, artifact = _validate(mappings)
+    assert artifact.get("content_hash"), validate.get("proof_bundle", {}).keys()
+
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="sqlite"),
+        source_filename="shop.db",
+        source_content=content,
+        read_options={"sheet": "orders"},
+        destination=EndpointConfig(
+            kind="database", format="postgresql", host=c["host"], port=int(c["port"]),
+            database=c["database"], username=c["username"], password=c["password"],
+            schema="public", table=table,
+        ),
+        mappings=mappings,
+        sync_mode="full_refresh_overwrite",
+        skip_preflight=False,
+        decision_artifact=artifact,
+        approved_decision_artifact_hash=artifact["content_hash"],
+    )
+    result = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
+    conn = psycopg2.connect(
+        host=c["host"], port=int(c["port"]), dbname=c["database"],
+        user=c["username"], password=c["password"],
+    )
+    try:
+        assert "drifted since Validate" not in (result.error or ""), result.error
+        assert result.success is True, result.error
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT id, name FROM public."{table}" ORDER BY id')
+            got = cur.fetchall()
+        assert [(int(r[0]), r[1]) for r in got] == [(i, n) for i, n, _a, _note in ROWS]
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
+        conn.commit()
+        conn.close()
