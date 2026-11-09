@@ -1977,8 +1977,13 @@ def _quarantine_details_to_records(details: list[dict], transform_overrides: Opt
                 order.append(row_num)
         # Prefer explicit source_values when dual-stamped (Wave 32).
         base = detail.get("source_values") if isinstance(detail.get("source_values"), dict) else None
+        values = detail.get("values") if isinstance(detail.get("values"), dict) else {}
         if not base:
-            base = detail.get("values") if isinstance(detail.get("values"), dict) else {}
+            base = values
+        elif "_df_lsn" in values and "_df_lsn" not in base:
+            # The stale-CDC guard matches replay rows by key + _df_lsn; source
+            # values never carry the LSN the writer stamped.
+            base = {**base, "_df_lsn": values["_df_lsn"]}
         if base:
             from connectors.writer_common import quarantine_cell_wire
 

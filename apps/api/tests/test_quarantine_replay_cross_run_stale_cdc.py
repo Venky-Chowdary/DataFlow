@@ -168,3 +168,12 @@ def test_partition_refuses_incomparable_lsn_families():
         [_finding(1, "0/10")], key_columns=["id"], destination_lsns=lambda _k: {("1",): "mysql-bin.000003:120"}
     )
     assert keep == [] and [s["reason"] for s in stale] == [REASON_STALE_DEST_NEWER]
+
+
+def test_dual_stamped_finding_keeps_the_lsn_the_stale_guard_matches_on():
+    from src.routers.connectors_router import _quarantine_details_to_records
+
+    detail = {"row": 1, "source_values": {"id": 3, "name": "bad"},
+              "values": {"id": 3, "name": "bad", "_df_lsn": "0/16B3748"}}
+    records, _ = _quarantine_details_to_records([detail])
+    assert records and records[0].get("_df_lsn") == "0/16B3748"
