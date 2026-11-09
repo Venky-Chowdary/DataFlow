@@ -5958,7 +5958,11 @@ _VALUE_DECIDED_REFUSALS = frozenset({
 })
 # A CHECK refusal is decided by the row's own values, so its key is held out
 # like a width overflow; these name a conflict with another row or table.
-_ROW_DECIDED_MARKERS = ("unique", "duplicate", "foreign key", "exclusion", "not-null", "not null")
+_ROW_DECIDED_MARKERS = (
+    "unique", "duplicate", "foreign key", "exclusion", "not-null", "not null",
+    # Oracle ORA-02291/02292 name an FK as "integrity constraint ... parent/child key".
+    "integrity constraint", "parent key", "child record",
+)
 _CHECK_MARKERS = ("check constraint",)
 
 

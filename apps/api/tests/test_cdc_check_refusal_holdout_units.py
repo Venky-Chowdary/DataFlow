@@ -11,6 +11,7 @@ from src.transfer.reconcile_step import _held_out_keys
 PG_CHECK = 'new row for relation "t" violates check constraint "ck_t"'
 MYSQL_CHECK = "(3819, \"Check constraint 'ck_t' is violated.\")"
 PG_UNIQUE = 'duplicate key value violates unique constraint "t_pkey"'
+ORA_FK = "ORA-02291: integrity constraint (APP.FK_T) violated - parent key not found"
 
 
 def _detail(key: str, reason: str, row: int = 1) -> dict:
@@ -21,6 +22,7 @@ def _detail(key: str, reason: str, row: int = 1) -> dict:
 def test_check_refusal_holds_the_key_out_unique_does_not():
     summary = {"rejected_details": [
         _detail("3", PG_CHECK), _detail("4", MYSQL_CHECK), _detail("6", PG_UNIQUE),
+        _detail("7", ORA_FK),
     ]}
     assert _held_out_keys(summary, "id") == {"3", "4"}
 
@@ -93,3 +95,14 @@ def test_value_proof_drops_held_out_source_rows():
     assert _without_held_out(rows, pairs, {"3", "4"}, "id") == [{"ID": 5}]
     assert _without_held_out(rows, pairs, None, "id") == rows
     assert _without_held_out(rows, pairs, {"3"}, "other") == rows
+
+
+def test_oracle_foreign_key_refusal_is_not_withdrawn_from_the_census():
+    class _Acc:
+        def withdraw_rejected(self, keys, stored):
+            raise AssertionError(f"withdrew {keys}")
+
+    summary = {"rejected_details": [_detail("7", ORA_FK)]}
+    assert ct._census_without_rejected_keys(
+        _Acc(), summary, key_cols=["id"], dest_type="oracle", dest_cfg={}, dest_table="t",
+    ) is None
