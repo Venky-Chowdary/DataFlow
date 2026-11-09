@@ -3142,6 +3142,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
                 error=display,
                 error_details=error_details,
+                row_accounting=error_details.get("row_accounting") or {},
                 operation=request.operation,
                 contract_id=contract_id,
             )
@@ -4368,6 +4369,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
                 error=display,
                 error_details=error_details,
+                row_accounting=error_details.get("row_accounting") or {},
                 operation=request.operation,
                 contract_id=contract_id,
             )
@@ -5201,6 +5203,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
                 error=display,
                 error_details=error_details,
+                row_accounting=error_details.get("row_accounting") or {},
                 operation=request.operation,
                 contract_id=contract_id,
             )

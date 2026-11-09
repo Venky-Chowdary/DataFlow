@@ -2894,10 +2894,14 @@ def _stream_database_transfer_impl(
                     break
             raise _undo_failed_write(
                 run,
-                ValueError(
-                    f"All {run.tally.rejected_total} row(s) were quarantined, so nothing "
-                    "was written to the destination"
-                    + (f" — {'; '.join(reasons)}" if reasons else "")
+                _stamp_all_held_out_ledger(
+                    run,
+                    ValueError(
+                        f"All {run.tally.rejected_total} row(s) were quarantined, so nothing "
+                        "was written to the destination"
+                        + (f" — {'; '.join(reasons)}" if reasons else "")
+                    ),
+                    removed_on_read=removed_on_read_total,
                 ),
             )
         if run.cfg.columns and (getattr(run.cfg.destination, "extra", None) or {}).get(
@@ -3842,6 +3846,7 @@ from src.transfer.stream_write_ledger import (  # noqa: E402,F401 - re-export
     _merge_chunk_write_summaries,
     _merge_embedding_usage,
     _seed_write_complete_summary,
+    _stamp_all_held_out_ledger,
     _undo_failed_write,
 )
 

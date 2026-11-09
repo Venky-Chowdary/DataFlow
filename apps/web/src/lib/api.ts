@@ -193,6 +193,53 @@ async function parseApiError(res: Response, fallback: string): Promise<string> {
   return (await readApiRefusal(res, fallback)).detail;
 }
 
+/**
+ * Browsers open at most 6 HTTP/1.1 connections per host. When the API is slow,
+ * the shell's own calls filled all 6 and a lazy screen's module requests sat in
+ * the browser queue until those calls timed out ("Loading Settings…" for ~15 s).
+ * Capping in-flight API requests below that keeps sockets free for chunk loads.
+ */
+export const API_MAX_IN_FLIGHT = 4;
+let apiInFlight = 0;
+const apiSlotWaiters: Array<() => void> = [];
+
+function releaseApiSlot(): void {
+  const next = apiSlotWaiters.shift();
+  if (next) next();
+  else apiInFlight = Math.max(apiInFlight - 1, 0);
+}
+
+/** FIFO slot under the cap; a waiter whose signal aborts leaves the queue. */
+function acquireApiSlot(signal: AbortSignal): Promise<() => void> {
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    releaseApiSlot();
+  };
+  if (apiInFlight < API_MAX_IN_FLIGHT && apiSlotWaiters.length === 0) {
+    apiInFlight += 1;
+    return Promise.resolve(release);
+  }
+  return new Promise((resolve, reject) => {
+    const grant = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(release);
+    };
+    const onAbort = () => {
+      const index = apiSlotWaiters.indexOf(grant);
+      if (index >= 0) apiSlotWaiters.splice(index, 1);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    apiSlotWaiters.push(grant);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** Authenticated fetch (Bearer + X-Workspace-Id + CSRF); shared by the lib/*Api modules. */
 export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
   const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal, ...requestInit } = init;
@@ -236,7 +283,9 @@ export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit 
     signal?.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
+  let releaseSlot: (() => void) | null = null;
   try {
+    releaseSlot = await acquireApiSlot(controller.signal);
     const res = await fetch(input, { ...mergedInit, signal: controller.signal });
     if (res.status === 401 && apiUnauthorizedEndsSession(session)) {
       notifyAuthRequired(typeof input === "string" ? input : String(input));
@@ -249,6 +298,7 @@ export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit 
     throw error;
   } finally {
     window.clearTimeout(timeout);
+    releaseSlot?.();
   }
 }
 
