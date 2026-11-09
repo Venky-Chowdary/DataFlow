@@ -42,3 +42,14 @@ describe("UI preview session", () => {
     assert.equal(apiUnauthorizedEndsSession(null), true);
   });
 });
+
+describe("sessionDisplayName (F6)", () => {
+  it("shows the name entered at signup, not the mailbox", async () => {
+    const { sessionDisplayName } = await import("./session.js");
+    const s = { email: "qasignup372@gmail.com", name: "Sam Signup" };
+    assert.equal(sessionDisplayName(s, "qasignup372@gmail.com"), "Sam Signup");
+    assert.equal(sessionDisplayName({ ...s, name: "  " }, s.email), "Qasignup372");
+    assert.equal(sessionDisplayName(s, "other@example.com"), "Other");
+    assert.equal(sessionDisplayName(null, ""), "User");
+  });
+});

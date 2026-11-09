@@ -176,9 +176,14 @@ async def lifespan(app: FastAPI):
     # Durable mail outbox: a restart can leave 'queued' rows behind —
     # re-queue them through the send lane so no reset/OTP mail is lost.
     try:
-        from services.signup_service import recover_mail_outbox
+        from services.signup_service import (
+            recover_mail_outbox,
+            start_mail_outbox_sweeper,
+        )
 
         recover_mail_outbox()
+        # A row in retry backoff at restart is not due yet; keep sweeping.
+        start_mail_outbox_sweeper()
     except Exception as oe:  # pragma: no cover - recovery must not block boot
         print(f"[!] Mail outbox drain warning: {oe}")
     os.environ.setdefault("DATAFLOW_VECTOR_STORE_DIR", str(vector_store_dir()))

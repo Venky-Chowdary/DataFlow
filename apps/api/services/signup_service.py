@@ -357,6 +357,48 @@ def recover_mail_outbox() -> int:
         skip_reason=_outbox_dead_link_status)
 
 
+_SWEEP_STOP = threading.Event()
+_SWEEPER: threading.Thread | None = None
+
+
+def start_mail_outbox_sweeper(interval_sec: float | None = None) -> threading.Thread:
+    """Keep draining the outbox after boot.
+
+    The startup drain only claims rows that are due. A row waiting out a retry
+    backoff when the process restarted lost its in-memory retry timer, so
+    without a later pass it stayed 'queued' forever. Each pass re-offers every
+    due row; ``mail_outbox.claim`` fences it to one send across replicas and
+    any timer still pending in this process. ``DATAWRAP_MAIL_OUTBOX_SWEEP_SEC``
+    (default 30) sets the period.
+    """
+    global _SWEEPER
+    if _SWEEPER is not None and _SWEEPER.is_alive():
+        return _SWEEPER
+    period = float(interval_sec if interval_sec is not None
+                   else max(1, _env_int("MAIL_OUTBOX_SWEEP_SEC", 30)))
+    _SWEEP_STOP.clear()
+
+    def _loop() -> None:
+        while not _SWEEP_STOP.wait(period):
+            try:
+                recover_mail_outbox()
+            except Exception:  # noqa: BLE001 - one bad pass must not end the sweeper
+                logger.error("mail outbox sweep failed", exc_info=True)
+
+    _SWEEPER = threading.Thread(target=_loop, name="mail-outbox-sweeper",
+                                daemon=True)
+    _SWEEPER.start()
+    return _SWEEPER
+
+
+def stop_mail_outbox_sweeper(timeout: float = 5.0) -> None:
+    global _SWEEPER
+    _SWEEP_STOP.set()
+    if _SWEEPER is not None:
+        _SWEEPER.join(timeout)
+    _SWEEPER = None
+
+
 def queue_mail(template: str, to: str, context: dict[str, Any], *,
                idempotency_key: str, purpose: str = "",
                quota: str = "request", once: bool = False,

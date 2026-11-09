@@ -159,6 +159,30 @@ def _consume_quota() -> None:
                        retry_after_sec=exc.retry_after_sec) from exc
 
 
+def invite_days_left(expires_at: Any, now: datetime | None = None) -> int:
+    """Whole days until ``expires_at``, rounded up (at least 1).
+
+    The one rounding rule for "expires in N days": the Team page applies the
+    same ceiling in ``apps/web/src/lib/teamInvite.ts::inviteExpiryLabel``, so a
+    fresh 7-day invite reads 7 in the email and in the list. Falls back to the
+    configured TTL when the stamp is missing or unreadable.
+    """
+    import math
+
+    at = expires_at
+    if isinstance(at, str):
+        try:
+            at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+        except ValueError:
+            at = None
+    if not isinstance(at, datetime):
+        return invite_ttl().days
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    left = (at - (now or _now())).total_seconds()
+    return max(1, math.ceil(left / 86400))
+
+
 def _queue_invite_mail(doc: dict[str, Any], token: str, workspace_name: str) -> None:
     from services.signup_service import queue_mail
 
@@ -166,7 +190,8 @@ def _queue_invite_mail(doc: dict[str, Any], token: str, workspace_name: str) -> 
         "workspace_invite", doc["email"],
         {"inviter_name": doc.get("invited_by_name") or "", "inviter_email": doc.get("invited_by") or "",
          "workspace_name": workspace_name, "role": doc.get("role"), "name": doc.get("name") or "",
-         "accept_url": _accept_url(token), "expires_days": invite_ttl().days},
+         "accept_url": _accept_url(token),
+         "expires_days": invite_days_left(doc.get("expires_at"))},
         idempotency_key=f"invite:{doc['id']}:{int(doc.get('sent_count') or 1)}",
         purpose=_PURPOSE, quota="prepaid")
 

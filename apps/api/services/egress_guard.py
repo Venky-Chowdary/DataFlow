@@ -448,8 +448,13 @@ def _refuse_at_new_point(
 
 
 def host_is_blocked(host: str) -> bool:
-    """True when ``host`` is denied with an empty allowlist. DNS failure denies."""
-    return classify_host(host, allowlist=(), fail_closed_dns=True) is not None
+    """True when ``host`` is denied. DNS failure denies.
+
+    Default deny; the shared allowlist (workspace entries, then
+    ``DATAFLOW_EGRESS_ALLOWLIST``) admits private/loopback targets the same way
+    it does for connector dials. Metadata endpoints are never admitted.
+    """
+    return classify_host(host, allowlist=None, fail_closed_dns=True) is not None
 
 
 def assert_connector_dial_allowed(

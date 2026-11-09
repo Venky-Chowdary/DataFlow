@@ -14,7 +14,11 @@ export const INVITE_DEFAULTS = {
   createLogin: false,
 } as const;
 
-/** "Expires in 6 days" / "Expires in 3 hours" / "Expired" for a pending invite. */
+/**
+ * "Expires in 7 days" / "Expires in 3 hours" / "Expired" for a pending invite.
+ * Days round UP — the same rule the invite email uses
+ * (`services/workspace_invites.py::invite_days_left`), so both say 7 for a fresh 7-day link.
+ */
 export function inviteExpiryLabel(expiresAt: string | undefined, now: number = Date.now()): string {
   if (!expiresAt) return "";
   const at = new Date(expiresAt).getTime();
@@ -22,7 +26,7 @@ export function inviteExpiryLabel(expiresAt: string | undefined, now: number = D
   const left = at - now;
   if (left <= 0) return "Expired";
   const hours = Math.floor(left / 3_600_000);
-  if (hours >= 48) return `Expires in ${Math.floor(hours / 24)} days`;
+  if (hours >= 48) return `Expires in ${Math.ceil(left / 86_400_000)} days`;
   if (hours >= 1) return `Expires in ${hours} hour${hours === 1 ? "" : "s"}`;
   return "Expires within the hour";
 }

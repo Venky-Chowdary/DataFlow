@@ -444,6 +444,14 @@ def _welcome(ctx: dict[str, Any]) -> RenderedEmail:
     return RenderedEmail(subject, text, _shell(subject, body, preheader=f"Your Datawrap account is ready \u2014 {workspace}"))
 
 
+
+def _invited_line(who: str, workspace: str) -> str:
+    """"invited you to the Acme workspace" — without doubling the noun when the
+    name already ends in it (every self-serve default: "Sam's workspace")."""
+    if workspace.strip().lower().endswith("workspace"):
+        return f"{who} invited you to {workspace}."
+    return f"{who} invited you to the {workspace} workspace."
+
 def _workspace_invite(ctx: dict[str, Any]) -> RenderedEmail:
     """A workspace admin's invitation. The inviter's address is always shown
     next to their display name, so a name like "Datawrap Security" cannot
@@ -461,7 +469,7 @@ def _workspace_invite(ctx: dict[str, Any]) -> RenderedEmail:
     body = (
         _eyebrow("Workspace invitation")
         + _h1(f"Join {workspace} on Datawrap")
-        + _p(f"{who} invited you to the {workspace} workspace.")
+        + _p(_invited_line(who, workspace))
         + _facts([
             ("Workspace", workspace),
             ("Role", _role_line(role)),
@@ -476,7 +484,7 @@ def _workspace_invite(ctx: dict[str, Any]) -> RenderedEmail:
     )
     text = (
         f"Join {workspace} on Datawrap\n\n"
-        f"{who} invited you to the {workspace} workspace.\n\n"
+        f"{_invited_line(who, workspace)}\n\n"
         f"  Workspace:  {workspace}\n"
         f"  Role:       {_role_line(role)}\n"
         f"  Invited by: {who}\n\n"

@@ -22,7 +22,11 @@ def test_public_https_is_allowed(monkeypatch):
     assert egress_url_allowed("https://example.com/hook")
 
 
-def test_loopback_and_link_local_are_blocked():
+def test_loopback_and_link_local_are_blocked(monkeypatch):
+    # host_is_blocked honors the shared allowlist (QA1 F3); conftest admits
+    # loopback for live suites, so prove the default-deny without it.
+    monkeypatch.delenv("DATAFLOW_EGRESS_ALLOWLIST", raising=False)
+    monkeypatch.delenv("DATAWRAP_EGRESS_ALLOWLIST", raising=False)
     assert host_is_blocked("127.0.0.1")
     assert host_is_blocked("localhost")
     assert host_is_blocked("169.254.169.254")
