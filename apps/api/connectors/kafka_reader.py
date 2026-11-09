@@ -391,16 +391,33 @@ def read_topic_batch(
 
 _KAFKA_NUMERIC_LOGICALS = frozenset({"INTEGER", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE"})
 _INT_RANK = {"INTEGER": 0, "BIGINT": 1}
+_KAFKA_TEMPORAL_LOGICALS = frozenset({"DATE", "TIMESTAMP", "TIMESTAMPTZ"})
 
 #: A string an exact numeric column holds without changing its text: no sign
 #: but ``-``, no leading zeros, no exponent, no padding ("2.50", "-0.5").
 _PLAIN_DECIMAL = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
 
 
+def _temporal_join(prev: str, logical: str) -> str:
+    """Lattice join of two ISO temporal carriers, else ``""``.
+
+    DATE < TIMESTAMP < TIMESTAMPTZ (``services.type_lattice``). Folding them
+    to TEXT made the plan and the create-new DDL disagree: the mapping re-typed
+    the declared TEXT from samples while the reader's types said TEXT (D258).
+    """
+    from services.type_lattice import canonical_logical, join_logical_types
+
+    bases = [canonical_logical(t.split("(", 1)[0]) for t in (prev, logical)]
+    if not all(b in _KAFKA_TEMPORAL_LOGICALS for b in bases):
+        return ""
+    return join_logical_types(*bases)
+
+
 def merge_kafka_logicals(prev: str | None, logical: str) -> str:
     """One column's type across messages: the widest number that holds them all.
 
-    INTEGER < BIGINT < DOUBLE < DECIMAL, else TEXT. A JSON fraction is DOUBLE
+    INTEGER < BIGINT < DOUBLE < DECIMAL; ISO temporal strings join on
+    DATE < TIMESTAMP < TIMESTAMPTZ; anything else is TEXT. A JSON fraction is DOUBLE
     only when binary64 holds it exactly (the exact decoder returns ``Decimal``
     otherwise), so one such value widens the column to DECIMAL instead of
     turning it into text (D203). An integer meeting a double is the double
@@ -409,6 +426,9 @@ def merge_kafka_logicals(prev: str | None, logical: str) -> str:
     if not prev or prev == logical:
         return logical
     pair = {prev, logical}
+    temporal = _temporal_join(prev, logical)
+    if temporal:
+        return temporal
     if not pair <= _KAFKA_NUMERIC_LOGICALS:
         return "TEXT"
     if "DECIMAL" in pair:
