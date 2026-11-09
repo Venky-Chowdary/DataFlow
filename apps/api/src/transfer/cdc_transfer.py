@@ -688,6 +688,9 @@ class CdcState:
     accumulated_rejected_rows: int = 0
     accumulated_coerced_null_rows: int = 0
     superseded_rejected_details: list[dict[str, Any]] = field(default_factory=list)
+    #: Change rows merged so far: a writer numbers findings within its batch,
+    #: so two refused rows of two batches both said ``row`` 1 and counted as one.
+    rejected_row_base: int = 0
     #: Per destination table: earlier runs' open quarantine identities by key,
     #: loaded on the first delete window (``_record_quarantined_key_deletes``).
     quarantine_index: dict[str, dict[tuple[str, ...], set[str]]] = field(default_factory=dict)
@@ -878,6 +881,13 @@ def _merge_cdc_dest_summary(
     new_details = [
         dict(d) for d in (incoming.get("rejected_details") or []) if isinstance(d, dict)
     ]
+    if change is not None:
+        from .job_quarantine import rebase_batch_rejects
+
+        new_details = rebase_batch_rejects(
+            new_details, batch_start=state.rejected_row_base, row_basis="cdc_change"
+        )
+        state.rejected_row_base += len(change.inserts or []) + len(change.updates or [])
     if new_details:
         if not str(job_id or "").strip():
             raise RuntimeError(
@@ -1516,6 +1526,90 @@ def _stash_reconcile_evidence(
             dest_summary["reconcile_delete_key_columns"] = _pk_columns(pk_target_col)
 
 
+def _census_without_rejected_keys(
+    census_acc: Any,
+    dest_summary: dict[str, Any],
+    *,
+    key_cols: list[str],
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+) -> dict[str, Any] | None:
+    """Withdraw the keys this batch's writer quarantined from the run census.
+
+    A key held out for its own values (width, type, CHECK) did not land; a
+    UNIQUE / FK refusal may concern one copy of a key that did, so it stays
+    counted and the ledger stays unproven. A key whose post-write probe fails
+    stays counted too.
+    """
+    from services.dest_precount import destination_key_hits
+    from services.row_conservation import coerce_pk_part
+
+    from .reconcile_step import _ROW_DECIDED_MARKERS, _rejected_key
+
+    def _bind(part: str) -> Any:
+        value = coerce_pk_part(part)
+        return value if str(value) == part else part
+
+    keys: list[tuple[str, ...]] = []
+    for detail in dest_summary.get("rejected_details") or []:
+        if not isinstance(detail, dict) or detail.get("disposition") == "coerced_null":
+            continue
+        reason = str(detail.get("reason") or detail.get("failure_reason") or "").lower()
+        if any(marker in reason for marker in _ROW_DECIDED_MARKERS):
+            continue
+        key = _rejected_key(detail, key_cols)
+        if key is not None and key not in keys:
+            keys.append(key)
+    if not keys:
+        return None
+    stored: set[tuple[str, ...]] = set()
+    probed: list[tuple[str, ...]] = []
+    try:
+        for key in keys:
+            hits = destination_key_hits(
+                dest_type,
+                dict(dest_cfg),
+                schema=str(dest_cfg.get("schema") or ""),
+                table_name=dest_table,
+                key_columns=list(key_cols),
+                keys=[tuple(_bind(p) for p in key)],
+            )
+            if hits is None:
+                continue
+            probed.append(key)
+            if int(hits):
+                stored.add(key)
+    except Exception as exc:
+        logger.warning("CDC census kept quarantined keys: %s", exc, exc_info=exc)
+        return None
+    if not census_acc.withdraw_rejected(probed, stored):
+        return None
+    census = census_acc.to_census()
+    return census.to_dict() if census is not None else None
+
+
+def _without_open_quarantine(
+    state: CdcState, rows: list[dict[str, Any]], key_cols: list[str]
+) -> list[dict[str, Any]]:
+    """Source rows the destination lacks because this run quarantined them.
+
+    Their absence is the open DLQ finding. Image repair re-applied the same
+    refused image, which was refused again and persisted as a second finding
+    for one row (QA4: 4 DLQ rows for 2 rejected keys).
+    """
+    if not rows or not key_cols or not state.accumulated_rejected_details:
+        return rows
+    from .reconcile_step import _ladder_key, _rejected_key
+
+    open_keys = {
+        k
+        for k in (_rejected_key(d, key_cols) for d in state.accumulated_rejected_details)
+        if k is not None
+    }
+    return [r for r in rows if _ladder_key(r, key_cols) not in open_keys]
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -1803,6 +1897,15 @@ def _apply_change_batch(
     if dest_summary is None:
         dest_summary = {}
     _stash_reconcile_evidence(dest_summary, change, pk_target_col or "")
+    if census_acc is not None and census_payload and pk_target_cols:
+        census_payload = _census_without_rejected_keys(
+            census_acc,
+            dest_summary,
+            key_cols=pk_target_cols,
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+        ) or census_payload
     if census_payload:
         from services.row_conservation import CENSUS_KEY
 
@@ -4218,6 +4321,9 @@ def _run_cdc_single_stream(
                     except CdcValueScanIncomplete as exc:
                         logger.warning("CDC key image repair skipped: %s", exc)
                         missing_image = None
+            missing_image = _without_open_quarantine(
+                state, list(missing_image or []), list(pk_source_cols or [])
+            )
             if missing_image:
                 token = unwrap_resume_token(cursor_now)
                 if eos_active:
@@ -4373,7 +4479,9 @@ def _run_cdc_single_stream(
                     }
                     still_drifting = []
                     if rescan_complete:
-                        for row in rescanned_image or []:
+                        for row in _without_open_quarantine(
+                            state, list(rescanned_image or []), list(pk_source_cols or [])
+                        ):
                             row_evidence = _build_drift_evidence(
                                 cursor_key=cursor_key,
                                 source_table=str(table_name or ""),

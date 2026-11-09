@@ -5956,13 +5956,18 @@ _VALUE_DECIDED_REFUSALS = frozenset({
     "TYPE_CAST_FAILURE", "INVALID_NUMERIC", "INVALID_TIMESTAMP", "INVALID_BOOLEAN",
     "FRACTIONAL_PRECISION_LOSS", "OVERFLOW", "UNDERFLOW", "LENGTH_OVERFLOW",
 })
-_ROW_DECIDED_MARKERS = ("unique", "duplicate", "constraint", "foreign key", "not-null", "not null")
+# A CHECK refusal is decided by the row's own values, so its key is held out
+# like a width overflow; these name a conflict with another row or table.
+_ROW_DECIDED_MARKERS = ("unique", "duplicate", "foreign key", "exclusion", "not-null", "not null")
+_CHECK_MARKERS = ("check constraint",)
 
 
 def _value_decided_refusal(reason: str) -> bool:
     text = str(reason or "").lower()
     if any(marker in text for marker in _ROW_DECIDED_MARKERS):
         return False
+    if any(marker in text for marker in _CHECK_MARKERS):
+        return True
     from services.decision_kernel.findings import classify_transform_failure
 
     return classify_transform_failure(str(reason or "")).value in _VALUE_DECIDED_REFUSALS
@@ -5972,9 +5977,9 @@ def _held_out_keys(dest_summary: dict[str, Any], sort_key: str | None) -> set[st
     """Keys of the rows the writer quarantined on a value it could not store.
 
     The finding's own value is masked and truncated for display, so it cannot
-    be matched back to the source row; the key it names can. A UNIQUE / FK /
-    CHECK refusal is about one copy of a key that may also have landed, so it
-    never holds the key out.
+    be matched back to the source row; the key it names can. A UNIQUE / FK
+    refusal is about one copy of a key that may also have landed, so it never
+    holds the key out; a CHECK refusal is decided by the row's own values.
     """
     if not sort_key:
         return set()
@@ -6013,7 +6018,12 @@ def _census_without_held_out_keys(
     from services.row_conservation import KeyCensus, coerce_pk_part
 
     census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
-    if census is None or len(key_columns) != 1 or dest_summary.get("held_out_keys_classified"):
+    if (
+        census is None
+        or census.held_out_keys
+        or len(key_columns) != 1
+        or dest_summary.get("held_out_keys_classified")
+    ):
         return
     # A later batch may have written a key an earlier batch held out.
     landed = {str(x) for x in dest_summary.get("written_ids") or [] if x is not None}
@@ -8482,6 +8492,8 @@ def _run_reconciliation_impl(
                     dest_table=str(table_name or ""),
                     mappings=list(mapping_dicts or []),
                     dest_types=dest_types,
+                    held_out_keys=_held_out_keys(dest_summary, pk_column),
+                    held_out_column=pk_column or "",
                     **_cdc_poll_window(dest_summary),
                 )
             except CdcValueScanIncomplete as exc:
