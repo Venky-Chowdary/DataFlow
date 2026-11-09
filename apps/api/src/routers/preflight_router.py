@@ -913,7 +913,7 @@ class CellPreviewRequest(BaseModel):
     # canonically (WIRE) when the operator declared no locale.
     source_kind: str = "file"
     source_type: str | None = None
-    # Destination dialect for the carrier fit (DECIMAL(p,s)) the writer applies.
+    # Destination engine, so a VARCHAR(n) width counts units the way its writer does.
     dest_db: str = ""
 
 

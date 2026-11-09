@@ -115,8 +115,10 @@ export function decimalWouldCollapse(sourceType: string, targetType: string): bo
   const src = parseDecimalPrecisionScale(sourceType);
   const tgt = parseDecimalPrecisionScale(targetType);
   if (!src) return false;
-  // Proven (p,s) → bare DECIMAL invents platform default — Accept risk.
-  if (!tgt) return true;
+  // Bare NUMERIC is the unbounded carrier (PostgreSQL), not a platform
+  // default: every (p,s) value round-trips, as the API classifier says.
+  if (!tgt) return !/^\s*numeric\s*$/i.test(targetType);
+  // Proven (p,s) → bare DECIMAL/NUMBER invents platform default — Accept risk.
   if (src.scale > tgt.scale) return true;
   // Integer digits capacity: precision − scale.
   return src.precision - src.scale > tgt.precision - tgt.scale;

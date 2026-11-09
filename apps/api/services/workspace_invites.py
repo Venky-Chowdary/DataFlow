@@ -266,6 +266,7 @@ def resend_invite(*, workspace_id: str, invite_id: str, principal: Any, ip: str 
         _queue_invite_mail(fresh, token, _workspace_name(workspace_id))
     except Exception:
         logger.error("invitation resend mail could not be queued", exc_info=True)
+        store.restore_token(invite_id, failed=fresh, previous=doc)
         raise ApiError(503, "email_send_failed", "We couldn't send the invitation — try again.")
     record_security_event(
         "team.invite.resent", outcome="succeeded", actor=principal.email,

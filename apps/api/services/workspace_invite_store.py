@@ -267,6 +267,38 @@ def rotate_token(invite_id: str, *, ttl: timedelta) -> tuple[str, dict[str, Any]
     return token, out
 
 
+def restore_token(invite_id: str, *, failed: dict[str, Any], previous: dict[str, Any]) -> bool:
+    """Undo a resend whose mail never queued: the emailed link must keep working.
+
+    Compare-and-set on the rotated hash, so an accept, revoke or newer resend
+    that landed in between is never reverted.
+    """
+    swapped = list(failed.get("superseded_hashes") or [])
+    if not swapped or not failed.get("token_hash"):
+        return False
+    # Restore the hash this rotation replaced, never the caller's earlier read:
+    # an overlapping resend may already have mailed a newer link.
+    fields: dict[str, Any] = {"token_hash": swapped[0], "superseded_hashes": swapped[1:],
+                              "sent_count": max(int(failed.get("sent_count") or 1) - 1, 1)}
+    if previous.get("token_hash") == swapped[0]:
+        fields.update(last_sent_at=previous.get("last_sent_at"), expires_at=previous.get("expires_at"))
+    db = _database()
+    if db is not None:
+        expires = fields.get("expires_at")
+        if expires:
+            fields["purge_at"] = _purge_at(datetime.fromisoformat(str(expires)))
+        done = db[COLLECTION].update_one(
+            {"_id": invite_id, "status": "pending", "token_hash": failed["token_hash"]},
+            {"$set": fields})
+        return bool(done.modified_count)
+    with json_doc_transaction(_path(), {"invites": {}}) as data:
+        row = data.setdefault("invites", {}).get(invite_id)
+        if row is None or row.get("status") != "pending" or row.get("token_hash") != failed["token_hash"]:
+            return False
+        row.update(fields)
+    return True
+
+
 def transition(invite_id: str, *, to_status: str, require_unexpired: bool = False,
                token_hash: str = "", **fields: Any) -> dict[str, Any] | None:
     """Compare-and-set ``pending`` → ``to_status``. Exactly one caller wins;
