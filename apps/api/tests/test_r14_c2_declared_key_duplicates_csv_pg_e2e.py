@@ -147,6 +147,15 @@ def test_replay_over_a_table_that_repeats_its_key_is_a_typed_409_then_works(clie
         cur.execute(f'SELECT name FROM public."{table}" WHERE sku IN (%s, %s) ORDER BY sku', ("SKU-00003", "SKU-00004"))  # nosec B608
         assert [r[0] for r in cur.fetchall()] in ([None, " "], ["", " "])
 
+        # Create-new declares the operator's key (sku), so the table refuses an
+        # extra copy outright. A table that repeats its key is one without that
+        # key (an earlier build, or another writer): model exactly that.
+        cur.execute(
+            "SELECT conname FROM pg_constraint WHERE contype = 'p' AND conrelid = %s::regclass",
+            (f'public."{table}"',),
+        )
+        (pkey,) = cur.fetchone()
+        cur.execute(f'ALTER TABLE public."{table}" DROP CONSTRAINT "{pkey}"')  # nosec B608
         # The table now repeats a key (an earlier build, or another writer).
         cur.execute(
             f'INSERT INTO public."{table}" (sku, name, price) VALUES (%s, %s, %s)',  # nosec B608

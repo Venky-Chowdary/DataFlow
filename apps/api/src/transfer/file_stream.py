@@ -2071,7 +2071,10 @@ def stream_file_to_database(
             resumed=resumed,
             read_options=read_options,
             # "Use sku as the key": a table this COPY creates declares it.
-            create_key_columns=[] if incremental else list(pk_target_cols or []),
+            # duplicate_policy=append keeps every copy, so no key is declared.
+            create_key_columns=[]
+            if incremental or normalize_duplicate_policy(duplicate_policy) == "append"
+            else list(pk_target_cols or []),
         )
     finally:
         reset_copy_decline_capture(copy_decline_token)
