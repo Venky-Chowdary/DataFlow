@@ -411,3 +411,20 @@ def test_failed_overlapping_resend_never_revives_an_older_link(world, request):
     assert store.get(invite["id"])["token_hash"] == store.hash_token(mailed)
     assert client.post("/api/v1/invites/inspect", json={"token": mailed}).json()["ok"] is True
     assert client.post("/api/v1/invites/inspect", json={"token": _token_for("gus@example.com")}).json()["ok"] is False
+
+
+@pytest.mark.parametrize("world", ["env", "mongo_env"])
+def test_restored_link_keeps_its_own_expiry_not_the_failed_resends(world, request):
+    from datetime import timedelta
+
+    from services import workspace_invite_store as store
+
+    client, admin, ws, _ = request.getfixturevalue(world)
+    invite = _invite(client, admin, ws, "hal@example.com")["invite"]
+    stale_read = store.get(invite["id"])
+    mailed, mailed_doc = store.rotate_token(invite["id"], ttl=timedelta(days=1))
+    _, failed = store.rotate_token(invite["id"], ttl=timedelta(days=30))
+    assert store.restore_token(invite["id"], failed=failed, previous=stale_read)
+    row = store.get(invite["id"])
+    assert row["token_hash"] == store.hash_token(mailed)
+    assert row["expires_at"] == mailed_doc["expires_at"]

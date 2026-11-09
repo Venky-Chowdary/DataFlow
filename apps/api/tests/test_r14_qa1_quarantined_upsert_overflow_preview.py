@@ -151,3 +151,13 @@ def test_live_mysql_to_pg_upsert_with_quarantined_keys_verifies(mode):
             c.execute(f"DROP TABLE IF EXISTS {t}_df_quarantine")
         my.close()
         pg.close()
+
+
+def test_coerced_null_row_landed_so_its_key_is_still_compared():
+    from src.transfer.reconcile_step import _held_out_keys
+
+    summary = {"rejected_details": [
+        {"source_pk": 1, "column": "amt", "reason": "value too long", "disposition": "coerced_null"},
+        {"source_pk": 2, "column": "amt", "reason": "value too long"},
+    ]}
+    assert _held_out_keys(summary, "id") == {"2"}

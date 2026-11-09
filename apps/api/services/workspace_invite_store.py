@@ -229,6 +229,10 @@ def pending_count(workspace_id: str) -> int:
     return sum(1 for r in list_for_workspace(workspace_id) if effective_status(r, now) == "pending")
 
 
+def _link_of(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: row.get(k) for k in ("token_hash", "last_sent_at", "expires_at")}
+
+
 def rotate_token(invite_id: str, *, ttl: timedelta) -> tuple[str, dict[str, Any]] | None:
     """Re-send: a new token on the same pending record; the old link reads as
     superseded. Also re-opens an invitation whose link lapsed. None when the
@@ -249,7 +253,7 @@ def rotate_token(invite_id: str, *, ttl: timedelta) -> tuple[str, dict[str, Any]
             {"_id": invite_id, "status": "pending", "token_hash": current["token_hash"]},
             {"$set": {"token_hash": digest, "superseded_hashes": older,
                       "last_sent_at": _iso(now), "expires_at": _iso(expires),
-                      "purge_at": _purge_at(expires)},
+                      "purge_at": _purge_at(expires), "replaced_link": _link_of(current)},
              "$inc": {"sent_count": 1}},
             return_document=ReturnDocument.AFTER)
         return (token, _clean(row)) if row is not None else None
@@ -257,6 +261,7 @@ def rotate_token(invite_id: str, *, ttl: timedelta) -> tuple[str, dict[str, Any]
         row = data.setdefault("invites", {}).get(invite_id)
         if row is None or row.get("status") != "pending":
             return None
+        row["replaced_link"] = _link_of(row)
         row["superseded_hashes"] = ([row["token_hash"]]
                                     + list(row.get("superseded_hashes") or []))[:_SUPERSEDED_KEEP]
         row["token_hash"] = digest
@@ -274,19 +279,22 @@ def restore_token(invite_id: str, *, failed: dict[str, Any], previous: dict[str,
     that landed in between is never reverted.
     """
     swapped = list(failed.get("superseded_hashes") or [])
-    if not swapped or not failed.get("token_hash"):
+    link = failed.get("replaced_link") if isinstance(failed.get("replaced_link"), dict) else {}
+    if previous.get("token_hash") == (swapped[:1] or [None])[0] and not link:
+        link = _link_of(previous)
+    # Restore the link this rotation replaced, with that link's own deadline —
+    # never the caller's earlier read (an overlapping resend may already have
+    # mailed a newer link) and never the failed resend's later expiry.
+    if (not swapped or not failed.get("token_hash") or link.get("token_hash") != swapped[0]
+            or not link.get("expires_at")):
         return False
-    # Restore the hash this rotation replaced, never the caller's earlier read:
-    # an overlapping resend may already have mailed a newer link.
     fields: dict[str, Any] = {"token_hash": swapped[0], "superseded_hashes": swapped[1:],
-                              "sent_count": max(int(failed.get("sent_count") or 1) - 1, 1)}
-    if previous.get("token_hash") == swapped[0]:
-        fields.update(last_sent_at=previous.get("last_sent_at"), expires_at=previous.get("expires_at"))
+                              "sent_count": max(int(failed.get("sent_count") or 1) - 1, 1),
+                              "last_sent_at": link.get("last_sent_at"), "expires_at": link["expires_at"],
+                              "replaced_link": None}
     db = _database()
     if db is not None:
-        expires = fields.get("expires_at")
-        if expires:
-            fields["purge_at"] = _purge_at(datetime.fromisoformat(str(expires)))
+        fields["purge_at"] = _purge_at(datetime.fromisoformat(str(fields["expires_at"])))
         done = db[COLLECTION].update_one(
             {"_id": invite_id, "status": "pending", "token_hash": failed["token_hash"]},
             {"$set": fields})

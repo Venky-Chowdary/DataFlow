@@ -2204,9 +2204,7 @@ class UniversalTransferEngine:
                     chunks=chunks,
                 )
                 update = dict(
-                    # D230: a blocking source wait re-labels the job "reading";
-                    # every committed batch puts the write phase back.
-                    phase="writing",
+                    phase="writing",  # D230: a source wait re-labels the job "reading"
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
@@ -3656,8 +3654,6 @@ class UniversalTransferEngine:
                     chunks=chunks,
                 )
                 update = dict(
-                    # D230: a blocking source wait re-labels the job "reading";
-                    # every committed batch puts the write phase back.
                     phase="writing",
                     records_processed=rows,
                     chunk_current=chunk,
@@ -4798,8 +4794,6 @@ class UniversalTransferEngine:
                     chunks=chunks,
                 )
                 update = dict(
-                    # D230: a blocking source wait re-labels the job "reading";
-                    # every committed batch puts the write phase back.
                     phase="writing",
                     records_processed=rows,
                     chunk_current=chunk,
