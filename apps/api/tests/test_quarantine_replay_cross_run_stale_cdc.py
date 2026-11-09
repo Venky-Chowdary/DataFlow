@@ -147,6 +147,10 @@ def test_cross_run_deleted_cdc_key_is_not_resurrected_on_replay(engine, fake, mo
         run_n = _run(fake, table, dest, "id", validation_mode="balanced")
         rejected = (run_n.destination_summary or {}).get("rejected_details") or []
         assert {str((d.get("values") or {}).get("id")) for d in rejected} >= {"3", "4"}, rejected
+        from services.quarantine_dlq import list_dlq_events
+
+        events = list_dlq_events(job_id=str(run_n.job_id), limit=500)
+        assert {(e.get("details") or {}).get("source") for e in events} == {"cdc_batch"}, events
         # Run N+1 deletes key 3 at the source (Gate-8 grading of open key 4: see above).
         _pg([f"DELETE FROM {table} WHERE id=3"])
         _run(fake, table, dest, "id", validation_mode="balanced")

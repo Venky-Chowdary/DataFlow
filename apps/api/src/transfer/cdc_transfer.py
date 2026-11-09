@@ -2780,6 +2780,8 @@ def _run_cdc_shared_multi_table(
                 total_rows,
                 {
                     "chunk_index": chunk_idx,
+                    # Tagged and persisted before the watermark moved.
+                    "quarantine_cdc_owned": True,
                     "watermark": published_shared,
                     "rows_written": total_rows,
                     "streams": list(stream_health.values()),
@@ -3966,6 +3968,8 @@ def _run_cdc_single_stream(
                 state.rows_written,
                 {
                     "chunk_index": chunk_idx,
+                    # Tagged and persisted before the watermark moved.
+                    "quarantine_cdc_owned": True,
                     "watermark": checkpoint_watermark,
                     "stream": table_name,
                     "rows_written": state.rows_written,
