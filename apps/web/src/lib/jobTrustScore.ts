@@ -3,6 +3,8 @@
  * Prefer server `job.trust` when present; otherwise compute client-side.
  */
 
+import { isGate8WholeTableScope } from "../components/transfer/gate8Status";
+
 export type JobTrustFactor = {
   id: string;
   label: string;
@@ -240,8 +242,11 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     const lastStream =
       String(recon.checksum_scope || "").toLowerCase() === "last_stream"
       || assurance === "per_stream_checksum";
+    // Same scope rule as the Gate-8 evidence tile: a CDC source-image or
+    // batch digest is never reported as a full checksum pass.
     const fullChecksum =
       !lastStream
+      && isGate8WholeTableScope(recon)
       && (
         assurance === "full_checksum"
         || (

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import dataclasses
 import gzip
 import io
 import json
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -172,7 +175,7 @@ def detect_format(filename: str, content: bytes) -> str:
 # Which readers honour a declared window. A reader that cannot honour one must
 # refuse the request: ingesting a different population than the operator
 # declared is worse than failing the upload.
-_SHEET_WINDOW_TYPES = frozenset({"excel"})
+_SHEET_WINDOW_TYPES = frozenset({"excel", "sqlite"})
 _DELIMITED_TYPES = frozenset({"csv", "tsv", "excel"})
 
 
@@ -185,9 +188,11 @@ def unsupported_read_options(options: ReadOptions, file_type: str) -> str:
         )
     if options.selects_sheet and file_type not in _SHEET_WINDOW_TYPES:
         return (
-            f"A sheet selection applies to Excel workbooks; this source is {file_type}"
+            "A sheet selection applies to Excel workbooks and SQLite databases "
+            f"(the table); this source is {file_type}"
         )
-    if not options.sheet_window.is_default and file_type not in _DELIMITED_TYPES:
+    row_window = dataclasses.replace(options.sheet_window, sheet="", sheet_index=-1)
+    if not row_window.is_default and file_type not in _DELIMITED_TYPES:
         return (
             "Header row and row-skip options apply to Excel and delimited text "
             f"sources; this source is {file_type}"
@@ -679,6 +684,57 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             yield headers, data_rows[i:i+chunk_size]
 
 
+@contextlib.contextmanager
+def sqlite_upload_connection(content: bytes):
+    """Immutable read-only connection over uploaded SQLite bytes; ValueError when unusable."""
+    import sqlite3
+    import tempfile
+
+    from src.transfer.endpoint_kind import open_untrusted_sqlite
+
+    if bytes(content[:16]) != b"SQLite format 3\x00":
+        raise ValueError("The uploaded file is not a SQLite database.")
+    if content[18:20] == b"\x02\x02":
+        raise ValueError(
+            "The uploaded SQLite database is in WAL mode. Checkpoint it into a "
+            "single file (PRAGMA journal_mode=DELETE) and upload it again."
+        )
+    with tempfile.TemporaryDirectory(prefix="df_sqlite_profile_") as tmp:
+        path = os.path.join(tmp, "upload.sqlite")
+        with open(path, "wb") as fh:
+            fh.write(content)
+        try:
+            conn = open_untrusted_sqlite(path)
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(f"The uploaded file could not be opened as SQLite: {exc}") from exc
+        try:
+            yield conn
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(f"The uploaded SQLite database could not be read: {exc}") from exc
+        finally:
+            conn.close()
+
+
+def sqlite_user_tables(conn) -> list[str]:
+    return [
+        str(r[0])
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+    ]
+
+
+def list_sqlite_tables(content: bytes) -> list[dict]:
+    """Table inventory for the source picker, shaped like the workbook sheet list."""
+    try:
+        with sqlite_upload_connection(content) as conn:
+            names = sqlite_user_tables(conn)
+    except ValueError:
+        return []
+    return [{"name": n, "index": i, "is_active": len(names) == 1} for i, n in enumerate(names)]
+
+
 @dataclass
 class ParseResult:
     """Result of file parsing"""
@@ -1100,6 +1156,54 @@ class FileParser:
                 success=False, data=[], columns=[], row_count=0,
                 error=f"Excel parse error: {exc}", file_type="excel",
             )
+
+    @staticmethod
+    def parse_sqlite(
+        content: bytes, options: ReadOptions | None = None, max_rows: int = 100_000
+    ) -> ParseResult:
+        """Profile one table of an uploaded SQLite database (the ``sheet`` picks it).
+
+        Read through the same immutable, read-only open the transfer stages the
+        upload with, so the profile and the run see one table and one population.
+        """
+        sheet = (options.sheet if options is not None else "") or ""
+        try:
+            with sqlite_upload_connection(content) as conn:
+                tables = sqlite_user_tables(conn)
+                table = sheet.strip()
+                index = options.sheet_index if options is not None else -1
+                if not table and 0 <= index < len(tables):
+                    table = tables[index]
+                if not table:
+                    if len(tables) != 1:
+                        listed = ", ".join(tables[:10]) if tables else "no tables"
+                        return ParseResult(
+                            success=False, data=[], columns=[], row_count=0,
+                            error=(
+                                f"The SQLite database holds {len(tables)} tables ({listed}); "
+                                "pick the table to load."
+                            ) if tables else "The SQLite database holds no tables.",
+                            file_type="sqlite",
+                        )
+                    table = tables[0]
+                elif table not in tables:
+                    return ParseResult(
+                        success=False, data=[], columns=[], row_count=0,
+                        error=f"The SQLite database has no table {table!r}.",
+                        file_type="sqlite",
+                    )
+                quoted = '"' + table.replace('"', '""') + '"'
+                total = int(conn.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0])
+                cur = conn.execute(f"SELECT * FROM {quoted} LIMIT ?", (max_rows,))
+                columns = [str(d[0]) for d in cur.description or ()]
+                records = [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+        except ValueError as exc:
+            return ParseResult(
+                success=False, data=[], columns=[], row_count=0, error=str(exc), file_type="sqlite"
+            )
+        return ParseResult(
+            success=True, data=records, columns=columns, row_count=total, file_type="sqlite"
+        )
 
     @staticmethod
     def parse_parquet(content: bytes, max_rows: int = 100_000) -> ParseResult:
@@ -1563,6 +1667,8 @@ class FileParser:
             return cls.parse_excel(raw_bytes, options=read_options)
         elif file_type == "parquet":
             return cls.parse_parquet(raw_bytes)
+        elif file_type == "sqlite":
+            return cls.parse_sqlite(raw_bytes, options=read_options)
         elif file_type == "avro":
             return cls.parse_avro(raw_bytes)
         elif file_type == "orc":

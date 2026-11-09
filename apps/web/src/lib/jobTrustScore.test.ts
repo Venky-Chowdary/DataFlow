@@ -217,6 +217,23 @@ describe("computeJobTrustScore", () => {
     assert.ok(factor?.note.toLowerCase().includes("unproven"));
   });
 
+  it("CDC source-image reconcile is not a full checksum pass (same verdict as the Gate-8 tile)", () => {
+    const score = computeJobTrustScore({
+      status: "completed",
+      sync_mode: "cdc",
+      reconciliation: {
+        passed: true,
+        assurance_level: "full_checksum",
+        checksum_scope: "cdc_source_image_values",
+        source_checksum: "f1e2d3",
+        target_checksum: "f1e2d3",
+      },
+    });
+    const reconcile = score.factors.find((f) => f.id === "reconcile");
+    assert.ok(reconcile);
+    assert.doesNotMatch(reconcile.note, /full checksum reconcile passed/i);
+  });
+
   it("does not treat append dest-before delta as full checksum Verified", () => {
     const append = computeJobTrustScore({
       status: "completed",

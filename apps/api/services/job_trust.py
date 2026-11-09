@@ -57,6 +57,17 @@ def is_append_delta_proof(recon: dict[str, Any] | None) -> bool:
     )
 
 
+_NARROWER_CLAIMS = frozenset({
+    "cdc_source_image_values",
+    "per_stream_checksum",
+    "row_count",
+    "writer_ack",
+    "sample",
+    "pre_write_only",
+    "failed",
+})
+
+
 def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
     """True only for independent source↔dest digest match (not writer-ack/sample)."""
     if not isinstance(recon, dict) or not recon:
@@ -68,6 +79,13 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
     # this scope; the scope wins.
     scope = str(recon.get("checksum_scope") or "").strip().lower()
     if scope == LAST_STREAM_CHECKSUM:
+        return False
+    # One verdict with the signed proof pack and the Gate-8 tile: a digest the
+    # proof classifier files under a narrower claim (CDC source-image values,
+    # per-stream, row-count delta) is never a full-checksum pass on Trust.
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    if classify_post_write_assurance(recon).get("claim_level") in _NARROWER_CLAIMS:
         return False
     assurance = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
     if assurance == "full_checksum":

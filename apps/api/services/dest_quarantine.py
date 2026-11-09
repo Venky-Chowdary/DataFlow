@@ -398,11 +398,9 @@ def mark_dlq_promoted(
             updated = int(result.rowcount or 0)
         return {"updated": updated, "table": table, "promoted_at": promoted_at}
     except Exception as exc:
-        if re.search(
-            r"undefined.?table|does not exist|no such table|invalid object name",
-            str(exc),
-            re.I,
-        ):
+        from services.sql_object_identity import is_missing_relation_error
+
+        if is_missing_relation_error(exc):
             # Shape-divert / DLQ-only findings live in the control-plane DLQ —
             # the destination may never have had a {table}_df_quarantine.
             # Absent table is not an error: the closure ledger must not

@@ -2928,6 +2928,26 @@ async def delete_connector(connector_id: str, request: Request):
 # FILE UPLOAD & TRANSFER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _default_sqlite_table(content: bytes, filename: str, read_options):
+    """Profile a multi-table SQLite upload's first table and say so in ``read_options``.
+
+    The Source step needs a preview to render the table picker; echoing the
+    table in the returned window keeps the run on the table the operator saw.
+    """
+    if read_options.sheet or read_options.sheet_index >= 0:
+        return read_options
+    if FileParser.detect_file_type(filename, content) != "sqlite":
+        return read_options
+    from services.file_parser import list_sqlite_tables
+
+    tables = list_sqlite_tables(content)
+    if len(tables) < 2:
+        return read_options
+    import dataclasses
+
+    return dataclasses.replace(read_options, sheet=str(tables[0]["name"]))
+
+
 def profile_file_upload(
     content: bytes, filename: str, *, use_ocr: bool = False, read_options=None, file_id: str = "",
 ) -> dict:
@@ -2940,6 +2960,7 @@ def profile_file_upload(
         from services.read_options import parse_read_options_payload
 
         read_options = parse_read_options_payload("")
+    read_options = _default_sqlite_table(content, filename, read_options)
     result = FileParser.parse(
         content,
         filename,
@@ -2990,6 +3011,10 @@ def profile_file_upload(
         from services.excel_parser import list_excel_sheets
 
         sheets = list_excel_sheets(content)
+    elif result.file_type == "sqlite":
+        from services.file_parser import list_sqlite_tables
+
+        sheets = list_sqlite_tables(content)
 
     stored_file_id = file_id
     if not stored_file_id:
