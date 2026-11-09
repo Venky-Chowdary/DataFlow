@@ -359,6 +359,8 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             # Platform-admin-only sandbox teardown (C18), probed against B like
             # break-glass: the A-only editor must neither delete B nor learn it.
             values = {"workspace_id": workspace_b}
+        elif template.startswith("/api/v1/team/workspaces/{workspace_id}/invites"):
+            values = {"workspace_id": workspace_b, "invite_id": "B_INVITE_SENTINEL"}
         elif template.startswith("/api/v1/team/workspaces/{workspace_id}/members"):
             values = {
                 "workspace_id": workspace_b,
@@ -397,6 +399,8 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
                 body = {"reason": "matrix probe", "scopes": ["run"]}
             if template.endswith("/break-glass/restore-admin"):
                 body = {"email": "B_MEMBER_SENTINEL@example.com", "reason": "matrix probe"}
+            if template.endswith("/invites"):
+                body = {"email": "B_MEMBER_SENTINEL@example.com", "role": "viewer"}
             if template.endswith("/members"):
                 body = {"email": "B_MEMBER_SENTINEL@example.com", "role": "viewer"}
         response = _request(editor, method, path, body=body)

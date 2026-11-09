@@ -289,3 +289,41 @@ def test_cross_workspace_invite_ids_are_not_reachable(env):
     other = client.post("/api/v1/team/workspaces", json={"name": "Other"}, headers=admin).json()["workspace"]["id"]
     res = client.delete(f"/api/v1/team/workspaces/{other}/invites/{invite['id']}", headers=admin)
     assert res.status_code == 404
+
+
+def test_concurrent_accepts_of_one_token_yield_exactly_one_membership(env):
+    import threading
+
+    from src.main import app
+
+    client, admin, ws, tmp_path = env
+    _invite(client, admin, ws, "race@example.com", role="editor")
+    token = _token_for("race@example.com")
+    racers = 2
+    barrier = threading.Barrier(racers)
+    results: list[int] = []
+    errors: list[str] = []
+
+    def run() -> None:
+        own = TestClient(app)
+        barrier.wait()
+        res = _accept(own, token, name="Race", password=PASSWORD)
+        results.append(res.status_code)
+        if res.status_code != 200:
+            errors.append(res.json()["error"]["code"])
+
+    threads = [threading.Thread(target=run) for _ in range(racers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert sorted(results) == [200, 410], (results, errors)
+    assert errors == ["invite_accepted"]
+    assert team_store.get_workspace_role(workspace_id=ws, email="race@example.com") == "editor"
+    members = client.get(f"/api/v1/team/workspaces/{ws}/members", headers=admin).json()["members"]
+    assert [m["email"] for m in members].count("race@example.com") == 1
+    record, _ = invite_store.find_by_token(token)
+    assert record is not None and record["status"] == "accepted"
+    assert invite_store.list_for_workspace(ws) == []
+    assert _actions(tmp_path).count("team.invite.accepted") == 1
