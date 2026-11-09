@@ -1850,10 +1850,13 @@ def cdc_key_tombstones(pipeline_key: str, dest_table: str) -> dict[str, str]:
 
 def job_quarantine_pipeline_tagged(job_id: str) -> bool:
     """Whether this job's quarantine was persisted with its pipeline tag."""
-    for ev in list_dlq_events(job_id=job_id, limit=500):
-        if str(ev.get("action") or "") in {"quarantine", "quarantine_chunk"}:
-            return bool((ev.get("details") or {}).get("pipeline_key"))
-    return False
+    # A CDC run also persists untagged copies through the generic path; one
+    # tagged chunk proves the run recorded tombstones for its pipeline.
+    return any(
+        str(ev.get("action") or "") in {"quarantine", "quarantine_chunk"}
+        and bool((ev.get("details") or {}).get("pipeline_key"))
+        for ev in list_dlq_events(job_id=job_id, limit=500)
+    )
 
 
 def later_untracked_deletes(

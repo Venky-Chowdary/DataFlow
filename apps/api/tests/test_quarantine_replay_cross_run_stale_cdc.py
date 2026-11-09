@@ -363,3 +363,16 @@ def test_tombstone_written_during_a_mongo_outage_survives_mongo_recovery(monkeyp
 
     monkeypatch.setattr(dlq, "_dlq_coll", lambda: _Recovered())
     assert dlq.cdc_key_tombstones("pipe", "t") == {"k1": "0/40"}
+
+
+def test_parent_is_tagged_when_any_quarantine_chunk_carries_the_pipeline(monkeypatch):
+    from services import quarantine_dlq as dlq
+
+    events = [
+        {"action": "quarantine", "details": {"rejected_details": []}},
+        {"action": "quarantine", "details": {"pipeline_key": "pipe", "dest_table": "t"}},
+    ]
+    monkeypatch.setattr(dlq, "list_dlq_events", lambda **_k: events)
+    assert dlq.job_quarantine_pipeline_tagged("n") is True
+    monkeypatch.setattr(dlq, "list_dlq_events", lambda **_k: events[:1])
+    assert dlq.job_quarantine_pipeline_tagged("n") is False
