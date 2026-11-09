@@ -1416,6 +1416,7 @@ def write_mapped_rows(
                         use_ledger = False
                 if create_table:
                     from services.schema_fidelity import (
+                        create_key_inputs,
                         empty_unsupported_report,
                         render_create_column_defs,
                         resolve_create_fidelity_plan,
@@ -1435,9 +1436,7 @@ def write_mapped_rows(
                             dest_dialect="sqlite",
                             table_already_exists=bool(table_existed) and not recreate_stage,
                             dest_table=live_table_name,
-                            carry_keys=write_mode != "insert"
-                            or bool(_kwargs.get("carry_source_keys")),
-                            operator_key_columns=list(conflict_cols),
+                            **create_key_inputs(write_mode=write_mode, conflict_columns=list(conflict_cols), carry_source_keys=bool(_kwargs.get("carry_source_keys"))),
                         )
                     except Exception as exc:
                         logger.warning(

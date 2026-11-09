@@ -13,6 +13,11 @@ export function shouldApplyInitialJobFocus(
   return jobIds.includes(initialJobId);
 }
 
+/** True while a ``#/jobs?jobId=`` focus has not been applied to the list yet. */
+export function deepLinkPending(initialJobId: string | undefined, lastApplied: string | null): boolean {
+  return Boolean(initialJobId) && lastApplied !== initialJobId;
+}
+
 /** Keep the current pick when it is still in the filtered list. */
 export function nextListSelection(
   selectedId: string | null,

@@ -3248,6 +3248,7 @@ def preview_quarantine_cells(
     coerce_count = 0
     ok_count = 0
 
+    from connectors.writer_common import fits_decimal, parse_decimal_precision_scale
     from services.column_case import header_index
     from services.mapping_constraints import write_mappings
     from services.transform_resolver import resolve_transform
@@ -3261,6 +3262,8 @@ def preview_quarantine_cells(
         if idx is None:
             continue
         transform = resolve_transform(m, column_types=column_types)
+        dest_type = str(m.get("target_type") or "")
+        decimal_carrier = parse_decimal_precision_scale(dest_type, dest_db=dest_db)
         column_values = [
             row[idx] if idx < len(row) else ""
             for row in sample_rows[:sample_size]
@@ -3285,6 +3288,21 @@ def preview_quarantine_cells(
                     source_type=str((column_types or {}).get(src) or ""),
                 ):
                     out, err = None, None
+                if (
+                    not err
+                    and decimal_carrier
+                    and out is not None
+                    and str(out).strip() != ""
+                    and not fits_decimal(
+                        out, decimal_carrier[0], decimal_carrier[1], dest_db=dest_db
+                    )
+                ):
+                    # The writer's own fit test (quarantine_unfit_decimals): a
+                    # value past the column's scale is held out, never rounded.
+                    err = (
+                        f"decimal does not fit {dest_type} — the writer "
+                        "quarantines it (never rounds/truncates on write)"
+                    )
                 if not err:
                     err = _width_overflow(
                         raw_s if out is None else out,

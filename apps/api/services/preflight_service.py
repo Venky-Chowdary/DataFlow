@@ -52,6 +52,8 @@ from services.preflight_file_plan import (
     _plan_in_file_dedupe,
 )
 from services.coercion_gate_reconcile import reconcile_coercion_report
+from services.create_ddl_gate import create_ddl_gate as build_create_ddl_gate
+from services.preflight_policy_gates import blockers_from_gates
 from services.preflight_file_phases import (
     apply_constraint_findings,
     apply_schema_drift_gate,
@@ -365,6 +367,7 @@ def run_file_preflight(
     # Operator approved the DDL DataFlow disclosed for this run (e.g. the
     # unique index an upsert needs on an existing destination table — D101).
     ddl_changes_acknowledged: bool = False,
+    schema_policy_explicit: bool = False,
     # Operator chose to empty a populated destination from a 0-row source (D56).
     empty_source_overwrite_acknowledged: bool = False,
     acknowledgment_actor: str = "",
@@ -2250,27 +2253,25 @@ def run_file_preflight(
     except Exception as exc:  # noqa: BLE001 — unmeasured, never a false pass
         logger.warning("NULL-cursor gate probe skipped: %s", exc, exc_info=exc)
 
+    # Only an operator-declared manual_review gates create-new (the default is the golden path).
+    create_ddl_gate = build_create_ddl_gate(
+        schema_policy=schema_policy if schema_policy_explicit else None,
+        table_exists=dest_table_exists,
+        can_create=dest_can_create, acknowledged=bool(ddl_changes_acknowledged),
+        destination_table=str(destination_table or ""), mappings=write_maps,
+    )
     null_cursor_blocked = bool(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )
-    upsert_ddl_blocked = bool(
-        upsert_ddl_gate and upsert_ddl_gate.get("status") == "block"
+    upsert_ddl_blocked = bool(upsert_ddl_gate and upsert_ddl_gate.get("status") == "block")
+    enriched_blockers.extend(
+        blockers_from_gates((create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"))
     )
-    if upsert_ddl_blocked:
-        enriched_blockers.append(
-            {
-                "id": "g_upsert_dest_key",
-                "message": str(upsert_ddl_gate.get("message") or ""),
-                "details": dict(upsert_ddl_gate.get("details") or {}),
-                "suggested_actions": list(
-                    upsert_ddl_gate.get("suggested_actions") or []
-                ),
-            }
-        )
     extra_gates: list[dict[str, Any]] = (
         ([fit_gate] if fit_gate else [])
         + ([null_cursor_gate] if null_cursor_gate else [])
         + ([upsert_ddl_gate] if upsert_ddl_gate else [])
+        + ([create_ddl_gate] if create_ddl_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])
     )

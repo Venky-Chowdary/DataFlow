@@ -78,6 +78,9 @@ export const ACCEPTED_UPLOAD_EXTENSIONS = new Set([
   "xlsx",
   "xls",
   "xml",
+  "db",
+  "sqlite",
+  "sqlite3",
 ]);
 
 export const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;

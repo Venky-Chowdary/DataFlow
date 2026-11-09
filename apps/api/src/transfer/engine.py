@@ -109,6 +109,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import pii_guard
 
+from services.create_ddl_gate import refuse_unapproved_create
 from services.file_export_append import land_export_bytes
 
 from .adapters import (
@@ -121,6 +122,7 @@ from .adapters import (
     write_destination_file,
 )
 from .cdc_transfer import run_cdc_database_transfer
+from .endpoint_kind import artifact_source_identity
 from .incremental_no_op import incremental_no_op_result
 from .file_stream import (
     peek_file_source,
@@ -1790,6 +1792,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
+            refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -1946,13 +1949,9 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=_preflight_sample_rows(records),
-                    # The whole batch is already in memory — decide bounded
-                    # destination carriers here instead of letting the writer
-                    # discover an unfit value mid-load. A just-approved Studio
-                    # Validate already asked that question; write-time fit
-                    # still binds every row.
-                    # An empty batch stays the population even on a reused
-                    # Validate: it is what proves a header-only file is empty.
+                    # The batch is in memory: decide bounded carriers here, not
+                    # mid-load. A reused Studio Validate skips the walk, but an
+                    # empty batch stays the population (proves a header-only file).
                     population_rows=None if reuse_fit and records else records,
                     rows_are_population=not reuse_fit or not records,
                     skip_population_fit=reuse_fit,
@@ -2085,8 +2084,8 @@ class UniversalTransferEngine:
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
                 source_column_types=schema,
-                source_kind=str(getattr(request.source, "kind", "") or ""),
-                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
+                source_kind=artifact_source_identity(request.source, src_fmt)[0],
+                source_format=artifact_source_identity(request.source, src_fmt)[1],
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
             )
             if art_err:
@@ -3301,6 +3300,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
+            refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -3531,8 +3531,8 @@ class UniversalTransferEngine:
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
                 source_column_types=schema,
-                source_kind=str(getattr(request.source, "kind", "") or ""),
-                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
+                source_kind=artifact_source_identity(request.source, src_fmt)[0],
+                source_format=artifact_source_identity(request.source, src_fmt)[1],
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
             )
             if art_err:
@@ -4479,6 +4479,7 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
+            refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
@@ -4534,13 +4535,10 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=_preflight_sample_rows(sample_rows),
-                    # Second read-only pass over the same bytes the writer is
-                    # about to stream: a narrowing destination carrier is decided
-                    # before the first batch, not at row 431 with the load
-                    # half-done. Lazy — nothing is re-read when no mapped column
-                    # can exceed its destination carrier by declaration.
-                    # A just-approved Studio Validate already walked this file;
-                    # do not spend minutes asking the same question again.
+                    # Second read-only pass over the bytes the writer will stream:
+                    # a narrowing carrier is decided before the first batch, not at
+                    # row 431. Lazy — skipped when no mapped column can exceed its
+                    # carrier, or when a just-approved Studio Validate walked it.
                     population_rows=(
                         None
                         if reuse_fit and sample_rows
@@ -4686,8 +4684,8 @@ class UniversalTransferEngine:
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
                 source_column_types=schema,
-                source_kind=str(getattr(request.source, "kind", "") or ""),
-                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
+                source_kind=artifact_source_identity(request.source, src_fmt)[0],
+                source_format=artifact_source_identity(request.source, src_fmt)[1],
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
             )
             if art_err:

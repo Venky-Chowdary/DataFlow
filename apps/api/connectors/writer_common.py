@@ -459,6 +459,23 @@ def resolve_writer_backfill(
     )
 
 
+def additive_ddl_would_write_nothing(
+    *, rejected_details: list[dict[str, Any]], policy: str, source_row_count: int
+) -> bool:
+    """Whether an ADD COLUMN would run for a write that lands no row.
+
+    Every row quarantining against the live carriers means the run writes
+    nothing, so it must not change the destination either: the DDL is
+    deferred to a run that actually lands rows. Callers only ask when no widen
+    is pending (a widen could make the rejected values fit).
+    """
+    if policy == "coerce_null" or int(source_row_count or 0) <= 0:
+        return False
+    held_out = {d.get("row") for d in rejected_details or [] if isinstance(d, dict)}
+    held_out.discard(None)
+    return len(held_out) >= int(source_row_count)
+
+
 def widen_skip_key_columns(
     conflict_columns: list[str] | None, mappings: list[dict[str, Any]] | None
 ) -> list[str]:

@@ -1061,7 +1061,12 @@ async def execute_transfer_json(
         # Public execute never honors client skip_preflight (enterprise fail-closed).
         skip_preflight=False,
         sync_mode=body.sync_mode or "full_refresh_overwrite",
-        schema_policy=body.schema_policy or "manual_review",
+        # Only a declared policy is operator intent (create-new DDL gate).
+        **(
+            {"schema_policy": body.schema_policy}
+            if "schema_policy" in body.model_fields_set and body.schema_policy
+            else {}
+        ),
         validation_mode=body.validation_mode or "strict",
         source_filter=dict(body.source_filter or {}),
         read_options=_validated_read_options(body.read_options),

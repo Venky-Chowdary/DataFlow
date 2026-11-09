@@ -189,7 +189,8 @@ def _persist_checkpoint_quarantine_delta(
     ``last_persisted`` is a single-element list holding the count already written.
     """
     details = list((checkpoint or {}).get("rejected_details") or [])
-    if not details:
+    # CDC persists its own quarantine (pipeline-tagged) before advancing.
+    if not details or (checkpoint or {}).get("quarantine_cdc_owned"):
         return
     prev = max(
         int(last_persisted[0] or 0),

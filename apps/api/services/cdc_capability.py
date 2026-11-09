@@ -93,13 +93,15 @@ class LogCaptureUnavailable(RuntimeError):
         self.dialect = dialect
 
 
-_QUOTA_MARKERS = (
+#: The server's own words when the slot / WAL-sender quota is spent. Unlike the
+#: setting names, they never appear in a "turn on wal_level" message.
+SLOT_QUOTA_SIGNALS = (
     "all replication slots are in use",
-    "max_replication_slots",
-    "max_wal_senders",
+    "max_replication_slots reached",
     "too many wal senders",
     "number of requested standby connections exceeds",
 )
+_QUOTA_MARKERS = (*SLOT_QUOTA_SIGNALS, "max_replication_slots", "max_wal_senders")
 _PRIVILEGE_MARKERS = (
     "must be superuser",
     "permission denied",

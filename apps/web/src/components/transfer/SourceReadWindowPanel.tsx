@@ -17,7 +17,7 @@ const DELIMITERS: { value: string; label: string }[] = [
   { value: "|", label: "Pipe  |" },
 ];
 
-const SHEET_WINDOW_TYPES = new Set(["excel"]);
+const SHEET_WINDOW_TYPES = new Set(["excel", "sqlite"]);
 const DELIMITED_TYPES = new Set(["csv", "tsv"]);
 
 /** True when this source has a row window at all (workbook or delimited text). */
@@ -84,6 +84,9 @@ export function SourceReadWindowPanel({
 
   const isWorkbook = SHEET_WINDOW_TYPES.has(type);
   const isDelimited = DELIMITED_TYPES.has(type);
+  /** A SQLite database: the window is only which table to read — rows are rows. */
+  const isTable = type === "sqlite";
+  const unit = isTable ? "table" : "sheet";
   const locked = Boolean(refusal);
 
   const submit = () => {
@@ -108,12 +111,18 @@ export function SourceReadWindowPanel({
           </span>
         ) : (
           <span className="df2-label-hint" style={{ marginLeft: 8 }}>
-            {isWorkbook ? "Active sheet · header on row 1" : "Sniffed codec · header on row 1"}
+            {isTable
+              ? "Only table"
+              : isWorkbook
+                ? "Active sheet · header on row 1"
+                : "Sniffed codec · header on row 1"}
           </span>
         )}
       </summary>
       <p className="df2-label-hint">
-        {isWorkbook
+        {isTable
+          ? "Pick the table to load. This is the table the run reads and reconciles — not just the preview."
+          : isWorkbook
           ? "Pick the sheet and the physical row holding the column names, and drop title or totals rows. This window is what the run reads and reconciles — not just the preview."
           : "Declare the codec, separator and the physical header row, and drop leading or trailing rows. This window is what the run reads and reconciles — not just the preview."}
       </p>
@@ -121,7 +130,7 @@ export function SourceReadWindowPanel({
       <div className="df2-form-row">
         {isWorkbook && (
           <div className="df2-field">
-            <label className="df2-label" htmlFor="read-window-sheet">Sheet</label>
+            <label className="df2-label" htmlFor="read-window-sheet">{isTable ? "Table" : "Sheet"}</label>
             <select
               id="read-window-sheet"
               className="df2-input df2-select"
@@ -129,17 +138,17 @@ export function SourceReadWindowPanel({
               disabled={locked || busy}
               onChange={(e) => setDraft({ ...draft, sheet: e.target.value })}
             >
-              <option value="">Active sheet (default)</option>
+              <option value="">{isTable ? "Only table (default)" : "Active sheet (default)"}</option>
               {sheets.map((sheet) => (
                 <option key={`${sheet.index}:${sheet.name}`} value={sheet.name}>
                   {sheet.name}
-                  {sheet.is_active ? " · active" : ""}
+                  {sheet.is_active && !isTable ? " · active" : ""}
                 </option>
               ))}
             </select>
             {sheets.length > 0 && (
               <span className="df2-label-hint">
-                {sheets.length} sheet{sheets.length === 1 ? "" : "s"} in this workbook
+                {sheets.length} {unit}{sheets.length === 1 ? "" : "s"} in this {isTable ? "database" : "workbook"}
               </span>
             )}
           </div>
@@ -181,6 +190,7 @@ export function SourceReadWindowPanel({
         )}
       </div>
 
+      {!isTable && (<>
       <div className="df2-form-row">
         <div className="df2-field">
           <label className="df2-label" htmlFor="read-window-header-row">Header row</label>
@@ -235,6 +245,7 @@ export function SourceReadWindowPanel({
           <small>Every row is data; columns are named col_0, col_1, … by position.</small>
         </span>
       </label>
+      </>)}
 
       {error && (
         <div className="df2-alert df2-alert-error" role="alert">

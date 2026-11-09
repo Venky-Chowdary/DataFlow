@@ -277,6 +277,21 @@ describe("destination DDL approval (g_upsert_dest_key)", () => {
     assert.equal(pendingDdlApproval(null), null);
   });
 
+  it("offers the approve control for a create-new CREATE TABLE gate", () => {
+    const createGate = {
+      id: "g_create_dest_ddl",
+      status: "block",
+      details: {
+        remediation_kind: "approve_ddl_or_dedupe",
+        requires_approval: true,
+        planned_ddl: "CREATE TABLE public.qa_new (sku TEXT)",
+      },
+    };
+    assert.equal(pendingDdlApproval({ gates: [createGate] })?.id, "g_create_dest_ddl");
+    assert.equal(ddlApprovalPending(createGate), true);
+    assert.equal(ddlApprovalRecorded({ gates: [{ id: "g_create_dest_ddl", details: { acknowledged: true } }] }), true);
+  });
+
   it("counts an approval only when Validate recorded it", () => {
     assert.equal(ddlApprovalRecorded(null), false);
     assert.equal(ddlApprovalRecorded({ gates: [{ id: "g_upsert_dest_key", details: { ddl_acknowledged: true } }] }), false);
