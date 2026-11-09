@@ -3170,10 +3170,15 @@ class KeyCensusAccumulator:
         self._pending_reabsent: list[tuple[Any, ...]] = []
         self._pending_reinserts: list[tuple[Any, ...]] = []
         self._tomb_unique = 0
-        self._held_out = 0
+        #: Refused images per key that has not landed since; a later batch
+        #: that writes the key supersedes its findings, so it leaves here.
+        self._held_out: dict[tuple[Any, ...], int] = {}
 
     def begin_live_batch(self) -> None:
         """Close the previous batch's reverse window without dropping its keys."""
+        if self._pending_open:
+            for key in self._pending_new:
+                self._held_out.pop(key, None)
         self._pending_open = False
         self._pending_new = []
         self._pending_added = 0
@@ -3206,6 +3211,7 @@ class KeyCensusAccumulator:
         self._inserts -= self._pending_added
         if self._inserts < 0:
             self._failed = True
+        self._pending_open = False
         self.begin_live_batch()
 
     def withdraw_rejected(
@@ -3233,9 +3239,9 @@ class KeyCensusAccumulator:
                 self._inserts -= 1
                 self._pending_added -= 1
             withdrawn += 1
+            self._held_out[key] = self._held_out.get(key, 0) + 1
         if self._inserts < 0:
             self._failed = True
-        self._held_out += withdrawn
         return withdrawn
 
     def unseen_live(self, keys: Sequence[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
@@ -3347,7 +3353,7 @@ class KeyCensusAccumulator:
             tombstones=self._tombstones,
             unique_tombstone_keys=unique_tombs,
             events_read=self._events or None,
-            held_out_keys=self._held_out,
+            held_out_keys=sum(self._held_out.values()),
         )
 
 

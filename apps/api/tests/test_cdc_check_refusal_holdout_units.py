@@ -106,3 +106,51 @@ def test_oracle_foreign_key_refusal_is_not_withdrawn_from_the_census():
     assert ct._census_without_rejected_keys(
         _Acc(), summary, key_cols=["id"], dest_type="oracle", dest_cfg={}, dest_table="t",
     ) is None
+
+
+def test_a_held_out_key_a_later_batch_writes_is_no_longer_held_out():
+    acc = KeyCensusAccumulator()
+    acc.begin_live_batch()
+    acc.add_batch([("3",), ("4",)], dest_hits=0)
+    acc.withdraw_rejected([("3",), ("4",)], stored=set())
+    acc.begin_live_batch()
+    acc.add_batch([("3",)], dest_hits=0)
+    acc.begin_live_batch()
+    census = acc.to_census()
+    assert census is not None
+    assert (census.unique_batch_keys, census.dest_preexisting, census.held_out_keys) == (1, 0, 1)
+
+
+def test_a_reversed_batch_keeps_its_key_held_out():
+    acc = KeyCensusAccumulator()
+    acc.begin_live_batch()
+    acc.add_batch([("3",), ("5",)], dest_hits=0)
+    acc.withdraw_rejected([("3",)], stored=set())
+    acc.begin_live_batch()
+    acc.add_batch([("3",)], dest_hits=0)
+    acc.reverse_last_live_batch()
+    census = acc.to_census()
+    assert census is not None
+    assert (census.unique_batch_keys, census.held_out_keys) == (1, 1)
+
+
+def test_a_key_whose_other_image_landed_is_not_withdrawn(monkeypatch):
+    import services.dest_precount as dp
+
+    monkeypatch.setattr(dp, "destination_key_hits", lambda *a, **k: 1)
+
+    class _Acc:
+        def withdraw_rejected(self, keys, stored):
+            raise AssertionError(f"withdrew {keys}")
+
+    summary = {"rejected_details": [_detail("3", PG_CHECK)]}
+    change = ChangeBatch(inserts=[{"id": "3", "n": -1}], updates=[{"id": "3", "n": 2}])
+    assert ct._census_without_rejected_keys(
+        _Acc(), summary, key_cols=["id"], dest_type="postgresql", dest_cfg={},
+        dest_table="t", change=change,
+    ) is None
+
+
+def test_value_proof_drops_held_out_rows_whatever_the_column_case():
+    rows = [{"id": 3}, {"id": 5}]
+    assert _without_held_out(rows, [("ID", "id")], {"3"}, "id") == [{"id": 5}]
