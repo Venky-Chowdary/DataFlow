@@ -5991,6 +5991,61 @@ def _held_out_keys(dest_summary: dict[str, Any], sort_key: str | None) -> set[st
     return keys
 
 
+def _census_without_held_out_keys(
+    dest_summary: dict[str, Any],
+    *,
+    db_type: str,
+    cfg: dict[str, Any],
+    schema: str,
+    table_name: str,
+    key_columns: list[str],
+) -> None:
+    """Take the keys the writer quarantined out of the pre-write key census.
+
+    The census is probed before the write over every live key, so a key held
+    out for a value it could not store was counted as an insert (new) or an
+    update (stored). Neither happened: it did not land, and a stored copy kept
+    its old value. Re-probing the held-out keys after the write says which
+    were stored; both terms drop by what the writer actually skipped.
+    """
+    from services.dest_precount import destination_key_hits
+    from services.row_conservation import KeyCensus, coerce_pk_part
+
+    census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
+    if census is None or len(key_columns) != 1 or dest_summary.get("held_out_keys_classified"):
+        return
+    held = sorted(_held_out_keys(dest_summary, key_columns[0]))
+    if not held or len(held) > census.unique_batch_keys:
+        return
+    stored = destination_key_hits(
+        db_type,
+        dict(cfg),
+        schema=schema,
+        table_name=table_name,
+        key_columns=list(key_columns),
+        keys=[(coerce_pk_part(k),) for k in held],
+    )
+    if stored is None or stored > min(len(held), census.dest_preexisting):
+        return
+    preexisting = census.dest_preexisting - int(stored)
+    payload = dict(dest_summary.get(CENSUS_KEY) or {})
+    payload.update(
+        KeyCensus(
+            unique_batch_keys=census.unique_batch_keys - len(held),
+            dest_preexisting=preexisting,
+            tombstones=census.tombstones,
+            unique_tombstone_keys=census.unique_tombstone_keys,
+            events_read=census.events_read,
+            prior_pass_inserts=census.prior_pass_inserts,
+            kept_existing=min(census.kept_existing, preexisting),
+        ).to_dict()
+    )
+    payload["held_out_keys"] = len(held)
+    payload["held_out_keys_stored"] = int(stored)
+    dest_summary[CENSUS_KEY] = payload
+    dest_summary["held_out_keys_classified"] = True
+
+
 def _without_held_out_cells(
     sample_records: list[dict[str, Any]],
     rejected: list[dict[str, Any]],
@@ -6703,6 +6758,20 @@ def _run_reconciliation_impl(
         except Exception as exc:
             logging.getLogger(__name__).debug(
                 "Gate-8 identity resolve skipped: %s", exc, exc_info=exc
+            )
+    if pk_cols and dest_summary.get(CENSUS_KEY):
+        try:
+            _census_without_held_out_keys(
+                dest_summary,
+                db_type=db_type,
+                cfg=cfg,
+                schema=str(schema or ""),
+                table_name=str(table_name or ""),
+                key_columns=[str(c) for c in pk_cols if c],
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "held-out key census skipped: %s", exc, exc_info=exc
             )
     # Complete overwrite snapshot + dest PK: split MISSING_TARGET from
     # EXTRA_TARGET. Incremental CDC must not pass a batch as S (that would
