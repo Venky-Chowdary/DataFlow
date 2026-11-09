@@ -4595,11 +4595,19 @@ def _name_gate8_culprits_pg(
 def _census_join(db: Any) -> tuple[list[Any], list[Any], list[Any]]:
     """Join a loaded (side, pk, h) census into changed/missing/extra keys."""
     lim = _CULPRIT_KEYS_LIMIT + 1
+    # Compare each key's bag of row hashes, not row pairs: an append that loads
+    # every copy of a repeated key holds the same rows on both sides, and a
+    # pairwise join cross-matched them into false "changed" keys.
+    bag = (
+        "SELECT pk, group_concat(h, ',') AS g FROM "
+        "(SELECT pk, h FROM k WHERE side = {side} ORDER BY pk, h) GROUP BY pk"
+    )
     changed = [
         r[0]
         for r in db.execute(
-            "SELECT s.pk FROM k s JOIN k d ON s.pk = d.pk AND d.side = 1 "
-            "WHERE s.side = 0 AND s.h <> d.h LIMIT ?",
+            f"SELECT s.pk FROM ({bag.format(side=0)}) s "
+            f"JOIN ({bag.format(side=1)}) d ON s.pk = d.pk "
+            "WHERE s.g <> d.g LIMIT ?",
             (lim,),
         )
     ]
