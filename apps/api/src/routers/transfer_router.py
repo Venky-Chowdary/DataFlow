@@ -1067,6 +1067,8 @@ async def execute_transfer_json(
             if "schema_policy" in body.model_fields_set and body.schema_policy
             else {}
         ),
+        schema_policy_declared="schema_policy" in body.model_fields_set
+        and bool(body.schema_policy),
         validation_mode=body.validation_mode or "strict",
         source_filter=dict(body.source_filter or {}),
         read_options=_validated_read_options(body.read_options),

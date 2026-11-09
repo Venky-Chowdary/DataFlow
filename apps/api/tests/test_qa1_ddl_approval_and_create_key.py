@@ -159,6 +159,29 @@ def test_execute_refuses_unapproved_create_new():
     refuse_unapproved_create(default, False)
 
 
+def test_execute_refuses_unapproved_create_on_engine_request():
+    from services.create_ddl_gate import refuse_unapproved_create
+    from src.transfer.models import (
+        EndpointConfig,
+        TransferRequest,
+        transfer_request_from_dict,
+        transfer_request_to_dict,
+    )
+
+    req = TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        destination=EndpointConfig(kind="database", format="postgresql", table="qa_new"),
+        schema_policy="manual_review", schema_policy_declared=True,
+    )
+    with pytest.raises(ValueError, match="CREATE TABLE was not approved"):
+        refuse_unapproved_create(req, False)
+    # A claim-queue worker rebuilds the request from its stored dict.
+    with pytest.raises(ValueError, match="CREATE TABLE was not approved"):
+        refuse_unapproved_create(transfer_request_from_dict(transfer_request_to_dict(req)), False)
+    req.schema_policy_declared = False
+    refuse_unapproved_create(req, False)
+
+
 def test_preflight_surfaces_create_new_ddl_gate():
     from services.preflight_service import run_file_preflight
 
