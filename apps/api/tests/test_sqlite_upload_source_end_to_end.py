@@ -57,14 +57,21 @@ def test_upload_profiles_sqlite_for_every_extension(tmp_path, filename):
     assert [s["name"] for s in out["sheets"]] == ["orders"]
 
 
-def test_multi_table_sqlite_lists_tables_and_requires_a_pick(tmp_path):
+def test_multi_table_sqlite_previews_first_table_and_names_it(tmp_path):
     from services.read_options import ReadOptions
     from src.routers.connectors_router import profile_file_upload
 
+    from services.file_parser import FileParser
+
     content = _sqlite_bytes(tmp_path, extra_table=True)
-    with pytest.raises(Exception) as refused:
-        profile_file_upload(content, "shop.db")
-    assert "pick the table" in str(refused.value).lower()
+    refused = FileParser.parse(content, "shop.db")
+    assert not refused.success and "pick the table" in (refused.error or "").lower()
+
+    # The Source step still gets a preview (so it can render the table picker),
+    # and the window it returns names the table that preview was built from.
+    first = profile_file_upload(content, "shop.db")
+    assert first["read_options"]["sheet"] == "audit"
+    assert sorted(s["name"] for s in first["sheets"]) == ["audit", "orders"]
 
     picked = profile_file_upload(content, "shop.db", read_options=ReadOptions(sheet="orders"))
     assert picked["row_count"] == 3 and picked["file_type"] == "sqlite"
