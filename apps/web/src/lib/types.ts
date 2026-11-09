@@ -91,6 +91,9 @@ export interface Connector {
   extra?: Record<string, unknown>;
   created_at: string;
   last_test_ok?: boolean;
+  /** Host that will actually be dialed. Loopback stays loopback. */
+  dial_host?: string;
+  dial_host_loopback?: boolean;
   last_tested_at?: string | null;
   last_used_at?: string | null;
   last_transfer_ok_at?: string | null;
@@ -196,6 +199,8 @@ export interface TransferJob {
   destination_database: string;
   destination_collection: string;
   status: JobStatus | string;
+  /** Set when the operator canceled. A late completed write must not hide it. */
+  cancel_requested?: boolean;
   records_processed: number;
   created_at: string;
   total_rows?: number;

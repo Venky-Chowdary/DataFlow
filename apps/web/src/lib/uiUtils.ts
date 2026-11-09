@@ -43,6 +43,16 @@ export function isJobParked(status: string | undefined): boolean {
   );
 }
 
+/**
+ * Status the operator should read. A cancel flag wins over a late
+ * ``completed`` write: a canceled run must not wear the green success badge.
+ */
+export function presentedJobStatus(job: { status?: string; cancel_requested?: boolean } | null | undefined): string {
+  const status = String(job?.status || "");
+  if (job?.cancel_requested || status === "cancelled" || status === "canceled") return "cancelled";
+  return status;
+}
+
 /** Human-readable label for a job status (never surface the raw enum). */
 export function jobStatusLabel(status: string): string {
   switch (status) {

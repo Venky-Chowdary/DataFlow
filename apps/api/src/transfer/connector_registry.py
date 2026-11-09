@@ -867,8 +867,12 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     import importlib
 
     from services.connector_auth import engine_login_role, resolve_api_key
+    from services.dial_target import reconcile_dial_host
     from services.egress_guard import metadata_endpoint_refusal
 
+    # A leftover localhost host must not hide an Atlas URI, and must not be
+    # invented when the URI already names the cluster.
+    reconcile_dial_host(cfg)
     refusal = metadata_endpoint_refusal(
         str(cfg.get("host") or ""),
         str(cfg.get("endpoint_url") or ""),

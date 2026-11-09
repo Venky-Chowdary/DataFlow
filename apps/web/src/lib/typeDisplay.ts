@@ -433,6 +433,49 @@ export function destTypeSelectOptions(
   return [{ value: cur, label: `${physical} — current` }, ...base];
 }
 
+/** Platform floors the mapper invents when a decimal has no (precision, scale). */
+const PLATFORM_DECIMAL_FLOORS = new Set([
+  "DECIMAL(38,15)",
+  "DECIMAL(38,10)",
+  "NUMERIC(38,10)",
+  "NUMERIC(38,15)",
+  "NUMBER(38,10)",
+  "NUMBER(38,15)",
+  "BIGNUMERIC(76,38)",
+  "DECIMAL",
+  "NUMERIC",
+  "NUMBER",
+]);
+
+function decimalPrecisionScale(raw: string | undefined): { precision: number; scale: number } | null {
+  const text = (raw || "").trim();
+  const match = text.match(/^(?:decimal|numeric|number|bignumeric)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)$/i);
+  if (!match) return null;
+  return { precision: Number(match[1]), scale: Number(match[2]) };
+}
+
+/**
+ * Keep a declared DECIMAL(p,s) when the only destination type on offer is the
+ * platform floor (MySQL DECIMAL(38,15)). An existing physical column is not
+ * rewritten — pass ``liveColumn`` true for that. An operator-chosen type that
+ * is not the floor is kept.
+ */
+export function preserveSourceDecimalPrecision(
+  sourceType: string | undefined,
+  targetType: string | undefined,
+  liveColumn = false,
+): string {
+  const target = (targetType || "").trim();
+  if (liveColumn) return target;
+  const declared = decimalPrecisionScale(sourceType);
+  if (!declared) return target;
+  const folded = target.toUpperCase().replace(/\s+/g, "");
+  if (target && !PLATFORM_DECIMAL_FLOORS.has(folded)) return target;
+  const head = (sourceType || "").trim().match(/^([A-Za-z]+)/);
+  const token = (head?.[1] || "DECIMAL").toUpperCase();
+  return `${token}(${declared.precision},${declared.scale})`;
+}
+
 /** Normalize a type string to a select option value when possible. */
 export function normalizeDestTypeValue(current?: string, destType?: string): string {
   const cur = (current || "").trim();

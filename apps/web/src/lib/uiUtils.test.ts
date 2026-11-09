@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from "./uiUtils.js";
+import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel, presentedJobStatus, uniqueListKey } from "./uiUtils.js";
 
 describe("completed with warnings status", () => {
   it("matches the server's successful terminal status contract", () => {
@@ -11,6 +11,21 @@ describe("completed with warnings status", () => {
     assert.equal(isJobTerminal("completed_with_warnings"), true);
     assert.equal(jobStatusLabel("completed_with_warnings"), "Completed with warnings");
     assert.equal(jobStatusBadgeClass("completed_with_warnings"), "df2-badge df2-badge-warn");
+  });
+});
+
+describe("canceled jobs are not completed", () => {
+  it("a cancel flag beats a late completed status", () => {
+    const job = { status: "completed", cancel_requested: true };
+    assert.equal(presentedJobStatus(job), "cancelled");
+    assert.equal(jobStatusLabel(presentedJobStatus(job)), "Cancelled");
+    assert.equal(jobStatusBadgeClass(presentedJobStatus(job)).includes("df2-badge-live"), false);
+    assert.equal(isJobSuccess(presentedJobStatus(job)), false);
+  });
+
+  it("a stored cancelled status stays cancelled", () => {
+    assert.equal(presentedJobStatus({ status: "cancelled" }), "cancelled");
+    assert.equal(presentedJobStatus({ status: "completed" }), "completed");
   });
 });
 

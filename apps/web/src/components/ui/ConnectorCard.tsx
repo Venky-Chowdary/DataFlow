@@ -13,6 +13,7 @@ import {
   resolveDisplayRole,
 } from "../../lib/topologyUtils";
 import { Button } from "./Button";
+import { connectorEndpointLabel } from "../../lib/connectorEndpoint";
 
 interface ConnectorCardProps {
   connector: Connector;
@@ -57,7 +58,7 @@ export function ConnectorCard({
   const healthy = connectorLooksHealthy(c);
   const neverTested = connectorTestHealth(c) === "never_tested";
   const testLabel = connectorTestLabel(c);
-  const endpoint = c.host ? `${c.host}${c.port ? `:${c.port}` : ""}` : "";
+  const endpoint = connectorEndpointLabel(c);
   const roleClass =
     displayRole === "destination"
       ? "df2-role-dest"

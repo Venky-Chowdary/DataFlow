@@ -2755,6 +2755,26 @@ export function TransferPage({
       const paintRecovery = (state: StudioRouteSnapshot) => {
         // Block the auto-pick effect from putting the previous source back.
         autoSelectedSourceConnector.current = true;
+        // The studio stays mounted. Drop the previous route's population,
+        // columns, and green Validate before painting this one. A shared
+        // source connector does not reset those on its own, so Open Validate
+        // on a small schedule kept a 1,000,000-row transfer on screen.
+        setAnalysis(null);
+        setParsed(null);
+        setPreflight(null);
+        setPreflightError("");
+        setValidatedContractKey(null);
+        setTransferPlan(null);
+        setConnectorSampleRows([]);
+        setSourceRowEstimate(null);
+        setDestColumns([]);
+        setDestSchemaMap({});
+        proveDestTableExists(null);
+        setStreamPreviews([]);
+        setActiveStreamTab("");
+        setSourceIntrospectError(null);
+        sourceIntrospectGateRef.current = { key: "", status: "idle" };
+        setActiveData(null);
         setFile(null);
         setParsed(null);
         setReplayJournal(null);
@@ -2958,9 +2978,14 @@ export function TransferPage({
       });
     }
     const scheduleRoute = Boolean(seedStudioIntent.sourceConnectorId && seedStudioIntent.destConnectorId);
+    const askedValidate = seedStudioIntent.step === "validate";
 
     if (seedStudioIntent.step === "map") {
       setStep(STEP_MAP);
+    } else if (askedValidate) {
+      // Open Validate names this job's route. Connector ids must not send
+      // the operator to Source, where the previous transfer was still painted.
+      setStep(STEP_VALIDATE);
     } else if (seedStudioIntent.step === "source" || scheduleRoute) {
       setStep(STEP_SOURCE);
     } else {
@@ -2972,8 +2997,14 @@ export function TransferPage({
       ? ` from job ${seedStudioIntent.jobId.slice(0, 8)}…`
       : "";
     toast({
-      title: scheduleRoute ? "Opened Transfer Studio from the schedule" : "Opened Validate in Studio",
-      message: scheduleRoute
+      title: askedValidate
+        ? "Opened Validate for this route"
+        : scheduleRoute
+          ? "Opened Transfer Studio from the schedule"
+          : "Opened Validate in Studio",
+      message: askedValidate
+        ? `Validate is this job's route${jobHint}. The previous transfer was cleared.`
+        : scheduleRoute
         ? "Source and destination are prefilled. Continue through Map and Validate, then Schedule from the footer so the beat has a mapping contract."
         : seedStudioIntent.repairProposalId
           ? `Repair proposal ready${jobHint}. Review actions, then re-run Validate.`

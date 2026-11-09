@@ -215,24 +215,36 @@ def create_new_validate_holds_after_dest_exists(
         source_dbs.append(connector_id)
     if "" not in source_dbs:
         source_dbs.append("")
+    # Validate often stamps an empty source fingerprint (file inference, or
+    # types that were not authoritative yet). Execute then hashes the live
+    # catalog. Those are the same Map. A stamp taken on a real source
+    # fingerprint still has to match that fingerprint — "" is an extra
+    # candidate, not a substitute for a drifted one.
+    source_fps: list[str] = []
+    for fp in ((source_fingerprint or "").strip(), ""):
+        if fp not in source_fps:
+            source_fps.append(fp)
     matched = False
     for rid in routes:
         for src in source_dbs:
-            create_new = build_artifact_from_mappings(
-                maps,
-                dest_db=dest_engine,
-                source_db=src,
-                tenant_id=tenant_id or "anonymous",
-                route_id=rid,
-                source_fingerprint=(source_fingerprint or "").strip(),
-                dest_fingerprint="",
-                sync_mode=sync_mode,
-                error_policy=error_policy,
-                artifact_id="da_inline",
-                created_at="1970-01-01T00:00:00+00:00",
-            )
-            if create_new.content_hash.lower() == approved:
-                matched = True
+            for sfp in source_fps:
+                create_new = build_artifact_from_mappings(
+                    maps,
+                    dest_db=dest_engine,
+                    source_db=src,
+                    tenant_id=tenant_id or "anonymous",
+                    route_id=rid,
+                    source_fingerprint=sfp,
+                    dest_fingerprint="",
+                    sync_mode=sync_mode,
+                    error_policy=error_policy,
+                    artifact_id="da_inline",
+                    created_at="1970-01-01T00:00:00+00:00",
+                )
+                if create_new.content_hash.lower() == approved:
+                    matched = True
+                    break
+            if matched:
                 break
         if matched:
             break

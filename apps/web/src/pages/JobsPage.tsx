@@ -28,7 +28,7 @@ import {
   type JobHistory,
   type JobHistoryQuery,
 } from "../lib/jobHistory";
-import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from "../lib/uiUtils";
+import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, presentedJobStatus, uniqueListKey } from "../lib/uiUtils";
 import { parseServerTimestampMs } from "../lib/jobTheaterProgress";
 import { jobDetailNeedsRefetch } from "../lib/theaterMount";
 import { JobProgress, TransferJob } from "../lib/types";
@@ -518,7 +518,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   const filtered = useMemo(() => {
     let list = jobs;
     if (filter === "running") list = jobs.filter((j) => LIVE_JOB_STATUSES.has(j.status));
-    else if (filter === "completed") list = jobs.filter((j) => isJobSuccess(j.status));
+    else if (filter === "completed") list = jobs.filter((j) => isJobSuccess(presentedJobStatus(j)));
     else if (filter !== "all") list = jobs.filter((j) => j.status === filter);
 
     const q = jobSearch.trim().toLowerCase();
@@ -1304,7 +1304,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                     const route = displayName === fullRoute
                       ? `${job.source_type || "source"} → ${job.destination_type || "destination"}`
                       : fullRoute;
-                    const isLiveRow = LIVE_JOB_STATUSES.has(job.status);
+                    const shownStatus = presentedJobStatus(job);
+                    const isLiveRow = LIVE_JOB_STATUSES.has(shownStatus);
                     return (
                       <button
                         key={uniqueListKey(job._id, index, "job")}
@@ -1314,7 +1315,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                         className={[
                           "df2-job-row",
                           selectedId === job._id ? "is-active" : "",
-                          job.status === "failed" ? "is-failed" : "",
+                          shownStatus === "failed" || shownStatus === "cancelled" ? "is-failed" : "",
                           isLiveRow ? "is-live" : "",
                         ].filter(Boolean).join(" ")}
                         aria-current={selectedId === job._id ? "true" : undefined}
@@ -1323,14 +1324,14 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                           setMobileListOpen(false);
                         }}
                       >
-                        <span className={`df2-job-row-status is-${job.status}`} aria-hidden>
-                          <DtIcon name={statusIcon(job.status)} size={14} />
+                        <span className={`df2-job-row-status is-${shownStatus}`} aria-hidden>
+                          <DtIcon name={statusIcon(shownStatus)} size={14} />
                         </span>
                         <div className="df2-job-row-main">
                           <div className="df2-job-row-title">
                             <span className="df2-job-row-name" title={displayName}>{displayName}</span>
-                            <span className={`${jobStatusBadgeClass(job.status)} df2-job-row-badge`}>
-                              {jobStatusLabel(job.status)}
+                            <span className={`${jobStatusBadgeClass(shownStatus)} df2-job-row-badge`}>
+                              {jobStatusLabel(shownStatus)}
                             </span>
                           </div>
                           <div className="df2-job-row-meta">
@@ -1478,7 +1479,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                             onCancel={cancelRename}
                           />
                           <div className="df2-jobs-v3-summary-ids">
-                            <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
+                            <span className={jobStatusBadgeClass(presentedJobStatus(liveJob))}>{jobStatusLabel(presentedJobStatus(liveJob))}</span>
                             <span
                               className={`df2-jobs-v3-summary-dest ${destMetricToneClass(destMetric)}`}
                               title={destMetric.title}
@@ -1809,7 +1810,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                               }
                               hideGap={Boolean(liveJob.cdc_cursor_gap)}
                             />
-                            {isJobSuccess(selected.status) && ((rejectedCount - coercedCount) > 0 || coercedCount > 0) && (
+                            {isJobSuccess(presentedJobStatus(selected)) && ((rejectedCount - coercedCount) > 0 || coercedCount > 0) && (
                               <div className="df2-data-integrity" role="note">
                                 <header className="df2-data-integrity-head">
                                   <DtIcon name="alert" size={16} />
@@ -1932,6 +1933,36 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                                 </article>
                               </div>
                             </section>
+                            <QuarantinePanel
+                              jobId={selectedId || liveJob._id}
+                              rejectedRows={rejectedCount}
+                              coercedNullRows={coercedCount}
+                              initialDetails={rejectedDetails}
+                              truncatedDetails={Math.max(0, readRejectedDetailsTotal(liveJob) - (rejectedDetails?.length ?? 0))}
+                              autoLoad
+                              initiallyOpen
+                              repairMappings={jobRepairMappings}
+                              onOpenValidate={() => openValidateInStudio()}
+                              onRepairDecided={(proposal) => {
+                                if (proposal.status === "rejected") return;
+                                const applied = proposal.apply_result?.mappings;
+                                const maps = Array.isArray(applied) && applied.length
+                                  ? (applied as RepairMapping[])
+                                  : jobRepairMappings;
+                                const reopen =
+                                  proposal.status === "proposed"
+                                  || (proposal.status === "approved" && maps.length > 0);
+                                openValidateInStudio({
+                                  repairProposalId: reopen ? proposal.id : undefined,
+                                  mappings: maps,
+                                  step: "validate",
+                                });
+                              }}
+                              onReplayComplete={(childJobId) => {
+                                void onRefresh?.();
+                                if (childJobId) setSelectedId(childJobId);
+                              }}
+                            />
                           </div>
                         )}
 
@@ -1992,7 +2023,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                       </div>
 
                       <div className="df2-jobs-detail-footer" role="navigation" aria-label="Job actions">
-                        {detailTab === "detail" && isJobSuccess(selected.status) && (
+                        {detailTab === "detail" && isJobSuccess(presentedJobStatus(selected)) && (
                           <div className="df2-jobs-v3-actions">
                             <button
                               type="button"

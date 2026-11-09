@@ -1614,7 +1614,7 @@ def create_schedule(
     with _NAME_LOCK:
         _assert_unique_schedule_name_locked(str(payload.get("name") or ""))
         schedules = _load_all()
-        sched = PipelineSchedule.from_dict({
+        created_payload = {
             **payload,
             "id": str(uuid.uuid4()),
             "interval": interval,
@@ -1625,7 +1625,11 @@ def create_schedule(
             "require_signed_contract": require_signed,
             "enabled": enabled,
             "enabled_note": enabled_note,
-        })
+        }
+        from services.schedule_decision_stamp import align_schedule_decision_hash
+
+        align_schedule_decision_hash(created_payload)
+        sched = PipelineSchedule.from_dict(created_payload)
         _guard_schedule_destination(sched.dest_connector_id, sched.dest_table)
         _assert_dest_pipeline_ownership(payload)
         sched.next_run_at = next_run_for(sched) if sched.enabled else None
@@ -2096,6 +2100,9 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         ) and _route_stamp_is_stale(s, merged):
             merged["approved_decision_artifact_hash"] = ""
             merged["approved_ddl_identity_hash"] = ""
+        from services.schedule_decision_stamp import align_schedule_decision_hash
+
+        align_schedule_decision_hash(merged)
         updated = PipelineSchedule.from_dict(merged)
         # Recompute the next due time when the cadence changed.
         if (interval, cron, tz) != (s.interval, s.cron, s.timezone):

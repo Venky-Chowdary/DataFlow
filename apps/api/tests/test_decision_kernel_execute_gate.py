@@ -329,6 +329,54 @@ def test_create_new_validate_stamp_holds_after_dest_exists_append():
     assert art is not None
 
 
+def test_create_new_stamp_holds_when_execute_source_fingerprint_is_live():
+    """Validate stamped an empty source fingerprint. Execute now has a catalog fingerprint.
+
+    That is not a Map edit. Sync Now on the saved rows must run. A real type
+    edit still refuses.
+    """
+    from services.schema_fingerprint import fingerprint_schema
+
+    maps = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+            "confidence": 0.93,
+            "create_new": True,
+        }
+    ]
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="mysql",
+        source_db="mysql",
+        source_fingerprint="",
+        dest_fingerprint="",
+        sync_mode="full_refresh_append",
+        route_id="validate:mysql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    live_src = fingerprint_schema(["id"], {"id": "BIGINT"})
+    dest_types = {"id": "BIGINT"}
+    live_dest = fingerprint_schema(["id"], dest_types)
+    err, art = enforce_decision_artifact(
+        mappings=maps,
+        dest_db="mysql",
+        source_db="mysql",
+        approved_content_hash=stamped.content_hash,
+        source_fingerprint=live_src,
+        dest_fingerprint=live_dest,
+        destination_table_exists=True,
+        dest_column_names=["id"],
+        sync_mode="full_refresh_append",
+        skip_preflight=False,
+    )
+    assert err is None, err
+    assert art is not None
+
+
 def test_create_new_stamp_still_refuses_real_map_edit():
     maps = [
         {

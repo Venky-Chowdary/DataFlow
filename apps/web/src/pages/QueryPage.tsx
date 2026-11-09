@@ -390,6 +390,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
           limit: active.limit,
           params: paramsForRequest,
         }),
+        // File export streams every row. The grid limit stays on Run.
+        // A connector write still uses that limit and the API says so.
+        full_population: !destConnectorId,
         format: exportFormat,
         output_path: outputPath,
         destination_connector_id: destConnectorId || undefined,
@@ -400,8 +403,10 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
       if (data.success) {
         toast({
           title: "Export ready",
-          message: `${data.row_count?.toLocaleString() ?? 0} rows exported`,
-          tone: "success",
+          message: data.population_note
+            ? `${data.row_count?.toLocaleString() ?? 0} rows. ${data.population_note}`
+            : `${data.row_count?.toLocaleString() ?? 0} rows exported`,
+          tone: data.truncated ? "warning" : "success",
         });
       } else {
         toast({ title: "Export failed", message: data.error || "Unknown error", tone: "error" });
@@ -729,7 +734,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                 <div className="df2-qw-export-note">
                   <DtIcon name="info" size={14} />
                   <span>
-                    Export re-runs this query server-side and writes the result. For production
+                    File export re-runs this query on the server and writes every row. The
+                    grid limit does not apply. A LIMIT already in the SQL is kept. Writing
+                    to a connector uses the preview limit and says so. For production
                     movement use Transfer Studio — Map → Validate → Execute is what produces
                     reconciliation proof.
                   </span>

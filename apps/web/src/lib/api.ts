@@ -4526,6 +4526,8 @@ export interface QueryExportResult {
   row_count?: number;
   format?: string;
   error?: string;
+  truncated?: boolean;
+  population_note?: string;
 }
 
 /** Shared Run + Export fields. Bind params must travel on both. */
@@ -4567,6 +4569,8 @@ export async function exportQuery(
     destination?: string;
     sync_mode?: string;
     conflict_columns?: string[];
+    /** File export streams every row. The preview ``limit`` is not applied. */
+    full_population?: boolean;
   },
 ): Promise<QueryExportResult> {
   const res = await apiFetch(`${API_BASE}/query/export`, {

@@ -1870,6 +1870,29 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
             return True
         if bare_typmod == "STRING" and not _dest_spells_string_as_string(db):
             return False
+        if bare_typmod in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"} and "(" in upper:
+            # The reject set is the bare token (MySQL DECIMAL → DECIMAL(38,15)).
+            # A (p,s) in the destination's own spelling is the requested
+            # precision — DECIMAL(18,6) on MySQL stays DECIMAL(18,6). A foreign
+            # spelling (DECIMAL on BigQuery) still rematerializes. A typmod
+            # past the destination cap still rematerializes.
+            from services.type_system import _DECIMAL_CAPS, _DECIMAL_PARAM_TEMPLATES
+
+            template = _DECIMAL_PARAM_TEMPLATES.get(db, "")
+            native = template.split("{", 1)[0].split("(", 1)[0].strip().upper()
+            precision, scale = parse_numeric_precision_scale(raw)
+            cap = _DECIMAL_CAPS.get(db)
+            if (
+                native
+                and bare_typmod == native
+                and precision is not None
+                and scale is not None
+                and cap is not None
+                and precision <= cap[0]
+                and scale <= cap[1]
+                and precision >= scale
+            ):
+                return True
         if bare_typmod in reject:
             return False
         return True

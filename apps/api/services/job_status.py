@@ -65,6 +65,32 @@ def refuse_job_status_write(
     return None
 
 
+def cancel_blocks_status_write(next_status: str) -> bool:
+    """True when this status must not land on a job the operator cancelled.
+
+    The in-process check races a cancel that arrives after the snapshot and
+    before the write. Callers also put :func:`cancel_status_write_filter` on
+    the update so the database rejects the race.
+    """
+    return (next_status or "").strip() in CANCEL_BLOCKS_STATUSES
+
+
+def cancel_status_write_filter(next_status: str) -> dict[str, Any] | None:
+    """Mongo filter fragment. ``None`` when this status may follow a cancel.
+
+    A success or progress write matches only a document that is not already
+    cancelled and has no ``cancel_requested`` flag. ``failed`` and
+    ``cancelled`` themselves are not filtered — the worker still records
+    the terminal cancel.
+    """
+    if not cancel_blocks_status_write(next_status):
+        return None
+    return {
+        "cancel_requested": {"$ne": True},
+        "status": {"$ne": "cancelled"},
+    }
+
+
 def job_timestamp_iso(value: object) -> str:
     """ISO-8601 UTC with ``Z`` for a job timestamp; ``""`` when unset.
 

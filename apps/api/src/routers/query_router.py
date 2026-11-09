@@ -560,6 +560,9 @@ class QueryExecuteRequest(BaseModel):
 
 class QueryExportRequest(QueryExecuteRequest):
     format: str = Field("csv", description="csv, json, jsonl, tsv, excel, parquet")
+    # File export of a completed transfer must not inherit the 1000-row preview.
+    # Connector writes stay on the preview limit and say so.
+    full_population: bool = False
     output_path: str = Field(
         "",
         description="Optional file name inside the server exports folder; empty generates one",
@@ -650,6 +653,10 @@ class QueryExportResult(BaseModel):
     row_count: int = 0
     format: str = ""
     error: str = ""
+    # True when a cap withheld rows. A full-population file export is false
+    # unless the statement itself named a window.
+    truncated: bool = False
+    population_note: str = ""
 
 
 def _actor(request: Request) -> str:
@@ -730,6 +737,129 @@ async def query_execute(
         )
 
 
+# A full-population file can outlive the interactive 120s preview. 15 minutes
+# covers a million-row CSV without holding the rows in the API process.
+_FULL_EXPORT_STATEMENT_TIMEOUT_SECONDS = 900.0
+_FULL_EXPORT_STREAM_FORMATS = frozenset({"csv", "tsv", "jsonl"})
+
+
+def _export_full_population_file(connector, body: QueryExportRequest, *, workspace_id: str = ""):  # noqa: ARG001
+    """Write every row of a read-only query to a file. The preview limit is not applied.
+
+    Rows are written as they arrive. The response carries the count and a
+    download URL, not the rows. Excel and Parquet stay on the preview path
+    and say so — they would buffer the population.
+    """
+    import csv
+    import json
+    import uuid
+
+    fmt = (body.format or "csv").strip().lower()
+    if fmt not in _FULL_EXPORT_STREAM_FORMATS:
+        return QueryExportResult(
+            success=False,
+            format=fmt,
+            truncated=True,
+            population_note=(
+                f"{fmt.upper()} export buffers rows and stays on the preview limit. "
+                "Choose CSV to export every row of this query."
+            ),
+            error=(
+                f"{fmt.upper()} cannot stream the full population. "
+                "Choose CSV, TSV, or JSONL."
+            ),
+        )
+    ctype = (connector.type or "").lower().strip()
+    if ctype in {"mongodb", "snowflake"} or services_query_extract.connector_queryable_via_extract(ctype):
+        return QueryExportResult(
+            success=False,
+            format=fmt,
+            truncated=True,
+            population_note=(
+                "Full-population file export streams a SQL result. "
+                "This connector was not silently capped at 1000 rows — the export was refused."
+            ),
+            error=(
+                "Full-population export is a streaming SQL file. "
+                "Run the query against the SQL destination, or export CSV from a SQL connector."
+            ),
+        )
+
+    from services.export_paths import ExportPathError, generated_export_path, resolve_export_path
+
+    ext = "jsonl" if fmt == "jsonl" else fmt
+    try:
+        if body.output_path.strip():
+            final_path = resolve_export_path(body.output_path, default_ext=ext)
+        else:
+            final_path = generated_export_path(f"query_{uuid.uuid4().hex[:16]}.{ext}")
+    except ExportPathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+
+    written = {"n": 0}
+    handle = final_path.open("w", encoding="utf-8", newline="")
+    writer_box: dict[str, Any] = {}
+
+    def _on_row(columns: list[str], record: dict[str, Any]) -> None:
+        if fmt == "jsonl":
+            handle.write(json.dumps(record, default=str) + "\n")
+        else:
+            writer = writer_box.get("w")
+            if writer is None:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=columns,
+                    extrasaction="ignore",
+                    delimiter="\t" if fmt == "tsv" else ",",
+                )
+                writer.writeheader()
+                writer_box["w"] = writer
+            writer.writerow({k: "" if record.get(k) is None else record.get(k) for k in columns})
+        written["n"] += 1
+
+    try:
+        _run_sql_query(
+            connector,
+            body,
+            json_engine_text=True,
+            apply_limit=False,
+            on_row=_on_row,
+            statement_timeout_seconds=_FULL_EXPORT_STATEMENT_TIMEOUT_SECONDS,
+        )
+    except HTTPException:
+        handle.close()
+        final_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        handle.close()
+        final_path.unlink(missing_ok=True)
+        detail, _cid = public_error(
+            exc,
+            event="query.export.errored",
+            public_message="Query execution failed.",
+        )
+        return QueryExportResult(success=False, error=detail, format=fmt)
+    finally:
+        if not handle.closed:
+            handle.close()
+
+    filename = final_path.name
+    return QueryExportResult(
+        success=True,
+        filename=filename,
+        path=str(final_path),
+        download_url=f"/api/v1/transfer/download/{filename}",
+        row_count=written["n"],
+        format=fmt,
+        truncated=False,
+        population_note=(
+            "Full population. The preview row limit was not applied. "
+            "A LIMIT, TOP, or FETCH already in the query is still honored."
+        ),
+    )
+
+
 @router.post("/export", response_model=QueryExportResult)
 async def query_export(
     body: QueryExportRequest,
@@ -744,8 +874,11 @@ async def query_export(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
 
+    if body.full_population and not (body.destination_connector_id or "").strip():
+        return _export_full_population_file(connector, body, workspace_id=workspace_id)
+
     try:
-        rows, columns, schema, _ = _run_query(
+        rows, columns, schema, truncated = _run_query(
             connector,
             body,
             surface="query_export",
@@ -769,7 +902,14 @@ async def query_export(
         return QueryExportResult(success=True, row_count=0, format=body.format)
 
     if body.destination_connector_id:
-        return _export_to_connector(body, rows, columns, schema, workspace_id, request)
+        exported = _export_to_connector(body, rows, columns, schema, workspace_id, request)
+        if body.full_population and exported.success:
+            exported.truncated = True
+            exported.population_note = (
+                f"Writing to a connector uses the preview limit of {body.limit} rows. "
+                "File export writes every row of this query."
+            )
+        return exported
 
     try:
         from src.transfer.adapters import write_destination_file
@@ -804,6 +944,12 @@ async def query_export(
         filename = final_path.name
 
         final_path.write_bytes(export_bytes)
+        note = ""
+        if truncated:
+            note = (
+                f"Export stopped at the preview limit of {body.limit} rows. "
+                "File export with the full population writes every row."
+            )
         return QueryExportResult(
             success=True,
             filename=filename,
@@ -811,6 +957,8 @@ async def query_export(
             download_url=f"/api/v1/transfer/download/{filename}",
             row_count=len(rows),
             format=body.format,
+            truncated=bool(truncated),
+            population_note=note,
         )
     except HTTPException:
         raise
@@ -1288,7 +1436,7 @@ def _apply_read_only_session(conn: Any, db_type: str) -> None:
 DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS = 120.0
 
 
-def _apply_statement_timeout(conn: Any, db_type: str) -> None:
+def _apply_statement_timeout(conn: Any, db_type: str, *, seconds_override: float | None = None) -> None:
     """Have the server cancel an interactive query that outlives the tool deadline.
 
     The deadline frees the caller; this frees the database and the worker, which
@@ -1301,6 +1449,8 @@ def _apply_statement_timeout(conn: Any, db_type: str) -> None:
         seconds = float(raw) if raw else DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS
     except ValueError:
         seconds = DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS
+    if seconds_override is not None and seconds_override > 0:
+        seconds = seconds_override
     if seconds <= 0:
         return
     from src.ai.copilot.tool_deadline import statement_timeout_seconds
@@ -1469,7 +1619,15 @@ def _is_oracle_connector(connector_type: object) -> bool:
     return _is_oracle_wire("", str(connector_type or ""))
 
 
-def _run_sql_query(connector, body, *, json_engine_text: bool = False):
+def _run_sql_query(
+    connector,
+    body,
+    *,
+    json_engine_text: bool = False,
+    apply_limit: bool = True,
+    on_row=None,
+    statement_timeout_seconds: float | None = None,
+):
     raw_query = body.query.strip()
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
@@ -1522,7 +1680,13 @@ def _run_sql_query(connector, body, *, json_engine_text: bool = False):
     # a table sample did not.
     # Fetch limit+1: one row past the cap is how we know rows were withheld —
     # a LIMIT at exactly `limit` can never distinguish "capped" from "short".
-    clean_query = append_result_limit(connector.type, raw_query, body.limit + 1)
+    # Preview adds LIMIT so the grid cannot pull a million rows into the
+    # browser. A full-population file export does not. A window the operator
+    # already wrote (LIMIT / TOP / FETCH) is still honored.
+    if apply_limit:
+        clean_query = append_result_limit(connector.type, raw_query, body.limit + 1)
+    else:
+        clean_query = raw_query.strip().rstrip(";")
 
     restore_json = lambda: None  # noqa: E731
     try:
@@ -1530,7 +1694,9 @@ def _run_sql_query(connector, body, *, json_engine_text: bool = False):
 
         with engine.connect() as conn:
             _apply_read_only_session(conn, connector.type)
-            _apply_statement_timeout(conn, connector.type)
+            _apply_statement_timeout(
+                conn, connector.type, seconds_override=statement_timeout_seconds
+            )
             from services.sql_literals import escape_sqlalchemy_literal_colons
 
             if json_engine_text:
@@ -1573,14 +1739,18 @@ def _run_sql_query(connector, body, *, json_engine_text: bool = False):
             withheld = 0
             rows = []
             for i, row in enumerate(result):
-                if i >= body.limit:
+                if apply_limit and i >= body.limit:
                     withheld += 1
                     break
                 if tz_positions:
                     from connectors.oracle_tstz import parse_oracle_tz_row
 
                     row = parse_oracle_tz_row(row, tz_positions)
-                rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
+                record = {columns[j]: _jsonify_value(v) for j, v in enumerate(row)}
+                if on_row is not None:
+                    on_row(columns, record)
+                else:
+                    rows.append(record)
             try:
                 result.close()
             except Exception:

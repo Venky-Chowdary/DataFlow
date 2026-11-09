@@ -110,6 +110,51 @@ def test_query_export_csv(test_client, tmp_path, monkeypatch):
     assert data["download_url"].startswith("/api/v1/transfer/download/")
 
 
+def test_query_export_full_population_is_not_capped_at_preview_limit(test_client, tmp_path, monkeypatch):
+    """A silent 1000-row export hid a million-row transfer. File export streams all rows."""
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = tmp_path / "population.db"
+    conn_sql = sqlite3.connect(db_path)
+    conn_sql.execute("CREATE TABLE rows (id INTEGER PRIMARY KEY, name TEXT)")
+    conn_sql.executemany(
+        "INSERT INTO rows (id, name) VALUES (?, ?)",
+        [(i, f"n{i}") for i in range(1, 1006)],
+    )
+    conn_sql.commit()
+    conn_sql.close()
+    saved = connector_store.create_connector({
+        "name": "Population SQLite",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+    capped = test_client.post("/api/v1/query/export", json={
+        "connector_id": saved.id,
+        "query": "SELECT * FROM rows ORDER BY id",
+        "format": "csv",
+        "limit": 1000,
+    })
+    assert capped.status_code == 200, capped.text
+    capped_body = capped.json()
+    assert capped_body["row_count"] == 1000
+    assert capped_body["truncated"] is True
+
+    full = test_client.post("/api/v1/query/export", json={
+        "connector_id": saved.id,
+        "query": "SELECT * FROM rows ORDER BY id",
+        "format": "csv",
+        "limit": 1000,
+        "full_population": True,
+    })
+    assert full.status_code == 200, full.text
+    body = full.json()
+    assert body["success"] is True
+    assert body["row_count"] == 1005
+    assert body["truncated"] is False
+    assert "preview" in body["population_note"].lower() or "full population" in body["population_note"].lower()
+
+
 def test_query_export_refuses_overwrite_to_connector(test_client, tmp_path, monkeypatch):
     """Playground export must not replace a table without Transfer Studio gates."""
     _isolated_store(monkeypatch, tmp_path)
