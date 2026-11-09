@@ -121,7 +121,6 @@ from .adapters import (
     write_destination_file,
 )
 from .cdc_transfer import run_cdc_database_transfer
-from .endpoint_kind import artifact_source_identity
 from .incremental_no_op import incremental_no_op_result
 from .file_stream import (
     peek_file_source,
@@ -556,6 +555,7 @@ from .engine_identity import (  # noqa: E402,F401 — re-export
     _enforce_ddl_identity,
     _enforce_decision_artifact,
     _inline_stamp_ddl_identity,
+    decision_artifact_source,
     _operator_contract_maps,
     _request_decision_artifact_payload,
     execute_preflight_progress_message,
@@ -2086,8 +2086,7 @@ class UniversalTransferEngine:
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
                 source_column_types=schema,
-                source_kind=artifact_source_identity(request.source, src_fmt)[0],
-                source_format=artifact_source_identity(request.source, src_fmt)[1],
+                **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
             )
             if art_err:
@@ -3532,8 +3531,7 @@ class UniversalTransferEngine:
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
                 source_column_types=schema,
-                source_kind=artifact_source_identity(request.source, src_fmt)[0],
-                source_format=artifact_source_identity(request.source, src_fmt)[1],
+                **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
             )
             if art_err:
@@ -4687,8 +4685,7 @@ class UniversalTransferEngine:
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
                 source_column_types=schema,
-                source_kind=artifact_source_identity(request.source, src_fmt)[0],
-                source_format=artifact_source_identity(request.source, src_fmt)[1],
+                **decision_artifact_source(request.source, src_fmt),
                 source_connector_id=str(getattr(request.source, "connector_id", "") or ""),
             )
             if art_err:

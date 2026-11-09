@@ -5,7 +5,9 @@
  */
 
 export type QuarantineRow = {
-  row?: number;
+  /** Source row number — or, on a transform divert, the record as it reached the step. */
+  row?: number | Record<string, unknown>;
+  source_row_index?: number;
   column?: string;
   target?: string;
   value?: string | null;
@@ -55,4 +57,15 @@ export function isReplayable(row: QuarantineRow): boolean {
     Object.keys(row.values ?? {}).length > 0
     || Object.keys(row.source_values ?? {}).length > 0
   );
+}
+
+/**
+ * 1-based source row of a finding. A transform divert stores the diverted
+ * record under ``row`` and the row number under ``source_row_index``; rendering
+ * that record as a table cell crashed Job Theater and Transfer Studio.
+ */
+export function quarantineSourceRow(finding: Pick<QuarantineRow, "row" | "source_row_index">): number | null {
+  if (typeof finding.row === "number" && Number.isFinite(finding.row)) return finding.row;
+  const idx = finding.source_row_index;
+  return typeof idx === "number" && Number.isFinite(idx) ? idx : null;
 }

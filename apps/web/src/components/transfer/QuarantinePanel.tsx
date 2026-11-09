@@ -5,7 +5,7 @@ import { Dialog } from "../ui/Dialog";
 import { useToast } from "../Toast";
 import { downloadJobQuarantineCsv, fetchJobQuarantine, proposeRepairFromQuarantine, replayJobQuarantine, type RepairMapping, type RepairProposal } from "../../lib/api";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
-import { isReplayable, quarantineEvidenceSource, type QuarantineRow } from "./quarantineReplay";
+import { isReplayable, quarantineEvidenceSource, quarantineSourceRow, type QuarantineRow } from "./quarantineReplay";
 
 export { isReplayable };
 export type { QuarantineRow };
@@ -764,8 +764,8 @@ function QuarantinePanelJob({
                 </thead>
                 <tbody>
                   {rows.map((r, i) => (
-                    <tr key={`${r.row}-${r.column}-${i}`}>
-                      <td>{r.row ?? "—"}</td>
+                    <tr key={`${quarantineSourceRow(r)}-${r.column}-${i}`}>
+                      <td>{quarantineSourceRow(r) ?? "—"}</td>
                       <td>{r.column || "—"}</td>
                       <td>{r.target || "—"}</td>
                       <td
@@ -818,7 +818,9 @@ function QuarantinePanelJob({
             <p>
               Fix the value for{" "}
               <strong>{rows[editIndex]?.column || "column"}</strong>
-              {rows[editIndex]?.row != null ? ` (source row ${rows[editIndex].row})` : ""} before replaying.
+              {editIndex !== null && rows[editIndex] && quarantineSourceRow(rows[editIndex]) != null
+                ? ` (source row ${quarantineSourceRow(rows[editIndex])})`
+                : ""} before replaying.
             </p>
             <label className="df2-label" htmlFor="df2-quarantine-edit-input">Value</label>
             <input

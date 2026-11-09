@@ -149,6 +149,14 @@ def _operator_contract_maps(request, mappings: list) -> list:
     return list(getattr(request, "mappings", None) or []) or mappings
 
 
+def decision_artifact_source(src, fallback_format: str = "") -> dict[str, str]:
+    """``source_kind`` / ``source_format`` kwargs the Decision Artifact was bound to."""
+    from .endpoint_kind import artifact_source_identity
+
+    kind, fmt = artifact_source_identity(src, fallback_format)
+    return {"source_kind": kind, "source_format": fmt}
+
+
 def _enforce_decision_artifact(
     pf: dict | None,
     mappings: list,
