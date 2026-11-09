@@ -71,6 +71,54 @@ def test_failed_probe_leaves_the_census_alone(monkeypatch):
     assert summary[CENSUS_KEY] == before
 
 
+def test_text_key_is_probed_as_text_and_a_later_landed_key_stays(monkeypatch):
+    from services import dest_precount
+    from src.transfer.reconcile_step import _census_without_held_out_keys
+
+    probed: list = []
+
+    def hits(db_type, cfg, *, schema, table_name, key_columns, keys):
+        probed.extend(keys)
+        return 0
+
+    monkeypatch.setattr(dest_precount, "destination_key_hits", hits)
+    summary = {
+        CENSUS_KEY: {"unique_batch_keys": 4, "dest_preexisting": 0},
+        "written_ids": ["7"],  # held out by batch 1, written by batch 2
+        "rejected_details": [
+            {"column": "name", "source_pk": k, "reason": WIDTH} for k in ("001", "42", "7")
+        ],
+    }
+    _census_without_held_out_keys(
+        summary, db_type="postgresql", cfg={}, schema="public", table_name="t", key_columns=["id"]
+    )
+    assert sorted(probed, key=str) == [("001",), (42,)]
+    assert summary[CENSUS_KEY]["unique_batch_keys"] == 2
+
+
+def _ledger(quarantined: int, held: int, dest_count: int | None = 6):
+    from services.row_conservation import DEST_READBACK, KeyCensus, _account_keyed
+
+    census = KeyCensus(unique_batch_keys=3, dest_preexisting=0, events_read=10, held_out_keys=held)
+    return _account_keyed(
+        read=10, dest_count=dest_count, dest_count_source=DEST_READBACK, dest_count_before=3,
+        quarantined=quarantined, skipped=0, coerced=0, ack=3, census=census,
+    )
+
+
+def test_ledger_balances_when_every_quarantined_row_is_a_held_out_key():
+    ledger = _ledger(7, 7)
+    assert ledger.balanced is True and ledger.unaccounted == 0, ledger.note
+    assert (ledger.inserts, ledger.updates, ledger.dest_delta, ledger.rows_written) == (3, 0, 3, 3)
+    assert "7 quarantined key(s) did not land" in ledger.note
+
+
+def test_ledger_stays_unproven_when_hold_outs_are_unmatched_or_dest_unread():
+    for ledger in (_ledger(7, 0), _ledger(7, 6), _ledger(7, 7, dest_count=None)):
+        assert ledger.balanced is False and ledger.unaccounted is None
+        assert ledger.rows_written_source == "unmeasured"
+
+
 def _up() -> bool:
     import socket
 
@@ -122,6 +170,8 @@ def test_live_upsert_census_counts_only_landed_keys(mode):
         assert (census.get("inserts"), census.get("updates")) == (3, 0), census
         ledger = r.row_accounting or {}
         assert (ledger.get("inserts"), ledger.get("updates"), ledger.get("dest_delta")) == (3, 0, 3)
+        assert ledger.get("balanced") is True, ledger.get("note")
+        assert ledger.get("rows_written_source") == "gate8_dest_readback" and ledger.get("unaccounted") == 0
     finally:
         with my.cursor() as c:
             c.execute(f"DROP TABLE IF EXISTS {t}")
