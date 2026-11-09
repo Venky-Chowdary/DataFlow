@@ -109,6 +109,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import pii_guard
 
+from services.create_ddl_gate import refuse_unapproved_create
 from services.file_export_append import land_export_bytes
 
 from .adapters import (
@@ -1791,8 +1792,6 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
-            from services.create_ddl_gate import refuse_unapproved_create
-
             refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
@@ -1950,13 +1949,9 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=_preflight_sample_rows(records),
-                    # The whole batch is already in memory — decide bounded
-                    # destination carriers here instead of letting the writer
-                    # discover an unfit value mid-load. A just-approved Studio
-                    # Validate already asked that question; write-time fit
-                    # still binds every row.
-                    # An empty batch stays the population even on a reused
-                    # Validate: it is what proves a header-only file is empty.
+                    # The batch is in memory: decide bounded carriers here, not
+                    # mid-load. A reused Studio Validate skips the walk, but an
+                    # empty batch stays the population (proves a header-only file).
                     population_rows=None if reuse_fit and records else records,
                     rows_are_population=not reuse_fit or not records,
                     skip_population_fit=reuse_fit,
@@ -3305,8 +3300,6 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
-            from services.create_ddl_gate import refuse_unapproved_create
-
             refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
@@ -4486,8 +4479,6 @@ class UniversalTransferEngine:
                 mongo=mongo,
                 job_id=job_id,
             )
-            from services.create_ddl_gate import refuse_unapproved_create
-
             refuse_unapproved_create(request, dest_table_exists_flag)
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
@@ -4544,13 +4535,10 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=_preflight_sample_rows(sample_rows),
-                    # Second read-only pass over the same bytes the writer is
-                    # about to stream: a narrowing destination carrier is decided
-                    # before the first batch, not at row 431 with the load
-                    # half-done. Lazy — nothing is re-read when no mapped column
-                    # can exceed its destination carrier by declaration.
-                    # A just-approved Studio Validate already walked this file;
-                    # do not spend minutes asking the same question again.
+                    # Second read-only pass over the bytes the writer will stream:
+                    # a narrowing carrier is decided before the first batch, not at
+                    # row 431. Lazy — skipped when no mapped column can exceed its
+                    # carrier, or when a just-approved Studio Validate walked it.
                     population_rows=(
                         None
                         if reuse_fit and sample_rows
