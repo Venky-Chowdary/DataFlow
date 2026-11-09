@@ -1977,8 +1977,13 @@ def _quarantine_details_to_records(details: list[dict], transform_overrides: Opt
                 order.append(row_num)
         # Prefer explicit source_values when dual-stamped (Wave 32).
         base = detail.get("source_values") if isinstance(detail.get("source_values"), dict) else None
+        values = detail.get("values") if isinstance(detail.get("values"), dict) else {}
         if not base:
-            base = detail.get("values") if isinstance(detail.get("values"), dict) else {}
+            base = values
+        elif "_df_lsn" in values and "_df_lsn" not in base:
+            # The stale-CDC guard matches replay rows by key + _df_lsn; source
+            # values never carry the LSN the writer stamped.
+            base = {**base, "_df_lsn": values["_df_lsn"]}
         if base:
             from connectors.writer_common import quarantine_cell_wire
 
@@ -2096,6 +2101,24 @@ def _refuse_incomplete_quarantine_replay(
             )
 
 
+def _pipeline_job_history(pipeline_key: str) -> list[dict]:
+    """Jobs of one CDC pipeline (cursor key) with their CDC summary. Raises when unreadable."""
+    mongo = get_mongodb_service()
+    store = getattr(mongo, "_jobs", None)
+    if not isinstance(store, dict):
+        store = getattr(mongo, "jobs", None)
+    if isinstance(store, dict):
+        return [{"id": jid, **(doc or {})} for jid, doc in store.items()]
+    coll = mongo.get_database()["transfer_jobs"]
+    return list(coll.find(
+        {"$or": [
+            {"destination_summary.cursor_key": pipeline_key},
+            {"destination_summary.cdc.cursor_key": pipeline_key},
+        ]},
+        {"destination_summary.cursor_key": 1, "destination_summary.cdc": 1},
+    ))
+
+
 async def _drop_stale_cdc_replay_images(
     job_id: str,
     job: dict,
@@ -2118,7 +2141,11 @@ async def _drop_stale_cdc_replay_images(
     from starlette.concurrency import run_in_threadpool
 
     from services.quarantine_dlq import (
+        CLOSING_STALE_REASONS,
         append_dlq_event,
+        cdc_key_tombstones,
+        job_quarantine_pipeline_tagged,
+        later_untracked_deletes,
         partition_stale_cdc_replay,
         read_destination_cdc_lsns,
         replay_row_identity,
@@ -2131,23 +2158,44 @@ async def _drop_stale_cdc_replay_images(
             key_columns=key_columns, keys=keys,
         )
 
-    try:
-        keep, stale = await run_in_threadpool(
-            partition_stale_cdc_replay, details, key_columns=key_columns, destination_lsns=_lookup
+    summary = job.get("destination_summary") or {}
+    pipeline_key = str(summary.get("cursor_key") or (summary.get("cdc") or {}).get("cursor_key") or "")
+
+    def _partition():
+        tombstones: dict[str, str] = {}
+        unproven = None
+        if pipeline_key:
+            tombstones = cdc_key_tombstones(pipeline_key, table)
+            unproven = later_untracked_deletes(
+                _pipeline_job_history(pipeline_key),
+                parent_job_id=job_id,
+                pipeline_key=pipeline_key,
+                parent_tagged=job_quarantine_pipeline_tagged(job_id),
+            )
+        return partition_stale_cdc_replay(
+            details,
+            key_columns=key_columns,
+            destination_lsns=_lookup,
+            tombstones=tombstones,
+            deleted_after_unproven=unproven,
         )
+
+    try:
+        keep, stale = await run_in_threadpool(_partition)
     except Exception as exc:
         logger.warning("quarantine replay %s: CDC staleness read failed: %s", job_id, exc, exc_info=exc)
         raise HTTPException(
             status_code=409,
             detail=(
-                "Quarantine replay refused: could not read the destination _df_lsn for the "
-                f"quarantined CDC keys ({type(exc).__name__}), so a stale image cannot be told "
-                "from a pending one. Check destination access, then replay."
+                "Quarantine replay refused: could not read the destination _df_lsn or the CDC "
+                f"delete history for the quarantined keys ({type(exc).__name__}), so a stale "
+                "image cannot be told from a pending one. Check destination access, then replay."
             ),
         ) from exc
     if not stale:
         return details, records, []
-    identities = sorted({s["identity"] for s in stale} - {replay_row_identity(d) for d in keep})
+    closing = [s for s in stale if s["reason"] in CLOSING_STALE_REASONS]
+    identities = sorted({s["identity"] for s in closing} - {replay_row_identity(d) for d in keep})
     if identities:
         append_dlq_event(
             job_id=job_id,
@@ -2156,8 +2204,8 @@ async def _drop_stale_cdc_replay_images(
             workspace_id=str(job.get("workspace_id") or ""),
             details={
                 "identities": identities,
-                "reason": "replay: the destination holds a newer CDC image of the same key",
-                "stale_refused": stale[:200],
+                "reason": "replay: a later CDC change or delete of the same key already landed",
+                "stale_refused": closing[:200],
             },
         )
     if not keep:

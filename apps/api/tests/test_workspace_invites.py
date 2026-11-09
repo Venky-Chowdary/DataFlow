@@ -377,3 +377,37 @@ def test_concurrent_accepts_are_atomic_on_live_mongodb(mongo_env):
     assert invite_store._database() is not None, "invite store must be on the Mongo tier"
     for round_no in range(3):
         _race_one_token(mongo_env, f"race{round_no}@example.com", racers=2 + round_no)
+
+
+@pytest.mark.parametrize("world", ["env", "mongo_env"])
+def test_failed_resend_keeps_the_emailed_link_working(world, request, monkeypatch):
+    client, admin, ws, _ = request.getfixturevalue(world)
+    invite = _invite(client, admin, ws, "fay@example.com")["invite"]
+    first = _token_for("fay@example.com")
+    monkeypatch.setattr("services.workspace_invites.RESEND_COOLDOWN_SEC", 0)
+
+    def _down(*_a, **_k):
+        raise RuntimeError("outbox unavailable")
+
+    monkeypatch.setattr("services.workspace_invites._queue_invite_mail", _down)
+    res = client.post(f"/api/v1/team/workspaces/{ws}/invites/{invite['id']}/resend", headers=admin)
+    assert res.status_code == 503 and res.json()["error"]["code"] == "email_send_failed"
+    assert client.post("/api/v1/invites/inspect", json={"token": first}).json()["ok"] is True
+    assert _accept(client, first, name="Fay", password=PASSWORD).status_code == 200
+
+
+@pytest.mark.parametrize("world", ["env", "mongo_env"])
+def test_failed_overlapping_resend_never_revives_an_older_link(world, request):
+    from datetime import timedelta
+
+    from services import workspace_invite_store as store
+
+    client, admin, ws, _ = request.getfixturevalue(world)
+    invite = _invite(client, admin, ws, "gus@example.com")["invite"]
+    stale_read = store.get(invite["id"])
+    mailed, _ = store.rotate_token(invite["id"], ttl=timedelta(days=7))
+    _, failed = store.rotate_token(invite["id"], ttl=timedelta(days=7))
+    assert store.restore_token(invite["id"], failed=failed, previous=stale_read)
+    assert store.get(invite["id"])["token_hash"] == store.hash_token(mailed)
+    assert client.post("/api/v1/invites/inspect", json={"token": mailed}).json()["ok"] is True
+    assert client.post("/api/v1/invites/inspect", json={"token": _token_for("gus@example.com")}).json()["ok"] is False
