@@ -686,6 +686,9 @@ class CdcState:
     accumulated_rejected_rows: int = 0
     accumulated_coerced_null_rows: int = 0
     superseded_rejected_details: list[dict[str, Any]] = field(default_factory=list)
+    #: Per destination table: earlier runs' open quarantine identities by key,
+    #: loaded on the first delete window (``_record_quarantined_key_deletes``).
+    quarantine_index: dict[str, dict[tuple[str, ...], set[str]]] = field(default_factory=dict)
     #: Per destination table — keys from orders and users must not mix.
     census_accs: dict[str, Any] = field(default_factory=dict)
     #: Dest COUNT(*) before the first write to each table this run.
@@ -713,6 +716,16 @@ def _applied_change_keys(change: ChangeBatch, key_cols: list[str]) -> set[tuple[
         key = _ladder_key(record, key_cols)
         if key is not None:
             keys.add(key)
+    return keys | _deleted_change_keys(change, key_cols)
+
+
+def _deleted_change_keys(change: ChangeBatch, key_cols: list[str]) -> set[tuple[str, ...]]:
+    """Whole keys this window deleted, spelled as the ladder spells them."""
+    from services.verification_ladder import _pk_key
+
+    from .reconcile_step import _ladder_key
+
+    keys: set[tuple[str, ...]] = set()
     for raw in change.deletes or []:
         if isinstance(raw, dict):
             key = _ladder_key(raw, key_cols)
@@ -727,6 +740,59 @@ def _applied_change_keys(change: ChangeBatch, key_cols: list[str]) -> set[tuple[
         if key is not None:
             keys.add(key)
     return keys
+
+
+def _record_quarantined_key_deletes(
+    state: CdcState,
+    change: ChangeBatch | None,
+    key_cols: list[str],
+    job_id: str,
+    destination: Any,
+) -> None:
+    """Tombstone deleted keys that an earlier run of this pipeline left quarantined.
+
+    The destination keeps no row for a deleted key, so a replay could not tell
+    "deleted after the image" from "never landed" and would resurrect it. Only
+    keys with a persisted quarantine finding are recorded, so ordinary deletes
+    cost one lookup per run. Called before the watermark advances: if the
+    tombstone cannot be persisted, the window must not advance.
+    """
+    if change is None or not change.deletes or not key_cols or not state.cursor_key or not job_id:
+        return
+    from services.quarantine_dlq import (
+        open_pipeline_quarantine_findings,
+        record_cdc_key_deletes,
+        replay_row_identity,
+    )
+
+    from .reconcile_step import _rejected_key
+
+    table = str(getattr(destination, "table", None) or "")
+    try:
+        index = state.quarantine_index.get(table)
+        if index is None:
+            index = {}
+            for d in open_pipeline_quarantine_findings(state.cursor_key, table):
+                key = _rejected_key(d, key_cols)
+                if key is not None:
+                    index.setdefault(key, set()).add(replay_row_identity(d))
+            state.quarantine_index[table] = index
+        identities = sorted(
+            {i for k in _deleted_change_keys(change, key_cols) for i in index.get(k, ())}
+        )
+        if identities:
+            record_cdc_key_deletes(
+                job_id=str(job_id),
+                pipeline_key=state.cursor_key,
+                dest_table=table,
+                identities=identities,
+                lsn=str(extract_cdc_lsn(change.resume_token) or ""),
+            )
+    except Exception as exc:
+        raise RuntimeError(
+            "CDC delete of a quarantined key could not be recorded — refuse watermark "
+            f"advance (a replay would resurrect the deleted key): {exc}"
+        ) from exc
 
 
 def _supersede_rejected_images(
@@ -828,6 +894,8 @@ def _merge_cdc_dest_summary(
                     or getattr(destination, "kind", None)
                     or ""
                 ),
+                pipeline_key=state.cursor_key,
+                dest_table=str(getattr(destination, "table", None) or ""),
             )
             incoming["quarantine_cdc_durable"] = True
             incoming["quarantine_durable"] = True
@@ -2399,7 +2467,7 @@ def _run_cdc_shared_multi_table(
     chunk_idx = 0
     headers = list(schema.keys())
     last_summary: dict[str, Any] = {}
-    shared_accum = CdcState()  # quarantine accumulate across shared-reader batches
+    shared_accum = CdcState(cursor_key=shared_key)  # quarantine accumulate across shared-reader batches
     original_dest_table = getattr(destination, "table", None)
     original_dest_collection = getattr(destination, "collection", None)
 
@@ -2598,6 +2666,9 @@ def _run_cdc_shared_multi_table(
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
         dest_summary = _note_inherited_map(dest_summary, inherit_note)
+        _record_quarantined_key_deletes(
+            shared_accum, change, list(pk_source or []), str(job_id or ""), destination
+        )
         if dest_summary:
             last_summary = _merge_cdc_dest_summary(
                 shared_accum,
@@ -2821,6 +2892,8 @@ def _run_cdc_shared_multi_table(
         "tables": tables,
         "watermark": shared_watermark,
         "cursor_key": shared_key,
+        "deletes": cycle_counts["deletes"],
+        "quarantine_tombstones": True,
         **lag_fields,
     }
     if eos_active:
@@ -3769,6 +3842,9 @@ def _run_cdc_single_stream(
         state.updates += len(change.updates)
         state.deletes += deleted
         state.last_checksum = last_checksum or state.last_checksum
+        _record_quarantined_key_deletes(
+            state, change, list(pk_source_cols or []), str(job_id or ""), destination
+        )
         if dest_summary:
             dest_summary = _merge_cdc_dest_summary(
                 state,
@@ -4405,6 +4481,7 @@ def _run_cdc_single_stream(
             "deletes": state.deletes,
             "watermark": final_watermark,
             "cursor_key": cursor_key,
+            "quarantine_tombstones": True,
             "poll_rounds": max_poll_rounds,
             **lag_fields,
         }
