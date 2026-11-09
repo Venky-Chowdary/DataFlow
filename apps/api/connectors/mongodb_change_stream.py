@@ -593,7 +593,8 @@ class MongodbChangeStreamCdc:
         A business-key change must retire the old key (Debezium emits delete +
         create); applying only the after-image left the old row at the
         destination. The old key lives only in the pre-image, so a key-changing
-        ``update`` without one fails closed like an unkeyed delete.
+        ``update`` (or any ``replace``) without one fails closed like an
+        unkeyed delete.
         """
         new = self._pk_value(record)
         new_pk = new if _has_key(new) else ""
@@ -605,10 +606,11 @@ class MongodbChangeStreamCdc:
             old = self._pk_value(before)
             if _has_key(old) and old != new:
                 out.append(CdcTxnEvent(op="d", pk=old, row=None))
-        elif self._needs_pre_image and op == "update":
+        elif self._needs_pre_image and op in ("update", "replace"):
+            # A replace has no updateDescription: any replace may move the key.
             desc = change.get("updateDescription") or {}
             touched = set(desc.get("updatedFields") or {}) | set(desc.get("removedFields") or [])
-            if touched.intersection(self._pk_columns()):
+            if op == "replace" or touched.intersection(self._pk_columns()):
                 from services.cdc_capability import (
                     LogCaptureUnavailable,
                     mongo_key_change_refusal,

@@ -194,6 +194,20 @@ def test_key_change_without_pre_image_fails_closed() -> None:
         cdc._row_events(_change("update", {"id": 30}, None, ("id",)), "update", {"id": 30})
 
 
+def test_replace_without_pre_image_fails_closed() -> None:
+    """A replace carries no updateDescription, so without the pre-image a moved
+    business key is invisible; applying only the new row would strand the old."""
+    cdc = MongodbChangeStreamCdc(CFG, collection="unit", primary_key="id")
+    with pytest.raises(LogCaptureUnavailable, match="old key"):
+        cdc._row_events(_change("replace", {"id": 30}, None, ()), "replace", {"id": 30})
+
+
+def test_replace_with_pre_image_retires_moved_key() -> None:
+    cdc = MongodbChangeStreamCdc(CFG, collection="unit", primary_key="id")
+    events = cdc._row_events(_change("replace", {"id": 30}, {"id": 3}, ()), "replace", {"id": 30})
+    assert [(e.op, e.pk) for e in events] == [("d", "3"), ("u", "30")]
+
+
 def test_non_key_update_without_pre_image_still_applies() -> None:
     cdc = MongodbChangeStreamCdc(CFG, collection="unit", primary_key="id")
     events = cdc._row_events(_change("update", {"id": 3}, None, ("name",)), "update", {"id": 3})
