@@ -345,6 +345,54 @@ def weaviate_mapped_property_types(
     return out
 
 
+def weaviate_decimal_into_number_columns(
+    mappings: list[dict],
+    column_types: dict[str, str] | None,
+    live_types: dict[str, str] | None,
+) -> list[tuple[str, str, str]]:
+    """``(source, target, source_type)`` for each DECIMAL mapped onto a ``number``.
+
+    Weaviate's ``number`` is IEEE float64 and it has no exact decimal type:
+    ``NUMBER(18,6)`` 99999999999.999999 cannot be held, and the exact text the
+    plan carries is refused per object, so a run landed only the NULL rows
+    before strict stopped it (D265). Checked against the live class before
+    anything is written.
+    """
+    from services.type_system import normalize_logical_type
+
+    live = {str(k): str(v) for k, v in (live_types or {}).items() if k}
+    live_lower = {k.lower(): v for k, v in live.items()}
+    source_types = {str(k).lower(): str(v) for k, v in (column_types or {}).items() if k}
+    out: list[tuple[str, str, str]] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        target = str(m.get("target") or m.get("source") or "").strip()
+        source = str(m.get("source") or target).strip()
+        stored = weaviate_property_name(target, list(live))
+        if not target or stored in _RESERVED_PROPERTIES:
+            continue
+        carrier = live.get(stored) or live_lower.get(target.lower()) or ""
+        if carrier.upper() != "FLOAT":
+            continue
+        src_type = source_types.get(source.lower(), "") or str(m.get("source_type") or "")
+        if normalize_logical_type(src_type) == "decimal":
+            out.append((source, target, src_type))
+    return out
+
+
+def weaviate_decimal_number_refusal(
+    class_name: str, lossy: list[tuple[str, str, str]]
+) -> str:
+    cols = ", ".join(f"{src} {src_type} -> {tgt} number" for src, tgt, src_type in lossy)
+    return (
+        f"Weaviate class {class_name!r} stores {cols}: number is float64 and "
+        "cannot hold these decimals exactly; nothing was written. Choose: write "
+        "to a new class (Datawrap declares the column text and keeps every "
+        "digit), or drop and recreate this class so the property is text."
+    )
+
+
 def _ensure_class(
     session: Any,
     base_url: str,
@@ -368,7 +416,9 @@ def _ensure_class(
     stored_names = _weaviate_property_keys(list(property_types or {}))
     for key, data_type in (property_types or {}).items():
         name = stored_names.get(key, key)
-        if name in declared or name in _WRITER_PROPERTIES:
+        # Oracle's ID folds to ``id``: the object identity, never a property.
+        # Declaring it made Weaviate refuse the class (D265).
+        if name in declared or name in _WRITER_PROPERTIES or name in _RESERVED_PROPERTIES:
             continue
         declared.add(name)
         properties.append({"name": name, "dataType": [data_type]})
@@ -846,7 +896,11 @@ def write_mapped_rows(
             # ``source_id`` text property, never a class property of its own.
             identity_carrier = effective.get("source_id")
             for c in mapped_targets:
-                if c in _RESERVED_PROPERTIES and identity_carrier and not effective.get(c):
+                if (
+                    weaviate_property_name(c) in _RESERVED_PROPERTIES
+                    and identity_carrier
+                    and not effective.get(c)
+                ):
                     effective[c] = identity_carrier
             if isinstance(studio_live, dict):
                 for c in mapped_targets:
@@ -876,6 +930,31 @@ def write_mapped_rows(
                     error=phys_err,
                 )
             live_prop_types = effective
+            lossy = weaviate_decimal_into_number_columns(
+                mappings or [], column_types, schema_types
+            )
+            if lossy:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=class_name,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=weaviate_decimal_number_refusal(class_name, lossy),
+                    rejected_details=[
+                        {
+                            "row": "",
+                            "column": src,
+                            "target": tgt,
+                            "value": "",
+                            "reason": f"{src_type} into Weaviate number (float64) loses precision",
+                            "policy": "fail",
+                        }
+                        for src, tgt, src_type in lossy
+                    ],
+                    rejected_rows=0,
+                )
         elif status == 404:
             if not create_table:
                 return WriteResult(
