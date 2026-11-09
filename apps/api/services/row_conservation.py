@@ -235,6 +235,8 @@ class KeyCensus:
     #: Stored keys a ``dedupe_skip`` write left untouched. They are
     #: pre-existing keys that were skipped, not updated.
     kept_existing: int = 0
+    #: Keys the writer quarantined, already taken out of both terms above.
+    held_out_keys: int = 0
 
     @property
     def inserts(self) -> int:
@@ -267,6 +269,7 @@ class KeyCensus:
             "expected_delta": self.expected_delta,
             "prior_pass_inserts": self.prior_pass_inserts,
             "kept_existing": self.kept_existing,
+            "held_out_keys": self.held_out_keys,
         }
 
     @classmethod
@@ -283,9 +286,12 @@ class KeyCensus:
             events = int(events_raw) if events_raw is not None and events_raw != "" else None
             prior = int(data.get("prior_pass_inserts") or 0)
             kept = int(data.get("kept_existing") or 0)
+            held = int(data.get("held_out_keys") or 0)
         except (TypeError, ValueError):
             return None
         if unique < 0 or preexisting < 0 or tombs < 0 or tomb_keys < 0 or prior < 0 or kept < 0:
+            return None
+        if held < 0:
             return None
         if events is not None and events < 0:
             return None
@@ -301,6 +307,7 @@ class KeyCensus:
             events_read=events,
             prior_pass_inserts=prior,
             kept_existing=kept,
+            held_out_keys=held,
         )
 
 
@@ -1294,7 +1301,10 @@ def _account_keyed(
     # Keys a dedupe_skip write left in place are classified: the census
     # measured them as stored keys. Only other skips stay unclassified.
     unclassified_skips = max(int(skipped) - int(census.kept_existing), 0)
-    if quarantined or unclassified_skips:
+    # Hold-outs are classified when the census already took exactly the
+    # quarantined keys out of inserts/updates; any other count stays unproven.
+    unclassified_holds = 0 if int(quarantined) == int(census.held_out_keys) else int(quarantined)
+    if unclassified_holds or unclassified_skips:
         return ConservationLedger(
             **base,
             rows_written=None,
@@ -1332,6 +1342,11 @@ def _account_keyed(
             note += (
                 f" {census.kept_existing} stored key(s) were kept unchanged "
                 "(Duplicate rows: skip keys already stored)."
+            )
+        if census.held_out_keys:
+            note += (
+                f" {census.held_out_keys} quarantined key(s) did not land and "
+                "are not counted as inserts or updates."
             )
         events = census.events_read
         if events is not None and events > census.unique_batch_keys:

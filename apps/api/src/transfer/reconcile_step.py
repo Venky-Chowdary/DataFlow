@@ -6015,16 +6015,24 @@ def _census_without_held_out_keys(
     census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
     if census is None or len(key_columns) != 1 or dest_summary.get("held_out_keys_classified"):
         return
-    held = sorted(_held_out_keys(dest_summary, key_columns[0]))
+    # A later batch may have written a key an earlier batch held out.
+    landed = {str(x) for x in dest_summary.get("written_ids") or [] if x is not None}
+    held = sorted(_held_out_keys(dest_summary, key_columns[0]) - landed)
     if not held or len(held) > census.unique_batch_keys:
         return
+
+    def _bind(key: str) -> Any:
+        # Text key ``001`` is not integer 1.
+        part = coerce_pk_part(key)
+        return part if str(part) == key else key
+
     stored = destination_key_hits(
         db_type,
         dict(cfg),
         schema=schema,
         table_name=table_name,
         key_columns=list(key_columns),
-        keys=[(coerce_pk_part(k),) for k in held],
+        keys=[(_bind(k),) for k in held],
     )
     if stored is None or stored > min(len(held), census.dest_preexisting):
         return
@@ -6039,9 +6047,9 @@ def _census_without_held_out_keys(
             events_read=census.events_read,
             prior_pass_inserts=census.prior_pass_inserts,
             kept_existing=min(census.kept_existing, preexisting),
+            held_out_keys=len(held),
         ).to_dict()
     )
-    payload["held_out_keys"] = len(held)
     payload["held_out_keys_stored"] = int(stored)
     dest_summary[CENSUS_KEY] = payload
     dest_summary["held_out_keys_classified"] = True
