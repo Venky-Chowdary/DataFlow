@@ -589,14 +589,9 @@ def _stream_database_transfer_impl(
                 (_src_rich_catalog[2] or {}).get("primary_key_columns"),
                 run.cfg.mappings,
             )
-    if requires_upsert(run.cfg.effective_sync) and not run.cfg.pk_target_cols:
-        raise ValueError(
-            f"Sync mode `{run.cfg.effective_sync}` requires primary_key for upsert; "
-            "refuse silent insert fallback (set primary_key on the stream contract)"
-        )
-    run.cfg.write_mode = (
-        "upsert" if requires_upsert(run.cfg.effective_sync) and run.cfg.pk_target_cols else "insert"
-    )
+    from .stream_es_identity import bind_stream_elasticsearch_write_mode
+
+    bind_stream_elasticsearch_write_mode(run, stream_contracts)
     _create_scope_token, _create_scope = begin_fast_path_create_scope(
         _fast_path_source_catalog(run.cfg.src_read_type, run.cfg.mappings, run.cfg.schema, _src_rich_catalog),
         run.cfg.mappings,

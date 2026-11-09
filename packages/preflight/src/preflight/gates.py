@@ -2513,8 +2513,9 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                 ):
                     return _block(
                         GateId.G6_TARGET_DDL,
-                        "Identity key required — set Primary key on Map "
-                        "(code/id/_id/iso) before Run to a key-addressed destination",
+                        "Identity key required — set Primary key on Map or "
+                        "Identity key in Advanced settings before Run to a "
+                        "key-addressed destination",
                         start,
                         _scope(
                             {

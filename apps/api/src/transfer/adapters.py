@@ -2069,7 +2069,12 @@ def _write_destination_database(
 
         for col in columns:
             ddl_log.append(f"ES FIELD {col}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+            destination_extra=dict(getattr(endpoint, "extra", None) or {}),
+        )
         if not result.ok:
             raise_writer_failure(result, "Elasticsearch write failed")
         ddl_log.insert(0, f"BULK INDEX {result.table_name}")
