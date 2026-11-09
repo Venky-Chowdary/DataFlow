@@ -1846,18 +1846,12 @@ class UniversalTransferEngine:
             # Key-addressed sinks (Redis/Dynamo/ES/vectors) always need identity —
             # append still collides on the key. Infer from natural keys; never invent
             # weak attrs (countries:capital bug).
-            from services.primary_key import KEY_ADDRESSED_DESTS
+            from services.primary_key import KEY_ADDRESSED_DESTS, bind_explicit_elasticsearch_identity
             from .connector_capabilities import resolve_driver_type
 
             dest_driver = resolve_driver_type(request.destination.format or "")
-            # Elasticsearch does not derive a document id from column shape.
-            # Redis / Dynamo / vector sinks keep their ranking. An explicit
-            # contract, Map flag, or endpoint primary_key is bound below.
-            if (
-                not conflict_columns
-                and dest_driver in KEY_ADDRESSED_DESTS
-                and dest_driver != "elasticsearch"
-            ):
+            # Elasticsearch document ids are explicit (bound below), not inferred.
+            if not conflict_columns and dest_driver in KEY_ADDRESSED_DESTS - {"elasticsearch"}:
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
@@ -1877,16 +1871,10 @@ class UniversalTransferEngine:
                 # The destination's own declared key is catalog evidence, not a
                 # guess (Validate's collision probe resolves on it too).
                 conflict_columns = _declared_destination_key(request.destination, mappings)
-            if dest_driver == "elasticsearch":
-                from services.primary_key import bind_explicit_elasticsearch_identity
-
-                conflict_columns = bind_explicit_elasticsearch_identity(
-                    dest_driver,
-                    mappings,
-                    conflict_columns,
-                    stream_contracts=request.stream_contracts,
-                    destination_extra=getattr(request.destination, "extra", None),
-                )
+            conflict_columns = bind_explicit_elasticsearch_identity(
+                dest_driver, mappings, conflict_columns, stream_contracts=request.stream_contracts,
+                destination_extra=getattr(request.destination, "extra", None),
+            )
             if requires_upsert(effective_sync):
                 if not conflict_columns:
                     raise ValueError(

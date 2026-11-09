@@ -589,30 +589,9 @@ def _stream_database_transfer_impl(
                 (_src_rich_catalog[2] or {}).get("primary_key_columns"),
                 run.cfg.mappings,
             )
-    if resolve_driver_type(run.cfg.dest_type) == "elasticsearch":
-        from services.primary_key import bind_explicit_elasticsearch_identity
+    from .stream_es_identity import bind_stream_elasticsearch_write_mode
 
-        run.cfg.pk_target_cols = bind_explicit_elasticsearch_identity(
-            run.cfg.dest_type,
-            run.cfg.mappings,
-            run.cfg.pk_target_cols,
-            stream_contracts=stream_contracts,
-            destination_extra=getattr(run.cfg.destination, "extra", None),
-        )
-        if run.cfg.pk_target_cols and not run.cfg.pk_source_cols:
-            from services.primary_key import identity_source_columns
-
-            run.cfg.pk_source_cols = identity_source_columns(
-                run.cfg.pk_target_cols, run.cfg.mappings
-            )
-    if requires_upsert(run.cfg.effective_sync) and not run.cfg.pk_target_cols:
-        raise ValueError(
-            f"Sync mode `{run.cfg.effective_sync}` requires primary_key for upsert; "
-            "refuse silent insert fallback (set primary_key on the stream contract)"
-        )
-    run.cfg.write_mode = (
-        "upsert" if requires_upsert(run.cfg.effective_sync) and run.cfg.pk_target_cols else "insert"
-    )
+    bind_stream_elasticsearch_write_mode(run, stream_contracts)
     _create_scope_token, _create_scope = begin_fast_path_create_scope(
         _fast_path_source_catalog(run.cfg.src_read_type, run.cfg.mappings, run.cfg.schema, _src_rich_catalog),
         run.cfg.mappings,

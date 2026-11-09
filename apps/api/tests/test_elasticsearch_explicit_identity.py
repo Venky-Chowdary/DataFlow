@@ -251,6 +251,48 @@ def test_explicit_sources_that_agree_are_one_key():
     assert cols == ["order_id"]
 
 
+def test_stream_helper_binds_es_key_and_keeps_append_insert():
+    from types import SimpleNamespace
+
+    from src.transfer.stream_es_identity import bind_stream_elasticsearch_write_mode
+
+    run = SimpleNamespace(
+        cfg=SimpleNamespace(
+            dest_type="elasticsearch",
+            mappings=MAPPINGS,
+            pk_target_cols=[],
+            pk_source_cols=[],
+            destination=SimpleNamespace(extra={"primary_key": "order_id"}),
+            effective_sync="full_refresh_append",
+            write_mode="insert",
+        )
+    )
+    bind_stream_elasticsearch_write_mode(run, [])
+    assert run.cfg.pk_target_cols == ["order_id"]
+    assert run.cfg.pk_source_cols == ["order_id"]
+    assert run.cfg.write_mode == "insert"
+
+
+def test_stream_helper_still_refuses_keyless_upsert():
+    from types import SimpleNamespace
+
+    from src.transfer.stream_es_identity import bind_stream_elasticsearch_write_mode
+
+    run = SimpleNamespace(
+        cfg=SimpleNamespace(
+            dest_type="postgresql",
+            mappings=MAPPINGS,
+            pk_target_cols=[],
+            pk_source_cols=[],
+            destination=SimpleNamespace(extra={}),
+            effective_sync="incremental_deduped",
+            write_mode="insert",
+        )
+    )
+    with pytest.raises(ValueError, match="primary_key"):
+        bind_stream_elasticsearch_write_mode(run, [])
+
+
 def test_stream_write_forwards_elasticsearch_identity(monkeypatch):
     from src.transfer.models import EndpointConfig
     from src.transfer.stream_write import _write_batch
