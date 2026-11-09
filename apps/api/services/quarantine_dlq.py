@@ -1585,3 +1585,154 @@ def delete_workspace_events(workspace_id: str, *, dry_run: bool = False) -> int:
             if hit and not dry_run:
                 _atomic_rewrite(path, kept)
     return removed
+
+
+REPLAY_STALE_CDC_CODE = "REPLAY_STALE_CDC_IMAGE"
+#: The destination already holds this key at the quarantined LSN or a newer one.
+REASON_STALE_DEST_NEWER = "cdc_replay_stale_destination_newer"
+#: A newer quarantined image of the same key is in this replay set.
+REASON_SUPERSEDED_IN_LEDGER = "cdc_replay_superseded_in_ledger"
+
+
+def _detail_cdc_lsn(detail: dict[str, Any]) -> str:
+    """The ``_df_lsn`` the CDC writer stamped on this quarantined image, or ''."""
+    from connectors.lsn_guards import DF_LSN_COL
+
+    for bag_name in ("values", "source_values"):
+        bag = detail.get(bag_name)
+        if isinstance(bag, dict):
+            raw = bag.get(DF_LSN_COL)
+            if raw is not None and str(raw).strip():
+                return str(raw).strip()
+    return ""
+
+
+def _detail_key(detail: dict[str, Any], key_columns: list[str]) -> tuple[str, ...] | None:
+    for bag_name in ("values", "source_values"):
+        bag = detail.get(bag_name)
+        if isinstance(bag, dict) and all(c in bag for c in key_columns):
+            return tuple(str(bag[c]) for c in key_columns)
+    return None
+
+
+def partition_stale_cdc_replay(
+    details: list[dict[str, Any]],
+    *,
+    key_columns: list[str],
+    destination_lsns: Callable[[list[tuple[str, ...]]], dict[tuple[str, ...], Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split replay findings into (replayable, stale) for CDC images.
+
+    A quarantined CDC image carries the ``_df_lsn`` it was read at. Replay is a
+    keyed upsert, so landing it over a destination row a later run already
+    wrote at a newer position regresses that key (cross-run; same-run images
+    are closed by ``cdc_transfer._supersede_rejected_images``). The test is
+    the writer's own monotonic guard, ``lsn_is_newer``: equal or incomparable
+    positions are refused, never invented newer. Findings without a stamped
+    LSN (non-CDC routes) are untouched. ``destination_lsns`` maps key tuples
+    to the destination ``_df_lsn``; a key it omits holds no row and replays.
+    """
+    from connectors.lsn_guards import lsn_is_newer
+
+    if not key_columns:
+        return list(details), []
+    cdc: list[tuple[dict[str, Any], tuple[str, ...], str]] = []
+    keep: list[dict[str, Any]] = []
+    for d in details:
+        lsn = _detail_cdc_lsn(d) if isinstance(d, dict) else ""
+        key = _detail_key(d, key_columns) if lsn else None
+        if lsn and key is not None:
+            cdc.append((d, key, lsn))
+        else:
+            keep.append(d)
+    if not cdc:
+        return keep, []
+    newest: dict[tuple[str, ...], str] = {}
+    for _d, key, lsn in cdc:
+        if key not in newest or lsn_is_newer(lsn, newest[key]):
+            newest[key] = lsn
+    found = destination_lsns(sorted(newest))
+    stale: list[dict[str, Any]] = []
+    for d, key, lsn in cdc:
+        dest_lsn = found.get(key)
+        named = dict(zip(key_columns, key))
+        if dest_lsn is not None and str(dest_lsn).strip() and not lsn_is_newer(lsn, dest_lsn):
+            reason = REASON_STALE_DEST_NEWER
+        elif lsn != newest[key]:
+            reason = REASON_SUPERSEDED_IN_LEDGER
+        else:
+            keep.append(d)
+            continue
+        stale.append({
+            "identity": replay_row_identity(d),
+            "key": named,
+            "reason": reason,
+            "quarantined_lsn": lsn,
+            "destination_lsn": "" if dest_lsn is None else str(dest_lsn),
+            "newest_quarantined_lsn": newest[key],
+        })
+    return keep, stale
+
+
+def read_destination_cdc_lsns(
+    dest_cfg: dict[str, Any],
+    *,
+    dest_kind: str,
+    schema: str,
+    table: str,
+    key_columns: list[str],
+    keys: list[tuple[str, ...]],
+) -> dict[tuple[str, ...], Any]:
+    """``{key: _df_lsn}`` the destination holds for ``keys`` (absent = no row).
+
+    Raises when the read cannot run: replay must not guess that a key is not
+    newer on the destination.
+    """
+    import sqlalchemy as sa
+
+    from connectors.lsn_guards import DF_LSN_COL
+    from services.dest_precount import warehouse_sql_engine, warehouse_sql_table_ref
+
+    out: dict[tuple[str, ...], Any] = {}
+    if not keys or not key_columns:
+        return out
+    ref = warehouse_sql_table_ref(dest_kind, dest_cfg, schema, table)
+    with warehouse_sql_engine(dest_kind, dest_cfg) as engine:
+        quote = engine.dialect.identifier_preparer.quote
+        cols = ", ".join(quote(c) for c in key_columns)
+        with engine.connect() as conn:
+            for start in range(0, len(keys), 200):
+                chunk = keys[start : start + 200]
+                params: dict[str, Any] = {}
+                clauses = []
+                for i, key in enumerate(chunk):
+                    parts = []
+                    for j, col in enumerate(key_columns):
+                        params[f"k{i}_{j}"] = key[j]
+                        parts.append(f"{quote(col)} = :k{i}_{j}")
+                    clauses.append("(" + " AND ".join(parts) + ")")
+                stmt = (
+                    f"SELECT {cols}, {quote(DF_LSN_COL)} FROM {ref} "  # nosec B608 — quoted identifiers, bound values
+                    f"WHERE {' OR '.join(clauses)}"
+                )
+                for row in conn.execute(sa.text(stmt), params):
+                    out[tuple(str(v) for v in row[: len(key_columns)])] = row[len(key_columns)]
+    return out
+
+
+def replay_stale_cdc_refusal(table: str, stale: list[dict[str, Any]]) -> dict[str, Any]:
+    """The typed 409 when every replayable finding is a stale CDC image."""
+    return {
+        "code": REPLAY_STALE_CDC_CODE,
+        "message": (
+            f"Replay refused: all {len(stale)} quarantined CDC image(s) are older than "
+            f"what destination table '{table}' already holds for the same key. "
+            "Upserting them would regress those keys to stale values."
+        ),
+        "table": table,
+        "stale_refused": stale,
+        "next_action": (
+            "No replay is needed for these keys: a later CDC change already landed. "
+            "Inspect the destination row; if it is wrong, fix the source and let CDC deliver it."
+        ),
+    }
