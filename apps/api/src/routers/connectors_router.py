@@ -2942,6 +2942,10 @@ def profile_file_upload(
         from services.excel_parser import list_excel_sheets
 
         sheets = list_excel_sheets(content)
+    elif result.file_type == "sqlite":
+        from services.file_parser import list_sqlite_tables
+
+        sheets = list_sqlite_tables(content)
 
     stored_file_id = file_id
     if not stored_file_id:

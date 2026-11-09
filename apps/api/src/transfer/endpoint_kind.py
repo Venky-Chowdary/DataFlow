@@ -180,7 +180,15 @@ def stage_sqlite_upload(request: Any, job_id: str = "") -> bool:
     except Exception:
         _discard(staged)
         raise
-    table = (src.table or "").strip() or str((src.extra or {}).get("sqlite_table") or "").strip()
+    # The Studio's table picker declares the table as the read window's sheet;
+    # it is consumed here so the staged database source carries no file window.
+    read_options = dict(getattr(request, "read_options", None) or {})
+    picked = str(read_options.pop("sheet", "") or "").strip()
+    table = (
+        (src.table or "").strip()
+        or str((src.extra or {}).get("sqlite_table") or "").strip()
+        or picked
+    )
     if not table:
         if len(tables) != 1:
             _discard(staged)
@@ -202,6 +210,9 @@ def stage_sqlite_upload(request: Any, job_id: str = "") -> bool:
     )
     request.source_content = b""
     request.source_path = ""
+    if picked and hasattr(request, "read_options"):
+        read_options.pop("sheet_index", None)
+        request.read_options = read_options
     return True
 
 
