@@ -1776,6 +1776,7 @@ def _pipeline_dlq_events(pipeline_key: str, dest_table: str, actions: set[str]) 
     Raises when the store cannot be read: callers judge deletes from this
     history and must not read an outage as "no history".
     """
+    out: list[dict[str, Any]] = []
     coll = _dlq_coll()
     if coll is not None:
         try:
@@ -1784,15 +1785,17 @@ def _pipeline_dlq_events(pipeline_key: str, dest_table: str, actions: set[str]) 
                 "details.pipeline_key": pipeline_key,
                 "details.dest_table": dest_table,
             })
-            return [{k: v for k, v in dict(d).items() if k != "_id"} for d in docs]
+            out = [{k: v for k, v in dict(d).items() if k != "_id"} for d in docs]
         except Exception as exc:  # noqa: BLE001 — any Mongo failure falls back to JSONL
             logger.warning("DLQ Mongo pipeline scan failed, falling back to JSONL: %s", exc)
     if not DLQ_PATH.exists():
-        return []
-    out: list[dict[str, Any]] = []
+        return out
+    # Events appended during a Mongo outage live only in JSONL; a recovered
+    # Mongo must not hide them (a lost tombstone resurrects a deleted key).
+    seen = {str(e.get("id") or "") for e in out} - {""}
     for line in DLQ_PATH.read_text(encoding="utf-8").splitlines():
         ev = load_dlq_event(line.strip()) if line.strip() else None
-        if not ev or str(ev.get("action") or "") not in actions:
+        if not ev or str(ev.get("action") or "") not in actions or str(ev.get("id") or "") in seen:
             continue
         det = ev.get("details") or {}
         if det.get("pipeline_key") == pipeline_key and det.get("dest_table") == dest_table:
@@ -1872,7 +1875,9 @@ def later_untracked_deletes(
         cdc = ds.get("cdc") or {}
         if jid == parent_job_id or str(ds.get("cursor_key") or cdc.get("cursor_key") or "") != pipeline_key:
             continue
-        if int(cdc.get("deletes") or 0) <= 0:
+        # ``deletes`` is rows affected: a delete of a quarantined key the
+        # destination never held affects none, yet the source deleted it.
+        if max(int(cdc.get("deletes") or 0), int(cdc.get("delete_events") or 0)) <= 0:
             continue
         if parent_tagged and cdc.get("quarantine_tombstones"):
             continue

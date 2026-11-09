@@ -339,3 +339,27 @@ def test_tombstone_persistence_failure_refuses_watermark_advance(monkeypatch):
     dest = type("D", (), {"table": "t"})()
     with pytest.raises(RuntimeError, match="refuse watermark advance"):
         _record_quarantined_key_deletes(_cdc_state(), ChangeBatch(deletes=["3"]), ["id"], "j", dest)
+
+
+def test_delete_of_a_key_the_destination_never_held_still_counts_as_a_later_delete():
+    from services.quarantine_dlq import later_untracked_deletes
+
+    job = _job("n1", 0, "0/90")
+    job["destination_summary"]["cdc"]["delete_events"] = 1
+    unproven = later_untracked_deletes([job], parent_job_id="n", pipeline_key="pipe", parent_tagged=False)
+    assert unproven("0/10") is True
+
+
+def test_tombstone_written_during_a_mongo_outage_survives_mongo_recovery(monkeypatch, tmp_path: Path):
+    from services import quarantine_dlq as dlq
+
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    monkeypatch.setattr(dlq, "_dlq_coll", lambda: None)
+    dlq.record_cdc_key_deletes(job_id="j2", pipeline_key="pipe", dest_table="t", identities=["k1"], lsn="0/40")
+
+    class _Recovered:
+        def find(self, _q):
+            return []
+
+    monkeypatch.setattr(dlq, "_dlq_coll", lambda: _Recovered())
+    assert dlq.cdc_key_tombstones("pipe", "t") == {"k1": "0/40"}
