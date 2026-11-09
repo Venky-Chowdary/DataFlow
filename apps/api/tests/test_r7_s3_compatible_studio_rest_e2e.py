@@ -254,6 +254,8 @@ def test_studio_cloud_storage_source_on_s3_compatible_endpoint(client, s3_store,
                 "source": src, "destination": _dest(dst.id, table),
                 "mappings": mappings, "sync_mode": "full_refresh_overwrite",
                 "validation_mode": "strict", "schema_policy": "manual_review",
+                # Run 1 creates the table: manual review needs the DDL approval.
+                "ddl_changes_acknowledged": True,
                 "async_mode": False, "skip_preflight": True,
             })
             assert resp.status_code == 200, resp.text

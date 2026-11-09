@@ -530,6 +530,8 @@ def test_d204_csv_non_ascii_into_new_sqlserver_run1_run2(client, route):
                     "source": source, "destination": dest, "mappings": mappings,
                     "sync_mode": "full_refresh_overwrite", "validation_mode": "strict",
                     "schema_policy": "manual_review", "async_mode": False,
+                    # Run 1 creates the table: manual review needs the DDL approval.
+                    "ddl_changes_acknowledged": True,
                     "skip_preflight": False,
                 }).json()
                 assert body.get("success") is True, json.dumps(body, default=str)[:800]
