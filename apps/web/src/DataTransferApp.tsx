@@ -21,19 +21,19 @@ import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetch
 import { EMPTY_JOB_HISTORY, type JobHistory } from "./lib/jobHistory";
 import { clearSession, readSession, writeSession } from "./lib/session";
 import { loadStudioRecovery } from "./lib/studioRecovery";
-import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId } from "./lib/workspace";
+import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "./lib/workspace";
 import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { useTheme } from "./lib/useTheme";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
-import { ForgotPasswordPage, ResetPasswordPage, SignupPage } from "./pages/SignupPage";
+import { AcceptInvitePage, ForgotPasswordPage, ResetPasswordPage, SignupPage } from "./pages/SignupPage";
 import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { LoadingBlock } from "./components/LoadingState";
-import { focusFromHash, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
+import { focusFromHash, inviteLinkToken, isInviteLinkRoute, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -1060,10 +1060,15 @@ function DataTransferAppInner() {
   // token once at boot; the page itself strips it from the URL.
   const [resetToken] = useState<string>(() =>
     resetLinkToken(window.location.pathname, window.location.hash));
-  const [stage, setStage] = useState<"landing" | "login" | "signup" | "forgot" | "reset-link" | "app">(() => {
+  // Invitation links land on /accept-invite#token=... — kept in state so a
+  // sign-in detour comes back to the same invitation.
+  const [inviteToken, setInviteToken] = useState<string>(() =>
+    inviteLinkToken(window.location.pathname, window.location.hash));
+  const [stage, setStage] = useState<"landing" | "login" | "signup" | "forgot" | "reset-link" | "invite-link" | "app">(() => {
     if (resetToken) {
       return "reset-link";
     }
+    if (inviteToken) return "invite-link";
     if (readStoredUser()) return "app";
     return "landing";
   });
@@ -1074,6 +1079,7 @@ function DataTransferAppInner() {
   useEffect(() => {
     const syncFromHash = () => {
       if (isResetLinkRoute(window.location.pathname, window.location.hash)) return;
+      if (isInviteLinkRoute(window.location.pathname, window.location.hash)) return;
       const hash = window.location.hash;
       const session = readStoredUser();
       const screen = session
@@ -1145,6 +1151,10 @@ function DataTransferAppInner() {
 
   const handleAuthenticated = (email: string) => {
     setUserEmail(email);
+    if (inviteToken) {
+      setStage("invite-link");
+      return;
+    }
     if (!isSignedInHelpHash(window.location.hash)) {
       writeAppHash(entryScreen, true);
     }
@@ -1244,6 +1254,32 @@ function DataTransferAppInner() {
           token={resetToken}
           onSignIn={() => { window.history.replaceState({}, "", "/"); setStage("login"); }}
           onSendNewLink={() => { window.history.replaceState({}, "", "/"); setStage("forgot"); }}
+        />
+      )}
+
+      {stage === "invite-link" && (
+        <AcceptInvitePage
+          token={inviteToken}
+          signedInEmail={userEmail}
+          onSignIn={() => setStage("login")}
+          onSignOut={() => { clearSession(); setUserEmail(""); }}
+          onAccepted={(result) => {
+            if (result.session) {
+              writeSession(result.session, true);
+              setUserEmail(result.session.email);
+            }
+            if (result.workspaceId) setActiveWorkspaceId(result.workspaceId);
+            setInviteToken("");
+            window.history.replaceState({}, "", "/");
+            setEntryScreen("dashboard");
+            writeAppHash("dashboard", true);
+            setStage("app");
+          }}
+          onBack={() => {
+            setInviteToken("");
+            window.history.replaceState({}, "", "/");
+            setStage(userEmail ? "app" : "landing");
+          }}
         />
       )}
 

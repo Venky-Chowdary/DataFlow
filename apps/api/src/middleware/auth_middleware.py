@@ -35,6 +35,9 @@ _PUBLIC_PREFIXES = (
     "/api/v1/auth/password/forgot",
     "/api/v1/auth/password/reset",
     "/api/v1/public/form-token",
+    # Workspace invitation landing + accept: the single-use link is the credential.
+    "/api/v1/invites/inspect",
+    "/api/v1/invites/accept",
     "/api/v1/public/email-events",
     "/auth/signup",
     "/auth/verify-email",

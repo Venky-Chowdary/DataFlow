@@ -293,6 +293,27 @@ def _authorize_change(
             raise PermissionDenied("Only a workspace admin can grant the admin role")
 
 
+def authorize_member_grant(
+    *,
+    workspace_id: str,
+    role: str,
+    actor_email: str = "",
+    actor_is_platform_admin: bool = False,
+    principal: Any = None,
+) -> None:
+    """Raise unless the actor may bring someone new into ``workspace_id`` as
+    ``role`` — the exact rule ``add_workspace_member`` applies, for flows
+    (email invitations) that decide before the membership is written and
+    again when it is. Also refuses a missing or closing workspace."""
+    ws_row = get_workspace(workspace_id) if workspace_id else None
+    if ws_row is None:
+        raise WorkspaceNotFound("Workspace not found")
+    if ws_row.deleting_at:
+        raise WorkspaceClosing(workspace_id)
+    authority = _authority(workspace_id, actor_email, actor_is_platform_admin, principal)
+    _authorize_change(authority, current="", requested=normalize_role(role))
+
+
 def _is_transactions_unsupported(exc: OperationFailure) -> bool:
     """True when the server refused the transaction because it is a standalone.
 

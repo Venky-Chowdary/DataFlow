@@ -245,3 +245,73 @@ export async function confirmEmailChange(challengeId: string, code: string): Pro
   });
   return { ok: Boolean(data.ok) };
 }
+
+/** What an invitation link offers — details only while the link is live. */
+export interface InviteDetails {
+  ok: boolean;
+  status: string;
+  email: string;
+  workspaceId: string;
+  workspaceName: string;
+  role: string;
+  inviterName: string;
+  inviterEmail: string;
+  expiresAt: string;
+  account: "new" | "existing" | "disabled" | "";
+  signedInAsInvitee: boolean;
+}
+
+/** Landing-page probe for an invitation link — never consumes it. */
+export async function inspectInvite(token: string): Promise<InviteDetails> {
+  const d = await authedCall("/invites/inspect", { token });
+  return {
+    ok: Boolean(d.ok),
+    status: String(d.status ?? "invalid"),
+    email: String(d.email ?? ""),
+    workspaceId: String(d.workspace_id ?? ""),
+    workspaceName: String(d.workspace_name ?? ""),
+    role: String(d.role ?? ""),
+    inviterName: String(d.inviter_name ?? ""),
+    inviterEmail: String(d.inviter_email ?? ""),
+    expiresAt: String(d.expires_at ?? ""),
+    account: (["new", "existing", "disabled"].includes(String(d.account)) ? d.account : "") as InviteDetails["account"],
+    signedInAsInvitee: Boolean(d.signed_in_as_invitee),
+  };
+}
+
+export interface AcceptedInvite {
+  workspaceId: string;
+  workspaceName: string;
+  role: string;
+  alreadyMember: boolean;
+  /** Set when accepting created the account: the browser session it opened. */
+  session: WorkspaceSession | null;
+}
+
+/** Accept: signed in as the invitee, or name + password for a new account. */
+export async function acceptInvite(input: { token: string; name?: string; password?: string }): Promise<AcceptedInvite> {
+  const d = await authedCall("/invites/accept", {
+    token: input.token,
+    name: input.name ?? "",
+    password: input.password ?? "",
+  });
+  const workspace = (d.workspace ?? {}) as Record<string, unknown>;
+  const user = (d.user ?? {}) as Record<string, unknown>;
+  const session: WorkspaceSession | null = typeof d.token === "string" && d.token && user.email
+    ? {
+        email: String(user.email),
+        name: String(user.name ?? ""),
+        role: String(user.role ?? "member"),
+        token: d.token,
+        expires_at: Number(d.expires_at ?? 0),
+        signed_in_at: Date.now(),
+      }
+    : null;
+  return {
+    workspaceId: String(workspace.id ?? ""),
+    workspaceName: String(workspace.name ?? ""),
+    role: String(d.role ?? ""),
+    alreadyMember: Boolean(d.already_member),
+    session,
+  };
+}

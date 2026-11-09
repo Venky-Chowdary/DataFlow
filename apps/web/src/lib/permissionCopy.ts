@@ -42,6 +42,7 @@ const PERMISSION_ROLE: Record<string, string> = {
   "schedule.authorize": "admin",
   "workspace.manage": "admin",
   "iam.manage": "admin",
+  "member.invite": "admin",
 };
 
 /**

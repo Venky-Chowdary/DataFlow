@@ -326,6 +326,10 @@ def _outbox_dead_link_status(row: dict[str, Any]) -> str | None:
         if status in ("used", "superseded", "invalid"):
             return "superseded"
         return None
+    if purpose == "team.invite":
+        from services import workspace_invites
+
+        return workspace_invites.outbox_skip_reason(key)
     if key.startswith("otp:"):
         parts = key.split(":")
         if len(parts) < 3:
@@ -353,21 +357,89 @@ def recover_mail_outbox() -> int:
         skip_reason=_outbox_dead_link_status)
 
 
-def _send(template: str, to: str, context: dict[str, Any], *, idempotency_key: str) -> None:
-    """Sync quota check (raises → caller maps to the 429 envelope) → render
-    → persist a sealed outbox row → serialized-lane delivery. Every auth
-    mail — signup code, reset link, email-change code, notices — shares the
-    same restart durability, atomic claim, and bounded retries. The quota
-    slot is consumed here on the request path (the user-facing 429 contract
-    stays synchronous); the row is flagged so the lane doesn't count twice.
-    Provider failures never reach the request — they mark the row and audit."""
-    consume_send_slot()  # raises EmailQuotaExceeded — caller maps to envelope
+def queue_mail(template: str, to: str, context: dict[str, Any], *,
+               idempotency_key: str, purpose: str = "",
+               quota: str = "request", once: bool = False,
+               reply_to: str = "") -> dict[str, Any] | None:
+    """The one path every product mail takes: render → persist a sealed
+    outbox row → serialized-lane delivery (restart durability, atomic claim,
+    bounded retries, ``mail.sent`` / ``mail.send_failed`` audit).
+
+    ``quota``: ``"request"`` consumes the send-quota slot here, so the caller
+    gets a synchronous :class:`EmailQuotaExceeded` (the user-facing 429/503
+    contract); ``"prepaid"`` means the caller already consumed it before its
+    own writes; ``"lane"`` leaves it to the lane, where a quota refusal
+    reschedules instead of failing the caller's request. ``once`` makes the
+    key unique in the outbox (``mail_outbox.enqueue_once``): a repeat call
+    returns ``None`` and queues nothing. Provider failures never reach the
+    request — they mark the row and audit."""
+    if quota not in ("request", "prepaid", "lane"):
+        raise ValueError(f"unknown quota mode {quota!r}")
+    if quota == "request":
+        consume_send_slot()  # raises EmailQuotaExceeded — caller maps to envelope
     mail = render_email(template, context)
-    row = mail_outbox.enqueue(
-        to=to, subject=mail.subject, text=mail.text, html=mail.html,
-        idempotency_key=idempotency_key, purpose=template,
-        quota_counted=True)
+    fields = dict(to=to, subject=mail.subject, text=mail.text, html=mail.html,
+                  idempotency_key=idempotency_key, purpose=purpose or template,
+                  quota_counted=quota != "lane", reply_to=reply_to)
+    if once:
+        row, created = mail_outbox.enqueue_once(**fields)
+        if not created:
+            return None
+    else:
+        row = mail_outbox.enqueue(**fields)
     _deliver_later(lambda: _deliver_outbox_row(row))
+    return row
+
+
+def _send(template: str, to: str, context: dict[str, Any], *, idempotency_key: str) -> None:
+    """Auth mail (codes, links, notices): request-path quota, see ``queue_mail``."""
+    queue_mail(template, to, context, idempotency_key=idempotency_key)
+
+
+def app_url() -> str:
+    """Public web origin for links in mail (``DATAWRAP_APP_URL``)."""
+    return (getenv_brand("APP_URL") or "https://www.datawrap.io").rstrip("/")
+
+
+def queue_welcome(*, email: str, name: str, workspace_name: str,
+                  joined: bool = False, role: str = "admin",
+                  ip: str = "") -> bool:
+    """Queue the branded welcome mail for a new account — at most once per
+    account (outbox key ``welcome:<canonical email>``), off the request path,
+    and never able to fail the signup that triggered it: the lane takes the
+    quota slot (a full quota reschedules), and any error here is logged and
+    audited, not raised. Returns True when a row was queued."""
+    try:
+        canonical = canonical_email(email)
+        row = queue_mail(
+            "welcome", email,
+            {"name": name or "there", "workspace_name": workspace_name,
+             "app_url": f"{app_url()}/", "joined": joined, "role": role},
+            idempotency_key=f"welcome:{canonical}", purpose="welcome",
+            quota="lane", once=True)
+    except Exception as exc:  # noqa: BLE001 — a welcome must never break signup
+        logger.warning("welcome mail could not be queued (%s)", type(exc).__name__)
+        try:
+            record_security_event("signup.welcome_failed", outcome="failed",
+                                  actor=email, reason_code=type(exc).__name__,
+                                  details={"ip": ip})
+        except Exception:  # noqa: BLE001
+            logger.error("welcome failure audit event failed", exc_info=True)
+        return False
+    if row is None:
+        return False
+    record_security_event("signup.welcome_queued", outcome="succeeded",
+                          actor=email, session_id=row["id"],
+                          details={"ip": ip, "joined": joined})
+    return True
+
+
+def check_new_password(password: str) -> None:
+    """Length + breach checks every path that sets a first password shares."""
+    if not (MIN_PASSWORD_LEN <= len(password or "") <= MAX_PASSWORD_LEN):
+        raise ApiError(400, "invalid_password",
+                       f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
+    _refuse_pwned_password(password)
 
 
 SALES_ADDRESS = "sales@datawrap.io"
@@ -395,13 +467,11 @@ def send_sales_lead(lead: dict[str, Any]) -> str:
         "lead_id": lead.get("lead_id"),
         "received": lead.get("created_at"),
     }
-    mail = render_email("sales_lead_internal", context)
-    row = mail_outbox.enqueue(
-        to=SALES_ADDRESS, subject=mail.subject, text=mail.text, html=mail.html,
+    row = queue_mail(
+        "sales_lead_internal", SALES_ADDRESS, context,
         idempotency_key=f"sales-lead:{lead['lead_id']}",
-        purpose="sales_lead_internal",
-        reply_to=str(lead.get("email") or ""))
-    _deliver_later(lambda: _deliver_outbox_row(row))
+        quota="lane", reply_to=str(lead.get("email") or ""))
+    assert row is not None  # not a once-only send
     return row["id"]
 
 
@@ -453,11 +523,8 @@ def request_signup(
         raise ApiError(429, "signup_rate_limited",
                        "too many attempts — try again shortly",
                        retry_after_sec=retry)
-    if not (MIN_PASSWORD_LEN <= len(password or "") <= MAX_PASSWORD_LEN):
-        # Validation is fine to surface — it reveals nothing about the account.
-        raise ApiError(400, "invalid_password",
-                       f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
-    _refuse_pwned_password(password)
+    # Validation is fine to surface — it reveals nothing about the account.
+    check_new_password(password)
     verifier_bump, verifier_reasons = _check_address_deliverable(
         normalized, ip=ip)
     role_flagged = role_assessment(normalized) == "flagged"
@@ -666,6 +733,8 @@ def verify_email(
     )
     record_security_event("session.created", outcome="succeeded",
                           actor=user["email"], session_id=session["jti"])
+    queue_welcome(email=user["email"], name=user.get("name") or "",
+                  workspace_name=workspace.name, ip=ip)
     return {
         "user": user,
         "org": org,
@@ -824,7 +893,7 @@ def request_password_reset(*, email: str, ip: str = "",
     account_email = user["email"]
     token, stored = password_reset_store.issue(
         email=account_email, ip=ip, ua=ua)
-    base = (getenv_brand("APP_URL") or "https://www.datawrap.io").rstrip("/")
+    base = app_url()
     # The token rides the URL fragment, not the query string — it can never
     # reach a server, CDN or proxy access log or a Referer header.
     reset_url = f"{base}/reset-password#token={token}"
@@ -861,10 +930,7 @@ def inspect_reset_token(*, token: str) -> dict[str, Any]:
 def confirm_password_reset(*, token: str,
                            new_password: str, ip: str = "") -> dict[str, Any]:
     """Consume a reset-link token, set the argon2id hash, kill sessions."""
-    if not (MIN_PASSWORD_LEN <= len(new_password or "") <= MAX_PASSWORD_LEN):
-        raise ApiError(400, "invalid_password",
-                       f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
-    _refuse_pwned_password(new_password)
+    check_new_password(new_password)
     status, doc = password_reset_store.consume(token)
     if status != "ok" or doc is None:
         # 'used' also covers links superseded by a newer request.

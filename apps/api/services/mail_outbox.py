@@ -78,6 +78,11 @@ def _database():
         try:
             db[COLLECTION].create_index("status")
             db[COLLECTION].create_index("expires_at", expireAfterSeconds=0)
+            # enqueue_once: at most one row per key among rows that asked
+            # for it — the database, not a read-then-write, decides a race.
+            db[COLLECTION].create_index(
+                "idempotency_key", unique=True, name="idempotency_once_unique",
+                partialFilterExpression={"once": True})
         except Exception:
             logger.error("mail_outbox: Mongo index setup failed; refusing "
                          "the file fallback (queue state would split "
@@ -112,15 +117,10 @@ def _expiry_iso() -> str:
     return (datetime.now(UTC) + _KEEP_SENT_FOR).isoformat()
 
 
-def enqueue(*, to: str, subject: str, text: str, html: str,
-            idempotency_key: str, purpose: str,
-            quota_counted: bool = False,
-            reply_to: str = "") -> dict[str, Any]:
-    """Persist a queued outbox row and return it. ``quota_counted`` marks
-    rows whose send-quota slot was already consumed on the request path
-    (signup/OTP mails keep the synchronous 429), so the lane doesn't
-    count the same send twice."""
-    row = {
+def _new_row(*, to: str, subject: str, text: str, html: str,
+             idempotency_key: str, purpose: str, quota_counted: bool,
+             reply_to: str) -> dict[str, Any]:
+    return {
         "id": f"mo_{uuid.uuid4().hex}",
         "purpose": purpose,
         "to": to,
@@ -136,6 +136,19 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
         "created_at": _now_iso(),
         "expires_at": _expiry_iso(),
     }
+
+
+def enqueue(*, to: str, subject: str, text: str, html: str,
+            idempotency_key: str, purpose: str,
+            quota_counted: bool = False,
+            reply_to: str = "") -> dict[str, Any]:
+    """Persist a queued outbox row and return it. ``quota_counted`` marks
+    rows whose send-quota slot was already consumed on the request path
+    (signup/OTP mails keep the synchronous 429), so the lane doesn't
+    count the same send twice."""
+    row = _new_row(to=to, subject=subject, text=text, html=html,
+                   idempotency_key=idempotency_key, purpose=purpose,
+                   quota_counted=quota_counted, reply_to=reply_to)
     db = _database()
     if db is not None:
         # BSON datetime — the expires_at TTL index only fires on dates.
@@ -149,6 +162,46 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
         _prune_expired(rows, _now_iso())
         rows[row["id"]] = row
     return row
+
+
+def enqueue_once(*, to: str, subject: str, text: str, html: str,
+                 idempotency_key: str, purpose: str,
+                 quota_counted: bool = False,
+                 reply_to: str = "") -> tuple[dict[str, Any], bool]:
+    """``enqueue`` for mail that must exist at most once per key (welcome).
+
+    Returns ``(row, created)``. A second call with the same key — a retried
+    request, a second replica — returns the first row and ``created=False``
+    instead of queueing a duplicate. Mongo decides with a partial unique
+    index; the file tier inside its exclusive lock. The guarantee lasts as
+    long as the row (``_KEEP_SENT_FOR``); callers that need a longer window
+    must also be once-only by construction."""
+    row = {**_new_row(to=to, subject=subject, text=text, html=html,
+                      idempotency_key=idempotency_key, purpose=purpose,
+                      quota_counted=quota_counted, reply_to=reply_to),
+           "once": True}
+    db = _database()
+    if db is not None:
+        from pymongo.errors import DuplicateKeyError
+
+        try:
+            db[COLLECTION].insert_one(
+                {**row, "_id": row["id"],
+                 "expires_at": datetime.now(UTC) + _KEEP_SENT_FOR})
+        except DuplicateKeyError:
+            existing = db[COLLECTION].find_one(
+                {"idempotency_key": idempotency_key, "once": True}) or {}
+            return {k: v for k, v in existing.items() if k != "_id"}, False
+        return row, True
+
+    with json_doc_transaction(_path(), {"rows": {}}) as doc:
+        rows = doc.setdefault("rows", {})
+        _prune_expired(rows, _now_iso())
+        for existing in rows.values():
+            if existing.get("once") and existing.get("idempotency_key") == idempotency_key:
+                return dict(existing), False
+        rows[row["id"]] = row
+    return row, True
 
 
 def mark(row_id: str, status: str, *, claim_token: str | None = None,

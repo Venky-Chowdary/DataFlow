@@ -47,3 +47,10 @@ test("the permission is recovered from the gate's own wording", () => {
   assert.equal(permissionFromRefusal("Permission denied: schedule.manage", "job.run"), "job.run");
   assert.equal(permissionFromRefusal("Internal server error", ""), "");
 });
+
+
+test("member.invite refusals name the admin role, not editor", () => {
+  const sentence = refusalSentence("member.invite", "editor");
+  assert.match(sentence, /admin role/);
+  assert.doesNotMatch(sentence, /editor role/);
+});

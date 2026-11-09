@@ -307,8 +307,11 @@ def create_signup_user(
     canonical: str,
     signup_ip: str = "",
     signup_risk: float = 0.0,
+    created_by: str = "signup",
 ) -> dict[str, Any]:
-    """Insert the verified account after a successful OTP challenge.
+    """Insert the verified account after a successful OTP challenge (or an
+    accepted workspace invitation — the emailed link proved the inbox the
+    same way; ``created_by`` names which).
 
     The caller owns the hash (argon2id from the pending row) — this path never
     re-hashes. Verified at insert: a user row only exists after the code proved
@@ -330,7 +333,7 @@ def create_signup_user(
         "signup_risk": float(signup_risk),
         "must_change_password": False,
         "created_at": _now(),
-        "created_by": "signup",
+        "created_by": created_by or "signup",
         "updated_at": _now(),
         "last_login_at": None,
     }

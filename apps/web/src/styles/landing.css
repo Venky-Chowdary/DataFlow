@@ -13844,3 +13844,37 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-status-table thead th { background: rgba(15, 23, 42, .04); font-weight: 600; }
 .lp-status-table tbody tr + tr > * { border-top: 1px solid rgba(15, 23, 42, .08); }
 @media (max-width: 640px) { .lp-status-row { flex-direction: column; align-items: flex-start; } }
+
+/* Workspace invitation landing: receipt-style facts (workspace, role, expiry). */
+.lp-invite-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--df-border);
+  border-left: 3px solid var(--df-brand-arrow);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-surface-subtle);
+}
+
+.lp-invite-facts > div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.lp-invite-facts dt {
+  font-family: var(--df-font-mono, ui-monospace, monospace);
+  font-size: var(--df-fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--df-text-secondary);
+}
+
+.lp-invite-facts dd {
+  margin: 0;
+  font-size: 14px;
+  color: var(--df-text-primary);
+  overflow-wrap: anywhere;
+}
