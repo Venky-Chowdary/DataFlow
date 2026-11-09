@@ -42,3 +42,19 @@ export function nextListSelection(
   if (selectedId && filteredIds.includes(selectedId)) return selectedId;
   return filteredIds[0] ?? null;
 }
+
+/** Where the selected job's full record read stands. List rows are slim — no reconciliation, preflight, or proof. */
+export type JobDetailRead = "pending" | "read" | "failed";
+
+/** One retry before a failed job-record read is reported. */
+export const JOB_DETAIL_RETRY_MS = 1500;
+
+/**
+ * Status for an evidence panel the shown job does not carry. Absence only
+ * means "Not captured" once the full record was read; before that the list
+ * row simply never carried it (QA: Gate-8 / Validate "Not captured" until Refresh).
+ */
+export function absentEvidenceLabel(read: JobDetailRead): string {
+  if (read === "read") return "Not captured";
+  return read === "pending" ? "Loading…" : "Detail unavailable — Refresh";
+}
