@@ -3732,6 +3732,122 @@ def _sqlite_temporal_precision_over_text(inferred: str, values: Sequence[Any]) -
     return f"{token}({max(digits, 7)})" if digits else inferred
 
 
+def sqlite_profile_columns(cur: Any, table: str, table_q: str, info_rows: Sequence[Any]) -> list[dict[str, Any]]:
+    """Typed columns of one SQLite table: declared affinity first, samples refine.
+
+    The single SQLite column-type rule. The database connector and the SQLite
+    *upload* profile both call it, so Validate and Execute read one source type.
+    """
+    col_names: list[str] = [row[1] for row in info_rows]
+    declared_types: dict[str, str] = {row[1]: (row[2] or "").upper() for row in info_rows}
+
+    # Sample up to 100 rows for value-based inference
+    samples: dict[str, list[str]] = {name: [] for name in col_names}
+    try:
+        cur.execute(f"SELECT * FROM {table_q} LIMIT 100")  # nosec B608
+        for row in cur.fetchall():
+            for i, name in enumerate(col_names):
+                value = row[i]
+                if isinstance(value, bytes):
+                    # keep BLOB as-is for BINARY classification
+                    samples[name].append(value)
+                else:
+                    samples[name].append(str(value) if value is not None else "")
+    except Exception:
+        logger.warning("SQLite sample read failed for %s", table, exc_info=True)
+
+    # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+    pragma_by_name = {str(row[1]): row for row in info_rows if row and row[1]}
+
+    columns: list[dict[str, Any]] = []
+    for name in col_names:
+        declared = declared_types.get(name, "")
+        declared_base = declared.split("(", 1)[0].strip().upper()
+        values = samples.get(name, [])
+        semantic_role = None
+        if declared == "BLOB" or any(isinstance(v, bytes) for v in values):
+            inferred = "BINARY"
+        else:
+            from services.schema_inference import infer_column
+
+            str_values = [v for v in values if not isinstance(v, bytes)]
+            intel = infer_column(str_values, field_name=name)
+            inferred = str(intel["logical_type"])
+            semantic_role = intel.get("semantic_role")
+            # Prefer declared affinity over sample narrowing. SQLite stores
+            # NUMERIC(38,15) values as ints when they have no fraction, and
+            # sample inference alone would report INTEGER — then SCD2/upsert
+            # re-runs falsely block DECIMAL → INTEGER as lossy.
+            if declared_base in {"NUMERIC", "DECIMAL", "NUMBER"} or declared.startswith(
+                ("NUMERIC", "DECIMAL", "NUMBER")
+            ):
+                # Keep the declared (p,s) — SQLite records the DDL token
+                # verbatim, and dropping it to bare DECIMAL forces
+                # downstream invent to guess a precision from samples.
+                from services.type_system import parse_numeric_precision_scale
+
+                p, s = parse_numeric_precision_scale(declared)
+                if p is not None:
+                    inferred = f"DECIMAL({p},{s if s is not None else 0})"
+                else:
+                    inferred = "DECIMAL"
+            elif declared_base in {"INTEGER", "INT", "BIGINT"}:
+                # SQLite INTEGER affinity is a signed int64 storage class
+                # (not PG/MySQL INT32). Stamping INTEGER invents INT32 on
+                # those destinations and rejects/quarantines values >
+                # 2147483647 (audit ITEM 1). Keep BOOLEAN/temporal when
+                # samples prove them; otherwise never-narrower BIGINT.
+                inf_u = str(inferred or "").strip().upper()
+                if inf_u in {"BOOLEAN", "BOOL"}:
+                    inferred = "BOOLEAN"
+                elif inf_u in {
+                    "DATE",
+                    "DATETIME",
+                    "TIMESTAMP",
+                    "TIME",
+                    "TIMESTAMPTZ",
+                }:
+                    pass
+                else:
+                    inferred = "BIGINT"
+            elif declared_base in {"REAL", "FLOAT", "DOUBLE"}:
+                # REAL affinity holds IEEE-754 float64 values in SQLite.
+                inf_u = str(inferred or "").strip().upper()
+                if inf_u in {"DECIMAL", "NUMERIC", "NUMBER"}:
+                    inferred = "DECIMAL"
+                else:
+                    inferred = "DOUBLE PRECISION"
+            elif declared_base in {"TEXT", "VARCHAR", "CHAR", "CLOB", "STRING"}:
+                inferred = _sqlite_temporal_precision_over_text(
+                    time_of_day_over_date(_sqlite_text_over_numeric_samples(
+                        declared, _sqlite_declared_over_samples(declared, inferred),
+                    ), str_values),
+                    str_values,
+                )
+            else:
+                inferred = _sqlite_declared_over_samples(declared, inferred)
+
+        prow = pragma_by_name.get(name)
+        notnull = int(prow[3] or 0) if prow is not None else 0
+        dflt = prow[4] if prow is not None else None
+        native_type = str(prow[2] or "").strip() if prow is not None else ""
+        col_out: dict[str, Any] = {
+            "name": name,
+            "inferred_type": inferred,
+            "declared_type": native_type,
+            "native_type": native_type,
+            "sample_refined": any(bool(value) for value in values),
+            # Property 6 — never invent nullable=True when PRAGMA says NOT NULL.
+            "nullable": notnull == 0,
+        }
+        if dflt is not None and str(dflt).strip() != "":
+            col_out["default"] = str(dflt)
+        if semantic_role:
+            col_out["semantic_role"] = semantic_role
+        columns.append(col_out)
+    return columns
+
+
 def _introspect_sqlite(
     *,
     database: str = "",
@@ -3788,113 +3904,7 @@ def _introspect_sqlite(
             if not info_rows:
                 return {"ok": False, "error": f"No columns for table `{table}`", "columns": [], "tables": []}
 
-            col_names: list[str] = [row[1] for row in info_rows]
-            declared_types: dict[str, str] = {row[1]: (row[2] or "").upper() for row in info_rows}
-
-            # Sample up to 100 rows for value-based inference
-            samples: dict[str, list[str]] = {name: [] for name in col_names}
-            try:
-                cur.execute(f"SELECT * FROM {table_q} LIMIT 100")  # nosec B608
-                for row in cur.fetchall():
-                    for i, name in enumerate(col_names):
-                        value = row[i]
-                        if isinstance(value, bytes):
-                            # keep BLOB as-is for BINARY classification
-                            samples[name].append(value)
-                        else:
-                            samples[name].append(str(value) if value is not None else "")
-            except Exception:
-                logger.warning("SQLite sample read failed for %s", table, exc_info=True)
-
-            # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
-            pragma_by_name = {str(row[1]): row for row in info_rows if row and row[1]}
-
-            columns: list[dict[str, Any]] = []
-            for name in col_names:
-                declared = declared_types.get(name, "")
-                declared_base = declared.split("(", 1)[0].strip().upper()
-                values = samples.get(name, [])
-                semantic_role = None
-                if declared == "BLOB" or any(isinstance(v, bytes) for v in values):
-                    inferred = "BINARY"
-                else:
-                    from services.schema_inference import infer_column
-
-                    str_values = [v for v in values if not isinstance(v, bytes)]
-                    intel = infer_column(str_values, field_name=name)
-                    inferred = str(intel["logical_type"])
-                    semantic_role = intel.get("semantic_role")
-                    # Prefer declared affinity over sample narrowing. SQLite stores
-                    # NUMERIC(38,15) values as ints when they have no fraction, and
-                    # sample inference alone would report INTEGER — then SCD2/upsert
-                    # re-runs falsely block DECIMAL → INTEGER as lossy.
-                    if declared_base in {"NUMERIC", "DECIMAL", "NUMBER"} or declared.startswith(
-                        ("NUMERIC", "DECIMAL", "NUMBER")
-                    ):
-                        # Keep the declared (p,s) — SQLite records the DDL token
-                        # verbatim, and dropping it to bare DECIMAL forces
-                        # downstream invent to guess a precision from samples.
-                        from services.type_system import parse_numeric_precision_scale
-
-                        p, s = parse_numeric_precision_scale(declared)
-                        if p is not None:
-                            inferred = f"DECIMAL({p},{s if s is not None else 0})"
-                        else:
-                            inferred = "DECIMAL"
-                    elif declared_base in {"INTEGER", "INT", "BIGINT"}:
-                        # SQLite INTEGER affinity is a signed int64 storage class
-                        # (not PG/MySQL INT32). Stamping INTEGER invents INT32 on
-                        # those destinations and rejects/quarantines values >
-                        # 2147483647 (audit ITEM 1). Keep BOOLEAN/temporal when
-                        # samples prove them; otherwise never-narrower BIGINT.
-                        inf_u = str(inferred or "").strip().upper()
-                        if inf_u in {"BOOLEAN", "BOOL"}:
-                            inferred = "BOOLEAN"
-                        elif inf_u in {
-                            "DATE",
-                            "DATETIME",
-                            "TIMESTAMP",
-                            "TIME",
-                            "TIMESTAMPTZ",
-                        }:
-                            pass
-                        else:
-                            inferred = "BIGINT"
-                    elif declared_base in {"REAL", "FLOAT", "DOUBLE"}:
-                        # REAL affinity holds IEEE-754 float64 values in SQLite.
-                        inf_u = str(inferred or "").strip().upper()
-                        if inf_u in {"DECIMAL", "NUMERIC", "NUMBER"}:
-                            inferred = "DECIMAL"
-                        else:
-                            inferred = "DOUBLE PRECISION"
-                    elif declared_base in {"TEXT", "VARCHAR", "CHAR", "CLOB", "STRING"}:
-                        inferred = _sqlite_temporal_precision_over_text(
-                            time_of_day_over_date(_sqlite_text_over_numeric_samples(
-                                declared, _sqlite_declared_over_samples(declared, inferred),
-                            ), str_values),
-                            str_values,
-                        )
-                    else:
-                        inferred = _sqlite_declared_over_samples(declared, inferred)
-
-                prow = pragma_by_name.get(name)
-                notnull = int(prow[3] or 0) if prow is not None else 0
-                dflt = prow[4] if prow is not None else None
-                native_type = str(prow[2] or "").strip() if prow is not None else ""
-                col_out: dict[str, Any] = {
-                    "name": name,
-                    "inferred_type": inferred,
-                    "declared_type": native_type,
-                    "native_type": native_type,
-                    "sample_refined": any(bool(value) for value in values),
-                    # Property 6 — never invent nullable=True when PRAGMA says NOT NULL.
-                    "nullable": notnull == 0,
-                }
-                if dflt is not None and str(dflt).strip() != "":
-                    col_out["default"] = str(dflt)
-                if semantic_role:
-                    col_out["semantic_role"] = semantic_role
-                columns.append(col_out)
+            columns = sqlite_profile_columns(cur, table, table_q, info_rows)
 
             apply_identity_probe("sqlite", cur, "", table, columns)
             unique_meta = _sqlite_fetch_unique_keys(cur, table_q, info_rows)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import csv
 import dataclasses
 import gzip
 import io
@@ -1204,12 +1203,21 @@ class FileParser:
                 cur = conn.execute(f"SELECT * FROM {quoted} LIMIT ?", (max_rows,))
                 columns = [str(d[0]) for d in cur.description or ()]
                 records = [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+                # Types come from the declared affinity — the rule Execute reads
+                # the staged copy with — never from sample digits alone (a REAL
+                # column of 0.5–4.0 is DOUBLE, not a sample-guessed DECIMAL(2,1)).
+                from services.schema_introspect import sqlite_profile_columns
+
+                pcur = conn.cursor()
+                info_rows = pcur.execute(f"PRAGMA table_info({quoted})").fetchall()
+                column_meta = sqlite_profile_columns(pcur, table, quoted, info_rows)
         except ValueError as exc:
             return ParseResult(
                 success=False, data=[], columns=[], row_count=0, error=str(exc), file_type="sqlite"
             )
         return ParseResult(
-            success=True, data=records, columns=columns, row_count=total, file_type="sqlite"
+            success=True, data=records, columns=columns, row_count=total, file_type="sqlite",
+            column_meta=column_meta or None,
         )
 
     @staticmethod

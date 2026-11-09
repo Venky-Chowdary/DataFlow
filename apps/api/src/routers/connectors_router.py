@@ -2991,6 +2991,17 @@ def profile_file_upload(
         schema = merge_profiler_schema(schema, profile["schema"])
     except Exception:
         profile = None
+    if result.file_type == "sqlite" and result.column_meta:
+        # A declared schema (SQLite affinity) is the type Execute reads the
+        # staged source with; sample digits never override it (QA1 S12).
+        schema = {
+            **schema,
+            **{
+                str(c["name"]): str(c["inferred_type"])
+                for c in result.column_meta
+                if isinstance(c, dict) and c.get("name") and c.get("inferred_type")
+            },
+        }
     sample_cap = 100
     from services.file_parser import json_safe_cell
 
