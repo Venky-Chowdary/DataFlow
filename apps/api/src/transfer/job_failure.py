@@ -623,6 +623,15 @@ def _fail_runtime_job(
     for key, value in capture.items():
         if not str(prev.get(key) or "").strip():
             status_kwargs.setdefault(key, value)
+    held_out_ledger = getattr(exc, "row_accounting", None)
+    if isinstance(held_out_ledger, dict):
+        # The run counted its read and held every row out; the job keeps that
+        # ledger instead of an unmeasured rebuild that reads "held out 0".
+        error_details["row_accounting"] = held_out_ledger
+        status_kwargs["row_accounting"] = held_out_ledger
+        status_kwargs.setdefault(
+            "rejected_rows", int(held_out_ledger.get("rows_quarantined") or 0)
+        )
     if stamped_details:
         from services.job_document_budget import slim_rejected_details
 
