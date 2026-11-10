@@ -9,7 +9,7 @@ from typing import Any
 from services import oidc_client
 from services.brand_env import getenv_brand
 from services import integrations_store
-from services.platform_config import public_url
+from services.platform_config import api_service_url
 from services.rbac import all_permissions
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ def get_mcp_oauth_config() -> McpOAuthConfig:
         if oidc.get("enabled"):
             issuer = str(oidc.get("issuer") or "").strip()
 
-    base_url = public_url().rstrip("/")
+    base_url = api_service_url().rstrip("/")
     audience = (getenv_brand("MCP_OAUTH_AUDIENCE", "") or "").strip()
     if not audience:
         audience = f"{base_url}/api/v1/mcp"

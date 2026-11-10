@@ -143,3 +143,22 @@ def test_engine_failure_notification_carries_no_api_host(railway_api_service, mo
     (payload,) = sent
     assert INTERNAL not in payload["text"] and "/api/v1/" not in payload["text"]
     assert "https://app.example/jobs/job-9" in payload["text"]
+
+
+def test_mcp_oauth_audience_keeps_its_deployed_resolution(monkeypatch):
+    """D339 moved only user-facing links. The MCP OAuth audience is a value
+    clients and the identity provider already hold: it stays on the API
+    service's own host unless DATAWRAP_MCP_OAUTH_AUDIENCE says otherwise."""
+    from services import mcp_oauth, platform_config
+
+    for name in ("DATAWRAP_PUBLIC_URL", "DATAFLOW_PUBLIC_URL", "DATAWRAP_MCP_OAUTH_AUDIENCE",
+                 "DATAFLOW_MCP_OAUTH_AUDIENCE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "api-internal.example")
+    monkeypatch.setenv("DATAWRAP_WEB_URL", "https://app.example")
+    assert platform_config.api_service_url() == "https://api-internal.example"
+    assert "api-internal.example" not in platform_config.web_url()
+    assert mcp_oauth.get_mcp_oauth_config().audience == "https://api-internal.example/api/v1/mcp"
+    monkeypatch.setenv("DATAWRAP_MCP_OAUTH_AUDIENCE", "https://mcp.example/api/v1/mcp")
+    assert mcp_oauth.get_mcp_oauth_config().audience == "https://mcp.example/api/v1/mcp"

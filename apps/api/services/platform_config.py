@@ -353,6 +353,25 @@ def public_url() -> str:
     return configured_origin()
 
 
+def api_service_url() -> str:
+    """This API service's own base URL, for protocol metadata only (MCP OAuth).
+
+    Kept on the resolution MCP OAuth was deployed with: ``DATAWRAP_PUBLIC_URL``,
+    else this service's ``RAILWAY_PUBLIC_DOMAIN``. The audience is a value MCP
+    clients and the identity provider already hold, so it must not move with
+    the user-facing origin (D339 changed only :func:`public_url`); set
+    ``DATAWRAP_MCP_OAUTH_AUDIENCE`` to change it on purpose.
+    """
+    explicit = getenv_brand("PUBLIC_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    if is_railway():
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+        if domain:
+            return f"https://{domain}"
+    return ""
+
+
 def email_provider_config() -> dict[str, Any]:
     """Managed transactional email provider config for SaaS notifications.
 
