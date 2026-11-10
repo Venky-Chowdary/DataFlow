@@ -22,8 +22,19 @@ router = APIRouter(prefix="/copilot", tags=["AI Copilot"])
 
 
 def _confirm_failure(action: str, exc: BaseException) -> str:
-    """Plain Confirm failure text; the driver/host detail goes to the log only."""
+    """Plain Confirm failure text; the driver/host detail goes to the log only.
+
+    A connector-store failure carries its own credential-masked, operator-facing
+    reason, so it is named instead of pointing at the API log (D292).
+    """
     _logger.exception("Pilot confirm failed to %s: %s", action, exc)
+    from services.connector_store import ConnectorStoreError
+
+    if isinstance(exc, ConnectorStoreError):
+        return (
+            f"Failed to {action}. Nothing was changed and the approval was released, "
+            f"so you can press Confirm again. Reason: {exc}"
+        )
     return (
         f"Failed to {action}. Nothing was changed and the approval was released, "
         "so you can press Confirm again. The cause is in the API log."

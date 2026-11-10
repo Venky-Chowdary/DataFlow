@@ -1129,10 +1129,18 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
                 str(merged.get("type") or raw.get("type") or ""),
                 merged.get("role"),
             )
-            if _TLS_PLAN_FIELDS & set(data):
-                plain = SavedConnector.from_dict({**merged, "id": connector_id})
-                validate_merged_ssl_mode(data, {**merged, "connection_string": plain.connection_string})
+            # ``merged`` mixes stored ciphertext with the edit's plaintext (the
+            # Confirm route re-sends the decrypted password). Encrypt first so
+            # every secret is ciphertext, then decrypt only the DSN the TLS check
+            # reads: decrypting the mix made production's vault refuse the
+            # plaintext and every secret-bearing edit fail (D292).
             doc = _encrypt_connector_doc(merged)
+            if _TLS_PLAN_FIELDS & set(data):
+                plain_dsn = decrypt_secret(
+                    str(doc.get("connection_string") or ""),
+                    tenant_id=tenant_id_from_workspace(doc.get("workspace_id") or ""),
+                )
+                validate_merged_ssl_mode(data, {**doc, "connection_string": plain_dsn})
             coll.replace_one(query, doc)
             try:
                 return _doc_to_connector(doc)
