@@ -1036,12 +1036,14 @@ def plan_transfer(
 
     from src.transfer.connector_capabilities import (
         destination_only_source_refusal,
-        source_only_destination_refusal,
+        destination_refusal,
     )
 
     # D139: a source-only connector is not a destination; say so before any gate.
-    not_a_destination = source_only_destination_refusal(
-        str(dst_conn.get("type") or dst_conn.get("format") or "")
+    # D276: nor is SQLite on the hosted cloud (the file lives on one server).
+    not_a_destination = destination_refusal(
+        str(dst_conn.get("type") or dst_conn.get("format") or ""),
+        str(dst_conn.get("connection_string") or ""),
     )
     if not_a_destination:
         return _tool_result(tool, success=False, error=not_a_destination)

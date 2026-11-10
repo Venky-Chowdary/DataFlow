@@ -148,6 +148,15 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
 
     src_fmt = _resolve(source_format)
     dst_fmt = _resolve(dest_format)
+    if (dest_kind or "").strip().lower() == "database":
+        # D276: SQLite is not a destination on the hosted cloud (env reads only).
+        try:
+            from services.local_file_policy import sqlite_destination_refusal
+        except ImportError:  # loaded standalone (test_registry.py)
+            sqlite_destination_refusal = None  # type: ignore[assignment]
+        refusal = sqlite_destination_refusal(dst_fmt) if sqlite_destination_refusal else None
+        if refusal:
+            return False, refusal
 
     # Source-only SaaS connectors can feed any live destination.
     if source_kind == "database" and _source_only_supported(src_fmt):
@@ -349,12 +358,18 @@ def get_capabilities() -> dict:
             "status": "live",
         }
 
+    from services.local_file_policy import (
+        SQLITE_DESTINATION_UNAVAILABLE_LABEL,
+        sqlite_destination_refusal,
+    )
+
     combos: list[dict] = []
     seen_combos: set[tuple[str, str, str, str]] = set()
+    sqlite_dest_refused = sqlite_destination_refusal("sqlite") is not None
 
     def _add(sk: str, sf: str, dk: str, df: str, op: str) -> None:
         key = (sk, sf.lower(), dk, df.lower())
-        if key in seen_combos:
+        if key in seen_combos or (sqlite_dest_refused and dk == "database" and key[3] == "sqlite"):
             return
         seen_combos.add(key)
         combos.append(_combo(sk, sf, dk, df, op))
@@ -379,6 +394,9 @@ def get_capabilities() -> dict:
 
     source_dbs = []
     dest_dbs = []
+    # D276: a destination this host refuses stays listed, disabled, with why —
+    # the picker shows "Not available on cloud" instead of silently dropping it.
+    dest_unavailable: list[dict[str, str]] = []
     for cid in live_catalog:
         driver = resolve_driver_type(cid)
         if driver in _FILE_FORMATS:
@@ -388,7 +406,13 @@ def get_capabilities() -> dict:
         if source_ready(caps) or _source_only_ready(caps):
             source_dbs.append(cid)
         if dest_ready(caps):
-            dest_dbs.append(cid)
+            refusal = sqlite_destination_refusal(cid)
+            if refusal:
+                dest_unavailable.append(
+                    {"id": cid, "reason": SQLITE_DESTINATION_UNAVAILABLE_LABEL, "message": refusal}
+                )
+            else:
+                dest_dbs.append(cid)
 
     drivers = transfer_live_driver_types()
     try:
@@ -429,6 +453,7 @@ def get_capabilities() -> dict:
         "live_combinations": combos,
         "source_formats": LIVE_SOURCE_FORMATS,
         "destination_databases": dest_dbs,
+        "destination_databases_unavailable": dest_unavailable,
         "destination_file_formats": LIVE_DEST_FILE_FORMATS,
         "source_databases": source_dbs,
         "transfer_live_drivers": drivers,

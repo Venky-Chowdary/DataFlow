@@ -3550,7 +3550,7 @@ class DataPilotTools:
             except ImportError:
                 gate_ids = []
 
-        from src.transfer.connector_capabilities import source_only_destination_refusal
+        from src.transfer.connector_capabilities import destination_refusal
 
         # D139: the generic sketch listed every gate for a destination that has
         # no writer. Name the saved connector's engine, or the engine itself.
@@ -3564,7 +3564,7 @@ class DataPilotTools:
                     break
         except Exception:  # noqa: BLE001 - the store is a hint here, not a gate
             pass
-        not_a_destination = source_only_destination_refusal(dest_type)
+        not_a_destination = destination_refusal(dest_type)  # D139 source-only, D276 SQLite
         if not_a_destination:
             return ToolResult(
                 name="plan_transfer_route", success=False, output=None, error=not_a_destination

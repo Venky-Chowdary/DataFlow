@@ -358,6 +358,18 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
     # credentials: authorize each against its own workspace first (404).
     assert_connector_accessible(http_request, body.connector_id)
     assert_connector_accessible(http_request, body.source_connector_id)
+    from services.local_file_policy import endpoint_sqlite_destination_refusal
+
+    # D276: SQLite on the hosted cloud is refused before any gate dials it.
+    refusal = endpoint_sqlite_destination_refusal(
+        {
+            "format": body.dest_type,
+            "connector_id": body.connector_id,
+            "connection_string": body.dest_connection_string,
+        }
+    )
+    if refusal:
+        raise HTTPException(status_code=422, detail=refusal)
     _apply_callable_intake(body)
     if not body.columns:
         raise HTTPException(status_code=400, detail="No columns provided for preflight")

@@ -1460,6 +1460,14 @@ def write_destination_database(
     )
 
     cfg = resolve_connector_config(endpoint)
+    from services.local_file_policy import sqlite_destination_refusal
+
+    # D276: the last door before a server-local SQLite file (replay, query export…).
+    refusal = sqlite_destination_refusal(
+        str(cfg.get("type") or endpoint.format or ""), str(cfg.get("connection_string") or "")
+    )
+    if refusal:
+        raise ValueError(refusal)
     from services.procedure_destination import (
         DEST_ROW_MODES,
         assert_dest_procedure_sync_allowed,

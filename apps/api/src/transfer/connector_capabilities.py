@@ -1205,6 +1205,19 @@ def source_only_destination_refusal(dest_type: str) -> str | None:
     )
 
 
+def destination_refusal(dest_type: str, connection_string: str = "") -> str | None:
+    """Why this connector type cannot be a destination *on this host*, or ``None``.
+
+    The source-only refusal (D139) plus the hosted-cloud SQLite policy (D276):
+    every planning surface asks this one question before any gate runs.
+    """
+    from services.local_file_policy import sqlite_destination_refusal
+
+    return sqlite_destination_refusal(dest_type, connection_string) or (
+        source_only_destination_refusal(dest_type)
+    )
+
+
 def destination_only_source_refusal(source_type: str) -> str | None:
     """The one sentence for "this connector cannot be a source" (D273).
 

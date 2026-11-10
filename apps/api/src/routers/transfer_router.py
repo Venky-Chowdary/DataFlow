@@ -235,6 +235,32 @@ def _assert_endpoint_connectors(
         assert_connector_accessible(request, _connector_id_of(endpoint), write=True)
 
 
+def _refuse_unavailable_destination(endpoint: Any, workspace_id: str | None) -> None:
+    """D276: 422 for a destination this host refuses (SQLite on the hosted cloud).
+
+    Before any job exists or any row is read; the engine refuses the same run
+    again before it writes, for every path that does not come through here.
+    """
+    from services.local_file_policy import endpoint_sqlite_destination_refusal
+
+    refusal = endpoint_sqlite_destination_refusal(endpoint, workspace_id)
+    if refusal:
+        raise HTTPException(status_code=422, detail=refusal)
+
+
+def _refuse_unavailable_plan_destination(plan_id: str) -> None:
+    """:func:`_refuse_unavailable_destination` for a saved plan's destination (Validate)."""
+    from services.local_file_policy import sqlite_destination_allowed
+
+    if sqlite_destination_allowed():
+        return
+    from services.transfer_plan_store import get_plan
+
+    plan = get_plan(plan_id)
+    if plan is not None:
+        _refuse_unavailable_destination(plan.destination, None)
+
+
 class EndpointDTO(BaseModel):
     # Allow Studio flat keys (schema_types, table_exists, …) so EndpointConfig.from_dict
     # can fold them into extra — never silently strip live DDL / existence SSOT.
@@ -843,6 +869,7 @@ async def preflight_transfer_plan(
     from services.transfer_plan_service import run_plan_preflight
 
     payload = body or PlanPreflightRequest()
+    _refuse_unavailable_plan_destination(plan_id)
     try:
         ack = resolve_acknowledgments(
             compliance=payload.compliance_acknowledged,
@@ -1042,6 +1069,7 @@ async def execute_transfer_json(
 
     workspace_id = resolve_write_workspace(request, workspace_id)
     _assert_endpoint_connectors(request, read=(body.source,), write=(body.destination,))
+    _refuse_unavailable_destination(body.destination, workspace_id)
     # Same door as POST /schedules: an upsert with no resolvable key is a 422
     # here, not a job that the sync-contract gate refuses (MySQL D13 review).
     from services.upsert_key_door import assert_upsert_key_resolvable
@@ -1430,6 +1458,14 @@ async def run_universal_transfer(
         request,
         read=tuple(c for c in (source_connector_id,) if c),
         write=tuple(c for c in (dest_connector_id,) if c),
+    )
+    _refuse_unavailable_destination(
+        {
+            "format": dest_format,
+            "connector_id": dest_connector_id,
+            "connection_string": dest_connection_string,
+        },
+        workspace_id,
     )
 
     src_fmt = source_format

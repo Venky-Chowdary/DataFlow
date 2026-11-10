@@ -19,6 +19,10 @@ import { countGateStatuses } from "../lib/preflightGates";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
+import {
+  unavailableDestTypesFromCapabilities,
+  type UnavailableDestType,
+} from "../lib/destinationAvailability";
 import { DestProcedurePanel, type DestWriteMode } from "../components/transfer/DestProcedurePanel";
 import { SqlEditor } from "../components/ui/SqlEditor";
 import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdvancedDrawer";
@@ -653,6 +657,7 @@ export function TransferPage({
   const [liveDestTypes, setLiveDestTypes] = useState<{ id: string; label: string }[]>(
     () => FALLBACK_DEST_TYPES.map((id) => ({ id, label: getConnectorDefaults(id).label })),
   );
+  const [unavailableDestTypes, setUnavailableDestTypes] = useState<UnavailableDestType[]>([]);
   const [liveExportFormats, setLiveExportFormats] = useState<{ id: string; label: string }[]>(
     () => FALLBACK_EXPORT_FORMATS.map((id) => ({ id, label: id.toUpperCase() })),
   );
@@ -1012,6 +1017,9 @@ export function TransferPage({
         if (dbs.length) {
           setLiveDestTypes(dbs.map((id) => ({ id, label: getConnectorDefaults(id).label })));
         }
+        // D276: engines this host refuses as a destination (SQLite on the hosted
+        // cloud) are listed by the API with why; the picker shows them disabled.
+        setUnavailableDestTypes(unavailableDestTypesFromCapabilities(caps));
         if (exports.length) {
           setLiveExportFormats(exports.map((id) => ({ id, label: id.toUpperCase() })));
         }
@@ -8052,6 +8060,7 @@ export function TransferPage({
                   connectorId={connectorId}
                   destType={destType}
                   liveDestTypes={liveDestTypes}
+                  unavailableDestTypes={unavailableDestTypes}
                   onSelectConnector={applyConnectorSelection}
                   onSelectManual={() => {
                     setConnectorId("");

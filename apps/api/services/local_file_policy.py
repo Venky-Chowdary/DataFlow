@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from services.brand_env import getenv_brand
 from services.would_apply_audit import audit_would_apply
@@ -80,4 +81,96 @@ def audit_would_confine(subdir: str, resolved: Path) -> None:
         dedupe_key=(subdir, str(resolved)),
         flag=FLAG,
         details={"kind": subdir, "path": str(resolved), "would_be_root": str(root)},
+    )
+
+
+# --- D276: SQLite as a destination on the hosted cloud ----------------------
+#
+# On the hosted cloud the API, the worker and the scheduler are separate
+# services, each with its own filesystem; a volume attaches to one service
+# only. A job writes the SQLite file on the worker, the API lists the file on
+# its own disk, and a redeploy can replace either: "Data kept at <table>" was
+# true on one server and false everywhere else. SQLite also has one writer at a
+# time. So the hosted cloud does not offer SQLite as a destination; a
+# self-hosted single-machine install keeps it, and SQLite as a source is
+# unchanged. ``DATAWRAP_SQLITE_DESTINATION=on|off`` (or ``DATAFLOW_…``) decides
+# explicitly, so a self-hoster on any cloud can turn it back on.
+SQLITE_DESTINATION_FLAG = "DATAWRAP_SQLITE_DESTINATION"
+SQLITE_DESTINATION_UNAVAILABLE_LABEL = "Not available on cloud"
+_SQLITE_DRIVERS = frozenset({"sqlite", "sqlite3"})
+
+
+def sqlite_destination_message() -> str:
+    from services.brand import PRODUCT_NAME
+
+    return (
+        f"SQLite isn't available as a destination on {PRODUCT_NAME} Cloud: the file "
+        "would live on a single server and isn't kept between runs. Use PostgreSQL, "
+        f"MySQL or another database destination, or run {PRODUCT_NAME} self-hosted "
+        f"(where {SQLITE_DESTINATION_FLAG}=on keeps it)."
+    )
+
+
+def sqlite_destination_allowed() -> bool:
+    """May SQLite be a transfer destination in this process? Env reads only.
+
+    1. ``DATAWRAP_SQLITE_DESTINATION`` / ``DATAFLOW_SQLITE_DESTINATION`` on/off wins;
+    2. otherwise off on a deployed Railway service (deploy-time markers only —
+       a ``railway run`` shell, CI or a test run is not the hosted cloud);
+    3. otherwise on. Never keyed off ``is_production()``: a self-hosted
+       production install keeps SQLite.
+    """
+    from services.brand_env import getenv_brand_bool
+    from services.platform_config import is_railway_deployed
+
+    return getenv_brand_bool("SQLITE_DESTINATION", not is_railway_deployed())
+
+
+def _is_sqlite_destination(dest_type: str, connection_string: str = "") -> bool:
+    raw = (dest_type or "").strip().lower()
+    if not raw:
+        return False
+    try:
+        from src.transfer.connector_capabilities import resolve_driver_type
+    except ImportError:  # loaded with apps/api/src on the path
+        from transfer.connector_capabilities import resolve_driver_type  # type: ignore[no-redef]
+    driver = resolve_driver_type(raw)
+    if raw in _SQLITE_DRIVERS or driver in _SQLITE_DRIVERS:
+        return True
+    # A generic SQL connector pointed at a ``sqlite:`` URL writes the same local file.
+    return driver == "generic_sql" and (connection_string or "").strip().lower().startswith("sqlite:")
+
+
+def sqlite_destination_refusal(dest_type: str, connection_string: str = "") -> str | None:
+    """The operator message when ``dest_type`` is SQLite and SQLite may not be a destination here."""
+    if sqlite_destination_allowed() or not _is_sqlite_destination(dest_type, connection_string):
+        return None
+    return sqlite_destination_message()
+
+
+def endpoint_sqlite_destination_refusal(endpoint: Any, workspace_id: str | None = None) -> str | None:
+    """:func:`sqlite_destination_refusal` for a destination endpoint (DTO, dict or EndpointConfig).
+
+    A saved ``connector_id`` without an inline format is looked up (one store
+    read) only while SQLite is refused here, so this costs nothing elsewhere.
+    """
+    if endpoint is None or sqlite_destination_allowed():
+        return None
+
+    def get(key: str) -> Any:
+        return endpoint.get(key) if isinstance(endpoint, dict) else getattr(endpoint, key, None)
+
+    refusal = sqlite_destination_refusal(
+        str(get("format") or get("type") or ""), str(get("connection_string") or "")
+    )
+    connector_id = str(get("connector_id") or "").strip()
+    if refusal or not connector_id:
+        return refusal
+    from services.connector_store import get_connector
+
+    saved = get_connector(connector_id, workspace_id=workspace_id or None)
+    if saved is None:
+        return None
+    return sqlite_destination_refusal(
+        str(getattr(saved, "type", "") or ""), str(getattr(saved, "connection_string", "") or "")
     )

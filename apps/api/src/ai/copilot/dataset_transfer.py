@@ -219,10 +219,11 @@ def stage_dataset_transfer(
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
 
-    from src.transfer.connector_capabilities import source_only_destination_refusal
+    from src.transfer.connector_capabilities import destination_refusal
 
-    not_a_destination = source_only_destination_refusal(
-        str(dst_conn.get("type") or dst_conn.get("format") or "")
+    not_a_destination = destination_refusal(
+        str(dst_conn.get("type") or dst_conn.get("format") or ""),
+        str(dst_conn.get("connection_string") or ""),
     )
     if not_a_destination:
         return _tool_result(tool, success=False, error=not_a_destination)

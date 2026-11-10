@@ -1835,6 +1835,22 @@ def _dispatch_transfer(
 
     authorized_drift = False
     try:
+        from services.local_file_policy import (
+            sqlite_destination_allowed,
+            sqlite_destination_refusal,
+        )
+
+        # D276: a saved SQLite destination on the hosted cloud is refused at this
+        # run's preflight, before a job exists, instead of failing mid-write.
+        # Env-only check first; the resolver's record may be a dict or an object.
+        if not sqlite_destination_allowed():
+            def _field(name: str) -> str:
+                value = dst.get(name) if isinstance(dst, dict) else getattr(dst, name, None)
+                return str(value or "")
+
+            refusal = sqlite_destination_refusal(_field("type"), _field("connection_string"))
+            if refusal:
+                raise ValueError(refusal)
         request = build_schedule_request(
             sched,
             src,
