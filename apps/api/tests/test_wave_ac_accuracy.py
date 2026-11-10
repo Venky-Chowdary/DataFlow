@@ -28,9 +28,39 @@ def test_upsert_without_primary_key_refuses_insert_fallback():
 
     assert requires_upsert("cdc")
     assert requires_upsert("incremental_deduped")
-    # Stream path: missing PK must raise (exercise the guard via source snippet contract).
+    # Stream path: missing PK must raise. Since 446364c70 the stream applies the
+    # guard through bind_stream_elasticsearch_write_mode (stream_es_identity.py),
+    # so pin that stream.py routes through the binder and exercise the binder.
+    from types import SimpleNamespace
+
+    from src.transfer.stream_es_identity import bind_stream_elasticsearch_write_mode
+
     stream_src = Path(_API_ROOT / "src/transfer/stream.py").read_text()
-    assert "refuse silent insert fallback" in stream_src
+    assert "bind_stream_elasticsearch_write_mode(run, stream_contracts)" in stream_src
+    for dest_type in ("postgresql", "elasticsearch"):
+        cfg = SimpleNamespace(
+            dest_type=dest_type,
+            effective_sync="cdc",
+            mappings=[],
+            pk_target_cols=[],
+            pk_source_cols=[],
+            destination=SimpleNamespace(extra={}),
+            write_mode=None,
+        )
+        with pytest.raises(ValueError, match="refuse silent insert fallback"):
+            bind_stream_elasticsearch_write_mode(SimpleNamespace(cfg=cfg), None)
+        assert cfg.write_mode is None
+    keyed = SimpleNamespace(
+        dest_type="postgresql",
+        effective_sync="cdc",
+        mappings=[],
+        pk_target_cols=["id"],
+        pk_source_cols=["id"],
+        destination=SimpleNamespace(extra={}),
+        write_mode=None,
+    )
+    bind_stream_elasticsearch_write_mode(SimpleNamespace(cfg=keyed), None)
+    assert keyed.write_mode == "upsert"
     engine_src = Path(_API_ROOT / "src/transfer/engine.py").read_text()
     assert "refuse silent insert fallback" in engine_src
 
