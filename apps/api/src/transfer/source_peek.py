@@ -28,6 +28,42 @@ _OFFSET_PAGEABLE = frozenset({
 })
 
 
+def source_wait_message(src_type: str, src_cfg: Mapping[str, Any] | None, step: str) -> str:
+    """What a run waiting on its source says while the source does not answer.
+
+    A read in the peek or the population-fit walk blocked on the source (a
+    lock or load on the source database, or the network path) left the job on
+    its phase line ("Analyzing source table…", "Validating mapping and
+    schema…") with no heartbeat, which reads as a queue nobody can see (D326).
+    """
+    from src.ai.copilot.tool_deadline import describe_target
+
+    cfg = dict(src_cfg or {})
+    where = describe_target(cfg) or str(cfg.get("database") or "")
+    label = " ".join(p for p in (str(src_type or ""), where) if p) or "source"
+    return (
+        f"{step}: waiting for the source ({label}) to answer this read; the "
+        "source database has not returned it yet (a lock or load there, or "
+        "the network path)"
+    )
+
+
+_NO_ROW = object()
+
+
+def _first_row_waits(rows: Iterator[dict[str, Any]], message: str) -> Iterator[dict[str, Any]]:
+    """Name the wait (after one pulse interval) until the source returns a row."""
+    from services.cancel_check import wait_pulse
+
+    it = iter(rows)
+    with wait_pulse(message):
+        first = next(it, _NO_ROW)
+    if first is _NO_ROW:
+        return
+    yield first
+    yield from it
+
+
 def _peek_each_file(
     source: EndpointConfig,
     *,
@@ -165,18 +201,21 @@ def peek_stream_source(
         result = (columns, schema, total_rows, sample_rows)
         return (*result, probe) if include_batch else result
 
-    probe, _ = _unwrap_read(
-        _read_batch(
-            src_type,
-            src_cfg,
-            table,
-            None,
-            0,
-            CHUNK_SIZE,
-            database=src_db,
-            sdk_state=sdk_state,
+    from services.cancel_check import wait_pulse
+
+    with wait_pulse(source_wait_message(src_type, src_cfg, "Analyzing source table")):
+        probe, _ = _unwrap_read(
+            _read_batch(
+                src_type,
+                src_cfg,
+                table,
+                None,
+                0,
+                CHUNK_SIZE,
+                database=src_db,
+                sdk_state=sdk_state,
+            )
         )
-    )
     columns = probe.headers
     if not columns and probe.total_rows == 0:
         raise ValueError(f"Source `{table}` has no columns or is empty")
@@ -472,6 +511,11 @@ def iter_bounded_table_population_rows(
             cursor_after=cursor_after,
             cursor_primary_key=cursor_pk,
         )
+        rows = _first_row_waits(rows, source_wait_message(
+            src_type,
+            {"host": source.host, "port": source.port, "database": source.database},
+            "Validating mapping and schema",
+        ))
         if source_filter:
             from services.row_filter import iter_filtered_rows
 
