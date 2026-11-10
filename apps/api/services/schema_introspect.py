@@ -3999,7 +3999,7 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
     """Infer Kafka topic field types from a small poll of JSON/Debezium envelopes."""
     try:
         from connectors.kafka_reader import infer_topic_schema
-        from services.copy_kafka_common import is_sasl_mechanism, kafka_security_options
+        from services.copy_kafka_common import is_sasl_mechanism, kafka_connection_cfg
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
@@ -4024,20 +4024,16 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
         or ""
     ).strip()
     cfg = {
+        # The same builder, so the same SASL listener, Test dialed (D83).
+        **kafka_connection_cfg(kwargs),
         "host": kwargs.get("host") or "localhost",
-        "port": int(kwargs.get("port") or 9092),
-        "database": kwargs.get("database") or "",
         "table": topic,
         "connection_string": (
             ""
             if str(kwargs.get("connection_string") or "").startswith("http")
             else (kwargs.get("connection_string") or "")
         ),
-        "username": kwargs.get("username") or "",
-        "password": kwargs.get("password") or "",
         "schema_registry_url": registry,
-        # The same SASL listener Test dialed (D83).
-        **kafka_security_options(kwargs),
     }
     if not topic:
         try:

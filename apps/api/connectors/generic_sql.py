@@ -737,6 +737,9 @@ CONNECTION_OPTION_KEYS: tuple[str, ...] = (
     "application_intent",
     "driver",
     "odbc_driver",
+    # Kafka listener: a connector may declare these under ``extra`` (D83)
+    "security_protocol",
+    "sasl_mechanism",
     # generic
     "connect_timeout",
     "options",

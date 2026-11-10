@@ -183,6 +183,32 @@ def kafka_security_options(cfg: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def kafka_connection_cfg(fields: dict[str, Any]) -> dict[str, Any]:
+    """The cfg a Kafka client dials with, built from a connector's fields (D83).
+
+    Test and introspection both build their cfg here, and both end, like the
+    transfer clients, in :func:`kafka_client_kwargs`; the listener therefore
+    cannot differ between them. The security protocol and SASL mechanism are
+    written out as explicit keys from wherever the connector keeps them, and
+    ``extra`` is kept. Introspection used to rebuild the cfg from host, port and
+    credentials only: a SASL_PLAINTEXT connector that declared its protocol in
+    ``extra`` passed Test and then failed introspect and plan on SASL_SSL.
+    """
+    extra = fields.get("extra") if isinstance(fields.get("extra"), dict) else {}
+    return {
+        "host": str(fields.get("host") or ""),
+        "port": int(fields.get("port") or 9092),
+        "connection_string": str(fields.get("connection_string") or ""),
+        "username": str(fields.get("username") or ""),
+        "password": str(fields.get("password") or fields.get("api_key") or ""),
+        "api_key": str(fields.get("api_key") or ""),
+        "schema": str(fields.get("schema") or ""),
+        "database": str(fields.get("database") or ""),
+        "extra": dict(extra),
+        **kafka_security_options(fields),
+    }
+
+
 def _configured_security_protocol(cfg: dict[str, Any]) -> str:
     extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
     return str(
