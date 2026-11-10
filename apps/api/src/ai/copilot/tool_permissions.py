@@ -123,6 +123,9 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     # GET /ops/cdc-captures and POST /ops/cdc-captures/cleanup (C11).
     "list_cdc_captures": (Permission.WORKSPACE_MANAGE, READ),
     "cleanup_cdc_captures": (Permission.WORKSPACE_MANAGE, MUTATE),
+    # GET /cdc/mapping-reviews and POST /cdc/mapping-reviews/{id}/acknowledge.
+    "list_cdc_mapping_reviews": (Permission.JOB_READ, READ),
+    "acknowledge_cdc_mapping_review": (Permission.JOB_MANAGE, MUTATE),
     "rebaseline_transfer": (Permission.JOB_MANAGE, MUTATE),
     "recover_schedule_destination": (Permission.SCHEDULE_MANAGE, MUTATE),
 }
@@ -153,6 +156,7 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "studio_remediation": Permission.JOB_RUN,
     "clear_cursor_resnapshot": Permission.WORKSPACE_MANAGE,
     "cleanup_cdc_captures": Permission.WORKSPACE_MANAGE,
+    "acknowledge_cdc_mapping_review": Permission.JOB_MANAGE,
     "rebaseline_transfer": Permission.JOB_MANAGE,
     "recover_schedule_destination": Permission.SCHEDULE_MANAGE,
 }

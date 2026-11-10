@@ -27,7 +27,9 @@ def list_cdc_mapping_reviews(
         "count": len(reviews),
         "honesty": (
             "Open reviews mean CDC saw schema drift. Acknowledge after Map review — "
-            "schedules with matching sources skip until acknowledged. Still at-least-once."
+            "schedules that read the flagged table on this source are held until "
+            "acknowledged (MCP: list_cdc_mapping_reviews / "
+            "acknowledge_cdc_mapping_review). Still at-least-once."
         ),
     }
 

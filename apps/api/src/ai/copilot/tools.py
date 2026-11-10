@@ -1972,6 +1972,8 @@ class DataPilotTools:
             "clear_cursor_resnapshot": self._clear_cursor_resnapshot,
             "list_cdc_captures": self._list_cdc_captures,
             "cleanup_cdc_captures": self._cleanup_cdc_captures,
+            "list_cdc_mapping_reviews": self._list_cdc_mapping_reviews,
+            "acknowledge_cdc_mapping_review": self._acknowledge_cdc_mapping_review,
             "rebaseline_transfer": self._rebaseline_transfer,
             "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
@@ -4266,6 +4268,18 @@ class DataPilotTools:
         return stage_cleanup_cdc_captures(
             connector_id, name, slot_names, include_unregistered, reason
         )
+
+    def _list_cdc_mapping_reviews(
+        self, connector_id: str = "", name: str = "", table: str = "", status: str = "open"
+    ) -> ToolResult:
+        from .lifecycle_tools import list_cdc_mapping_reviews
+
+        return list_cdc_mapping_reviews(connector_id, name, table, status)
+
+    def _acknowledge_cdc_mapping_review(self, review_id: str = "", reason: str = "") -> ToolResult:
+        from .lifecycle_tools import stage_acknowledge_cdc_mapping_review
+
+        return stage_acknowledge_cdc_mapping_review(review_id, reason)
 
     def _rebaseline_transfer(
         self,

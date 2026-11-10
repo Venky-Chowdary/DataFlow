@@ -562,6 +562,13 @@ async def _run_lifecycle_confirm(
             reason=str(payload.get("reason") or ""),
         )
         return await post_cdc_captures_cleanup(body, http_request, workspace_id)
+    if kind == "acknowledge_cdc_mapping_review":
+        from .cdc_mapping_review_router import acknowledge_cdc_mapping_review
+
+        rid = str(payload.get("review_id") or "").strip()
+        if not rid:
+            raise HTTPException(status_code=400, detail="Approval is missing review_id")
+        return dict(acknowledge_cdc_mapping_review(rid, http_request))
     if kind == "rebaseline_transfer":
         from services.append_continuity import RebaselineError, rebaseline
         from services.connector_store import get_connector, list_connectors
