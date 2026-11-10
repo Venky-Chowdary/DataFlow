@@ -134,30 +134,57 @@ def _listed(parts: list[str], limit: int = 8) -> str:
 _PROTECTING_TRANSFORMS = frozenset({"mask_pii", "hash_pii", "redact"})
 
 
-def protected_pii_columns(mappings: list[dict[str, Any]] | None) -> set[str]:
-    """Source columns a mapping masks, hashes or redacts before the write."""
+def protected_pii_columns(
+    mappings: list[dict[str, Any]] | None,
+    sample_rows: list[dict[str, Any]] | None = None,
+) -> set[str]:
+    """Source columns a mapping masks, hashes or redacts before the write.
+
+    A column flattened out of a masked / hashed / redacted document field
+    inherits that protection at Execute, so it counts here too (D349).
+    """
+    from services.flatten_protection import preview_inherited
+
+    rows = list(mappings or [])
+    if sample_rows is not None or any(isinstance(m, dict) and m.get("protected_by") for m in rows):
+        rows = preview_inherited(rows, sample_rows).mappings
     return {
         str(m.get("source") or "")
-        for m in mappings or []
+        for m in rows
         if str(m.get("transform") or "").strip().lower() in _PROTECTING_TRANSFORMS
     }
 
 
+def pii_detection_warnings(
+    compliance: dict[str, Any] | None,
+    mappings: list[dict[str, Any]] | None = None,
+    sample_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Preflight's PII warning plus the columns that inherit a protection (D349)."""
+    from services.flatten_protection import flatten_preflight_warnings
+
+    pii = pii_detection_warning(compliance, mappings, sample_rows)
+    return [*([pii] if pii else []), *flatten_preflight_warnings(mappings, sample_rows)]
+
+
 def pii_detection_warning(
-    compliance: dict[str, Any] | None, mappings: list[dict[str, Any]] | None = None
+    compliance: dict[str, Any] | None,
+    mappings: list[dict[str, Any]] | None = None,
+    sample_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """A visible preflight warning for PII that does not force a review hold.
 
     Email / phone / IP are medium-risk: they do not block, but a gate that
     found them in a column's content and said nothing was indistinguishable
     from one that never looked (D94). Columns already masked, hashed or
-    redacted by their mapping are named as protected.
+    redacted by their mapping (or inheriting it from a flattened parent) are
+    named as protected.
     """
     compliance = compliance or {}
     fields = list(compliance.get("sensitive_fields") or [])
     if not fields:
         return None
-    protected = protected_pii_columns(mappings)
+    protected = protected_pii_columns(mappings, sample_rows)
     parts = _finding_lines(compliance)
     open_cols = [c for c in fields if c not in protected]
     note = (
@@ -231,7 +258,7 @@ def build_preflight_proof_bundle(
             for s in (source_schemas or [])
             if isinstance(s, dict) and s.get("name")
         },
-        protected_columns=protected_pii_columns(mappings),
+        protected_columns=protected_pii_columns(mappings, sample_rows),
     )
     compliance["acknowledged"] = bool(compliance_acknowledged)
     if compliance_acknowledged:

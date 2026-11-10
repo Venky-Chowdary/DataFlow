@@ -3236,13 +3236,16 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         # erased to TEXT and create-new never stamps VARCHAR(24).
         docs = list(db[target].find().limit(100)) if target else []
         reader_cfg = kwargs.get("reader_cfg")
+        # Which column each expanded column came from: protecting a field
+        # protects what the reader flattens out of it (D349).
+        flatten_lineage: dict[str, str] = {}
         if reader_cfg is not None and docs:
             # Same expansion as connectors.mongodb_reader._page_docs_to_batch, on
             # the BSON values (ObjectId / Decimal128 carriers survive it).
             from services.json_intelligence import expand_mongo_documents
 
             raw_keys = {k for doc in docs for k in doc}
-            docs = expand_mongo_documents(docs, cfg=reader_cfg)
+            docs = expand_mongo_documents(docs, cfg=reader_cfg, lineage=flatten_lineage)
             expanded = sorted({k for doc in docs for k in doc} - raw_keys)
             if expanded:
                 logger.info(
@@ -3327,7 +3330,13 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     col["inferred_type"] = "TEXT" if logical == "VARCHAR" else logical
                 except Exception:
                     logger.debug("Mongo sample re-infer failed for %s", col.get("name"), exc_info=True)
-        return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}
+        return {
+            "ok": True,
+            "tables": tables,
+            "columns": list(columns.values()),
+            "schema": db_name,
+            "flatten_lineage": flatten_lineage,
+        }
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 

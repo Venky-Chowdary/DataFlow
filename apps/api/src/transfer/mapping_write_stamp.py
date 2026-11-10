@@ -105,9 +105,16 @@ def stamp_additive_mappings_for_write(
 
     Prevents Execute fail-closed after Validate when Map left ``target_type``
     blank for additive columns (Excel→PG partial Studio cliff).
+
+    First, every column flattened out of a protected document field inherits
+    its protection (D349) — this is the one step every Execute route shares,
+    after Map and schema propagation.
     """
     if not mappings:
         return mappings
+    from services.flatten_protection import protect_run_children
+
+    mappings = protect_run_children(request, mappings, sample_rows, column_types)
     try:
         from services.batch_progress import effective_backfill_new_fields
         from services.decision_kernel import stamp_additive_mapping_types

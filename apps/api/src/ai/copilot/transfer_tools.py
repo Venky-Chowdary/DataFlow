@@ -1324,6 +1324,22 @@ def plan_transfer(
     mappings, transform_refusal = _apply_column_transforms(mappings, column_transforms)
     if transform_refusal:
         return _tool_result(tool, success=False, error=transform_refusal)
+    # D349: a redacted / omitted / masked / hashed document field protects the
+    # columns the reader flattens out of it, and the plan names them.
+    from services.flatten_protection import protect_planned_children
+
+    flatten_protection = protect_planned_children(
+        mappings,
+        source_type=str(src_info.get("db_type") or src_conn.get("type") or ""),
+        source_cfg=src_info.get("config"),
+        sample_rows=sample_rows,
+        introspected_lineage=(src_info.get("raw") or {}).get("flatten_lineage"),
+        column_transforms=column_transforms,
+        column_pipelines=column_pipelines,
+    )
+    if flatten_protection.refusal:
+        return _tool_result(tool, success=False, error=flatten_protection.refusal)
+    mappings = flatten_protection.mappings
     if zone_columns:
         mappings = stamp_zone_transform(mappings, source_timezone, zone_columns)
 
@@ -1512,6 +1528,12 @@ def plan_transfer(
             # Display lists below are truncated for readability; execution must
             # use this untouched list or wide tables would lose columns.
             "engine_mappings": mappings,
+            # D349: columns flattened from a protected field, and what they inherit.
+            **(
+                {"inherited_protection": flatten_protection.inherited}
+                if flatten_protection.inherited
+                else {}
+            ),
             # Multi-step column transforms, compiled to the recipe Execute runs.
             **(
                 {
