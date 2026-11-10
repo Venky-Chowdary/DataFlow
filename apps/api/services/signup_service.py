@@ -589,15 +589,17 @@ def request_signup(
                               details={"ip": ip})
         return form_token_mod.fake_accept_body()
     # Turnstile: enforced when a secret is configured; unconfigured just
-    # raises the risk floor (P2-8 wires the full scorer).
+    # raises the risk floor (P2-8 wires the full scorer). The token's hostname
+    # is checked against every host the site serves (turnstile's allow-list):
+    # pinning the apex refused every signup made on www (D322).
     if turnstile.configured():
         verdict = turnstile.verify(
-            turnstile_token, remote_ip=ip,
-            expected_action="signup", expected_hostname="datawrap.io")
+            turnstile_token, remote_ip=ip, expected_action="signup")
         if not verdict["ok"]:
             record_security_event("signup.blocked", outcome="failed",
                                   reason_code=f"turnstile:{verdict['reason']}",
-                                  details={"ip": ip})
+                                  details={"ip": ip,
+                                           "hostname": verdict.get("hostname", "")})
             raise ApiError(400, "turnstile_required",
                            "couldn't verify you're human — try again")
     normalized = user_store.validate_email(email)
