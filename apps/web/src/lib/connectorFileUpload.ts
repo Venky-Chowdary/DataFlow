@@ -1,7 +1,7 @@
 /**
  * Saved file-connector Configure dialogs attach a file the server stores.
  *
- * Transfer Studio already uploads through ``#df2-source-file``. CSV, TSV,
+ * Transfer Studio already uploads through the ``df2-source-file`` input. CSV, TSV,
  * Excel, JSON, and SQLite connections used to offer only a path box, so a
  * hosted customer who typed a laptop path failed Test with "Path not found".
  * The upload fills that path with the stored file and keeps ``uploaded_file_id``

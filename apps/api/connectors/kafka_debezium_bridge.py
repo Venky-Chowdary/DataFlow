@@ -215,6 +215,11 @@ def _seek_on_assign(
     return _Listener()
 
 
+#: Bound on each offset lookup a run makes (log start, log end, the group's
+#: committed position): the same request bound the other Kafka readers use.
+KAFKA_OFFSET_LOOKUP_TIMEOUT_MS = 8000
+
+
 class KafkaDebeziumConsumer:
     """Optional kafka-python consumer. Requires ``kafka-python`` extra.
 
@@ -327,11 +332,17 @@ class KafkaDebeziumConsumer:
         assigned = list(self._consumer.assignment() or [])
         if not assigned:
             return
-        begin = self._consumer.beginning_offsets(assigned) or {}
-        end = self._consumer.end_offsets(assigned) or {}
+        # Every lookup carries a deadline. ``committed()`` without one retries
+        # a silent or unavailable coordinator forever: an incremental run sat
+        # on its last message with no heartbeat until it was cancelled (D287).
+        wait = KAFKA_OFFSET_LOOKUP_TIMEOUT_MS
+        begin = self._consumer.beginning_offsets(assigned, timeout_ms=wait) or {}
+        end = self._consumer.end_offsets(assigned, timeout_ms=wait) or {}
         committed = {}
         if self.config.get("start_position") != "earliest":
-            committed = {tp: self._consumer.committed(tp) for tp in assigned}
+            committed = {
+                tp: self._consumer.committed(tp, timeout_ms=wait) for tp in assigned
+            }
         cursor = {
             (str(i["topic"]), int(i["partition"])): int(i["offset"])
             for i in self.config.get("start_offsets") or []

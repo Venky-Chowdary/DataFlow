@@ -1012,8 +1012,18 @@ async def query_schema(
     from src.transfer.endpoint_intelligence import introspect_endpoint
 
     endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
+    from src.ai.copilot.tool_deadline import run_off_event_loop
+
+    def _timed_out(message: str) -> Any:
+        raise HTTPException(status_code=504, detail=message)
+
     try:
-        info = introspect_endpoint(endpoint)
+        # Off the event loop, under the connector deadline (D321).
+        info = await run_off_event_loop(
+            "introspect_connector_schema", lambda: introspect_endpoint(endpoint), _timed_out
+        )
+    except HTTPException:
+        raise
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "Query schema introspection failed for %s: %s", body.connector_id, exc

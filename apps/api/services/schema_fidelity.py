@@ -655,15 +655,26 @@ def create_key_inputs(
     write_mode: str,
     conflict_columns: list[str] | None,
     carry_source_keys: bool = False,
+    duplicates_allowed: bool | None = None,
 ) -> dict[str, Any]:
     """Key inputs every SQL writer hands :func:`resolve_create_fidelity_plan`.
 
     Upsert and overwrite carry keys. Plain append withholds the source key,
     but an identity the operator declared ("Use sku as the key") is the new
     table's key on any write mode: dropping it left the table without the
-    constraint the operator chose.
+    constraint the operator chose. The exception is an insert under an explicit
+    append policy (``duplicate_policy=append`` / ``allow_duplicates``): the
+    operator said the key repeats, so a unique key would refuse the second copy
+    mid-load. ``duplicates_allowed`` defaults to the policy of the write in
+    progress (:func:`services.duplicate_policy.current_duplicates_allowed`).
     """
+    if duplicates_allowed is None:
+        from services.duplicate_policy import current_duplicates_allowed
+
+        duplicates_allowed = current_duplicates_allowed()
     keys = [str(c) for c in (conflict_columns or []) if str(c or "").strip()]
+    if duplicates_allowed and write_mode == "insert":
+        keys = []
     return {
         "carry_keys": write_mode != "insert" or bool(carry_source_keys) or bool(keys),
         "operator_key_columns": keys or None,

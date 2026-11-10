@@ -2720,6 +2720,10 @@ def _ch_to_logical(dtype: str) -> str:
     return "TEXT"
 
 
+#: Snowflake BINARY's maximum (and default) length, 8 MB.
+_SNOWFLAKE_BINARY_MAX_BYTES = 8388608
+
+
 def _sf_to_logical(
     dtype: str,
     *,
@@ -2807,7 +2811,14 @@ def _sf_to_logical(
     if d == "BINARY" or d.startswith("BINARY("):
         m_bin = re.match(r"^BINARY\s*\(\s*(\d+)\s*\)$", d)
         width = int(m_bin.group(1)) if m_bin else char_len
-        return f"BINARY({width})" if width else "BINARY"
+        # A bare ``BINARY`` is Snowflake's maximum, and DESC / the catalog
+        # report it as ``BINARY(8388608)``: that is the unbounded column, not a
+        # width a source byte string could exceed. Read as a bound, every
+        # second run into a table DataFlow created with BINARY was "lossy"
+        # (D182).
+        if width and width < _SNOWFLAKE_BINARY_MAX_BYTES:
+            return f"BINARY({width})"
+        return "BINARY"
     if d == "TIME" or d.startswith("TIME("):
         m_time = re.match(r"^TIME\s*\(\s*(\d+)\s*\)$", d)
         prec = int(m_time.group(1)) if m_time else dt_prec
@@ -3988,7 +3999,7 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
     """Infer Kafka topic field types from a small poll of JSON/Debezium envelopes."""
     try:
         from connectors.kafka_reader import infer_topic_schema
-        from services.copy_kafka_common import is_sasl_mechanism, kafka_security_options
+        from services.copy_kafka_common import is_sasl_mechanism, kafka_connection_cfg
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
@@ -4013,20 +4024,16 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
         or ""
     ).strip()
     cfg = {
+        # The same builder, so the same SASL listener, Test dialed (D83).
+        **kafka_connection_cfg(kwargs),
         "host": kwargs.get("host") or "localhost",
-        "port": int(kwargs.get("port") or 9092),
-        "database": kwargs.get("database") or "",
         "table": topic,
         "connection_string": (
             ""
             if str(kwargs.get("connection_string") or "").startswith("http")
             else (kwargs.get("connection_string") or "")
         ),
-        "username": kwargs.get("username") or "",
-        "password": kwargs.get("password") or "",
         "schema_registry_url": registry,
-        # The same SASL listener Test dialed (D83).
-        **kafka_security_options(kwargs),
     }
     if not topic:
         try:

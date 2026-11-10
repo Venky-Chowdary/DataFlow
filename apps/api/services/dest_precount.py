@@ -551,6 +551,17 @@ def destination_table_exists(
             mdb = _mongo_db(cfg)
             names = mdb.list_collection_names()
             return table in names
+        if db_type == "weaviate":
+            # A failed strict run into a class it created must drop that
+            # class; without this stamp the undo could only DELETE, which
+            # Weaviate has no branch for, and the accepted objects stayed
+            # behind (D285/D293).
+            from services.copy_weaviate_common import (
+                weaviate_class,
+                weaviate_class_exists,
+            )
+
+            return weaviate_class_exists(cfg, weaviate_class(table, cfg))
         if db_type == "postgresql":
             from connectors.postgresql_conn import get_connection
 

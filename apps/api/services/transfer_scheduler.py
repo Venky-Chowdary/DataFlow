@@ -151,20 +151,14 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
         on_lost=_mark_lease_lost,
         fence=fence,
     )
-    with _inflight_lock:
-        _inflight[job_id] = _inflight.get(job_id, 0) + 1
+    mark_local_run(job_id)
 
     def _done() -> None:
         # Release only the lease THIS run took. After a same-process takeover
         # the process's current fence is the newer run's (QA D213).
         stop_heartbeat()
         _lease_store.release(job_id, fence=fence)
-        with _inflight_lock:
-            left = _inflight.get(job_id, 0) - 1
-            if left > 0:
-                _inflight[job_id] = left
-            else:
-                _inflight.pop(job_id, None)
+        unmark_local_run(job_id)
 
     def _leased_fn(*a: Any, **kw: Any) -> Any:
         detach_token = None
@@ -210,6 +204,21 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
     except Exception:
         _done()
         raise
+
+
+def mark_local_run(job_id: str) -> None:
+    """Count one more run of ``job_id`` in this process (nesting allowed)."""
+    with _inflight_lock:
+        _inflight[job_id] = _inflight.get(job_id, 0) + 1
+
+
+def unmark_local_run(job_id: str) -> None:
+    with _inflight_lock:
+        left = _inflight.get(job_id, 0) - 1
+        if left > 0:
+            _inflight[job_id] = left
+        else:
+            _inflight.pop(job_id, None)
 
 
 def local_job_ids() -> frozenset[str]:

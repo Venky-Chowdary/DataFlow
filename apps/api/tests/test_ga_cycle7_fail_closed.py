@@ -64,6 +64,11 @@ def test_hollow_proven_pack_strips_migration_proven_without_hashes():
             "checksum_match": True,
             "source_checksum": "abc",
             "target_checksum": "abc",
+            # Since 64b1bf244 a full_checksum claim also needs the source digest
+            # to come from an independent re-read (reconcile_step stamps it), and
+            # such a re-read must be identity/hash aligned with the destination.
+            "source_checksum_provenance": "independent_source_reread",
+            "identity_hash_aligned": True,
         },
         actor="ops",
         # Intentionally omit ddl_hash / mapping_hash / connector_versions
@@ -91,6 +96,11 @@ def test_complete_evidence_keeps_migration_proven():
             "checksum_match": True,
             "source_checksum": "abc",
             "target_checksum": "abc",
+            # Since 64b1bf244 a full_checksum claim also needs the source digest
+            # to come from an independent re-read (reconcile_step stamps it), and
+            # such a re-read must be identity/hash aligned with the destination.
+            "source_checksum_provenance": "independent_source_reread",
+            "identity_hash_aligned": True,
         },
         actor="ops",
         ddl_hash="ddl-1",

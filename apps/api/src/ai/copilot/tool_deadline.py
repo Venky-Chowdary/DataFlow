@@ -57,7 +57,12 @@ DEADLINE_TOOLS = frozenset(
 )
 
 #: Interactive tools that also dial out but had no deadline at all (D181).
-QUERY_DEADLINE_TOOLS = frozenset({"run_query", "test_connector", "aggregate_data"})
+#: ``create_connector`` probes and introspects the new host (``test_first``
+#: is the default): unbounded, a silent host held the MCP request thread for
+#: good and enough of them starved every MCP call, list_jobs included (D321).
+QUERY_DEADLINE_TOOLS = frozenset(
+    {"run_query", "test_connector", "aggregate_data", "create_connector"}
+)
 
 
 def _seconds_from_env(name: str, default: float) -> float:
@@ -436,6 +441,45 @@ def unregister_connection(conn: Any) -> None:
         _drop_from(owner, key)
 
 
+@contextlib.contextmanager
+def interruptible_connect():
+    """Make a driver's connect handshake interruptible by the call's deadline.
+
+    A handshake has no connection object yet: python-oracledb bounds only the
+    TCP connect, and a peer that accepted and went silent held the worker in
+    ``recv`` until the tunnel closed, long after the call was abandoned
+    (D281). Every Python socket the handshake connects is registered with the
+    call while it runs; the driver connection that owns it afterwards is
+    registered by the pool events instead. A no-op outside a tool call.
+    """
+    if _progress.get() is None:
+        yield
+        return
+    from services.egress_guard import observe_dials
+
+    sockets: list[Any] = []
+
+    def _track(sock: Any) -> None:
+        progress = _progress.get()
+        if progress is not None:
+            with progress.lock:
+                late = progress.interrupted or threading.get_ident() in progress.interrupted_threads
+            if late:
+                # A retry after the deadline must not start I/O nobody will end.
+                raise ConnectionAbortedError(
+                    "the call passed its deadline; the connection was not opened"
+                )
+        sockets.append(sock)
+        register_connection(sock)
+
+    try:
+        with observe_dials(_track):
+            yield
+    finally:
+        for sock in sockets:
+            unregister_connection(sock)
+
+
 def _shutdown_descriptor(fd: int, identity: tuple[int, int] | None) -> bool:
     """Shut the socket behind ``fd`` if it is still the registered one.
 
@@ -666,6 +710,27 @@ def run_with_deadline(
         )
     except (ConnectorCallTimeout, ConnectorCapacityExceeded) as exc:
         return on_timeout(str(exc))
+
+
+async def run_off_event_loop(
+    tool: str,
+    fn: Callable[[], Any],
+    on_timeout: Callable[[str], Any],
+    *,
+    seconds: float | None = None,
+) -> Any:
+    """:func:`run_with_deadline` for an ``async`` route.
+
+    A connector call made straight from an ``async def`` route runs on the
+    event loop: against a host that accepts the connection and never answers
+    (python-oracledb has no handshake timeout) the loop stopped, and with it
+    every ``/api/v1`` route, ``/api/v1/health`` and MCP included, until the far
+    end closed (D321). The call runs on the connector executor under its
+    deadline; the loop only awaits a thread that the deadline bounds.
+    """
+    import asyncio
+
+    return await asyncio.to_thread(run_with_deadline, tool, fn, on_timeout, seconds=seconds)
 
 
 @dataclass

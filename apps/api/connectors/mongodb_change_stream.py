@@ -43,7 +43,6 @@ from services.cdc_net_effect import CdcTxnEvent, coalesce_cdc_txn_events
 from connectors.mongodb_common import _new_mongo_client
 from connectors.mongodb_reader import (
     _connection_string,
-    _serialize,
     read_collection_cursor_batch,
 )
 
@@ -117,16 +116,27 @@ def _has_key(pk: str) -> bool:
     return is_present_cdc_row_key(pk)
 
 
-def _doc_to_record(doc: dict[str, Any], columns: list[str] | None) -> dict[str, Any]:
-    if "_id" in doc:
-        doc["_id"] = str(doc["_id"])
+def _wire_row_to_record(
+    headers: list[str], row: list[Any], columns: list[str] | None
+) -> dict[str, Any]:
+    """A snapshot page row as a CDC record, keeping its wire encoding (D315).
+
+    Reader pages are wire already: SQL NULL is ``__DF_SQL_NULL__``, an absent
+    (nested) field ``__DF_MISSING__``, and colliding text is escaped. Passing
+    them through the raw-document serializer encoded them a second time, so a
+    missing ``payload.k`` reached the ``payload_k`` INTEGER column as the
+    escaped *text* ``__DF_ESC____DF_SQL_NULL__`` and the first CDC copy failed
+    or quarantined every such row, while the same docs loaded as NULL in a
+    full refresh. The cells are marked as wire so no later layer re-encodes.
+    """
+    from services.value_serializer import SQL_NULL_SENTINEL, reader_wire_cell
+
+    cells = {h: reader_wire_cell(v) for h, v in zip(headers, row)}
     if not columns:
-        return {k: _serialize(v) for k, v in doc.items()}
-    # Known columns first, then any sparse extras — never silent-drop mid-stream fields.
-    out = {c: _serialize(doc.get(c)) for c in columns}
-    for k, v in doc.items():
-        if k not in out:
-            out[k] = _serialize(v)
+        return cells
+    out = {c: cells.get(c, reader_wire_cell(SQL_NULL_SENTINEL)) for c in columns}
+    for key, value in cells.items():
+        out.setdefault(key, value)
     return out
 
 
@@ -385,7 +395,7 @@ class MongodbChangeStreamCdc:
         records: list[dict[str, Any]] = []
         new_last = last_pk
         for doc in cursor:
-            rec = _doc_to_record(doc, self.columns)
+            rec = self._record(doc)
             records.append(rec)
             raw = doc.get(pk)
             new_last = str(raw) if raw is not None else new_last
@@ -451,7 +461,7 @@ class MongodbChangeStreamCdc:
                     )
                 if not batch.rows:
                     break
-                records = [_doc_to_record(dict(zip(batch.headers, row)), self.columns) for row in batch.rows]
+                records = [_wire_row_to_record(batch.headers, row, self.columns) for row in batch.rows]
                 if "_id" in batch.headers:
                     last_id = str(batch.rows[-1][batch.headers.index("_id")])
                 # Persist snapshot progress + change-stream handoff on every batch.
@@ -549,7 +559,9 @@ class MongodbChangeStreamCdc:
             pk = self._pk_value(before)
             if _has_key(pk):
                 return pk
-        pk = self._pk_value(change)
+        # The event's own ``_id`` is its resume token, not the document's:
+        # an ``_id``-keyed delete read the token as the key (D315).
+        pk = self._pk_value(change.get("documentKey") or {})
         if _has_key(pk):
             return pk
         from services.cdc_capability import (
@@ -561,6 +573,25 @@ class MongodbChangeStreamCdc:
             mongo_delete_key_refusal(self.db_name, self.collection, self.primary_key),
             "mongodb",
         )
+
+    def _record(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """A change-stream document as a CDC record shaped like a snapshot row.
+
+        The snapshot reads pages through the reader, which flattens nested
+        fields (``payload.k`` -> ``payload_k``) when the connector does. A
+        change event serialized the raw document instead: ``payload_k`` was
+        absent from the record and reached the typed column as escaped
+        sentinel text (D315). The full document is the whole row, so a field
+        it lacks is NULL here, as it was before.
+        """
+        from connectors.mongodb_reader import _page_docs_to_batch
+        from services.value_serializer import SQL_NULL_SENTINEL, is_missing_sentinel
+
+        batch = _page_docs_to_batch(
+            [dict(doc)], cfg=self.cfg, columns=self.columns, offset=0, total=None
+        )
+        row = [SQL_NULL_SENTINEL if is_missing_sentinel(v) else v for v in batch.rows[0]]
+        return _wire_row_to_record(batch.headers, row, self.columns)
 
     def _pk_columns(self) -> list[str]:
         from services.cdc_snapshot_window import _pk_columns
@@ -682,9 +713,9 @@ class MongodbChangeStreamCdc:
                     op = change.get("operationType")
                     doc = self._full_doc(change)
                     if op == "insert" and doc:
-                        events.append({"op": "c", "row": _doc_to_record(doc, self.columns)})
+                        events.append({"op": "c", "row": self._record(doc)})
                     elif op in ("update", "replace") and doc:
-                        events.append({"op": "u", "row": _doc_to_record(doc, self.columns)})
+                        events.append({"op": "u", "row": self._record(doc)})
                     elif op == "delete":
                         pk = self._delete_key(change)
                         from services.cdc_snapshot_window import _pk_row_dict
@@ -763,7 +794,7 @@ class MongodbChangeStreamCdc:
                     if op in ("insert", "replace", "update"):
                         if not doc:
                             continue
-                        record = _doc_to_record(doc, self.columns)
+                        record = self._record(doc)
                         events.extend(self._row_events(change, op, record))
                     elif op == "delete":
                         events.append(CdcTxnEvent(op="d", pk=self._delete_key(change), row=None))

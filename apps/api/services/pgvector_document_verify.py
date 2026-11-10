@@ -11,7 +11,6 @@ field equal — SQL NULL as JSON null, '' as '', unicode byte for byte.
 from __future__ import annotations
 
 import itertools
-import json
 import logging
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -39,7 +38,11 @@ def _canon(value: Any) -> str:
             return f"n:{dec.quantize(Decimal(1))}"
         return f"n:{dec.normalize()}"
     if isinstance(value, (dict, list)):
-        return "j:" + json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        # Exact on both sides: a nested decimal read back exactly from JSONB
+        # (D216) is a Decimal, and a JSON number is written as its digits.
+        from services.value_serializer import json_dumps_exact_numbers
+
+        return "j:" + json_dumps_exact_numbers(value, sort_keys=True, separators=(",", ":"))
     if isinstance(value, (datetime, date, time)):
         return f"s:{value.isoformat()}"
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -47,8 +50,10 @@ def _canon(value: Any) -> str:
     text = str(value)
     stripped = text.strip()
     if stripped[:1] in {"{", "["}:
+        from services.value_serializer import json_loads_exact
+
         try:
-            parsed = json.loads(stripped)
+            parsed = json_loads_exact(stripped)
         except ValueError:
             parsed = None
         if isinstance(parsed, (dict, list)):
@@ -178,14 +183,22 @@ def _canon_bool(value: Any) -> str:
     return _canon(value)
 
 
-def boolean_keys(mappings: list[dict[str, Any]]) -> set[str]:
-    """Metadata keys the plan declares BOOLEAN (the writer stores a JSON bool)."""
+def boolean_keys(
+    mappings: list[dict[str, Any]], source_schema: Mapping[str, Any] | None = None
+) -> set[str]:
+    """Metadata keys whose plan or source declares BOOLEAN.
+
+    A JSON bool and its text (``true``, the exact text a Weaviate ``text``
+    property holds for a source BOOLEAN, D293) are one value.
+    """
     from services.type_system import normalize_logical_type
 
+    schema = dict(source_schema or {})
     out: set[str] = set()
     for m in mappings or []:
-        if normalize_logical_type(str(m.get("target_type") or "")) == "boolean":
-            source = str(m.get("source") or "").strip()
+        source = str(m.get("source") or "").strip()
+        declared = (m.get("target_type"), m.get("source_type"), schema.get(source))
+        if any(normalize_logical_type(str(t or "")) == "boolean" for t in declared):
             out.add(str(m.get("target") or source).strip())
     return out
 
@@ -213,10 +226,16 @@ def carried_fields(
 
 
 def read_document_metadata(cfg: Mapping[str, Any], schema: str, table: str) -> list[dict[str, Any]]:
-    """One metadata object per document (its first chunk)."""
+    """One metadata object per document (its first chunk).
+
+    JSONB numbers are exact; psycopg2 decodes ``jsonb`` with ``json.loads``,
+    which rounds 99999999999.999999 to 100000000000.0, so correct metadata
+    failed its own proof (D216). Read the text and parse it exactly.
+    """
     from psycopg2 import sql
 
     from connectors.postgresql_conn import get_connection
+    from services.value_serializer import json_loads_exact
 
     conn = get_connection(
         host=str(cfg.get("host") or ""),
@@ -231,7 +250,7 @@ def read_document_metadata(cfg: Mapping[str, Any], schema: str, table: str) -> l
         with conn.cursor() as cur:
             cur.execute(
                 sql.SQL(
-                    "SELECT DISTINCT ON (source_id) metadata FROM {}.{} "
+                    "SELECT DISTINCT ON (source_id) metadata::text FROM {}.{} "
                     "ORDER BY source_id, chunk_index"
                 ).format(sql.Identifier(schema), sql.Identifier(table))
             )
@@ -241,9 +260,33 @@ def read_document_metadata(cfg: Mapping[str, Any], schema: str, table: str) -> l
     out = []
     for (meta,) in rows:
         if isinstance(meta, str):
-            meta = json.loads(meta)
+            meta = json_loads_exact(meta)
         out.append(meta if isinstance(meta, dict) else {})
     return out
+
+
+def _differing_fields(
+    fields: list[tuple[str, str]],
+    unmatched_options: list[list[list[str]]],
+    dest: Counter,
+) -> list[str]:
+    """Fields whose value in an unmatched row is held by no unclaimed document.
+
+    The verdict compares whole rows; this names the column a real mismatch
+    is in, instead of listing every carried field (D216).
+    """
+    if not unmatched_options:
+        return []
+    held: list[set[str]] = [set() for _ in fields]
+    for cells, count in dest.items():
+        if count > 0:
+            for i, cell in enumerate(cells):
+                held[i].add(cell)
+    return [
+        key
+        for i, (_source, key) in enumerate(fields)
+        if any(not set(options[i]) & held[i] for options in unmatched_options)
+    ]
 
 
 def compare_documents(
@@ -294,6 +337,7 @@ def compare_documents(
     dest = Counter(k for k in (dest_key(m) for m in documents) if k is not None)
     missing_keys = sum(1 for m in documents if dest_key(m) is None)
     unmatched: list[dict[str, Any]] = []
+    unmatched_options: list[list[list[str]]] = []
     for row in source_rows:
         options = [
             [_canon_instant(row.get(source))]
@@ -308,12 +352,14 @@ def compare_documents(
         )
         if hit is None:
             unmatched.append({s: row.get(s) for s, _k in fields})
+            unmatched_options.append(options)
             continue
         dest[hit] -= 1
     return {
         "source_rows": len(source_rows),
         "documents": len(documents),
         "fields": [k for _s, k in fields],
+        "differing_fields": _differing_fields(fields, unmatched_options, dest),
         "unmatched_source_rows": len(unmatched),
         "documents_missing_a_field": missing_keys,
         "examples": [
@@ -326,6 +372,11 @@ def compare_documents(
         ] if unmatched else [],
         "passed": not unmatched,
     }
+
+
+def _differing_label(proof: Mapping[str, Any]) -> str:
+    differing = list(proof.get("differing_fields") or [])
+    return f"differing: {', '.join(differing)}; " if differing else ""
 
 
 def verify_document_values(
@@ -415,7 +466,7 @@ def gate8_document_report(
             "message": (
                 f"pgvector document metadata does not hold {proof['unmatched_source_rows']} "
                 f"of {proof['source_rows']} source row(s) value for value "
-                f"(fields: {fields}); first: {proof['examples'][:1]}"
+                f"({_differing_label(proof)}fields: {fields}); first: {proof['examples'][:1]}"
             ),
         }
     return {

@@ -7172,7 +7172,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-jobs-pagination {
   position: sticky;
   bottom: 0;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -7671,7 +7671,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-page-fit.df2-page-jobs .df2-jobs-v3-detail {
-  overflow: hidden !important;
+  overflow: hidden var(--df-jobs-detail-overflow-y, hidden) !important;
   min-height: 0 !important;
   align-self: stretch;
   display: flex;
@@ -8050,7 +8050,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: var(--df-radius-md);
 }
 
 .df2-drift-dialog .df2-modal-header,
@@ -8079,8 +8079,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-drift-status > .dt-nav-icon { flex: 0 0 auto; }
 .df2-drift-status strong { overflow-wrap: anywhere; }
 .df2-drift-status span { color: var(--df-text-secondary); font-size: 12px; }
-.df2-drift-status.is-blocked { color: var(--df-danger, #b42318); }
-.df2-drift-status.is-additive { color: var(--df-success, #16794b); }
+.df2-drift-status.is-blocked { color: var(--df-danger); }
+.df2-drift-status.is-additive { color: var(--df-success); }
 .df2-drift-status.is-review { color: var(--df-text-secondary); }
 .df2-drift-note { margin: 12px 0; font-size: 12px; line-height: 1.5; color: var(--df-text-secondary); overflow-wrap: anywhere; }
 
@@ -8104,13 +8104,13 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-drift-table code { padding: 0; background: none; border: 0; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
 .df2-drift-kind { display: inline-flex; align-items: flex-start; gap: 6px; }
 .df2-drift-kind .dt-nav-icon { flex: 0 0 auto; margin-top: 1px; }
-.df2-drift-kind.is-added { color: var(--df-success, #16794b); }
-.df2-drift-kind.is-blocked { color: var(--df-danger, #b42318); }
+.df2-drift-kind.is-added { color: var(--df-success); }
+.df2-drift-kind.is-blocked { color: var(--df-danger); }
 .df2-drift-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
 .df2-drift-decisions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .df2-drift-actions button { min-height: 36px; }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-modal-overlay:has(.df2-drift-dialog) { padding: 8px; }
   .df2-modal.df2-drift-dialog { width: calc(100vw - 16px); max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
   .df2-drift-dialog .df2-modal-header,
@@ -8551,7 +8551,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-jobs-v3-summary-route .df2-jobs-v3-summary-endpoint > span {
   display: block;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   line-height: 1.2;
   color: var(--df-text-tertiary);
 }
@@ -12023,7 +12023,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 .df2-quarantine-replay-result.is-verified {
   background: var(--df-success-bg, var(--df-surface-muted));
-  color: var(--df-success, #16794b);
+  color: var(--df-success);
 }
 .df2-quarantine-notifications .dt-toast-host {
   position: static;
@@ -13418,22 +13418,25 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     grid-column: 1;
   }
 
+  /* Specificity already beats the page-fit display rules. The column and the
+     scroll axis are fed to the existing important-flagged rules through variables
+     (responsive-shell-fixes.css, .df2-page-fit .df2-jobs-v3-detail). */
   .df2-page-fit.df2-page-jobs .df2-jobs-v3-layout.is-mobile-list-open > .df2-jobs-v3-detail {
-    display: none !important;
+    display: none;
   }
 
   .df2-page-fit.df2-page-jobs .df2-jobs-v3-layout.has-selection {
-    grid-template-columns: minmax(0, 1fr) !important;
+    --df-jobs-layout-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
   }
 
   .df2-page-fit.df2-page-jobs .df2-jobs-v3-layout.has-selection > .df2-jobs-v3-list {
-    display: none !important;
+    display: none;
   }
 
   .df2-page-fit.df2-page-jobs .df2-jobs-v3-layout.has-selection > .df2-jobs-v3-detail {
     grid-column: 1;
-    overflow-y: auto !important;
+    --df-jobs-detail-overflow-y: auto;
   }
 
   .df2-jobs-v3-back {

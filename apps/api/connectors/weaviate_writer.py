@@ -216,12 +216,16 @@ def build_weaviate_objects(
     class_name: str,
     dimension: int,
     live_property_names: Any = (),
+    text_properties: Any = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Map Datawrap vector rows to Weaviate batch objects (testable, no I/O).
 
     Returns ``(objects, rejected)``. Missing embeddings are rejected — never
     fabricated as zero vectors. Missing ids → deterministic UUID over
     source_id+chunk+content (retry-safe), else quarantine.
+    ``text_properties`` (stored names) hold the exact text of the cell: a
+    boolean, number, list or object bound there is sent as its canonical
+    text, as the plan says (D293).
     """
     from services.vector_embedding import (
         coerce_chunk_index,
@@ -240,6 +244,9 @@ def build_weaviate_objects(
         meta = vector_prepare_metadata(row.get("metadata") or {})
         stored = _weaviate_property_keys(list(meta), live_property_names)
         props = {stored[k]: v for k, v in meta.items()}
+        for name in text_properties:
+            if name in props and not isinstance(props[name], str):
+                props[name] = cell_to_string(props[name])
         props["content"] = vector_cell_token(row.get("content"))
         props["source_id"] = vector_cell_token(row.get("source_id"))
         try:
@@ -391,6 +398,20 @@ def weaviate_decimal_number_refusal(
         "to a new class (Datawrap declares the column text and keeps every "
         "digit), or drop and recreate this class so the property is text."
     )
+
+
+def _weaviate_text_property_names(schema_doc: Any) -> set[str]:
+    """Properties a live class declares ``text``/``string`` (GET /v1/schema/{class})."""
+    if not isinstance(schema_doc, dict):
+        return set()
+    return {
+        str(p["name"])
+        for p in schema_doc.get("properties") or []
+        if isinstance(p, dict)
+        and p.get("name")
+        and isinstance(p.get("dataType"), list)
+        and str((p["dataType"] or [""])[0]).lower() in {"text", "string"}
+    }
 
 
 def _ensure_class(
@@ -845,6 +866,7 @@ def write_mapped_rows(
     session = _requests_session()
     hdrs = _headers(key)
     class_existed = False
+    text_properties: set[str] = set()
     try:
         class_resp = session.get(
             f"{base_url}/v1/schema/{class_name}", headers=hdrs, timeout=10
@@ -868,6 +890,7 @@ def write_mapped_rows(
             try:
                 schema_types = _weaviate_live_property_types(class_resp.json())
                 live_names = _live_property_names(class_resp.json())
+                text_properties = _weaviate_text_property_names(class_resp.json())
             except Exception:
                 schema_types = {}
             if not schema_types and not studio_typed_all:
@@ -1183,11 +1206,23 @@ def write_mapped_rows(
             meta={"embedding_usage": usage.to_dict()},
         )
 
+    declared_types: dict[str, str] = {}
+    if not class_existed:
+        # The class this run creates declares these carriers; the payload
+        # must send what they hold (a boolean as ``"true"``, D293).
+        declared_types = weaviate_mapped_property_types(
+            mappings, column_types, live_prop_types
+        )
+        declared_names = _weaviate_property_keys(list(declared_types))
+        text_properties = {
+            declared_names.get(k, k) for k, v in declared_types.items() if v == "text"
+        }
     objects, embed_rejected = build_weaviate_objects(
         vector_rows,
         class_name=class_name,
         dimension=dimension,
         live_property_names=live_names,
+        text_properties=text_properties,
     )
     rejected = list(map_rejected) + list(embed_rejected)
     if not objects and rejected:
@@ -1233,9 +1268,7 @@ def write_mapped_rows(
                 base_url,
                 class_name,
                 hdrs,
-                property_types=weaviate_mapped_property_types(
-                    mappings, column_types, live_prop_types
-                ),
+                property_types=declared_types,
             )
         incoming_fingerprint = sync_context["fingerprint"]
         if incoming_fingerprint is None:

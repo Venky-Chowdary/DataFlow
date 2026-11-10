@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, Callable, Iterator, Sequence
 
+from services.header_sniff import SNIFF_ROWS, first_row_is_data
 from services.read_options import ReadOptions, ReadOptionsError
 from services.tabular_rows import is_blank_row
 
@@ -97,6 +98,17 @@ def header_and_rows(
                 "Point header_row at the row holding the column names, or set "
                 "header_row=0 to synthesize names."
             )
+        if not explicit and options.sniff_header:
+            # D317: an undeclared row 1 that reads as a record is a record.
+            # Taking it as names dropped it silently, and COUNT and Gate-8 read
+            # through this same rule, so they "matched" the loss.
+            ahead = _look_ahead(rows)
+            rows = _replay(ahead, rows)
+            if first_row_is_data(header, ahead):
+                return (
+                    synthetic_headers(len(header)),
+                    windowed_rows(_chain_rows(header, rows), options),
+                )
         headers = header_names(header)
     else:
         # Names come from the width of the first value-bearing row, which must
@@ -114,6 +126,26 @@ def _chain_rows(
     first: Sequence[Any], rest: Iterator[Sequence[Any]]
 ) -> Iterator[Sequence[Any]]:
     yield first
+    yield from rest
+
+
+def _look_ahead(rows: Iterator[Sequence[Any]]) -> list[Sequence[Any]]:
+    """Up to ``SNIFF_ROWS`` value-bearing rows, plus the blanks between them."""
+    ahead: list[Sequence[Any]] = []
+    seen = 0
+    for row in rows:
+        ahead.append(row)
+        if len(row) and not is_blank_row(row):
+            seen += 1
+            if seen >= SNIFF_ROWS:
+                break
+    return ahead
+
+
+def _replay(
+    ahead: list[Sequence[Any]], rest: Iterator[Sequence[Any]]
+) -> Iterator[Sequence[Any]]:
+    yield from ahead
     yield from rest
 
 

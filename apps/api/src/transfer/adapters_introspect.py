@@ -194,7 +194,6 @@ def _introspect_table_schema_rich(
             logger.debug("table schema introspection failed: %s", exc, exc_info=exc)
 
     from connectors.generic_sql import connection_options
-    from services.copy_kafka_common import kafka_security_options
     from services.dialect_profiles import schema_from_cfg
     from services.schema_introspect import introspect_schema, is_object_store_type
 
@@ -237,10 +236,9 @@ def _introspect_table_schema_rich(
         introspect_purpose="destination" if physical_carriers else "",
         # Object stores dial the connector's endpoint/port from it (D142).
         reader_cfg=cfg if is_object_store_type(db_type) else None,
-        # TLS / service-name / driver keywords the writer will use.
+        # TLS / service-name / driver keywords the writer will use, and a
+        # Kafka connector's SASL listener (D83).
         **connection_options(cfg),
-        # A Kafka connector's SASL listener (D83).
-        **(kafka_security_options(cfg) if db_type == "kafka" else {}),
     )
     if info.get("ok") and info.get("columns"):
         types, nulls, defaults, ident, gen, coll = _columns_schema_meta(

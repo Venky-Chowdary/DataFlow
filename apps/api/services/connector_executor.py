@@ -447,6 +447,9 @@ class ConnectorExecutor:
                 f"{snap['max_workers']} workers busy ({snap['stuck_workers']} abandoned "
                 f"and still running), {snap['queued']} queued"
             )
+            if snap["stuck_calls"]:
+                # Name what holds the workers, so the operator checks those hosts.
+                reason += "; stuck: " + "; ".join(snap["stuck_calls"][:3])
         elif snap["oldest_in_flight_seconds"] > max_age:
             reason = (
                 f"oldest in-flight connector call has run "

@@ -22,6 +22,10 @@ from typing import Any
 
 _MATCH = contextvars.ContextVar("df_duplicate_match_action", default="update")
 _ORDER = contextvars.ContextVar("df_duplicate_order_column", default="")
+# True while a write runs under an explicit append policy (duplicate_policy=append
+# or allow_duplicates): repeated keys are the operator's choice, so the writer's
+# CREATE must not turn the declared key into a unique constraint.
+_ROWS_ALLOWED = contextvars.ContextVar("df_duplicate_rows_allowed", default=False)
 
 # incremental_append is cursor-bounded: only rows after the watermark are
 # written. Rewriting it to a full-file upsert reloaded the history (the
@@ -421,12 +425,26 @@ def resolve_duplicate_policy(
     )
 
 
-def set_match_action(action: str):
-    return _MATCH.set("skip" if (action or "").strip().lower() == "skip" else "update")
+def set_match_action(action: str, *, duplicates_allowed: bool = False):
+    return (
+        _MATCH.set("skip" if (action or "").strip().lower() == "skip" else "update"),
+        _ROWS_ALLOWED.set(bool(duplicates_allowed)),
+    )
 
 
 def reset_match_action(token) -> None:
-    _MATCH.reset(token)
+    match_token, rows_token = token
+    _ROWS_ALLOWED.reset(rows_token)
+    _MATCH.reset(match_token)
+
+
+def duplicates_allowed(decision: "DuplicateDecision | None") -> bool:
+    """The operator explicitly allowed repeated keys (append / allow_duplicates)."""
+    return bool(decision is not None and decision.explicit and decision.policy == "append")
+
+
+def current_duplicates_allowed() -> bool:
+    return _ROWS_ALLOWED.get()
 
 
 def current_match_action() -> str:

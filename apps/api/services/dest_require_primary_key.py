@@ -138,11 +138,17 @@ def planned_create_primary_key(
     The shared duplicate-policy resolver applies the explicit destination
     options to the sync's initial write mode. Keys are carried for effective
     upsert and overwrite (``carry_source_keys``), withheld for plain append;
-    the operator key is the destination key only on upsert. SCD2's
+    the operator key is the destination key on any write mode except an
+    explicit append policy, which allows repeated keys
+    (``schema_fidelity.create_key_inputs``). SCD2's
     history table never carries the key (``scd2_engine``) and the CDC apply
     table declares its key columns itself (``cdc_eos_sa``). No second rulebook.
     """
-    from services.duplicate_policy import DuplicatePolicyError, resolve_duplicate_policy
+    from services.duplicate_policy import (
+        DuplicatePolicyError,
+        duplicates_allowed,
+        resolve_duplicate_policy,
+    )
     from services.schema_fidelity import resolve_create_fidelity_plan
     from services.sync_cursor import is_overwrite_sync, normalize_sync_mode, requires_upsert
 
@@ -158,6 +164,7 @@ def planned_create_primary_key(
     if mode == "cdc":
         return keys
     write_mode = "upsert" if requires_upsert(mode) and keys and mode != "scd2" else "insert"
+    rows_allowed = False
     if mode != "scd2":
         cfg = destination_config or {}
         try:
@@ -171,12 +178,14 @@ def planned_create_primary_key(
         except DuplicatePolicyError:
             return []
         write_mode = decision.write_mode
+        rows_allowed = duplicates_allowed(decision)
     from services.schema_fidelity import create_key_inputs
 
     key_inputs = create_key_inputs(
         write_mode=write_mode,
         conflict_columns=keys if mode != "scd2" else None,
         carry_source_keys=is_overwrite_sync(mode),
+        duplicates_allowed=rows_allowed,
     )
     carry = mode != "scd2" and key_inputs["carry_keys"]
     plan = resolve_create_fidelity_plan(

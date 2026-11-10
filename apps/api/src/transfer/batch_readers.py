@@ -489,16 +489,22 @@ def _read_batch_unscoped(
         )
     if src_type == "kafka":
         from connectors.kafka_reader import read_topic_batch
+        from services.cancel_check import wait_pulse
 
-        return read_topic_batch(
-            cfg=cfg,
-            topic=table,
-            columns=columns,
-            offset=offset,
-            limit=limit,
-            known_total_rows=known_total_rows,
-            kafka_cursor=kafka_cursor,
-        )
+        # Every page joins the group and looks up offsets; a broker that stops
+        # answering must not leave the job silent on its last message (D287).
+        with wait_pulse(
+            f"Reading Kafka topic {table!r} - waiting for the broker to answer"
+        ):
+            return read_topic_batch(
+                cfg=cfg,
+                topic=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                kafka_cursor=kafka_cursor,
+            )
     if src_type == "qdrant":
         from connectors.qdrant_reader import read_points_batch
 

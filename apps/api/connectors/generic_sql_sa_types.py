@@ -19,6 +19,19 @@ from connectors.generic_sql import (
     re,
     sa,
 )
+from sqlalchemy.ext.compiler import compiles
+
+
+@compiles(_ExactJSON, "snowflake")
+def _compile_exact_json_snowflake(type_, compiler, **_kw):  # noqa: ANN001
+    """Snowflake has no JSON type: its document carrier is VARIANT.
+
+    The SCD2 history table is created through SQLAlchemy, whose Snowflake
+    dialect cannot render a JSON column at all, so every SCD2 run with a JSON
+    column failed at CREATE after a green preflight (D47).
+    """
+    return "VARIANT"
+
 
 def _type_repr(type_obj: Any) -> str:
     try:

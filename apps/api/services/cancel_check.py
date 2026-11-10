@@ -40,6 +40,14 @@ _attempt: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+#: Jobs this context is executing, innermost last. Every engine run (pool
+#: worker, synchronous API call, proof ledger) registers its job as running in
+#: this process, so the orphan sweeper never takes a live run for an orphan.
+_local_runs: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "df_local_runs", default=()
+)
+
+
 def set_cancel_probe(fn: Callable[[int | None], None] | None) -> None:
     _probe.set(fn)
 
@@ -49,10 +57,18 @@ def begin_run_attempt(mongo: Any, job_id: str) -> str | None:
 
     Returns ``None`` (and binds nothing) when the store cannot record it - an
     attempt that cannot be proven current must not be able to find itself
-    superseded.
+    superseded. The job counts as running in this process until
+    :func:`end_run_attempt` either way: a synchronous ``/transfer/run`` holds
+    no pool lease, and without this the sweeper resumed it as an orphan once
+    its document sat idle past the grace period, superseding the live run.
     """
     import uuid
 
+    if job_id:
+        from services.transfer_scheduler import mark_local_run
+
+        mark_local_run(job_id)
+        _local_runs.set(_local_runs.get() + (job_id,))
     if mongo is None or not job_id:
         return None
     attempt = uuid.uuid4().hex
@@ -69,6 +85,12 @@ def begin_run_attempt(mongo: Any, job_id: str) -> str | None:
 
 def end_run_attempt() -> None:
     _attempt.set(None)
+    held = _local_runs.get()
+    if held:
+        _local_runs.set(held[:-1])
+        from services.transfer_scheduler import unmark_local_run
+
+        unmark_local_run(held[-1])
 
 
 def get_cancel_probe() -> Callable[[int | None], None] | None:
@@ -330,6 +352,43 @@ def blocking_step(message: str, *, phase: str = "reading") -> Iterator[None]:
         message=message,
         interval_s=BLOCKING_STEP_PULSE_SECONDS,
         until=lambda: meter.mark() > rows_at_entry or attempt_superseded(mongo, job_id),
+        bound_seconds=_blocking_step_bound_seconds(),
+    ):
+        yield
+
+
+@contextlib.contextmanager
+def wait_pulse(message: str) -> Iterator[None]:
+    """Keep the heartbeat moving while one source call waits (D287).
+
+    ``blocking_step`` names its wait at once, at the cost of a job read and a
+    status write: right for a run's first page, too much for every page. This
+    pulse writes nothing unless the call outlasts one pulse interval; from
+    then on it stamps ``heartbeat_at`` and ``message`` with the elapsed time
+    (never ``updated_at``), and past the readiness bound it says the source
+    has not answered. A Kafka page read waiting on a broker that stopped
+    answering left the job on its last message ("Writing batch 1/2 (10
+    rows)...") with no heartbeat at all. The phase is left as it is. A no-op
+    outside a run; it stops for a cancelled or superseded attempt.
+    """
+    store = active_job_store()
+    if store is None:
+        yield
+        return
+    mongo, job_id = store
+    from src.transfer.reconcile_heartbeat import job_phase_heartbeat
+
+    def _not_live() -> bool:
+        job = _read_job(mongo, job_id) or {}
+        return str(job.get("status") or "") != "running" or _is_superseded(job)
+
+    with job_phase_heartbeat(
+        mongo,
+        job_id,
+        phase="",
+        message=message,
+        interval_s=BLOCKING_STEP_PULSE_SECONDS,
+        until=_not_live,
         bound_seconds=_blocking_step_bound_seconds(),
     ):
         yield

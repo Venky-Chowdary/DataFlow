@@ -211,6 +211,20 @@ def test_connectors_upload_small_gzip_still_parses(small_caps, client):
     assert response.status_code == 200, response.text
 
 
+def test_connectors_upload_gzip_csv_is_validated_after_decompression(small_caps, client):
+    # mtime=13 puts a bare CR in the gzip header; scanning the compressed bytes
+    # as CSV raised "new-line character seen in unquoted field" (HTTP 500).
+    payload = gzip.compress(b"a,b\n1,2\n", mtime=13)
+    response = client.post(
+        "/api/v1/connectors/upload",
+        files={"file": ("rows.csv.gz", payload, "application/gzip")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["columns"] == ["a", "b"]
+    assert body["validation"]["rows_scanned"] == 1
+
+
 def test_analyze_file_refuses_oversize_and_bomb(small_caps, client):
     _assert_413(
         client.post(

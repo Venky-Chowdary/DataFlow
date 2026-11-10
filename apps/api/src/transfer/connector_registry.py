@@ -296,6 +296,8 @@ _OPERATOR_COPY_PREFIXES = (
     "that is a snowflake account host",
     "that salesforce host is a form placeholder",
     "connector driver is not installed",
+    # generic_sql._dialect_unavailable: a missing driver, not a bad password (D310).
+    "sqlalchemy dialect/driver for",
     "host not found",
     "cannot reach the host",
     "cannot reach this railway",

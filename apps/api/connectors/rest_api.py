@@ -17,7 +17,7 @@ from typing import Any
 import requests
 from services.value_serializer import cell_to_string, load_http_json
 
-from connectors.saas_common import ReadBatch, base_url, token
+from connectors.saas_common import ReadBatch, _within_call_budget, base_url, token
 
 COMMON_DATA_PATHS = ["data", "results", "items", "records", "values", "contacts", "accounts", "list", "objects"]
 
@@ -101,7 +101,11 @@ def _request_with_retry(
     hooks["response"] = [*list(hooks.get("response") or []), redirect_guard_hook(url)]
     kwargs["hooks"] = hooks
     last_exc: Exception | None = None
+    timeout = kwargs.pop("timeout", None)
     for attempt in range(max_retries):
+        if timeout is not None:
+            # Never past the tool call's budget, nothing once it is spent (D281).
+            kwargs["timeout"] = _within_call_budget(timeout)
         try:
             resp = requests.request(method, url, **kwargs)
             if resp.status_code == 429:
@@ -134,6 +138,8 @@ def _request_with_retry(
     if last_exc is not None:
         raise last_exc
     # max_retries==0 or all retries consumed without a response
+    if timeout is not None:
+        kwargs["timeout"] = _within_call_budget(timeout)
     return requests.request(method, url, **kwargs)
 
 

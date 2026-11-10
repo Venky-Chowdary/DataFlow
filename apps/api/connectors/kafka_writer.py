@@ -263,20 +263,21 @@ def test_kafka(
     schema: str = "",
     **_kwargs: Any,
 ) -> tuple[bool, str]:
-    cfg = {
+    from services import copy_kafka_common
+
+    # The builder introspection uses too: Test cannot pass on a listener the
+    # other paths do not dial (D83).
+    cfg = copy_kafka_common.kafka_connection_cfg({
+        **_kwargs,
         "host": host,
-        "port": port or 9092,
+        "port": port,
         "connection_string": connection_string,
         "username": username,
-        "password": password or api_key,
+        "password": password,
         "api_key": api_key,
         "schema": schema or ("SASL_SSL" if ssl else ""),
         "database": database,
-        "security_protocol": str(_kwargs.get("security_protocol") or ""),
-        "sasl_mechanism": str(_kwargs.get("sasl_mechanism") or ""),
-        "extra": _kwargs.get("extra") if isinstance(_kwargs.get("extra"), dict) else {},
-    }
-    from services import copy_kafka_common
+    })
 
     check = copy_kafka_common.kafka_sasl_check(cfg)
     if check is not None and check.outcome not in {"ok", "inconclusive"}:

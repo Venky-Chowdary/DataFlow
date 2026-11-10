@@ -861,16 +861,10 @@ def overlay_cell_edit(posted: dict[str, Any], durable: list[dict[str, Any]]) -> 
                     base = row
                     break
     if base is None:
+        base = _finding_for_posted_pk(posted, durable)
+    if base is None:
         return posted
     merged = copy.deepcopy(base)
-    col = str(posted.get("column") or posted.get("target") or "").strip()
-    if col and "value" in posted:
-        merged["column"] = col
-        merged["value"] = posted["value"]
-        for bag_name in ("values", "source_values", "target_values"):
-            bag = merged.get(bag_name)
-            if isinstance(bag, dict):
-                bag[col] = posted["value"]
     for bag_name in ("values", "source_values"):
         edit_bag = posted.get(bag_name)
         if isinstance(edit_bag, dict):
@@ -879,7 +873,94 @@ def overlay_cell_edit(posted: dict[str, Any], durable: list[dict[str, Any]]) -> 
                 current = {}
                 merged[bag_name] = current
             current.update(edit_bag)
+    # D294: the replay builds the row from ``source_values`` (else ``values``)
+    # and puts the finding's ``value`` on top, so an edited cell must reach all
+    # of them. A flat edit ``{row: 3, id: 3, qty: '30'}`` carries its cells at
+    # the top level; only names that are columns of the stored row, and not
+    # fields of the finding itself, are cells. A bag the client echoed back
+    # unchanged edits nothing.
+    _apply_cell_edits(merged, _edited_cells(posted, base))
+    col = str(posted.get("column") or posted.get("target") or "").strip()
+    if col and "value" in posted and (
+        col != str(base.get("column") or "") or posted["value"] != base.get("value")
+    ):
+        merged["column"] = col
+        merged["value"] = posted["value"]
+        for bag_name in ("values", "source_values", "target_values"):
+            bag = merged.get(bag_name)
+            if isinstance(bag, dict):
+                bag[col] = posted["value"]
     return merged
+
+
+def _edited_cells(posted: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
+    """Cells the edit changes relative to the stored finding ``base``."""
+    edits: dict[str, Any] = {}
+    columns: set[str] = set()
+    for bag_name in ("values", "source_values", "target_values"):
+        stored = base.get(bag_name)
+        if isinstance(stored, dict):
+            columns.update(str(k) for k in stored)
+        edit_bag = posted.get(bag_name)
+        if bag_name == "target_values" or not isinstance(edit_bag, dict):
+            continue
+        stored = stored if isinstance(stored, dict) else {}
+        for key, value in edit_bag.items():
+            if key not in stored or stored[key] != value:
+                edits[key] = value
+    for key, value in posted.items():
+        if key in columns and key not in base:
+            edits[key] = value
+    return edits
+
+
+def _apply_cell_edits(merged: dict[str, Any], edits: dict[str, Any]) -> None:
+    """Write each edited cell into every bag of the finding and its ``value``.
+
+    An edit that reached only one bag, or left ``value`` holding the original
+    cell, was replayed with the original bad value and quarantined again.
+    """
+    for bag_name in ("values", "source_values", "target_values"):
+        bag = merged.get(bag_name)
+        if isinstance(bag, dict):
+            for key, value in edits.items():
+                if key in bag:
+                    bag[key] = value
+    col = str(merged.get("column") or "")
+    if col in edits and "value" in merged:
+        merged["value"] = edits[col]
+
+
+def _finding_for_posted_pk(
+    posted: dict[str, Any], durable: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The stored finding whose key equals the edit's ``pk_value`` (D294).
+
+    A quarantine-record edit ``{source_pk, pk_value, values}`` carries no row
+    number, and its ``source_pk`` may name the key column instead of holding
+    its value, so it matched no finding and was replayed as a bare scrap
+    (several such edits then collapsed into one row).
+    """
+    pk = posted.get("pk_value")
+    if isinstance(pk, dict):
+        want = {str(k): str(v) for k, v in pk.items()}
+        scalar = next(iter(want.values())) if len(want) == 1 else None
+    elif pk is not None and str(pk) != "":
+        want, scalar = None, str(pk)
+    else:
+        return None
+    if not want and scalar is None:
+        return None
+    for row in durable or []:
+        if not isinstance(row, dict):
+            continue
+        stored = row.get("pk_value")
+        if want and isinstance(stored, dict):
+            if {str(k): str(v) for k, v in stored.items()} == want:
+                return row
+        elif scalar is not None and replay_row_identity(row) == f"pk:{scalar}":
+            return row
+    return None
 
 
 def open_quarantine_details(

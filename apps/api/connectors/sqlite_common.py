@@ -48,6 +48,36 @@ def register_sqlite_decimal_adapter() -> None:
 
 register_sqlite_decimal_adapter()
 
+#: Zone-bearing tokens DataFlow declares on SQLite columns it creates. SQLite
+#: stores their values as ISO-8601 text.
+SQLITE_TEXT_CARRIER_TOKENS = ("TIMESTAMPTZ", "TIMETZ")
+
+
+def register_sqlite_text_carriers() -> None:
+    """Reflect DataFlow's zone-bearing SQLite tokens as text, under their own name.
+
+    SQLAlchemy does not know ``TIMESTAMPTZ`` on SQLite and falls back to the
+    NUMERIC affinity, whose Decimal result processor raised "must be real
+    number, not str" on the ISO text in every row: every cursor (incremental)
+    read out of a table DataFlow created failed (D97). The values are text, so
+    they read, bind and compare as text; DDL still spells the declared token.
+    """
+    try:
+        import sqlalchemy as sa
+        from sqlalchemy.dialects.sqlite import base as sqlite_base
+        from sqlalchemy.ext.compiler import compiles
+    except ImportError:  # pragma: no cover - SQLAlchemy is a hard dependency
+        return
+    for token in SQLITE_TEXT_CARRIER_TOKENS:
+        if token in sqlite_base.ischema_names:
+            continue
+        carrier = type(f"SQLiteTextCarrier_{token}", (sa.types.TEXT,), {})
+        compiles(carrier)(lambda _type, _compiler, _token=token, **_kw: _token)
+        sqlite_base.ischema_names[token] = carrier
+
+
+register_sqlite_text_carriers()
+
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 

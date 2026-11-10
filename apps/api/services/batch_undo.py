@@ -319,6 +319,26 @@ def _decide(
     return ("clear", "")
 
 
+def _drop_run_created(db_type: str, cfg: dict[str, Any], table: str, schema: Any) -> bool:
+    """Drop an object the failed run created; ``False`` = no drop support.
+
+    A Weaviate overwrite keeps the class (``drop_table`` has no Weaviate
+    branch), so a class a failed strict run created kept the objects Weaviate
+    had accepted (D285/D293). The run created it: removing it, and the
+    embedding fingerprint the run stamped for it, restores the destination.
+    """
+    if db_type == "weaviate":
+        from services.copy_weaviate_common import weaviate_class, weaviate_delete_class
+        from services.vector_fingerprint import delete_weaviate_fingerprint
+
+        weaviate_delete_class(cfg, table)
+        delete_weaviate_fingerprint(cfg, weaviate_class(table, cfg))
+        return True
+    from connectors.table_manager import drop_table
+
+    return bool(drop_table(db_type, cfg, table, schema=schema))
+
+
 def _mode_merges_append(mode: str) -> bool:
     """True when a single-chunk write could have merged into the live object."""
     try:
@@ -386,9 +406,7 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
     for _t in tables:
         if drop_created:
             try:
-                from connectors.table_manager import drop_table
-
-                dropped = bool(drop_table(db_type, cfg, _t, schema=schema))
+                dropped = _drop_run_created(db_type, cfg, _t, schema)
             except Exception as drop_exc:  # noqa: BLE001
                 # A table the run never reached CREATE on is already
                 # 'byte-identical to before' — missing-object errors (SQL

@@ -249,6 +249,9 @@ def _introspect_thin_saas(brand: str, **kwargs: Any) -> dict[str, Any]:
     try:
         if brand == "stripe":
             from connectors.stripe import read_object
+        elif brand == "notion":
+            # Notion reads are POST-only; the generic REST GET is a 400 (D311).
+            from connectors.notion import read_object
         else:
             from connectors.rest_api import read_object
 
@@ -288,6 +291,12 @@ def _introspect_thin_saas(brand: str, **kwargs: Any) -> dict[str, Any]:
     }
 
 
+def _notion_sdk_streams() -> list[dict[str, Any]]:
+    from connectors.sdk.transfer_bridge import sdk_manifest_streams
+
+    return sdk_manifest_streams("notion")
+
+
 def _stamp_thin_saas_write_carriers(
     brand: str,
     table: str,
@@ -324,7 +333,12 @@ def _stamp_thin_saas_write_carriers(
                     for f in meta_fields:
                         if isinstance(f, dict) and f.get("name"):
                             live[str(f["name"])] = airtable_field_to_carrier(f)
-        elif brand == "notion":
+        elif brand == "notion" and table not in {
+            s["name"] for s in _notion_sdk_streams()
+        }:
+            # A source stream (pages / databases / database_rows) has fixed
+            # columns, not a database's properties: "database_rows" is no
+            # database id to look up (D311).
             from connectors.notion_writer import (
                 notion_property_to_carrier,
                 _fetch_database_properties,

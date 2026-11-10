@@ -203,6 +203,10 @@ def test_mongo_orphan_claim_fails_closed_before_a_stale_sweeper_retries(
             elif isinstance(value, dict) and "$in" in value:
                 if document.get(key) not in value["$in"]:
                     return False
+            elif isinstance(value, dict) and "$ne" in value:
+                # The cancel guard (job_status.cancel_status_write_filter).
+                if document.get(key) == value["$ne"]:
+                    return False
             elif document.get(key) != value:
                 return False
         return True
@@ -390,3 +394,24 @@ def test_a_job_waiting_for_a_pool_thread_keeps_its_lease(
         release.set()
         future.result(timeout=5)
     assert "waiting-job" not in transfer_scheduler.local_job_ids()
+
+
+def test_a_synchronous_run_in_this_process_is_never_swept_as_an_orphan() -> None:
+    """``/transfer/run`` with async_mode=false runs on the request thread: no pool
+    lease, no queue row. In CI a slow S3 run sat idle past the grace period, the
+    sweeper resumed it ("Orphaned job ... resumed (fresh_start)") and the live
+    request answered 422 "Transfer superseded by a newer attempt of this job"."""
+    from services.cancel_check import begin_run_attempt, end_run_attempt
+
+    store = _store({"_id": "sync1", "status": "running", "transfer_request": _REQUEST})
+    # No store handle: the attempt stamp would refresh updated_at, and the point
+    # here is a run whose document has gone stale.
+    begin_run_attempt(None, "sync1")
+    try:
+        out, submitted = _sweep(store, local_ids=None)
+        assert out == [] and submitted == []
+    finally:
+        end_run_attempt()
+    out, submitted = _sweep(store, local_ids=None)
+    assert [d["action"] for d in out] == ["resumed"]
+    assert submitted and submitted[0][0] == "sync1"

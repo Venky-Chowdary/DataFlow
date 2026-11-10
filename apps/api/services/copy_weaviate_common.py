@@ -165,7 +165,7 @@ def weaviate_delete_class(cfg: dict[str, Any], class_name: str) -> None:
         headers=headers,
         timeout=30,
     )
-    if resp.status_code not in {200, 404}:
+    if resp.status_code not in {200, 204, 404}:
         raise ValueError(
             f"Weaviate delete class failed: {resp.status_code} {resp.text[:200]}"
         )

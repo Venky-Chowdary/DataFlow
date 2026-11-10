@@ -1912,6 +1912,12 @@ def _apply_change_batch(
     if dest_summary is None:
         dest_summary = {}
     _stash_reconcile_evidence(dest_summary, change, pk_target_col or "")
+    if pk_target_cols:
+        # Gate-8 addresses rows by the whole key the writer upserted on; without
+        # it the ladder and value proof fell back to ``id`` and a held-out
+        # (eu, 3) also hid the valid (us, 3) from the proof.
+        dest_summary.setdefault("primary_key_columns", list(pk_target_cols))
+        dest_summary.setdefault("conflict_columns", list(pk_target_cols))
     if census_acc is not None and census_payload and pk_target_cols:
         census_payload = _census_without_rejected_keys(
             census_acc,
@@ -4754,10 +4760,14 @@ def _run_cdc_single_stream(
             delivery="exactly_once" if eos_active else "at-least-once",
             has_position=state.running_cursor is not None, error=exc,
         )
-        if dest_absent_before:
-            _drop_created_table_left_empty(
-                dest_type, dest_cfg, str(dest_table or ""), ddl_log
-            )
+        if dest_absent_before and _drop_created_table_left_empty(
+            dest_type, dest_cfg, str(dest_table or ""), ddl_log
+        ):
+            # The job record must not claim rows stay on a table that is gone.
+            try:
+                exc.destination_table_dropped = str(dest_table or "")  # type: ignore[attr-defined]
+            except Exception as stamp_exc:  # noqa: BLE001 - an immutable exception keeps its text
+                logging.getLogger(__name__).debug("drop not stamped: %s", stamp_exc)
         raise
     finally:
         stamp_capture_identity(sys.exc_info()[1], cdc)

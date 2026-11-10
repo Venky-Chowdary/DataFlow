@@ -272,7 +272,17 @@ def paginate(
                 else paginator.page_size
             )
             request_page_size = min(paginator.page_size, remaining)
-            if paginator.type in {"cursor", "offset", "page"} and paginator.page_size_param:
+            if (
+                paginator.type == "cursor"
+                and paginator.cursor_location == "body"
+                and paginator.page_size_param
+                and page_body is not None
+            ):
+                # A body-cursor API (Notion) reads its page size from the body
+                # too; a fixed template size overran a smaller record_limit and
+                # the page was refused (D311).
+                _set_nested_request_value(page_body, paginator.page_size_param, request_page_size)
+            elif paginator.type in {"cursor", "offset", "page"} and paginator.page_size_param:
                 page_params[paginator.page_size_param] = request_page_size
             if paginator.type == "cursor" and current_token not in (None, ""):
                 if paginator.cursor_location == "body":

@@ -737,6 +737,9 @@ CONNECTION_OPTION_KEYS: tuple[str, ...] = (
     "application_intent",
     "driver",
     "odbc_driver",
+    # Kafka listener: a connector may declare these under ``extra`` (D83)
+    "security_protocol",
+    "sasl_mechanism",
     # generic
     "connect_timeout",
     "options",
@@ -6146,6 +6149,10 @@ def write_mapped_rows(
                         ) in SALVAGE_POLICIES:
                             chunk_written = 0
                             for row_i, row in enumerate(batch):
+                                # D299: one commit per row runs for minutes on a
+                                # slow destination; a cancel stops before the
+                                # next row, counting the rows already committed.
+                                cancel_checkpoint(written + chunk_written)
                                 try:
                                     if write_mode == "upsert" and conflict_columns:
                                         row_written = _upsert_batch(

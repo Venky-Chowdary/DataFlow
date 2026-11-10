@@ -220,6 +220,10 @@ NON_RETRIABLE_PATTERNS: set[str] = {
 
 # Operator-facing failure catalog. Only patterns we can map accurately.
 # `fix` must list *likely checks* — never a single guaranteed remedy.
+#: The generic tail of a classified failure. A run that dropped the table it
+#: created kept no rows, so the job record removes this claim (D315).
+ROWS_STAY_NOTE = "Rows already written stay on the destination until you address capacity."
+
 _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (
         # First: the reasons quoted after this sentence name columns, and the
@@ -283,6 +287,24 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
                 "approved recipe. Nothing was written to the destination."
             ),
             "primary_action": "open_shape",
+        },
+    ),
+    (
+        # A source cell the Map transform could not convert (D315). Its text
+        # names the column, so the `column '` needle below titled it a missing
+        # destination column and claimed rows stay "until you address capacity".
+        ("value could not be converted", "cannot coerce to"),
+        {
+            "code": "value_conversion_refused",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "A source value could not be converted to its column's type",
+            "fix": (
+                "The named column's mapped type cannot hold that source value. Fix the "
+                "value at the source, or change the column's type or transform in Map, "
+                "then run Validate again."
+            ),
+            "primary_action": "open_map",
         },
     ),
     (
@@ -1089,7 +1111,7 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 f"{title}. Driver reported: {raw}. "
                 "This does not say the destination was missing, and it is not a capacity problem."
             )
-        elif matched.get("code") == "all_rows_quarantined":
+        elif matched.get("code") in {"all_rows_quarantined", "value_conversion_refused"}:
             message = f"{title}. {raw}."
         elif matched.get("code") == "shape_refused_row":
             message = (
@@ -1104,10 +1126,7 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 "nothing was written to the destination."
             )
         else:
-            message = (
-                f"{title}. Driver reported: {raw}. "
-                f"Rows already written stay on the destination until you address capacity."
-            )
+            message = f"{title}. Driver reported: {raw}. {ROWS_STAY_NOTE}"
         return {
             "code": matched["code"],
             "category": matched["category"],

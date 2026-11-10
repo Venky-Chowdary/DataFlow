@@ -2238,7 +2238,11 @@ class DataPilotTools:
         host_key_policy: str = "",
         trust_server_certificate: bool | None = None,
     ) -> ToolResult:
-        from .connector_create import build_connector_draft, draft_is_complete
+        from .connector_create import (
+            build_connector_draft,
+            draft_is_complete,
+            driver_missing_refusal,
+        )
 
         if (host_key or "").strip():
             from connectors.sftp_common import normalize_host_key_pin
@@ -2300,6 +2304,10 @@ class DataPilotTools:
         except ValueError as exc:
             return ToolResult(name="create_connector", success=False, output=None, error=str(exc))
         ok, missing = draft_is_complete(draft)
+        if ok:
+            # Planned here: no call on it could ever connect (D310).
+            missing = driver_missing_refusal(str(draft.get("type") or ""))
+            ok = not missing
         if not ok:
             from .ack_ledger import redact_payload
 
@@ -2375,6 +2383,10 @@ class DataPilotTools:
             try:
                 from src.transfer.connector_registry import run_probe
 
+                from .tool_deadline import note_step
+
+                # The tool deadline (D321) then names the host it waited on.
+                note_step("create_connector: testing the new connector", draft, role="connector")
                 probe_ok, probe_msg = run_probe(
                     draft["type"],
                     {

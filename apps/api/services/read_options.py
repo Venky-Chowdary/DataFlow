@@ -60,6 +60,10 @@ class ReadOptions:
                     SQL NULL and a quoted ``""`` as ``''``; ``'keep'`` keeps
                     ``''`` for an unquoted empty too — a non-text column
                     still lands NULL ('' is not a number).
+    ``sniff_header`` with an undeclared header (``header_row`` 1), decide
+                    from the data whether row 1 is names or the first record
+                    (D317). ``has_header=true`` in a payload turns it off,
+                    ``has_header=false`` is ``header_row=0``.
     """
 
     sheet: str = ""
@@ -71,6 +75,7 @@ class ReadOptions:
     delimiter: str = ""
     fixed_width_layout: tuple[tuple[str, int], ...] = ()
     empty_cell: str = "null"
+    sniff_header: bool = True
 
     def __post_init__(self) -> None:
         if self.empty_cell not in {"null", "keep"}:
@@ -176,10 +181,21 @@ class ReadOptions:
         elif sheet_raw is not None:
             sheet = str(sheet_raw).strip()
 
+        header_row = _as_int(data.get("header_row", 1), "header_row", default=1)
+        has_header = _as_has_header(data.get("has_header"))
+        if has_header is not None and data.get("header_row") not in (None, ""):
+            if has_header != (header_row > 0):
+                raise ReadOptionsError(
+                    f"has_header={str(has_header).lower()} contradicts "
+                    f"header_row={header_row}; send one of them"
+                )
+        if has_header is False:
+            header_row = 0
         return cls(
             sheet=sheet,
             sheet_index=sheet_index,
-            header_row=_as_int(data.get("header_row", 1), "header_row", default=1),
+            header_row=header_row,
+            sniff_header=has_header is None,
             skip_rows=_as_int(data.get("skip_rows", 0), "skip_rows", default=0),
             skip_footer=_as_int(data.get("skip_footer", 0), "skip_footer", default=0),
             encoding=str(data.get("encoding") or "").strip(),
@@ -274,6 +290,20 @@ def _as_delimiter(value: Any) -> str:
             f"delimiter must be a single character, got {value!r}"
         )
     return text
+
+
+def _as_has_header(value: Any) -> bool | None:
+    """``has_header``: true / false, or ``None`` for auto (the default)."""
+    if value is None or isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    if text in ("", "auto"):
+        return None
+    if text in ("true", "yes", "1"):
+        return True
+    if text in ("false", "no", "0"):
+        return False
+    raise ReadOptionsError(f"has_header must be true, false or 'auto', got {value!r}")
 
 
 def _as_fixed_width_layout(value: Any) -> tuple[tuple[str, int], ...]:

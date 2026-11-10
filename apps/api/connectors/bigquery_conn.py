@@ -26,6 +26,44 @@ def _is_local_endpoint(host: str, connection_string: str) -> tuple[bool, str]:
 # reads as a hang. Bound the replay so the refusal surfaces in seconds.
 _EMULATOR_RETRY_DEADLINE_S = 20.0
 _emulator_client_cls: type | None = None
+_budgeted_client_cls: type | None = None
+
+
+def _budgeted_client_class(bigquery: Any) -> type:
+    """``bigquery.Client`` whose API calls fit the tool call's budget (D314).
+
+    The client sends every request with ``timeout=None`` and retries it (and
+    re-issues query jobs) for 10 to 40 minutes: a list or sample cut off at
+    its deadline kept its pool worker for 305-536 s, and an endpoint that
+    never answered held it for good (an HTTP client has no driver socket the
+    deadline's interrupt can shut). Inside a tool call each request's timeout
+    and retry deadline are bounded by the remaining budget, and once it is
+    spent no request is sent. Outside a tool call nothing changes.
+    """
+    global _budgeted_client_cls
+    if _budgeted_client_cls is not None:
+        return _budgeted_client_cls
+
+    class _BudgetedClient(bigquery.Client):  # type: ignore[misc, name-defined]
+        def _call_api(self, retry: Any, *args: Any, **kwargs: Any) -> Any:
+            from src.ai.copilot.tool_deadline import remaining_seconds
+
+            left = remaining_seconds()
+            if left is not None:
+                if left <= 0:
+                    # Not a retryable error type: neither retry nor job_retry replays it.
+                    raise TimeoutError(
+                        "the call passed its deadline; the BigQuery request was not sent"
+                    )
+                timeout = kwargs.get("timeout")
+                if not isinstance(timeout, (int, float)) or timeout > left:
+                    kwargs["timeout"] = left
+                if retry:
+                    retry = retry.with_timeout(left)
+            return super()._call_api(retry, *args, **kwargs)
+
+    _budgeted_client_cls = _BudgetedClient
+    return _BudgetedClient
 
 
 def _emulator_client_class(bigquery: Any) -> type:
@@ -37,7 +75,7 @@ def _emulator_client_class(bigquery: Any) -> type:
     bounded_retry = DEFAULT_RETRY.with_deadline(_EMULATOR_RETRY_DEADLINE_S)
     bounded_job_retry = DEFAULT_JOB_RETRY.with_deadline(_EMULATOR_RETRY_DEADLINE_S)
 
-    class _EmulatorClient(bigquery.Client):  # type: ignore[misc, name-defined]
+    class _EmulatorClient(_budgeted_client_class(bigquery)):  # type: ignore[misc]
         def query(self, query: str, *args: Any, **kwargs: Any) -> Any:
             kwargs.setdefault("retry", bounded_retry)
             kwargs.setdefault("job_retry", bounded_job_retry)
@@ -100,5 +138,7 @@ def get_client(
             creds = service_account.Credentials.from_service_account_info(info)
         else:
             creds = service_account.Credentials.from_service_account_file(creds_ref)
-        return bigquery.Client(project=project_id, credentials=creds, location=location or None)
-    return bigquery.Client(project=project_id, location=location or None)
+        return _budgeted_client_class(bigquery)(
+            project=project_id, credentials=creds, location=location or None
+        )
+    return _budgeted_client_class(bigquery)(project=project_id, location=location or None)

@@ -678,6 +678,33 @@ def _enforce_qdrant(
     return status
 
 
+def delete_weaviate_fingerprint(cfg: Mapping[str, Any], target: str) -> None:
+    """Remove the sidecar fingerprint object for a Weaviate class."""
+    import uuid
+
+    from connectors.weaviate_writer import _base_url, _headers, _requests_session
+    from services.connector_auth import resolve_api_key
+
+    session = _requests_session()
+    base_url = _base_url(
+        str(cfg.get("host") or ""),
+        int(cfg.get("port") or 8080),
+        bool(cfg.get("ssl")),
+        str(cfg.get("connection_string") or ""),
+    )
+    object_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"dataflow-vector:{target}"))
+    try:
+        resp = session.delete(
+            f"{base_url}/v1/objects/DfVectorCollections/{object_id}",
+            headers=_headers(resolve_api_key(dict(cfg))),
+            timeout=15,
+        )
+        if resp.status_code not in {200, 204, 404}:
+            raise RuntimeError(f"Weaviate fingerprint delete failed: {resp.status_code}")
+    finally:
+        session.close()
+
+
 def _enforce_weaviate(
     cfg: Mapping[str, Any], target: str, incoming: EmbeddingFingerprint
 ) -> str:

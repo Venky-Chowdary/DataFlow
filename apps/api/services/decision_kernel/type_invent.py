@@ -1801,7 +1801,10 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
     # illegal on this dest (e.g. DECIMAL(38,18) on SQLite → TEXT rematerialize).
     if "(" in upper or "[" in upper or "<" in upper:
         if "<" in upper or "[" in upper:
-            return True
+            # Snowflake spells nested types ARRAY(T) / OBJECT(...) / MAP(K, V);
+            # the logical ``ARRAY<T>`` / ``T[]`` read back from its own table
+            # is a syntax error there ("unexpected '<'", D77).
+            return db != "snowflake"
         bare_typmod = upper.split("(", 1)[0].strip()
         # Oracle character-length semantics (``VARCHAR2(64 BYTE)``) are physical
         # only on Oracle. Everywhere else the unit is a syntax error, so the
