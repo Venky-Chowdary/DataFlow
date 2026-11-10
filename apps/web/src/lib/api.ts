@@ -4899,6 +4899,8 @@ export type Tenant = {
   byok_key_id: string;
   security_contact_email: string;
   mfa_required: boolean;
+  /** D343: members must sign in through SSO (password sign-in refused). */
+  sso_enforced?: boolean;
   session_timeout_hours: number;
   enforce_session_timeout?: boolean;
   ip_allowlist: string[];

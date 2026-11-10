@@ -39,6 +39,7 @@ export function TenantSettings() {
   const [dataRegion, setDataRegion] = useState("us-east-1");
   const [securityContact, setSecurityContact] = useState("");
   const [mfaRequired, setMfaRequired] = useState(false);
+  const [ssoEnforced, setSsoEnforced] = useState(false);
   const [sessionTimeout, setSessionTimeout] = useState(8);
   // A saved timeout is enforced unless the admin unticks this (QA round 11).
   const [enforceTimeout, setEnforceTimeout] = useState(true);
@@ -97,6 +98,7 @@ export function TenantSettings() {
           setDataRegion(t.data_region || "us-east-1");
           setSecurityContact(t.security_contact_email);
           setMfaRequired(t.mfa_required);
+          setSsoEnforced(Boolean(t.sso_enforced));
           setSessionTimeout(t.session_timeout_hours);
           setEnforceTimeout(Boolean(t.enforce_session_timeout));
           setIpAllowlist((t.ip_allowlist || []).join("\n"));
@@ -143,6 +145,7 @@ export function TenantSettings() {
         byok_key_id: tenant?.byok_key_id || "",
         security_contact_email: securityContact.trim(),
         mfa_required: mfaRequired,
+        sso_enforced: ssoEnforced,
         session_timeout_hours: Math.max(1, Math.min(24, Number(sessionTimeout) || 8)),
         enforce_session_timeout: enforceTimeout,
         ip_allowlist: ipAllowlist.split("\n").map((s) => s.trim()).filter(Boolean),
@@ -323,6 +326,21 @@ export function TenantSettings() {
               </p>
             </div>
             <button type="button" role="switch" aria-checked={mfaRequired} aria-label="Require two-factor authentication" className={`df2-switch ${mfaRequired ? "on" : ""}`} onClick={() => setMfaRequired((v) => !v)}>
+              <span className="df2-switch-thumb" />
+            </button>
+          </div>
+
+          <div className="df2-settings-policy-row df2-team-spaced">
+            <div>
+              <h3>Require single sign-on</h3>
+              <p>
+                Members of this workspace must sign in through your deployment&apos;s single sign-on; password
+                sign-in is refused. Platform administrators keep an audited password break-glass; API keys and
+                SCIM are not affected. The SSO provider itself is configured deployment-wide by your platform
+                administrator. Turn this on from a session that signed in with SSO.
+              </p>
+            </div>
+            <button type="button" role="switch" aria-checked={ssoEnforced} aria-label="Require single sign-on" className={`df2-switch ${ssoEnforced ? "on" : ""}`} onClick={() => setSsoEnforced((v) => !v)}>
               <span className="df2-switch-thumb" />
             </button>
           </div>

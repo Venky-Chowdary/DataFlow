@@ -34,6 +34,8 @@ SECURITY_EVENTS: dict[str, str] = {
     "auth.login.locked": "A password login attempt triggered an account lockout.",
     "auth.logout": "An authenticated session was revoked.",
     "auth.sso.login": "An SSO authentication completed.",
+    "auth.login.sso_required": "A password sign-in was refused because a workspace of the person requires single sign-on.",
+    "auth.sso_enforced.break_glass": "A platform administrator signed in with a password although a workspace of theirs requires single sign-on.",
     "system.security_settings.snapshot": "Effective security settings at API startup.",
     "acl.grant.create": "A resource ACL grant was created.",
     "acl.grant.revoke": "A resource ACL grant was revoked.",

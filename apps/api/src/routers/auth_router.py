@@ -1021,6 +1021,12 @@ async def login(body: LoginRequest, request: Request):
             )
         except Exception:
             logger.error("rekey heal audit event failed", exc_info=True)
+    # A workspace that requires SSO refuses its members' password sign-in,
+    # after the password matched so the refusal reveals nothing to a guesser
+    # (D343; platform admins pass as audited break-glass).
+    from services.sso_enforcement import refuse_password_sign_in
+
+    refuse_password_sign_in(user["email"], request=request)
     # An enrolled account answers a challenge here, never a session (QA S7).
     from .mfa_router import login_step_up
 

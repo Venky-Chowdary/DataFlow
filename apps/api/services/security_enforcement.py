@@ -110,12 +110,16 @@ def enforcement_status(tenant: Any, request: Any = None) -> dict[str, Any]:
     from services.mfa_enforcement import posture as mfa_posture
 
     mfa = mfa_posture(tenant)
+    from services.sso_enforcement import posture as sso_posture
+
+    sso, sso_warnings = sso_posture(tenant)
+    warnings += sso_warnings
     if tenant and mfa.get("status") != "enforced" and getattr(tenant, "mfa_required", False):
         warnings.append(
             "Two-factor authentication is required but not enforced: sign-in is not "
             "required on this deployment. Ask your platform administrator to require sign-in."
         )
-    out: dict[str, Any] = {"ip_allowlist": ip, "session_timeout": session, "mfa": mfa}
+    out: dict[str, Any] = {"ip_allowlist": ip, "session_timeout": session, "mfa": mfa, "sso": sso}
     if caller_ip is not None:
         from services.ip_allowlist_policy import proxy_hint
 

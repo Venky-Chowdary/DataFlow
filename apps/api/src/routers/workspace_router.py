@@ -113,6 +113,8 @@ class TenantCreateBody(_TenantFieldChecks):
     enforce_session_timeout: bool = Field(default=True)
     ip_allowlist: list[str] = Field(default_factory=list)
     egress_allowlist: list[str] = Field(default_factory=list)
+    # D343: refuse password sign-in for this workspace's members.
+    sso_enforced: bool = Field(default=False)
 
 
 class TenantUpdateBody(_TenantFieldChecks):
@@ -128,6 +130,7 @@ class TenantUpdateBody(_TenantFieldChecks):
     enforce_session_timeout: bool | None = Field(default=None)
     ip_allowlist: list[str] | None = Field(default=None)
     egress_allowlist: list[str] | None = Field(default=None)
+    sso_enforced: bool | None = Field(default=None)
 
 
 class BYOKKeyCreateBody(BaseModel):
@@ -1223,6 +1226,10 @@ async def post_tenant(body: TenantCreateBody, request: Request):
 
         assert_may_require_mfa(request)
     _refuse_self_lockout(request, body.ip_allowlist, workspace_id)
+    if body.sso_enforced:
+        from services.sso_enforcement import assert_may_enforce_sso
+
+        assert_may_enforce_sso(request)
     try:
         tenant = create_tenant(
             workspace_id=workspace_id,
@@ -1236,6 +1243,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             enforce_session_timeout=body.enforce_session_timeout,
             ip_allowlist=body.ip_allowlist,
             egress_allowlist=body.egress_allowlist,
+            sso_enforced=body.sso_enforced,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1269,6 +1277,10 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
         assert_may_require_mfa(request)
     if body.ip_allowlist is not None:
         _refuse_self_lockout(request, body.ip_allowlist, tenant.workspace_id, tenant.ip_allowlist)
+    if body.sso_enforced and not tenant.sso_enforced:
+        from services.sso_enforcement import assert_may_enforce_sso
+
+        assert_may_enforce_sso(request)
     try:
         updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -1285,6 +1297,8 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
             "fields": sorted(body.model_dump(exclude_none=True).keys()),
             **({"mfa_required": body.mfa_required} if body.mfa_required is not None
                and body.mfa_required != tenant.mfa_required else {}),
+            **({"sso_enforced": body.sso_enforced} if body.sso_enforced is not None
+               and body.sso_enforced != tenant.sso_enforced else {}),
         },
     )
     return _tenant_with_enforcement(updated, request)
@@ -1496,6 +1510,8 @@ def _security_posture(tenant: Tenant | None = None, request: Request | None = No
         # True only when the tenant requires it AND sign-in is enforced
         # (services.mfa_enforcement holds password sessions without a factor).
         "mfa_enforced": mfa_block["enforced"],
+        # D343: password sign-in refused for members (SSO provider is deployment-wide).
+        "sso_enforced": bool(enforcement["sso"]["enforced"]),
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
         # Idle timeout on sign-in sessions (services.session_policy); API keys
         # and the absolute token lifetime are separate.

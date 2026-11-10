@@ -376,6 +376,11 @@ async def login_mfa(body: ChallengeBody, request: Request):
         raise _code_failure(request, email, result, status=401)
     if result.method == "recovery":
         _audit_recovery_used(request, email, result)
+    # D343: a challenge opened before the workspace required SSO cannot finish
+    # a password sign-in after it.
+    from services.sso_enforcement import refuse_password_sign_in
+
+    refuse_password_sign_in(email, request=request, resource="/auth/login/mfa")
     method = "otp" if result.method == "totp" else "recovery"
     try:
         from .auth_router import session_client

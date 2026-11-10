@@ -158,6 +158,9 @@ class Tenant:
     # with until the hours are saved again (docs/DEPLOYMENT.md, backfill note).
     enforce_session_timeout: bool = True
     ip_allowlist: list[str] = field(default_factory=list)
+    # D343: members must sign in through the deployment's SSO provider; their
+    # password sign-in is refused (services.sso_enforcement).
+    sso_enforced: bool = False
     # Connector egress. Empty means private ranges stay refused. This is not
     # the inbound API allowlist, and it is not a deploy setting.
     egress_allowlist: list[str] = field(default_factory=list)
@@ -184,6 +187,7 @@ class Tenant:
             session_timeout_hours=int(data.get("session_timeout_hours", 8)),
             enforce_session_timeout=bool(data.get("enforce_session_timeout", True)),
             ip_allowlist=list(data.get("ip_allowlist", []) or []),
+            sso_enforced=bool(data.get("sso_enforced", False)),
             egress_allowlist=list(data.get("egress_allowlist", []) or []),
             created_at=data.get("created_at", _now()),
             updated_at=data.get("updated_at", _now()),
@@ -211,6 +215,7 @@ def create_tenant(
     enforce_session_timeout: bool = True,
     ip_allowlist: list[str] | None = None,
     egress_allowlist: list[str] | None = None,
+    sso_enforced: bool = False,
 ) -> Tenant:
     """Create a new tenant bound to a workspace."""
     custom_domain = _validate_domain(custom_domain)
@@ -240,6 +245,7 @@ def create_tenant(
         enforce_session_timeout=bool(enforce_session_timeout),
         ip_allowlist=_validate_allowlist(ip_allowlist or []),
         egress_allowlist=_validate_egress_allowlist(egress_allowlist or []),
+        sso_enforced=bool(sso_enforced),
     )
     data["tenants"].append(tenant.to_dict())
     _save(data)
@@ -359,6 +365,8 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
                 raw["ip_allowlist"] = _validate_allowlist(kwargs["ip_allowlist"])
             if "egress_allowlist" in kwargs:
                 raw["egress_allowlist"] = _validate_egress_allowlist(kwargs["egress_allowlist"])
+            if "sso_enforced" in kwargs:
+                raw["sso_enforced"] = bool(kwargs["sso_enforced"])
             raw["updated_at"] = _now()
             _save(data)
             return Tenant.from_dict(raw)
