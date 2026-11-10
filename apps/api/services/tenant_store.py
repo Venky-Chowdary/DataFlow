@@ -302,17 +302,25 @@ def _validate_egress_allowlist(entries: list[str]) -> list[str]:
 
 
 def _validate_allowlist(entries: list[str]) -> list[str]:
+    """Normalize an inbound IP allowlist; an invalid entry is refused (D336).
+
+    Dropping it silently stored ``[]`` for a list of one typo, and the admin
+    read "saved" for a control that held nothing.
+    """
     out: list[str] = []
     for e in entries:
-        e = e.strip()
+        e = str(e or "").strip()
         if not e:
             continue
         try:
             # Accept single IP or CIDR; normalize to network string.
             network = ipaddress.ip_network(e, strict=False)
-            out.append(str(network))
         except ValueError:
-            logger.warning("Ignoring invalid allowlist entry: %s", e)
+            raise ValueError(
+                f"Invalid IP allowlist entry {e!r}: use an IP address or a CIDR range "
+                "such as 203.0.113.0/24"
+            ) from None
+        out.append(str(network))
     return out
 
 

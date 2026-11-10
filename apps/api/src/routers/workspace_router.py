@@ -1065,13 +1065,32 @@ def _tenant_with_enforcement(tenant: Tenant, request: Request) -> dict[str, Any]
     return {**tenant.to_dict(), "enforcement": enforcement_status(tenant, request)}
 
 
-def _refuse_self_lockout(request: Request, entries: list[str], workspace_id: str) -> None:
-    """400 when the list would shut out the admin saving it (audited)."""
+def _refuse_self_lockout(
+    request: Request, entries: list[str], workspace_id: str, stored: list[str] | None = None
+) -> None:
+    """Refuse an IP allowlist save that is invalid (422), that this deployment
+    could not enforce (409, D336), or that would shut out the admin saving it
+    (400). Each refusal of a well-formed list is audited."""
     from services.audit_coverage import record_security_event
     from services.client_ip import client_ip_from_request
-    from services.ip_allowlist_policy import lockout_refusal
+    from services.ip_allowlist_policy import UNENFORCEABLE_REASON, lockout_refusal, unenforceable_refusal
+    from services.tenant_store import _validate_allowlist
 
-    message = lockout_refusal(request, entries)
+    try:
+        normalized = _validate_allowlist(list(entries or []))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    unenforceable = unenforceable_refusal(request, normalized, list(stored or []))
+    if unenforceable:
+        record_security_event(
+            "workspace.ip_allowlist.unenforceable_refused", outcome="failed", request=request,
+            resource="/workspace/tenant", reason_code=UNENFORCEABLE_REASON, level="warn",
+            details={"workspace_id": workspace_id, "client_ip": client_ip_from_request(request),
+                     "entries": len(normalized)},
+            workspace_id=workspace_id,
+        )
+        raise HTTPException(status_code=409, detail=unenforceable)
+    message = lockout_refusal(request, normalized)
     if not message:
         return
     record_security_event(
@@ -1195,7 +1214,7 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
 
         assert_may_require_mfa(request)
     if body.ip_allowlist is not None:
-        _refuse_self_lockout(request, body.ip_allowlist, tenant.workspace_id)
+        _refuse_self_lockout(request, body.ip_allowlist, tenant.workspace_id, tenant.ip_allowlist)
     try:
         updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
     except ValueError as exc:

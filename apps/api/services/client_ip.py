@@ -19,7 +19,26 @@ alias and a bare ``TRUSTED_PROXY_COUNT`` are accepted). Default 0: forwarded
 headers are ignored and the socket peer is used, which cannot be spoofed.
 When the header has fewer hops than trusted proxies the request did not come
 through the whole chain (or the count is wrong), so the socket peer is used
-rather than a client-supplied value. See docs/DEPLOYMENT.md.
+rather than a client-supplied value.
+
+Operator setting ``DATAWRAP_TRUSTED_PROXY_COUNT`` (D336)
+-------------------------------------------------------
+* What: the number of proxies in front of the API that APPEND the address
+  they received the request from to ``X-Forwarded-For`` (CDN, platform edge,
+  the web tier's reverse proxy). Count only proxies you operate or pay for;
+  never count the client.
+* Unset (the default) behind a proxy: every caller resolves to the proxy's
+  private/CGNAT address. Workspace IP allowlists are then NOT enforced
+  (services.ip_allowlist_policy): the posture reports
+  ``enforcement.ip_allowlist.status = "untrusted_client_ip"`` and saving a new
+  list is refused with 409 so no admin reads "saved" as "enforced".
+* Too high: the left-most entries are client-supplied, so a value larger than
+  the real chain lets a caller choose its address. Too low: callers resolve to
+  a proxy. Neither is detected automatically.
+* How to choose and verify: set it to the number of appending proxies, then
+  call ``GET /api/v1/workspace/security/posture`` from a known network;
+  ``enforcement.caller_ip`` must be that network's public address. Explicitly
+  setting 0 declares "no proxy: the socket peer is the client".
 """
 
 from __future__ import annotations
