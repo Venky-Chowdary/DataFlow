@@ -856,7 +856,10 @@ def _introspect_endpoint_impl(
         out["connected"] = probe.ok
         out["objects"] = _operator_visible_objects(probe.tables, "index")
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.database and probe.ok:
+        # The index is the destination table (the writer resolves table ->
+        # collection -> database); sampling only when ``database`` was set left
+        # an existing index schemaless, so append/upsert were refused (D300).
+        if (endpoint.table or endpoint.collection or endpoint.database) and probe.ok:
             _attach_db_sample(out, endpoint)
         return out
 
@@ -1428,7 +1431,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         if fmt == "elasticsearch":
             from connectors.elasticsearch_reader import _client, read_index_batch
 
-            index = endpoint.database or endpoint.table
+            # Same index the writer and the source reader use (D300): the
+            # chosen table, never a connector-level default index first.
+            index = endpoint.table or endpoint.collection or endpoint.database
             if index:
                 exists: bool | None = None
                 client = None
