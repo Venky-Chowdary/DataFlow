@@ -396,6 +396,42 @@ def _ensure_scd_columns(
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
+def _add_new_data_columns(
+    engine: Any,
+    table_obj: Any,
+    dialect_name: str,
+    target_cols: list[str],
+) -> list[str]:
+    """ADD (nullable) mapped columns an existing history table lacks.
+
+    Called only when the run's schema policy approved additive evolution
+    (``backfill_new_fields``: propagate_columns, or an acknowledged review):
+    the same ADD COLUMN overwrite and upsert writers apply, typed exactly as
+    this table's CREATE would type the column. Closed versions keep NULL in
+    it. Without it a propagate run refused the new column, or inserted into a
+    column the table does not have (D347). An ALTER that fails fails the run.
+    """
+    import sqlalchemy as sa
+
+    existing = {
+        str(c["name"]).casefold()
+        for c in sa.inspect(engine).get_columns(table_obj.name, schema=table_obj.schema)
+    }
+    qualified = _qualified_name(table_obj.name, table_obj.schema, dialect_name)
+    added: list[str] = []
+    for name in target_cols:
+        if not name or str(name).casefold() in existing or name not in table_obj.c:
+            continue
+        type_ddl = table_obj.c[name].type.compile(dialect=engine.dialect)
+        col_quoted = quote_stored_identifier(dialect_name, name)
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(f"ALTER TABLE {qualified} ADD COLUMN {col_quoted} {type_ddl}")
+            )
+        added.append(str(name))
+    return added
+
+
 def _build_scd_table(
     engine: Any,
     table_name: str,
@@ -407,8 +443,12 @@ def _build_scd_table(
     *,
     mappings: list[dict[str, Any]] | None = None,
     source_schema_catalog: dict[str, Any] | None = None,
+    add_new_columns: bool = False,
 ) -> Any:
     """Build or reflect the destination table with SCD2 audit columns.
+
+    ``add_new_columns`` is the run's approved additive evolution: mapped
+    columns an existing table lacks are added (nullable) before the merge.
 
     ``source_schema_catalog`` is the source's create-new fidelity catalog. A
     CREATE that never saw it took the server default collation, so a MySQL
@@ -472,6 +512,8 @@ def _build_scd_table(
     )
     if table_exists:
         _ensure_scd_columns(engine, table_obj, dialect_name, cols)
+        if add_new_columns:
+            _add_new_data_columns(engine, table_obj, dialect_name, list(target_cols))
     else:
         table_obj.create(engine, checkfirst=True)
     return table_obj
@@ -1373,8 +1415,12 @@ def apply_scd2(
     complete_snapshot: bool = False,
     scd2_opts: dict[str, Any] | None = None,
     source_endpoint: Any = None,
+    add_new_columns: bool = False,
 ) -> dict[str, Any]:
     """Apply an SCD2 merge against the SQL destination.
+
+    ``add_new_columns`` (the run's ``backfill_new_fields``) adds mapped columns
+    an existing history table lacks before the merge (D347).
 
     ``source_endpoint`` is the run's source; its create-new catalog (keys,
     nullability, collation) reaches the history table's CREATE exactly as on
@@ -1487,6 +1533,7 @@ def apply_scd2(
                 db_type, cols,
                 mappings=mappings,
                 source_schema_catalog=source_schema_catalog,
+                add_new_columns=add_new_columns,
             )
             # Window start for the Gate-8 version recount: every stamp this
             # call writes is >= this instant. Callers that split the run

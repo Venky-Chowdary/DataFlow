@@ -2510,7 +2510,7 @@ class UniversalTransferEngine:
                                 # SCD2 never narrows its read (bind_batch_incremental),
                                 # so an unlimited read is the whole source population.
                                 complete_snapshot=not int(request.limit or 0),
-                                scd2_opts=_scd2_opts,
+                                scd2_opts=_scd2_opts, add_new_columns=backfill_fields,
                                 source_endpoint=request.source,
                             ),
                             budget=RetryBudget(
