@@ -325,6 +325,40 @@ def _row_hash(
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+def _version_unchanged(
+    snap: dict[str, Any] | None,
+    hydrated: dict[str, Any],
+    new_hash: str,
+    target_cols: list[str],
+    *,
+    tracked: list[str] | None = None,
+    stamp_set: set[str] | None = None,
+) -> bool:
+    """Whether the incoming row carries the current version's values.
+
+    The stored ``row_hash`` was taken over the columns the table had when the
+    version was written. After an additive column it no longer covers the
+    current column set, so every key hashed as changed and an unchanged row
+    was closed and re-opened value-identical (D348). A hash mismatch is
+    therefore settled on the values the hash covers, compared cell by cell
+    with the same wire the hash uses: a new column that is NULL on both sides
+    is no change, a real value anywhere still is.
+    """
+    if snap is None:
+        return False
+    if str(snap.get("hash") or "") == new_hash:
+        return True
+    from connectors.writer_common import conflict_key_wire
+
+    stamps = stamp_set or _STAMP_SET
+    attrs = snap.get("attrs") or {}
+    return all(
+        conflict_key_wire(hydrated.get(c)) == conflict_key_wire(attrs.get(c))
+        for c in (list(tracked) if tracked else target_cols)
+        if c not in stamps
+    )
+
+
 def _hydrate_scd2_omit(
     row: dict[str, Any],
     current_attrs: dict[str, Any] | None,
@@ -1343,7 +1377,10 @@ def _merge_scd2_bundle(
             dialect=dialect_name,
         )
         hydrated[cols["row_hash"]] = new_hash
-        if key in current_hashes and current_hashes[key] == new_hash:
+        if key in current_hashes and _version_unchanged(
+            snap, hydrated, new_hash, target_cols,
+            tracked=tracked or None, stamp_set=stamps,
+        ):
             # Tracked attributes unchanged — Type-1 refresh of untracked
             # columns on the current row, only where they actually differ.
             if cols.get("type1") and snap is not None and untracked_cols:
@@ -2119,7 +2156,10 @@ def preview_scd2_merge(
                                 "attrs": dict(hydrated),
                             }
                             continue
-                        if str(snap.get("hash") or "") != new_hash:
+                        if not _version_unchanged(
+                            snap, hydrated, new_hash, target_cols,
+                            tracked=tracked or None, stamp_set=stamps,
+                        ):
                             closes.append(label)
                             opens.append(label)
                             snaps[key] = {
