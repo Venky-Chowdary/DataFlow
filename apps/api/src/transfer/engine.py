@@ -3444,7 +3444,8 @@ class UniversalTransferEngine:
                 pf = apply_policy_gates(
                     pf,
                     _engine_module._execute_policy_gates_for_request(
-                        request, source_columns=columns, resume=resume
+                        request, source_columns=columns, resume=resume,
+                        planned=(mappings, schema, dest_schema_types),
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
@@ -4058,7 +4059,6 @@ class UniversalTransferEngine:
             if lost is not None:
                 return lost
             verified = True
-
 
             if effective_sync == "cdc" and isinstance(dest_summary, dict):
                 from services.cdc_catchup import unread_postgres_change

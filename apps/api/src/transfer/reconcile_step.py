@@ -6525,6 +6525,12 @@ def _run_reconciliation_impl(
             stamped["physical_state"] = dict(physical_state)
         stamped = _apply_n5_gate8_extensions(stamped, n5_ctx)
         rounded = list(carrier_ctx.get("rounded_columns") or [])
+        ms_proof = carrier_ctx.get("millisecond_fit")
+        if ms_proof:
+            # D148: every value of these columns passed the write-time guard as
+            # a whole millisecond, so the carrier dropped nothing from them.
+            fit = set(ms_proof.get("fit_columns") or [])
+            rounded = [c for c in rounded if c.get("column") not in fit]
         if rounded:
             # Both digests were taken at the destination carrier's granularity,
             # so a match here proves every cell the destination *can* hold. The
@@ -6550,6 +6556,12 @@ def _run_reconciliation_impl(
                 "Source and target checksums match at the destination's granularity",
             )
             stamped["message"] = f"{headline}{note}"
+        if ms_proof:
+            stamped["millisecond_fit"] = ms_proof
+            if stamped.get("passed"):
+                stamped["message"] = (
+                    f"{str(stamped.get('message') or '').rstrip()} {ms_proof['message']}"
+                ).strip()
         stamped = _name_row_on_checksum_only_failure(stamped, full_compare_ctx)
         stamped = _localize_checksum_mismatch(stamped, dest_summary)
         stamped = qualify_multi_stream_reconciliation(stamped, dest_summary)
@@ -6874,6 +6886,21 @@ def _run_reconciliation_impl(
             dest_types=dest_types,
             dest_engine=db_type,
             measured_fractional_digits=_measured_fractional_digits(),
+        )
+        from services.millisecond_fit import (
+            EVIDENCE_ATTR,
+            TRUNCATED_KEY,
+            millisecond_fit_proof,
+        )
+
+        carrier_ctx["millisecond_fit"] = millisecond_fit_proof(
+            mapping_dicts,
+            source_schema=source_schema,
+            dest_types=dest_types,
+            dest_engine=db_type,
+            source_db=str(getattr(source_endpoint, "format", "") or ""),
+            preflight=getattr(endpoint, EVIDENCE_ATTR, None),
+            truncated=(dest_summary or {}).get(TRUNCATED_KEY),
         )
     except Exception as exc:
         logging.getLogger(__name__).warning(

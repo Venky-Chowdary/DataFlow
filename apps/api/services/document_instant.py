@@ -228,10 +228,13 @@ def document_instant_wire_preserved(
     refuses, and ``resolve_timezone_policy`` calls it POLICY_UTC_INVENT and
     requires an operator contract.
 
-    A source declaring more than three digits is preserved only when the
-    measured ``population`` holds whole milliseconds — the carrier then loses
-    nothing those rows contain, and the writer refuses any later cell that
-    does not. Unmeasured, the declaration stands and the pair is a truncation.
+    A source declaring more than three digits is decided on its values, not its
+    declaration (D148): a measured cell with a sub-millisecond digit makes the
+    pair a truncation. Otherwise it is preserved — provisionally where nothing
+    was measured — because the write-time guard (``services.millisecond_fit``)
+    checks every value and refuses any batch holding one, so a truncation can
+    never land unacknowledged. A SQL source answers earlier: preflight counts the
+    population with one aggregate and blocks on a non-zero count.
     """
     from services.type_system import (
         LOGICAL_DATE,
@@ -249,7 +252,7 @@ def document_instant_wire_preserved(
     src_p = source_fractional_digits(source_type)
     if src_p is None or src_p <= DOCUMENT_INSTANT_FRACTIONAL_DIGITS:
         return True
-    return population_fits_document_instant(population) is True
+    return population_fits_document_instant(population) is not False
 
 
 def document_instant_utc_invent(

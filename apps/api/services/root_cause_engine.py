@@ -337,6 +337,22 @@ def _is_missing_value_signal(message: str, details: dict[str, Any]) -> bool:
     return all(_MISSING_VALUE_RE.search(i) for i in issues)
 
 
+def _millisecond_count_note(gates: list[dict[str, Any]]) -> str:
+    """D148: the value-level millisecond check's count, for the fidelity root.
+
+    The type path alone says a column *may* lose digits; this names how many
+    values would, so the root does not read as a declaration-only refusal.
+    """
+    for g in gates or []:
+        if (
+            str(g.get("id") or "") == "g3_millisecond_fit"
+            and g.get("status") == "block"
+            and g.get("message")
+        ):
+            return f". {g['message']}"
+    return ""
+
+
 def _is_fidelity_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -1225,6 +1241,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     f"Fidelity risk across type path — impacts "
                     f"{len(absorbed)} gate check(s); open Map for column detail"
                 )
+            summary += _millisecond_count_note(fidelity_gates)
             widening = _pending_widen_paths(preflight)
             if cols and all(c.lower() in widening for c in cols):
                 # Every "collapse" is a source column that widened past an
@@ -1364,7 +1381,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 fidelity_root.summary = (
                     f"{len(merged_cols)} column(s) collapse fidelity on write"
                     f" ({col_label}) — impacts {len(merged_absorbed)} gate check(s)"
-                )
+                ) + _millisecond_count_note(gates)
             else:
                 fidelity_root.summary = (
                     f"Fidelity risk across type path — impacts "

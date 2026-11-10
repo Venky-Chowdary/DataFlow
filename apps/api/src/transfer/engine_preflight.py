@@ -261,11 +261,16 @@ def _execute_policy_gates_for_request(
     *,
     source_columns: list[str] | None = None,
     resume: bool = False,
+    planned: tuple[Any, Any, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate≡Execute policy gates — never default source_kind to file.
 
     Studio Validate passes dest_type / source_type / source_kind / write_via_staging.
     Execute must match or CDC/SCD2/staging falsely block (or skip) after Approve.
+
+    ``planned`` is the run's ``(mappings, source types, destination types)``:
+    with it, a datetime narrowed onto a millisecond carrier gets its value-level
+    answer (D148, ``services.millisecond_fit``).
     """
     from services.preflight_cursor_gate import read_scope_for_transfer_request
     from services.preflight_service import run_transfer_policy_gates
@@ -287,7 +292,7 @@ def _execute_policy_gates_for_request(
         except Exception as exc:
             logger.debug("CDC policy source config unread: %s", exc)
             source_config = None
-    return run_transfer_policy_gates(
+    gates = run_transfer_policy_gates(
         sync_mode=str(getattr(request, "sync_mode", "") or ""),
         schema_policy=str(getattr(request, "schema_policy", "") or "manual_review"),
         validation_mode=str(getattr(request, "validation_mode", "") or "strict"),
@@ -315,3 +320,10 @@ def _execute_policy_gates_for_request(
         source_config=source_config if isinstance(source_config, dict) else None,
         resume=resume,
     )
+    if planned is not None:
+        from services.millisecond_fit import millisecond_fit_gate
+
+        ms_gate = millisecond_fit_gate(request, *planned)
+        if ms_gate is not None:
+            gates = [*gates, ms_gate]
+    return gates

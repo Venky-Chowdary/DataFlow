@@ -152,7 +152,11 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     meta = getattr(result, "meta", None)
     if isinstance(meta, dict) and meta:
         # Promote Gate-8 sample / identity stamps into destination_summary.
-        for key in ("reconcile_sample", "written_ids", "source_row_count", "rows_expanded"):
+        # ``ms_truncated_values``: values a ms carrier truncated under the ack (D148).
+        for key in (
+            "reconcile_sample", "written_ids", "source_row_count", "rows_expanded",
+            "ms_truncated_values",
+        ):
             if key in meta and meta[key] is not None:
                 out[key] = meta[key]
     return out

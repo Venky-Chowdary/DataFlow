@@ -19,6 +19,8 @@ def test_document_date_target_is_graded_as_an_instant(engine):
         target_types={"ts": "date"},
         dest_db_type=engine,
         dest_table_exists=False,
+        # D148: the values decide — a measured sub-millisecond cell is graded.
+        sample_rows=[{"ts": "2024-01-02T03:04:05.123456+00:00"}],
     )
     ts = [i for i in issues if i["source"] == "ts"]
     assert ts, "microseconds into a millisecond carrier must still be graded"

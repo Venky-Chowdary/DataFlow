@@ -54,6 +54,7 @@ from services.source_reread import (
 )
 from services.primary_key import dest_is_key_addressed
 from services.duplicate_policy import merge_skipped_identity_keys, rows_without_kept_keys
+from services.millisecond_fit import merge_truncations as ms_totals
 from services.row_conservation import (
     CENSUS_KEY,
     census_for_duplicate_policy,
@@ -2483,7 +2484,7 @@ def _stream_database_transfer_impl(
             expanded_total += int(incoming.get("rows_expanded") or 0)
             page_skips["skipped"] += int(incoming.get("rows_skipped") or 0)
             page_skips["collapsed"] += int(incoming.get("collapsed_duplicate_rows") or 0)
-            skipped_keys = merge_skipped_identity_keys(prev, incoming)
+            skipped_keys = merge_skipped_identity_keys(prev, incoming) | ms_totals(prev, incoming)
             run.tally.dest_summary = {
                 **prev,
                 **incoming,

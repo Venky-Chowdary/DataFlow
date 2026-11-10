@@ -857,7 +857,6 @@ def write_mapped_rows(
             if m.get("risk_acknowledged") or m.get("riskAcknowledged")
         }
         utc_normalized_cols: set[str] = set()
-        ms_truncated_cols: set[str] = set()
         # Columns the source declares as a calendar day. A date has no time of
         # day and therefore no zone to invent: UTC midnight is the one instant
         # every driver reads back as the same date. Refusing it as "naive"
@@ -1112,16 +1111,15 @@ def write_mapped_rows(
                     # BSON date counts milliseconds; the driver drops anything
                     # finer without a word. Judge the raw cell so a seven-digit
                     # string is not first truncated to Python's six.
-                    if cell_exceeds_document_instant(value):
-                        if column in utc_normalize_ack:
-                            ms_truncated_cols.add(column)
-                        else:
-                            raise ValueError(
-                                f"MongoDB date refused {value!r}: BSON date keeps "
-                                "milliseconds and this value has finer digits — map "
-                                "to a string, or accept the millisecond-truncation "
-                                "risk on this column (refuse silent truncation)"
-                            )
+                    # The batch guard below already refused an unacknowledged
+                    # one; this stays as the per-cell backstop.
+                    if cell_exceeds_document_instant(value) and column not in ms_ack_cols:
+                        raise ValueError(
+                            f"MongoDB date refused {value!r}: BSON date keeps "
+                            "milliseconds and this value has finer digits — map "
+                            "to a string, or accept the millisecond-truncation "
+                            "risk on this column (refuse silent truncation)"
+                        )
                     from datetime import timezone as _tz
 
                     return coerced.astimezone(_tz.utc)
@@ -1190,6 +1188,48 @@ def write_mapped_rows(
                     rejected_details=rejected_details,
                     policy=policy,
                 )
+
+        # D148: BSON date keeps milliseconds. Every guarded cell is checked
+        # before anything is bound; an unacknowledged sub-millisecond value
+        # refuses the whole batch — never a partial write, never a truncation.
+        from services.millisecond_fit import (
+            TRUNCATED_KEY,
+            guard_batch,
+            narrowing_acknowledged,
+            truncation_warnings,
+        )
+
+        ms_ack_cols = {
+            sanitize_identifier(m.get("target") or m.get("source"), preserve_case=True)
+            for m in mappings
+            if narrowing_acknowledged(m)
+        }
+        ms_guard = guard_batch(
+            mapped_rows,
+            target_cols,
+            [
+                c
+                for c, t in zip(target_cols, tgt_types)
+                if _target_is_temporal(t)
+                and c not in calendar_day_cols
+                and not transform_narrows_to_calendar_day(transform_by_col.get(c, ""))
+            ],
+            acknowledged=ms_ack_cols,
+            carrier_label="MongoDB date",
+        )
+        if ms_guard.refusal:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection_name,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                error=ms_guard.refusal,
+                rejected_rows=rejected_rows,
+                rejected_details=list(rejected_details),
+                warnings=transform_errors,
+            )
 
         typed_rows: list[tuple] = []
         # 1-based source row of each typed row: hold-outs leave gaps, and a
@@ -1517,15 +1557,12 @@ def write_mapped_rows(
                     "UTC-normalize risk"
                     for col in sorted(utc_normalized_cols)
                 ),
-                *(
-                    f"{col}: sub-millisecond digits truncated to BSON milliseconds "
-                    "under the accepted risk"
-                    for col in sorted(ms_truncated_cols)
-                ),
+                *truncation_warnings(ms_guard.truncated, "BSON"),
             ],
             meta={
                 **gate8_writer_meta(mapped_rows, target_cols),
                 **({"collapsed_duplicate_rows": collapsed_total} if collapsed_total else {}),
+                **({TRUNCATED_KEY: dict(ms_guard.truncated)} if ms_guard.truncated else {}),
             },
         )
     except (PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:

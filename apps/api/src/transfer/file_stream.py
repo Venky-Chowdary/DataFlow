@@ -2850,7 +2850,12 @@ def stream_file_to_database(
             prior_precount = dest_summary.get(PRECOUNT_KEY)
             prior_key_addressed = dest_summary.get(KEY_ADDRESSED_KEY)
             prior_skipped = int(dest_summary.get("rows_skipped") or 0)
+            from services.millisecond_fit import merge_truncations
+
+            # Values a millisecond carrier truncated under the ack, run total (D148).
+            ms_truncated = merge_truncations(dest_summary, batch_summary)
             dest_summary = dict(batch_summary)
+            dest_summary.update(ms_truncated)
             # A SQL/document writer stamps the rows it *wrote* (target-named,
             # already transformed) as ``reconcile_sample``. Gate-8 reads that
             # key as SOURCE rows and applies each mapping's transform again,
