@@ -1,34 +1,41 @@
-from pathlib import Path
-
 from src.ai.copilot.tool_permissions import TOOL_PERMISSIONS
 
 
-def test_mcp_documentation_mentions_every_registered_tool():
-    text = (Path(__file__).parents[3] / "docs" / "MCP.md").read_text()
-    missing = sorted(
+def test_every_registered_mcp_tool_has_a_permission_and_an_effect():
+    """The MCP tool table lives in code (docs/ was removed in 1415f1f0f).
+
+    Every tool the assistant and MCP expose is gated by exactly one permission
+    and declares whether it reads, plans or mutates; no permission row is left
+    for a tool that no longer exists.
+    """
+    from src.ai.copilot.tools import TOOL_DEFINITIONS
+
+    registered = {tool["name"] for tool in TOOL_DEFINITIONS}
+    assert registered - set(TOOL_PERMISSIONS) == set(), "tool without a permission"
+    assert set(TOOL_PERMISSIONS) - registered == set(), "permission for a removed tool"
+    bad = sorted(
         name
         for name, (permission, effect) in TOOL_PERMISSIONS.items()
-        if f"| `{name}` | `{permission}` | `{effect}` |" not in text
+        if effect not in {"read", "plan", "mutate"} or "." not in permission
     )
-    assert not missing, f"MCP documentation drift: {missing}"
+    assert not bad, f"tool permission drift: {bad}"
 
 
-def test_mcp_documentation_lists_rate_limit_settings_and_error_kinds():
-    text = (Path(__file__).parents[3] / "docs" / "MCP.md").read_text()
-    required = (
-        "DATAFLOW_MCP_RATE_LIMIT",
-        "DATAFLOW_MCP_RATE_BURST",
-        "DATAFLOW_MCP_RATE_QPS",
-        "DATAFLOW_MCP_RATE_MAX_KEYS",
-        "ok",
-        "permission_denied",
-        "rate_limited",
-        "auth",
-        "policy_denied",
-        "tool_error",
-    )
-    missing = [value for value in required if f"`{value}`" not in text]
-    assert not missing, f"MCP documentation drift: {missing}"
+def test_mcp_rate_limit_settings_are_the_ones_the_limiter_reads(monkeypatch):
+    """DATAFLOW_MCP_RATE_LIMIT / _BURST / _QPS / _MAX_KEYS steer the limiter."""
+    from services import mcp_rate_limit
+
+    principal = "mcp-settings-contract"
+    monkeypatch.setenv("DATAFLOW_MCP_RATE_LIMIT", "0")
+    assert mcp_rate_limit.check_mcp_rate_limit(principal)["allowed"] is True
+    assert mcp_rate_limit.check_mcp_rate_limit(principal).get("disabled") is True
+
+    monkeypatch.setenv("DATAFLOW_MCP_RATE_LIMIT", "1")
+    monkeypatch.setenv("DATAFLOW_MCP_RATE_BURST", "1")
+    monkeypatch.setenv("DATAFLOW_MCP_RATE_QPS", "0.001")
+    monkeypatch.setenv("DATAFLOW_MCP_RATE_MAX_KEYS", "10")
+    assert mcp_rate_limit.check_mcp_rate_limit(principal)["allowed"] is True
+    assert mcp_rate_limit.check_mcp_rate_limit(principal)["allowed"] is False
 
 
 def test_mcp_invocation_logs_accept_explicit_error_kinds_and_fallback(monkeypatch, tmp_path):
