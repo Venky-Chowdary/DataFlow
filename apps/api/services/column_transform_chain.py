@@ -100,7 +100,7 @@ def compile_column_chains(
                 return {}, (
                     f"column_transforms[{key!r}] step {op!r} is not a transform the "
                     f"engine applies. Use one of: {', '.join(sorted(KNOWN_TRANSFORMS))} "
-                    "or replace:/default:/assume_timezone:."
+                    "or replace:/concat:/default:/assume_timezone:."
                 )
             try:
                 steps.append(_step_to_shape_wire(RecipeStep(column=column, op=op)))

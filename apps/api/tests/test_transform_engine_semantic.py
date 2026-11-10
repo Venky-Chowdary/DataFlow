@@ -15,9 +15,10 @@ from services.transform_engine import apply_transform, infer_transform_for_mappi
 
 
 def test_apply_transform_phone():
-    # For generic string targets the phone transform preserves formatting.
-    assert apply_transform("+1 (555) 123-4567", "phone") == ("+1 (555) 123-4567", None)
-    assert apply_transform("555-123-4567", "phone") == ("555-123-4567", None)
+    # The phone transform normalizes, as its catalog entry says (D330): a
+    # leading + country code yields E.164; without one, the national digits.
+    assert apply_transform("+1 (555) 123-4567", "phone") == ("+15551234567", None)
+    assert apply_transform("555-123-4567", "phone") == ("5551234567", None)
 
 
 def test_empty_semantic_transform_errors_not_silent_null():

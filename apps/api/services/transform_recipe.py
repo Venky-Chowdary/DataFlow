@@ -82,13 +82,31 @@ _ON_ERROR_TO_SHAPE = {"fail": "refuse"}
 #: Engine parameterized ops that map onto shape options faithfully.
 #: ``assume_timezone:`` is a timestamp cast with a zone: both attach the zone
 #: through ``transform_engine.attach_timezone`` (gap refused, PostgreSQL fold).
-#: ``concat:`` (suffix literal) has no faithful shape step, so it refuses to
-#: compile — listed here so the refusal is deliberate, not an unhandled branch.
+#: ``concat:TEXT`` appends a literal suffix: it compiles to ``set_value`` with
+#: an expression that keeps NULL as NULL, as the Map transform does (D330).
 _ENGINE_PREFIX_TO_SHAPE = (
     ("replace:", "replace"),
     ("default:", "default_if_null"),
     ("assume_timezone:", "cast_column"),
+    ("concat:", "set_value"),
 )
+
+
+def _concat_suffix_expression(column: str, suffix: str) -> str:
+    """``concat:SUFFIX`` on ``column`` as a shape expression.
+
+    The column is a ``[name]`` reference and the suffix a quoted literal (the
+    quote doubled), so neither can change the expression's structure. NULL
+    stays NULL: the engine's ``concat:`` never turns a missing value into the
+    bare suffix.
+    """
+    if not column or "]" in column:
+        raise ValueError(
+            f"concat: on column {column!r} cannot be expressed as a shape step "
+            "(the column name cannot be referenced); rename the column first"
+        )
+    literal = "'" + suffix.replace("'", "''") + "'"
+    return f"if(is_null([{column}]), null, concat([{column}], {literal}))"
 
 
 def _now() -> str:
@@ -402,6 +420,9 @@ def _step_to_shape_wire(step: RecipeStep) -> dict[str, Any]:
             elif prefix_hit == "assume_timezone:":
                 op = "cast_column"
                 options = {"to_type": "timestamp", "timezone": arg.strip()}
+            elif prefix_hit == "concat:":
+                op = "set_value"
+                options = {"expression": _concat_suffix_expression(step.column, arg)}
             else:  # default:
                 op = "default_if_null"
                 options = {"value": arg}

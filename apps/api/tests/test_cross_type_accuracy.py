@@ -405,7 +405,7 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
         ("SGVsbG8=", "binary", "SGVsbG8=", False),
         ("hello", "binary", None, True),
         # semantic transforms
-        ("+1-555-0199", "phone", "+1-555-0199", False),
+        ("+1-555-0199", "phone", "+15550199", False),  # normalized (D330)
         ("Test@Example.COM", "email", "test@example.com", False),
         ("HTTPS://Example.COM/Path", "url", "https://Example.COM/Path", False),
         ("GB82 west 1234 5698 7654 32", "iban", "GB82WEST12345698765432", False),
