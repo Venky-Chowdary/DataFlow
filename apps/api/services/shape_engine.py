@@ -1774,7 +1774,13 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
             return _call("regex_replace", value, options.get("search"), options.get("replacement", ""))
         return _call("replace", value, options.get("search"), options.get("replacement", ""))
     if op == "default_if_null":
-        return options.get("value") if is_blank(value) else value
+        if is_blank(value) or (
+            # The Map transform default: (D350): '' and whitespace-only text
+            # are empty too, on a typed source where is_blank() keeps them.
+            options.get("include_empty") and isinstance(value, str) and not value.strip()
+        ):
+            return options.get("value")
+        return value
     if op == "null_if":
         if is_blank(value):
             return None

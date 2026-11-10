@@ -190,7 +190,12 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         options=("search", "replacement", "regex"),
         required=("search",),
     ),
-    _StepDef("default_if_null", "Substitute a value for blanks", options=("value",), required=("value",)),
+    _StepDef(
+        "default_if_null",
+        "Substitute a value for blanks",
+        options=("value", "include_empty"),
+        required=("value",),
+    ),
     _StepDef("null_if", "Treat a sentinel value as null", options=("values",), required=("values",)),
     _StepDef("round_number", "Round to N decimal places", options=("places",), required=("places",)),
     _StepDef("truncate_number", "Drop digits beyond N places", options=("places",), required=("places",)),
@@ -1022,6 +1027,13 @@ def _normalize_options(
         if not persisted:
             raise ShapeError(f"{where}: null_if needs a list of sentinel values")
         out["values"] = persisted
+
+    if op == "default_if_null" and "include_empty" in out:
+        # include_empty is the Map transform default: ("use literal when cell
+        # is empty"): '' and whitespace-only text take the value too, on a
+        # typed source as well, where only NULL is blank (D350).
+        if not isinstance(out["include_empty"], bool):
+            raise ShapeError(f"{where}: include_empty must be true or false")
 
     if op == "normalize_unicode":
         form = str(out.get("form") or "NFC").strip().upper()

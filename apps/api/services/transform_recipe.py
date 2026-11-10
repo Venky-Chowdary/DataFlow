@@ -401,7 +401,8 @@ def _step_to_shape_wire(step: RecipeStep, *, engine_names: bool = False) -> dict
     ``engine_names`` says the op is a Map transform name (MCP
     ``column_transforms``), so an engine id that is also a shape op name
     (``normalize_unicode``) compiles to what the Map transform does, not to
-    the shape op of the same name (D332).
+    the shape op of the same name (D332), and ``default:`` replaces an
+    empty cell, not only NULL (D350).
     """
     from services.shape_models import STEP_CATALOG
 
@@ -433,6 +434,11 @@ def _step_to_shape_wire(step: RecipeStep, *, engine_names: bool = False) -> dict
             else:  # default:
                 op = "default_if_null"
                 options = {"value": arg}
+                if engine_names:
+                    # The Map transform default: uses the literal when the
+                    # cell is empty - NULL, '' or whitespace-only - on every
+                    # source (D350). A typed source's is_blank() is NULL only.
+                    options["include_empty"] = True
         elif (canonical := normalize_engine_transform(step.op)) in _ENGINE_OP_TO_SHAPE:
             # Aliases (``to_decimal`` → ``decimal``) map through their canonical
             # engine id — the faithful shape op is the same one.
