@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Iterable
 
+from services.brand import PRODUCT_NAME
+
 logger = logging.getLogger(__name__)
 
 #: Keys a CDC reader adds to a row image that are not source columns.
@@ -66,7 +68,7 @@ def refusal_message(columns: list[str], *, table: str, dest_table: str) -> str:
         f"capture started, and the schedule's schema policy does not add new "
         f"columns, so {dest_table} has no column for them. No change carrying "
         f"{names} was applied and the log position was not advanced: set the "
-        "schedule's schema_policy to propagate_columns (DataFlow then adds the "
+        f"schedule's schema_policy to propagate_columns ({PRODUCT_NAME} then adds the "
         f"column, nullable, to {dest_table}), or add {names} to the destination "
         "and the mapping yourself, then run the schedule again — the held "
         "changes are re-read from the log."
@@ -77,7 +79,7 @@ def propagation_note(columns: list[str], *, table: str, dest_table: str) -> str:
     names = ", ".join(columns)
     return (
         f"Source column(s) {names} were added to {table} during this CDC capture; "
-        f"DataFlow added them to {dest_table} (nullable, schema policy propagates "
+        f"{PRODUCT_NAME} added them to {dest_table} (nullable, schema policy propagates "
         "new columns) and applies their values from the first change that "
         "carries them. Rows with no change since keep NULL there until they "
         "change or are repaired."
