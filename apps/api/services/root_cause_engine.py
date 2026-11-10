@@ -1000,6 +1000,42 @@ def quarantine_retry_fix(job_id: str) -> str:
     )
 
 
+def _confidence_floor_by_mode() -> str:
+    """Which validation modes move G4's floor — none of the writing ones below 0.75."""
+    from services.validation_mode_contract import confidence_floor_for_mode
+
+    balanced = confidence_floor_for_mode("balanced")
+    return (
+        f"validation_mode does not lower this floor below {balanced:g}: balanced, "
+        f"lenient and migration all use {balanced:g} (strict "
+        f"{confidence_floor_for_mode('strict'):g}). Lenient holds out cells that "
+        "fail to cast; it does not accept a low-confidence mapping"
+    )
+
+
+_CONFIDENCE_FLOOR_BY_MODE = _confidence_floor_by_mode()
+
+
+def _mapping_confidence_fix(columns: list[str]) -> str:
+    """G4's way out on every surface (D329): Studio Map, or a signed acceptance.
+
+    A verified continue-policy contract on the pair clears G4 like
+    ``user_override`` (D197); ``risk_acceptance`` is how MCP and REST sign one.
+    """
+    from services.risk_acceptance import RISK_ACCEPTANCE_SURFACES
+
+    named = ", ".join(columns[:8])
+    return (
+        "Open Map → review low-confidence pairs → Approve with evidence or remap "
+        "to the correct target → re-run Validate. Without Studio, sign the "
+        "reviewed pairs: pass risk_acceptance {approved_by, reason, "
+        "execution_policy: TRANSFORM_AND_CONTINUE (a column transform) or "
+        "CAST_AND_CONTINUE"
+        + (f", columns: [{named}]" if named else "")
+        + f"}} to {RISK_ACCEPTANCE_SURFACES}. {_CONFIDENCE_FLOOR_BY_MODE}."
+    )
+
+
 def _pending_widen_paths(preflight: dict[str, Any]) -> dict[str, str]:
     """``column -> "OLD → NEW"`` for every approvable destination widen.
 
@@ -1512,14 +1548,11 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 affected_rows_sample=sample_n,
                 estimated_total_rows=est_n,
                 risk_level="high",
-                recommended_fix=(
-                    "Open Map → review low-confidence pairs → Approve with evidence "
-                    "or remap to the correct target → re-run Validate."
-                ),
+                recommended_fix=_mapping_confidence_fix(cols),
                 alternative_fixes=[
                     "Improve source/target column names for lexical match",
                     "Approve with user_override after human review",
-                    "Lower validation mode only when Discovery/Migration mode is intentional",
+                    _CONFIDENCE_FLOOR_BY_MODE,
                 ],
                 recovery_strategy=(
                     "After Map approve/remap, re-Validate. No write occurs until G4 passes."

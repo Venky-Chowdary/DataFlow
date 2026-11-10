@@ -1261,6 +1261,19 @@ TOOL_DEFINITIONS: list[dict] = [
                         "acknowledgement a one-shot Confirm records on the job."
                     ),
                 },
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "The start_transfer risk_acceptance object {approved_by, "
+                        "reason, execution_policy (QUARANTINE_ROW, CAST_AND_CONTINUE, "
+                        "TRANSFORM_AND_CONTINUE, SKIP_ROW, STOP_COLUMN), "
+                        "on_cast_failure?, columns?}. It signs a Migration Risk "
+                        "Contract on each mapping a gate requires (lossy, "
+                        "value-changing or below the confidence floor); the signed "
+                        "contracts are stored on the schedule's mappings and every "
+                        "unattended run replays them. Omitted means nothing is signed."
+                    ),
+                },
             },
             "required": ["cadence"],
         },
@@ -4782,6 +4795,7 @@ class DataPilotTools:
         duplicate_policy: str = "",
         in_file_dedupe: str = "block",
         file_wait_seconds: int = 0,
+        risk_acceptance: dict | None = None,
     ) -> ToolResult:
         from .schedule_tools import create_schedule
 
@@ -4820,6 +4834,7 @@ class DataPilotTools:
             duplicate_policy=duplicate_policy,
             in_file_dedupe=in_file_dedupe,
             file_wait_seconds=file_wait_seconds,
+            risk_acceptance=risk_acceptance,
         )
 
     def _analyze_result(
