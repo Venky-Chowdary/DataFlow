@@ -290,6 +290,24 @@ def _proof_source_batches(
                 qcols = _snowflake_projection(
                     conn, source_endpoint, src_cfg, read_cols
                 )[0]
+            elif src_type in {"postgresql", "postgres"}:
+                # D331: see what the write's reader saw. It carries inet,
+                # interval, json, ranges… as engine text; the driver's decode
+                # renders them differently ('10.0.0.1' vs '10.0.0.1/32'), so
+                # an untouched row read as "changed in source during run".
+                from connectors.postgresql_reader import text_carry_select_sql
+
+                with conn.connection.cursor() as _cur:
+                    qcols = text_carry_select_sql(
+                        _cur,
+                        str(
+                            getattr(source_endpoint, "schema", "")
+                            or src_cfg.get("schema")
+                            or "public"
+                        ),
+                        str(source_endpoint.table or ""),
+                        list(read_cols),
+                    ) or qcols
             for batch in iter_select_row_dicts(
                 conn,
                 sa.text(f"SELECT {qcols} FROM {table_ref}"),  # nosec B608
@@ -618,13 +636,23 @@ class _PinStore:
         return out
 
     def drift_stats(self) -> tuple[int, int, int]:
-        """(exp keys unpinned, exp key count, dest-only key count)."""
+        """(exp keys unpinned and unproven, exp key count, dest-only key count).
+
+        D331: a key whose destination row equals the recipe output of the
+        re-read is proven whatever its pin says. The pin compares the write
+        reader's rendering with the re-read's (PG ``inet::text`` keeps
+        ``/32``, the driver does not), so counting every unpinned key told
+        the operator 3 of 3 rows changed on a source nobody touched while
+        2 of them read back exact.
+        """
         drift_n = int(
             self.db.execute(
                 "SELECT count(*) FROM exp e "
                 "LEFT JOIN pin p ON e.k = p.k "
                 "LEFT JOIN rawh r ON e.k = r.k "
-                "WHERE p.h IS NULL OR p.h IS NOT r.h"
+                "LEFT JOIN destk d ON e.k = d.k "
+                "WHERE (p.h IS NULL OR p.h IS NOT r.h) "
+                "AND (d.k IS NULL OR d.fp IS NOT e.fp)"
             ).fetchone()[0]
         )
         n_keys = int(
@@ -1104,19 +1132,20 @@ def _transform_applied_proof_impl(
         return str(dest_types.get(col) or dest_types.get(col.lower()) or "")
 
     def _src_norm(v: Any, ddl: str = "") -> str:
-        # Source-side hash normalization — must match stream._pin_norm on
-        # the write ledger: declared text compares literally, numeric/date
-        # columns canonicalize so COPY-text and driver reprs hash alike.
-        if v is None:
-            return _NULL_SENTINEL
+        # Source-side hash — the write ledger's own chain: the SQL readers
+        # put every decoded cell on the wire with cell_to_string, then the
+        # ledger hashes it with _pin_norm. D331: a separate normalization
+        # here hashed Decimal('1.500') as '1.5' against the wire's '1.500'
+        # (and a TIMETZ time against its ISO text), so every untouched row
+        # holding such a value read as "changed in source during run".
+        from services.value_serializer import cell_to_string
+
+        from .stream_pin_ledger import _pin_norm
+
         try:
-            if isinstance(v, str) and ddl and _TEXT_FAMILY_DDL_RE.match(
-                str(ddl).strip()
-            ):
-                return v
-            return normalize_cell(v, ddl_type=str(ddl or ""), engine=src_type)
+            return _pin_norm(cell_to_string(v, preserve_sql_null=True), ddl)
         except Exception:
-            return str(v)
+            return _NULL_SENTINEL if v is None else str(v)
 
     def _src_ddl(col: str) -> str:
         ss = source_schema or {}
@@ -2386,9 +2415,13 @@ def _transform_applied_proof_impl(
             "longer matches what was written"
         )
         if drift_counts and drift_counts[1]:
+            # D331: an unpinned key is not proof the source changed — the
+            # write's reader and the re-read can render one value two ways.
             drift_reason = (
-                f"source changed during run — {drift_counts[0]} of "
-                f"{drift_counts[1]} keys changed in source during run; "
+                f"{drift_counts[0]} of {drift_counts[1]} keys do not hold "
+                "the recipe output and their source rows no longer read "
+                "back as this run read them (changed in source during run, "
+                "or read back in a different form); "
                 f"{drift_counts[1] - drift_counts[0]} proven"
             )
         return {
