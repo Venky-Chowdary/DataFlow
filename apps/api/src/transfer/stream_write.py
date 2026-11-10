@@ -176,6 +176,7 @@ def _write_batch(
         source_handoff["upsert_ddl_approved"] = True
     from services.duplicate_policy import (
         DuplicatePolicyError,
+        duplicates_allowed,
         reset_match_action,
         resolve_duplicate_policy,
         set_match_action,
@@ -196,7 +197,10 @@ def _write_batch(
         decided = None
     if decided is not None and (decided.explicit or (decided.policy == "upsert" and write_mode == "insert" and conflict_columns)):
         write_mode = decided.write_mode
-    match_token = set_match_action(decided.match_action if decided else "update")
+    match_token = set_match_action(
+        decided.match_action if decided else "update",
+        duplicates_allowed=duplicates_allowed(decided),
+    )
     from services.sync_cursor import is_overwrite_sync
 
     # Overwrite rebuilds the table from one source snapshot, so the source key

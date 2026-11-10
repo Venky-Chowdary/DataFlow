@@ -5,11 +5,14 @@ QA (jobs 6ae6a429…, 6ae6a44d…): PostgreSQL -> MySQL with
 ``incremental_append``: preflight passed and the write failed with MySQL 3750.
 Upsert and overwrite worked (they create the key).
 
-DataFlow creates an append destination without a key on purpose (a second
-copy of a row is legal on append). On a server that forces a PRIMARY KEY that
-CREATE can never succeed, so Validate (G6) now reads the server variable and
-refuses before anything is written, naming the variable and the fixes; upsert
-and overwrite still create PRIMARY KEY (id) and run.
+DataFlow creates an append destination without the *source* key on purpose (a
+second copy of a row is legal on append). Since 8f9963845 a key the operator
+declares is the new table's PRIMARY KEY on any write mode, unless an explicit
+append policy (duplicate_policy=append / allow_duplicates) says the key repeats.
+A CREATE that declares no key can never succeed on a server that forces one, so
+Validate (G6) reads the server variable and refuses before anything is written,
+naming the variable and the fixes; upsert, overwrite and append with a declared
+key create PRIMARY KEY (id) and run.
 
 The live half sets ``SET GLOBAL sql_require_primary_key=ON`` (restored in a
 finally block) on a PRIVATE MySQL only — never the shared server other suites
@@ -47,14 +50,15 @@ def _source_table() -> str:
     return t
 
 
-def _stage(client, t: str, mode: str):
+def _stage(client, t: str, mode: str, primary_key: str | None = "id"):
     src = _connector("postgresql", _pg_cfg(), "source")
     dst = _connector("mysql", _cfg("mysql"), "destination")
     return h.mcp_call(client, "start_transfer", {
         "source_connector_id": src, "dest_connector_id": dst, "source_table": t,
-        "dest_table": t, "sync_mode": mode, "primary_key": "id",
-        "validation_mode": "strict",
-        **({"cursor_column": "id"} if mode == "incremental_append" else {})})
+        "dest_table": t, "sync_mode": mode, "validation_mode": "strict",
+        **({"primary_key": primary_key} if primary_key else {}),
+        **({"cursor_column": "id", "cursor_semantics": "monotonic_sequence"}
+           if mode == "incremental_append" else {})})
 
 
 def _mysql_exists(t: str) -> bool:
@@ -68,13 +72,18 @@ def test_append_create_new_is_refused_at_validate_naming_the_variable(client, mo
 
     monkeypatch.setattr(rpk, "server_requires_primary_key",
                         lambda cfg: rpk.PrimaryKeyRequirement(variable="sql_require_primary_key"))
-    t = _source_table()
+    t = _keyless_source_table()
     try:
-        ok, out = _stage(client, t, mode)
+        # No key anywhere: the append CREATE declares none and the server would
+        # refuse it.
+        ok, out = _stage(client, t, mode, primary_key=None)
         assert not ok, out
         text = str(out)
         assert "sql_require_primary_key=ON" in text and "upsert" in text, text
         assert not _mysql_exists(t)
+        # A declared key is the new table's PRIMARY KEY on append (8f9963845).
+        ok, out = _stage(client, t, mode)
+        assert ok and not h.blockers_of(out), out
     finally:
         h.drop_table("postgresql", t)
         h.drop_table("mysql", t)
@@ -139,7 +148,7 @@ def test_live_server_variable_on_refuses_append_and_lets_upsert_run(client, requ
 
         assert server_requires_primary_key(srv).variable == "sql_require_primary_key"
         for mode in ("full_refresh_append", "incremental_append"):
-            ok, out = _stage_args(client, t, mode, dest_cfg=srv)
+            ok, out = _stage_args(client, t, mode, dest_cfg=srv, primary_key=None)
             assert not ok and "sql_require_primary_key=ON" in str(out), out
             assert not _g_exists(f"{t}_d")
         ok, out = _stage_args(client, t, "upsert", dest_cfg=srv)
@@ -176,10 +185,12 @@ def test_an_unreadable_variable_is_a_finding_not_a_pass(client, monkeypatch):
 
     monkeypatch.setattr(rpk, "server_requires_primary_key",
                         lambda cfg: rpk.PrimaryKeyRequirement(unreadable="sql_require_primary_key unreadable (1227)"))
-    t = _source_table()
+    t = _keyless_source_table()
     try:
-        ok, out = _stage(client, t, "full_refresh_append")
+        ok, out = _stage(client, t, "full_refresh_append", primary_key=None)
         assert not ok and "Could not read whether the destination forces" in str(out), out
+        ok, out = _stage(client, t, "full_refresh_append")  # declared key: keyed create
+        assert ok, out
         ok, out = _stage(client, t, "upsert")  # keyed create: the question does not arise
         assert ok, out
     finally:
@@ -204,6 +215,8 @@ def _stage_args(client, t: str, mode: str, dest_cfg: dict | None = None, **extra
     args = {"source_connector_id": src, "dest_connector_id": dst, "source_table": t,
             "dest_table": f"{t}_d", "sync_mode": mode, "primary_key": "id",
             "validation_mode": "strict", **extra}
+    if args["primary_key"] is None:
+        del args["primary_key"]
     if mode in {"incremental_append", "incremental_upsert", "scd2"}:
         args.setdefault("cursor_column", "id")
     return h.mcp_call(client, "start_transfer", args)
@@ -229,11 +242,13 @@ def require_pk_on():
 
 # (source has a PK?, mode, extra args, refused?)
 _MODES = [
-    (False, "full_refresh_overwrite", {}, True),     # keyless source: no key to carry
-    (True, "full_refresh_overwrite", {}, False),     # source PK carried
+    (False, "full_refresh_overwrite", {"primary_key": None}, True),  # keyless source, no key
+    (False, "full_refresh_overwrite", {}, False),    # operator key is the PK (8f9963845)
+    (True, "full_refresh_overwrite", {"primary_key": None}, False),  # source PK carried
     (False, "upsert", {}, False),                    # operator key is the PK
     (False, "incremental_upsert", {"cursor_semantics": "monotonic_sequence"}, False),
-    (True, "full_refresh_append", {}, True),         # append withholds keys
+    (True, "full_refresh_append", {"primary_key": None}, True),  # append withholds source key
+    (True, "full_refresh_append", {}, False),        # operator key is the PK (8f9963845)
     (True, "scd2", {"cursor_semantics": "modification_timestamp"}, True),  # history table
 ]
 
@@ -282,34 +297,44 @@ def test_planned_key_is_the_writers_planner_answer():
             keys={"primary_key_columns": pk, "unique_keys": []}))
 
     keyed, keyless = catalog(["id"]), catalog([])
+    append_policy = {"type": "mysql", "duplicate_policy": "append"}
+    # (mode, source catalog, operator key, destination options) -> planned key.
+    # Since 8f9963845 the operator key is the CREATE's key on any write mode,
+    # except under an explicit append policy, which allows repeated keys.
     cases = {
-        ("full_refresh_overwrite", "keyed"): ["id"],
-        ("full_refresh_overwrite", "keyless"): [],
-        ("full_refresh_overwrite", None): [],
-        ("upsert", "keyless"): ["id"],
-        ("upsert", None): ["id"],
-        ("incremental_deduped", "keyless"): ["id"],
-        ("full_refresh_append", "keyed"): [],
-        ("incremental_append", "keyed"): [],
-        ("scd2", "keyed"): [],
-        ("cdc", None): ["id"],
+        ("full_refresh_overwrite", "keyed", None, None): ["id"],
+        ("full_refresh_overwrite", "keyless", "id", None): ["id"],
+        ("full_refresh_overwrite", "keyless", None, None): [],
+        ("full_refresh_overwrite", None, None, None): [],
+        ("upsert", "keyless", "id", None): ["id"],
+        ("upsert", None, "id", None): ["id"],
+        ("incremental_deduped", "keyless", "id", None): ["id"],
+        ("full_refresh_append", "keyed", "id", None): ["id"],
+        ("full_refresh_append", "keyed", None, None): [],
+        ("full_refresh_append", "keyed", "id", "append"): [],
+        ("incremental_append", "keyed", "id", None): ["id"],
+        ("incremental_append", "keyed", None, None): [],
+        ("incremental_append", "keyed", "id", "append"): [],
+        ("scd2", "keyed", "id", None): [],
+        ("cdc", None, "id", None): ["id"],
     }
     cats = {"keyed": keyed, "keyless": keyless, None: None}
-    for (mode, cat), want in cases.items():
+    for (mode, cat, key, policy), want in cases.items():
         got = planned_create_primary_key(sync_mode=mode, mappings=maps,
-                                         operator_key_columns=["id"],
-                                         source_schema_catalog=cats[cat])
-        assert got == want, (mode, cat, got)
+                                         operator_key_columns=[key] if key else [],
+                                         source_schema_catalog=cats[cat],
+                                         destination_config=append_policy if policy else None)
+        assert got == want, (mode, cat, key, policy, got)
 
 
-def _pure_csv_plan_and_g6(monkeypatch, mode, target, key_hint, requirement):
+def _pure_csv_plan_and_g6(monkeypatch, mode, target, key_hint, requirement, options=None):
     from services import dest_require_primary_key as rpk
     from services.ddl_compatibility import evaluate_ddl_compatibility
 
     mappings = [{"source": "order_id", "target": target},
                 {"source": "name", "target": "name"}]
     source = {"config": {"type": "csv"}, "table": "orders.csv"}
-    destination_config = {"type": "mysql"}
+    destination_config = {"type": "mysql", **(options or {})}
     probes = []
     catalogs = []
 
@@ -326,7 +351,7 @@ def _pure_csv_plan_and_g6(monkeypatch, mode, target, key_hint, requirement):
     planned = rpk.planned_create_primary_key(
         sync_mode=mode, mappings=mappings,
         operator_key_columns=[key_hint] if key_hint else [],
-        source_schema_catalog=None,
+        source_schema_catalog=None, destination_config=destination_config,
     )
     compatible, issues = evaluate_ddl_compatibility(
         mappings=mappings, table_exists=False, dest_connected=True,
@@ -341,19 +366,26 @@ def _pure_csv_plan_and_g6(monkeypatch, mode, target, key_hint, requirement):
 
 
 @pytest.mark.parametrize("target", ["order_id", "order_key"])
-@pytest.mark.parametrize("mode, keyed", [
-    ("full_refresh_append", False),
-    ("incremental_append", False),
-    ("upsert", True),
-    ("incremental_deduped", True),
-    ("full_refresh_overwrite", False),
+@pytest.mark.parametrize("mode", [
+    "full_refresh_append",
+    "incremental_append",
+    "upsert",
+    "incremental_deduped",
+    "full_refresh_overwrite",
 ])
-def test_pure_csv_selected_key_planner_and_g6(monkeypatch, target, mode, keyed):
+# The selected key is the CREATE's key on every mode (8f9963845) unless the
+# operator explicitly allowed repeated keys, which also turns upsert into insert.
+@pytest.mark.parametrize("options, keyed", [
+    ({}, True),
+    ({"duplicate_policy": "append"}, False),
+    ({"allow_duplicates": True}, False),
+], ids=["default", "append_policy", "allow_duplicates"])
+def test_pure_csv_selected_key_planner_and_g6(monkeypatch, target, mode, options, keyed):
     from services.dest_require_primary_key import PrimaryKeyRequirement
 
     planned, compatible, issues = _pure_csv_plan_and_g6(
         monkeypatch, mode, target, "order_id",
-        PrimaryKeyRequirement(variable="sql_require_primary_key"),
+        PrimaryKeyRequirement(variable="sql_require_primary_key"), options,
     )
     assert planned == ([target] if keyed else [])
     assert compatible is keyed, issues
@@ -397,8 +429,10 @@ def test_pure_csv_detect_probe_evidence_is_not_overclaimed(monkeypatch, target, 
             unreadable="sql_require_primary_key unreadable (1227)"),
         "off": PrimaryKeyRequirement(),
     }
+    # No declared key: the detect CREATE declares none, so the probe's answer
+    # decides (a declared key would be planned and the question would not arise).
     planned, compatible, issues = _pure_csv_plan_and_g6(
-        monkeypatch, "detect", target, "order_id", requirements[state],
+        monkeypatch, "detect", target, None, requirements[state],
     )
     assert planned == []
     assert compatible is (state == "off"), issues
@@ -420,16 +454,18 @@ def test_pure_csv_detect_probe_evidence_is_not_overclaimed(monkeypatch, target, 
 
 
 @pytest.mark.parametrize("mode", ["full_refresh_append", "incremental_append"])
-@pytest.mark.parametrize("options, expected_write_mode", [
-    ({"duplicate_policy": "upsert"}, "upsert"),
-    ({"duplicate_policy": "skip_duplicates"}, "upsert"),
-    ({"duplicate_policy": "merge", "allow_duplicates": True}, "upsert"),
-    ({"duplicate_policy": "append"}, "insert"),
-    ({"allow_duplicates": True}, "insert"),
-    ({}, "insert"),
+# key_declared: the default append declares the operator key (8f9963845); an
+# explicit append policy allows repeated keys, so its CREATE declares none.
+@pytest.mark.parametrize("options, expected_write_mode, key_declared", [
+    ({"duplicate_policy": "upsert"}, "upsert", True),
+    ({"duplicate_policy": "skip_duplicates"}, "upsert", True),
+    ({"duplicate_policy": "merge", "allow_duplicates": True}, "upsert", True),
+    ({"duplicate_policy": "append"}, "insert", False),
+    ({"allow_duplicates": True}, "insert", False),
+    ({}, "insert", True),
 ])
 def test_pure_explicit_policy_writer_and_g6_same_inputs(
-    monkeypatch, mode, options, expected_write_mode,
+    monkeypatch, mode, options, expected_write_mode, key_declared,
 ):
     from services import dest_require_primary_key as rpk
     from services.ddl_compatibility import evaluate_ddl_compatibility
@@ -456,12 +492,12 @@ def test_pure_explicit_policy_writer_and_g6_same_inputs(
         destination_table="orders", contract_primary_key="order_id",
         destination_config=destination_config,
     )
-    assert compatible is (expected_write_mode == "upsert"), issues
+    assert compatible is key_declared, issues
     planned = rpk.planned_create_primary_key(
         sync_mode=mode, mappings=mappings, operator_key_columns=["order_id"],
         destination_config=destination_config,
     )
-    assert planned == (["order_key"] if expected_write_mode == "upsert" else [])
+    assert planned == (["order_key"] if key_declared else [])
     if compatible:
         assert issues == []
     else:

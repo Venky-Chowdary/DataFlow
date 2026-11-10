@@ -1512,6 +1512,7 @@ def write_destination_database(
         )
         options["source_spool"] = spill.spool
     from services.duplicate_policy import (
+        duplicates_allowed,
         reset_match_action,
         resolve_duplicate_policy,
         set_match_action,
@@ -1530,7 +1531,9 @@ def write_destination_database(
     ):
         write_mode = decided.write_mode
         options["write_mode"] = decided.write_mode
-    match_token = set_match_action(decided.match_action)
+    match_token = set_match_action(
+        decided.match_action, duplicates_allowed=duplicates_allowed(decided)
+    )
     # The population handed to the writer, counted before it can release the
     # list. A writer stamps ``source_row_count`` as the rows it *accepted*;
     # Gate-8 then subtracted the quarantined rows a second time ("source 29,

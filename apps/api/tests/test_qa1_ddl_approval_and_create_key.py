@@ -233,6 +233,31 @@ def test_operator_key_materializes_on_create_new_append(dest, key):
         assert "sku" not in keyed
 
 
+@pytest.mark.parametrize("dest", ["pg", "mysql"])
+def test_explicit_append_policy_keeps_the_operator_key_off_the_create(dest):
+    """duplicate_policy=append allows a repeated key, so the CREATE must not make it unique."""
+    from services.duplicate_policy import reset_match_action, set_match_action
+
+    conn = _connect(dest)
+    table = "qa1_key_new_dup"
+    conn.cursor().execute(f"DROP TABLE IF EXISTS {table}")
+    token = set_match_action("update", duplicates_allowed=True)
+    try:
+        res = _write(
+            dest, table_name=table, headers=["sku", "name", "qty"],
+            data_rows=[["A1", "x", "1"], ["A1", "y", "2"]],
+            mappings=[{"source": h, "target": h} for h in ["sku", "name", "qty"]],
+            column_types={"sku": "string", "name": "string", "qty": "integer"},
+            create_table=True, write_mode="insert", conflict_columns=["sku"],
+            validation_mode="balanced",
+        )
+    finally:
+        reset_match_action(token)
+    assert res.ok and res.rows_written == 2, res.error
+    assert _count(conn, table) == 2
+    assert "sku" not in {col for _, col in _keys(dest, conn, table)}
+
+
 # --- 1b. Validate's cell preview predicts the writer's decimal-scale quarantine ---
 
 
