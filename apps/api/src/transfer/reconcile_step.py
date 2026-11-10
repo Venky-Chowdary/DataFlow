@@ -3578,6 +3578,16 @@ def _maybe_attach_verification_ladder(
     # dedupe_skip kept the stored row for a key that was already there: that row
     # is not this run's write, so neither side of it is graded against the source.
     _kept_keys = dedupe_skip_kept_keys(dest_summary, key_cols)
+    # D335 — so is a keyed-append tie peer the inclusive seed re-read and the
+    # boundary dedupe left in place: an earlier run wrote it.
+    _kept_keys |= {
+        k
+        for k in (
+            _ladder_key(_d, key_cols)
+            for _d in dest_summary.get("incremental_window_landed_keys") or []
+        )
+        if k is not None
+    }
     if _kept_keys:
         source_rows = [
             r for r in source_rows

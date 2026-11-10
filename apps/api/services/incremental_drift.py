@@ -403,10 +403,21 @@ def fail_on_window_duplicates(
     out = dict(report)
     n = int(duplicates.get("rows") or 0)
     cols = ", ".join(duplicates.get("match_columns") or [])
+    # Name the duplicated rows themselves (D335): the whole-table culprit
+    # census that follows lists every key whose content differs, which is not
+    # the duplicate.
+    named = "; ".join(
+        ", ".join(f"{c}={v}" for c, v in (s.get("identity") or {}).items())
+        + f" ({s.get('copies')} copies, source holds {s.get('expected')})"
+        for s in duplicates.get("sample") or []
+        if isinstance(s, dict)
+    )
     sentence = (
         f"Gate-8: {n:,} row(s) inside this run's cursor window are at the "
         "destination more times than the source holds them — the window was "
-        f"appended twice (matched on {cols}). The run is not exactly-once; "
+        f"appended twice (matched on {cols}"
+        + (f"; duplicated: {named}" if named else "")
+        + "). The run is not exactly-once; "
         "the job's undo note says whether the batch was removed or kept."
     )
     out["passed"] = False
