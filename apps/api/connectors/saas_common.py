@@ -324,7 +324,7 @@ def request(
             headers=h,
             params=params,
             json=body,
-            timeout=timeout,
+            timeout=_within_call_budget(timeout),
             hooks=hooks,
         )
         resp.raise_for_status()
@@ -344,6 +344,28 @@ def request(
         ),
         **retry_options,
     )
+
+
+def _within_call_budget(timeout: float) -> float:
+    """``timeout`` bounded by the tool call's remaining budget (D281).
+
+    A count or read pages through the API one request at a time, each with
+    its own timeout and retries: a tool call cut off at its deadline kept
+    paging HubSpot for 627-2600 s and held its pool worker. Once the call's
+    budget is spent no request is sent (not retried either), so the worker
+    ends at its next page. Outside a tool call (a transfer job) nothing
+    changes.
+    """
+    from src.ai.copilot.tool_deadline import remaining_seconds
+
+    left = remaining_seconds()
+    if left is None:
+        return timeout
+    if left <= 0:
+        raise ConnectionAbortedError(
+            "the call passed its deadline; the HTTP request was not sent"
+        )
+    return min(timeout, max(1.0, left))
 
 
 def is_auth_error(exc: Exception) -> bool:

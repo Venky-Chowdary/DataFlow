@@ -141,6 +141,43 @@ def _on_gone(dbapi_connection: Any, *_args: Any) -> None:
     unregister_connection(dbapi_connection)
 
 
+def _on_do_connect(dialect: Any, _record: Any, cargs: Any, cparams: Any) -> Any:
+    """Open an Oracle connection whose handshake the call's deadline can end.
+
+    python-oracledb bounds only the TCP connect: a host that accepted and went
+    silent held the worker until the peer closed (D281). Inside a tool call
+    the connect runs with its sockets registered for the deadline's
+    interrupt. Every other dialect (and any connect outside a tool call)
+    keeps SQLAlchemy's own path, including engine-level ``do_connect`` hooks.
+    """
+    if getattr(dialect, "name", "") != "oracle":
+        return None
+    _pin_oracle_thin_mode(dialect)
+    from src.ai.copilot.tool_deadline import _progress, interruptible_connect
+
+    if _progress.get() is None:
+        return None
+    with interruptible_connect():
+        return dialect.connect(*cargs, **cparams)
+
+
+def _pin_oracle_thin_mode(dialect: Any) -> None:
+    """Fix python-oracledb in thin mode before any connect.
+
+    Until its first connection succeeds the driver serializes every connect
+    in the process behind the one deciding thin or thick mode, on a lock no
+    deadline can interrupt: one silent Oracle host parked every other Oracle
+    connect without dialing (D281: zero inbound connections on their
+    tunnels). The API only ever uses thin mode.
+    """
+    enable = getattr(getattr(dialect, "loaded_dbapi", None), "enable_thin_mode", None)
+    if callable(enable):
+        try:
+            enable()
+        except Exception as exc:  # noqa: BLE001 - thick mode chosen elsewhere
+            logger.debug("oracledb thin mode not pinned: %s", exc)
+
+
 def install() -> None:
     """Register the pool listeners once per process."""
     global _installed
@@ -151,6 +188,7 @@ def install() -> None:
             return
         try:
             from sqlalchemy import event
+            from sqlalchemy.engine.default import DefaultDialect
             from sqlalchemy.pool import Pool
         except ImportError:  # pragma: no cover - SQLAlchemy is a dependency
             return
@@ -161,4 +199,5 @@ def install() -> None:
         event.listen(Pool, "close", _on_gone)
         event.listen(Pool, "close_detached", _on_gone)
         event.listen(Pool, "invalidate", _on_gone)
+        event.listen(DefaultDialect, "do_connect", _on_do_connect)
         _installed = True

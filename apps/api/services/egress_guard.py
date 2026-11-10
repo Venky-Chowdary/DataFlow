@@ -728,6 +728,10 @@ _EGRESS_WORKSPACE: contextvars.ContextVar[str] = contextvars.ContextVar(
     "egress_workspace", default=""
 )
 _INSTALL: dict[str, Any] = {"count": 0}
+#: Told about each Python socket this context connects (see :func:`observe_dials`).
+_DIAL_OBSERVER: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "egress_dial_observer", default=None
+)
 
 # Control-plane stores the API itself dials (job store, CDC leases). A writer
 # callback can open a pooled socket to them while a connector scope is active;
@@ -872,12 +876,18 @@ def _install_guards() -> None:
                 return address
             return ""
 
+        def _observe(sock) -> None:
+            observer = _DIAL_OBSERVER.get()
+            if observer is not None:
+                observer(sock)
+
         def guarded_connect(self, address):
             policy = _DIAL_POLICY.get()
             if policy is not None:
                 refusal = _refusal_for_target(_sockaddr_host(address), policy, real)
                 if refusal:
                     raise EgressRefused(refusal)
+            _observe(self)
             return real_connect(self, address)
 
         def guarded_connect_ex(self, address):
@@ -886,6 +896,7 @@ def _install_guards() -> None:
                 refusal = _refusal_for_target(_sockaddr_host(address), policy, real)
                 if refusal:
                     raise EgressRefused(refusal)
+            _observe(self)
             return real_connect_ex(self, address)
 
         def guarded(host, port, *args, **kwargs):
@@ -972,6 +983,23 @@ def pinned_egress(
         yield
     finally:
         _DIAL_POLICY.reset(token)
+        _uninstall_guards()
+
+
+@contextmanager
+def observe_dials(observer: Any) -> Iterator[None]:
+    """Call ``observer(sock)`` for every Python socket this context connects.
+
+    A driver handshake has no connection object to interrupt yet: the tool
+    deadline uses this to reach the socket of a connect that hangs on a peer
+    that accepted and went silent (D281). Scoped like :func:`pinned_egress`.
+    """
+    token = _DIAL_OBSERVER.set(observer)
+    _install_guards()
+    try:
+        yield
+    finally:
+        _DIAL_OBSERVER.reset(token)
         _uninstall_guards()
 
 

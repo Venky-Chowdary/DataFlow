@@ -441,6 +441,45 @@ def unregister_connection(conn: Any) -> None:
         _drop_from(owner, key)
 
 
+@contextlib.contextmanager
+def interruptible_connect():
+    """Make a driver's connect handshake interruptible by the call's deadline.
+
+    A handshake has no connection object yet: python-oracledb bounds only the
+    TCP connect, and a peer that accepted and went silent held the worker in
+    ``recv`` until the tunnel closed, long after the call was abandoned
+    (D281). Every Python socket the handshake connects is registered with the
+    call while it runs; the driver connection that owns it afterwards is
+    registered by the pool events instead. A no-op outside a tool call.
+    """
+    if _progress.get() is None:
+        yield
+        return
+    from services.egress_guard import observe_dials
+
+    sockets: list[Any] = []
+
+    def _track(sock: Any) -> None:
+        progress = _progress.get()
+        if progress is not None:
+            with progress.lock:
+                late = progress.interrupted or threading.get_ident() in progress.interrupted_threads
+            if late:
+                # A retry after the deadline must not start I/O nobody will end.
+                raise ConnectionAbortedError(
+                    "the call passed its deadline; the connection was not opened"
+                )
+        sockets.append(sock)
+        register_connection(sock)
+
+    try:
+        with observe_dials(_track):
+            yield
+    finally:
+        for sock in sockets:
+            unregister_connection(sock)
+
+
 def _shutdown_descriptor(fd: int, identity: tuple[int, int] | None) -> bool:
     """Shut the socket behind ``fd`` if it is still the registered one.
 
