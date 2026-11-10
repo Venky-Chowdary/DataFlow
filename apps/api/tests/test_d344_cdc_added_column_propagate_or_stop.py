@@ -560,3 +560,45 @@ def test_mongo_new_field_is_propagated_or_stops(isolated, monkeypatch, policy):
     finally:
         coll.drop()
         _pg_sql(f'DROP TABLE IF EXISTS "{name}_dst"')
+
+
+@needs_live
+def test_a_column_the_table_already_had_but_the_map_leaves_out_does_not_stop(
+    isolated, monkeypatch
+):
+    """D344 counts only columns the source gained after the capture opened.
+
+    A column the table already had and the operator deliberately left out of
+    the mapping is not an ADD COLUMN: the stream keeps applying the mapped
+    columns and never writes the omitted one (the shared consumer judges the
+    same way, from the live catalog at start).
+    """
+    from src.transfer.engine import UniversalTransferEngine
+
+    table = "d344u_" + uuid.uuid4().hex[:8]
+    try:
+        _pg_sql(f'CREATE TABLE "{table}" (id INT PRIMARY KEY, name TEXT, status TEXT)')
+        _pg_sql(f'ALTER TABLE "{table}" REPLICA IDENTITY FULL')
+        for i in range(1, 4):
+            _pg_sql(f'INSERT INTO "{table}" VALUES (%s, %s, %s)', (i, f"n{i}", "new"))
+        mapped = [
+            {"source": "id", "target": "id", "confidence": 0.99, "approved": True},
+            {"source": "name", "target": "name", "confidence": 0.99, "approved": True},
+        ]
+
+        def run(sync: str):
+            req = _request(table, sync, "manual_review")
+            req.mappings = list(mapped)
+            job_id = "d344u" + uuid.uuid4().hex[:12]
+            isolated.update_job_status(job_id, "pending", transfer_request={})
+            return UniversalTransferEngine().execute_tracked(req, job_id)
+
+        first = run("cdc")
+        assert first.success, first.error
+        _pg_sql(f"UPDATE \"{table}\" SET name = 'renamed', status = 'paid' WHERE id = 2")
+        second = run("cdc_incremental")
+        assert second.success, second.error
+        assert "status" not in _dest_columns(table)
+        assert _my_sql(f"SELECT name FROM `{table}_dst` WHERE id = 2", fetch=True)[0][0] == "renamed"
+    finally:
+        _cleanup(table)

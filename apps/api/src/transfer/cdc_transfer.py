@@ -3548,6 +3548,22 @@ def _run_cdc_single_stream(
     # other column (a source ADD COLUMN mid-capture) is propagated or refused
     # before it is applied, never written without it.
     started_columns = [*headers, *(str(m.get("source") or "") for m in mappings or [])]
+    # A column the source table already had when this capture opened is a
+    # deliberate omission from the mapping, not a source ADD COLUMN: only a
+    # column the live catalog did not list then counts as added (as the shared
+    # consumer does). An unreadable catalog keeps the mapped set.
+    try:
+        from services.reflection_cache import invalidate_named_tables
+
+        from .adapters_introspect import _introspect_table_schema_rich
+
+        invalidate_named_tables(table_name)
+        _live_at_start, _nulls, _keys = _introspect_table_schema_rich(
+            src_type, src_cfg, table_name, []
+        )
+        started_columns.extend(str(c) for c in (_live_at_start or {}))
+    except Exception:  # noqa: BLE001 - fall back to the mapped column set
+        logger.debug("CDC start catalog unreadable for %s", table_name, exc_info=True)
     added_columns: list[str] = []
     source_schema_catalog = _cdc_source_schema_catalog(
         src_type, src_cfg, table_name, headers, column_types

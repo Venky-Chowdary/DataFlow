@@ -556,7 +556,7 @@ def test_cdc_transfer_when_needed_snapshots_on_retention_gap() -> None:
             source,
             destination,
             mappings=[{"source": "id", "target": "id"}],
-            schema={"id": "string"},
+            schema={"id": "string", "v": "string"},  # the fake table has v from the start
             stream_contracts=[
                 {
                     "sync_mode": "cdc",
@@ -972,7 +972,7 @@ def test_cdc_transfer_honors_snapshot_mode_never() -> None:
             source,
             destination,
             mappings=[{"source": "id", "target": "id"}],
-            schema={"id": "string"},
+            schema={"id": "string", "v": "string"},  # the fake table has v from the start
             stream_contracts=[
                 {
                     "sync_mode": "cdc",
