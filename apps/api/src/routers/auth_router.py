@@ -1182,6 +1182,10 @@ async def change_password(body: ChangePasswordRequest, request: Request):
         raise HTTPException(status_code=403, detail="Current password is incorrect")
     if body.new_password == body.current_password:
         raise HTTPException(status_code=400, detail="Choose a password you have not used")
+    # D340: the same policy as signup/invite/reset (length, breached lists).
+    from services.signup_service import check_new_password
+
+    check_new_password(body.new_password)
     set_password(email=actor, password=body.new_password)
     # D338: every other session (Bearer and paired cookie) of this person is
     # signed out; the session that made the change stays signed in.

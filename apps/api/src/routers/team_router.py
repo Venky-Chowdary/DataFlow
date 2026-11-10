@@ -277,6 +277,10 @@ async def patch_user(email: str, body: UserUpdateBody, request: Request):
 @router.post("/users/{email}/password")
 async def post_user_password(email: str, body: PasswordBody, request: Request):
     actor = _require_platform_admin(request)
+    # D340: an admin-set password meets the same policy as every other path.
+    from services.signup_service import check_new_password
+
+    check_new_password(body.password)
     try:
         user = set_password(email=email, password=body.password)
     except UserStoreError as e:
