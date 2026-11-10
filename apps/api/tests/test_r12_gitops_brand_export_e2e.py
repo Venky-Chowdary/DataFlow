@@ -21,6 +21,8 @@ PostgreSQL source (``r11_live_world``):
 
 from __future__ import annotations
 
+import copy
+import json
 import uuid
 
 import pytest
@@ -36,6 +38,31 @@ GITOPS_API_VERSION = "datawrap.io/v1"
 GITOPS_GENERATOR = "datawrap-gitops-export"
 LEGACY_API_VERSION = "dataflow.space/v1"
 PARAMS = {"none": None, "empty": "", "blank": "   ", "label": "Zoë 名前 ✓"}
+#: The literals the export itself used to write (QA r12 #4a).
+OLD_BRAND_LITERALS = ("dataflow.space", "dataflow-gitops-export", "dataflowmanifest", "railway")
+#: Values that are user data, exported as entered: an approver's e-mail may
+#: legitimately contain "dataflow". Other tests in the shard sign contracts
+#: in the shared store as admin@dataflow.app.
+USER_VALUE_KEYS = frozenset({"approved_by"})
+
+
+def _without_user_values(node):
+    if isinstance(node, dict):
+        return {k: _without_user_values(v) for k, v in node.items() if k not in USER_VALUE_KEYS}
+    if isinstance(node, list):
+        return [_without_user_values(v) for v in node]
+    return node
+
+
+def _assert_no_old_brand(text: str, doc) -> None:
+    lowered = text.lower()
+    assert not [lit for lit in OLD_BRAND_LITERALS if lit in lowered], [
+        ln for ln in text.splitlines() if any(lit in ln.lower() for lit in OLD_BRAND_LITERALS)
+    ][:5]
+    branded = json.dumps(_without_user_values(copy.deepcopy(doc)), ensure_ascii=False).lower()
+    assert "dataflow" not in branded, [
+        ln for ln in branded.split(",") if "dataflow" in ln
+    ][:5]
 
 
 def _schedule(src: str, table: str, name: str) -> dict:
@@ -102,10 +129,9 @@ def test_export_names_datawrap_only_and_old_manifests_still_import(live):
             res = live.admin.get(path)
             assert res.status_code == 200, (path, res.text[:300])
             text = res.text
-            assert "dataflow" not in text.lower(), [ln for ln in text.splitlines() if "dataflow" in ln.lower()][:5]
-            assert "railway" not in text.lower()
-            assert 'filename=datawrap.yaml' in res.headers.get("content-disposition", "")
             doc = yaml.safe_load(text)
+            _assert_no_old_brand(text, doc)
+            assert 'filename=datawrap.yaml' in res.headers.get("content-disposition", "")
             assert doc["apiVersion"] == GITOPS_API_VERSION
             assert doc["kind"] == "DatawrapManifest"
             assert doc["metadata"]["generator"] == GITOPS_GENERATOR
@@ -117,12 +143,12 @@ def test_export_names_datawrap_only_and_old_manifests_still_import(live):
 
             as_json = live.admin.get(path, params={"format": "json"})
             assert as_json.status_code == 200, as_json.text
-            assert "dataflow" not in as_json.text.lower()
+            _assert_no_old_brand(as_json.text, as_json.json())
             assert as_json.json()["apiVersion"] == GITOPS_API_VERSION
 
         single = live.admin.get(f"/api/v1/schedules/{sid}/export")
         assert single.status_code == 200, single.text
-        assert "dataflow" not in single.text.lower()
+        _assert_no_old_brand(single.text, yaml.safe_load(single.text))
         assert yaml.safe_load(single.text)["apiVersion"] == GITOPS_API_VERSION
 
         # The new export imports back; applying it twice updates, never duplicates.
