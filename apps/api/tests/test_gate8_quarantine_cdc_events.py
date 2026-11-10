@@ -395,8 +395,11 @@ def test_single_stream_raising_mid_cycle_emits_counts_so_far_and_reraises(
          patch.object(cdc_transfer, "_apply_change_batch", side_effect=_fake_apply), \
          patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "2"}), \
          pytest.raises(BaseException) as raised:
+        # The reader's update image carries ``v``: the capture starts with it
+        # (a column it did not start with stops the apply — D344).
         cdc_transfer._run_cdc_single_stream(
-            source, destination, [{"source": "id", "target": "id"}], {"id": "string"}, None,
+            source, destination, [{"source": "id", "target": "id"}],
+            {"id": "string", "v": "string"}, None,
             sync_mode="cdc",
             stream_contracts=[{"name": TABLE, "selected": True, "primary_key": "id", "sync_mode": "cdc"}],
             job_id="job-single", workspace_id="ws-single", validation_mode="strict",
