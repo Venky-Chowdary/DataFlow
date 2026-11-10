@@ -75,16 +75,25 @@ def cancel_blocks_status_write(next_status: str) -> bool:
     return (next_status or "").strip() in CANCEL_BLOCKS_STATUSES
 
 
-def cancel_status_write_filter(next_status: str) -> dict[str, Any] | None:
+def cancel_status_write_filter(
+    next_status: str, *, allow_terminal_exit: bool = False
+) -> dict[str, Any] | None:
     """Mongo filter fragment. ``None`` when this status may follow a cancel.
 
     A success or progress write matches only a document that is not already
     cancelled and has no ``cancel_requested`` flag. ``failed`` and
     ``cancelled`` themselves are not filtered — the worker still records
     the terminal cancel.
+
+    Resume (``allow_terminal_exit=True``) is the documented way out of
+    ``cancelled``: it clears the cancel flag first, then moves the job to
+    pending/running. Its write must match a ``cancelled`` document, and a
+    cancel that lands after the flag was cleared still wins.
     """
     if not cancel_blocks_status_write(next_status):
         return None
+    if allow_terminal_exit:
+        return {"cancel_requested": {"$ne": True}}
     return {
         "cancel_requested": {"$ne": True},
         "status": {"$ne": "cancelled"},

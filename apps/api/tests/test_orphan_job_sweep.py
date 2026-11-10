@@ -203,6 +203,10 @@ def test_mongo_orphan_claim_fails_closed_before_a_stale_sweeper_retries(
             elif isinstance(value, dict) and "$in" in value:
                 if document.get(key) not in value["$in"]:
                     return False
+            elif isinstance(value, dict) and "$ne" in value:
+                # The cancel guard (job_status.cancel_status_write_filter).
+                if document.get(key) == value["$ne"]:
+                    return False
             elif document.get(key) != value:
                 return False
         return True

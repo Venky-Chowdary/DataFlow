@@ -796,7 +796,9 @@ class MongoDBService:
         # only the fast path.
         from services.job_status import cancel_status_write_filter
 
-        cancel_guard = cancel_status_write_filter(status)
+        cancel_guard = cancel_status_write_filter(
+            status, allow_terminal_exit=allow_terminal_exit
+        )
         if cancel_guard:
             filt = {"$and": [filt, cancel_guard]}
         if fence is not None:
@@ -1780,11 +1782,14 @@ class MemoryMongoDBService:
 
         # Re-read the cancel flag immediately before the write. A cancel that
         # arrived after the snapshot at the top of this method must not be
-        # overwritten by a late "completed".
+        # overwritten by a late "completed". Resume (allow_terminal_exit) is
+        # the documented exit from "cancelled": it cleared the flag first, so
+        # only a cancel that arrived after that still blocks it.
         from services.job_status import cancel_blocks_status_write
 
         if cancel_blocks_status_write(status) and (
-            rec.get("cancel_requested") or rec.get("status") == "cancelled"
+            rec.get("cancel_requested")
+            or (rec.get("status") == "cancelled" and not allow_terminal_exit)
         ):
             logging.getLogger(__name__).info(
                 "Ignoring %s update for job %s: cancel_requested",
