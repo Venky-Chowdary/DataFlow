@@ -89,19 +89,74 @@ def test_resend_after_cooldown_sends_new_code():
     assert row["sent_count"] == 2
 
 
-def test_new_code_voids_old():
+def test_resend_repeats_the_live_code_so_the_first_email_still_works():
+    """QA 2026-11-10: the first code email landed late (spam), the user pressed
+    Resend, and two emails carried two codes, the first one dead. A resend
+    while the code is still valid now repeats it: either email works."""
+    import re
+
+    c = _client()
+    cid = _signup(c)
+    first_mail = await_outbox("ada@example.com")[-1]
+    _age_last_sent(cid, 61)
+    resp = c.post("/api/v1/auth/resend", json={"challenge_id": cid})
+    assert resp.status_code == 202
+    assert resp.json()["same_code"] is True
+    second_mail = await_outbox("ada@example.com", min_count=2)[-1]
+    first_code = re.search(r"\b(\d{6})\b", first_mail.text).group(1)
+    second_code = re.search(r"\b(\d{6})\b", second_mail.text).group(1)
+    assert first_code == second_code
+    r = c.post("/api/v1/auth/verify-email",
+               json={"challenge_id": cid, "code": first_code})
+    assert r.status_code == 200, r.text
+
+
+def test_burned_code_gets_a_new_code_and_the_old_one_stays_dead():
+    """Five wrong tries burn the code: a resend then issues a NEW code (attempts
+    reset), never the burned one, and the old code does not verify."""
+    import re
+
     c = _client()
     cid = _signup(c)
     old_mail = await_outbox("ada@example.com")[-1]
-    _age_last_sent(cid, 61)
-    c.post("/api/v1/auth/resend", json={"challenge_id": cid})
-    await_outbox("ada@example.com", min_count=2)[-1]
-    import re
     old_code = re.search(r"\b(\d{6})\b", old_mail.text).group(1)
-    # old code no longer verifies (hash was replaced)
+    signup_store._update_challenge(cid, attempts=5)
+    _age_last_sent(cid, 61)
+    resp = c.post("/api/v1/auth/resend", json={"challenge_id": cid})
+    assert resp.status_code == 202
+    assert resp.json()["same_code"] is False
+    new_mail = await_outbox("ada@example.com", min_count=2)[-1]
+    new_code = re.search(r"\b(\d{6})\b", new_mail.text).group(1)
+    assert signup_store.get_challenge(cid)["attempts"] == 0
+    if new_code != old_code:  # 1-in-a-million collision aside
+        r = c.post("/api/v1/auth/verify-email",
+                   json={"challenge_id": cid, "code": old_code})
+        assert r.status_code in (400, 410)
     r = c.post("/api/v1/auth/verify-email",
-               json={"challenge_id": cid, "code": old_code})
-    assert r.status_code in (400, 410)
+               json={"challenge_id": cid, "code": new_code})
+    assert r.status_code == 200, r.text
+
+
+def test_expired_code_cannot_be_resent():
+    c = _client()
+    cid = _signup(c)
+    past = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    signup_store._update_challenge(cid, expires_at=past)
+    _age_last_sent(cid, 61)
+    resp = c.post("/api/v1/auth/resend", json={"challenge_id": cid})
+    assert resp.status_code == 410
+    assert resp.json()["error"]["code"] == "code_expired"
+
+
+def test_same_code_resend_keeps_the_wrong_attempt_count():
+    """Repeating a code must not buy more guesses at it."""
+    c = _client()
+    cid = _signup(c)
+    signup_store._update_challenge(cid, attempts=3)
+    _age_last_sent(cid, 61)
+    resp = c.post("/api/v1/auth/resend", json={"challenge_id": cid})
+    assert resp.status_code == 202 and resp.json()["same_code"] is True
+    assert signup_store.get_challenge(cid)["attempts"] == 3
 
 
 def test_hourly_cap_holds():

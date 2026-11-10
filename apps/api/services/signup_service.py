@@ -210,13 +210,25 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
         # already terminal — exactly one send per row, no double send.
         return
     try:
-        if not row.get("quota_counted"):
+        # One email per request: a code or link that a newer send replaced,
+        # or that already expired or was used, is never sent. A resend made
+        # while the first mail still waited in the lane used to send both.
+        stale = _stale_status_or_none(row)
+        if stale:
+            mail_outbox.mark(row["id"], stale, claim_token=token)
+            logger.info("mail outbox row %s not sent: %s", row.get("purpose"), stale)
+            return
+        quota_now = not row.get("quota_counted")
+        if quota_now:
             consume_send_slot()
+            row["quota_counted"] = True
         payload = mail_outbox.body(row)  # sealed at rest, decrypted on send
         # Renew under our fencing token right before the provider call so
         # the lease covers the whole send: a slow provider can never let a
-        # second replica reclaim and re-send this row mid-flight.
-        if not mail_outbox.extend_lease(row["id"], token):
+        # second replica reclaim and re-send this row mid-flight. The same
+        # write records the quota slot on the row, so a retry (in this process
+        # or after a restart) never counts it again.
+        if not mail_outbox.extend_lease(row["id"], token, quota_counted=quota_now):
             logger.warning(
                 "mail outbox lease lost before send (%s); not sending",
                 row.get("purpose"))
@@ -307,6 +319,17 @@ def _outbox_send_failed(row: dict[str, Any], exc: Exception,
                                   details=details)
     except Exception:
         logger.error("mail send_failed audit event failed", exc_info=True)
+
+
+def _stale_status_or_none(row: dict[str, Any]) -> str | None:
+    """:func:`_outbox_dead_link_status`, where a failing check means "send":
+    a store hiccup must not drop a code the user is waiting for."""
+    try:
+        return _outbox_dead_link_status(row)
+    except Exception:  # noqa: BLE001 - deliver rather than lose the mail
+        logger.warning("mail outbox staleness check failed (%s); sending",
+                       row.get("purpose"), exc_info=True)
+        return None
 
 
 def _outbox_dead_link_status(row: dict[str, Any]) -> str | None:
@@ -862,12 +885,15 @@ def resend_code(*, challenge_id: str) -> dict[str, Any]:
                        "we couldn't send your code right now — try again later",
                        retry_after_sec=exc.retry_after_sec) from exc
     try:
-        _send(
+        # The slot was consumed just above: "prepaid", or each resend counted
+        # twice against the daily cap and shut every mail off early.
+        queue_mail(
             "reset_code" if updated["purpose"] == "reset" else "signup_code",
             recipient,
             {**ctx, "code": code,
              "expires_minutes": int(otp_service.OTP_TTL.total_seconds() // 60)},
             idempotency_key=f"otp:{updated['id']}:{updated['sent_count']}",
+            quota="prepaid",
         )
     except EmailSendError as exc:
         raise ApiError(503, "email_send_failed",
@@ -879,6 +905,9 @@ def resend_code(*, challenge_id: str) -> dict[str, Any]:
         "challenge_id": challenge_id,
         "resend_after_sec": RESEND_COOLDOWN_SEC,
         "expires_in_sec": int(otp_service.OTP_TTL.total_seconds()),
+        # True when the resend repeated the live code, so the code in an
+        # earlier email still works (the screen says so).
+        "same_code": str(updated.get("code_hmac") or "") == str(challenge.get("code_hmac") or ""),
     }
 
 

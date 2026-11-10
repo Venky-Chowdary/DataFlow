@@ -20,7 +20,7 @@ import {
   verifyEmail,
 } from "../lib/signupApi";
 import { changeEmailRequestError, codeEntryError, mailSendError } from "../lib/authFlowCopy";
-import { focusFirstInvalid, PasswordToggle, ResendRow } from "../components/AuthFlow";
+import { focusFirstInvalid, PasswordToggle, ResendRow, SpamFolderHint } from "../components/AuthFlow";
 import { AuthButton } from "../components/AuthButton";
 import { TurnstileWidget } from "../components/TurnstileWidget";
 import { writeSession } from "../lib/session";
@@ -470,6 +470,7 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
               </div>
             )}
             <div className="lp-login-resend">
+              <SpamFolderHint what="reset email" />
               <p className="lp-login-legal">
                 Didn't get it?{" "}
                 <AuthButton variant="link" onClick={resend} disabled={cooldown > 0} loading={resending} loadingLabel="Sending…">

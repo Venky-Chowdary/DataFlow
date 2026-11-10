@@ -219,12 +219,14 @@ def test_reused_link_is_rejected():
 
 
 def test_expired_link_is_rejected(monkeypatch):
-    monkeypatch.setattr(password_reset_store, "TOKEN_TTL",
-                        timedelta(seconds=-1))
     c = _client()
     _verified_user(c)
     _forgot(c)
     token = _link_token()
+    # The link expires after it was mailed. (A link already dead when its turn
+    # in the mail lane comes is not sent at all: test_r16_auth_mail_one_email.)
+    later = password_reset_store._now() + password_reset_store.TOKEN_TTL + timedelta(minutes=1)
+    monkeypatch.setattr(password_reset_store, "_now", lambda: later)
     resp = c.post("/api/v1/auth/password/reset", json={
         "token": token, "new_password": "an-even-better-password"})
     assert resp.status_code == 410

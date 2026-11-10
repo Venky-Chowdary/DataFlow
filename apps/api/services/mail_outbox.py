@@ -357,27 +357,33 @@ def claim(row_id: str, *, lease_sec: int = _LEASE_SEC) -> str | None:
 
 
 def extend_lease(row_id: str, claim_token: str,
-                 *, lease_sec: int = _LEASE_SEC) -> bool:
+                 *, lease_sec: int = _LEASE_SEC,
+                 quota_counted: bool = False) -> bool:
     """Push ``lease_until`` out while we still own the claim. Called right
     before the provider send so the lease always covers the whole call:
     a send that runs long can never be reclaimed and duplicated by a
     second replica mid-flight. False when the claim is already lost
-    (expired and reclaimed, or terminal) — the caller must not send."""
+    (expired and reclaimed, or terminal) — the caller must not send.
+    ``quota_counted`` records, in the same write, that this row's send-quota
+    slot is taken, so a retry never consumes a second one."""
     now = datetime.now(UTC)
     until = (now + timedelta(seconds=lease_sec)).isoformat()
+    fields: dict[str, Any] = {"lease_until": until}
+    if quota_counted:
+        fields["quota_counted"] = True
     db = _database()
     if db is not None:
         res = db[COLLECTION].update_one(
             {"_id": row_id, "status": "sending",
              "claim_token": claim_token},
-            {"$set": {"lease_until": until}})
+            {"$set": fields})
         return res.modified_count == 1
     ok = False
     with json_doc_transaction(_path(), {"rows": {}}) as doc:
         row = doc.setdefault("rows", {}).get(row_id)
         if (row is not None and row.get("status") == "sending"
                 and row.get("claim_token") == claim_token):
-            row["lease_until"] = until
+            row.update(fields)
             ok = True
     return ok
 

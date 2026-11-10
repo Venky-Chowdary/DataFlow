@@ -53,6 +53,8 @@ export interface ChallengeResponse {
   challengeId: string;
   resendAfterSec: number;
   expiresInSec: number;
+  /** A resend repeated the still-valid code: the code in an earlier email works. */
+  sameCode?: boolean;
 }
 
 function challenge(data: Record<string, unknown>): ChallengeResponse {
@@ -61,6 +63,7 @@ function challenge(data: Record<string, unknown>): ChallengeResponse {
     challengeId: String(data.challenge_id ?? ""),
     resendAfterSec: Number(data.resend_after_sec ?? 60),
     expiresInSec: Number(data.expires_in_sec ?? 600),
+    sameCode: data.same_code === true,
   };
 }
 

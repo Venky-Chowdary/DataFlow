@@ -9,6 +9,18 @@ export function focusFirstInvalid(root: HTMLElement | null) {
   root?.querySelector<HTMLElement>('[aria-invalid="true"], .lp-field.is-error .lp-input')?.focus();
 }
 
+/** Where to look when a code or link does not show up. Mail can land in
+ *  spam or junk, especially the first time; marking it "Not spam" teaches
+ *  the mailbox to deliver the next one to the inbox. */
+export function SpamFolderHint({ what = "email" }: { what?: string }) {
+  return (
+    <p className="lp-login-legal lp-login-spam-hint">
+      Can't find the {what}? Check your spam or junk folder. It can take a minute to arrive. If it's
+      there, mark it "Not spam" so the next one lands in your inbox.
+    </p>
+  );
+}
+
 /** Resend-with-cooldown row shared by verify + reset: muted while the
  *  countdown runs, aria-disabled, and the countdown + "New code sent"
  *  announce through an aria-live region. */
@@ -33,8 +45,12 @@ export function ResendRow({ challengeId, initialCooldown }: { challengeId: strin
       const r = await resendCode(challengeId);
       setCooldown(r.resendAfterSec || 60);
       setSent(true);
-      setNotice("New code sent — check your inbox.");
-      toast({ title: "New code sent", message: "Check the inbox for the latest 6-digit code.", tone: "info" });
+      // The server repeats the still-valid code, so either email works.
+      const msg = r.sameCode
+        ? "Sent again. It's the same code, so the code in either email works. Check your spam folder too."
+        : "New code sent. Use the code from the newest email, and check your spam folder too.";
+      setNotice(msg);
+      toast({ title: r.sameCode ? "Code sent again" : "New code sent", message: msg, tone: "info" });
     } catch (err) {
       const msg = err instanceof SignupApiError && err.code === "resend_limited"
         ? `Too many resends — wait ${Math.max(1, Math.round(err.retryAfterSec / 60))} min.`
@@ -49,6 +65,7 @@ export function ResendRow({ challengeId, initialCooldown }: { challengeId: strin
 
   return (
     <div className="lp-login-resend">
+      <SpamFolderHint what="code" />
       <p className="lp-login-legal" aria-live="polite">
         Didn't get it?{" "}
         <AuthButton variant="link" onClick={resend} disabled={cooldown > 0} loading={resending} loadingLabel="Sending…">

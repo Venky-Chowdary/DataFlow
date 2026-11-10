@@ -312,26 +312,34 @@ def record_attempt(challenge_id: str) -> dict[str, Any] | None:
             return None
 
 
-def mark_sent(challenge_id: str, *, code_hmac: str, ttl: timedelta) -> dict[str, Any] | None:
-    """Refresh a challenge for a resend: new hash, sent_count++, new expiry."""
+def mark_sent(challenge_id: str, *, code_hmac: str | None, ttl: timedelta,
+              code_enc: str = "") -> dict[str, Any] | None:
+    """Refresh a challenge for a resend: sent_count++, new expiry.
+
+    With a ``code_hmac`` the resend carries a new code: hash and sealed code
+    replaced, wrong attempts reset. ``code_hmac=None`` re-sends the same live
+    code: hash, sealed code and the wrong-attempt count stay as they are, so a
+    resend never buys extra guesses on a code that did not change.
+    """
     row = get_challenge(challenge_id)
     if row is None:
         return None
     now = _now()
-    fields = {
-        "code_hmac": code_hmac,
-        "attempts": 0,
+    fields: dict[str, Any] = {
         "sent_count": int(row.get("sent_count") or 0) + 1,
         "last_sent_at": now.isoformat(),
         "expires_at": (now + ttl).isoformat(),
     }
+    if code_hmac is not None:
+        fields.update(code_hmac=code_hmac, code_enc=code_enc, attempts=0)
     _update_challenge(challenge_id, **fields)
     row.update(fields)
     return row
 
 
 def consume_challenge(challenge_id: str) -> None:
-    _update_challenge(challenge_id, consumed_at=_now().isoformat())
+    # The sealed code (kept only so a resend can repeat it) goes with use.
+    _update_challenge(challenge_id, consumed_at=_now().isoformat(), code_enc="")
 
 
 def active_challenge(subject_id: str, purpose: str) -> dict[str, Any] | None:

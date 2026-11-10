@@ -138,6 +138,9 @@ class ResendEmailSender:
         reply_to = email.reply_to or _email_reply_to()
         if reply_to:
             payload["reply_to"] = reply_to
+        if email.headers:
+            # Message headers ride in the payload; they were dropped before.
+            payload["headers"] = dict(email.headers)
         headers = {"Authorization": f"Bearer {api_key}"}
         headers["Idempotency-Key"] = email.idempotency_key or uuid.uuid4().hex
 

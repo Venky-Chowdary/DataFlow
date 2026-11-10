@@ -7,6 +7,12 @@
 - 5 wrong attempts burn the challenge: the 6th try fails even with the
   right code (it's already consumed).
 - Verification compares with ``hmac.compare_digest``.
+- A resend repeats the live code (QA 2026-11-10): a first email that lands
+  late, or in spam, still carries a working code, and the user never gets two
+  emails with two different codes. The code is kept sealed with the platform
+  secret vault (as the outbox seals the mail body that carries it) only until
+  it is used or expires. Once it has expired or been burned, a resend issues
+  a new code.
 """
 
 from __future__ import annotations
@@ -69,24 +75,72 @@ def issue(subject_id: str, purpose: str) -> tuple[dict[str, Any], str]:
         ttl=OTP_TTL,
     )
     code = generate_code()
-    signup_store._update_challenge(
-        challenge["id"], code_hmac=code_hmac(challenge["id"], purpose, code)
-    )
-    challenge["code_hmac"] = code_hmac(challenge["id"], purpose, code)
+    digest = code_hmac(challenge["id"], purpose, code)
+    sealed = _seal_code(code)
+    signup_store._update_challenge(challenge["id"], code_hmac=digest, code_enc=sealed)
+    challenge["code_hmac"] = digest
+    challenge["code_enc"] = sealed
     return challenge, code
 
 
+def _seal_code(code: str) -> str:
+    """The live code, encrypted with the platform vault ("" if it cannot be)."""
+    try:
+        from services.secret_vault import _get_vault
+
+        return _get_vault().encrypt(code)
+    except Exception as exc:  # noqa: BLE001 - a resend then issues a new code
+        logger.warning("OTP code could not be sealed for resend (%s)", type(exc).__name__)
+        return ""
+
+
+def live_code(row: dict[str, Any] | None) -> str | None:
+    """The code a still-valid challenge was sent with, or ``None``.
+
+    ``None`` when the challenge is used, burned by wrong attempts, expired,
+    carries no sealed code, or the sealed code does not match the stored hash
+    (a resend then issues a new code, as before).
+    """
+    if not row or row.get("consumed_at") or not row.get("code_enc"):
+        return None
+    if int(row.get("attempts") or 0) >= int(row.get("max_attempts") or MAX_ATTEMPTS):
+        return None
+    if signup_store._expired(row):
+        return None
+    try:
+        from services.secret_vault import _get_vault
+
+        code = _get_vault().decrypt(str(row["code_enc"]))
+    except Exception as exc:  # noqa: BLE001 - fall back to a new code
+        logger.warning("OTP sealed code unreadable (%s)", type(exc).__name__)
+        return None
+    expected = str(row.get("code_hmac") or "")
+    candidate = code_hmac(str(row.get("id") or ""), str(row.get("purpose") or ""), code)
+    if not code or not hmac.compare_digest(candidate, expected):
+        return None
+    return code
+
+
 def reissue(challenge_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    """New code on an existing challenge (resend path): fresh hash, attempts
-    reset, expiry extended, sent_count incremented."""
+    """Resend path: repeat the live code, else issue a new one.
+
+    While the challenge's code is still valid, the resend carries the same
+    code: expiry extended, sent_count incremented, wrong attempts NOT reset.
+    Otherwise a new code: fresh hash, attempts reset, expiry extended.
+    """
     row = signup_store.get_challenge(challenge_id)
     if row is None:
         return None, None
+    same = live_code(row)
+    if same is not None:
+        updated = signup_store.mark_sent(challenge_id, code_hmac=None, ttl=OTP_TTL)
+        return updated, same
     code = generate_code()
     updated = signup_store.mark_sent(
         challenge_id,
         code_hmac=code_hmac(challenge_id, row["purpose"], code),
         ttl=OTP_TTL,
+        code_enc=_seal_code(code),
     )
     return updated, code
 
