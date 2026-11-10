@@ -527,7 +527,7 @@
 
 @media (max-width: 900px) {
   .df2-jobs-v3-layout {
-    grid-template-columns: 1fr !important;
+    grid-template-columns: var(--df-jobs-layout-columns, 1fr) !important;
   }
 
   .df2-jobs-detail-footer .df2-btn,

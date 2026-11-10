@@ -731,7 +731,7 @@
   padding: 12px;
   border: 1px solid var(--df-warning-border);
   border-left: 4px solid var(--df-warning);
-  border-radius: 8px;
+  border-radius: var(--df-radius-md);
   background: var(--df-warning-bg);
 }
 
