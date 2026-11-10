@@ -90,7 +90,8 @@ def gate8_weaviate_report(
     fields = [(source, stored[key]) for source, key in fields]
     instant = {k for _s, k in fields if data_types.get(k) in ("date", "date[]")}
     proof = compare_documents(
-        src, docs, fields, numeric_keys(mappings, source_schema), boolean_keys(mappings), instant
+        src, docs, fields, numeric_keys(mappings, source_schema),
+        boolean_keys(mappings, source_schema), instant
     )
     expansion = object_expansion(source_rows, docs)
     caps = content_caps(docs)

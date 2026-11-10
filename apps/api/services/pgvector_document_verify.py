@@ -178,14 +178,22 @@ def _canon_bool(value: Any) -> str:
     return _canon(value)
 
 
-def boolean_keys(mappings: list[dict[str, Any]]) -> set[str]:
-    """Metadata keys the plan declares BOOLEAN (the writer stores a JSON bool)."""
+def boolean_keys(
+    mappings: list[dict[str, Any]], source_schema: Mapping[str, Any] | None = None
+) -> set[str]:
+    """Metadata keys whose plan or source declares BOOLEAN.
+
+    A JSON bool and its text (``true``, the exact text a Weaviate ``text``
+    property holds for a source BOOLEAN, D293) are one value.
+    """
     from services.type_system import normalize_logical_type
 
+    schema = dict(source_schema or {})
     out: set[str] = set()
     for m in mappings or []:
-        if normalize_logical_type(str(m.get("target_type") or "")) == "boolean":
-            source = str(m.get("source") or "").strip()
+        source = str(m.get("source") or "").strip()
+        declared = (m.get("target_type"), m.get("source_type"), schema.get(source))
+        if any(normalize_logical_type(str(t or "")) == "boolean" for t in declared):
             out.add(str(m.get("target") or source).strip())
     return out
 
