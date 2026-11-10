@@ -444,9 +444,18 @@ def source_numbers_are_typed(source_db_type: str) -> bool:
         return False
     if source_types_are_authoritative("database", fmt):
         return True
+    from services.copy_elasticsearch_common import elasticsearch_family_name
     from services.copy_kafka_common import kafka_family_name
+    from services.copy_qdrant_common import qdrant_family_name
 
-    return fmt == "mongodb" or kafka_family_name(fmt) == "kafka"
+    # An Elasticsearch ``double`` and a Qdrant payload number are JSON numbers
+    # under a declared mapping, the same as a Kafka JSON number (D161).
+    return (
+        fmt == "mongodb"
+        or kafka_family_name(fmt) == "kafka"
+        or elasticsearch_family_name(fmt) == "elasticsearch"
+        or qdrant_family_name(fmt) == "qdrant"
+    )
 
 
 # Carriers a schemaless/text source declares for *every* column (CSV header,

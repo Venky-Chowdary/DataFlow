@@ -963,11 +963,70 @@ def _native_exact_decimal_carrier(target_type: str, dest_db: str) -> int | None:
     return _NATIVE_DECIMAL_DIGITS.get(db)
 
 
+def _binary64_carrier(target_type: str, dest_db: str) -> bool:
+    """True when ``target_type`` stores an IEEE-754 double on ``dest_db``."""
+    from services.numeric_fit import float_mantissa_bits
+
+    bits = float_mantissa_bits(target_type, dest_db=dest_db)
+    if bits is not None:
+        return bits == 53
+    # Bare FLOAT is single precision on MySQL/MariaDB/DuckDB, a double elsewhere.
+    base = str(target_type or "").split("(", 1)[0].strip().upper()
+    return base == "FLOAT" and (dest_db or "").strip().lower() not in {
+        "mysql", "mariadb", "duckdb",
+    }
+
+
+#: A long cell whose 15-digit rounding is this short meant the short decimal
+#: (``0.30000000000000004`` is 0.3 plus binary residue).
+_RESIDUE_SHORT_DIGITS = 12
+
+
+def _double_holds_every_sample(samples: list[Any] | None) -> bool:
+    """True when each sampled number is a full-precision double, read back as written.
+
+    ``float(cell)`` then ``repr`` gives the same number back, so a binary64
+    column stores the cell exactly as written. A cell that is binary residue
+    of a short decimal (``0.30000000000000004``, ``111.89999999999999``) does
+    not count: the chip exists to ask whether the source meant the short value.
+    ``0.14285714285714285`` (1/7) has no shorter neighbour. Non-finite cells do
+    not count either (several carriers refuse them).
+    """
+    import math
+
+    seen = False
+    for raw in samples or []:
+        if raw is None or str(raw).strip() == "":
+            continue
+        value = _canonical_numeric(raw)
+        if value is None:
+            from services.value_serializer import is_null_evidence
+
+            if is_null_evidence(raw):
+                continue
+            return False
+        if not value.is_finite():
+            return False
+        try:
+            as_double = float(value)
+        except (OverflowError, ValueError):
+            return False
+        if not math.isfinite(as_double) or Decimal(repr(as_double)) != value:
+            return False
+        if significant_digit_count(value) > 15 and (
+            significant_digit_count(format(as_double, ".15g")) <= _RESIDUE_SHORT_DIGITS
+        ):
+            return False
+        seen = True
+    return seen
+
+
 def ieee_float_create_new_risk(
     observation: dict[str, Any] | None,
     *,
     target_type: str = "",
     dest_db: str = "",
+    samples: list[Any] | None = None,
 ) -> dict[str, str] | None:
     """Risk stamp when invent chose FLOAT due to Excel/IEEE residue.
 
@@ -975,9 +1034,30 @@ def ieee_float_create_new_risk(
     written (a CSV's ``0.30000000000000004`` into ``DECIMAL(18,17)``), nothing
     is approximated: the chip becomes an informational note that the values
     look like binary-float noise, and does not hold the mapping (D161).
+
+    The same holds for an IEEE double carrier when every sampled cell is a
+    double spelled the way it reads back (``0.14285714285714285``): the double
+    stores it exactly, so a DOUBLE column into a new table is not held at G4
+    (D161). Called without ``samples`` the chip keeps holding the column.
     """
     if not observation or observation.get("kind") != "ieee_float":
         return None
+    if (
+        target_type
+        and samples
+        and _binary64_carrier(target_type, dest_db)
+        and _double_holds_every_sample(samples)
+    ):
+        return {
+            "kind": "ieee_float_kept_exact_double",
+            "severity": "warn",
+            "message": (
+                "Some values look like binary-float output (for example "
+                f"0.14285714285714285). {target_type} is an IEEE double and stores "
+                "every sampled value exactly as written; nothing is rounded. Add a "
+                "rounding transform if the source meant a shorter value."
+            ),
+        }
     if target_type and _exact_decimal_holds(observation, target_type, dest_db):
         return {
             "kind": "ieee_float_residue_kept_exact",

@@ -28,6 +28,8 @@ _INFORMATIONAL_WARN_KINDS = frozenset({
     "unbounded_decimal_carrier",
     # Float-residue-shaped text held exactly by the DECIMAL it lands in (D161).
     "ieee_float_residue_kept_exact",
+    # ...or by the IEEE double it lands in, every sampled value read back as written.
+    "ieee_float_kept_exact_double",
 })
 
 
@@ -209,7 +211,10 @@ def apply_create_new_risk_stamps(
             None
             if declared_source
             else ieee_float_create_new_risk(
-                observe_numeric_samples(col_samples), target_type=tgt, dest_db=db
+                observe_numeric_samples(col_samples),
+                target_type=tgt,
+                dest_db=db,
+                samples=col_samples,
             )
         )
         if ieee and not any(r.get("kind") == ieee["kind"] for r in risks):
