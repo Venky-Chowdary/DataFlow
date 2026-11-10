@@ -4882,6 +4882,9 @@ export type Tenant = {
   workspace_id: string;
   name: string;
   custom_domain: string;
+  /** D337: set only by a passed DNS TXT check; an unverified domain gets no CORS. */
+  custom_domain_verified?: boolean;
+  custom_domain_verification?: CustomDomainVerification;
   data_region: string;
   byok_key_id: string;
   security_contact_email: string;
@@ -4894,6 +4897,15 @@ export type Tenant = {
   updated_at: string;
   /** What is enforced now (read and save responses; same source as the posture). */
   enforcement?: TenantEnforcement;
+};
+
+export type CustomDomainVerification = {
+  status: "not_configured" | "pending_dns_verification" | "verified";
+  verified: boolean;
+  verified_at?: string | null;
+  record_type?: "TXT";
+  record_name?: string;
+  record_value?: string | null;
 };
 
 export type ControlStatus = "enforced" | "audit_only" | "untrusted_client_ip" | "recorded_only" | "not_configured";
@@ -5021,6 +5033,13 @@ export async function createTenant(body: Omit<Tenant, "id" | "created_at" | "upd
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not create tenant"));
+  return res.json();
+}
+
+/** D337: look up the tenant's DNS TXT challenge; 409 explains what is missing. */
+export async function verifyTenantCustomDomain(tenantId: string): Promise<Tenant> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/${tenantId}/custom-domain/verify`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not verify the custom domain"));
   return res.json();
 }
 

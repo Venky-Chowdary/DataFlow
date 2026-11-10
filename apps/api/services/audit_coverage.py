@@ -28,6 +28,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "workspace.ip_allowlist.blocked": "A request from outside a workspace IP allowlist was refused.",
     "workspace.ip_allowlist.break_glass": "A platform administrator reached an IP-allowlisted workspace from outside its list through the break-glass header.",
     "workspace.ip_allowlist.lockout_refused": "An IP allowlist that excludes the saving administrator's own address was refused.",
+    "workspace.tenant.custom_domain.verify": "A workspace administrator ran the DNS ownership check of the tenant custom domain (outcome and reason recorded).",
     "workspace.ip_allowlist.unenforceable_refused": "A new IP allowlist was refused because the deployment cannot see real client addresses (proxy hop count not configured), so it would not be enforced.",
     "auth.login": "A password authentication attempt completed.",
     "auth.login.locked": "A password login attempt triggered an account lockout.",

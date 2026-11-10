@@ -154,9 +154,10 @@ def test_tenant_custom_origin_allowed(monkeypatch):
 
     fake = MagicMock()
     fake.custom_domain = "data.acme.example"
+    # D337: only a DNS-verified domain is a browser origin.
     monkeypatch.setattr(
         "services.tenant_store.get_tenant_by_domain",
-        lambda host: fake if host == "data.acme.example" else None,
+        lambda host, verified_only=False: fake if host == "data.acme.example" and verified_only else None,
     )
     assert cors_policy.tenant_custom_origin_allowed("https://data.acme.example") is True
     assert cors_policy.tenant_custom_origin_allowed("https://evil.example") is False

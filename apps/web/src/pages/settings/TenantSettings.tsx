@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../../components/Toast";
-import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, rotateByokKey, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
+import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, rotateByokKey, SecurityPosture, Tenant, updateTenant, verifyTenantCustomDomain } from "../../lib/api";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import { TENANT_SAVED_EVENT, WORKSPACE_CHANGED_EVENT, concreteWorkspaceId, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
@@ -171,6 +171,21 @@ export function TenantSettings() {
     }
   };
 
+  const [verifyingDomain, setVerifyingDomain] = useState(false);
+  const verifyDomain = async () => {
+    if (!allowManage() || !tenant) return;
+    setVerifyingDomain(true);
+    try {
+      const next = await verifyTenantCustomDomain(tenant.id);
+      setTenant(next);
+      toast({ title: "Custom domain verified", message: `https://${next.custom_domain} is now accepted as a browser origin for this workspace.`, tone: "success" });
+    } catch (err) {
+      toast({ title: "Domain not verified", message: err instanceof Error ? err.message : "Could not verify the custom domain", tone: "warning" });
+    } finally {
+      setVerifyingDomain(false);
+    }
+  };
+
   const addByokKey = async () => {
     if (!allowManage()) return;
     if (!tenant) {
@@ -255,6 +270,27 @@ export function TenantSettings() {
             <div className="df2-settings-field">
               <label htmlFor="tenant-domain">Custom domain</label>
               <input id="tenant-domain" className="df2-input" value={customDomain} onChange={(e) => setCustomDomain(e.target.value)} placeholder="transfers.example.com" />
+              {tenant?.custom_domain && tenant.custom_domain_verification && (
+                <div className="df2-settings-hint" data-testid="tenant-domain-verification">
+                  {tenant.custom_domain_verification.verified ? (
+                    <p>Verified: https://{tenant.custom_domain} is accepted as a browser origin for this workspace.</p>
+                  ) : (
+                    <>
+                      <p>
+                        Not verified: the API does not accept this domain as a browser origin until you prove you own it.
+                        Publish this DNS record, then verify.
+                      </p>
+                      <p>
+                        <code>{tenant.custom_domain_verification.record_name}</code> TXT{" "}
+                        <code>{tenant.custom_domain_verification.record_value}</code>
+                      </p>
+                      <Button variant="secondary" disabled={verifyingDomain || !manage.allowed} onClick={verifyDomain}>
+                        {verifyingDomain ? "Verifying…" : "Verify domain"}
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
             <div className="df2-settings-field">
               <label htmlFor="tenant-region">Data region</label>

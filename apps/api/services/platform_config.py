@@ -190,25 +190,11 @@ def cors_origins() -> list[str]:
     if extra:
         origins.extend(o.strip() for o in extra.split(",") if o.strip())
 
-    # Tenant custom domains configured via workspace APIs — customers set these
-    # so the SPA at https://data.customer.com can call the API with credentials.
-    if getenv_brand("CORS_INCLUDE_TENANT_DOMAINS", "1").lower() not in ("0", "false", "no"):
-        try:
-            from services.tenant_store import list_tenants
-
-            for tenant in list_tenants():
-                host = (tenant.custom_domain or "").strip().lower()
-                # A record predating workspace scoping serves no workspace, so
-                # its domain is not a browser origin we trust with credentials —
-                # the same refusal domain resolution already makes.
-                if not host or not tenant.workspace_id:
-                    continue
-                if host.startswith("http://") or host.startswith("https://"):
-                    origins.append(host.rstrip("/"))
-                else:
-                    origins.append(f"https://{host}")
-        except Exception:
-            pass
+    # Tenant custom domains are NOT listed here (D337): a saved domain is only
+    # a claim, and this list is read once at startup and trusted for every
+    # request. services.cors_policy.TenantAwareCORSMiddleware admits a tenant
+    # origin live, only once its DNS challenge passed and only on requests
+    # scoped to that tenant's workspace.
 
     seen: set[str] = set()
     unique: list[str] = []

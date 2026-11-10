@@ -84,12 +84,69 @@ def _normalize_domain(domain: str) -> str:
     return d
 
 
+_LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+_TLD = re.compile(r"^(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$")
+
+
+def _validate_domain(domain: str) -> str:
+    """A custom domain as a normalized DNS host name, or ``""`` to clear it.
+
+    It becomes a DNS challenge name and, once proven, a browser origin, so
+    anything that is not a plain host name (spaces, a path, an IP address, a
+    single label) is refused rather than stored (D337/D341).
+    """
+    raw = str(domain or "").strip()
+    if not raw:
+        return ""
+    bare = re.sub(r"^https?://", "", raw.lower()).rstrip("/")
+    d = _normalize_domain(raw).rstrip(".")
+    labels = d.split(".")
+    valid = (
+        not any(c in bare for c in "/?#:@ \t")  # a path, port or credentials is not a host name
+        and 0 < len(d) <= 253
+        and len(labels) >= 2
+        and all(_LABEL.match(label) for label in labels)
+        and bool(_TLD.match(labels[-1]))
+    )
+    if not valid:
+        raise ValueError(
+            f"Invalid custom domain {raw[:80]!r}: use a host name such as data.example.com "
+            "(letters, digits and hyphens; no spaces, paths, ports or IP addresses)"
+        )
+    return d
+
+
+def _new_domain_challenge() -> str:
+    import secrets
+
+    return secrets.token_hex(16)
+
+
+def _set_custom_domain(raw: dict[str, Any], domain: str) -> None:
+    """Store ``domain``; a changed (or cleared) domain loses its proof."""
+    if domain == _normalize_domain(str(raw.get("custom_domain") or "")) and domain:
+        raw["custom_domain"] = domain
+        if not raw.get("custom_domain_challenge"):  # saved before D337
+            raw["custom_domain_challenge"] = _new_domain_challenge()
+        return
+    raw["custom_domain"] = domain
+    raw["custom_domain_verified"] = False
+    raw["custom_domain_verified_at"] = ""
+    raw["custom_domain_challenge"] = _new_domain_challenge() if domain else ""
+
+
 @dataclass
 class Tenant:
     id: str
     workspace_id: str = ""
     name: str = ""
     custom_domain: str = ""  # e.g. dataflow.wellsfargo.com
+    # D337: a custom domain is a credentialed CORS origin only once its DNS
+    # TXT challenge passed (services.custom_domain_verification). Changing
+    # the domain clears the proof and issues a new challenge token.
+    custom_domain_verified: bool = False
+    custom_domain_verified_at: str = ""
+    custom_domain_challenge: str = ""
     data_region: str = ""      # e.g. us-east-1
     byok_key_id: str = ""
     security_contact_email: str = ""
@@ -117,6 +174,9 @@ class Tenant:
             workspace_id=data.get("workspace_id", ""),
             name=data.get("name", ""),
             custom_domain=data.get("custom_domain", ""),
+            custom_domain_verified=bool(data.get("custom_domain_verified", False)),
+            custom_domain_verified_at=str(data.get("custom_domain_verified_at", "") or ""),
+            custom_domain_challenge=str(data.get("custom_domain_challenge", "") or ""),
             data_region=data.get("data_region", ""),
             byok_key_id=data.get("byok_key_id", ""),
             security_contact_email=data.get("security_contact_email", ""),
@@ -153,6 +213,7 @@ def create_tenant(
     egress_allowlist: list[str] | None = None,
 ) -> Tenant:
     """Create a new tenant bound to a workspace."""
+    custom_domain = _validate_domain(custom_domain)
     if custom_domain and get_tenant_by_domain(custom_domain):
         raise ValueError(f"Custom domain '{custom_domain}' is already in use")
 
@@ -169,7 +230,8 @@ def create_tenant(
         id=str(uuid.uuid4()),
         workspace_id=workspace_id or "",
         name=name.strip()[:128] or "Tenant",
-        custom_domain=custom_domain.strip()[:253],
+        custom_domain=custom_domain,
+        custom_domain_challenge=_new_domain_challenge() if custom_domain else "",
         data_region=_validate_region(data_region),
         byok_key_id=byok_key_id,
         security_contact_email=security_contact_email.strip()[:128],
@@ -194,7 +256,12 @@ def get_tenant(tenant_id: str) -> Tenant | None:
     return None
 
 
-def get_tenant_by_domain(domain: str) -> Tenant | None:
+def get_tenant_by_domain(domain: str, *, verified_only: bool = False) -> Tenant | None:
+    """The tenant that claims ``domain``.
+
+    ``verified_only`` (browser-origin trust, D337) answers only a tenant whose
+    DNS ownership challenge passed; a merely saved domain is a claim, not proof.
+    """
     target = _normalize_domain(domain)
     if not target:
         return None
@@ -203,7 +270,40 @@ def get_tenant_by_domain(domain: str) -> Tenant | None:
         # workspace, so host routing cannot decide what data it would serve:
         # resolving it would answer a client domain out of an empty scope.
         if t.normalized_domain == target and t.workspace_id:
+            if verified_only and not t.custom_domain_verified:
+                return None
             return t
+    return None
+
+
+def ensure_domain_challenge(tenant_id: str) -> Tenant | None:
+    """The tenant, with a challenge token for its domain (a pre-D337 record has none)."""
+    data = _load_raw()
+    for raw in data.get("tenants", []):
+        if isinstance(raw, dict) and raw.get("id") == tenant_id:
+            if raw.get("custom_domain") and not raw.get("custom_domain_challenge"):
+                raw["custom_domain_challenge"] = _new_domain_challenge()
+                _save(data)
+            return Tenant.from_dict(raw)
+    return None
+
+
+def mark_custom_domain_verified(tenant_id: str, domain: str) -> Tenant | None:
+    """Record a passed DNS challenge for ``domain``.
+
+    Only services.custom_domain_verification calls this, after the TXT record
+    matched. A domain changed since the lookup started is not marked.
+    """
+    data = _load_raw()
+    for raw in data.get("tenants", []):
+        if isinstance(raw, dict) and raw.get("id") == tenant_id:
+            if not domain or _normalize_domain(str(raw.get("custom_domain") or "")) != domain:
+                return None
+            raw["custom_domain_verified"] = True
+            raw["custom_domain_verified_at"] = _now()
+            raw["updated_at"] = _now()
+            _save(data)
+            return Tenant.from_dict(raw)
     return None
 
 
@@ -233,11 +333,11 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
     for raw in data.get("tenants", []):
         if isinstance(raw, dict) and raw.get("id") == tenant_id:
             if "custom_domain" in kwargs:
-                new_domain = _normalize_domain(kwargs["custom_domain"])
+                new_domain = _validate_domain(kwargs["custom_domain"])
                 existing = get_tenant_by_domain(new_domain)
                 if existing and existing.id != tenant_id:
                     raise ValueError(f"Custom domain '{new_domain}' is already in use")
-                raw["custom_domain"] = new_domain[:253]
+                _set_custom_domain(raw, new_domain)
             if "name" in kwargs:
                 raw["name"] = kwargs["name"].strip()[:128]
             if "data_region" in kwargs:

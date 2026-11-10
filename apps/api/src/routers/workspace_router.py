@@ -1060,9 +1060,14 @@ def _authorized_request_tenant(request: Request):
 
 def _tenant_with_enforcement(tenant: Tenant, request: Request) -> dict[str, Any]:
     """The saved tenant plus what is enforced now (same source as the posture)."""
+    from services.custom_domain_verification import challenge
     from services.security_enforcement import enforcement_status
 
-    return {**tenant.to_dict(), "enforcement": enforcement_status(tenant, request)}
+    return {
+        **tenant.to_dict(),
+        "custom_domain_verification": challenge(tenant),
+        "enforcement": enforcement_status(tenant, request),
+    }
 
 
 def _refuse_self_lockout(
@@ -1236,6 +1241,53 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
     return _tenant_with_enforcement(updated, request)
 
 
+_DOMAIN_REFUSALS = {
+    "txt_record_not_found": "No TXT record was found at {name}.",
+    "txt_record_mismatch": "The TXT record at {name} does not hold the expected value.",
+    "domain_changed_during_verification": "The custom domain changed while it was being verified.",
+}
+
+
+@router.post("/tenant/{tenant_id}/custom-domain/verify")
+async def verify_tenant_custom_domain(tenant_id: str, request: Request):
+    """Prove DNS ownership of the tenant's custom domain (D337).
+
+    Until this passes, the domain is stored but is not a CORS origin. The
+    only way to set ``custom_domain_verified`` is a matching TXT record.
+    """
+    from services.audit_coverage import record_security_event
+    from services.custom_domain_verification import challenge, verify
+
+    tenant = get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    _require_tenant_admin(request, tenant.workspace_id)
+    if not tenant.custom_domain:
+        raise HTTPException(status_code=400, detail="Set a custom domain before verifying it")
+    outcome = await asyncio.to_thread(verify, tenant_id)
+    details = {"tenant_id": tenant_id, "workspace_id": tenant.workspace_id,
+               "custom_domain": tenant.custom_domain, "reason": outcome.reason}
+    record_security_event(
+        "workspace.tenant.custom_domain.verify", outcome="succeeded" if outcome.verified else "failed",
+        request=request, resource=f"/workspace/tenant/{tenant_id}/custom-domain/verify",
+        reason_code=outcome.reason, level="info" if outcome.verified else "warn",
+        details=details, workspace_id=tenant.workspace_id,
+    )
+    if not outcome.verified:
+        block = challenge(outcome.tenant or tenant)
+        why = _DOMAIN_REFUSALS.get(outcome.reason, "The domain could not be verified.")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{why.format(name=block.get('record_name'))} Publish a TXT record named "
+                f"{block.get('record_name')} with the value {block.get('record_value')}, wait for "
+                "DNS to update, and verify again. Until then the domain is not accepted as a "
+                "browser origin."
+            ),
+        )
+    return _tenant_with_enforcement(outcome.tenant, request)
+
+
 @router.delete("/tenant/{tenant_id}")
 async def delete_tenant_route(tenant_id: str, request: Request):
     from services.audit_log import append_audit_event
@@ -1325,6 +1377,26 @@ async def rotate_tenant_byok_key(key_id: str, request: Request):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _custom_domain_cors(tenant: Tenant | None) -> dict[str, Any]:
+    """Whether the API accepts the tenant's custom domain as a browser origin (D337)."""
+    from services.custom_domain_verification import challenge
+
+    domain = (tenant.custom_domain or "").strip() if tenant else ""
+    verified = bool(tenant and domain and tenant.custom_domain_verified)
+    return {
+        "enabled": verified,
+        "origin": f"https://{domain}" if verified else None,
+        "verification": challenge(tenant) if tenant else {"status": "not_configured", "verified": False},
+        "hint": (
+            "Set the custom domain (e.g. data.customer.com), publish the TXT record shown "
+            "under verification, then verify it. The API accepts https://<domain> as a "
+            "credentialed browser origin only after DNS ownership is verified, and only on "
+            "requests scoped to this workspace. Changing the domain requires verifying again. "
+            "The primary app origin is configured by your platform administrator."
+        ),
+    }
+
+
 def _security_posture(tenant: Tenant | None = None, request: Request | None = None) -> dict[str, Any]:
     from services.byok_key_manager import key_status_summary
     from services.cdc_effectively_once import (
@@ -1355,19 +1427,7 @@ def _security_posture(tenant: Tenant | None = None, request: Request | None = No
         "tenant_id": tenant.id if tenant else None,
         "workspace_id": tenant.workspace_id if tenant else None,
         "custom_domain": tenant.custom_domain if tenant else None,
-        "custom_domain_cors": {
-            "enabled": True,
-            "origin": (
-                f"https://{(tenant.custom_domain or '').strip()}"
-                if tenant and (tenant.custom_domain or "").strip()
-                else None
-            ),
-            "hint": (
-                "Set the custom domain (e.g. data.customer.com) and point its DNS to the "
-                "Datawrap web host; the API accepts that origin as soon as it is saved. "
-                "The primary app origin is configured by your platform administrator."
-            ),
-        },
+        "custom_domain_cors": _custom_domain_cors(tenant),
         "data_region": region,
         "environment": "production" if prod else "development",
         "encryption_at_rest": encryption_ready,
