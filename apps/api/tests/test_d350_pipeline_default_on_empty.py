@@ -383,9 +383,10 @@ def test_live_typed_pair_defaults_empty_and_the_proof_verifies(fake_jobs, src_ki
         assert result.success, result.error
         proof = (result.reconciliation or {}).get("transform_applied") or {}
         assert proof.get("status") == "verified", proof
-        if src_kind != "sqlserver":
-            assert proof.get("provenance") == "independent SQL oracle", proof
-            assert proof.get("oracle_uncovered_steps") == [], proof
+        # SQL Server included: its oracle aliases were quoted "[x[" and the
+        # oracle silently never ran there.
+        assert proof.get("provenance") == "independent SQL oracle", proof
+        assert proof.get("oracle_uncovered_steps") == [], proof
         assert _read_dest(dst_kind, dst_t) == _DEST_WANT
     finally:
         _drop(src_kind, src_t)

@@ -1706,7 +1706,8 @@ def _transform_applied_proof_impl(
         try:
             sel = ", ".join(
                 f"{quote_sql_identifier(c, qs)} AS "
-                f'{qs}__raw_{c}{qs}, {e} AS {qs}__o_{c}{qs}'
+                f"{quote_sql_identifier(f'__raw_{c}', qs)}, "
+                f"{e} AS {quote_sql_identifier(f'__o_{c}', qs)}"
                 for c, e in oracle_exprs.items()
             )
             stmt = sa.text(
