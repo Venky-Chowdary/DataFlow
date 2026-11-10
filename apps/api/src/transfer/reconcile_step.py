@@ -984,6 +984,7 @@ def _transform_applied_proof_impl(
     mappings: list[dict] | None,
     source_schema: dict[str, str] | None,
     recon: dict[str, Any],
+    validation_mode: str = "strict",
 ) -> dict[str, Any] | None:
     """G-1: prove the approved recipe actually ran on a shaped run.
 
@@ -1320,6 +1321,25 @@ def _transform_applied_proof_impl(
         RunWindow.from_summary(dest_summary) if scope_pk and not scd2_opts else None
     )
 
+    from services.mapping_constraints import write_mappings as _write_mappings
+
+    _map_stage_on = bool(_write_mappings(mappings))
+
+    def _map_stage(shaped: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
+        # D325: the writer runs each mapping's Map transform after the recipe;
+        # the expected image is what that same stage wrote, not the bare
+        # recipe output.
+        if not _map_stage_on:
+            return [{} for _ in shaped]
+        return _shaped_rows_as_written(
+            shaped,
+            mappings=mappings,
+            target_cols=digest_cols,
+            dest_types=dest_types,
+            dest_type=dest_db_type,
+            validation_mode=validation_mode,
+        )
+
     def _expected_iter():
         nonlocal raw_count
         _extra = (
@@ -1383,11 +1403,15 @@ def _transform_applied_proof_impl(
                             ).hexdigest()[:16],
                         )
                     )
+            written = _map_stage(outs)
             for i, out in enumerate(outs):
-                orow = {
+                shaped_t = {
                     map_source_to_target(k, mappings): v
                     for k, v in out.items()
                 }
+                if written[i] is None:
+                    continue  # the writer's Map stage held this row out
+                orow = {**shaped_t, **written[i]}
                 if _is_kept(orow, pin_key_cols):
                     continue
                 _fpm_buf.append(("e", _fph(orow)))
@@ -1418,19 +1442,23 @@ def _transform_applied_proof_impl(
                         (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
                     )
                     if origin[i] is not None:
+                        # The SQL oracle recomputes the recipe stage only.
                         _eo_buf.append(
                             (
                                 tc,
                                 _vh(_key_norm(origin[i].get(sc))),
-                                _vh(_val_norm(orow.get(tc), _val_ddl(tc))),
+                                _vh(_val_norm(shaped_t.get(tc), _val_ddl(tc))),
                             )
                         )
                 yield orow
             _flush_ms()
-        for out in runner.drain() or []:
+        _drained = list(runner.drain() or [])
+        for out, written in zip(_drained, _map_stage(_drained)):
+            if written is None:
+                continue
             orow = {
-                map_source_to_target(k, mappings): v
-                for k, v in out.items()
+                **{map_source_to_target(k, mappings): v for k, v in out.items()},
+                **written,
             }
             _fpm_buf.append(("e", _fph(orow)))
             if keyed:
@@ -2591,6 +2619,31 @@ def _source_rows_as_written(
         dest_kind=dest_type,
     )
     return [dict(zip(target_cols, row)) for row in mapped]
+
+
+def _shaped_rows_as_written(
+    shaped: list[dict],
+    **as_written: Any,
+) -> list[dict | None]:
+    """Each shaped row's target image after the writer's Map stage.
+
+    D325 — a column's single Map transform (``replace:``, ``default:``,
+    ``currency``…) runs on the mapping after the recipe, in the writer's own
+    ``map_rows_for_fingerprint`` path. The transform proof recomputed the
+    recipe only, so every correct Map-transformed cell read as unexplained
+    drift and failed the job. ``None`` marks a row the writer held out.
+    One call per batch; a batch that lost a row is re-mapped row by row so
+    every output stays paired with its own input.
+    """
+    if not shaped:
+        return []
+    mapped = _source_rows_as_written(shaped, **as_written)
+    if len(mapped) == len(shaped):
+        return list(mapped)
+    return [
+        (_source_rows_as_written([row], **as_written) or [None])[0]
+        for row in shaped
+    ]
 
 
 def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
@@ -8788,6 +8841,7 @@ def run_reconciliation(
                 mappings=mappings,
                 source_schema=source_schema,
                 recon=recon,
+                validation_mode=validation_mode,
             )
         except Exception as exc:
             proof = {
