@@ -154,3 +154,82 @@ def adopt_added_columns(
             dest_table_exists=True,
         )
     return [*(mappings or []), *entries], headers, column_types
+
+
+def shared_refusal_message(columns: list[str], *, table: str, exactly_once: bool) -> str:
+    """Why a shared multi-table capture stopped, and the remedy that works there.
+
+    A shared stream's mapping is the one it opened with: a restart treats a
+    column that existed at its start as unmapped, so the reachable remedy is
+    to give the column a destination column and a mapping entry.
+    """
+    names = ", ".join(columns)
+    why = (
+        "This shared exactly-once capture applies every table of a source "
+        "transaction in one destination transaction and does not add a column "
+        "inside it"
+        if exactly_once
+        else "the schedule's schema policy does not add new columns"
+    )
+    return (
+        f"CDC stopped: source column(s) {names} were added to table {table} after "
+        f"this shared capture started; {why}. No change carrying {names} was "
+        "applied and the log position was not advanced. Add "
+        f"{names} to the destination table {table} and to that stream's mapping, "
+        "then run the schedule again — the held changes are re-read from the log."
+    )
+
+
+def shared_stream_mappings(
+    stream_cfg: dict[str, Any],
+    change: Any,
+    use_maps: list[dict[str, Any]],
+    *,
+    stream: str,
+    propagate: bool,
+    exactly_once: bool,
+    dest_db: str,
+    source_types: Callable[[list[str]], dict[str, str]] | None,
+    imaged: list[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The shared multi-table consumer's per-table form of the D344 check.
+
+    ``stream_cfg["started_columns"]`` is the table's column set when the
+    shared capture opened. A column outside it is propagated (non-exactly-once
+    apply, policy allows: the per-batch writer adds it as the single-stream
+    path does) or refused before the event is applied. Columns
+    already adopted stay on every later batch of that table, typed once
+    (``stream_cfg["added_types"]``). Returns the mappings for this batch and
+    the columns adopted by this call.
+    """
+    adopted: list[dict[str, Any]] = stream_cfg.setdefault("added_maps", [])
+    new_cols = added_source_columns(
+        imaged,
+        [*stream_cfg.get("started_columns", []), *(str(m.get("source") or "") for m in adopted)],
+    )
+    if new_cols:
+        if not propagate or exactly_once:
+            raise CdcAddedColumnRefused(
+                shared_refusal_message(new_cols, table=stream, exactly_once=propagate),
+                new_cols,
+            )
+        records = [*(getattr(change, "inserts", None) or []), *(getattr(change, "updates", None) or [])]
+        entries, _headers, types = adopt_added_columns(
+            new_cols,
+            mappings=[],
+            headers=[],
+            column_types={},
+            propagate=propagate,
+            table=stream,
+            dest_table=stream,
+            dest_db=dest_db,
+            source_types=source_types,
+            records=records,
+        )
+        adopted.extend(entries)
+        stream_cfg.setdefault("added_types", {}).update(types)
+    if not adopted:
+        return use_maps, new_cols
+    folded = {str(m.get("source") or "").casefold() for m in adopted}
+    kept = [m for m in use_maps or [] if str(m.get("source") or "").casefold() not in folded]
+    return [*kept, *adopted], new_cols

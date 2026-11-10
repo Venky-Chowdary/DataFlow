@@ -2226,7 +2226,14 @@ def _run_cdc_multi_stream(
             from services.cdc_lease import CdcLeaseConflict
             from services.error_handling import TransferCancelled
 
-            if isinstance(exc, (CdcLeaseConflict, CdcDestinationSessionError, TransferCancelled)):
+            from .cdc_added_columns import CdcAddedColumnRefused
+
+            # A refused added column (D344) is the answer, not a reader fault:
+            # the sequential fallback would read the same held changes.
+            if isinstance(
+                exc,
+                (CdcLeaseConflict, CdcDestinationSessionError, TransferCancelled, CdcAddedColumnRefused),
+            ):
                 raise
             if not _shared_reader_left_no_trace(shared_progress):
                 raise
@@ -2391,6 +2398,31 @@ def _run_cdc_shared_multi_table(
                 stream_name=name,
             ),
         }
+
+    # D344 — each table's column set when the shared capture opened. A row
+    # image carrying another column is propagated or refused before it is
+    # applied. A table whose catalog cannot be read keeps the old behaviour
+    # rather than refuse its own columns.
+    from services.reflection_cache import invalidate_named_tables
+
+    from .adapters_introspect import _introspect_table_schema_rich
+
+    def _shared_source_types(table: str) -> dict[str, str]:
+        invalidate_named_tables(table)
+        live, _nulls, _keys = _introspect_table_schema_rich(src_type, src_cfg, table, [])
+        return dict(live or {})
+
+    for name, cfg_s in stream_cfg.items():
+        try:
+            live_cols = list(_shared_source_types(name))
+        except Exception as exc:  # noqa: BLE001 - see above
+            logger.warning("CDC start columns unreadable for %s: %s", name, exc)
+            live_cols = []
+        cfg_s["started_columns"] = (
+            [*live_cols, *(str(m.get("source") or "") for m in cfg_s["mappings"] or [])]
+            if live_cols
+            else None
+        )
 
     shared_key = shared_route_cursor_key(
         engine=src_type,
@@ -2693,6 +2725,22 @@ def _run_cdc_shared_multi_table(
             pk_target = _pk_columns(pk_joined)
         else:
             pk_target = [map_source_to_target(c, use_maps) or c for c in pk_source]
+        if cfg.get("started_columns") is not None and (change.inserts or change.updates):
+            from .cdc_added_columns import propagation_note, shared_stream_mappings
+
+            use_maps, new_here = shared_stream_mappings(
+                cfg,
+                change,
+                use_maps,
+                stream=stream,
+                propagate=bool(backfill_new_fields),
+                exactly_once=bool(eos_active),
+                dest_db=dest_type,
+                source_types=lambda _cols, _t=stream: _shared_source_types(_t),
+                imaged=_change_column_names(change),
+            )
+            if new_here:
+                ddl_log.append(propagation_note(new_here, table=stream, dest_table=stream))
         if original_dest_table is not None or original_dest_collection is not None:
             if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
                 destination.collection = stream
@@ -2705,6 +2753,7 @@ def _run_cdc_shared_multi_table(
             aliases=(stream,),
         )
         col_types = dict(schema)
+        col_types.update(cfg.get("added_types") or {})
         if change.inserts or change.updates and not cfg.get("mappings_inherited"):
             sample = (change.inserts or change.updates)[0]
             headers = list(sample.keys())
@@ -2794,6 +2843,14 @@ def _run_cdc_shared_multi_table(
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
         dest_summary = _note_inherited_map(dest_summary, inherit_note)
+        if cfg.get("added_maps"):
+            from .cdc_added_columns import propagation_note
+
+            _added = [str(m.get("source") or "") for m in cfg["added_maps"]]
+            dest_summary = _note_inherited_map(
+                dest_summary, propagation_note(_added, table=stream, dest_table=stream)
+            )
+            dest_summary["schema_propagation"] = {"added_columns": _added}
         _record_quarantined_key_deletes(
             shared_accum, change, list(pk_source or []), str(job_id or ""), destination
         )
