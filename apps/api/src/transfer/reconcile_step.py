@@ -255,7 +255,7 @@ def _proof_source_batches(
         return
     from .proof_api_source import is_reader_source, iter_api_source_batches
 
-    if is_reader_source(src_type):
+    if is_reader_source(src_type, src_cfg):
         yield from iter_api_source_batches(
             source_endpoint=source_endpoint,
             src_type=src_type,
@@ -1591,8 +1591,14 @@ def _transform_applied_proof_impl(
     else:
         qs = '"'
     # A Mongo source has no SQL table: the SQL oracle and the tracked-equality
-    # join below are SQL-source only and already skip on an empty ref.
-    src_ref_sql = "" if src_type == "mongodb" else warehouse_sql_table_ref(
+    # join below are SQL-source only and already skip on an empty ref. Nor does
+    # a query / procedure extract (D333): its rows are the statement's result,
+    # not the base table's — selecting its alias names there fails.
+    from services.procedure_source import is_callable_source
+
+    src_ref_sql = "" if (
+        src_type == "mongodb" or is_callable_source(src_cfg)
+    ) else warehouse_sql_table_ref(
         src_type,
         src_cfg,
         str(
@@ -1606,6 +1612,7 @@ def _transform_applied_proof_impl(
     oracle_exprs: dict[str, str] = {}
     oracle_ok = (
         src_type in _ORACLE_DIALECTS
+        and bool(src_ref_sql)
         and bool(declared_src)
         and not any(
             str(st.get("op") or "") in _TRANSFORM_PROOF_POPULATION_OPS

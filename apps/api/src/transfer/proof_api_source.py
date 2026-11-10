@@ -42,10 +42,21 @@ _OFFSET_FILE_READERS = frozenset({"sftp", "s3", "gcs", "adls"})
 _NO_PROOF_REREAD = frozenset({"dynamodb", "elasticsearch", "redis", "kafka", "qdrant"})
 
 
-def is_reader_source(src_type: str) -> bool:
-    """True when the proof re-reads this source through the write's own reader."""
+def is_reader_source(src_type: str, src_cfg: Any = None) -> bool:
+    """True when the proof re-reads this source through the write's own reader.
+
+    D333: a query / procedure extract is read by running its statement
+    (``read_callable_batch``); re-reading the base table by the query's
+    output names asked for alias columns the table does not have.
+    """
+    from services.procedure_source import is_callable_source
+
     kind = (src_type or "").strip().lower()
-    return kind in _OFFSET_FILE_READERS or is_api_source(kind)
+    return (
+        kind in _OFFSET_FILE_READERS
+        or is_api_source(kind)
+        or is_callable_source(src_cfg or {})
+    )
 
 
 def proof_unavailable_reason(source_endpoint: Any, src_type: str) -> str | None:
