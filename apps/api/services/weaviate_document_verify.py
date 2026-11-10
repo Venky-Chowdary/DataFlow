@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from services.pgvector_document_verify import (
+    _differing_label,
     _source_for_proof,
     boolean_keys,
     carried_fields,
@@ -119,7 +120,8 @@ def gate8_weaviate_report(
             "passed": False,
             "message": (
                 f"Weaviate objects do not hold {proof['unmatched_source_rows']} of "
-                f"{proof['source_rows']} source row(s) value for value (fields: {names}); "
+                f"{proof['source_rows']} source row(s) value for value "
+                f"({_differing_label(proof)}fields: {names}); "
                 f"{expansion}; first: {proof['examples'][:1]}"
             ),
         }
