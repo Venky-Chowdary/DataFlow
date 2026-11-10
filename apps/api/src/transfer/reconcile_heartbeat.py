@@ -413,7 +413,8 @@ def job_phase_heartbeat(
 
     stop = threading.Event()
     started = time.monotonic()
-    fixed: dict[str, Any] = {"phase": phase}
+    # An empty ``phase`` leaves the job's phase as it is (a page-read pulse).
+    fixed: dict[str, Any] = {"phase": phase} if phase else {}
     if progress_pct is not None:
         fixed["progress_pct"] = progress_pct
     if records_processed is not None:

@@ -335,6 +335,43 @@ def blocking_step(message: str, *, phase: str = "reading") -> Iterator[None]:
         yield
 
 
+@contextlib.contextmanager
+def wait_pulse(message: str) -> Iterator[None]:
+    """Keep the heartbeat moving while one source call waits (D287).
+
+    ``blocking_step`` names its wait at once, at the cost of a job read and a
+    status write: right for a run's first page, too much for every page. This
+    pulse writes nothing unless the call outlasts one pulse interval; from
+    then on it stamps ``heartbeat_at`` and ``message`` with the elapsed time
+    (never ``updated_at``), and past the readiness bound it says the source
+    has not answered. A Kafka page read waiting on a broker that stopped
+    answering left the job on its last message ("Writing batch 1/2 (10
+    rows)...") with no heartbeat at all. The phase is left as it is. A no-op
+    outside a run; it stops for a cancelled or superseded attempt.
+    """
+    store = active_job_store()
+    if store is None:
+        yield
+        return
+    mongo, job_id = store
+    from src.transfer.reconcile_heartbeat import job_phase_heartbeat
+
+    def _not_live() -> bool:
+        job = _read_job(mongo, job_id) or {}
+        return str(job.get("status") or "") != "running" or _is_superseded(job)
+
+    with job_phase_heartbeat(
+        mongo,
+        job_id,
+        phase="",
+        message=message,
+        interval_s=BLOCKING_STEP_PULSE_SECONDS,
+        until=_not_live,
+        bound_seconds=_blocking_step_bound_seconds(),
+    ):
+        yield
+
+
 def active_job_store() -> tuple[Any, str] | None:
     """``(job store, job id)`` of the run this context belongs to, or ``None``.
 
