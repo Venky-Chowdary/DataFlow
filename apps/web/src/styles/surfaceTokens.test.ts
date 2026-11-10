@@ -563,11 +563,15 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
   it("Validate repair, run-id, and compact preflight leftovers do not flatten to #fff", () => {
     const studio = sheet("transfer-studio.css");
 
-    assert.match(studio, /\.df2-repair-issues li \{[\s\S]{0,120}--df-surface/);
-    assert.doesNotMatch(studio, /\.df2-repair-issues li \{[\s\S]{0,120}background: #fff;/);
+    // 64b1bf244 made each issue a left-ruled row on the drawer's own surface:
+    // no card background of its own, and the rule is a token, never raw hex.
+    assert.match(studio, /\.df2-repair-issues li \{[^}]*border-left: 3px solid var\(--df-border\)/);
+    assert.doesNotMatch(studio, /\.df2-repair-issues li \{[^}]*#[0-9a-fA-F]{3,8}/);
     assert.match(studio, /\.df2-repair-issues li\.is-block \{[\s\S]{0,80}--df-danger-bg/);
     assert.match(studio, /\.df2-repair-issues li\.is-warn \{[\s\S]{0,80}--df-warning-bg/);
-    assert.match(studio, /\.df2-repair-actions li \{[\s\S]{0,120}--df-surface-muted/);
+    // Same redesign: actions are divider-separated rows, not muted cards.
+    assert.match(studio, /\.df2-repair-actions li \{[^}]*border-bottom: 1px solid var\(--df-border\)/);
+    assert.doesNotMatch(studio, /\.df2-repair-actions li \{[^}]*#[0-9a-fA-F]{3,8}/);
     assert.match(studio, /\.df2-vd-assist-chevron \{[\s\S]{0,200}--df-surface/);
     assert.doesNotMatch(studio, /\.df2-vd-assist-chevron \{[\s\S]{0,200}background: #fff;/);
     assert.match(studio, /\.df2-vd-run-id \{[\s\S]{0,200}--df-surface-muted/);
@@ -1355,8 +1359,10 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(ui, /\.df2-quarantine-inspect-body \{[\s\S]{0,200}color: #0f172a/);
     assert.match(ui, /\.df2-quarantine-next \{[\s\S]{0,200}--df-surface-muted/);
     assert.doesNotMatch(ui, /\.df2-quarantine-next \{[\s\S]{0,200}background: #f8fafc/);
-    assert.match(ui, /\.df2-quarantine-next-copy strong \{[\s\S]{0,160}--df-text-secondary/);
-    assert.doesNotMatch(ui, /\.df2-quarantine-next-copy strong \{[\s\S]{0,160}color: #334155/);
+    // 64b1bf244 scoped the label to the direct child (`> strong`) so an inline
+    // <strong> inside the copy is not turned into a block caption.
+    assert.match(ui, /\.df2-quarantine-next-copy > strong \{[\s\S]{0,160}--df-text-secondary/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-next-copy > strong \{[\s\S]{0,160}color: #334155/);
     assert.match(ui, /\.df2-result-more > summary \{[\s\S]{0,160}--df-text-secondary/);
     assert.doesNotMatch(ui, /\.df2-result-more > summary \{[\s\S]{0,160}color: #334155/);
     assert.match(ui, /\.df2-result-more\[open\] > summary \{[\s\S]{0,80}--df-surface-muted/);

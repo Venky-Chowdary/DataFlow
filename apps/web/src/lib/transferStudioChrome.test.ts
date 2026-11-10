@@ -799,8 +799,12 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(schedules, /htmlFor="df2-schedule-import"/);
     assert.doesNotMatch(schedules, /importInputRef\.current\?\.click/);
 
-    assert.match(gate8, /id="df2-gate8-verify-proof"/);
-    assert.match(gate8, /htmlFor="df2-gate8-verify-proof"/);
+    // 64b1bf244: the input/label pair shares a per-instance useId() instead of
+    // a fixed id, so two mounted cards never collide on one document id.
+    assert.match(gate8, /const verifyInputId = useId\(\);/);
+    assert.match(gate8, /<HiddenFileInput\s+id=\{verifyInputId\}/);
+    assert.match(gate8, /<label\s+htmlFor=\{verifyInputId\}/);
+    assert.doesNotMatch(gate8, /<input[\s\S]{0,80}type="file"/);
     assert.doesNotMatch(gate8, /verifyInputRef\.current\?\.click/);
   });
 
