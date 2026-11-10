@@ -53,6 +53,7 @@ from services.cdc_exactly_once import (
 )
 from services.cdc_effectively_once import should_apply_pk_delete, should_apply_pk_row
 from services.cdc_engine import ChangeBatch
+from services.value_serializer import is_missing_sentinel
 
 _logger = logging.getLogger(__name__)
 
@@ -724,7 +725,7 @@ def _apply_mapped_transforms(
             target=target,
         )
         if err:
-            raise ValueError(f"column {target!r}: {err}")
+            raise ValueError(f"column {target!r} value could not be converted: {err}")
         out[target] = converted
     return out
 
@@ -751,6 +752,7 @@ def _upsert_row(
     pk_cols: list[str],
     values: dict[str, Any],
     dialect: str = "",
+    absent: set[str] | frozenset[str] = frozenset(),
 ) -> int:
     where = " AND ".join(f"{_q(c, dialect)} = :pk_{i}" for i, c in enumerate(pk_cols))
     pk_binds = {f"pk_{i}": values.get(c) for i, c in enumerate(pk_cols)}
@@ -769,7 +771,7 @@ def _upsert_row(
         ph = ", ".join(f":c_{i}" for i in range(len(target_cols)))
         conn.execute(text(f"INSERT INTO {table_q} ({cols}) VALUES ({ph})"), col_binds)
         return 1
-    set_cols = [c for c in target_cols if c not in pk_cols]
+    set_cols = [c for c in target_cols if c not in pk_cols and c not in absent]
     if not set_cols:
         return 0
     sets = ", ".join(f"{_q(c, dialect)} = :c_{target_cols.index(c)}" for c in set_cols)
@@ -1081,9 +1083,13 @@ def _sa_apply_member(
             incoming_lsn=incoming_lsn,
         )
     for rec in records:
+        row = _row_values(rec, target_cols, tgt_to_src, incoming_lsn)
+        # D315: an absent document field is not a value. An INSERT stores NULL
+        # (as the at-least-once dense write does); an UPDATE leaves the column.
+        absent = {c for c, v in row.items() if is_missing_sentinel(v)}
         values = _coerce_eos_row(
             _apply_mapped_transforms(
-                _row_values(rec, target_cols, tgt_to_src, incoming_lsn),
+                {c: (None if c in absent else v) for c, v in row.items()},
                 mappings,
                 column_types,
             ),
@@ -1091,7 +1097,8 @@ def _sa_apply_member(
             dialect,
         )
         rows_written += _upsert_row(
-            conn, table_q, target_cols, pk_target_cols, values, dialect
+            conn, table_q, target_cols, pk_target_cols, values, dialect,
+            absent=absent,
         )
     deleted = 0
     for key in list(change.deletes or []):

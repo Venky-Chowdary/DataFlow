@@ -676,6 +676,7 @@ def load_reduce_into_dest(
     """
     from services.cdc_effectively_once import should_apply_pk_row
     from services.cdc_snapshot_window import _pk_value
+    from services.value_serializer import is_missing_sentinel
 
     out: list[dict[str, Any]] = []
     for rec in incoming_rows:
@@ -694,7 +695,11 @@ def load_reduce_into_dest(
             ).applied:
                 continue
             merged = dict(dest)
-            merged.update(rec)
+            # An absent document field keeps the dest column (D315), the
+            # same as a column the event does not carry at all.
+            merged.update(
+                (k, v) for k, v in rec.items() if not is_missing_sentinel(v)
+            )
             merged[DF_LSN_COL] = incoming_lsn
             out.append(merged)
         else:

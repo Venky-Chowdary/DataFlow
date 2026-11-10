@@ -149,6 +149,20 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         "error_confidence": human.get("confidence"),
         "operator_error": human.get("message"),
     }
+    dropped = str(getattr(exc, "destination_table_dropped", "") or "")
+    if dropped:
+        from services.error_handling import ROWS_STAY_NOTE
+
+        # D315: a failed first CDC run drops the table it created when no row
+        # landed; the generic "rows stay" tail is untrue for it.
+        message = str(human.get("message") or exc).replace(ROWS_STAY_NOTE, "").strip()
+        message += (
+            f" Nothing was kept: this run created the destination table {dropped} "
+            "and dropped it again because no row had landed."
+        )
+        details["message"] = message
+        details["destination_table_dropped"] = dropped
+        extras["operator_error"] = message
     from services.cdc_drift_repair import (
         CdcDriftRequiresFencedRepair,
         cdc_drift_operator_message,
