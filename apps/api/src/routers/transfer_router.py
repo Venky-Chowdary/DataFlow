@@ -475,12 +475,25 @@ async def analyze_transfer(request: AnalyzeRequest, http_request: Request):
     engine = get_transfer_engine()
     src_data = request.source.model_dump(by_alias=True)
     dst_data = request.destination.model_dump(by_alias=True)
-    return engine.analyze_compatibility(
-        EndpointConfig.from_dict(request.source.kind, src_data),
-        EndpointConfig.from_dict(request.destination.kind, dst_data),
-        source_columns=request.source_columns or None,
-        source_schema=request.source_schema or None,
+    # It introspects both systems: off the event loop, under the deadline (D321).
+    return await _analyze_off_loop(
+        lambda: engine.analyze_compatibility(
+            EndpointConfig.from_dict(request.source.kind, src_data),
+            EndpointConfig.from_dict(request.destination.kind, dst_data),
+            source_columns=request.source_columns or None,
+            source_schema=request.source_schema or None,
+        )
     )
+
+
+async def _analyze_off_loop(fn: Any) -> Any:
+    """Run an analysis that reads customer systems off the event loop (D321)."""
+    from ..ai.copilot.tool_deadline import run_off_event_loop
+
+    def _timed_out(message: str) -> Any:
+        raise HTTPException(status_code=504, detail=message)
+
+    return await run_off_event_loop("plan_transfer", fn, _timed_out)
 
 
 @router.post("/introspect")
@@ -944,11 +957,13 @@ async def analyze_file_transfer(
         collection=dest_collection or (file.filename.rsplit(".", 1)[0] if file.filename else "import"),
     )
     source = EndpointConfig(kind="file", format=src_fmt)
-    plan = get_transfer_engine().analyze_compatibility(
-        source,
-        dest,
-        source_columns=columns,
-        source_schema=schema,
+    plan = await _analyze_off_loop(
+        lambda: get_transfer_engine().analyze_compatibility(
+            source,
+            dest,
+            source_columns=columns,
+            source_schema=schema,
+        )
     )
     plan["row_count_estimate"] = row_count
     stored_file_id = ""

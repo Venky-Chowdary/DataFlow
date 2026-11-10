@@ -2375,6 +2375,10 @@ class DataPilotTools:
             try:
                 from src.transfer.connector_registry import run_probe
 
+                from .tool_deadline import note_step
+
+                # The tool deadline (D321) then names the host it waited on.
+                note_step("create_connector: testing the new connector", draft, role="connector")
                 probe_ok, probe_msg = run_probe(
                     draft["type"],
                     {

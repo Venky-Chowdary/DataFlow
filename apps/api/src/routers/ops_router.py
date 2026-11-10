@@ -355,6 +355,20 @@ class SourceHaProbeBody(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+async def _probe_off_loop(fn: Any) -> Any:
+    """Run a live probe on the connector executor, never on the event loop.
+
+    A probe against a host that accepts the connection and never answers
+    froze every /api/v1 route while it ran on the loop (D321).
+    """
+    from src.ai.copilot.tool_deadline import run_off_event_loop
+
+    def _timed_out(message: str) -> Any:
+        raise HTTPException(status_code=504, detail=message)
+
+    return await run_off_event_loop("test_connector", fn, _timed_out)
+
+
 @router.post("/source-ha/probe")
 async def post_source_ha_probe(body: SourceHaProbeBody) -> dict[str, Any]:
     """Probe SQL Server Always On / Oracle Data Guard role on a live connection.
@@ -377,7 +391,8 @@ async def post_source_ha_probe(body: SourceHaProbeBody) -> dict[str, Any]:
         "multi_subnet_failover": body.multi_subnet_failover,
         "application_intent": body.application_intent,
     }
-    probe = probe_source_ha_safe(cfg)
+    # Off the event loop, under the connector deadline (D321).
+    probe = await _probe_off_loop(lambda: probe_source_ha_safe(cfg))
     return {"ok": True, "source_ha": probe.to_dict(), **probe.job_fields()}
 
 
@@ -422,12 +437,14 @@ async def post_cdc_retention_probe(body: CdcRetentionProbeBody) -> dict[str, Any
         "ssl": body.ssl,
         "multi_subnet_failover": body.multi_subnet_failover,
     }
-    probe = probe_cdc_retention(
-        cfg,
-        table=body.table,
-        schema=body.schema_name,
-        cursor_key=body.cursor_key,
-        watermark=body.watermark,
+    probe = await _probe_off_loop(
+        lambda: probe_cdc_retention(
+            cfg,
+            table=body.table,
+            schema=body.schema_name,
+            cursor_key=body.cursor_key,
+            watermark=body.watermark,
+        )
     )
     return {"ok": True, "retention": probe.to_dict(), **probe.job_fields()}
 

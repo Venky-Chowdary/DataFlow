@@ -269,6 +269,32 @@ async def test_connection(request: TestConnectionRequest, http_request: Request)
 
 
 async def _test_connection_impl(request: TestConnectionRequest, op):
+    """Test a connector configuration before saving.
+
+    The probe dials the customer system with a blocking driver: it runs on the
+    connector executor under the test_connector deadline, never on the event
+    loop (D321: one silent Oracle host froze every /api/v1 route).
+    """
+    from ..ai.copilot.tool_deadline import note_step, run_off_event_loop
+
+    def _timed_out(message: str) -> dict[str, Any]:
+        op.failed(category="probe_failed")
+        return {"success": False, "message": message}
+
+    def _probe() -> dict[str, Any]:
+        # A timeout names the endpoint, not "a system it reads from".
+        target = {
+            "host": request.host or "",
+            "port": request.port or "",
+            "connection_string": request.connection_string or "",
+        }
+        note_step("test_connector: reaching the host", target, role="connector")
+        return _test_connection_blocking(request, op)
+
+    return await run_off_event_loop("test_connector", _probe, _timed_out)
+
+
+def _test_connection_blocking(request: TestConnectionRequest, op):
     """Test a connector configuration before saving"""
     from ..transfer.connector_capabilities import file_source_types
     from ..transfer.connector_registry import (
