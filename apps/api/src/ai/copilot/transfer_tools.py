@@ -1040,10 +1040,12 @@ def plan_transfer(
     )
 
     # D139: a source-only connector is not a destination; say so before any gate.
-    # D276: nor is SQLite on the hosted cloud (the file lives on one server).
+    # D276: nor a local-disk destination on the hosted cloud (SQLite, a DuckDB file,
+    # a local Iceberg warehouse/catalog): judged on the saved connector's fields.
     not_a_destination = destination_refusal(
         str(dst_conn.get("type") or dst_conn.get("format") or ""),
         str(dst_conn.get("connection_string") or ""),
+        cfg=dst_conn,
     )
     if not_a_destination:
         return _tool_result(tool, success=False, error=not_a_destination)

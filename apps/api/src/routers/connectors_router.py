@@ -1784,7 +1784,6 @@ async def get_job_quarantine(job_id: str, request: Request):
 async def export_job_quarantine(job_id: str, request: Request):
     """Export quarantined rows to a CSV in the exports folder and return a download URL."""
     import uuid
-    from pathlib import Path
 
     mongo = get_mongodb_service()
     job = mongo.get_job(job_id)
@@ -1828,11 +1827,11 @@ async def export_job_quarantine(job_id: str, request: Request):
     rows = [[neutralize_formula_cell(cell) for cell in row] for row in rows]
     content, _ = convert_rows(headers, rows, source_format="csv", target_format="csv")
 
-    api_root = Path(__file__).resolve().parents[2]
-    export_dir = api_root / "exports"
-    export_dir.mkdir(parents=True, exist_ok=True)
+    from services.export_paths import generated_export_path
+
+    # The folder GET /transfer/download serves (DATAFLOW_EXPORTS_DIR aware).
     filename = f"quarantine_{job_id}_{uuid.uuid4().hex[:8]}.csv"
-    export_path = export_dir / filename
+    export_path = generated_export_path(filename)
     export_path.write_bytes(content)
 
     return {

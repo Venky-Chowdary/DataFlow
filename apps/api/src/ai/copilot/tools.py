@@ -3575,17 +3575,18 @@ class DataPilotTools:
 
         # D139: the generic sketch listed every gate for a destination that has
         # no writer. Name the saved connector's engine, or the engine itself.
-        dest_type = destination
+        dest_type, dest_saved = destination, None
         try:
             from services.connector_store import list_connectors
 
             for saved in list_connectors():
                 if str(getattr(saved, "name", "") or "").strip().casefold() == destination.casefold():
-                    dest_type = str(getattr(saved, "type", "") or destination)
+                    dest_type, dest_saved = str(getattr(saved, "type", "") or destination), saved
                     break
         except Exception:  # noqa: BLE001 - the store is a hint here, not a gate
             pass
-        not_a_destination = destination_refusal(dest_type)  # D139 source-only, D276 SQLite
+        # D139 source-only; D276 local disk (a saved DuckDB/Iceberg is judged on its path).
+        not_a_destination = destination_refusal(dest_type, cfg=dest_saved)
         if not_a_destination:
             return ToolResult(
                 name="plan_transfer_route", success=False, output=None, error=not_a_destination

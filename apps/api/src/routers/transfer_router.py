@@ -11,7 +11,6 @@ from services.mapping_proof import mappings_from_request
 from services.safe_errors import safe_http_exception
 from services.shape_preflight import ShapePreflightRefused
 from services.upload_limits import PayloadTooLarge, read_upload
-from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import (
@@ -236,23 +235,27 @@ def _assert_endpoint_connectors(
 
 
 def _refuse_unavailable_destination(endpoint: Any, workspace_id: str | None) -> None:
-    """D276: 422 for a destination this host refuses (SQLite on the hosted cloud).
+    """D276: 422 for a destination this host refuses (on the hosted cloud: SQLite,
+    a local DuckDB file, a local Iceberg warehouse/catalog, a file export).
 
     Before any job exists or any row is read; the engine refuses the same run
     again before it writes, for every path that does not come through here.
     """
-    from services.local_file_policy import endpoint_sqlite_destination_refusal
+    from services.local_file_policy import endpoint_local_destination_refusal
 
-    refusal = endpoint_sqlite_destination_refusal(endpoint, workspace_id)
+    refusal = endpoint_local_destination_refusal(endpoint, workspace_id)
     if refusal:
         raise HTTPException(status_code=422, detail=refusal)
 
 
 def _refuse_unavailable_plan_destination(plan_id: str) -> None:
     """:func:`_refuse_unavailable_destination` for a saved plan's destination (Validate)."""
-    from services.local_file_policy import sqlite_destination_allowed
+    from services.local_file_policy import (
+        local_file_destinations_allowed,
+        sqlite_destination_allowed,
+    )
 
-    if sqlite_destination_allowed():
+    if sqlite_destination_allowed() and local_file_destinations_allowed():
         return
     from services.transfer_plan_store import get_plan
 
@@ -1459,11 +1462,25 @@ async def run_universal_transfer(
         read=tuple(c for c in (source_connector_id,) if c),
         write=tuple(c for c in (dest_connector_id,) if c),
     )
+    dest_extra: dict = {}
+    if dest_extra_json.strip():
+        try:
+            import json as _json
+            parsed = _json.loads(dest_extra_json)
+            if isinstance(parsed, dict):
+                dest_extra = parsed
+        except Exception:
+            dest_extra = {}
+
     _refuse_unavailable_destination(
         {
+            "kind": dest_kind,
             "format": dest_format,
             "connector_id": dest_connector_id,
             "connection_string": dest_connection_string,
+            "database": dest_database,
+            "warehouse": dest_warehouse,
+            "extra": dest_extra,
         },
         workspace_id,
     )
@@ -1560,16 +1577,6 @@ async def run_universal_transfer(
         auth_source=source_auth_source,
         extra=source_extra,
     )
-    dest_extra: dict = {}
-    if dest_extra_json.strip():
-        try:
-            import json as _json
-            parsed = _json.loads(dest_extra_json)
-            if isinstance(parsed, dict):
-                dest_extra = parsed
-        except Exception:
-            dest_extra = {}
-
     destination = EndpointConfig(
         kind=dest_kind,
         format=dest_format,
@@ -2399,8 +2406,14 @@ async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request)
 
 @router.get("/download/{filename}")
 async def download_export(filename: str):
-    """Serve an exported file from the exports directory."""
-    export_dir = Path(__file__).resolve().parents[2] / "exports"
+    """Serve an exported file from the exports directory.
+
+    The folder the writers use (``export_paths.exports_dir()``, which honours
+    ``DATAFLOW_EXPORTS_DIR``), not a second hard-coded copy of the default.
+    """
+    from services.export_paths import exports_dir
+
+    export_dir = exports_dir()
     file_path = export_dir / filename
     # Security: refuse to serve files outside the exports directory
     if not file_path.resolve().is_relative_to(export_dir.resolve()):

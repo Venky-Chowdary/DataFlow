@@ -20,7 +20,12 @@ import { PermissionNotice } from "../components/PermissionNotice";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
 import {
+  fileExportUnavailableFromCapabilities,
+  localVariantNoteFor,
+  localVariantNotesFromCapabilities,
   unavailableDestTypesFromCapabilities,
+  type FileExportAvailability,
+  type LocalVariantNote,
   type UnavailableDestType,
 } from "../lib/destinationAvailability";
 import { DestProcedurePanel, type DestWriteMode } from "../components/transfer/DestProcedurePanel";
@@ -658,6 +663,10 @@ export function TransferPage({
     () => FALLBACK_DEST_TYPES.map((id) => ({ id, label: getConnectorDefaults(id).label })),
   );
   const [unavailableDestTypes, setUnavailableDestTypes] = useState<UnavailableDestType[]>([]);
+  // D276: on the hosted cloud file exports and the local-file variant of
+  // DuckDB / Iceberg land on the server's own disk; the API says so, with why.
+  const [fileExportUnavailable, setFileExportUnavailable] = useState<FileExportAvailability | null>(null);
+  const [localVariantNotes, setLocalVariantNotes] = useState<LocalVariantNote[]>([]);
   const [liveExportFormats, setLiveExportFormats] = useState<{ id: string; label: string }[]>(
     () => FALLBACK_EXPORT_FORMATS.map((id) => ({ id, label: id.toUpperCase() })),
   );
@@ -1020,6 +1029,8 @@ export function TransferPage({
         // D276: engines this host refuses as a destination (SQLite on the hosted
         // cloud) are listed by the API with why; the picker shows them disabled.
         setUnavailableDestTypes(unavailableDestTypesFromCapabilities(caps));
+        setFileExportUnavailable(fileExportUnavailableFromCapabilities(caps));
+        setLocalVariantNotes(localVariantNotesFromCapabilities(caps));
         if (exports.length) {
           setLiveExportFormats(exports.map((id) => ({ id, label: id.toUpperCase() })));
         }
@@ -8016,12 +8027,15 @@ export function TransferPage({
                         role="tab"
                         aria-selected={destKindMode === "file_export"}
                         className={`df2-dest-mode-btn${destKindMode === "file_export" ? " active" : ""}`}
+                        disabled={Boolean(fileExportUnavailable) && destKindMode !== "file_export"}
+                        title={fileExportUnavailable?.message}
                         onClick={() => {
                           setDestKindMode("file_export");
                           resetRouteForDestinationChange();
                         }}
                       >
                         File export
+                        {fileExportUnavailable ? ` (${fileExportUnavailable.reason})` : ""}
                       </button>
                     </div>
                     <Button
@@ -8053,6 +8067,11 @@ export function TransferPage({
                       <option key={f.id} value={f.id}>{f.label}</option>
                     ))}
                   </select>
+                  {fileExportUnavailable && (
+                    <p className="df2-label-hint" role="note">
+                      {fileExportUnavailable.reason}. {fileExportUnavailable.message}
+                    </p>
+                  )}
                 </div>
               ) : (
                 <DestinationPicker
@@ -8081,6 +8100,14 @@ export function TransferPage({
                   }}
                 />
               )}
+              {destKindMode !== "file_export" && (() => {
+                const note = localVariantNoteFor(localVariantNotes, destType, destDriverType);
+                return note ? (
+                  <p className="df2-label-hint" role="note" title={note.message}>
+                    {note.variant}: {note.reason}. {note.message}
+                  </p>
+                ) : null;
+              })()}
             </div>
 
             <div className="df2-dest-step-right">

@@ -1447,14 +1447,15 @@ def _guard_schedule_destination(connector_id: str, table: str) -> None:
 
 
 def _refuse_unavailable_destination(data: Mapping[str, Any]) -> None:
-    """D276: a schedule into a destination this host refuses (SQLite on the hosted cloud).
+    """D276: a schedule into a destination this host refuses (on the hosted cloud:
+    SQLite, a local DuckDB file, a local Iceberg warehouse/catalog).
 
     Every run would be refused at its preflight, so the save is refused now.
     """
-    from services.local_file_policy import endpoint_sqlite_destination_refusal
+    from services.local_file_policy import endpoint_local_destination_refusal
 
-    refusal = endpoint_sqlite_destination_refusal(
-        {"connector_id": data.get("dest_connector_id")},
+    refusal = endpoint_local_destination_refusal(
+        {"connector_id": data.get("dest_connector_id"), "database": data.get("dest_database")},
         workspace_id=str(data.get("workspace_id") or "") or None,
     )
     if refusal:

@@ -19,6 +19,7 @@ refuse (``scripts/audit_sqlite_paths.py`` lists the saved connectors).
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -115,15 +116,15 @@ def sqlite_destination_allowed() -> bool:
     """May SQLite be a transfer destination in this process? Env reads only.
 
     1. ``DATAWRAP_SQLITE_DESTINATION`` / ``DATAFLOW_SQLITE_DESTINATION`` on/off wins;
-    2. otherwise off on a deployed Railway service (deploy-time markers only —
-       a ``railway run`` shell, CI or a test run is not the hosted cloud);
-    3. otherwise on. Never keyed off ``is_production()``: a self-hosted
-       production install keeps SQLite.
+    2. otherwise :func:`local_file_destinations_allowed` (SQLite is one of the
+       local-disk destinations): ``DATAWRAP_LOCAL_FILE_DESTINATIONS`` on/off, else
+       off on a deployed Railway service (deploy-time markers only — a ``railway
+       run`` shell, CI or a test run is not the hosted cloud), else on. Never
+       keyed off ``is_production()``: a self-hosted production install keeps SQLite.
     """
     from services.brand_env import getenv_brand_bool
-    from services.platform_config import is_railway_deployed
 
-    return getenv_brand_bool("SQLITE_DESTINATION", not is_railway_deployed())
+    return getenv_brand_bool("SQLITE_DESTINATION", local_file_destinations_allowed())
 
 
 def _is_sqlite_destination(dest_type: str, connection_string: str = "") -> bool:
@@ -148,29 +149,248 @@ def sqlite_destination_refusal(dest_type: str, connection_string: str = "") -> s
     return sqlite_destination_message()
 
 
-def endpoint_sqlite_destination_refusal(endpoint: Any, workspace_id: str | None = None) -> str | None:
-    """:func:`sqlite_destination_refusal` for a destination endpoint (DTO, dict or EndpointConfig).
+# --- Local-disk destinations on the hosted cloud (D276, generalised) ---------
+#
+# Owner rule: on the hosted cloud a destination is offered only if the data does
+# NOT land on the app's own disk. The reason is the D276 one: the API, the
+# worker and the scheduler are separate services with separate disks, so a file
+# a job writes on the worker is invisible to the API (list, sample, download)
+# and is gone after a redeploy. Classified from the code that writes it:
+#
+# * SQLite: always a local file (``sqlite_common.sqlite_file_path``); D276.
+# * DuckDB: ``sqlite_common.duckdb_unconfined_path`` — ``md:``/``motherduck:`` is
+#   MotherDuck (remote); any other value is a file the process opens on its own
+#   disk (``duckdb:///s3://…`` too: DuckDB opens it as a relative local path),
+#   and an empty path or ``:memory:`` lives in the run's own memory.
+# * Iceberg: ``iceberg_catalog._infer_catalog_type``/``_sql_props``. filesystem
+#   and hadoop write a local warehouse; a ``sql`` catalog without a PostgreSQL /
+#   MySQL / SQL Server URI keeps its table pointers in a local SQLite file
+#   (``.dataflow_iceberg_catalog.db`` or ``sqlite:///``) even when the warehouse
+#   is on S3, so another service or a redeploy loses the table; a remote catalog
+#   (REST, Glue, Hive, SQL database) is local only with a local warehouse path.
+# * ``file_export``: ``file_export_append.land_export_bytes`` writes under
+#   ``export_paths.exports_dir()`` on the writing server. File delivery to
+#   S3/MinIO/GCS/ADLS/SFTP is a ``database``-kind destination and stays.
+#
+# ``DATAWRAP_LOCAL_FILE_DESTINATIONS=on|off`` (or ``DATAFLOW_…``) decides
+# explicitly; ``DATAWRAP_SQLITE_DESTINATION`` still decides SQLite on its own.
+LOCAL_FILE_DESTINATIONS_FLAG = "DATAWRAP_LOCAL_FILE_DESTINATIONS"
+DESTINATION_UNAVAILABLE_LABEL = SQLITE_DESTINATION_UNAVAILABLE_LABEL
+#: Engines that are a destination with a local and a remote variant.
+LOCAL_VARIANT_ENGINES = ("duckdb", "iceberg")
+_FILE_EXPORT_KINDS = frozenset({"file_export", "file"})
+_REMOTE_DUCKDB_PREFIXES = ("md:", "motherduck:")
+#: The SQL catalog URIs ``iceberg_catalog._sql_props`` hands to pyiceberg as is;
+#: any other ``sql`` catalog is the implicit local SQLite file.
+_REMOTE_ICEBERG_SQL_CATALOGS = ("postgresql://", "postgres://", "mysql://", "mssql://", "sqlserver://")
 
-    A saved ``connector_id`` without an inline format is looked up (one store
-    read) only while SQLite is refused here, so this costs nothing elsewhere.
+
+def local_file_destinations_allowed() -> bool:
+    """May a destination write to this server's own disk? Env reads only.
+
+    ``DATAWRAP_LOCAL_FILE_DESTINATIONS`` on/off wins; otherwise off on a deployed
+    Railway service, otherwise on (self-hosted, dev, tests, CI).
     """
-    if endpoint is None or sqlite_destination_allowed():
-        return None
+    from services.brand_env import getenv_brand_bool
+    from services.platform_config import is_railway_deployed
 
-    def get(key: str) -> Any:
-        return endpoint.get(key) if isinstance(endpoint, dict) else getattr(endpoint, key, None)
+    return getenv_brand_bool("LOCAL_FILE_DESTINATIONS", not is_railway_deployed())
 
-    refusal = sqlite_destination_refusal(
-        str(get("format") or get("type") or ""), str(get("connection_string") or "")
+
+def _cloud_refusal(what: str, instead: str) -> str:
+    from services.brand import PRODUCT_NAME
+
+    return (
+        f"{what} on {PRODUCT_NAME} Cloud: the data would be written to one server's own "
+        "disk, which the other servers can't read and which isn't kept between deploys. "
+        f"{instead}, or run {PRODUCT_NAME} self-hosted (where "
+        f"{LOCAL_FILE_DESTINATIONS_FLAG}=on keeps it)."
     )
-    connector_id = str(get("connector_id") or "").strip()
-    if refusal or not connector_id:
-        return refusal
-    from services.connector_store import get_connector
 
-    saved = get_connector(connector_id, workspace_id=workspace_id or None)
-    if saved is None:
-        return None
-    return sqlite_destination_refusal(
-        str(getattr(saved, "type", "") or ""), str(getattr(saved, "connection_string", "") or "")
+
+def local_destination_message(kind: str) -> str:
+    """The operator message for a refused local-disk destination ``kind``."""
+    if kind == "sqlite":
+        return sqlite_destination_message()
+    if kind == "duckdb":
+        return _cloud_refusal(
+            "A local DuckDB file isn't available as a destination",
+            "Use MotherDuck (an md: database) or another database destination",
+        )
+    if kind == "iceberg":
+        return _cloud_refusal(
+            "Iceberg with a local warehouse or a local catalog file isn't available as a destination",
+            "Use an S3, GCS or Azure warehouse with a REST, Glue, Hive or SQL-database "
+            "(PostgreSQL, MySQL, SQL Server) catalog",
+        )
+    return _cloud_refusal(
+        "File exports aren't available as a destination",
+        "Send the rows to an S3, MinIO, Google Cloud Storage, Azure or SFTP destination instead",
     )
+
+
+def _field(endpoint: Any, key: str) -> Any:
+    if isinstance(endpoint, Mapping):
+        return endpoint.get(key)
+    return getattr(endpoint, key, None)
+
+
+def _text(endpoint: Any, key: str) -> str:
+    return str(_field(endpoint, key) or "").strip()
+
+
+def _duckdb_is_local(endpoint: Any) -> bool:
+    from connectors.sqlite_common import duckdb_unconfined_path
+
+    try:
+        path = duckdb_unconfined_path(
+            _text(endpoint, "database"), _text(endpoint, "connection_string"), _text(endpoint, "host")
+        )
+    except ValueError:  # an invalid path is refused elsewhere; it is not remote
+        return True
+    return not path.lower().startswith(_REMOTE_DUCKDB_PREFIXES)
+
+
+def _iceberg_is_local(endpoint: Any) -> bool:
+    from connectors.iceberg_catalog import _infer_catalog_type, is_remote_location
+
+    raw_extra = _field(endpoint, "extra")
+    extra = dict(raw_extra) if isinstance(raw_extra, Mapping) else {}
+    # resolve_connector_config flattens ``extra`` into the config it hands writers.
+    for key in ("catalog_type", "catalog"):
+        if key not in extra and _text(endpoint, key):
+            extra[key] = _text(endpoint, key)
+    cs = _text(endpoint, "connection_string")
+    warehouse = _text(endpoint, "warehouse") or _text(endpoint, "database")
+    catalog = _infer_catalog_type(cs, _text(endpoint, "region"), warehouse, extra)
+    local_warehouse = bool(warehouse) and not is_remote_location(warehouse)
+    if catalog in {"filesystem", "hadoop", "sqlite"}:
+        return True
+    if catalog == "sql":
+        return not cs.lower().startswith(_REMOTE_ICEBERG_SQL_CATALOGS) or local_warehouse
+    if catalog in {"glue", "hive"}:
+        return local_warehouse
+    return False  # REST: the catalog server owns storage ("warehouse" names a catalog)
+
+
+def local_disk_destination(endpoint_or_type: Any, cfg: Any = None) -> str | None:
+    """``"sqlite"``, ``"duckdb"``, ``"iceberg"`` or ``"file_export"`` when this
+    destination lands on the writing server's own disk, else ``None``.
+
+    ``endpoint_or_type`` is an endpoint (EndpointConfig, DTO or dict) or a bare
+    type; ``cfg`` supplies the endpoint fields for a bare type. A bare type
+    without fields is judged on the type alone: only SQLite is local whatever
+    its path (DuckDB and Iceberg have remote variants).
+    """
+    if isinstance(endpoint_or_type, str):
+        fields = cfg
+        raw = endpoint_or_type.strip()
+    else:
+        fields = endpoint_or_type if cfg is None else cfg
+        raw = ""
+    if fields is not None:
+        raw = raw or _text(fields, "type") or _text(fields, "format")
+    raw = raw.lower()
+    connection_string = _text(fields, "connection_string") if fields is not None else ""
+    if _is_sqlite_destination(raw, connection_string):
+        return "sqlite"
+    if fields is None:
+        return None
+    if _text(fields, "kind").lower() in _FILE_EXPORT_KINDS:
+        return "file_export"
+    try:
+        from src.transfer.connector_capabilities import resolve_driver_type
+    except ImportError:  # loaded with apps/api/src on the path
+        from transfer.connector_capabilities import resolve_driver_type  # type: ignore[no-redef]
+    driver = resolve_driver_type(raw) if raw else ""
+    if raw == "duckdb" or driver == "duckdb" or (
+        driver == "generic_sql" and connection_string.lower().startswith("duckdb:")
+    ):
+        return "duckdb" if _duckdb_is_local(fields) else None
+    if driver == "iceberg":
+        return "iceberg" if _iceberg_is_local(fields) else None
+    return None
+
+
+def local_destination_refusal(endpoint_or_type: Any, cfg: Any = None) -> str | None:
+    """Why this destination may not be used on this host, or ``None``.
+
+    The one hosted-cloud question every destination choke point asks (engine,
+    ``write_destination_database``, ``validate_transfer``, planning, REST,
+    schedules). Costs two env reads when nothing is refused.
+    """
+    sqlite_ok = sqlite_destination_allowed()
+    files_ok = local_file_destinations_allowed()
+    if sqlite_ok and files_ok:
+        return None
+    kind = local_disk_destination(endpoint_or_type, cfg)
+    if kind is None or (sqlite_ok if kind == "sqlite" else files_ok):
+        return None
+    return local_destination_message(kind)
+
+
+def _with_saved_connector(endpoint: Any, saved: Any) -> dict[str, Any]:
+    """The destination fields as the engine will resolve them (inline wins, as in
+    ``adapters.resolve_connector_config``; the saved type and file path win)."""
+    from connectors.sql_dsn import is_masked_secret
+    from services.destination_identity import resolve_saved_vs_inline
+
+    saved_d = {k: _field(saved, k) for k in ("type", "database", "connection_string", "warehouse", "host", "region")}
+    merged: dict[str, Any] = {"kind": _text(endpoint, "kind") or "database"}
+    for key in ("connection_string", "warehouse", "host", "region"):
+        inline = _field(endpoint, key)
+        merged[key] = inline if inline and not is_masked_secret(inline) else saved_d[key]
+    merged["type"] = saved_d["type"] or _text(endpoint, "format") or _text(endpoint, "type")
+    merged["database"] = resolve_saved_vs_inline(
+        {"database": _text(endpoint, "database")}, {k: v or "" for k, v in saved_d.items()},
+        fmt=str(merged["type"] or "").lower(),
+    ).database
+    saved_extra, inline_extra = _field(saved, "extra"), _field(endpoint, "extra")
+    merged["extra"] = {
+        **(saved_extra if isinstance(saved_extra, Mapping) else {}),
+        **(inline_extra if isinstance(inline_extra, Mapping) else {}),
+    }
+    return merged
+
+
+def endpoint_local_destination_refusal(endpoint: Any, workspace_id: str | None = None) -> str | None:
+    """:func:`local_destination_refusal` for a destination endpoint (DTO, dict or EndpointConfig).
+
+    A saved ``connector_id`` is looked up (one store read) only while this host
+    refuses something, and its fields are merged under the inline ones the way
+    the engine resolves them, so a DuckDB/Iceberg connector is judged on its
+    saved path and catalog.
+    """
+    if endpoint is None or (sqlite_destination_allowed() and local_file_destinations_allowed()):
+        return None
+    connector_id = _text(endpoint, "connector_id")
+    if connector_id and _text(endpoint, "kind").lower() not in _FILE_EXPORT_KINDS:
+        from services.connector_store import get_connector
+
+        saved = get_connector(connector_id, workspace_id=workspace_id or None)
+        if saved is not None:
+            return local_destination_refusal(_with_saved_connector(endpoint, saved))
+    return local_destination_refusal(endpoint)
+
+
+def local_variant_notes(dest_ids: Any) -> list[dict[str, str]]:
+    """Capabilities entries for offered engines whose local-file variant is refused here."""
+    if local_file_destinations_allowed():
+        return []
+    try:
+        from src.transfer.connector_capabilities import resolve_driver_type
+    except ImportError:  # loaded with apps/api/src on the path
+        from transfer.connector_capabilities import resolve_driver_type  # type: ignore[no-redef]
+    notes: list[dict[str, str]] = []
+    for cid in dest_ids or ():
+        raw = str(cid or "").strip().lower()
+        engine = raw if raw in LOCAL_VARIANT_ENGINES else resolve_driver_type(raw)
+        if engine in LOCAL_VARIANT_ENGINES:
+            notes.append({
+                "id": str(cid),
+                "engine": engine,
+                "variant": "Local file",
+                "reason": DESTINATION_UNAVAILABLE_LABEL,
+                "message": local_destination_message(engine),
+            })
+    return notes

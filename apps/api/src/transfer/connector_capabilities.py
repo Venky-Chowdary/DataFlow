@@ -1205,15 +1205,21 @@ def source_only_destination_refusal(dest_type: str) -> str | None:
     )
 
 
-def destination_refusal(dest_type: str, connection_string: str = "") -> str | None:
-    """Why this connector type cannot be a destination *on this host*, or ``None``.
+def destination_refusal(
+    dest_type: str, connection_string: str = "", cfg: Any = None
+) -> str | None:
+    """Why this connector cannot be a destination *on this host*, or ``None``.
 
-    The source-only refusal (D139) plus the hosted-cloud SQLite policy (D276):
-    every planning surface asks this one question before any gate runs.
+    The source-only refusal (D139) plus the hosted-cloud local-disk policy (D276:
+    SQLite, a local DuckDB file, a local Iceberg warehouse/catalog). ``cfg`` is
+    the saved connector's fields; without it only the type is judged. Every
+    planning surface asks this one question before any gate runs.
     """
-    from services.local_file_policy import sqlite_destination_refusal
+    from services.local_file_policy import local_destination_refusal
 
-    return sqlite_destination_refusal(dest_type, connection_string) or (
+    if cfg is None and connection_string:
+        cfg = {"connection_string": connection_string}
+    return local_destination_refusal(dest_type, cfg) or (
         source_only_destination_refusal(dest_type)
     )
 

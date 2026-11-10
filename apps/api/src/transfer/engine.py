@@ -865,9 +865,9 @@ class UniversalTransferEngine:
         self._resolve_saved_connectors(request)
         stamp_kafka_source(request)
         from connectors.sql_identifiers import unsafe_destination_identifier_reason
-        from services.local_file_policy import sqlite_destination_refusal  # D276: before any write
+        from services.local_file_policy import local_destination_refusal  # D276: local disk, before any write
         dest = request.destination
-        ident_err = sqlite_destination_refusal(dest.format, dest.connection_string) or (
+        ident_err = local_destination_refusal(dest) or (
             unsafe_destination_identifier_reason(str(dest.format or ""), str(dest.table or dest.collection or ""))
         )
         if ident_err:

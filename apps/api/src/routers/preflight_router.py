@@ -358,14 +358,19 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
     # credentials: authorize each against its own workspace first (404).
     assert_connector_accessible(http_request, body.connector_id)
     assert_connector_accessible(http_request, body.source_connector_id)
-    from services.local_file_policy import endpoint_sqlite_destination_refusal
+    from services.local_file_policy import endpoint_local_destination_refusal
 
-    # D276: SQLite on the hosted cloud is refused before any gate dials it.
-    refusal = endpoint_sqlite_destination_refusal(
+    # D276: a local-disk destination on the hosted cloud (SQLite, a DuckDB file,
+    # a local Iceberg warehouse/catalog, a file export) is refused before any gate.
+    refusal = endpoint_local_destination_refusal(
         {
+            "kind": body.dest_kind,
             "format": body.dest_type,
             "connector_id": body.connector_id,
             "connection_string": body.dest_connection_string,
+            "database": body.dest_database,
+            "warehouse": body.dest_warehouse,
+            "extra": body.dest_extra or {},
         }
     )
     if refusal:

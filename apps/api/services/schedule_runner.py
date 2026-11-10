@@ -1844,21 +1844,11 @@ def _dispatch_transfer(
     authorized_drift = False
     try:
         from services.local_file_policy import (
+            local_destination_refusal,
+            local_file_destinations_allowed,
             sqlite_destination_allowed,
-            sqlite_destination_refusal,
         )
 
-        # D276: a saved SQLite destination on the hosted cloud is refused at this
-        # run's preflight, before a job exists, instead of failing mid-write.
-        # Env-only check first; the resolver's record may be a dict or an object.
-        if not sqlite_destination_allowed():
-            def _field(name: str) -> str:
-                value = dst.get(name) if isinstance(dst, dict) else getattr(dst, name, None)
-                return str(value or "")
-
-            refusal = sqlite_destination_refusal(_field("type"), _field("connection_string"))
-            if refusal:
-                raise ValueError(refusal)
         request = build_schedule_request(
             sched,
             src,
@@ -1866,6 +1856,16 @@ def _dispatch_transfer(
             resync_mode=resync_mode,
             triggered_by=triggered_by,
         )
+        # D276: a saved local-disk destination on the hosted cloud (SQLite, a
+        # DuckDB file, a local Iceberg warehouse/catalog) is refused at this run's
+        # preflight, before a job exists, instead of failing mid-write. Judged on
+        # the endpoint the run would write (connector + schedule location).
+        # Env-only check first; nothing to judge on a self-hosted install.
+        if not (local_file_destinations_allowed() and sqlite_destination_allowed()):
+            destination = getattr(request, "destination", None)
+            refusal = local_destination_refusal(destination) if destination is not None else None
+            if refusal:
+                raise ValueError(refusal)
         authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
         emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)

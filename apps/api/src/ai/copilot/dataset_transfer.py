@@ -224,6 +224,7 @@ def stage_dataset_transfer(
     not_a_destination = destination_refusal(
         str(dst_conn.get("type") or dst_conn.get("format") or ""),
         str(dst_conn.get("connection_string") or ""),
+        cfg=dst_conn,
     )
     if not_a_destination:
         return _tool_result(tool, success=False, error=not_a_destination)

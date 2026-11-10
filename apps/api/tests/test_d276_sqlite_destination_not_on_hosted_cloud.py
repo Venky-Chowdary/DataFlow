@@ -30,7 +30,12 @@ from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 
 REFUSAL = "isn't available as a destination"
 _RAILWAY_MARKERS = ("RAILWAY_ENVIRONMENT_NAME", "RAILWAY_DEPLOYMENT_ID", "RAILWAY_REPLICA_ID")
-_OVERRIDES = ("DATAWRAP_SQLITE_DESTINATION", "DATAFLOW_SQLITE_DESTINATION")
+_OVERRIDES = (
+    "DATAWRAP_SQLITE_DESTINATION",
+    "DATAFLOW_SQLITE_DESTINATION",
+    "DATAWRAP_LOCAL_FILE_DESTINATIONS",
+    "DATAFLOW_LOCAL_FILE_DESTINATIONS",
+)
 
 
 def _not_hosted(monkeypatch) -> None:
@@ -235,6 +240,10 @@ def test_sqlite_source_still_works_when_hosted(tmp_path, fake_store, monkeypatch
     assert destination_refusal("postgresql") is None
 
     monkeypatch.setenv("DATAFLOW_EXPORTS_DIR", str(tmp_path / "exports"))
+    # A file export lands on the server's disk too, refused on the hosted cloud
+    # since the local-disk rule (test_local_disk_destinations_not_on_hosted_cloud);
+    # with the override the SQLite source still exports.
+    monkeypatch.setenv("DATAWRAP_LOCAL_FILE_DESTINATIONS", "on")
     _job, result = _run(
         fake_store,
         EndpointConfig(kind="file_export", format="csv", output_path="d276.csv", table="customers"),

@@ -65,17 +65,21 @@ def _enriched_connectors() -> list[dict]:
 def _with_host_destination_policy(row: dict) -> dict:
     """D276: a destination this host refuses keeps its tile, flagged with why.
 
-    SQLite on the hosted cloud is still a source; as a destination it reads
+    On the hosted cloud SQLite and the file-export formats (a file on the
+    server's own disk) are still sources; as destinations they read
     ``dest_ready: false`` plus ``dest_unavailable_reason`` ("Not available on
-    cloud") so a picker can show it disabled instead of offering it.
+    cloud") so a picker can show them disabled instead of offering them. DuckDB
+    and Iceberg keep their tiles: their remote variants stay available.
     """
     from services.local_file_policy import (
-        SQLITE_DESTINATION_UNAVAILABLE_LABEL,
-        sqlite_destination_refusal,
+        DESTINATION_UNAVAILABLE_LABEL,
+        local_destination_refusal,
     )
+    from src.transfer.registry import _FILE_FORMATS
 
-    refusal = row.get("dest_ready") and sqlite_destination_refusal(
-        str(row.get("driver_type") or row.get("id") or "")
+    driver = str(row.get("driver_type") or row.get("id") or "")
+    refusal = row.get("dest_ready") and local_destination_refusal(
+        driver, {"kind": "file_export"} if driver.lower() in _FILE_FORMATS else None
     )
     if not refusal:
         return row
@@ -83,17 +87,20 @@ def _with_host_destination_policy(row: dict) -> dict:
         **row,
         "dest_ready": False,
         "dest_unavailable": True,
-        "dest_unavailable_reason": SQLITE_DESTINATION_UNAVAILABLE_LABEL,
+        "dest_unavailable_reason": DESTINATION_UNAVAILABLE_LABEL,
         "dest_unavailable_message": refusal,
     }
 
 
 def _host_rows() -> list[dict]:
     """The cached enrichment as this host offers it (env reads only; cache untouched)."""
-    from services.local_file_policy import sqlite_destination_allowed
+    from services.local_file_policy import (
+        local_file_destinations_allowed,
+        sqlite_destination_allowed,
+    )
 
     rows = _enriched_connectors()
-    if sqlite_destination_allowed():
+    if sqlite_destination_allowed() and local_file_destinations_allowed():
         return rows
     return [_with_host_destination_policy(row) for row in rows]
 

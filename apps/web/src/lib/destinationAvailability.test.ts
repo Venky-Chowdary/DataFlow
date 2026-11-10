@@ -3,7 +3,12 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { unavailableDestTypesFromCapabilities } from "./destinationAvailability.js";
+import {
+  fileExportUnavailableFromCapabilities,
+  localVariantNoteFor,
+  localVariantNotesFromCapabilities,
+  unavailableDestTypesFromCapabilities,
+} from "./destinationAvailability.js";
 
 describe("destination availability from /transfer/capabilities (D276)", () => {
   it("lists SQLite as unavailable with the API's reason when the host refuses it", () => {
@@ -37,5 +42,40 @@ describe("destination availability from /transfer/capabilities (D276)", () => {
     });
     assert.deepEqual(out.map((d) => d.id), ["sqlite"]);
     assert.equal(out[0].reason, "Not available here");
+  });
+});
+
+describe("local-disk destinations from /transfer/capabilities (D276, local files)", () => {
+  const caps = {
+    destination_databases: ["postgresql", "duckdb", "apache_iceberg"],
+    destination_file_formats: [],
+    destination_file_formats_unavailable: [
+      { id: "csv", reason: "Not available on cloud", message: "File exports aren't available as a destination …" },
+      { id: "json", reason: "Not available on cloud", message: "File exports aren't available as a destination …" },
+    ],
+    destination_local_variants_unavailable: [
+      { id: "duckdb", engine: "duckdb", variant: "Local file", reason: "Not available on cloud", message: "A local DuckDB file …" },
+      { id: "apache_iceberg", engine: "iceberg", variant: "Local file", reason: "Not available on cloud", message: "Iceberg with a local warehouse …" },
+    ],
+  };
+
+  it("reports file exports as unavailable with the API's reason", () => {
+    const out = fileExportUnavailableFromCapabilities(caps);
+    assert.equal(out?.reason, "Not available on cloud");
+    assert.match(out?.message ?? "", /File exports aren't available/);
+  });
+
+  it("keeps DuckDB and Iceberg offered and notes only their local-file variant", () => {
+    const notes = localVariantNotesFromCapabilities(caps);
+    assert.deepEqual(notes.map((n) => n.id), ["duckdb", "apache_iceberg"]);
+    assert.equal(localVariantNoteFor(notes, "duckdb")?.variant, "Local file");
+    assert.equal(localVariantNoteFor(notes, "iceberg", "iceberg")?.id, "apache_iceberg");
+    assert.equal(localVariantNoteFor(notes, "postgresql", "postgresql"), undefined);
+  });
+
+  it("says nothing when the API lists nothing (self-hosted, older API)", () => {
+    assert.equal(fileExportUnavailableFromCapabilities({ destination_file_formats: ["csv"] }), null);
+    assert.equal(fileExportUnavailableFromCapabilities({ destination_file_formats_unavailable: [] }), null);
+    assert.deepEqual(localVariantNotesFromCapabilities(null), []);
   });
 });
