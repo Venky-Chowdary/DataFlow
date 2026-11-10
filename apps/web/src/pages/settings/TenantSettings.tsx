@@ -307,7 +307,7 @@ export function TenantSettings() {
               <input id="tenant-timeout" className="df2-input" type="number" min={1} max={24} value={sessionTimeout} onChange={(e) => setSessionTimeout(Number(e.target.value))} />
               <label className="df2-settings-hint" htmlFor="tenant-timeout-enforce">
                 <input id="tenant-timeout-enforce" type="checkbox" checked={enforceTimeout} onChange={(e) => setEnforceTimeout(e.target.checked)} />{" "}
-                Enforce as idle timeout — sign members out after this many idle hours (API keys are not affected).
+                Enforce as idle timeout — sign members out after this many idle hours; new sign-ins also expire after this many hours (API keys are not affected).
               </label>
             </div>
           </div>

@@ -327,6 +327,19 @@ def _legacy_tokens_allowed() -> bool:
     return not is_production()
 
 
+def _token_ttl_for(email: str) -> int:
+    """The platform TTL, capped by the strictest enforced workspace session
+    timeout of this person (D342), so the ``expires_at`` a client stores is
+    the policy the workspace admin saved, not always 24 h. The idle timeout
+    is still enforced server-side on every request (services.session_policy).
+    """
+    ttl = _read_token_ttl_sec()
+    from services.session_policy import idle_timeout_seconds
+
+    policy = idle_timeout_seconds(email.strip().lower())
+    return min(ttl, policy) if policy else ttl
+
+
 def create_token(
     email: str,
     *,
@@ -346,7 +359,7 @@ def create_token(
     """
     from services.auth_sessions import create_session
 
-    expires = int(time.time()) + _read_token_ttl_sec()
+    expires = int(time.time()) + _token_ttl_for(email)
     email_n = email.strip().lower()
     jti = create_session(
         email_n, expires_at=expires, amr=amr, ip=ip, ua=ua, device_id=device_id, cookie_jti=cookie_jti

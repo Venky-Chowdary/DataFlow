@@ -18,7 +18,10 @@ _IP_NOT_COVERED = (
     "audited break-glass header"
 )
 _SESSION_SCOPE = "sign-in sessions of members of this workspace (strictest workspace wins)"
-_SESSION_NOT_COVERED = "API keys; the absolute sign-in token lifetime set by the platform"
+_SESSION_NOT_COVERED = (
+    "API keys; sign-in tokens issued before the timeout was saved keep their lifetime "
+    "(idle sign-out still applies to them)"
+)
 
 
 def _ip_block(tenant: Any, caller_ip: str | None) -> tuple[dict[str, Any], list[str]]:
@@ -87,6 +90,8 @@ def _session_block(tenant: Any) -> tuple[dict[str, Any], list[str]]:
         "status": status,
         "kind": "idle",
         "hours": hours,
+        # D342: an enforced timeout also caps new sign-in tokens (expires_at).
+        "token_lifetime_hours": hours if on else None,
         "scope": _SESSION_SCOPE,
         "not_covered": _SESSION_NOT_COVERED,
     }, warnings

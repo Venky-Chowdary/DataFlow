@@ -52,7 +52,7 @@ def _can_access_job(request: Request | None, job: dict) -> bool:
     if not job_id:
         return True
     try:
-        from services.resource_acl import assert_resource_acl
+        from services.resource_acl import acl_exempt, assert_resource_acl
 
         assert_resource_acl(
             tenant_id=workspace_id,
@@ -60,7 +60,7 @@ def _can_access_job(request: Request | None, job: dict) -> bool:
             resource_id=job_id,
             principal=actor,
             min_role="viewer",
-            is_admin=scope.unrestricted,
+            is_admin=acl_exempt(scope, workspace_id),
         )
     except PermissionError:
         return False
