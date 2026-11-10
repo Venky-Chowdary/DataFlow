@@ -1732,6 +1732,14 @@ def _ground_data_rules(
         # Bind to the source's own spelling: the filter runs against read rows,
         # whose keys carry the DDL's case.
         spec = _rebind_filter_columns(spec, known)
+        # ``>`` / ``>=`` … are spellings of gt / gte …: the plan and the run
+        # carry the word form; an unknown operator is refused with the list.
+        from services.row_filter import canonical_filter_spec
+
+        try:
+            spec = canonical_filter_spec(spec)
+        except ValueError as exc:
+            return out, f"source_filter: {exc}"
         out["source_filter"] = spec
         out["filter_description"] = _describe_row_filter(spec)
 

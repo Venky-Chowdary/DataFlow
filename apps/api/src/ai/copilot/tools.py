@@ -111,7 +111,13 @@ _ROUTE_ID_PROPS: dict[str, dict] = {
 _ROW_RULE_PROPS: dict[str, dict] = {
     "source_filter": {
         "type": "object",
-        "description": "Row filter applied to the source read, e.g. {\"column\": \"region\", \"op\": \"=\", \"value\": \"EU\"}.",
+        "description": (
+            "Row filter applied to the source read, e.g. {\"column\": \"qty\", \"op\": \"gt\", "
+            "\"value\": 1}. Combine conditions with {\"and\": [...]} or {\"or\": [...]}. "
+            "op is one of: eq (=, ==), ne (!=, <>), gt (>), gte (>=), lt (<), lte (<=), "
+            "in / not_in (value is a list), contains, startswith, endswith, regex, "
+            "is_null, is_not_null (no value). Symbols are accepted as the word form."
+        ),
     },
     "dedupe_key": {
         "type": "string",

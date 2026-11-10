@@ -25,6 +25,9 @@ import json
 import logging
 from typing import Any
 
+# One operator vocabulary with the batch row filter (D328).
+from services.row_filter import FILTER_OP_ALIASES as _ALIASES
+
 _logger = logging.getLogger(__name__)
 
 MAX_DEPTH = 8
@@ -36,12 +39,6 @@ _IN = {"in", "not_in"}
 _NULL = {"is_null", "is_not_null"}
 _LIKE = {"contains", "startswith", "endswith"}
 SUPPORTED_OPS = frozenset(_COMPARE) | _IN | _NULL | _LIKE
-_ALIASES = {
-    "=": "eq", "==": "eq", "!=": "ne", "<>": "ne", ">": "gt", ">=": "gte",
-    "<": "lt", "<=": "lte", "not in": "not_in", "notin": "not_in",
-    "isnull": "is_null", "is null": "is_null", "notnull": "is_not_null",
-    "is not null": "is_not_null", "starts_with": "startswith", "ends_with": "endswith",
-}
 _SQL_DIALECTS = {"postgresql", "mysql", "sqlserver", "oracle"}
 _LIKE_ESCAPE = "!"
 
