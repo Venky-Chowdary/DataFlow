@@ -12,7 +12,10 @@ enters this once; every scope here is left on every outcome of the job
   normally takes it, and a run that fails before the ladder must not keep a
   ladder budget of digests in memory after the job;
 * the destination-table write lock (``services.destination_write_lock``),
-  taken once the connectors are resolved and held until the job ends.
+  taken once the connectors are resolved and held until the job ends;
+* the export-bucket binding (``services.export_object_store``): the workspace
+  a file export's object key is scoped to, and the job's staged local copy of
+  that export (read back by Gate-8), deleted when the job ends.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from typing import Any
 def tracked_job_scope(request: Any, job_id: str, *, store: Callable[[], Any]) -> Iterator[None]:
     from services.egress_guard import egress_workspace
     from services.endpoint_session import endpoint_session_scope
+    from services.export_object_store import export_job_scope
     from services.keyed_write_witness import keyed_write_witness_scope
     from services.pii_hash_keys import transfer_job_scope
 
@@ -36,7 +40,7 @@ def tracked_job_scope(request: Any, job_id: str, *, store: Callable[[], Any]) ->
             str(request.workspace_id or "")
         ), endpoint_session_scope(engines=("sftp",)), transfer_job_scope(
             request, job_id, store=store
-        ):
+        ), export_job_scope(job_id, str(request.workspace_id or "")):
             yield
     finally:
         release_destination_write_lock(job_id)

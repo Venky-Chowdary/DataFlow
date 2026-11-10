@@ -3,6 +3,7 @@ import type { RouteCertification, RouteCertificationStatus } from "./routeCertif
 import { streamDropNotice, streamSilenceNeedsCatchUp } from "./jobStreamLiveness";
 import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
+import { exportDownloadError, type JobExportDownload } from "./jobExportDownload";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, JobHistoryQuery, jobHistoryFromResponse } from "./jobHistory";
@@ -4708,6 +4709,43 @@ export async function exportJobQuarantine(jobId: string): Promise<{ success: boo
   const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/quarantine/export`, { method: "POST" });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export quarantine"));
   return res.json();
+}
+
+/**
+ * Signed download of a job's file export (`GET /jobs/{id}/export/download`).
+ * Bucket exports answer with a presigned URL of at most 15 minutes and the
+ * SHA-256 Gate-8 bound to the object; 410 means the export expired.
+ */
+export async function fetchJobExportDownload(jobId: string): Promise<JobExportDownload> {
+  const res = await apiFetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/export/download`);
+  if (!res.ok) {
+    throw exportDownloadError(res.status, await parseApiError(res, "Could not prepare the export download"));
+  }
+  return res.json();
+}
+
+/**
+ * Start a job export download in the browser. A presigned bucket URL is opened
+ * directly (it carries no API credentials); a self-hosted export is fetched
+ * with the session and saved as a Blob.
+ */
+export async function downloadJobExport(jobId: string): Promise<JobExportDownload> {
+  const info = await fetchJobExportDownload(jobId);
+  const anchor = document.createElement("a");
+  anchor.rel = "noopener";
+  if (info.storage === "object_store") {
+    anchor.href = info.url;
+    anchor.click();
+    return info;
+  }
+  const fileRes = await apiFetch(resolveApiAssetUrl(info.url));
+  if (!fileRes.ok) throw new Error(await parseApiError(fileRes, "Could not download the export"));
+  const href = URL.createObjectURL(await fileRes.blob());
+  anchor.href = href;
+  anchor.download = info.filename || "export";
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(href), 0);
+  return info;
 }
 
 /** Resolve API-relative download paths (e.g. /api/v1/transfer/download/x.csv) to an absolute URL. */

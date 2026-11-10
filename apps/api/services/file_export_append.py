@@ -56,17 +56,25 @@ def land_export_bytes(
     job_id: str,
     sync_mode: str,
     export_name: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Write an export to disk and describe where it landed.
 
     ``ValueError`` is raised for a path outside the exports folder and for an
     append the target file cannot carry — both refuse before touching the
     operator's file rather than replacing it.
+
+    Where local-disk destinations are off (the hosted cloud) and an export
+    bucket is configured, the export goes to that private bucket instead
+    (``services.export_object_store``): one object per job, so an append run
+    stores this run's rows as its own object and never rewrites another's.
     """
+    from services.export_object_store import exports_use_object_store, store_job_export
     from services.export_paths import generated_export_path, resolve_export_path
     from services.local_file_policy import local_destination_refusal
     from services.sync_cursor import is_append_sync, resolve_effective_sync_mode
 
+    if exports_use_object_store():
+        return store_job_export(destination, export_bytes, job_id=job_id, export_name=export_name)
     # D276: the last door before a job's export lands on this server's own disk
     # (the engine refuses the run before it reads a row; this covers any other caller).
     refusal = local_destination_refusal("file_export", {"kind": "file_export"})
