@@ -103,7 +103,9 @@ def compile_column_chains(
                     "or replace:/concat:/default:/assume_timezone:."
                 )
             try:
-                steps.append(_step_to_shape_wire(RecipeStep(column=column, op=op)))
+                steps.append(
+                    _step_to_shape_wire(RecipeStep(column=column, op=op), engine_names=True)
+                )
             except ValueError as exc:
                 return {}, f"column_transforms[{key!r}] step {op!r}: {exc}"
     payload: dict[str, Any] = {"steps": steps}

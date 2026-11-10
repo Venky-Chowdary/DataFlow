@@ -69,7 +69,7 @@ _ENGINE_OP_TO_SHAPE: dict[str, tuple[str, dict[str, Any]]] = {
     "text": ("cast_column", {"to_type": "text"}),
     "hash_pii": ("hash_pii", {}),
     "mask_pii": ("mask_pii", {}),
-    "normalize_unicode": ("normalize_unicode", {}),
+    "normalize_unicode": ("normalize_unicode", {"form": "NFKC", "collapse_whitespace": True}),
     "strip_controls": ("strip_characters", {"characters": "controls"}),
 }
 
@@ -391,12 +391,17 @@ def _substitute_params(value: Any, bound: dict[str, Any]) -> Any:
     )
 
 
-def _step_to_shape_wire(step: RecipeStep) -> dict[str, Any]:
+def _step_to_shape_wire(step: RecipeStep, *, engine_names: bool = False) -> dict[str, Any]:
     """One recipe step → one shape-catalog wire step.
 
     Refuses (raises ValueError naming the step) when the op cannot reach the
     shape engine faithfully — a recipe that half-compiles is worse than one
     that refuses to bind.
+
+    ``engine_names`` says the op is a Map transform name (MCP
+    ``column_transforms``), so an engine id that is also a shape op name
+    (``normalize_unicode``) compiles to what the Map transform does, not to
+    the shape op of the same name (D332).
     """
     from services.shape_models import STEP_CATALOG
 
@@ -404,7 +409,9 @@ def _step_to_shape_wire(step: RecipeStep) -> dict[str, Any]:
     if step.output_column and "to" not in options:
         options["to"] = step.output_column
 
-    if step.op in STEP_CATALOG:
+    if step.op in STEP_CATALOG and not (
+        engine_names and normalize_engine_transform(step.op) in _ENGINE_OP_TO_SHAPE
+    ):
         op = step.op
     else:
         prefix_hit = next(
