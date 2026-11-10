@@ -500,6 +500,25 @@ def probe_failure_advice(connector_type: str, *, host: str = "", connection_stri
     return f"Fix host/port/user/password{hint}, then ask again."
 
 
+def driver_missing_refusal(ctype: str) -> str:
+    """Why a connector of ``ctype`` cannot be created here, or ``""``.
+
+    Databricks is Planned on the API image (its driver is kept off the default
+    install), yet create_connector staged it and every later call went on to
+    a connection attempt that could only fail, blamed on the token (D310).
+    """
+    from src.transfer.connector_capabilities import driver_available, resolve_driver_type
+
+    kind = (ctype or "").strip().lower()
+    if not kind or driver_available(resolve_driver_type(kind), kind):
+        return ""
+    return (
+        f"{kind} connectors cannot be used on this server: the {kind} driver is not "
+        "installed here, so the connector is Planned. Nothing was saved and nothing "
+        "was sent to the host."
+    )
+
+
 def draft_is_complete(draft: dict[str, Any]) -> tuple[bool, str]:
     ctype = draft.get("type") or ""
     if ctype in {"sqlite", "duckdb"}:
