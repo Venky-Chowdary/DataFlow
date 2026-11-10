@@ -31,6 +31,39 @@ def is_api_source(src_type: str) -> bool:
     return kind in REGISTRY_OBJECT_READERS or _sdk_source(kind)
 
 
+#: File objects (CSV/JSONL/Parquet/XLSX…) the engine's batch reader pages by
+#: row offset (``batch_readers._read_batch_unscoped``). D327: the proof built
+#: a SQLAlchemy engine for them ("SQLAlchemy dialect/driver for 'sftp' is not
+#: available") and never proved a file source's transforms.
+_OFFSET_FILE_READERS = frozenset({"sftp", "s3", "gcs", "adls"})
+
+#: Sources paged by an opaque continuation token: the offset loop below would
+#: re-read page one forever, so their transforms are not re-computed.
+_NO_PROOF_REREAD = frozenset({"dynamodb", "elasticsearch", "redis", "kafka", "qdrant"})
+
+
+def is_reader_source(src_type: str) -> bool:
+    """True when the proof re-reads this source through the write's own reader."""
+    kind = (src_type or "").strip().lower()
+    return kind in _OFFSET_FILE_READERS or is_api_source(kind)
+
+
+def proof_unavailable_reason(source_endpoint: Any, src_type: str) -> str | None:
+    """Plain-words reason the proof cannot re-read this source, or ``None``."""
+    kind = (src_type or "").strip().lower()
+    if getattr(source_endpoint, "kind", "") != "database":
+        what = "uploaded or local file"
+    elif kind in _NO_PROOF_REREAD:
+        what = f"{kind} document or stream"
+    else:
+        return None
+    return (
+        f"transform proof not available for {what} sources — the recipe "
+        "output was not recomputed from the source, so the transforms are "
+        "not proven"
+    )
+
+
 def iter_api_source_batches(
     *,
     source_endpoint: Any,

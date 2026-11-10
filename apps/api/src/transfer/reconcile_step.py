@@ -253,9 +253,9 @@ def _proof_source_batches(
             source_endpoint=source_endpoint, src_cfg=src_cfg, read_cols=read_cols
         )
         return
-    from .proof_api_source import is_api_source, iter_api_source_batches
+    from .proof_api_source import is_reader_source, iter_api_source_batches
 
-    if is_api_source(src_type):
+    if is_reader_source(src_type):
         yield from iter_api_source_batches(
             source_endpoint=source_endpoint,
             src_type=src_type,
@@ -1051,11 +1051,23 @@ def _transform_applied_proof_impl(
                 "by the row ledger and dedupe winner checks"
             ),
         }
-    if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
+    from .connector_capabilities import resolve_driver_type
+    from .proof_api_source import proof_unavailable_reason
+
+    if source_endpoint is None:
         return {
             "status": "unverifiable",
-            "reason": "independent source re-read requires a database endpoint",
+            "reason": (
+                "transform proof not available — the run's source was not "
+                "handed to the verifier, so the transforms are not proven"
+            ),
         }
+    _unavailable = proof_unavailable_reason(
+        source_endpoint, resolve_driver_type(source_endpoint.format or "")
+    )
+    if _unavailable:
+        # D327: say plainly that nothing was proven; never a driver error.
+        return {"status": "unverifiable", "reason": _unavailable}
 
     import sqlalchemy as sa
 
@@ -1540,9 +1552,14 @@ def _transform_applied_proof_impl(
             dest_types=dest_types,
         )
     except Exception as exc:  # the proof must not crash the verifier
+        # D327: driver/dialect text stays in the log, not the job message.
+        _logger.warning("transform proof: source re-read failed: %s", exc)
         return {
             "status": "unverifiable",
-            "reason": f"expected-output recompute failed: {exc!s}"[:300],
+            "reason": (
+                "the source could not be re-read to recompute the recipe "
+                "output, so the transforms are not proven"
+            ),
         }
     exp_n = pin_store.side_count("e")
 
@@ -1928,11 +1945,13 @@ def _transform_applied_proof_impl(
                             dest_types=dest_types,
                         )
         except Exception as exc:
+            _logger.warning("transform proof: destination read-back failed: %s", exc)
             return {
                 "status": "unverifiable",
-                "reason": f"key-scoped destination read failed: {exc!s}"[
-                    :300
-                ],
+                "reason": (
+                    "the destination could not be read back to compare with "
+                    "the recipe output, so the transforms are not proven"
+                ),
                 "recipe_hash": str(
                     dest_summary.get("shape_recipe_hash") or ""
                 ),
@@ -2200,20 +2219,15 @@ def _transform_applied_proof_impl(
         # a missing/differing destination row on a stable key as a
         # provable defect (naming the key), not source drift.
         if not (pop_ops and actual_rows == raw_count):
+            # D327: this run has no pinned keys, so there are no key counts to
+            # give — the base reported "0 of 0 keys changed in source during
+            # run" here. Say what was measured.
             reason = (
-                "source changed during run — re-read returned "
-                f"{exp_n} recipe-applied rows but "
-                f"{actual_label} holds {actual_rows}"
+                f"the source re-read gives {exp_n} rows after the recipe but "
+                f"{actual_label} holds {actual_rows} (the source changed "
+                "during run, or rows were held out), so the transforms "
+                "are not proven"
             )
-            if pin_store is not None:
-                pin_store.flush()
-                _drift_n, _n_keys, _donly = pin_store.drift_stats()
-                reason = (
-                    "source changed during run — "
-                    f"{_drift_n + _donly} of {_n_keys + _donly} keys "
-                    f"changed in source during run; "
-                    f"{_n_keys - _drift_n} proven"
-                )
             return {
                 "status": "unverifiable",
                 "reason": reason,
@@ -2411,8 +2425,12 @@ def _transform_applied_proof_impl(
 
     if drift:
         drift_reason = (
-            "source changed during run — the re-read population no "
-            "longer matches what was written"
+            # D327: no pinned key separates a source change from a wrong
+            # value here — claiming "source changed" was a guess.
+            "the destination does not match the recipe output of the "
+            "source as re-read now, and the proof cannot tell a change in "
+            "the source during the run from a wrong value, so the "
+            "transforms are not proven"
         )
         if drift_counts and drift_counts[1]:
             # D331: an unpinned key is not proof the source changed — the
@@ -8877,9 +8895,10 @@ def run_reconciliation(
                 validation_mode=validation_mode,
             )
         except Exception as exc:
+            _logger.warning("transform proof errored: %s", exc)
             proof = {
                 "status": "unverifiable",
-                "reason": f"transform-applied proof errored: {exc!s}"[:300],
+                "reason": "the transform proof could not run, so the transforms are not proven",
             }
         if proof:
             # Plain statement of which compare ran — exact per-row multiset
