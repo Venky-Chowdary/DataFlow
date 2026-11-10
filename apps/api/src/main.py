@@ -29,10 +29,10 @@ _http_route_template = http_route_template
 from services.tracing import sanitize_correlation_id
 from services.platform_config import (
     apply_railway_defaults,
+    cors_origin_regex,
     cors_origins,
     docs_enabled,
     is_production,
-    is_railway,
     validate_production_config,
     vector_store_dir,
 )
@@ -427,13 +427,10 @@ def _build_commit() -> str:
 _BUILD_COMMIT = _build_commit()
 
 _cors_origins = cors_origins()
-# Railway deploys give each service a *.up.railway.app public domain, which is
-# not known until runtime.  Match exactly one Railway subdomain so origins like
-# https://evil.up.railway.app.attacker.com cannot pass.  The env var allows an
-# explicit override if the default is too restrictive.
-_cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
-if not _cors_origin_regex and is_railway():
-    _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
+# No implicit origin pattern: any https://*.up.railway.app page could be a
+# stranger's, so credentials go only to the exact origins in cors_origins()
+# (an operator may still set CORS_ORIGIN_REGEX deliberately).
+_cors_origin_regex = cors_origin_regex()
 
 app.add_middleware(TenantScopeMiddleware)
 app.add_middleware(AuditAccessMiddleware)
@@ -446,8 +443,8 @@ app.add_middleware(TenantMiddleware)
 app.add_middleware(ProductionConfigMiddleware)
 
 # Enterprise CORS: no wildcard methods/headers, explicit list only.
-# Credentials are only sent from the configured origins (cors_origins) or the
-# Railway subdomain regex.  Add ``X-Workspace-Id`` / ``X-Correlation-ID`` to the
+# Credentials are only sent from the exact configured origins (cors_origins),
+# or an operator-set CORS_ORIGIN_REGEX.  Add ``X-Workspace-Id`` / ``X-Correlation-ID`` to the
 # allowlist so multi-tenant and trace headers work across origins.
 _ALLOW_HEADERS = [
     "accept",

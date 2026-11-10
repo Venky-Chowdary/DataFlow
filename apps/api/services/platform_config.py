@@ -173,6 +173,11 @@ def cors_origins() -> list[str]:
     default = "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
     raw = os.getenv("CORS_ORIGINS", default if not is_railway() else "")
     origins = [o.strip() for o in raw.split(",") if o.strip()]
+    if is_railway():
+        # Exact origins only: the hosted app's own public web origins.
+        from services.brand import PUBLIC_WEB_ORIGINS
+
+        origins.extend(PUBLIC_WEB_ORIGINS)
 
     domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
     if domain:
@@ -203,6 +208,19 @@ def cors_origins() -> list[str]:
             seen.add(o)
             unique.append(o)
     return unique or ["http://localhost:5173"]
+
+
+def cors_origin_regex() -> str | None:
+    """An explicit operator-set CORS origin pattern, else ``None``.
+
+    There is no default pattern. The old Railway default accepted any
+    ``https://*.up.railway.app`` origin with credentials, and anyone can host
+    a site there, so a stranger's page could make signed-in calls to the API
+    (same class as D337). Browser origins are named exactly in
+    :func:`cors_origins` instead.
+    """
+    raw = os.getenv("CORS_ORIGIN_REGEX", "").strip()
+    return raw or None
 
 
 def docs_enabled() -> bool:
