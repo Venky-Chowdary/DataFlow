@@ -43,6 +43,7 @@ from .middleware.auth_middleware import AuthMiddleware
 from .middleware.production_config_middleware import ProductionConfigMiddleware
 from .middleware.tenant_middleware import TenantMiddleware
 from .middleware.proxy_fix_middleware import ProxyFixMiddleware
+from .middleware.own_host_redirect_middleware import OwnHostRedirectMiddleware
 from .middleware.workspace_ip_allowlist_middleware import WorkspaceIpAllowlistMiddleware
 from .middleware.tenant_scope_middleware import TenantScopeMiddleware
 from .routers.ai_router import router as ai_router
@@ -717,6 +718,9 @@ async def _add_timing_header_response(request: Request, call_next):
     return response
 
 
+# A redirect to the API's own host (redirect_slashes' 307) goes out relative,
+# never naming the internal host or its plain-http scheme (D339).
+app.add_middleware(OwnHostRedirectMiddleware)
 # Outermost: client address and scheme from the trusted proxy chain
 # (DATAWRAP_TRUSTED_PROXY_COUNT, ProxyFix semantics) before anything reads them.
 app.add_middleware(ProxyFixMiddleware)

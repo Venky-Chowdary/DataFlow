@@ -337,15 +337,20 @@ def enforce_production_config() -> None:
 
 
 def public_url() -> str:
-    """Public API base URL used for retry/resume links in notifications."""
+    """Public API base URL for absolute links handed to users (MCP OAuth metadata).
+
+    ``DATAWRAP_PUBLIC_URL``, else the configured public origin
+    (``services.public_origin.configured_origin``: public API origin, then the
+    web origin the browser reaches the API through). Never this service's own
+    ``RAILWAY_PUBLIC_DOMAIN``: on the API service that is the internal backend
+    host (D339). ``""`` when nothing is configured.
+    """
     explicit = getenv_brand("PUBLIC_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
-    if is_railway():
-        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
-        if domain:
-            return f"https://{domain}"
-    return ""
+    from services.public_origin import configured_origin
+
+    return configured_origin()
 
 
 def email_provider_config() -> dict[str, Any]:
@@ -374,7 +379,11 @@ def email_provider_config() -> dict[str, Any]:
 
 
 def web_url() -> str:
-    """Public web UI base URL used for clickable job links."""
+    """Public web UI base URL used for clickable job links.
+
+    Only the configured web origin: this process is the API service, whose
+    ``RAILWAY_PUBLIC_DOMAIN`` is the internal backend host, not the web UI (D339).
+    """
     explicit = getenv_brand("WEB_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
@@ -383,10 +392,6 @@ def web_url() -> str:
         if web_domain.startswith("http"):
             return web_domain.rstrip("/")
         return f"https://{web_domain}"
-    if is_railway():
-        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
-        if domain:
-            return f"https://{domain}"
     return ""
 
 

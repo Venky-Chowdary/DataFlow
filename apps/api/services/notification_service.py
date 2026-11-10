@@ -597,14 +597,23 @@ def build_job_payload(
     base_url: str = "",
     web_url: str = "",
 ) -> dict[str, Any]:
-    color = "28a745" if status in ("completed", "success") else "ffc107" if status in ("partial", "failed_with_quarantine", "completed_with_quarantine") else "dc3545"
+    """The notification body for a job.
+
+    Links are web pages on the configured web origin only (D339): "Job
+    details" always, and for a run that did not fully succeed "Retry/resume"
+    points at the same job page, where Retry is a button. The API resume path
+    (``retry_url``/``base_url``, kept for callers) is never put in a message: it
+    needs a bearer, so a browser gets 401, and its host is the API service's.
+    A run that never created a job has no "Job ID:" line and no job link.
+    """
+    succeeded = status in ("completed", "success")
+    color = "28a745" if succeeded else "ffc107" if status in ("partial", "failed_with_quarantine", "completed_with_quarantine") else "dc3545"
     title = f"Datawrap transfer {status}: {source} → {destination}"
-    api_base = (base_url or "").rstrip("/")
     web_base = (web_url or "").rstrip("/")
-    absolute_retry_url = f"{api_base}/api/v1/connectors/jobs/{job_id}/resume" if api_base else retry_url
-    job_url = f"{web_base}/jobs/{job_id}" if web_base else ""
-    text_lines = [
-        f"Job ID: {job_id}",
+    job_url = f"{web_base}/jobs/{job_id}" if web_base and job_id else ""
+    retry_page = "" if succeeded else job_url
+    text_lines = [f"Job ID: {job_id}"] if job_id else []
+    text_lines += [
         f"Status: {status}",
         f"Records transferred: {records_transferred:,}",
     ]
@@ -614,8 +623,8 @@ def build_job_payload(
         text_lines.append(f"Error: {error}")
     if job_url:
         text_lines.append(f"Job details: {job_url}")
-    if absolute_retry_url:
-        text_lines.append(f"Retry/resume: {absolute_retry_url}")
+    if retry_page:
+        text_lines.append(f"Retry/resume: {retry_page}")
     return {
         "title": title,
         "text": "\n".join(text_lines),
@@ -625,6 +634,6 @@ def build_job_payload(
         "records_transferred": records_transferred,
         "rejected_rows": rejected_rows,
         "error": error,
-        "retry_url": absolute_retry_url,
+        "retry_url": retry_page,
         "job_url": job_url,
     }
