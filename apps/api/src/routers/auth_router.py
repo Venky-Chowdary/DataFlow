@@ -427,7 +427,9 @@ async def sso_start(sso_type: str, request: Request):
 
 
 @router.get("/sso/{sso_type}/callback")
-async def sso_callback(sso_type: str, code: str = "", state: str = "", error: str = ""):
+async def sso_callback(
+    sso_type: str, request: Request, code: str = "", state: str = "", error: str = ""
+):
     resource = f"/auth/sso/{sso_type}/callback"
     if sso_type not in ("oidc", "azure_ad"):
         _raise_sso_failure(
@@ -576,7 +578,7 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
         )
         email = oidc_client.email_from_claims(claims, sso_type=sso_type)
         require_sso_authorization(email)
-        token, expires_at = create_token(email, amr=["sso"])
+        token, expires_at = create_token(email, amr=["sso"], **session_client(request))
         from services.audit_coverage import session_label
         from src.services.auth_service import token_jti
 
@@ -787,7 +789,7 @@ async def sso_post_callback(sso_type: str, request: Request):
             "/auth/sso/saml/callback",
         )
         raise
-    token, expires_at = create_token(email, amr=["sso"])
+    token, expires_at = create_token(email, amr=["sso"], **session_client(request))
     from services.audit_coverage import session_label
     from src.services.auth_service import token_jti
 
@@ -825,6 +827,16 @@ def _login_client_ip(request: Request) -> str:
     from services.client_ip import client_ip_from_request
 
     return client_ip_from_request(request) or "unknown"
+
+
+def session_client(request: Request) -> dict[str, str]:
+    """What "Active sessions" shows about a sign-in: client IP and user agent (D338)."""
+    from services.client_ip import client_ip_from_request
+
+    return {
+        "ip": client_ip_from_request(request) or "",
+        "ua": (request.headers.get("user-agent") or "")[:512],
+    }
 
 
 def _login_audit_actor(email: str) -> str:
@@ -1016,7 +1028,7 @@ async def login(body: LoginRequest, request: Request):
     if held is not None:
         return held
     try:
-        token, expires_at = create_token(user["email"], amr=["pwd"])
+        token, expires_at = create_token(user["email"], amr=["pwd"], **session_client(request))
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
@@ -1171,6 +1183,13 @@ async def change_password(body: ChangePasswordRequest, request: Request):
     if body.new_password == body.current_password:
         raise HTTPException(status_code=400, detail="Choose a password you have not used")
     set_password(email=actor, password=body.new_password)
+    # D338: every other session (Bearer and paired cookie) of this person is
+    # signed out; the session that made the change stays signed in.
+    from services import session_registry
+
+    revoked = session_registry.revoke_others(
+        actor, current=session_registry.current_session_id(request)
+    )
     try:
         from services.audit_log import append_audit_event
 
@@ -1179,7 +1198,8 @@ async def change_password(body: ChangePasswordRequest, request: Request):
             resource="/auth/change-password",
             actor=actor,
             level="warn",
+            details={"other_sessions_revoked": revoked},
         )
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-    return {"ok": True}
+    return {"ok": True, "other_sessions_revoked": revoked}

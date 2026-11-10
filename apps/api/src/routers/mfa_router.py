@@ -378,7 +378,9 @@ async def login_mfa(body: ChallengeBody, request: Request):
         _audit_recovery_used(request, email, result)
     method = "otp" if result.method == "totp" else "recovery"
     try:
-        token, expires_at = create_token(email, amr=["pwd", method])
+        from .auth_router import session_client
+
+        token, expires_at = create_token(email, amr=["pwd", method], **session_client(request))
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     jti = token_jti(token)

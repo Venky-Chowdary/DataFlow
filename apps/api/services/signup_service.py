@@ -1053,7 +1053,10 @@ def confirm_password_reset(*, token: str,
         raise ApiError(410, "link_expired", "this account no longer exists")
     user_store.set_password(email=email, password=new_password,
                             algo="argon2id")
-    get_auth_state().revoke_all_for_user(email)
+    # Bearer and cookie sessions alike (D338): a reset signs everything out.
+    from services import session_registry
+
+    session_registry.revoke_all(email)
     record_security_event("password.reset.used", outcome="succeeded",
                           actor=email, session_id=doc["id"],
                           details={"ip": ip})

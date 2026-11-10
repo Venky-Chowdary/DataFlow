@@ -327,17 +327,30 @@ def _legacy_tokens_allowed() -> bool:
     return not is_production()
 
 
-def create_token(email: str, *, amr: list[str] | None = None) -> tuple[str, int]:
+def create_token(
+    email: str,
+    *,
+    amr: list[str] | None = None,
+    ip: str = "",
+    ua: str = "",
+    device_id: str = "",
+    cookie_jti: str = "",
+) -> tuple[str, int]:
     """Mint Bearer token with server-side session (``jti``) — Phase D3.
 
     ``amr``: how the person authenticated (``pwd``/``otp``/``recovery``/``sso``),
     read by the workspace MFA policy. Omitted means password-only.
+    The session is registered in the one store "Active sessions" lists
+    (services.session_registry, D338); ``ip``/``ua``/``device_id`` describe it there and
+    ``cookie_jti`` pairs a browser cookie session opened by the same sign-in.
     """
     from services.auth_sessions import create_session
 
     expires = int(time.time()) + _read_token_ttl_sec()
     email_n = email.strip().lower()
-    jti = create_session(email_n, expires_at=expires, amr=amr)
+    jti = create_session(
+        email_n, expires_at=expires, amr=amr, ip=ip, ua=ua, device_id=device_id, cookie_jti=cookie_jti
+    )
     payload = f"{email_n}:{expires}:{jti}"
     sig = hmac.new(_token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}:{sig}", expires

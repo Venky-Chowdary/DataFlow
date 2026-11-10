@@ -35,6 +35,9 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(signup_store, "_pending_path", lambda: tmp_path / "pending.json")
     monkeypatch.setattr(signup_store, "_challenges_path", lambda: tmp_path / "challenges.json")
     monkeypatch.setattr(user_store, "_store_path", lambda: tmp_path / "users.json")
+    # The session registry /auth/sessions lists (D338) is per test, like auth_state below.
+    from services import auth_sessions
+    monkeypatch.setattr(auth_sessions, "_path", lambda: tmp_path / "auth_sessions.json")
     monkeypatch.setattr(signup_service.mx_check, "check_domain", lambda d: {"ok": True})
     monkeypatch.setattr(form_token_mod, "MIN_FILL_MS", 0)
     import src.services.auth_service as auth_mod
