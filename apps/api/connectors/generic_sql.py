@@ -1291,11 +1291,11 @@ def _dialect_unavailable(url: Any, db_type: Any) -> RuntimeError:
         "redshift": "psycopg2-binary (scheme postgresql+psycopg2://)",
         "snowflake": "snowflake-sqlalchemy",
         "bigquery": "sqlalchemy-bigquery",
-        "databricks": (
-            "databricks-sqlalchemy from apps/api/requirements-databricks.txt "
-            "(kept off the default install until the connector accepts oauthlib 4)"
-        ),
     }
+    from src.transfer.connector_capabilities import planned_driver_message
+
+    if planned := planned_driver_message(dialect_key):  # Databricks here (D345)
+        return RuntimeError(planned)
     hint = hint_by_dialect.get(dialect_key)
     if not hint:
         if "mysql" in driver_s or "mariadb" in driver_s:

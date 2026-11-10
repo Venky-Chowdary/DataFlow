@@ -509,9 +509,13 @@ def driver_missing_refusal(ctype: str) -> str:
     """
     from src.transfer.connector_capabilities import driver_available, resolve_driver_type
 
+    from src.transfer.connector_capabilities import planned_driver_message
+
     kind = (ctype or "").strip().lower()
     if not kind or driver_available(resolve_driver_type(kind), kind):
         return ""
+    if planned := planned_driver_message(kind):
+        return f"{planned} Nothing was saved."
     return (
         f"{kind} connectors cannot be used on this server: the {kind} driver is not "
         "installed here, so the connector is Planned. Nothing was saved and nothing "

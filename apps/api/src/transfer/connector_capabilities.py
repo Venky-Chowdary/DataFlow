@@ -1245,6 +1245,38 @@ def destination_only_source_refusal(source_type: str) -> str | None:
     )
 
 
+#: Every refusal for a Planned connector whose driver is not on this server
+#: starts with this, so the error humanizer keeps it as operator copy.
+PLANNED_DRIVER_PREFIX = "Not available on this server:"
+
+
+def planned_driver_message(connector_type: str) -> str:
+    """The one honest refusal for a Planned type whose driver is not installed.
+
+    Databricks is listed (Planned) but ``databricks-sqlalchemy`` is kept off the
+    API image (requirements-databricks.txt), so every call on such a connector
+    fails before any connection. That used to read "Authentication failed.
+    Check username, password..." or the SQLAlchemy dialect text (D345). ``""``
+    when the driver loads, or when the type is a Certified connector missing a
+    package on this machine (an environment gap, reported as such elsewhere).
+    """
+    kind = str(connector_type or "").strip().lower()
+    if not kind:
+        return ""
+    driver = resolve_driver_type(kind)
+    if driver_available(driver, kind):
+        return ""
+    entry = enrich_catalog_entry({"id": kind, "name": kind, "status": "planned"})
+    if entry.get("environment_gap") or entry.get("certification_tier") != "planned":
+        return ""
+    label = kind.replace("_", " ").title()
+    return (
+        f"{PLANNED_DRIVER_PREFIX} {label} support is not installed here, so {label} "
+        "connectors are Planned and cannot be tested, browsed, sampled or used in a "
+        "transfer. No connection was attempted, so nothing was sent to the host."
+    )
+
+
 def _driver_install_hint(driver: str) -> str:
     """Operator-facing package hint when a certified driver fails to load."""
     return {

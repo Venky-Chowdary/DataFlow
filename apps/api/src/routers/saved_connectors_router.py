@@ -336,6 +336,13 @@ def save_connector(
     if existing is not None:
         data = _preserve_masked_secrets(data, existing)
     _refuse_unsafe_egress(data, existing)
+    if existing is None:
+        from src.transfer.connector_capabilities import planned_driver_message
+
+        # D345: a new connector of a Planned type whose driver is not installed
+        # could never connect; refuse it instead of saving a dead connector.
+        if not_installed := planned_driver_message(str(data.get("type") or "")):
+            raise HTTPException(status_code=422, detail=f"{not_installed} Nothing was saved.")
     try:
         conn = create_connector(data)
     except ValueError as exc:
