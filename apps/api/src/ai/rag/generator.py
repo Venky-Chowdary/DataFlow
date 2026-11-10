@@ -11,12 +11,26 @@ from dataclasses import dataclass, field
 
 from .evidence import contradicts_draft, retains_evidence, strip_chat_filler
 from .lexical_index import content_terms
-from .product_docs import ProductDocHit, compose_documented_answer, nearest_articles
+from .product_docs import (
+    GROUNDING_FLOOR,
+    ProductDocHit,
+    compose_documented_answer,
+    nearest_articles,
+)
 from .retriever import RetrievalResult
 
 # An answer nothing in the documentation covers is reported at this confidence and
 # never above it: the operator must be able to tell a documented answer from a guess.
 UNGROUNDED_CONFIDENCE = 0.1
+
+
+def _training_grounding(query: str, text: str) -> float:
+    """Share of the question's content terms the trained example's question names."""
+    terms = content_terms(query)
+    if not terms:
+        return 0.0
+    asked = set(content_terms(text.split("Assistant", 1)[0]))
+    return sum(1 for term in terms if term in asked) / len(terms)
 
 
 def _compose_for_query(query: str, hits: list[ProductDocHit]) -> str:
@@ -158,6 +172,13 @@ class DataTransferRAGGenerator:
 
         for doc in retrieval.documents:
             if doc.metadata.get("type") == "copilot_training":
+                # The vector store always returns its nearest neighbours, so a
+                # trained conversation is evidence only when its question covers
+                # the asked terms (the product-doc grounding floor). Otherwise
+                # "how do I cook rice" was answered, grounded, with whichever
+                # synthesized "How do I set up <connector>" example sat closest.
+                if _training_grounding(query, doc.text) < GROUNDING_FLOOR:
+                    continue
                 answer = self._extract_copilot_answer(doc.text)
                 if answer:
                     return RAGResponse(

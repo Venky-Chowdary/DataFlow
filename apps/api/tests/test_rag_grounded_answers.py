@@ -381,6 +381,39 @@ def test_query_natural_language_carries_sources_and_grounded_flag():
     assert refused["confidence"] == UNGROUNDED_CONFIDENCE
 
 
+def test_a_trained_conversation_answers_only_the_question_it_covers():
+    """Once the training agent has indexed synthesized conversations, the vector
+    store returns the nearest one for any question. Off-topic questions must stay
+    refused instead of being answered, grounded, with a connector setup guide."""
+    from src.ai.rag.vector_store import VectorDocument
+
+    trained = VectorDocument(
+        id="conv_train_iterable",
+        text="User: How do I set up Iterable as a source?\n"
+             "Assistant: To use **Iterable** as a source: open Connectors.",
+        metadata={"type": "copilot_training"},
+        score=0.4,
+    )
+
+    def retrieval(question: str) -> RetrievalResult:
+        return RetrievalResult(
+            query=question, documents=[trained], canonical_form=None,
+            matched_pattern=None, synonym_matches=[], confidence=0.3, product_docs=[],
+        )
+
+    gen = _generator(None)
+    refused = gen.generate_natural_language_response("how do I cook rice", retrieval("how do I cook rice"))
+    assert refused.grounded is False
+    assert refused.sources == []
+    assert refused.confidence == UNGROUNDED_CONFIDENCE
+
+    question = "how do I set up iterable"
+    answered = gen.generate_natural_language_response(question, retrieval(question))
+    assert answered.grounded is True
+    assert answered.method == "trained_rag"
+    assert "Iterable" in answered.answer
+
+
 def test_rag_query_endpoint_publishes_the_evidence():
     import asyncio
 
