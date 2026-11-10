@@ -67,7 +67,9 @@ def test_control_plane_host_names_the_index_host(stub, monkeypatch):
     monkeypatch.setattr(pw, "PINECONE_CONTROL_PLANE_HOST", "127.0.0.1")
     ok, msg = pw.test_pinecone(host=f"http://127.0.0.1:{stub}", password=KEY, database="qa-index")
     assert not ok
-    assert "404" not in msg
+    # The stub's ephemeral port is in the message ("localhost:40441"); only the
+    # rest of the text must not surface the raw HTTP 404.
+    assert "404" not in msg.replace(f":{stub}", ":<port>")
     assert "control plane" in msg
     assert f"index 'qa-index' is at localhost:{stub}" in msg
 
