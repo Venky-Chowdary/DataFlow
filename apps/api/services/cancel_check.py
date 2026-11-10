@@ -40,6 +40,14 @@ _attempt: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+#: Jobs this context is executing, innermost last. Every engine run (pool
+#: worker, synchronous API call, proof ledger) registers its job as running in
+#: this process, so the orphan sweeper never takes a live run for an orphan.
+_local_runs: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "df_local_runs", default=()
+)
+
+
 def set_cancel_probe(fn: Callable[[int | None], None] | None) -> None:
     _probe.set(fn)
 
@@ -49,10 +57,18 @@ def begin_run_attempt(mongo: Any, job_id: str) -> str | None:
 
     Returns ``None`` (and binds nothing) when the store cannot record it - an
     attempt that cannot be proven current must not be able to find itself
-    superseded.
+    superseded. The job counts as running in this process until
+    :func:`end_run_attempt` either way: a synchronous ``/transfer/run`` holds
+    no pool lease, and without this the sweeper resumed it as an orphan once
+    its document sat idle past the grace period, superseding the live run.
     """
     import uuid
 
+    if job_id:
+        from services.transfer_scheduler import mark_local_run
+
+        mark_local_run(job_id)
+        _local_runs.set(_local_runs.get() + (job_id,))
     if mongo is None or not job_id:
         return None
     attempt = uuid.uuid4().hex
@@ -69,6 +85,12 @@ def begin_run_attempt(mongo: Any, job_id: str) -> str | None:
 
 def end_run_attempt() -> None:
     _attempt.set(None)
+    held = _local_runs.get()
+    if held:
+        _local_runs.set(held[:-1])
+        from services.transfer_scheduler import unmark_local_run
+
+        unmark_local_run(held[-1])
 
 
 def get_cancel_probe() -> Callable[[int | None], None] | None:
