@@ -833,11 +833,17 @@ def _fn_strip_characters(value: Any, kind: Any) -> Any:
         return "".join(
             c for c in text if unicodedata.category(c) != "Cc" or c in "\t\n\r"
         )
+    if name == "all_controls":
+        # The Map transform strip_controls (D351): every control character,
+        # tab/newline/CR included, and every invisible format character.
+        from services.transform_engine import strip_control_characters
+
+        return strip_control_characters(text)
     if name == "whitespace":
         return re.sub(r"\s+", "", text)
     raise EvalError(
         f"'{name}' is not a character class; use punctuation, digits, letters, "
-        "non_numeric, non_printable, controls or whitespace"
+        "non_numeric, non_printable, controls, all_controls or whitespace"
     )
 
 

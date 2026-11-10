@@ -1057,7 +1057,7 @@ def _normalize_options(
         kind = str(out.get("characters") or "").strip().casefold()
         allowed = (
             "punctuation", "digits", "letters",
-            "non_numeric", "non_printable", "controls", "whitespace",
+            "non_numeric", "non_printable", "controls", "all_controls", "whitespace",
         )
         if kind not in allowed:
             raise ShapeError(
