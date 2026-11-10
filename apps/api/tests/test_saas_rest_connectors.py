@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest import mock
+
+import requests
 
 from connectors.airtable import read_object as airtable_read
 from connectors.notion import read_object as notion_read
@@ -68,22 +71,29 @@ def test_zendesk_cursor_pagination():
 
 
 def test_notion_cursor_pagination():
+    """Notion reads are POST with ``start_cursor`` in the body (D311): the
+    generic REST GET ``/databases?start_cursor=`` is a path Notion does not serve."""
     calls: list[Any] = []
 
-    def _respond(*args, **kwargs):
-        calls.append((args, kwargs))
+    def _respond(_session, method, url, **kwargs):
+        calls.append((method, url, dict(kwargs.get("json") or {})))
         if len(calls) == 1:
             body = {"results": [{"id": "p1"}], "has_more": True, "next_cursor": "cur2"}
         else:
             body = {"results": [{"id": "p2"}], "has_more": False, "next_cursor": None}
-        return _make_response(body)
+        resp = requests.Response()
+        resp.status_code = 200
+        resp._content = json.dumps(body).encode()
+        resp.headers["Content-Type"] = "application/json"
+        resp.url = url
+        return resp
 
-    with mock.patch("connectors.rest_api.requests.request", side_effect=_respond):
+    with mock.patch("requests.sessions.Session.request", autospec=True, side_effect=_respond):
         batch = notion_read(cfg={"api_key": "secret_xxx", "table": "databases"}, limit=2)
-    assert batch.rows == [["p1"], ["p2"]]
-    second_params = calls[1][1].get("params")
-    assert second_params["start_cursor"] == "cur2"
-    assert second_params["page_size"] == 1
+    assert [row[batch.headers.index("id")] for row in batch.rows] == ["p1", "p2"]
+    assert [(m, u.rsplit("/", 1)[-1]) for m, u, _ in calls] == [("POST", "search"), ("POST", "search")]
+    assert calls[0][2]["page_size"] == 2 and "start_cursor" not in calls[0][2]
+    assert calls[1][2]["start_cursor"] == "cur2" and calls[1][2]["page_size"] == 1
 
 
 def test_airtable_cursor_pagination():

@@ -546,6 +546,8 @@ def introspect_connector_table(
         table=table,
         catalog_type=str(cfg.get("type") or ""),
         auth_source=str(cfg.get("auth_source") or ""),
+        # SaaS sources (Notion, Stripe, Airtable) authenticate with it (D311).
+        api_key=str(cfg.get("api_key") or ""),
         # Object stores dial the connector's endpoint/port from it (D142).
         reader_cfg=cfg if execute_shape or is_object_store_type(db_type) else None,
         introspect_purpose=purpose,
@@ -795,6 +797,7 @@ def introspect_connector_schema(
             table=table,
             catalog_type=str(cfg.get("type") or ""),
             auth_source=str(cfg.get("auth_source") or ""),
+            api_key=str(cfg.get("api_key") or ""),
             reader_cfg=cfg if is_object_store_type(db_type) else None,
             # TLS trust / service name / driver keywords the writer dials with.
             **connection_options(cfg),
