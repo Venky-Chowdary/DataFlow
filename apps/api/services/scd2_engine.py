@@ -550,10 +550,59 @@ def _insert_rows(conn: Any, table_obj: Any, rows: list[dict[str, Any]]) -> int:
 
     if not rows:
         return 0
+    if getattr(conn.dialect, "name", "") == "snowflake":
+        from connectors.snowflake_writer import _is_json_type
+
+        documents = {
+            c.name: compiled
+            for c in table_obj.columns
+            if _is_json_type(compiled := c.type.compile(dialect=conn.dialect))
+        }
+        if documents:
+            return _insert_snowflake_documents(conn, table_obj, rows, documents)
     result = conn.execute(sa.insert(table_obj), rows)
     # Oracle executemany reports rowcount -1 (unknown); it is not a count.
     rowcount = result.rowcount
     return rowcount if rowcount is not None and rowcount >= 0 else len(rows)
+
+
+def _insert_snowflake_documents(
+    conn: Any, table_obj: Any, rows: list[dict[str, Any]], documents: dict[str, str]
+) -> int:
+    """SCD2 versions into a Snowflake table with VARIANT / ARRAY columns.
+
+    Snowflake refuses text bound into a VARIANT column by ``INSERT ... VALUES``
+    ("Expression type does not match column data type") and a ``VALUES``
+    clause cannot call ``PARSE_JSON``, so every SCD2 run with a JSON column
+    failed after a green preflight (D47). The rows go in the way the Snowflake
+    writer loads documents: ``INSERT ... SELECT PARSE_JSON(columnN) ... FROM
+    VALUES``.
+    """
+    import sqlalchemy as sa
+    from connectors.snowflake_writer import MAX_BIND_INSERT_ROWS, _json_select_expr
+
+    dialect = conn.dialect
+    prep = dialect.identifier_preparer
+    columns = list(table_obj.columns)
+    binds = [c.type.dialect_impl(dialect).bind_processor(dialect) for c in columns]
+    col_sql = ", ".join(prep.format_column(c) for c in columns)
+    select_sql = ", ".join(
+        _json_select_expr(documents[c.name], f"column{i}") if c.name in documents else f"column{i}"
+        for i, c in enumerate(columns, start=1)
+    )
+    head = f"INSERT INTO {prep.format_table(table_obj)} ({col_sql}) SELECT {select_sql} FROM VALUES "  # nosec B608
+    for offset in range(0, len(rows), MAX_BIND_INSERT_ROWS):
+        params: dict[str, Any] = {}
+        tuples: list[str] = []
+        for r, row in enumerate(rows[offset : offset + MAX_BIND_INSERT_ROWS]):
+            names: list[str] = []
+            for i, (col, bind) in enumerate(zip(columns, binds)):
+                value = row.get(col.key)
+                params[f"v{r}_{i}"] = bind(value) if bind is not None else value
+                names.append(f":v{r}_{i}")
+            tuples.append(f"({', '.join(names)})")
+        conn.execute(sa.text(head + ", ".join(tuples)), params)
+    return len(rows)
 
 
 def _oracle_stamp_bind(stamp: datetime) -> tuple[str, str]:
