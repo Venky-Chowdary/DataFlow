@@ -2720,6 +2720,10 @@ def _ch_to_logical(dtype: str) -> str:
     return "TEXT"
 
 
+#: Snowflake BINARY's maximum (and default) length, 8 MB.
+_SNOWFLAKE_BINARY_MAX_BYTES = 8388608
+
+
 def _sf_to_logical(
     dtype: str,
     *,
@@ -2807,7 +2811,14 @@ def _sf_to_logical(
     if d == "BINARY" or d.startswith("BINARY("):
         m_bin = re.match(r"^BINARY\s*\(\s*(\d+)\s*\)$", d)
         width = int(m_bin.group(1)) if m_bin else char_len
-        return f"BINARY({width})" if width else "BINARY"
+        # A bare ``BINARY`` is Snowflake's maximum, and DESC / the catalog
+        # report it as ``BINARY(8388608)``: that is the unbounded column, not a
+        # width a source byte string could exceed. Read as a bound, every
+        # second run into a table DataFlow created with BINARY was "lossy"
+        # (D182).
+        if width and width < _SNOWFLAKE_BINARY_MAX_BYTES:
+            return f"BINARY({width})"
+        return "BINARY"
     if d == "TIME" or d.startswith("TIME("):
         m_time = re.match(r"^TIME\s*\(\s*(\d+)\s*\)$", d)
         prec = int(m_time.group(1)) if m_time else dt_prec
