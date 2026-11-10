@@ -290,7 +290,7 @@ def test_save_response_reports_enforcement_from_the_posture_function(ent, one_pr
 # ── MCP manifest origin ─────────────────────────────────────────────────────
 
 
-INTERNAL = "dataflow-api-production-722b.up.railway.app"
+INTERNAL = "api-service-0000.up.railway.app"
 
 
 def test_mcp_manifest_never_names_the_internal_host_or_http(ent, monkeypatch):
