@@ -1753,6 +1753,9 @@ def write_mapped_rows(
                             policy, mappings
                         ) in SALVAGE_POLICIES:
                             for row_i, row in enumerate(write_batch):
+                                # D299: a cancel stops before the next per-row
+                                # commit, counting the rows already committed.
+                                cancel_checkpoint(written + chunk_written)
                                 try:
                                     cur.execute(insert_sql, row)
                                     conn.commit()
