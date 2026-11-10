@@ -288,8 +288,8 @@ def prove_cdc_values(
     dest_types: dict[str, str] | None = None,
     window: Any = None,
     key_columns: list[str] | None = None,
-    held_out_keys: set[str] | None = None,
-    held_out_column: str = "",
+    held_out_keys: set[str] | set[tuple[str, ...]] | None = None,
+    held_out_column: str | list[str] = "",
 ) -> CdcValueProof | None:
     """Scan both tables.
 
@@ -304,7 +304,8 @@ def prove_cdc_values(
     the rows before the window are compared by ``key_columns`` and returned as
     out-of-window drift, which the caller reports instead of failing (D188).
 
-    ``held_out_keys`` (on destination column ``held_out_column``) are source
+    ``held_out_keys`` (on destination key column(s) ``held_out_column``; a
+    composite key is a tuple in column order) are source
     rows this run quarantined for their own values: their open DLQ finding is
     their proof, and they are not expected on the destination.
     """
@@ -382,23 +383,34 @@ def prove_cdc_values(
 def _without_held_out(
     rows: list[dict[str, Any]],
     pairs: list[tuple[str, str]],
-    held_out_keys: set[str] | None,
-    held_out_column: str,
+    held_out_keys: set[str] | set[tuple[str, ...]] | None,
+    held_out_column: str | list[str],
 ) -> list[dict[str, Any]]:
-    """Source rows minus the keys the writer quarantined on their own values."""
-    if not held_out_keys or not held_out_column:
+    """Source rows minus the keys the writer quarantined on their own values.
+
+    The whole key is matched: a composite held-out (eu, 3) leaves (us, 3) in.
+    """
+    key_dest = [held_out_column] if isinstance(held_out_column, str) else list(held_out_column)
+    if not held_out_keys or not key_dest or not all(key_dest):
         return rows
     to_source = {dest.lower(): src for src, dest in pairs}
-    column = to_source.get(str(held_out_column).lower())
-    if not column:
+    columns = [to_source.get(str(c).lower()) for c in key_dest]
+    if not all(columns):
         return rows
+    held = {(k,) if isinstance(k, str) else tuple(k) for k in held_out_keys}
     from services.verification_ladder import _pk_key
 
-    wanted = column.lower()
+    def _cell(row: dict[str, Any], column: str) -> Any:
+        # Exact name first; the reader may also return the column in another
+        # case (Oracle upper-cases unquoted names) — match it case-insensitively.
+        if column in row:
+            return row[column]
+        wanted = column.lower()
+        return next((v for k, v in row.items() if str(k).lower() == wanted), None)
+
     return [
         r for r in rows
-        if _pk_key(next((v for k, v in r.items() if str(k).lower() == wanted), None))
-        not in held_out_keys
+        if tuple(_pk_key(_cell(r, c)) for c in columns) not in held  # type: ignore[arg-type]
     ]
 
 

@@ -5978,16 +5978,26 @@ def _value_decided_refusal(reason: str) -> bool:
 
 
 def _held_out_keys(dest_summary: dict[str, Any], sort_key: str | None) -> set[str]:
-    """Keys of the rows the writer quarantined on a value it could not store.
+    """Single-column spelling of :func:`_held_out_key_tuples`."""
+    if not sort_key:
+        return set()
+    return {key[0] for key in _held_out_key_tuples(dest_summary, [sort_key])}
+
+
+def _held_out_key_tuples(
+    dest_summary: dict[str, Any], key_cols: list[str]
+) -> set[tuple[str, ...]]:
+    """Whole keys of the rows the writer quarantined on a value it could not store.
 
     The finding's own value is masked and truncated for display, so it cannot
     be matched back to the source row; the key it names can. A UNIQUE / FK
     refusal is about one copy of a key that may also have landed, so it never
     holds the key out; a CHECK refusal is decided by the row's own values.
+    A composite key is every key column: held-out (eu, 3) never holds out (us, 3).
     """
-    if not sort_key:
+    if not key_cols:
         return set()
-    keys: set[str] = set()
+    keys: set[tuple[str, ...]] = set()
     for detail in dest_summary.get("rejected_details") or []:
         # A coerce_null finding's row landed with a NULL cell; its other values are compared.
         if not isinstance(detail, dict) or detail.get("disposition") == "coerced_null":
@@ -5995,9 +6005,9 @@ def _held_out_keys(dest_summary: dict[str, Any], sort_key: str | None) -> set[st
         reason = str(detail.get("reason") or detail.get("failure_reason") or "").lower()
         if any(marker in reason for marker in _ROW_DECIDED_MARKERS):
             continue
-        key = _rejected_key(detail, [sort_key])
-        if key and key[0] not in (None, ""):
-            keys.add(str(key[0]))
+        key = _rejected_key(detail, list(key_cols))
+        if key and all(part not in (None, "") for part in key):
+            keys.add(tuple(str(part) for part in key))
     return keys
 
 
@@ -8496,8 +8506,8 @@ def _run_reconciliation_impl(
                     dest_table=str(table_name or ""),
                     mappings=list(mapping_dicts or []),
                     dest_types=dest_types,
-                    held_out_keys=_held_out_keys(dest_summary, pk_column),
-                    held_out_column=pk_column or "",
+                    held_out_keys=_held_out_key_tuples(dest_summary, list(pk_cols)),
+                    held_out_column=list(pk_cols),
                     **_cdc_poll_window(dest_summary),
                 )
             except CdcValueScanIncomplete as exc:

@@ -1912,6 +1912,12 @@ def _apply_change_batch(
     if dest_summary is None:
         dest_summary = {}
     _stash_reconcile_evidence(dest_summary, change, pk_target_col or "")
+    if pk_target_cols:
+        # Gate-8 addresses rows by the whole key the writer upserted on; without
+        # it the ladder and value proof fell back to ``id`` and a held-out
+        # (eu, 3) also hid the valid (us, 3) from the proof.
+        dest_summary.setdefault("primary_key_columns", list(pk_target_cols))
+        dest_summary.setdefault("conflict_columns", list(pk_target_cols))
     if census_acc is not None and census_payload and pk_target_cols:
         census_payload = _census_without_rejected_keys(
             census_acc,
