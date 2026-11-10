@@ -159,6 +159,8 @@ describe("Gate8ProofCard signature isolation", () => {
       localStorage: dom.window.localStorage, sessionStorage: dom.window.sessionStorage,
       IS_REACT_ACT_ENVIRONMENT: true,
     });
+    // Node 20 (CI) has no global navigator; react-dom/client reads it on import.
+    Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
     globalThis.fetch = ((input: RequestInfo | URL, options?: RequestInit) => {
       const method = options?.method || (input instanceof Request ? input.method : "GET");
       if (method === "POST") return new Promise<Response>((resolve) => pending.push(resolve));
