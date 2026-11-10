@@ -3071,7 +3071,12 @@ def profile_file_upload(
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
         from services.csv_validator import validate_csv_content
-        validation_report = validate_csv_content(content, result.columns, schema)
+        from services.upload_limits import gunzip_capped
+
+        # Scan the CSV the parser read: a .csv.gz upload is still gzip here, and
+        # its header bytes (mtime) could abort the scan with a csv.Error (500).
+        scanned = gunzip_capped(content) if content[:2] == b"\x1f\x8b" else content
+        validation_report = validate_csv_content(scanned, result.columns, schema)
 
     from services.pdf_ocr import ocr_dependency_status
 
