@@ -229,12 +229,12 @@ def create_tenant(
     tenant = Tenant(
         id=str(uuid.uuid4()),
         workspace_id=workspace_id or "",
-        name=name.strip()[:128] or "Tenant",
+        name=_validate_name(name) or "Tenant",
         custom_domain=custom_domain,
         custom_domain_challenge=_new_domain_challenge() if custom_domain else "",
         data_region=_validate_region(data_region),
         byok_key_id=byok_key_id,
-        security_contact_email=security_contact_email.strip()[:128],
+        security_contact_email=_validate_contact_email(security_contact_email),
         mfa_required=mfa_required,
         session_timeout_hours=max(1, min(24, int(session_timeout_hours))),
         enforce_session_timeout=bool(enforce_session_timeout),
@@ -339,13 +339,13 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
                     raise ValueError(f"Custom domain '{new_domain}' is already in use")
                 _set_custom_domain(raw, new_domain)
             if "name" in kwargs:
-                raw["name"] = kwargs["name"].strip()[:128]
+                raw["name"] = _validate_name(kwargs["name"])
             if "data_region" in kwargs:
                 raw["data_region"] = _validate_region(kwargs["data_region"])
             if "byok_key_id" in kwargs:
                 raw["byok_key_id"] = kwargs["byok_key_id"]
             if "security_contact_email" in kwargs:
-                raw["security_contact_email"] = kwargs["security_contact_email"].strip()[:128]
+                raw["security_contact_email"] = _validate_contact_email(kwargs["security_contact_email"])
             if "mfa_required" in kwargs:
                 raw["mfa_required"] = bool(kwargs["mfa_required"])
             if "session_timeout_hours" in kwargs:
@@ -375,16 +375,58 @@ def delete_tenant(tenant_id: str) -> bool:
     return True
 
 
+def supported_regions() -> list[str]:
+    """Regions a tenant may record (D341).
+
+    The built-in cloud regions, this deployment's ``DATAWRAP_DEFAULT_REGION``,
+    and any private-cloud / on-prem region tags the operator declares in
+    ``DATAWRAP_DATA_REGIONS`` (comma-separated, ``[a-z0-9-]{2,32}`` each). A
+    workspace admin can no longer invent one (``moon-1``).
+    """
+    extra = {
+        tag.strip().lower()
+        for tag in (getenv_brand("DATA_REGIONS", "") or "").split(",")
+        if re.fullmatch(r"[a-z0-9-]{2,32}", tag.strip().lower())
+    }
+    return sorted(_ALLOWED_REGIONS | extra | {default_region().lower()})
+
+
 def _validate_region(region: str) -> str:
     r = (region or "").strip().lower()
     if not r:
         return ""
-    if r in _ALLOWED_REGIONS:
+    allowed = supported_regions()
+    if r in allowed:
         return r
-    # Accept free-form region tags for private-cloud / on-prem SaaS nodes.
-    if re.match(r"^[a-z0-9-]{2,32}$", r):
-        return r
-    raise ValueError(f"Unsupported data region: {region}")
+    raise ValueError(f"Unsupported data region {str(region)[:40]!r}: use one of {', '.join(allowed)}")
+
+
+#: Markup and control characters: a tenant name is shown in the UI, the
+#: posture and the compliance report, so it is plain text (D341).
+_UNSAFE_TEXT = re.compile(r"[<>\x00-\x1f\x7f]")
+
+
+def _validate_name(name: str) -> str:
+    n = str(name or "").strip()
+    if len(n) > 128:
+        raise ValueError("Tenant name is longer than 128 characters")
+    if _UNSAFE_TEXT.search(n):
+        raise ValueError("Tenant name may not contain <, > or control characters")
+    return n
+
+
+def _validate_contact_email(email: str) -> str:
+    e = str(email or "").strip()
+    if not e:
+        return ""
+    from services.user_store import validate_email
+
+    try:
+        if len(e) > 128 or _UNSAFE_TEXT.search(e):
+            raise ValueError(e)
+        return validate_email(e)
+    except ValueError:
+        raise ValueError(f"Invalid security contact email {e[:80]!r}: use an address such as security@example.com") from None
 
 
 def _validate_egress_allowlist(entries: list[str]) -> list[str]:

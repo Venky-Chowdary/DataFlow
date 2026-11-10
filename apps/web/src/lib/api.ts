@@ -154,7 +154,17 @@ async function readApiRefusal(
     role = typeof data?.effective_role === "string" ? data.effective_role : "";
     const raw = data?.detail ?? data?.error ?? data?.message;
     if (typeof raw === "string" && raw.trim()) detail = raw;
-    else if (raw && typeof raw === "object") {
+    else if (Array.isArray(raw) && raw.length) {
+      // FastAPI field-level 422: name each refused field (D341).
+      const parts = raw
+        .map((e) => {
+          const loc = Array.isArray(e?.loc) ? e.loc.filter((p: unknown) => p !== "body").join(".") : "";
+          const msg = typeof e?.msg === "string" ? e.msg.replace(/^Value error, /, "") : "";
+          return msg ? (loc ? `${loc}: ${msg}` : msg) : "";
+        })
+        .filter(Boolean);
+      if (parts.length) detail = parts.join("; ");
+    } else if (raw && typeof raw === "object") {
       if (typeof raw.error === "string") detail = raw.error;
       else if (typeof raw.message === "string") detail = raw.message;
     }

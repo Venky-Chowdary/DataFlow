@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.effective_role import workspace_id_from_request_headers
 from services.brand import PRODUCT_SLUG
@@ -51,7 +51,56 @@ class WorkspaceSettingsBody(BaseModel):
     studio_canvas: bool | None = None
 
 
-class TenantCreateBody(BaseModel):
+class _TenantFieldChecks(BaseModel):
+    """Field-level 422s for tenant create/patch (D341), with the store's rules.
+
+    The store validates again for any caller that bypasses the route.
+    """
+
+    @field_validator("name", check_fields=False)
+    @classmethod
+    def _check_name(cls, v: str | None) -> str | None:
+        from services.tenant_store import _validate_name
+
+        return None if v is None else _validate_name(v)
+
+    @field_validator("custom_domain", check_fields=False)
+    @classmethod
+    def _check_domain(cls, v: str | None) -> str | None:
+        from services.tenant_store import _validate_domain
+
+        return None if v is None else _validate_domain(v)
+
+    @field_validator("data_region", check_fields=False)
+    @classmethod
+    def _check_region(cls, v: str | None) -> str | None:
+        from services.tenant_store import _validate_region
+
+        return None if v is None else _validate_region(v)
+
+    @field_validator("security_contact_email", check_fields=False)
+    @classmethod
+    def _check_email(cls, v: str | None) -> str | None:
+        from services.tenant_store import _validate_contact_email
+
+        return None if v is None else _validate_contact_email(v)
+
+    @field_validator("ip_allowlist", check_fields=False)
+    @classmethod
+    def _check_ip_allowlist(cls, v: list[str] | None) -> list[str] | None:
+        from services.tenant_store import _validate_allowlist
+
+        return None if v is None else _validate_allowlist(v)
+
+    @field_validator("egress_allowlist", check_fields=False)
+    @classmethod
+    def _check_egress_allowlist(cls, v: list[str] | None) -> list[str] | None:
+        from services.tenant_store import _validate_egress_allowlist
+
+        return None if v is None else _validate_egress_allowlist(v)
+
+
+class TenantCreateBody(_TenantFieldChecks):
     workspace_id: str = Field(default="", max_length=128)
     name: str = Field(default="", max_length=128)
     custom_domain: str = Field(default="", max_length=253)
@@ -66,7 +115,7 @@ class TenantCreateBody(BaseModel):
     egress_allowlist: list[str] = Field(default_factory=list)
 
 
-class TenantUpdateBody(BaseModel):
+class TenantUpdateBody(_TenantFieldChecks):
     name: str | None = Field(default=None, max_length=128)
     custom_domain: str | None = Field(default=None, max_length=253)
     data_region: str | None = Field(default=None, max_length=32)
