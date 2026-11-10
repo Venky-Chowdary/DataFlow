@@ -1257,17 +1257,9 @@ def plan_destination_evolution(
         # graded against the carrier it will have. Done here, not by a caller:
         # Validate re-derived it and Execute did not, so Execute's mapping
         # review refused the run Validate had passed (D200).
-        from services.mapping_proof import stamp_mapping_fidelity
-
         widened = {str(c.get("column") or "").lower() for c in widens}
         planned = [
-            stamp_mapping_fidelity(
-                [m],
-                source_types=source_schema,
-                target_types=types,
-                destination_db_type=dest_db,
-                dest_table_exists=True,
-            )[0]
+            _regrade_widened_pair(m, source_schema, types, dest_db)
             if str(m.get("source") or "").lower() in widened
             else m
             for m in planned
@@ -1315,6 +1307,45 @@ def plan_destination_evolution(
                 "new_type": types[str(col)],
             })
     return planned, types, applied
+
+
+def _regrade_widened_pair(
+    mapping: dict[str, Any],
+    source_schema: dict[str, str],
+    dest_types: dict[str, str],
+    dest_db: str,
+) -> dict[str, Any]:
+    """Grade a widened pair against the carrier it will have, and only that.
+
+    The widen changes the type path, nothing else. The full regrade also
+    classified the row's transform: a ``default:NA`` the approved plan carried
+    as ``preserve`` came back ``mutate``, Execute's review then demanded a
+    Migration Risk Contract for it, and every scheduled run after a plain
+    VARCHAR(12) -> VARCHAR(30) source widen failed with no way to sign one
+    (D334). When the type path is lossless, the transform keeps the verdict
+    the plan already held; a lossy type path still grades lossy.
+    """
+    from services.mapping_proof import stamp_mapping_fidelity
+
+    def _grade(row: dict[str, Any]) -> dict[str, Any]:
+        return stamp_mapping_fidelity(
+            [row],
+            source_types=source_schema,
+            target_types=dest_types,
+            destination_db_type=dest_db,
+            dest_table_exists=True,
+        )[0]
+
+    graded = _grade(mapping)
+    if (
+        str(graded.get("fidelity") or "").lower() == "mutate"
+        and str(mapping.get("fidelity") or "").lower() != "mutate"
+    ):
+        # "mutate" is reached only past a lossless type path: re-read the
+        # carrier alone so the plan's own transform verdict stands.
+        graded = {**_grade({**mapping, "transform": "none"}),
+                  "transform": mapping.get("transform")}
+    return graded
 
 
 def propagated_mapping_entry(
