@@ -181,3 +181,39 @@ def test_c4_live_pg_json_is_not_proven_and_exact_text_survives(world, monkeypatc
             cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
         conn.close()
 
+
+
+# ----------------------------------------- H1: no row value in a failed extract's reason
+
+_LEAKY = ("Read-back verification failed: row 1 column email→email: source='alice@example.com' dest='' "
+          "and source='__DF_SQL_NULL__'")
+
+
+def test_h1_a_failed_extract_job_error_is_allowlisted():
+    from services.exit_rehearsal import _failed_reason
+
+    reason = _failed_reason({"status": "failed", "error": _LEAKY})
+    assert "alice" not in reason and "example.com" not in reason and "__DF_SQL_NULL__" not in reason
+    assert "source=" not in reason and reason.startswith("The extract job")
+    assert "see the server log" in reason
+
+
+def test_h1_no_row_value_reaches_the_view_the_export_or_pilot_e2e(world):  # noqa: F811
+    from services import exit_store
+    from services.exit_evidence import render_markdown
+    from services.parity_state import job_store
+    from services.workspace_filter import WorkspaceFilter, bound_workspace_filter
+    from src.ai.copilot.tools import DataPilotTools
+
+    def fail_job(rehearsal):
+        job_id = rehearsal["tables"][0]["job_id"]
+        job_store().update_job_fields(job_id, {"status": "failed", "error": _LEAKY})
+
+    out = _run(_system(tables=[{"name": "orders"}]), tamper=fail_job)
+    assert out["verdict"] == "failed"
+    stored = exit_store.get(exit_store.REHEARSALS, out["id"])
+    with bound_workspace_filter(WorkspaceFilter.only("ws1")):
+        pilot = DataPilotTools().execute("explain_exit_rehearsal", {"rehearsal_id": out["id"]})
+    assert pilot.success, pilot.error
+    for text in (json.dumps(out), render_markdown(stored), json.dumps(pilot.output)):
+        assert "alice@example.com" not in text and "__DF_SQL_NULL__" not in text

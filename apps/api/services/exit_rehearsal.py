@@ -307,10 +307,14 @@ def _parity(job: dict[str, Any], job_id: str) -> dict[str, Any]:
 
 
 def _failed_reason(job: dict[str, Any]) -> str:
-    from services.parity_apply import scrub_text
+    """Why the extract job failed, allowlisted: a child job's error quotes row values (contract 20)."""
+    from services.parity_errors import safe_error
 
-    error = scrub_text(str(job.get("error") or job.get("message") or "no error was recorded"))[:300]
-    return f"The extract job ended {job.get('status') or 'without a status'}: {error}"
+    status = str(job.get("status") or "without a status")
+    error = job.get("error") or job.get("message")
+    if not error:
+        return f"The extract job ended {status}; no error was recorded."
+    return safe_error(error, what=f"The extract job ({status})", event=ERROR_EVENT)
 
 
 def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> dict[str, str]:
