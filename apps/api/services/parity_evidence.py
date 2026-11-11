@@ -727,7 +727,7 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
     if gate8_failed(recon) and not any(localizes(o) for o in ev.observations):
         mark_unaccounted(ev, recon)
     tables = [ev]
-    streams = dest.get("streams") if dest.get("multi_stream") else None
+    streams = dest.get("streams") if is_multi_stream(dest) else None
     for row in streams if isinstance(streams, list) else []:
         row = _dict(row)
         stream = str(row.get("name") or row.get("table") or "").strip()
@@ -751,6 +751,12 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
                     rows=abs(gap), origin="row_count",
                 ))
     return tables
+
+
+def is_multi_stream(dest: dict[str, Any]) -> bool:
+    """A run that wrote several tables: flagged, or (multi-table CDC writes no flag) two or more streams."""
+    streams = dest.get("streams")
+    return bool(dest.get("multi_stream")) or (isinstance(streams, list) and len(streams) >= 2)
 
 
 def _out_of_scope(ob: Observation) -> bool:
