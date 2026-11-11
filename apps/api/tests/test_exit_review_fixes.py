@@ -233,10 +233,14 @@ def test_h2_a_long_verification_holds_its_claim_and_closes_exactly_once(world, m
     real_verify = exit_rehearsal.verify
     runs = []
 
-    def slow_verify(doc, jobs):
+    def slow_verify(doc, jobs, **kw):
+        from services.exit_verify_guard import tick
+
         runs.append(time.monotonic())
-        time.sleep(1.5)  # stands for a full-population re-read longer than the stale window
-        return real_verify(doc, jobs)
+        for _ in range(15):  # a full-population re-read longer than the stale window, reading rows
+            tick(100)  # (review 2, N4: the claim is kept while rows are read)
+            time.sleep(0.1)
+        return real_verify(doc, jobs, **kw)
 
     monkeypatch.setattr(exit_rehearsal, "VERIFY_STALE", timedelta(seconds=1))
     monkeypatch.setattr(exit_rehearsal, "verify", slow_verify)

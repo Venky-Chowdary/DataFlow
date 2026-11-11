@@ -172,6 +172,7 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
     from services.reconciliation_api import FingerprintAccumulator, iter_row_fingerprints
 
     from services.exit_value_tokens import token, token_kind
+    from services.exit_verify_guard import tick
 
     eng = str(engine or "").strip().lower()
     exact, typed, uncompared = digest_plan(list(columns), dict(types or {}), eng)
@@ -193,6 +194,7 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
     def fed() -> Iterator[dict[str, Any]]:
         for row in rows:
             prof.rows += 1
+            tick()  # the verification's progress (its lease is refreshed only while rows are read)
             for col in candidates:
                 raw = row.get(col)
                 if auto and raw is not None and (isinstance(raw, bool) or not isinstance(raw, (int, float, Decimal))):

@@ -334,3 +334,105 @@ def test_n8_a_failed_extract_s_rehearsal_reason_names_its_job_and_reference_e2e(
     assert out["verdict"] == "failed" and table["status"] == "failed"
     assert table["job_id"] and table["job_id"] in table["reason"], table["reason"]
     assert "Reference " in table["reason"]
+
+
+# ------------------------------------- N4: a hung verifier loses its claim; the verification is capped
+
+
+def _poll(rid, seconds):
+    import time
+
+    from services.exit_rehearsal import settle
+    from services.exit_store import REHEARSALS, get
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and get(REHEARSALS, rid)["verdict"] == "running":
+        settle(rid, inline=False)  # page poll / scheduler beat
+        time.sleep(0.2)
+    return get(REHEARSALS, rid)
+
+
+def test_n4_a_verifier_that_reads_nothing_stops_refreshing_and_the_cap_closes_the_rehearsal(world, monkeypatch):  # noqa: F811,E501
+    import threading
+    import time
+    from datetime import timedelta
+
+    from services import exit_rehearsal, exit_verify_guard
+    from services.exit_store import REHEARSALS, get
+    from tests.test_exit_rehearsal_e2e import _wait
+
+    hang = threading.Event()
+    runs: list[float] = []
+
+    def hung_verify(doc, jobs, **kw):
+        if kw.get("timed_out_after") is not None:
+            return real_verify(doc, jobs, **kw)
+        runs.append(time.monotonic())
+        hang.wait(20)  # a source read stuck on a dead connection: no row is ever read
+        return real_verify(doc, jobs, timed_out_after=3.0)  # released late: its close finds the claim taken
+
+    real_verify = exit_rehearsal.verify
+    monkeypatch.setattr(exit_rehearsal, "VERIFY_STALE", timedelta(seconds=1))
+    monkeypatch.setattr(exit_verify_guard, "max_verify_seconds", lambda: 3.0)
+    monkeypatch.setattr(exit_rehearsal, "verify", hung_verify)
+    monkeypatch.setattr(exit_rehearsal, "settle_quietly", lambda rid: exit_rehearsal.settle(rid))
+    system = _system(tables=[{"name": "events"}])
+    first = exit_rehearsal.start(system, actor="a@example.com")
+    _wait(first)
+    try:
+        exit_rehearsal.settle(first["id"], inline=False)
+        time.sleep(0.6)
+        claimed = get(REHEARSALS, first["id"])["_verify"]
+        time.sleep(1.5)  # > the stale window, with no row read: the claim is not refreshed
+        assert get(REHEARSALS, first["id"])["_verify"]["at"] == claimed["at"]
+        doc = _poll(first["id"], 8)
+    finally:
+        hang.set()
+    assert doc["verdict"] == "not_proven", doc["verdict_reason"]
+    assert "did not finish" in doc["tables"][0]["reason"]
+    assert len(runs) >= 1
+    # The system is free again: a new rehearsal starts.
+    assert exit_rehearsal.start(system, actor="a@example.com")["verdict"] == "running"
+
+
+def test_n4_a_verifier_that_keeps_reading_keeps_its_claim(world, monkeypatch):  # noqa: F811
+    import time
+    from datetime import timedelta
+
+    from services import exit_rehearsal, exit_verify_guard
+    from tests.test_exit_rehearsal_e2e import _wait
+
+    real_verify = exit_rehearsal.verify
+    runs: list[float] = []
+
+    def reading_verify(doc, jobs, **kw):
+        runs.append(time.monotonic())
+        for _ in range(15):  # 1.5 s of rows being read: longer than the stale window
+            exit_verify_guard.tick(100)
+            time.sleep(0.1)
+        return real_verify(doc, jobs, **kw)
+
+    monkeypatch.setattr(exit_rehearsal, "VERIFY_STALE", timedelta(seconds=1))
+    monkeypatch.setattr(exit_rehearsal, "verify", reading_verify)
+    monkeypatch.setattr(exit_rehearsal, "settle_quietly", lambda rid: exit_rehearsal.settle(rid))
+    first = exit_rehearsal.start(_system(tables=[{"name": "events"}]), actor="a@example.com")
+    _wait(first)
+    doc = _poll(first["id"], 8)
+    assert doc["verdict"] == "proven", doc["verdict_reason"]
+    assert len(runs) == 1
+
+
+def test_n4_the_source_re_read_runs_under_a_statement_timeout(world, monkeypatch):  # noqa: F811
+    from services import exit_completeness
+    from src.ai.copilot.tool_deadline import statement_timeout_seconds
+
+    seen: list[float | None] = []
+    real = exit_completeness.source_columns_and_rows
+
+    def spy(endpoint, **kw):
+        seen.append(statement_timeout_seconds())
+        return real(endpoint, **kw)
+
+    monkeypatch.setattr(exit_completeness, "source_columns_and_rows", spy)
+    assert _run(_system(tables=[{"name": "events"}]))["verdict"] == "proven"
+    assert seen and seen[0] is not None and 0 < seen[0] <= 6 * 3600

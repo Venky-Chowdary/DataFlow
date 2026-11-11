@@ -232,19 +232,22 @@ def _update_retrying(rehearsal_id: str, mutate: Any, attempts: int = 5) -> dict[
 
 
 class _Lease:
-    """Keeps a verification claim fresh while the verifier runs (a heartbeat, not a fixed age).
+    """Keeps a verification claim fresh while the verifier makes progress (a heartbeat, not a timer).
 
-    A claim is taken over only when its timestamp is older than ``VERIFY_STALE``,
-    so a live verifier refreshes it every quarter of that window. A verifier that
-    died stops refreshing and its claim goes stale; one that is merely slow keeps
-    it, and is the one that closes the rehearsal.
+    A claim is taken over only when its timestamp is older than ``VERIFY_STALE``;
+    the lease checks every quarter of that window and refreshes the claim only
+    when the verifier read rows since the last check (review 2, N4). A verifier
+    that died, or hangs on a dead connection, stops refreshing and its claim
+    goes stale; one that is merely slow keeps it and closes the rehearsal. Past
+    the verification's total cap the lease stops it (:mod:`services.exit_verify_guard`).
     """
 
-    def __init__(self, rehearsal_id: str, claim_id: str) -> None:
+    def __init__(self, rehearsal_id: str, claim_id: str, progress: Any = None) -> None:
         import threading
 
         self._stop = threading.Event()
         self._rid, self._claim = rehearsal_id, claim_id
+        self._progress, self._seen = progress, -1
         self._thread = threading.Thread(target=self._beat, daemon=True, name=f"exit-verify-lease-{rehearsal_id}")
         self._thread.start()
 
@@ -257,6 +260,14 @@ class _Lease:
     def _beat(self) -> None:
         interval = max(VERIFY_STALE.total_seconds() / 4, 0.05)
         while not self._stop.wait(interval):
+            progress = self._progress
+            if progress is not None:
+                if progress.expired():
+                    progress.cancel()  # the cap: stop the verifier and interrupt its blocked reads
+                    return
+                if progress.rows == self._seen:
+                    continue  # no row read since the last check: let the claim go stale
+                self._seen = progress.rows
             try:
                 if _update_retrying(self._rid, self._refresh) is None:
                     return
@@ -266,6 +277,27 @@ class _Lease:
     def release(self) -> None:
         self._stop.set()
         self._thread.join(timeout=30)
+
+
+def _verify_within_cap(doc: dict[str, Any], jobs: dict[str, dict[str, Any]], rehearsal_id: str, claim_id: str,
+                       started: datetime | None) -> dict[str, Any]:
+    """``verify`` under its lease, progress tracking and total cap (review 2, N4)."""
+    from services.exit_verify_guard import VerificationTimedOut, max_verify_seconds, tracking
+
+    cap = max_verify_seconds()
+    left = cap - ((datetime.now(timezone.utc) - started).total_seconds() if started else 0.0)
+    if left <= 0:
+        return verify(doc, jobs, timed_out_after=cap)
+    with tracking(left) as progress:
+        lease = _Lease(rehearsal_id, claim_id, progress)
+        try:
+            result = verify(doc, jobs)
+        except VerificationTimedOut:
+            return verify(doc, jobs, timed_out_after=cap)
+        finally:
+            lease.release()
+        # A read the cap interrupted (or the server cancelled at it) is a timeout, not a read failure.
+        return verify(doc, jobs, timed_out_after=cap) if progress.cancelled.is_set() or progress.expired() else result
 
 
 def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
@@ -303,17 +335,14 @@ def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
         at = parse_ts(held.get("at"))
         if current.get("verdict") != "running" or (at and datetime.now(timezone.utc) - at < VERIFY_STALE):
             raise ExitConflict("verification already claimed")
-        current["_verify"] = {"id": claim_id, "at": now_iso()}
+        # ``started`` is the first attempt's: a takeover does not reset the total cap.
+        current["_verify"] = {"id": claim_id, "at": now_iso(), "started": held.get("started") or now_iso()}
 
     try:
-        exit_store.update(REHEARSALS, rehearsal_id, claim)
+        claimed, _ = exit_store.update(REHEARSALS, rehearsal_id, claim)
     except (ExitConflict, exit_store.StoreConflict):
         return exit_store.get(REHEARSALS, rehearsal_id)
-    lease = _Lease(rehearsal_id, claim_id)
-    try:
-        result = verify(doc, jobs)
-    finally:
-        lease.release()
+    result = _verify_within_cap(doc, jobs, rehearsal_id, claim_id, parse_ts(claimed["_verify"]["started"]))
 
     def close(current: dict[str, Any]) -> None:
         if (current.get("_verify") or {}).get("id") != claim_id:
@@ -519,19 +548,37 @@ def duration_block(extract_seconds: float | None, verify_seconds: float, window_
             "margin_pct": margin, "statement": statement}
 
 
-def verify(doc: dict[str, Any], jobs: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Every table's completeness, the seal, the measured duration and the verdict."""
+def _not_verified(table: dict[str, Any], job: dict[str, Any], timed_out_after: float) -> dict[str, Any]:
+    """A table the verification did not measure: failed to start or extract, or the cap was reached."""
+    from services.exit_verify_guard import timed_out_reason
+
+    out = {**table, "rows_source": None, "rows_extracted": None, "part": None, "differences": [],
+           "key_set": {"source_sha256": None, "extract_sha256": None, "match": None},
+           "row_set": {"source_sha256": None, "extract_sha256": None, "match": None}, "control_totals": [],
+           "value_parity": {"method": "none", "parity_verdict": None, "unexplained": None, "report": None},
+           "extract_seconds": None}
+    if table["status"] == "failed":
+        return out
+    if str(job.get("status") or "").lower() != "completed":
+        return {**out, "status": "failed", "reason": _failed_reason(job, str(table.get("job_id") or ""))}
+    return {**out, "status": "not_proven", "reason": timed_out_reason(timed_out_after)}
+
+
+def verify(doc: dict[str, Any], jobs: dict[str, dict[str, Any]], *,
+           timed_out_after: float | None = None) -> dict[str, Any]:
+    """Every table's completeness, the seal, the measured duration and the verdict.
+
+    ``timed_out_after`` (the cap, in seconds) closes the rehearsal without
+    measuring: every extracted table reads not proven with that reason.
+    """
     from services.exit_completeness import MERKLE_ALGORITHM, merkle_root, rehearsal_verdict
 
     verify_started = datetime.now(timezone.utc)
     clock = time.monotonic()
     tables = [
-        verify_table(doc, t, jobs.get(str(t.get("job_id") or ""), {})) if t["status"] != "failed" else
-        {**t, "rows_source": None, "rows_extracted": None, "part": None, "differences": [],
-         "key_set": {"source_sha256": None, "extract_sha256": None, "match": None},
-         "row_set": {"source_sha256": None, "extract_sha256": None, "match": None}, "control_totals": [],
-         "value_parity": {"method": "none", "parity_verdict": None, "unexplained": None, "report": None},
-         "extract_seconds": None}
+        verify_table(doc, t, jobs.get(str(t.get("job_id") or ""), {}))
+        if t["status"] != "failed" and timed_out_after is None else
+        _not_verified(t, jobs.get(str(t.get("job_id") or ""), {}), float(timed_out_after or 0))
         for t in doc["tables"]
     ]
     verify_seconds = time.monotonic() - clock
