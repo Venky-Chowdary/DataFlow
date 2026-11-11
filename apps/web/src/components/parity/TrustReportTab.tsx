@@ -1,0 +1,763 @@
+/**
+ * Page A: Job → Trust Report.
+ *
+ * One verdict with a stated confidence, then each table, then each difference
+ * with its cause, the AI's explanation, proposed fixes, and sign-off (Page C).
+ *
+ * The verdict, causes and parity figures come from the API's deterministic
+ * check. The AI writes the explanation and proposes fixes from a fixed menu; a
+ * person approves each fix here before anything is applied.
+ *
+ * Gate-8, the trust score and the conservation ledger already have their own
+ * cards on this job; this tab links to them instead of drawing them twice.
+ */
+
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { DtIcon } from "../DtIcon";
+import { Button } from "../ui/Button";
+import { EmptyState } from "../ui/EmptyState";
+import { LoadingBlock } from "../LoadingState";
+import { useToast } from "../Toast";
+import { DifferenceSplitBar, ParityRing, TableParityBars } from "../charts/ParityCharts";
+import { SignoffPanel, type ParityBusy } from "./SignoffPanel";
+import {
+  approveParityFix,
+  dismissParityFix,
+  downloadParityReportMarkdown,
+  explainParityReport,
+  fetchParityReport,
+  signParityReport,
+} from "../../lib/api";
+import { downloadBlob } from "../../lib/downloadBlob";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
+import {
+  PARITY_MAX_ROUNDS,
+  awaitingRerun,
+  badgeClass,
+  causeChip,
+  causeLabel,
+  differenceTitle,
+  differencesByTable,
+  fixApproveLabel,
+  fixConsequence,
+  fixStatusPresentation,
+  formatClock,
+  formatCount,
+  formatDateTime,
+  isFixActionable,
+  newerReport,
+  parityErrorMessage,
+  roleLabel,
+  verdictPresentation,
+  type ParityDifference,
+  type ParityFix,
+  type ParityReport,
+} from "../../lib/parity";
+
+/* ── Pieces ──────────────────────────────────────────────────── */
+
+function DifferenceRow({ diff }: { diff: ParityDifference }) {
+  const chip = causeChip(diff);
+  return (
+    <li className="df2-parity-diff">
+      <span className="df2-parity-diff-chips">
+        <span className={badgeClass(chip.tone)}>{chip.label}</span>
+        {diff.protected && (
+          <span className={badgeClass("muted")} title="Values in this column are protected and never shown.">
+            Protected
+          </span>
+        )}
+      </span>
+      <div className="df2-parity-diff-body">
+        <b>{differenceTitle(diff)}</b>
+        <span className="df2-parity-diff-cause">
+          <span className="df2-parity-cause-label">{causeLabel(diff.cause)}.</span> {diff.cause.detail}
+        </span>
+        {diff.protected ? (
+          <span className="df2-parity-muted">Example values: protected</span>
+        ) : diff.example ? (
+          <span className="df2-parity-example">
+            Source <code className="df2-mono">{diff.example.source ?? "NULL"}</code>
+            {" → "}destination <code className="df2-mono">{diff.example.destination ?? "NULL"}</code>
+          </span>
+        ) : null}
+        {diff.keys_sample.length > 0 && (
+          <details className="df2-parity-keys">
+            <summary>
+              {diff.keys_sample.length < diff.rows
+                ? `First ${diff.keys_sample.length} of ${diff.rows.toLocaleString("en-US")} keys`
+                : `${diff.keys_sample.length} ${diff.keys_sample.length === 1 ? "key" : "keys"}`}
+            </summary>
+            <code className="df2-mono">{diff.keys_sample.join(", ")}</code>
+          </details>
+        )}
+      </div>
+      <span className="df2-parity-num df2-parity-muted" aria-label={`${diff.rows} rows`}>
+        {diff.rows.toLocaleString("en-US")}
+      </span>
+    </li>
+  );
+}
+
+export interface FixCardProps {
+  fix: ParityFix;
+  busy: ParityBusy;
+  canAct: boolean;
+  onApprove: (fixId: string, note: string) => void;
+  onDismiss: (fixId: string, note: string) => void;
+}
+
+/** A proposed fix, with a confirmation step in the card before it is applied. */
+export function FixCard({ fix, busy, canAct, onApprove, onDismiss }: FixCardProps) {
+  const [confirming, setConfirming] = useState<"approve" | "dismiss" | null>(null);
+  const [note, setNote] = useState("");
+  const noteId = useId();
+  const status = fixStatusPresentation(fix.status);
+  const actionable = isFixActionable(fix);
+  const anyBusy = busy != null;
+  const mine = busy != null && "id" in busy && busy.id === fix.id;
+
+  // A fix that stops being actionable (applied elsewhere, refreshed) closes its confirmation.
+  useEffect(() => {
+    if (!actionable) setConfirming(null);
+  }, [actionable]);
+
+  return (
+    <article className={`df2-parity-fix is-${fix.status}`} aria-label={`Fix: ${fix.title}`}>
+      <header className="df2-parity-fix-head">
+        <b>{fix.title}</b>
+        <span className={badgeClass(status.tone)}>{status.label}</span>
+      </header>
+      <p className="df2-parity-fix-detail">{fix.detail}</p>
+      {fix.preview && <pre className="df2-parity-code">{fix.preview}</pre>}
+
+      {!fix.applicable && fix.status === "proposed" && (
+        <p className="df2-parity-muted">
+          <DtIcon name="alert" size={12} /> Can't be applied: {fix.not_applicable_reason || "the destination does not support it."}
+        </p>
+      )}
+      {fix.status !== "proposed" && (fix.approved_by || fix.applied_at || fix.result) && (
+        <p className={fix.status === "failed" ? "df2-parity-notice is-danger" : "df2-parity-muted"}>
+          {fix.approved_by ? `${fix.status === "dismissed" ? "Dismissed" : "Approved"} by ${fix.approved_by}` : ""}
+          {fix.applied_at ? ` · ${formatDateTime(fix.applied_at)}` : ""}
+          {fix.result ? `${fix.approved_by || fix.applied_at ? ". " : ""}${fix.result}` : ""}
+        </p>
+      )}
+
+      {actionable && canAct && confirming === null && (
+        <div className="df2-parity-actions">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => setConfirming("approve")}
+            disabled={anyBusy}
+          >
+            {fixApproveLabel(fix.action)}
+          </Button>
+          <Button size="sm" onClick={() => setConfirming("dismiss")} disabled={anyBusy}>
+            Dismiss
+          </Button>
+        </div>
+      )}
+
+      {actionable && canAct && confirming !== null && (
+        <form
+          className="df2-parity-confirm"
+          aria-label={confirming === "approve" ? "Confirm this fix" : "Confirm dismissing this fix"}
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (anyBusy) return;
+            if (confirming === "approve") onApprove(fix.id, note);
+            else onDismiss(fix.id, note);
+          }}
+        >
+          <p className="df2-parity-confirm-text">
+            <b>{confirming === "approve" ? "Apply this fix?" : "Dismiss this fix?"}</b>{" "}
+            {confirming === "approve"
+              ? fixConsequence(fix)
+              : "Nothing is changed. The differences stay as they are and still count against sign-off."}
+          </p>
+          <div className="df2-field">
+            <label className="df2-label" htmlFor={noteId}>
+              Note {fix.action === "accept" && confirming === "approve" ? "(recorded with the acceptance)" : "(optional)"}
+            </label>
+            <textarea
+              id={noteId}
+              className="df2-input df2-parity-note-input"
+              rows={2}
+              maxLength={500}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              disabled={anyBusy}
+            />
+          </div>
+          <div className="df2-parity-actions">
+            <Button
+              type="submit"
+              variant={confirming === "approve" ? "primary" : "default"}
+              size="sm"
+              disabled={anyBusy}
+              loading={mine}
+              loadingLabel={confirming === "approve" ? "Applying and re-checking…" : "Dismissing…"}
+            >
+              {confirming === "approve" ? "Confirm and apply" : "Confirm dismiss"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(null)} disabled={mine}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      )}
+    </article>
+  );
+}
+
+/* ── The view ────────────────────────────────────────────────── */
+
+export interface TrustReportViewProps {
+  report: ParityReport;
+  busy: ParityBusy;
+  /** job.run: approve or dismiss fixes. */
+  canFix: boolean;
+  fixDeniedReason?: string;
+  /** job.read: explain and sign. */
+  canSign: boolean;
+  signDeniedReason?: string;
+  /** Failures, keyed by area so each shows beside the control that failed. */
+  errors?: { explain?: string; fix?: string; signoff?: string };
+  onRefresh: () => void;
+  onExplain: () => void;
+  onApprove: (fixId: string, note: string) => void;
+  onDismiss: (fixId: string, note: string) => void;
+  onSign: (role: string, note: string) => void;
+  onExport: () => void;
+  /** Links to the existing evidence cards for this job. */
+  onOpenGate8?: () => void;
+  onOpenDetail?: () => void;
+}
+
+function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: "ok" | "warn" | "muted" }> {
+  const e = report.evidence;
+  return [
+    {
+      label: "Reconciliation",
+      value: e.reconciliation_passed == null ? "Not captured" : e.reconciliation_passed ? "Passed" : "Did not pass",
+      tone: e.reconciliation_passed == null ? "muted" : e.reconciliation_passed ? "ok" : "warn",
+    },
+    { label: "Assurance", value: e.assurance_level ? e.assurance_level.replace(/_/g, " ") : "Not captured", tone: e.assurance_level ? "ok" : "muted" },
+    {
+      label: "Trust score",
+      value: e.trust_score == null ? "Not captured" : String(Math.round(e.trust_score)),
+      tone: e.trust_score == null ? "muted" : "ok",
+    },
+    { label: "Protection proof", value: e.protection_proof || "None for this run", tone: e.protection_proof ? "ok" : "muted" },
+    { label: "Transform proof", value: e.transform_proof || "None for this run", tone: e.transform_proof ? "ok" : "muted" },
+  ];
+}
+
+export function TrustReportView({
+  report,
+  busy,
+  canFix,
+  fixDeniedReason,
+  canSign,
+  signDeniedReason,
+  errors = {},
+  onRefresh,
+  onExplain,
+  onApprove,
+  onDismiss,
+  onSign,
+  onExport,
+  onOpenGate8,
+  onOpenDetail,
+}: TrustReportViewProps) {
+  const verdict = verdictPresentation(report);
+  const { parity, confidence } = report;
+  const groups = differencesByTable(report);
+  const anyBusy = busy != null;
+  const openFixes = report.fixes.filter((f) => f.status === "proposed");
+  const doneFixes = report.fixes.filter((f) => f.status !== "proposed");
+  const ringTone = report.verdict === "unexplained" ? "warn" : report.verdict === "unverifiable" ? "idle" : "ok";
+  const signoffAnchor = `parity-signoff-${report.job_id}`;
+  const tablesTitleId = useId();
+
+  return (
+    <div className="df2-parity" aria-busy={anyBusy || undefined}>
+      <header className="df2-parity-toolbar">
+        <div className="df2-parity-toolbar-verdict">
+          <span className={badgeClass(verdict.tone)}>{verdict.label}</span>
+          <span className="df2-parity-muted">
+            Checked {formatDateTime(report.generated_at)} · version {report.version}
+          </span>
+        </div>
+        <div className="df2-parity-actions">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={onRefresh}
+            disabled={anyBusy}
+            loading={busy?.kind === "refresh"}
+            loadingLabel="Refreshing…"
+            leadingIcon={<DtIcon name="refresh" size={14} />}
+          >
+            Refresh
+          </Button>
+          <Button
+            size="sm"
+            onClick={onExport}
+            disabled={anyBusy}
+            loading={busy?.kind === "export"}
+            loadingLabel="Exporting…"
+            leadingIcon={<DtIcon name="download" size={14} />}
+          >
+            Export pack
+          </Button>
+          {/* Not an anchor: the app routes on location.hash, so a #fragment would navigate away. */}
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={() => {
+              const target = typeof document !== "undefined" ? document.getElementById(signoffAnchor) : null;
+              target?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+              target?.focus({ preventScroll: true });
+            }}
+          >
+            Go to sign-off
+          </Button>
+        </div>
+      </header>
+
+      {report.verdict === "unverifiable" && report.verdict_reason && (
+        <p className="df2-parity-notice is-warn" role="status">
+          <DtIcon name="alert" size={14} />
+          <span>{report.verdict_reason}</span>
+        </p>
+      )}
+
+      <div className="df2-parity-hero">
+        <div className="df2-parity-card df2-parity-ring-card">
+          <ParityRing pct={parity.proven_equal_pct} tone={ringTone} />
+          <span className={badgeClass(verdict.tone)}>{verdict.label}</span>
+        </div>
+        <div className="df2-parity-card">
+          <dl className="df2-parity-kpis">
+            <div className="df2-parity-kpi">
+              <dt>rows in source</dt>
+              <dd>{formatCount(parity.rows_source)}</dd>
+            </div>
+            <div className="df2-parity-kpi">
+              <dt>rows in destination</dt>
+              <dd>{formatCount(parity.rows_destination)}</dd>
+            </div>
+            <div className="df2-parity-kpi">
+              <dt>rows differ</dt>
+              <dd>{formatCount(parity.rows_differ)}</dd>
+            </div>
+            <div className="df2-parity-kpi">
+              <dt>explained</dt>
+              <dd>
+                {parity.explained.toLocaleString("en-US")} / {parity.rows_differ.toLocaleString("en-US")}
+              </dd>
+            </div>
+          </dl>
+          <p className="df2-parity-confidence">
+            <b>How sure is this?</b> {confidence.statement}
+          </p>
+          {report.verdict !== "unverifiable" && report.verdict_reason && (
+            <p className="df2-parity-muted">{report.verdict_reason}</p>
+          )}
+        </div>
+      </div>
+
+      <section className="df2-parity-card" aria-labelledby={tablesTitleId}>
+        <h3 id={tablesTitleId} className="df2-parity-h3">Tables</h3>
+        {report.tables.length ? (
+          <TableParityBars tables={report.tables} />
+        ) : (
+          <p className="df2-parity-muted">No tables were checked in this run.</p>
+        )}
+      </section>
+
+      <div className="df2-parity-grid2">
+        <section className="df2-parity-card" aria-label="Differences">
+          {groups.length === 0 ? (
+            <>
+              <h3 className="df2-parity-h3">Differences</h3>
+              <p className="df2-parity-muted">
+                {report.verdict === "unverifiable"
+                  ? "No differences were found, but the check could not cover enough rows to prove a match."
+                  : "No differences. Every checked row matches."}
+              </p>
+            </>
+          ) : (
+            groups.map((group) => (
+              <div key={group.table} className="df2-parity-diff-group">
+                <h3 className="df2-parity-h3">
+                  Differences in <span className="df2-mono">{group.table}</span>
+                </h3>
+                <ul className="df2-parity-diffs">
+                  {group.differences.map((diff) => (
+                    <DifferenceRow key={diff.id} diff={diff} />
+                  ))}
+                </ul>
+              </div>
+            ))
+          )}
+          {parity.rows_differ > 0 && <DifferenceSplitBar explained={parity.explained} unexplained={parity.unexplained} />}
+        </section>
+
+        <div className="df2-parity-stack">
+          <section className="df2-parity-ai" aria-label="Explanation">
+            <header className="df2-parity-ai-head">
+              <span className="df2-parity-who">Explanation · grounded in run evidence</span>
+              {report.explanation && (
+                <span
+                  className="df2-parity-source"
+                  title={
+                    report.explanation.source === "llm"
+                      ? "Written by the configured AI model from the classifier output and catalog metadata."
+                      : "Written from templates. No AI model was used."
+                  }
+                >
+                  source: {report.explanation.source}
+                </span>
+              )}
+            </header>
+            {report.explanation ? (
+              <>
+                {report.explanation.text
+                  .split(/\n{2,}/)
+                  .filter((p) => p.trim())
+                  .map((p, i) => (
+                    <p key={i} className="df2-parity-ai-text">{p}</p>
+                  ))}
+                <span className="df2-parity-muted">Written {formatDateTime(report.explanation.generated_at)}</span>
+              </>
+            ) : (
+              <p className="df2-parity-ai-text">
+                No explanation yet. Ask for one to get the likely cause of each difference in plain language.
+              </p>
+            )}
+            {canSign && (
+              <div className="df2-parity-actions">
+                <Button
+                  size="sm"
+                  onClick={onExplain}
+                  disabled={anyBusy}
+                  loading={busy?.kind === "explain"}
+                  loadingLabel="Explaining…"
+                  leadingIcon={<DtIcon name="sparkle" size={14} />}
+                >
+                  {report.explanation ? "Explain again" : "Explain"}
+                </Button>
+              </div>
+            )}
+            {errors.explain && (
+              <p className="df2-parity-notice is-danger" role="alert">
+                <DtIcon name="alert" size={14} />
+                <span>{errors.explain}</span>
+              </p>
+            )}
+          </section>
+
+          {report.fixes.length > 0 && (
+            <section className="df2-parity-card" aria-label="Proposed fixes">
+              <header className="df2-parity-section-head">
+                <h3 className="df2-parity-h3">Proposed fixes</h3>
+                <span className="df2-parity-muted df2-parity-num">
+                  {report.rounds.length} of {PARITY_MAX_ROUNDS} fix rounds used
+                </span>
+              </header>
+              {!canFix && openFixes.length > 0 && (
+                <p className="df2-parity-muted">{fixDeniedReason || "You don't have permission to approve fixes."}</p>
+              )}
+              {[...openFixes, ...doneFixes].map((fix) => (
+                <FixCard
+                  key={fix.id}
+                  fix={fix}
+                  busy={busy}
+                  canAct={canFix}
+                  onApprove={onApprove}
+                  onDismiss={onDismiss}
+                />
+              ))}
+              {errors.fix && (
+                <p className="df2-parity-notice is-danger" role="alert">
+                  <DtIcon name="alert" size={14} />
+                  <span>{errors.fix}</span>
+                </p>
+              )}
+            </section>
+          )}
+        </div>
+      </div>
+
+      {report.rounds.length > 0 && (
+        <section className="df2-parity-card" aria-label="Fix rounds">
+          <h3 className="df2-parity-h3">Fix rounds</h3>
+          <ol className="df2-parity-rounds">
+            {report.rounds.map((round) => {
+              const fix = report.fixes.find((f) => f.id === round.fix_id);
+              return (
+                <li key={round.n} className="df2-parity-round">
+                  <span className="df2-parity-round-n">Round {round.n}</span>
+                  <span className="df2-parity-muted" title={formatDateTime(round.at)}>{formatClock(round.at)}</span>
+                  <span>{fix?.title ?? "Fix applied"}</span>
+                  <span className="df2-parity-num">
+                    Unexplained {round.unexplained_before.toLocaleString("en-US")} → {round.unexplained_after.toLocaleString("en-US")}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      )}
+
+      <section className="df2-parity-card" aria-label="Evidence behind this report">
+        <header className="df2-parity-section-head">
+          <h3 className="df2-parity-h3">Evidence behind this report</h3>
+          <div className="df2-parity-actions">
+            {onOpenGate8 && (
+              <Button size="sm" variant="ghost" onClick={onOpenGate8} leadingIcon={<DtIcon name="shield" size={14} />}>
+                Open Gate-8 proof
+              </Button>
+            )}
+            {onOpenDetail && (
+              <Button size="sm" variant="ghost" onClick={onOpenDetail} leadingIcon={<DtIcon name="activity" size={14} />}>
+                Open trust score and ledger
+              </Button>
+            )}
+          </div>
+        </header>
+        <dl className="df2-parity-evidence">
+          {evidenceItems(report).map((item) => (
+            <div key={item.label}>
+              <dt>{item.label}</dt>
+              <dd>
+                <span className={badgeClass(item.tone)}>{item.value}</span>
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      <SignoffPanel
+        report={report}
+        busy={busy}
+        canSign={canSign}
+        signDeniedReason={signDeniedReason}
+        onSign={onSign}
+        onExport={onExport}
+        error={errors.signoff}
+      />
+    </div>
+  );
+}
+
+/* ── The tab: loading, errors, actions ───────────────────────── */
+
+export interface TrustReportTabProps {
+  jobId: string;
+  /** The job's status; a run still in flight has no report yet. */
+  jobStatus?: string;
+  onOpenGate8?: () => void;
+  onOpenDetail?: () => void;
+  /** How often to re-read while a re-run fix is finishing (ms). */
+  rerunPollMs?: number;
+}
+
+const IN_FLIGHT = new Set(["running", "pending", "queued"]);
+
+export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail, rerunPollMs = 15_000 }: TrustReportTabProps) {
+  const { toast } = useToast();
+  const fixGate = useWriteGate(PERMISSIONS.jobRun, "approve or dismiss a fix");
+  const signGate = useWriteGate(PERMISSIONS.jobRead, "explain or sign off a trust report");
+  const [report, setReport] = useState<ParityReport | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState<ParityBusy>(null);
+  const [errors, setErrors] = useState<{ explain?: string; fix?: string; signoff?: string }>({});
+  // Responses for a job the person has moved away from are dropped.
+  const jobRef = useRef(jobId);
+  jobRef.current = jobId;
+  const reportRef = useRef<ParityReport | null>(null);
+  reportRef.current = report;
+  const busyRef = useRef(false);
+  const inFlight = IN_FLIGHT.has(String(jobStatus || "").toLowerCase());
+
+  const accept = useCallback((forJob: string, next: ParityReport) => {
+    if (jobRef.current !== forJob) return;
+    setReport((current) => newerReport(current, next));
+  }, []);
+
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      const forJob = jobId;
+      try {
+        const next = await fetchParityReport(forJob, { signal });
+        accept(forJob, next);
+        if (jobRef.current === forJob) setLoadError("");
+      } catch (err) {
+        if (signal?.aborted || jobRef.current !== forJob) return;
+        setLoadError(parityErrorMessage(err, "Could not load the trust report."));
+      }
+    },
+    [jobId, accept],
+  );
+
+  useEffect(() => {
+    setReport(null);
+    setErrors({});
+    setLoadError("");
+    setBusy(null);
+    busyRef.current = false;
+    if (inFlight || !jobId) return;
+    const controller = new AbortController();
+    setLoading(true);
+    void load(controller.signal).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+    return () => controller.abort();
+  }, [jobId, inFlight, load]);
+
+  // A re-run fix finishes on its own schedule; keep reading until its round lands.
+  const waiting = awaitingRerun(report);
+  useEffect(() => {
+    if (!waiting || rerunPollMs <= 0) return;
+    const timer = window.setInterval(() => {
+      if (!busyRef.current) void load();
+    }, rerunPollMs);
+    return () => window.clearInterval(timer);
+  }, [waiting, rerunPollMs, load]);
+
+  /**
+   * Run one action at a time. Every control is disabled while it runs; the
+   * response replaces the report only if it is newer, and a response that is
+   * not newer (or a conflict) triggers a fresh read so the page shows the truth.
+   */
+  const run = useCallback(
+    async (
+      next: Exclude<ParityBusy, null>,
+      area: "explain" | "fix" | "signoff" | null,
+      call: () => Promise<ParityReport | void>,
+      success?: { title: string; message?: string },
+    ) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      const forJob = jobId;
+      const before = reportRef.current?.version ?? -1;
+      setBusy(next);
+      if (area) setErrors((e) => ({ ...e, [area]: undefined }));
+      try {
+        const result = await call();
+        if (result) {
+          accept(forJob, result);
+          if (result.version <= before) await load();
+        }
+        if (success && jobRef.current === forJob) toast({ ...success, tone: "success" });
+      } catch (err) {
+        if (jobRef.current !== forJob) return;
+        const fallback =
+          area === "explain"
+            ? "Could not write an explanation."
+            : area === "fix"
+              ? "Could not complete this fix."
+              : area === "signoff"
+                ? "Could not record your sign-off."
+                : next.kind === "export"
+                  ? "Could not export the evidence pack."
+                  : "Could not refresh the trust report.";
+        const message = parityErrorMessage(err, fallback);
+        if (area) setErrors((e) => ({ ...e, [area]: message }));
+        else toast({ title: fallback, message, tone: "error" });
+        const status = (err as { status?: number })?.status;
+        if (status === 409) await load();
+      } finally {
+        busyRef.current = false;
+        if (jobRef.current === forJob) setBusy(null);
+      }
+    },
+    [jobId, accept, load, toast],
+  );
+
+  if (!jobId) return null;
+
+  if (inFlight) {
+    return (
+      <EmptyState
+        compact
+        icon="shield"
+        title="The trust report appears when this run finishes"
+        description="Datawrap compares source and destination after the load, then shows the verdict here."
+      />
+    );
+  }
+
+  if (!report && (loading || !loadError)) {
+    return <LoadingBlock title="Building the trust report" hint="Comparing counts, checksums and sampled values for this run." size="sm" />;
+  }
+
+  if (!report) {
+    return (
+      <EmptyState
+        compact
+        icon="alert"
+        role="alert"
+        title="Could not load the trust report"
+        description={loadError || "The trust report is not available. Try again."}
+        action={
+          <Button
+            size="sm"
+            onClick={() => {
+              setLoadError("");
+              setLoading(true);
+              void load().finally(() => setLoading(false));
+            }}
+          >
+            Try again
+          </Button>
+        }
+      />
+    );
+  }
+
+  return (
+    <TrustReportView
+      report={report}
+      busy={busy}
+      canFix={fixGate.allowed}
+      fixDeniedReason={fixGate.reason}
+      canSign={signGate.allowed}
+      signDeniedReason={signGate.reason}
+      errors={errors}
+      onRefresh={() => void run({ kind: "refresh" }, null, () => fetchParityReport(jobId))}
+      onExplain={() =>
+        void run({ kind: "explain" }, "explain", () => explainParityReport(jobId), { title: "Explanation updated" })
+      }
+      onApprove={(fixId, note) => {
+        const fix = report.fixes.find((f) => f.id === fixId);
+        void run({ kind: "approve", id: fixId }, "fix", () => approveParityFix(jobId, fixId, note), {
+          title: fix?.action === "accept" ? "Differences accepted" : "Fix applied and re-checked",
+          message: fix?.title,
+        });
+      }}
+      onDismiss={(fixId, note) =>
+        void run({ kind: "dismiss", id: fixId }, "fix", () => dismissParityFix(jobId, fixId, note), { title: "Fix dismissed" })
+      }
+      onSign={(role, note) =>
+        void run({ kind: "sign" }, "signoff", () => signParityReport(jobId, role, note), {
+          title: `Signed as ${roleLabel(role)}`,
+        })
+      }
+      onExport={() =>
+        void run({ kind: "export" }, null, async () => {
+          const blob = await downloadParityReportMarkdown(jobId);
+          downloadBlob(`datawrap-trust-report-${jobId}.md`, blob);
+        })
+      }
+      onOpenGate8={onOpenGate8}
+      onOpenDetail={onOpenDetail}
+    />
+  );
+}
