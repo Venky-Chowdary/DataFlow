@@ -709,6 +709,14 @@ async def copilot_confirm(
             detail=ledger.unusable_reason(ack_id),
         )
 
+    # An approval is confirmed in the workspace it was staged in. To a caller
+    # whose tenant scope does not cover that workspace it does not exist.
+    staged_in = str(peek.get("workspace_id") or "").strip()
+    if staged_in and not tenant_scope(http_request).allows(staged_in):
+        from ..ai.copilot.ack_ledger import approval_restage_message
+
+        raise HTTPException(status_code=404, detail=approval_restage_message(None, expired=False))
+
     role, session_actor = _caller(http_request)
     with bind_request_principal(http_request, role):
         can_confirm = can_confirm_kind(role, str(peek.get("kind") or ""))

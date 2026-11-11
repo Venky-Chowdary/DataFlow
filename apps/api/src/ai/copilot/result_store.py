@@ -3,6 +3,12 @@
 Follow-ups ("analyze that", "filter where email is null") resolve against
 real stored rows — never invented fixtures. Single-process TTL store with
 optional file spill so short API restarts do not wipe open chat refs.
+
+A reference is not a credential. Each result is stamped with the workspace and
+actor that produced it and is readable only by that actor in a workspace that
+may read it; to anyone else it does not exist. The spill file holds the rows
+sealed by the connector-secret vault (``sealed_state``) — never in plaintext —
+and a deployment whose vault cannot seal keeps them in memory only (audit H5).
 """
 
 from __future__ import annotations
@@ -16,6 +22,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from .sealed_state import owner_stamp, readable_by_caller, seal, unseal
 
 _log = logging.getLogger(__name__)
 
@@ -50,6 +58,8 @@ class PilotResultStore:
         self._entries: dict[str, dict[str, Any]] = {}
         self._latest_by_session: dict[str, str] = {}
         self._latest_global: str | None = None
+        # result_id -> ciphertext of its rows, so a persist does not re-seal every entry.
+        self._seal_cache: dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -71,6 +81,13 @@ class PilotResultStore:
                 continue
             if float(doc.get("expires_at") or 0) <= now:
                 continue
+            if "rows_sealed" in doc:
+                rows = unseal(doc.get("rows_sealed"))
+                if not isinstance(rows, list):
+                    continue  # sealed under a key this process does not hold
+                doc = {k: v for k, v in doc.items() if k != "rows_sealed"} | {"rows": rows}
+            elif doc.get("rows"):
+                continue  # a pre-seal plaintext spill is not read back in
             key = str(rid)
             current = self._entries.get(key)
             if current is not None and float(current.get("created_at") or 0) > float(
@@ -101,7 +118,11 @@ class PilotResultStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
-                "entries": self._entries,
+                "entries": {
+                    rid: spilled
+                    for rid, doc in self._entries.items()
+                    if (spilled := self._sealed_doc(rid, doc)) is not None
+                },
                 "latest_by_session": self._latest_by_session,
                 "latest_global": self._latest_global,
             }
@@ -111,11 +132,26 @@ class PilotResultStore:
         except OSError as exc:
             _log.warning("pilot result store persist failed: %s", exc)
 
+    def _sealed_doc(self, rid: str, doc: dict[str, Any]) -> dict[str, Any] | None:
+        """The on-disk form of one entry: metadata in clear, rows sealed.
+
+        None when the vault cannot seal: that entry stays in this process only.
+        """
+        token = self._seal_cache.get(rid)
+        if token is None:
+            token = seal(doc.get("rows") or [])
+            if token is None:
+                return None
+            self._seal_cache[rid] = token
+        return {k: v for k, v in doc.items() if k != "rows"} | {"rows_sealed": token}
+
     def _gc_locked(self) -> None:
         now = _now()
         dead = [k for k, v in self._entries.items() if float(v.get("expires_at") or 0) <= now]
         for k in dead:
             self._entries.pop(k, None)
+        for k in [k for k in self._seal_cache if k not in self._entries]:
+            self._seal_cache.pop(k, None)
         self._latest_by_session = {
             k: v for k, v in self._latest_by_session.items() if v in self._entries
         }
@@ -155,6 +191,9 @@ class PilotResultStore:
             "expires_at": now + ttl,
             "source": source or (meta or {}).get("source") or "",
             "session_id": (session_id or "").strip(),
+            # Who may read this back: the staging actor, in a workspace that
+            # may read the staging workspace.
+            **owner_stamp(),
             "columns": cols,
             "column_schema": column_schema or {},
             "row_count": len(capped),
@@ -188,6 +227,9 @@ class PilotResultStore:
                 self._entries.pop(rid, None)
                 self._persist()
                 return None
+            if not readable_by_caller(doc, same_actor=True):
+                # Another workspace's or another actor's result does not exist here.
+                return None
             return dict(doc)
 
     def resolve(
@@ -195,7 +237,7 @@ class PilotResultStore:
         result_id: str = "",
         session_id: str = "",
     ) -> dict[str, Any] | None:
-        """An explicit result_id is the credential. Latest-without-id stays on this session."""
+        """The result named by ``result_id``, or this session's latest — if the caller owns it."""
         sid = (session_id or "").strip()
         if (result_id or "").strip():
             return self.get(result_id)
@@ -210,7 +252,11 @@ class PilotResultStore:
             if not rid:
                 return None
             doc = self._entries.get(rid)
-            if doc and float(doc.get("expires_at") or 0) > _now():
+            if (
+                doc
+                and float(doc.get("expires_at") or 0) > _now()
+                and readable_by_caller(doc, same_actor=True)
+            ):
                 return dict(doc)
         return None
 
@@ -220,7 +266,7 @@ class PilotResultStore:
         if rid:
             return (
                 f"Stored result '{rid}' is not in the store. "
-                "It expires after one hour, or the id is wrong. "
+                "It expires after one hour, belongs to another session, or the id is wrong. "
                 "Sample the table or run the query again."
             )
         return (
