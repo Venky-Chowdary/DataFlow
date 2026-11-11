@@ -156,6 +156,18 @@ describe("Trust Report states (static)", () => {
     assert.match(t, /your role in this job's workspace/);
   });
 
+  it("colours the evidence badges by their value, not by their presence (review U1)", () => {
+    const base = provenReport();
+    const html = view(provenReport({
+      evidence: { ...base.evidence, assurance_level: "none", trust_score: 41, transform_proof: "failed", protection_proof: "verified" },
+    }));
+    const badge = (value: string) => new RegExp(`<span class="([^"]+)"[^>]*>${value}</span>`).exec(html)?.[1] ?? "";
+    assert.match(badge("none"), /df2-badge-error/);
+    assert.match(badge("41"), /df2-badge-error/);
+    assert.match(badge("failed"), /df2-badge-error/);
+    assert.match(badge("verified"), /df2-badge-live/);
+  });
+
   it("links to the existing Gate-8 and trust-score cards rather than redrawing them", () => {
     const t = text(view(provenReport(), { onOpenGate8: noop, onOpenDetail: noop }));
     assert.match(t, /Open Gate-8 proof/);

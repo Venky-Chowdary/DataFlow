@@ -400,6 +400,37 @@ export function shouldPollApplying(report: Pick<ParityReport, "fixes"> | null, r
   return report.fixes.some((f) => f.status === "applying");
 }
 
+/**
+ * Evidence badge tones by value, never by presence: a captured value is not a
+ * good one. Trust score uses the Trust score card's own bands (85 / 60).
+ */
+export function trustScoreTone(score: number | null | undefined): ParityTone {
+  if (score == null || !Number.isFinite(score)) return "muted";
+  return score >= 85 ? "ok" : score >= 60 ? "warn" : "danger";
+}
+
+const PROVEN_ASSURANCE = new Set(["full_checksum", "five_layer"]);
+const FAILED_ASSURANCE = new Set(["failed", "none"]);
+
+/** Only a full-population proof is green; samples, counts and acknowledgements are partial. */
+export function assuranceTone(level: string | null | undefined): ParityTone {
+  const key = String(level || "").trim().toLowerCase();
+  if (!key) return "muted";
+  if (PROVEN_ASSURANCE.has(key)) return "ok";
+  return FAILED_ASSURANCE.has(key) ? "danger" : "warn";
+}
+
+const PROOF_OK = new Set(["verified", "passed", "proven", "ok"]);
+const PROOF_BAD = new Set(["failed", "leaked", "violated", "error"]);
+
+/** A protection or transform proof: green only when it verified, red when it failed. */
+export function proofTone(status: string | null | undefined): ParityTone {
+  const key = String(status || "").trim().toLowerCase();
+  if (!key) return "muted";
+  if (PROOF_OK.has(key)) return "ok";
+  return PROOF_BAD.has(key) ? "danger" : "warn";
+}
+
 /** Which fixes a person can still act on. */
 export function isFixActionable(fix: Pick<ParityFix, "status" | "applicable">): boolean {
   return fix.status === "proposed" && fix.applicable;

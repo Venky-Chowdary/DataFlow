@@ -37,6 +37,9 @@ import {
   verdictPresentation,
   parityIsLowerBound,
   heatCellLabel,
+  trustScoreTone,
+  assuranceTone,
+  proofTone,
   shouldPollApplying,
   PARITY_APPLYING_POLL_LIMIT,
   approvalAuthority,
@@ -122,6 +125,23 @@ describe("verdicts, statuses and causes", () => {
     assert.equal(groups.length, 1);
     assert.equal(groups[0].table, "payments");
     assert.equal(groups[0].differences[0].id, "d-amount");
+  });
+});
+
+describe("evidence tones by value (review U1)", () => {
+  it("trust score, assurance and proofs are green only when the value is good", () => {
+    assert.equal(trustScoreTone(92), "ok");
+    assert.equal(trustScoreTone(70), "warn");
+    assert.equal(trustScoreTone(40), "danger");
+    assert.equal(trustScoreTone(null), "muted");
+    assert.equal(assuranceTone("full_checksum"), "ok");
+    assert.equal(assuranceTone("sample"), "warn");
+    assert.equal(assuranceTone("none"), "danger");
+    assert.equal(assuranceTone(null), "muted");
+    assert.equal(proofTone("verified"), "ok");
+    assert.equal(proofTone("failed"), "danger");
+    assert.equal(proofTone("skipped"), "warn");
+    assert.equal(proofTone(null), "muted");
   });
 });
 

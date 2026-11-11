@@ -54,10 +54,14 @@ import {
   roleLabel,
   parityIsLowerBound,
   shouldPollApplying,
+  assuranceTone,
+  proofTone,
+  trustScoreTone,
   verdictPresentation,
   type ParityDifference,
   type ParityFix,
   type ParityReport,
+  type ParityTone,
 } from "../../lib/parity";
 
 /* ── Pieces ──────────────────────────────────────────────────── */
@@ -269,7 +273,7 @@ export interface TrustReportViewProps {
   onOpenDetail?: () => void;
 }
 
-function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: "ok" | "warn" | "muted"; detail?: string }> {
+function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: ParityTone; detail?: string }> {
   const e = report.evidence;
   return [
     {
@@ -277,14 +281,15 @@ function evidenceItems(report: ParityReport): Array<{ label: string; value: stri
       value: e.reconciliation_passed == null ? "Not captured" : e.reconciliation_passed ? "Passed" : "Did not pass",
       tone: e.reconciliation_passed == null ? "muted" : e.reconciliation_passed ? "ok" : "warn",
     },
-    { label: "Assurance", value: e.assurance_level ? e.assurance_level.replace(/_/g, " ") : "Not captured", tone: e.assurance_level ? "ok" : "muted" },
+    // Toned by value (review U1): a captured "none" assurance or a score of 40 is not green.
+    { label: "Assurance", value: e.assurance_level ? e.assurance_level.replace(/_/g, " ") : "Not captured", tone: assuranceTone(e.assurance_level) },
     {
       label: "Trust score",
       value: e.trust_score == null ? "Not captured" : String(Math.round(e.trust_score)),
-      tone: e.trust_score == null ? "muted" : "ok",
+      tone: trustScoreTone(e.trust_score),
     },
-    { label: "Protection proof", value: e.protection_proof || "None for this run", tone: e.protection_proof ? "ok" : "muted" },
-    { label: "Transform proof", value: e.transform_proof || "None for this run", tone: e.transform_proof ? "ok" : "muted" },
+    { label: "Protection proof", value: e.protection_proof || "None for this run", tone: proofTone(e.protection_proof) },
+    { label: "Transform proof", value: e.transform_proof || "None for this run", tone: proofTone(e.transform_proof) },
     { label: "Re-read now", ...rereadLabel(e.reread) },
   ];
 }
