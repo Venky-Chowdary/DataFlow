@@ -328,11 +328,24 @@ def source_columns_and_rows(endpoint: Any, *, itersize: int = 5000) -> tuple[lis
 
 
 def _sensitive(column: str, totals: dict[str, Decimal]) -> bool:
-    """A PII column by name, or a total that is itself a PII value (a card number, an SSN)."""
+    """Whether a column's totals are withheld: yes, unless the PII classifier clears it (review 2, N10).
+
+    Min / max of a column are real values (on one row, the sum is too), and a
+    name or value detector misses identifiers it has no rule for (``national_id``,
+    ``income``, a bare 9-digit number, a card number in ``numeric(20,2)``). So
+    they are masked by default and shown only for a column the preflight PII
+    classifier (:mod:`services.compliance_guard`) positively reads as a measure
+    (``amount``, ``qty``, ``price``, ...) with no PII finding by name or value.
+    """
+    from services.compliance_guard import _field_hits, _quantity_column, detect_pii_fields
     from services.pii_guard import detect_pii, is_sensitive_name
 
-    return is_sensitive_name(column) or any(
-        detect_pii(format(totals[k], "f")).get("has_pii") for k in ("min", "max") if k in totals)
+    if not _quantity_column(column) or is_sensitive_name(column) or _field_hits(column):
+        return True
+    values = [format(totals[k], "f") for k in ("min", "max") if k in totals]
+    if any(detect_pii(v).get("has_pii") for v in values):
+        return True
+    return bool(detect_pii_fields([column], [{column: v} for v in values]).get("sensitive_fields"))
 
 
 def _shown(totals: dict[str, Decimal] | None, masked: bool) -> dict[str, str | None] | None:
@@ -342,8 +355,8 @@ def _shown(totals: dict[str, Decimal] | None, masked: bool) -> dict[str, str | N
 
 
 def _totals_rows(src: Profile, ext: Profile | None) -> list[dict[str, Any]]:
-    """Control totals per numeric column. Sum, min and max are compared on the real values,
-    but a PII column's are withheld (``masked``): min / max of an identifier are real values."""
+    """Control totals per numeric column. Sum, min and max are compared on the real values, but
+    withheld (``masked``) unless the PII classifier clears the column (:func:`_sensitive`)."""
     out = []
     for col in sorted(src.totals):
         s = src.totals[col]

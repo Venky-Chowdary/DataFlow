@@ -120,3 +120,46 @@ def test_gap3_the_list_route_reads_current_over_rest(ent):  # noqa: F811
         body = editor.get(f"/api/v1/exit/rehearsals/{started['id']}").json()
     listed = editor.get(f"/api/v1/exit/systems/{sid}/rehearsals").json()["rehearsals"]
     assert listed[0]["id"] == started["id"] and listed[0]["current"] is True
+
+
+# -------------------------------- N10: control totals are masked unless classified non-sensitive
+
+
+def _totals(types, rows):
+    from services.exit_completeness import judge_table, profile_rows
+
+    src = profile_rows(rows, list(types), [], None, types=types, engine="postgresql")
+    ext = profile_rows(rows, list(types), [], sorted(src.totals), types=types, engine="postgresql")
+    out = judge_table(name="t", source=src, extract=ext, key_columns=[], seal_ok=True,
+                      parity={"check": "count_only", "verdict": "unverifiable", "unexplained": 0}, not_measured=[])
+    return {c["column"]: c for c in out["control_totals"]}, out
+
+
+def test_n10_identifier_and_personal_figures_are_masked_by_default():
+    import json
+    from decimal import Decimal
+
+    types = {"national_id": "BIGINT", "tax_id": "BIGINT", "tin": "BIGINT", "salary": "NUMERIC(12,2)",
+             "income": "NUMERIC(12,2)", "n": "INTEGER", "card": "NUMERIC(20,2)", "id": "BIGINT"}
+    rows = [{"national_id": 123456789, "tax_id": 223456789, "tin": 323456789, "salary": Decimal("91000.00"),
+             "income": Decimal("88000.00"), "n": 423456789, "card": Decimal("4111111111111111.00"), "id": 1}]
+    totals, out = _totals(types, rows)
+    for col in types:
+        assert totals[col]["masked"] is True, col
+        assert totals[col]["source"] == {"sum": None, "min": None, "max": None}, col
+        assert totals[col]["match"] is True, col
+    blob = json.dumps(out)
+    for secret in ("123456789", "91000", "88000", "423456789", "4111111111111111"):
+        assert secret not in blob, secret
+
+
+def test_n10_a_measure_the_classifier_clears_shows_its_totals():
+    from decimal import Decimal
+
+    types = {"amount": "NUMERIC(12,2)", "qty": "INTEGER"}
+    totals, _ = _totals(types, [{"amount": Decimal("2.50"), "qty": 3}, {"amount": Decimal("1.25"), "qty": 4}])
+    assert totals["amount"]["masked"] is False and totals["amount"]["source"]["max"] == "2.50"
+    assert totals["qty"]["masked"] is False and totals["qty"]["source"]["sum"] == "7"
+    # A measure whose values the classifier reads as PII stays masked.
+    card, _ = _totals({"amount": "NUMERIC(20,0)"}, [{"amount": Decimal("4111111111111111")}])
+    assert card["amount"]["masked"] is True

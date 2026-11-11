@@ -112,7 +112,9 @@ def test_a_clean_rehearsal_is_proven_sealed_and_measured(world):
     assert orders["value_parity"]["method"] == "population_digest"
     assert orders["value_parity"]["report"].endswith("/parity-report")
     totals = {c["column"]: c for c in orders["control_totals"]}
-    assert totals["id"]["source"] == {"sum": "1830", "min": "1", "max": "60"} and totals["id"]["match"] is True
+    # An identifier's totals are compared but withheld (review 2, N10: masked unless classified a measure).
+    assert totals["id"]["masked"] is True and totals["id"]["match"] is True
+    assert totals["id"]["source"] == {"sum": None, "min": None, "max": None}
     assert Decimal(totals["amount"]["source"]["sum"]) == Decimal("2287.50") and totals["amount"]["match"]
     # A keyless table is compared by its row digest (duplicates included); no key-set check applies.
     assert events["status"] == "proven" and events["key_set"]["source_sha256"] is None
