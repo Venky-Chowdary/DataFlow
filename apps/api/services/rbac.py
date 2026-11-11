@@ -392,6 +392,10 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/jobs/", Permission.JOB_READ),
     # Parity Studio's workspace summary reads stored job evidence only.
     ("GET", "/api/v1/parity/", Permission.JOB_READ),
+    # Reversibility Proof reads: the exit board, systems, rehearsals, evidence packs.
+    ("GET", "/api/v1/exit/", Permission.JOB_READ),
+    # Any other exit route not ruled above is a management action.
+    ("*", "/api/v1/exit/", Permission.JOB_MANAGE),
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/query/", Permission.QUERY_USE),
@@ -475,6 +479,13 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/jobs/{job_id}/parity-report/signoff", Permission.JOB_MANAGE),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/approve", Permission.JOB_MANAGE),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/dismiss", Permission.JOB_MANAGE),
+    # Reversibility Proof. Declaring a system configures recurring extracts of a
+    # saved connection (job.manage); a rehearsal runs those extracts (job.run);
+    # signing attests the Exit Evidence Pack (job.manage, plus the authority
+    # services.parity_authority binds to each role); verifying a pack is a read.
+    ("POST", "/api/v1/exit/systems", Permission.JOB_MANAGE),
+    ("PATCH", "/api/v1/exit/systems/{system_id}", Permission.JOB_MANAGE),
+    ("DELETE", "/api/v1/exit/systems/{system_id}", Permission.JOB_MANAGE),
     ("POST", "/api/v1/transfer/analyze", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/analyze-file", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/introspect", Permission.JOB_PLAN),
