@@ -187,6 +187,15 @@ def _job(route: dict, ack_id: str) -> dict:
         if job.get("status") not in {None, "", "pending", "queued", "running", "starting"}:
             break
         time.sleep(0.5)
+    # "completed" is stored before the worker returns: it still reads the whole
+    # destination to record the append-continuity baseline. Starting the next
+    # call while that read runs counts the job's scan against the plan (CI
+    # shard 2 on PR 395: dest_seq_scan 1 from append_continuity.record_after_run).
+    from services.transfer_scheduler import local_job_ids
+
+    while time.time() < deadline and job_id in local_job_ids():
+        time.sleep(0.1)
+    assert job_id not in local_job_ids(), ("the job's worker is still running", job)
     return job
 
 
