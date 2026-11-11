@@ -336,7 +336,11 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
     with — then the app database, and write the winner back into ``cfg`` so
     callers persist it and later paths agree.
     """
-    from connectors.mongodb_common import _mongo_client, explicit_mongodb_auth_source
+    from connectors.mongodb_common import (
+        _mongo_client,
+        explicit_mongodb_auth_source,
+        replica_set_members_unreachable,
+    )
 
     explicit = explicit_mongodb_auth_source(
         cfg.get("connection_string") or "", str(cfg.get("auth_source") or "")
@@ -349,6 +353,7 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
 
     last_error = ""
     for auth_source in ordered:
+        conn_str, client = "", None
         try:
             conn_str = mongodb_connection_string({**cfg, "auth_source": auth_source})
             client = _mongo_client(conn_str)
@@ -356,6 +361,11 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
             cfg["auth_source"] = auth_source
             return True, f"MongoDB reachable (authSource={auth_source})"
         except Exception as exc:
+            # The seed answered; its members are out of reach (D358). Another
+            # authSource cannot reach them either.
+            members = replica_set_members_unreachable(client, conn_str, exc)
+            if members:
+                return False, members
             last_error = str(exc)
     return False, last_error
 

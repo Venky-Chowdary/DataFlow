@@ -893,7 +893,9 @@ class UniversalTransferEngine:
             from services.transfer_file_staging import hydrate_file_source
 
             hydrate_file_source(request)
-        from services.append_continuity import check_before_write, record_after_run
+        from services.append_continuity import (
+            baseline_before_success, check_before_write, record_after_run_once,
+        )
 
         violation = check_before_write(request, resume=resume)
         if violation is not None:
@@ -947,7 +949,7 @@ class UniversalTransferEngine:
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
-            ):
+            ), baseline_before_success(request, job_id) as pending_baseline:
                 from services.destination_write_lock import hold_destination_write_lock
 
                 hold_destination_write_lock(request, job_id)  # released by tracked_job_scope
@@ -959,10 +961,7 @@ class UniversalTransferEngine:
             set_cancel_probe(None)
             set_progress_meter(None)
             end_run_attempt()
-        try:
-            record_after_run(request, job_id, result)
-        except Exception:
-            logger.warning("Continuity baseline not recorded for %s", job_id, exc_info=True)
+        record_after_run_once(pending_baseline, result)
         try:
             written = int(
                 getattr(result, "rows_written", 0)

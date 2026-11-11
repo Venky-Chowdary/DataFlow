@@ -328,6 +328,24 @@ def _snowflake_projection(
     )
 
 
+def _oracle_projection(
+    sa_conn: Any, endpoint: EndpointConfig, cfg: dict[str, Any], cols: list[str]
+) -> tuple[str, Any]:
+    """Proof read-back projection over Oracle's stored column names (D356)."""
+    from services.dialect_profiles import normalize_schema
+
+    from .writer_column_spelling import oracle_physical_projection
+
+    schema = normalize_schema(
+        "oracle",
+        str(getattr(endpoint, "schema", "") or cfg.get("schema") or ""),
+        username=cfg.get("username"),
+    )
+    return oracle_physical_projection(
+        sa_conn, schema, str(endpoint.table or ""), list(cols)
+    )
+
+
 _PROOF_OBJECT_STORES = frozenset({"s3", "gcs", "adls", "azure_blob", "minio", "r2"})
 
 
@@ -1689,13 +1707,6 @@ def _transform_applied_proof_impl(
                 oracle_exprs[scol] = expr
             if _step_ok:
                 _covered_step_idx.add(_si)
-    # Honest labeling (P3): name every step that got no independent SQL
-    # check so a re-apply verdict never reads as an independent proof.
-    oracle_uncovered: list[str] = [
-        f"step {i + 1} ({st.get('op') or 'unknown'})"
-        for i, st in enumerate(steps)
-        if i not in _covered_step_idx
-    ]
     oracle_bad: set[str] = set()
     if oracle_ok and oracle_exprs:
         # The oracle returns (raw -> oracle) pairs per declared column; a
@@ -1742,8 +1753,18 @@ def _transform_applied_proof_impl(
             pin_store.flush()
             for scol in pin_store.oracle_mismatch_cols():
                 oracle_bad.add(map_source_to_target(scol, mappings))
-        except Exception:
+        except Exception as exc:
+            _logger.warning("transform proof: SQL oracle did not run: %s", exc)
             oracle_ok = False
+    # Honest labeling (P3): name every step that got no independent SQL
+    # check so a re-apply verdict never reads as an independent proof. An
+    # oracle that did not run (a later step had no SQL form, or the query
+    # failed) covers no step at all (D356).
+    oracle_uncovered: list[str] = [
+        f"step {i + 1} ({st.get('op') or 'unknown'})"
+        for i, st in enumerate(steps)
+        if i not in _covered_step_idx or not (oracle_ok and oracle_exprs)
+    ]
     if oracle_bad:
         bad_steps = sorted(
             {
@@ -1943,6 +1964,11 @@ def _transform_applied_proof_impl(
                         if dest_db_type == "snowflake":
                             # D8: the writer's stored (folded) names.
                             qc0 = _snowflake_projection(
+                                c0, endpoint, dst_cfg0, sel_cols0
+                            )[0]
+                        elif dest_db_type == "oracle":
+                            # D356: the catalog's stored (upper) spellings.
+                            qc0 = _oracle_projection(
                                 c0, endpoint, dst_cfg0, sel_cols0
                             )[0]
                         actual_checksum = canonical_checksum_from_iter(
@@ -2299,11 +2325,13 @@ def _transform_applied_proof_impl(
             dest_scanned = True
             with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
                 with deng.connect() as dconn:
-                    if dest_db_type == "snowflake":
-                        # D8: the writer's stored (folded) names.
-                        qc, _sf_ref = _snowflake_projection(
-                            dconn, endpoint, dst_cfg, sel_cols
-                        )
+                    if dest_db_type in {"snowflake", "oracle"}:
+                        # D8 / D356: the writer's stored (folded) names.
+                        qc, _sf_ref = (
+                            _snowflake_projection
+                            if dest_db_type == "snowflake"
+                            else _oracle_projection
+                        )(dconn, endpoint, dst_cfg, sel_cols)
                         stmt = sa.text(  # nosec B608
                             f"SELECT {qc} FROM {dest_ref}"
                             + (
@@ -9036,6 +9064,21 @@ def run_reconciliation(
                 note = f"transform proof {label} — {proof.get('reason')}"
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"
+    if isinstance(dest_summary, dict) and isinstance(recon, dict):
+        # D355: a protecting transform that left a source value in clear is a
+        # failed run, even when every digest above agrees with what was written.
+        from .protection_proof import apply_protection_proof, protection_proof
+
+        proof_dest, proof_source = _bind_endpoints_to_last_stream(
+            endpoint, source_endpoint, dest_summary
+        )
+        apply_protection_proof(recon, protection_proof(
+            endpoint=proof_dest,
+            source_endpoint=proof_source,
+            dest_summary=dest_summary,
+            mappings=mappings,
+            shape_recipe=shape_recipe,
+        ))
     # X-37: with DATAFLOW_ENGINE_DIGEST=1 the L3 ladder already re-read both
     # populations and digested them with the same canonical algorithm — a
     # real full_checksum on an engine-copy route, not count-only. Promote it

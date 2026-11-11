@@ -466,8 +466,16 @@ def _dest_engine_count(conn: Any, sql: str) -> int | None:
     The COUNT runs inside a savepoint (``begin_nested``): a COUNT cancelled
     under load used to leave the write transaction aborted, so the soft-delete
     UPDATE that followed failed "current transaction is aborted" (R11, M5b).
+
+    A lock-wait timeout is raised, not unmeasured: another session holds the
+    table, so every later COUNT, UPDATE and DELETE of this step queued behind
+    the same lock for the whole bound again, one wait per statement, while a
+    25-row mirror sat at "Writing batch 1/1" (D360). An unmeasured count is
+    also read as 0 by the CDC snapshot sweep ("nothing to remove").
     """
     import sqlalchemy as sa
+
+    from connectors.write_resilience import is_lock_wait_timeout
 
     nested = None
     try:
@@ -485,6 +493,8 @@ def _dest_engine_count(conn: Any, sql: str) -> int | None:
                 nested.rollback()
             except Exception as rb_exc:  # noqa: BLE001 - the COUNT stays unmeasured
                 logging.getLogger(__name__).debug("COUNT savepoint rollback failed: %s", rb_exc)
+        if is_lock_wait_timeout(exc):
+            raise
         return None
     if row is None or row[0] is None:
         return None

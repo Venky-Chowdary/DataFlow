@@ -91,9 +91,20 @@ _LOCK_WAIT_RESET = {
     "postgresql": "RESET lock_timeout",
     "redshift": "RESET lock_timeout",
     "mysql": "SET SESSION lock_wait_timeout = DEFAULT",
-    "sqlserver": "SET LOCK_TIMEOUT -1",
-    "mssql": "SET LOCK_TIMEOUT -1",
 }
+
+
+def _lock_wait_reset_sql(driver: str) -> str:
+    """The statement that gives the session back the lock wait it had before."""
+    if driver in {"sqlserver", "mssql"}:
+        from connectors.write_resilience import destination_lock_wait_seconds
+
+        # Every pooled SQL Server session carries the destination lock bound
+        # from connect (apply_mssql_session_guards). ``SET LOCK_TIMEOUT -1``
+        # is "wait forever": the pooled session then hung any later statement
+        # behind another session's lock, this run's or the next one's (D360).
+        return f"SET LOCK_TIMEOUT {destination_lock_wait_seconds() * 1000}"
+    return _LOCK_WAIT_RESET.get(driver, "")
 
 
 def reset_lock_wait(conn: Any, dialect_name: str) -> None:
@@ -101,13 +112,14 @@ def reset_lock_wait(conn: Any, dialect_name: str) -> None:
 
     A pooled connection kept ``lock_timeout = '2s'`` after a sweep, so the next
     statement that waited on a lock under load (a mirror COUNT or UPDATE) was
-    cancelled (R11).
+    cancelled (R11). The session gets back its own bound, never an unbounded
+    wait (D360).
     """
     import sqlalchemy as sa
 
     from services.dialect_profiles import dialect_profile
 
-    stmt = _LOCK_WAIT_RESET.get(dialect_profile(dialect_name).driver, "")
+    stmt = _lock_wait_reset_sql(dialect_profile(dialect_name).driver)
     if not stmt:
         return
     try:

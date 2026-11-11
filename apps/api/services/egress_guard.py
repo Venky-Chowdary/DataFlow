@@ -993,8 +993,16 @@ def observe_dials(observer: Any) -> Iterator[None]:
     A driver handshake has no connection object to interrupt yet: the tool
     deadline uses this to reach the socket of a connect that hangs on a peer
     that accepted and went silent (D281). Scoped like :func:`pinned_egress`.
+    Nested scopes all observe: the outer observer is called first (D354: the
+    connect-timeout bound runs inside the deadline's interruptible connect).
     """
-    token = _DIAL_OBSERVER.set(observer)
+    outer = _DIAL_OBSERVER.get()
+
+    def chained(sock: Any) -> None:
+        outer(sock)
+        observer(sock)
+
+    token = _DIAL_OBSERVER.set(observer if outer is None else chained)
     _install_guards()
     try:
         yield

@@ -203,11 +203,11 @@ def history_shape_route_gate(shape_recipe: Any, sync_mode: str) -> dict[str, Any
 
     Same refusal text execute raises, so preflight cannot pass what execute refuses.
     """
-    steps = (shape_recipe or {}).get("steps") if isinstance(shape_recipe, Mapping) else None
-    active = [s for s in steps or [] if isinstance(s, dict) and s.get("enabled") is not False]
-    if not active or sync_mode == "scd2":
-        return None
-    refusal = history_shape_refusal(sync_mode)
+    from services.history_route_recipe import history_recipe_refusal
+
+    # scd2 used to be skipped whole, so a column pipeline with no scd2 contract
+    # step passed here and failed the first run (D361). Execute's own question.
+    refusal = history_recipe_refusal(shape_recipe, sync_mode)
     if not refusal:
         return None
     return {

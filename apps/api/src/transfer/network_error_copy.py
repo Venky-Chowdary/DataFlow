@@ -51,11 +51,19 @@ _UNREACHABLE = re.compile(
 _HANDSHAKE_TIMEOUT = re.compile(
     r"lost connection to (?:mysql )?server (?:during query|at '?reading initial "
     r"communication packet|at '?handshake)[^)]*\(timed out\)|"
-    r"reading initial communication packet"
+    r"reading initial communication packet|"
+    # services.oracle_handshake_bound (D354): the Oracle connect-timeout bound.
+    r"accepted the tcp connection but did not answer"
 )
 _TIMEOUT = re.compile(
     r"timed out|timeout expired|timeout|sockettimeout|connecttimeout"
 )
+# SQL Server's ODBC connect timeout. Its "login" is the whole connect, not a
+# refused password (D353: a silent endpoint read "Authentication failed").
+_LOGIN_TIMEOUT = re.compile(r"\bhyt00\b|login timeout expired")
+
+#: Copy whose cause a TCP check of the endpoint can settle (:func:`observed_endpoint_copy`).
+_RECHECKABLE = ("Connection timed out", "Network unreachable", "Handshake timed out")
 
 _PG_ENDPOINT = re.compile(r'connection to server at "([^"]+)"(?:\s*\([^)]*\))?,\s*port (\d+)')
 _MYSQL_HOST = re.compile(r"server on '([^']+)'")
@@ -69,6 +77,19 @@ def _where(raw: str) -> str:
     if m:
         return f" ({m.group(1)})"
     return ""
+
+
+def _refused_copy(where: str, hint: str = "") -> str:
+    return (
+        f"Connection refused{where}: the host answered, but nothing accepts "
+        "connections on this port. Check the port number and that the database "
+        f"is listening on it.{hint}"
+    )
+
+
+def is_login_timeout(text: str) -> bool:
+    """True for a driver connect timeout spelled as a login timeout."""
+    return bool(_LOGIN_TIMEOUT.search(text))
 
 
 def tls_requirement_copy(text: str, raw: str) -> str:
@@ -109,11 +130,7 @@ def network_failure_copy(
         hint = ""
         if driver == "mysql" and re.search(r"\b5432\b", raw):
             hint = " 5432 is PostgreSQL's default port; MySQL listens on 3306 by default."
-        return (
-            f"Connection refused{where}: the host answered, but nothing accepts "
-            "connections on this port. Check the port number and that the database "
-            f"is listening on it.{hint}"
-        )
+        return _refused_copy(where, hint)
     if _UNREACHABLE.search(text):
         return (
             f"Network unreachable{where}: there is no route from this server to the "
@@ -130,4 +147,33 @@ def network_failure_copy(
             f"Connection timed out{where}: no answer before the timeout. A firewall "
             "or security group may be dropping traffic, or the host is down."
         )
+    return ""
+
+
+def recheckable(message: str) -> bool:
+    """True when ``message`` is timeout/unreachable copy a TCP check can refine."""
+    return message.startswith(_RECHECKABLE)
+
+
+def observed_endpoint_copy(outcome: str, host: str, port: int, seconds: float) -> str:
+    """Copy for what a direct TCP check of ``host:port`` saw after a timed-out probe.
+
+    The driver's text cannot tell a dropped SYN from a server that accepted the
+    connection and never spoke; a dual-stack host even mixed in the unroutable
+    address's "Network is unreachable" (D353). ``outcome`` is
+    :func:`services.wire_protocol_sniff.tcp_answer`'s verdict; ``""`` when it
+    settles nothing.
+    """
+    where = f" ({host}:{port})"
+    if outcome == "silent":
+        return (
+            f"Handshake timed out{where}: the server accepted the TCP connection but "
+            f"did not answer the database handshake within {max(1, int(seconds))} "
+            "seconds. Something other than the database may be holding this port: a "
+            "proxy, tunnel or firewall that accepts connections without forwarding "
+            "them, or another service. Check the port and whatever sits in front of "
+            "the database."
+        )
+    if outcome == "refused":
+        return _refused_copy(where)
     return ""

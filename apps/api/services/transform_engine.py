@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation, Overflow
 from collections.abc import Iterable
 from typing import Any, Callable, Final
 
-from services.pii_guard import mask as pii_mask
+from services.pii_mask_transform import mask_pii_cell
 from services.semantic_types import (
     SemanticType,
     detect_semantic_type,
@@ -2935,7 +2935,9 @@ def apply_transform(
             return None, str(exc)
 
     if transform == "mask_pii":
-        return pii_mask(text), None
+        # A JSON document is masked value by value, like a scalar column, not
+        # only where a PII pattern matches inside its text (D355).
+        return mask_pii_cell(raw, text), None
 
     semantic_transform_map = {
         "phone": SemanticType.PHONE,

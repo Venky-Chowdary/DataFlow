@@ -145,20 +145,23 @@ def _on_do_connect(dialect: Any, _record: Any, cargs: Any, cparams: Any) -> Any:
     """Open an Oracle connection whose handshake the call's deadline can end.
 
     python-oracledb bounds only the TCP connect: a host that accepted and went
-    silent held the worker until the peer closed (D281). Inside a tool call
-    the connect runs with its sockets registered for the deadline's
-    interrupt. Every other dialect (and any connect outside a tool call)
-    keeps SQLAlchemy's own path, including engine-level ``do_connect`` hooks.
+    silent held the worker until the peer closed (D281). The handshake now
+    ends at the connect timeout the other engines honour (D354: a Test gave up
+    only at the 120 s tool deadline), and inside a tool call the connect also
+    runs with its sockets registered for the deadline's interrupt. Every other
+    dialect keeps SQLAlchemy's own path, including engine-level ``do_connect``
+    hooks.
     """
     if getattr(dialect, "name", "") != "oracle":
         return None
     _pin_oracle_thin_mode(dialect)
+    from services.oracle_handshake_bound import connect_within_timeout
     from src.ai.copilot.tool_deadline import _progress, interruptible_connect
 
     if _progress.get() is None:
-        return None
+        return connect_within_timeout(dialect, cargs, cparams)
     with interruptible_connect():
-        return dialect.connect(*cargs, **cparams)
+        return connect_within_timeout(dialect, cargs, cparams)
 
 
 def _pin_oracle_thin_mode(dialect: Any) -> None:

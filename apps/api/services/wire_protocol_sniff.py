@@ -60,6 +60,38 @@ def sniff_wire(host: str, port: int, *, timeout: float = 2.0) -> str:
             pass
 
 
+def tcp_answer(host: str, port: int, *, timeout: float = 2.0, listen: float = 0.5) -> str:
+    """What ``host:port`` does with a bare TCP connection, after a timed-out probe.
+
+    ``"silent"``: it accepts the connection and sends nothing back within
+    ``listen`` seconds (and does not close it). ``"refused"``: it actively
+    refuses. ``""``: anything else (no answer to the SYN, no route, DNS, the
+    peer spoke or closed), which leaves the driver's own classification.
+    Opens one connection to the configured address and sends nothing.
+    """
+    if not host or not port:
+        return ""
+    try:
+        sock = socket.create_connection((host, int(port)), timeout=timeout)
+    except ConnectionRefusedError:
+        return "refused"
+    except (OSError, ValueError):
+        return ""
+    try:
+        sock.settimeout(listen)
+        sock.recv(1)
+        return ""
+    except socket.timeout:
+        return "silent"
+    except OSError:
+        return ""
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 # Bolt handshake: the magic preamble, then four protocol versions the client
 # accepts (5.x, 4.4, 4.3, 3.0). A Bolt server always answers four bytes (the
 # chosen version, or zeros for none) starting with two zero bytes.

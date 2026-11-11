@@ -182,6 +182,24 @@ def keep_pg_json_engine_text(sa_connection: Any) -> Any:
     Returns a callable that restores psycopg2's decoder on the connection (it
     goes back to the pool); a no-op for every other driver.
     """
+    return _swap_pg_json_decoder(sa_connection, _keep_engine_text)
+
+
+def exact_pg_json_numbers(sa_connection: Any) -> Any:
+    """Make psycopg2 decode json/jsonb cells without rounding numbers (D352).
+
+    psycopg2's ``json.loads`` turns the stored JSON number
+    ``99999999999.999999`` into the float ``100000000000.0``: the query
+    playground showed pgvector metadata (and any jsonb document) rounded while
+    the table held every digit. Documents stay parsed; a number binary64
+    cannot hold exactly stays a ``Decimal`` (``json_loads_exact``).
+    """
+    from services.value_serializer import json_loads_exact
+
+    return _swap_pg_json_decoder(sa_connection, json_loads_exact)
+
+
+def _swap_pg_json_decoder(sa_connection: Any, loads: Any) -> Any:
     try:
         dbapi = sa_connection.connection.dbapi_connection
         import psycopg2.extensions
@@ -190,8 +208,8 @@ def keep_pg_json_engine_text(sa_connection: Any) -> Any:
         return lambda: None
     if not isinstance(dbapi, psycopg2.extensions.connection):
         return lambda: None
-    psycopg2.extras.register_default_json(dbapi, loads=_keep_engine_text)
-    psycopg2.extras.register_default_jsonb(dbapi, loads=_keep_engine_text)
+    psycopg2.extras.register_default_json(dbapi, loads=loads)
+    psycopg2.extras.register_default_jsonb(dbapi, loads=loads)
 
     def _restore() -> None:
         try:

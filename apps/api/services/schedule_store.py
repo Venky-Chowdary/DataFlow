@@ -581,6 +581,15 @@ def _refuse_keep_last_that_cannot_run(payload: dict[str, Any]) -> None:
         raise DuplicatePolicyError(refusal)
 
 
+def _refuse_history_route_recipe(payload: Mapping[str, Any], sync_mode: str) -> None:
+    """Save-time twin of Execute's recipe refusal on a history route (D361)."""
+    from services.history_route_recipe import schedule_recipe_refusal
+
+    refusal = schedule_recipe_refusal(payload.get("shape_recipe"), sync_mode)
+    if refusal:
+        raise ValueError(refusal)
+
+
 def canonicalize_cadence(interval: str, cron: str) -> tuple[str, str]:
     """Land a spoken or gapped minute cadence on an anchored interval.
 
@@ -1556,6 +1565,7 @@ def create_schedule(
     from services.transform_binding import apply_schedule_binding
 
     payload = apply_schedule_binding(payload)
+    _refuse_history_route_recipe(payload, sync_mode)
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     rows = persisted_mapping_rows(payload.get("mappings"))
@@ -2015,6 +2025,18 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         )
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
+        recipe_edited = bool({"shape_recipe", *binding_keys} & set(data))
+        if enabling or recipe_edited or sync_mode != str(s.sync_mode or ""):
+            _refuse_history_route_recipe(merged, sync_mode)
+        if recipe_edited and "approved_shape_recipe_hash" not in data:
+            from services.multi_stream_plan import enabled_recipe_steps
+
+            if not enabled_recipe_steps(merged.get("shape_recipe")):
+                # The edit removed every step. A recipe with no enabled step has
+                # no identity (ShapeRecipe.recipe_hash), so the approval of the
+                # removed program goes with it; kept, every run refused "approved
+                # with a transform recipe, but no recipe was supplied" (D361).
+                merged["approved_shape_recipe_hash"] = ""
         # Checked when this write touches what the schedule reads, or arms it.
         # Bookkeeping (next_run_at, last_status) on a legacy row must not trip on
         # what that row stores: the fire path refuses it with a readable reason.

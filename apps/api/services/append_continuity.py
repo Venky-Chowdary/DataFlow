@@ -18,6 +18,9 @@ import logging
 import os
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -609,6 +612,62 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
         except Exception:  # noqa: BLE001
             logger.warning("continuity algo upgrade skipped for %s", target.table, exc_info=True)
     return violation
+
+
+#: The run whose baseline is still to be recorded, bound around the engine body
+#: so the terminal success write can record it first (see
+#: ``record_before_success_status``).
+_PENDING_BASELINE: ContextVar[dict[str, Any] | None] = ContextVar(
+    "append_continuity_pending_baseline", default=None
+)
+
+
+@contextmanager
+def baseline_before_success(request: Any, job_id: str) -> Iterator[dict[str, Any]]:
+    """Bind this run so its baseline is recorded before ``completed`` is visible.
+
+    The success status used to be stored first and the baseline after, still
+    on the job's worker: an append started in between (a schedule, an
+    operator, the next tool call) compared the destination, which already
+    held this run's rows, with the previous run's baseline and was refused as
+    a destination changed outside the pipeline. On a large table that window
+    is the whole fingerprint read.
+    """
+    pending: dict[str, Any] = {"request": request, "job_id": job_id, "done": False}
+    token = _PENDING_BASELINE.set(pending)
+    try:
+        yield pending
+    finally:
+        _PENDING_BASELINE.reset(token)
+
+
+def _record_once(pending: dict[str, Any], result: Any) -> None:
+    if pending.get("done"):
+        return
+    pending["done"] = True
+    try:
+        record_after_run(pending["request"], pending["job_id"], result)
+    except Exception:  # noqa: BLE001 - a baseline failure never fails the run
+        logger.warning(
+            "Continuity baseline not recorded for %s", pending["job_id"], exc_info=True
+        )
+
+
+@dataclass(frozen=True)
+class _Succeeded:
+    success: bool = True
+
+
+def record_before_success_status() -> None:
+    """Record the bound run's baseline; called just before the success write."""
+    pending = _PENDING_BASELINE.get()
+    if pending is not None:
+        _record_once(pending, _Succeeded())
+
+
+def record_after_run_once(pending: dict[str, Any], result: Any) -> None:
+    """After the engine body: record the baseline unless the success write did."""
+    _record_once(pending, result)
 
 
 def record_after_run(request: Any, job_id: str, result: Any) -> None:

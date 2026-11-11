@@ -1715,6 +1715,12 @@ def _run_sql_query(
                 from services.json_polarity import keep_pg_json_engine_text
 
                 restore_json = keep_pg_json_engine_text(conn)
+            else:
+                # The playground shows a parsed document, digits intact (D352:
+                # pgvector metadata 99999999999.999999 showed 100000000000.0).
+                from services.json_polarity import exact_pg_json_numbers
+
+                restore_json = exact_pg_json_numbers(conn)
 
             tz_positions: frozenset[int] = frozenset()
             if _is_oracle_connector(connector.type):

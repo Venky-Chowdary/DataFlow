@@ -318,3 +318,61 @@ def normalize_mongodb_connection_string(
 
     query = urlencode({k: v[0] if v else "" for k, v in qs.items()}, doseq=False)
     return rebuild_url(replace(authority, path=path, query=query), user=user, password=secret)
+
+
+def _seed_addresses(conn_str: str) -> set[tuple[str, int]]:
+    """``(host, port)`` seeds of a ``mongodb://`` URI; empty for SRV or a bad URI."""
+    if not str(conn_str or "").lower().startswith("mongodb://"):
+        return set()
+    try:
+        from pymongo.uri_parser import parse_uri
+
+        nodes = parse_uri(conn_str, validate=False)["nodelist"]
+    except Exception:  # noqa: BLE001 - not classifiable, keep the driver's text
+        return set()
+    return {(str(host).lower(), int(port)) for host, port in nodes}
+
+
+def replica_set_members_unreachable(client: Any, conn_str: str, exc: BaseException) -> str:
+    """Operator copy when the seed answered but its replica-set members are out of reach.
+
+    Through a tunnel or proxy the seed answers ``hello`` as a replica-set
+    member that lists the set's own (internal) member hosts; the driver drops
+    the seed, dials those members and times out on them, and its error names
+    only the member's socket failure. Test read "Connection refused" for a
+    seed that answered (D358). Members that are not seeds can only have come
+    from the seed's answer. ``directConnection=true`` is named, never added.
+    """
+    from pymongo.errors import ServerSelectionTimeoutError
+
+    if client is None or not isinstance(exc, ServerSelectionTimeoutError):
+        return ""
+    if "directconnection=true" in str(conn_str or "").lower():
+        return ""
+    seeds = _seed_addresses(conn_str)
+    try:
+        description = client.topology_description
+        set_name = description.replica_set_name
+        servers = description.server_descriptions()
+    except Exception:  # noqa: BLE001 - no topology to read
+        return ""
+    if not seeds or not set_name:
+        return ""
+    members = sorted(
+        address
+        for address, sd in servers.items()
+        if (str(address[0]).lower(), int(address[1])) not in seeds and not sd.is_server_type_known
+    )
+    if not members:
+        return ""
+    named = ", ".join(f"{host}:{port}" for host, port in members[:5])
+    cause = str(servers[members[0]].error or "").split(" (configured timeouts", 1)[0]
+    seed_text = ", ".join(f"{host}:{port}" for host, port in sorted(seeds))
+    return (
+        f"MongoDB replica set '{set_name}': the seed {seed_text} answered, but it "
+        f"advertises its members as {named}, which this service cannot reach"
+        + (f" ({cause})" if cause else "")
+        + ". For a single node behind a tunnel or proxy, add directConnection=true to "
+        "the connection string; otherwise make every member host reachable from this "
+        "service (or expose each member through the tunnel)."
+    )
