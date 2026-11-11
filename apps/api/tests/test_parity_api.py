@@ -189,7 +189,9 @@ def test_dismiss_explain_and_summary(ent, world):
     assert editor.post(f"/api/v1/jobs/{job}/parity-report/fixes/{accept['id']}/dismiss", json={}).status_code == 409
     assert "job.parity.fix_dismissed" in [e.get("action") for e in ent.audit(ws)]
 
-    explained = viewer.post(f"/api/v1/jobs/{job}/parity-report/explain")
+    # Explaining stores the explanation (audited): job.run, not a reader (review finding 11).
+    assert viewer.post(f"/api/v1/jobs/{job}/parity-report/explain").status_code == 403
+    explained = editor.post(f"/api/v1/jobs/{job}/parity-report/explain")
     assert explained.status_code == 200, explained.text
     explanation = explained.json()["explanation"]
     assert explanation["source"] == "template"
@@ -197,6 +199,7 @@ def test_dismiss_explain_and_summary(ent, world):
     assert "10.1049" not in explanation["text"]  # metadata only: no row values in the words
     again = viewer.get(f"/api/v1/jobs/{job}/parity-report").json()
     assert again["explanation"]["text"] == explanation["text"]
+    assert "job.parity.explained" in [e.get("action") for e in ent.audit(ws)]
 
     _job(ws, "clean run", reconciliation={
         "passed": True, "source_rows": 10, "target_rows": 10,

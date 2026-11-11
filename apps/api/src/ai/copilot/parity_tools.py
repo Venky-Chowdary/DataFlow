@@ -38,6 +38,8 @@ PARITY_TOOL_DEFINITIONS: list[dict] = [
 
 
 def _summary(report: dict[str, Any]) -> dict[str, Any]:
+    from services.parity_explain import model_safe_detail
+
     parity = report["parity"]
     return {
         "job_id": report["job_id"],
@@ -58,7 +60,8 @@ def _summary(report: dict[str, Any]) -> dict[str, Any]:
             {
                 "table": d["table"], "column": d["column"], "kind": d["kind"], "rows": d["rows"],
                 "cause": d["cause"]["label"], "explained": d["cause"]["explained"],
-                "detail": d["cause"]["detail"],
+                # The assistant is a model: never who accepted a difference, nor their note.
+                "detail": model_safe_detail(d["cause"]),
             }
             for d in report["differences"]
         ],

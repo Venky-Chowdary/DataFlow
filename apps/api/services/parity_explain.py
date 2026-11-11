@@ -40,6 +40,19 @@ def _timeout_seconds() -> float:
         return 20.0
 
 
+def model_safe_detail(cause: dict[str, Any]) -> str:
+    """A cause's detail as a model may read it: never who accepted it, nor their note.
+
+    An operator's acceptance is a decision by a named person; the model gets
+    the fact (``accepted_by_operator``) and the classifier's diagnosis only.
+    """
+    detail = str(cause.get("detail") or "")
+    if cause.get("code") != "accepted_by_operator":
+        return detail
+    _accepted, _sep, diagnosed = detail.partition(" Diagnosed as:")
+    return "Accepted by an approver." + (f" Diagnosed as:{diagnosed}" if diagnosed else "")
+
+
 def grounded_facts(report: dict[str, Any], *, include_values: bool) -> dict[str, Any]:
     """Everything the model may see: classifier output and catalog metadata."""
     types: dict[str, dict[str, str]] = {}
@@ -50,7 +63,7 @@ def grounded_facts(report: dict[str, Any], *, include_values: bool) -> dict[str,
         item = {
             "id": d["id"], "table": d["table"], "column": d["column"], "kind": d["kind"],
             "rows": d["rows"], "cause": d["cause"]["code"], "explained": d["cause"]["explained"],
-            "detail": d["cause"]["detail"],
+            "detail": model_safe_detail(d["cause"]),
             "destination_type": types.get(d["table"], {}).get(d["column"] or ""),
         }
         if include_values and not d["protected"] and d.get("example"):
@@ -171,6 +184,11 @@ def explain_job(job_id: str, *, actor: str) -> dict[str, Any]:
         state["fix_order"] = explanation.get("fix_order") or []
 
     _job, state, _ = update_state(job_id, store)
+    from services.parity_state import audit
+
+    audit("job.parity.explained", job=job, job_id=job_id, actor=actor,
+          details={"source": explanation["source"], "version": int(state["version"]),
+                   "fix_order": list(state.get("fix_order") or [])})
     report["explanation"] = state["explanation"]
     report["version"] = state["version"]
     order = {fid: i for i, fid in enumerate(state["fix_order"])}

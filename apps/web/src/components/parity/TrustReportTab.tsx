@@ -617,7 +617,8 @@ const IN_FLIGHT = new Set(["running", "pending", "queued"]);
 export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: TrustReportTabProps) {
   const { toast } = useToast();
   const fixGate = useWriteGate(PERMISSIONS.jobRun, "approve or dismiss a fix");
-  const explainGate = useWriteGate(PERMISSIONS.jobRead, "ask for an explanation of a trust report");
+  // Explaining stores the explanation on the job (audited), so it is job.run (review finding 11).
+  const explainGate = useWriteGate(PERMISSIONS.jobRun, "ask for an explanation of a trust report");
   // Signing attests the report: job.manage, and the API binds each sign-off role
   // to your role in the job's workspace (review finding 5).
   const signGate = useWriteGate(PERMISSIONS.jobManage, "sign off a trust report");
