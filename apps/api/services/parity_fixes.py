@@ -343,7 +343,8 @@ def _accept(diff: dict[str, Any], *, protected: bool) -> dict:
     and the keyless count, so rows a later re-read adds are another preview (409 on approve)."""
     where = f"{diff['table']}.{diff['column']}" if diff.get("column") else diff["table"]
     keys, keyless = list(diff["_keys"]), int(diff["_keyless"])
-    rows = ([f"key{'s' if len(keys) != 1 else ''} {_shown_keys(keys, protected=protected)}"] if keys else []) + (
+    shown = _shown_keys(keys, protected=protected)  # "N protected key(s)" for a protected key
+    rows = ([shown if protected else f"key{'s' if len(keys) != 1 else ''} {shown}"] if keys else []) + (
         [f"{keyless:,} row(s) without a key"] if keyless else [])
     return _fix(
         "accept", [diff],

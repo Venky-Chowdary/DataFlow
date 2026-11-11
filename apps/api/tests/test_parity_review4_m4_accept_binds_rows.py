@@ -94,7 +94,7 @@ def test_a_protected_key_never_shows_in_the_accept_preview():
            "transfer_request": {"mappings": [{"source": "ssn", "target": "ssn", "transform": "hash_pii"}]},
            "destination_summary": {"table": "t", "primary_key_columns": ["ssn"], "sync_mode": "full_refresh_overwrite"}}
     fix = next(f for f in build_parity_report(job, reread=False)["fixes"] if f["action"] == "accept")
-    assert "123-45" not in fix["preview"] and "protected" in fix["preview"]
+    assert "123-45" not in fix["preview"] and fix["preview"].endswith("— 1 protected key(s)")
 
 
 def test_the_key_digest_binds_every_key_not_only_the_first_twenty():
