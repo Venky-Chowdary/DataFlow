@@ -33,7 +33,10 @@ from services.parity_evidence import (
     TableEvidence,
     dest_engine_of,
     extract_evidence,
+    gate8_failed,
     job_is_terminal,
+    localizes,
+    mark_unaccounted,
     reread_cells,
     sync_mode_of,
 )
@@ -69,6 +72,12 @@ def _ctx(ev: TableEvidence, column: str | None, engine: str) -> CellContext:
     )
 
 
+#: Origins whose cells are the values Gate-8 itself stored for a cell it found different.
+_STORED_CELL_ORIGINS = frozenset({"sample_compare", "ladder_l5"})
+#: ``reconciliation.py`` keeps at most this many characters of a stored sample value.
+STORED_VALUE_LIMIT = 120
+
+
 def _classify(ob: Observation, ev: TableEvidence, engine: str) -> dict[str, Any] | None:
     if ob.cause is not None:
         return ob.cause
@@ -79,19 +88,58 @@ def _classify(ob: Observation, ev: TableEvidence, engine: str) -> dict[str, Any]
                 "The key census found this row changed; its cells could not be re-read.",
                 explained=False,
             )
-        return classify_value(
+        found = classify_value(
             expected=ob.expected, dest=ob.dest, ctx=_ctx(ev, ob.column, engine),
             source_raw=ob.raw, raw_known=ob.raw_known, key=ob.key,
             quarantined_keys=ev.quarantined_keys, drifted_keys=ev.drifted_keys,
         )
+        if ob.origin in _STORED_CELL_ORIGINS:
+            return _stored_cell_cause(ob, found)
+        return found
     return classify_row(
         ob.kind, key=ob.key, quarantined_keys=ev.quarantined_keys, drifted_keys=ev.drifted_keys,
         outside_this_run=ev.outside_run,
     )
 
 
-def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str) -> None:
-    """Replace the evidence for re-read keys with what both sides hold now."""
+def _stored_cell_cause(ob: Observation, found: dict[str, Any] | None) -> dict[str, Any]:
+    """A cell Gate-8 found different is never dropped as equal.
+
+    Gate-8 stores its sample values cut at :data:`STORED_VALUE_LIMIT`
+    characters (as fingerprints), so two stored cells can read equal — or
+    differ only in a way a rule explains — while the full values differ
+    elsewhere. Unless the cells were re-read, such a cell stays unexplained.
+    A diagnosis that is itself unexplained (a cut, a changed digit) stands:
+    no longer value can make it explained.
+    """
+    cut = ob.origin == "sample_compare" and any(
+        len(v or "") >= STORED_VALUE_LIMIT for v in (ob.expected, ob.dest)
+    )
+    if found is not None and not (cut and found.get("explained")):
+        return found
+    if cut:
+        detail = (
+            f"Gate-8 found this cell different, but it keeps only the first {STORED_VALUE_LIMIT} characters "
+            "of a value, so the stored values are too short to classify the difference. Re-read the row "
+            "(a single-column key and a saved route) or re-run the job."
+        )
+    else:
+        detail = (
+            "Gate-8 found this cell different, but its stored values are too short to classify the "
+            "difference (they read equal as stored). Re-read the row or re-run the job."
+        )
+    return cause(UNEXPLAINED, detail, explained=False)
+
+
+def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str, resolved: set[str]) -> None:
+    """Replace the evidence for re-read keys with what both sides hold now.
+
+    A key the evidence named that now reads equal on both sides is *not*
+    resolved by that alone: the run's difference can no longer be re-checked
+    (the source or the destination changed since), so it stays an unexplained
+    difference saying so. Only keys a recorded fix re-checked (``resolved``)
+    and an extra row that is gone from the destination are resolved.
+    """
     keyed = [o for o in ev.observations if o.key and o.cause is None]
     keys = list(dict.fromkeys(o.key for o in keyed))
     if not keys:
@@ -107,13 +155,14 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str) -> None:
     fresh: list[Observation] = []
     for key, row in cells.items():
         raw, expected, dest = row.get("raw"), row.get("expected"), row.get("dest")
+        named = {o.kind for o in keyed if o.key == key}
+        sampled = any(o.sampled and o.key == key for o in keyed)
         if raw is None and dest is None:
-            named = {o.kind for o in keyed if o.key == key}
             if named <= {"extra_in_destination"}:
                 continue  # the extra row is gone from the destination: resolved
             kind = "missing_in_destination" if "missing_in_destination" in named else "value"
             fresh.append(Observation(
-                table=ev.name, kind=kind, key=key, origin="reread",
+                table=ev.name, kind=kind, key=key, origin="reread", sampled=sampled,
                 cause=cause(
                     UNEXPLAINED,
                     f"Neither side holds this key now: the source removed it after the run, so the row the "
@@ -125,11 +174,14 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str) -> None:
             continue
         if raw is not None and dest is None:
             if not (row.get("held_out") and key in ev.quarantined_keys):
-                fresh.append(Observation(table=ev.name, kind="missing_in_destination", key=key, origin="reread"))
+                fresh.append(Observation(table=ev.name, kind="missing_in_destination", key=key,
+                                         origin="reread", sampled=sampled))
             continue
         if raw is None:
-            fresh.append(Observation(table=ev.name, kind="extra_in_destination", key=key, origin="reread"))
+            fresh.append(Observation(table=ev.name, kind="extra_in_destination", key=key,
+                                     origin="reread", sampled=sampled))
             continue
+        before = len(fresh)
         # A row the run's own Map stage would hold out has no written image: grade it raw.
         for column, want in (expected or raw).items():
             ctx = _ctx(ev, column, engine)
@@ -143,12 +195,32 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str) -> None:
             fresh.append(Observation(
                 table=ev.name, kind="value", column=column, key=key, expected=want,
                 dest=dest.get(column), raw=raw.get(column), raw_known=True, origin="reread",
-                cause=found, sampled=any(o.sampled and o.key == key for o in keyed),
+                cause=found, sampled=sampled,
             ))
+        if len(fresh) == before and key not in resolved:
+            fresh.append(_cannot_recheck(ev, key, named, sampled))
     done = set(cells)
     ev.observations = [o for o in ev.observations if not (o.key in done and o.cause is None)] + fresh
     ev.reread = {"status": "ok", "keys": len(done)}
-    ev.resolved_now = sorted(done - {o.key for o in fresh})
+    still = {o.key for o in fresh}
+    ev.resolved_now = sorted(done - still)
+    if done & resolved - still:
+        ev.resolved_by_fix = True
+
+
+def _cannot_recheck(ev: TableEvidence, key: str, named: set[str], sampled: bool) -> Observation:
+    """An evidence-named key both sides now hold equal: the run's difference cannot be re-checked."""
+    kind = next((k for k in ("missing_in_destination", "extra_in_destination") if k in named), "value")
+    return Observation(
+        table=ev.name, kind=kind, key=key, origin="reread", sampled=sampled,
+        cause=cause(
+            UNEXPLAINED,
+            f"Gate-8 named this row ({kind.replace('_', ' ')}), but both sides now hold equal values, so the "
+            "difference it saw cannot be re-checked: the source or the destination changed after the run. "
+            "Accept it with a note if that change is expected, or re-run the job.",
+            explained=False,
+        ),
+    )
 
 
 def _reread_seconds() -> float:
@@ -184,11 +256,12 @@ def _reread_reason(exc: Exception) -> str:
     return f"the source or destination could not be re-read ({type(exc).__name__})"
 
 
-def _apply_resolved(ev: TableEvidence, state: dict[str, Any]) -> None:
-    """Without a re-read, keys a re-check proved equal stay resolved."""
-    resolved = set((state.get("resolved") or {}).get(ev.name) or [])
+def _apply_resolved(ev: TableEvidence, resolved: set[str]) -> None:
+    """Without a re-read, keys a recorded fix re-check proved equal stay resolved."""
     if resolved:
+        before = len(ev.observations)
         ev.observations = [o for o in ev.observations if not (o.key in resolved and o.cause is None)]
+        ev.resolved_by_fix = ev.resolved_by_fix or len(ev.observations) < before
 
 
 # ── grouping ─────────────────────────────────────────────────────────────────
@@ -216,8 +289,9 @@ def _group(ev: TableEvidence, engine: str, acceptances: dict[str, Any]) -> list[
                 "id": did, "table": ev.name, "column": ob.column, "kind": ob.kind,
                 "rows": 0, "keys_sample": [], "cause": dict(found),
                 "example": _example(ob, protected), "protected": protected,
-                "_keys": [], "_keyless": 0, "_sampled_keys": [],
+                "_keys": [], "_keyless": 0, "_sampled_keys": [], "_localizing": False,
             }
+        diff["_localizing"] = diff["_localizing"] or localizes(ob)
         if ob.key:
             if ob.key not in diff["_keys"]:
                 diff["_keys"].append(ob.key)
@@ -504,30 +578,40 @@ def public_report(report: dict[str, Any]) -> dict[str, Any]:
     return _public(out)
 
 
-def build_parity_report(job: dict[str, Any], *, reread: bool = True, job_id: str = "") -> dict[str, Any]:
+def build_parity_report(
+    job: dict[str, Any], *, reread: bool = True, job_id: str = "",
+    recheck: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
     """The full report for one job, with internal fields (see :func:`public_report`).
 
     ``reread=False`` reads no database: the summary and the MCP tool use it.
+    ``recheck`` names, per table, the keys a fix just wrote: a re-read that
+    finds them equal resolves them (a fix's re-check round).
     """
     from services.parity_fixes import propose_fixes
 
     state = state_of(job)
     engine = dest_engine_of(job)
-    tables_ev = extract_evidence(job) if isinstance(job.get("reconciliation"), dict) and job.get(
-        "reconciliation"
-    ) else []
+    recon = job.get("reconciliation") if isinstance(job.get("reconciliation"), dict) else {}
+    tables_ev = extract_evidence(job) if recon else []
     terminal = job_is_terminal(job)
     for ev in tables_ev:
+        resolved = set((state.get("resolved") or {}).get(ev.name) or [])
+        checking = set((recheck or {}).get(ev.name) or [])
         if reread and terminal and ev is tables_ev[0]:
-            _apply_reread(job, ev, engine)
+            _apply_reread(job, ev, engine, resolved | checking)
             if ev.reread.get("status") != "ok":
-                _apply_resolved(ev, state)
+                _apply_resolved(ev, resolved)
         else:
-            _apply_resolved(ev, state)
+            _apply_resolved(ev, resolved)
     differences: list[dict[str, Any]] = []
     tables: list[dict[str, Any]] = []
     for ev in tables_ev:
         diffs = _group(ev, engine, state.get("acceptances") or {})
+        if (ev is tables_ev[0] and gate8_failed(recon) and not ev.gate8_unaccounted
+                and not ev.resolved_by_fix and not any(d["_localizing"] for d in diffs)):
+            # Gate-8 failed, and no difference that accounts for it survived classification.
+            mark_unaccounted(ev, recon)
         differences += diffs
         tables.append(_table(ev, diffs))
     confidence = _confidence(tables)

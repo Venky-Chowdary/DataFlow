@@ -407,11 +407,13 @@ def settle_fix(job_id: str, fix_id: str, *, ok: bool, result: str) -> dict[str, 
             raise ParityConflict(f"Fix {fix_id} is not being applied.")
         record.update(status="applied" if ok else "failed", applied_at=now_iso(), result=result)
         if ok and record["action"] in {"resync_keys", "widen_column"}:
-            after = build_parity_report({**job, "parity": state}, reread=True, job_id=job_id)
-            still = {k for d in after["differences"] if not d["cause"]["explained"] for k in d["_keys"]}
             table = str(record.get("_table") or "")
             keys = list(record.get("_keys") or [])
-            if table and keys:
+            # The keys this fix wrote are re-read on both sides: equal now means resolved by it.
+            after = build_parity_report({**job, "parity": state}, reread=True, job_id=job_id,
+                                        recheck={table: keys} if table and keys else None)
+            still = {k for d in after["differences"] if not d["cause"]["explained"] for k in d["_keys"]}
+            if table and keys and (after["evidence"]["reread"].get(table) or {}).get("status") == "ok":
                 resolved = set(state["resolved"].get(table) or []) | (set(keys) - still)
                 state["resolved"][table] = sorted(resolved)
             state["rounds"].append({

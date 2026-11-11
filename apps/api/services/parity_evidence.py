@@ -76,6 +76,8 @@ class TableEvidence:
     note: str = ""
     #: Gate-8 failed this run and the stored evidence names nothing that accounts for it.
     gate8_unaccounted: bool = False
+    #: A recorded fix re-check resolved keys the evidence named.
+    resolved_by_fix: bool = False
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -343,10 +345,10 @@ def _value_observations(recon: dict[str, Any], table: str) -> list[Observation]:
 #: Observations that localize a Gate-8 failure (rows, keys or columns that differ).
 #: Recipe effects, protected columns and out-of-scope rows exist by design and
 #: account for no failure.
-_LOCALIZING = frozenset({
+LOCALIZING_ORIGINS = frozenset({
     "sample_compare", "ladder_l5", "key_census", "write_witness", "write_witness_loss",
     "ladder_aggregate", "unattributed", "row_count", "quarantine", "rule_checks",
-    "dedupe_checks", "batch_undo", "protection_proof",
+    "dedupe_checks", "batch_undo", "protection_proof", "reread",
 })
 
 
@@ -682,16 +684,8 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
     ev.observations += _duplicate_observations(recon, name)
     if dest.get("partial_batch_removed") or str(dest.get("partial_batch_undo") or "") == "restored":
         _batch_undone(ev, recon, dest)
-    if gate8_failed(recon) and not any(
-        o.origin in _LOCALIZING and not _out_of_scope(o) for o in ev.observations
-    ):
-        ev.gate8_unaccounted = True
-        layers = failed_layers(recon)
-        ev.note = (
-            f"Gate-8 failed this run{' (' + ', '.join(layers) + ')' if layers else ''}, but its "
-            f"evidence names no row or column of {name} that accounts for the failure, so parity "
-            "cannot be shown. Re-run the job to localize the difference."
-        )
+    if gate8_failed(recon) and not any(localizes(o) for o in ev.observations):
+        mark_unaccounted(ev, recon)
     tables = [ev]
     streams = dest.get("streams") if dest.get("multi_stream") else None
     for row in streams if isinstance(streams, list) else []:
@@ -721,6 +715,22 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
 
 def _out_of_scope(ob: Observation) -> bool:
     return bool(ob.cause) and ob.cause.get("code") == "out_of_scope_population"
+
+
+def localizes(ob: Observation) -> bool:
+    """Whether this observation names a row or column that can account for a Gate-8 failure."""
+    return ob.origin in LOCALIZING_ORIGINS and not _out_of_scope(ob)
+
+
+def mark_unaccounted(ev: TableEvidence, recon: dict[str, Any]) -> None:
+    """Gate-8 failed and nothing left in the report accounts for it: the table is unverifiable."""
+    ev.gate8_unaccounted = True
+    layers = failed_layers(recon)
+    ev.note = (
+        f"Gate-8 failed this run{' (' + ', '.join(layers) + ')' if layers else ''}, but its "
+        f"evidence names no row or column of {ev.name} that accounts for the failure, so parity "
+        "cannot be shown. Re-run the job to localize the difference."
+    )
 
 
 def job_is_terminal(job: dict[str, Any]) -> bool:

@@ -102,17 +102,32 @@ class CellContext:
 # ── value helpers ────────────────────────────────────────────────────────────
 
 
+def text_column(ctx: CellContext | None) -> bool:
+    """A character destination column (CHAR, VARCHAR, TEXT, CLOB …): its text is the value."""
+    if ctx is None or not ctx.dest_type:
+        return False
+    from services.type_system import LOGICAL_STRING, LOGICAL_TEXT, normalize_logical_type
+
+    return normalize_logical_type(ctx.dest_type) in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
 def same_value(left: str | None, right: str | None, ctx: CellContext | None = None) -> bool:
     """Gate-8 equality for two wire cells.
 
     With the destination column type known this is the sample compare's own
-    rule (``fingerprint_for_reconcile`` under that type). Without it, only an
-    identical cell or the same exact number counts as equal — never a guess
-    that would hide a difference.
+    rule (``fingerprint_for_reconcile`` under that type) — except on a
+    character column, where the stored text *is* the value: ``TRUE`` and
+    ``true``, ``2024-01-02`` and ``2024-01-02 00:00:00`` are different text
+    there, so only identical text is equal (the fingerprint's date and boolean
+    coercions would hide the difference). Without a type, only an identical
+    cell or the same exact number counts as equal — never a guess that would
+    hide a difference.
     """
     if left == right:
         return True
     if left is None or right is None:
+        return False
+    if text_column(ctx):
         return False
     ddl = ctx.dest_type if ctx is not None else ""
     if ddl:
