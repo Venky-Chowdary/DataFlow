@@ -51,6 +51,14 @@ class TenancyWorld:
     def member(self, email: str, workspace_id: str, role: str) -> TestClient:
         return _member(self.app, self.admin, email, workspace_id, role)
 
+    def job(self, workspace_id: str, **fields: Any) -> str:
+        """A stored job owned by ``workspace_id`` (in-memory job store)."""
+        from services.mongodb_service import get_mongodb_service
+
+        return get_mongodb_service().create_transfer_job(
+            {"status": "completed", "workspace_id": workspace_id, "transfer_request": {}, **fields}
+        )
+
     def add_membership(self, email: str, workspace_id: str, role: str) -> None:
         """A second membership for an account that already exists."""
         from services import team_store
@@ -106,6 +114,7 @@ def tenancy_world(tmp_path, monkeypatch) -> Iterator[TenancyWorld]:
         audit_log,
         connector_store,
         contract_store,
+        mongodb_service,
         resource_acl,
         schedule_store,
         team_store,
@@ -125,6 +134,11 @@ def tenancy_world(tmp_path, monkeypatch) -> Iterator[TenancyWorld]:
     monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
     monkeypatch.setattr(resource_acl, "STORE_PATH", tmp_path / "resource-acls.jsonl")
     monkeypatch.setattr(transfer_plan_store, "STORE_PATH", tmp_path / "transfer_plans.json")
+    # One in-memory job store per test: jobs seeded here are the jobs the
+    # routes (and every store that follows a job to its workspace) read.
+    jobs = mongodb_service.MemoryMongoDBService()
+    jobs.connect()
+    monkeypatch.setattr(mongodb_service, "_mongodb_service", jobs)
     contract_store.reset_contract_store()
     reset_auth_rate_limits()
 

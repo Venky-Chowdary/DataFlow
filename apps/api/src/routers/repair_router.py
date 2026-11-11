@@ -80,6 +80,14 @@ async def decide_repair(proposal_id: str, body: DecideBody, request: Request) ->
     from services.agentic_repair import PARITY_SOURCE, apply_actions_with_report, decide_proposal, get_proposal
 
     found = get_proposal(proposal_id)
+    if found is not None:
+        # Deciding changes the proposal: an editor/admin role in its own
+        # workspace, not merely a credential that may see it (audit H-3).
+        from services.workspace_access import assert_resource_workspace
+
+        assert_resource_workspace(
+            request, found.workspace_id, write=True, not_found_detail="Proposal not found"
+        )
     if found is not None and found.source == PARITY_SOURCE:
         # One workflow, one entry point per kind: a parity fix is applied through
         # the transfer path and re-checked on the job's Trust Report.
