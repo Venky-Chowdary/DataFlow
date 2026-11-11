@@ -79,7 +79,7 @@ describe("real backend payloads (static)", () => {
     assert.ok(reportResynced.fixes.some((f) => f.id.endsWith("-2") && f.status === "applied"));
     assert.match(t, /Failed/);
     // The re-sync runs as its own job (review finding 10); its failure is that job's.
-    assert.match(t, /Approved by ops@example\.com · [^.]+\. re-sync job resync-child-1 failed: destination locked/);
+    assert.match(t, /Approved by ops@example\.com · [^.]+\. Re-sync job resync-child-1 failed: see the server log for the details\./);
     assert.match(t, /Note: “first try”/);
     assert.match(t, /Re-synced 4 key\(s\) through job resync-child-2 \(upsert on id; 4 row\(s\) written\)\. Note: “triggers removed”/);
     assert.match(t, /Dismissed by owner@example\.com/);

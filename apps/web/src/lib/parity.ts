@@ -108,6 +108,8 @@ export interface ParityFix {
   title: string;
   detail: string;
   preview: string | null;
+  /** SHA-256 of the preview; an approve sends it back so only what was reviewed runs. */
+  preview_sha256?: string | null;
   applicable: boolean;
   not_applicable_reason: string | null;
   status: ParityFixStatus;

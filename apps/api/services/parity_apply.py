@@ -66,8 +66,16 @@ class _SignedMeanwhile(ParityConflict):
     """The report was signed before this fix's outcome arrived."""
 
 
-class RerunRefused(ParityConflict):
+class FixRefused(ParityConflict):
+    """The write was refused before anything was written: the claim is released."""
+
+
+class RerunRefused(FixRefused):
     """The re-run route refused (or never started) the re-run: nothing was written."""
+
+
+class PreviewChanged(FixRefused):
+    """What the fix would run now is not what the person reviewed."""
 
 
 # Row values a database error may quote: never into a fix result, the signed pack or the audit.
@@ -160,7 +168,7 @@ def _repair_decision(job_id: str, fix: dict[str, Any], *, approve: bool, actor: 
 
 def approve_fix(
     job_id: str, fix_id: str, *, actor: str, note: str = "", expected_version: int | None = None,
-    start_rerun: Callable[[], str] | None = None,
+    start_rerun: Callable[[], str] | None = None, preview_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Approve one fix and apply it; returns the new report.
 
@@ -177,6 +185,10 @@ def approve_fix(
     job, report, fix = _decision_report(job_id, fix_id, expected_version)
     if not fix["applicable"]:
         raise ParityConflict(str(fix.get("not_applicable_reason") or "This fix cannot be applied."))
+    if preview_sha256 and preview_sha256 != fix.get("preview_sha256"):
+        # The person approved a preview (a DDL, a key list) that is not what would run now.
+        raise ParityConflict("This fix changed since you reviewed it (its preview is different); "
+                             "reload the report and review it again.")
     if fix["action"] == "rerun" and start_rerun is None:
         raise ParityConflict("A re-run can only be started from the API.")
     version = int(report["version"])
@@ -213,7 +225,7 @@ def approve_fix(
         else:
             started = start_rerun() if start_rerun is not None else ""
             ok, result = True, f"Started re-run {started}; it gets its own parity report when it completes."
-    except RerunRefused as exc:
+    except FixRefused as exc:
         _release(job, job_id, fix_id, actor=actor, reason=scrub_text(exc))
         raise
     except Exception as exc:  # noqa: BLE001 - a failed write is recorded on the fix, never hidden
@@ -478,7 +490,13 @@ def _widen_apply(job: dict[str, Any], fix: dict[str, Any]) -> str:
     """Execute the widen the fix previewed: the same helper, the same inputs, no dry run."""
     from services.parity_fixes import widen_statements
 
-    ran = widen_statements(job, str(fix["_table"]), str(fix["_column"]), str(fix["_new_type"]), dry_run=False)
+    args = (job, str(fix["_table"]), str(fix["_column"]), str(fix["_new_type"]))
+    # Bound to what was approved: the statements the destination needs now must be the
+    # previewed ones, or nothing runs (the claim is released and the person reviews again).
+    if "; ".join(widen_statements(*args, dry_run=True)) != str(fix.get("preview") or ""):
+        raise PreviewChanged("The DDL this widen would run now differs from the DDL you approved; "
+                             "reload the report and review it again. Nothing was changed.")
+    ran = widen_statements(*args, dry_run=False)
     if not ran:
         raise RuntimeError("the destination column was not changed: it is already at least as wide")
     return "Ran: " + "; ".join(ran)
@@ -577,6 +595,6 @@ def dismiss_fix(
 
 
 __all__ = [
-    "ParityError", "SIGNED_IS_FINAL", "approve_fix", "dismiss_fix", "not_signed", "settle_fix",
+    "FixRefused", "ParityError", "PreviewChanged", "SIGNED_IS_FINAL", "approve_fix", "dismiss_fix", "not_signed", "settle_fix",
     "settle_pending", "summarized",
 ]

@@ -6032,10 +6032,17 @@ function decisionBody(note: string | undefined, expectedVersion: number | undefi
 }
 
 /** Approve a proposed fix: the API applies it, re-checks and returns the new report. */
-export async function approveParityFix(jobId: string, fixId: string, note?: string, expectedVersion?: number): Promise<ParityReport> {
+export async function approveParityFix(
+  jobId: string,
+  fixId: string,
+  note?: string,
+  expectedVersion?: number,
+  /** The preview_sha256 of the fix the person reviewed: the API refuses (409) to run anything else. */
+  previewSha256?: string | null,
+): Promise<ParityReport> {
   const res = await apiFetch(parityReportUrl(jobId, `/fixes/${encodeURIComponent(fixId)}/approve`), {
     method: "POST",
-    body: decisionBody(note, expectedVersion),
+    body: decisionBody(note, expectedVersion, previewSha256 ? { preview_sha256: previewSha256 } : {}),
     timeoutMs: 300_000,
   });
   return parityReportFrom(res, "Could not apply this fix.");

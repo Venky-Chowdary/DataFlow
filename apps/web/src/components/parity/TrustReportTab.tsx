@@ -843,7 +843,12 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
         void run({ kind: "explain" }, "explain", () => explainParityReport(jobId), { title: "Explanation updated" })
       }
       onApprove={(fixId, note) =>
-        void run({ kind: "approve", id: fixId }, "fix", () => approveParityFix(jobId, fixId, note, report.version), (result) =>
+        void run(
+          { kind: "approve", id: fixId },
+          "fix",
+          () =>
+            approveParityFix(jobId, fixId, note, report.version, report.fixes.find((f) => f.id === fixId)?.preview_sha256),
+          (result) =>
           // The toast follows what came back for the fix: a 200 can carry a failed fix.
           approveOutcome(result || null, fixId),
         )

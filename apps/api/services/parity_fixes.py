@@ -67,11 +67,16 @@ def _fix(action: str, diffs: list[dict[str, Any]], *, title: str, detail: str,
     ids = [d["id"] for d in diffs]
     return {
         "id": _fix_id(action, ids), "difference_ids": ids, "action": action,
-        "title": title, "detail": detail, "preview": preview,
+        "title": title, "detail": detail, "preview": preview, "preview_sha256": preview_digest(preview),
         "applicable": reason is None, "not_applicable_reason": reason,
         "status": "proposed", "approved_by": None, "applied_at": None, "result": None,
         **{f"_{k}": v for k, v in internal.items()},
     }
+
+
+def preview_digest(preview: str | None) -> str | None:
+    """SHA-256 of what a person reviewed (the DDL, the key list): an approve may name it."""
+    return hashlib.sha256(preview.encode("utf-8")).hexdigest() if preview else None
 
 
 def _keys_preview(table: str, key_col: str, keys: list[str], *, protected: bool = False) -> str:

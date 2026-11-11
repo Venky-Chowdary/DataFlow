@@ -313,6 +313,7 @@ describe("parity API client", () => {
     await signParityReport("job-31", "data_owner", "Checked totals.");
     // The version the person decided on travels with the decision (409 when it moved on).
     await approveParityFix("job-31", "fix-widen", "go", 7);
+    await approveParityFix("job-31", "fix-widen", "go", 7, "ab12");
     await dismissParityFix("job-31", "fix-resync", undefined, 7);
     await signParityReport("job-31", "compliance", undefined, 7);
     assert.deepEqual(
@@ -323,6 +324,7 @@ describe("parity API client", () => {
         ["POST", "/jobs/job-31/parity-report/fixes/fix-resync/dismiss", "{}"],
         ["POST", "/jobs/job-31/parity-report/signoff", '{"role":"data_owner","note":"Checked totals."}'],
         ["POST", "/jobs/job-31/parity-report/fixes/fix-widen/approve", '{"note":"go","expected_version":7}'],
+        ["POST", "/jobs/job-31/parity-report/fixes/fix-widen/approve", '{"preview_sha256":"ab12","note":"go","expected_version":7}'],
         ["POST", "/jobs/job-31/parity-report/fixes/fix-resync/dismiss", '{"expected_version":7}'],
         ["POST", "/jobs/job-31/parity-report/signoff", '{"role":"compliance","expected_version":7}'],
       ],

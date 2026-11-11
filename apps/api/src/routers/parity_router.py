@@ -33,6 +33,8 @@ class NoteBody(BaseModel):
     note: str = Field(default="", max_length=500)
     # The report version the person decided on; another version is a 409.
     expected_version: int | None = Field(default=None, ge=0)
+    # The fix's preview_sha256 the person reviewed (approve only); another preview is a 409.
+    preview_sha256: str | None = Field(default=None, max_length=64)
 
 
 class SignoffBody(BaseModel):
@@ -154,6 +156,7 @@ async def approve_parity_fix(
             approve_fix, job_id, fix_id, actor=actor_from_request(request),
             note=(body.note if body else ""), start_rerun=start_rerun,
             expected_version=(body.expected_version if body else None),
+            preview_sha256=(body.preview_sha256 if body else None),
         )
     except ParityError as exc:
         raise _http(exc) from exc
