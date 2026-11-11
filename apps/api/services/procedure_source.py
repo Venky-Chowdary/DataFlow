@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from services.brand_env import getenv_brand
 from services.value_serializer import (
     SQL_NULL_SENTINEL,
     cell_to_string,
@@ -1701,7 +1702,7 @@ def _open_callable_result(cfg: Mapping[str, Any], spec: CallableSpec, *, peek: b
 
     engine = _engine(dict(cfg))
     timeout = PEEK_TIMEOUT_S if peek else int(
-        os.environ.get("DATAFLOW_PROCEDURE_TIMEOUT_S") or DEFAULT_TIMEOUT_S
+        getenv_brand("DATAFLOW_PROCEDURE_TIMEOUT_S") or DEFAULT_TIMEOUT_S
     )
     conn = engine.connect()
     try:

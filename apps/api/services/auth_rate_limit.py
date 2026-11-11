@@ -8,16 +8,16 @@ exponential backoff on both dimensions.
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 from dataclasses import dataclass
 
+from services.brand_env import getenv_brand
 from services.mcp_rate_limit import TokenBucketStore
 
 
 def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name, "").strip()
+    raw = (getenv_brand(name, "") or "").strip()
     if not raw:
         return default
     try:
@@ -27,7 +27,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name, "").strip()
+    raw = (getenv_brand(name, "") or "").strip()
     if not raw:
         return default
     try:
@@ -50,7 +50,7 @@ _LOCKOUTS: dict[str, _LockoutState] = {}
 
 
 def auth_rate_limit_enabled() -> bool:
-    raw = os.getenv("DATAFLOW_AUTH_RATE_LIMIT", "1").strip().lower()
+    raw = getenv_brand("DATAFLOW_AUTH_RATE_LIMIT", "1").strip().lower()
     return raw not in {"0", "false", "off", "no"}
 
 
@@ -62,7 +62,7 @@ def public_rate_limit_enabled() -> bool:
     test IP and a health fleet are not throttled by a code deploy alone.
     ``/health`` is excluded even when the limiter is on.
     """
-    raw = os.getenv("DATAFLOW_PUBLIC_RATE_LIMIT", "").strip().lower()
+    raw = getenv_brand("DATAFLOW_PUBLIC_RATE_LIMIT", "").strip().lower()
     return raw in {"1", "true", "on", "yes"}
 
 

@@ -38,6 +38,18 @@ def getenv_brand(name: str, default: Optional[str] = None) -> Optional[str]:
     return default
 
 
+def setenv_brand(name: str, value: str) -> None:
+    """Force a flag for this process under both names.
+
+    For an entrypoint that *is* a role (``python -m src.worker_main``): setting
+    only ``DATAFLOW_X`` loses to a ``DATAWRAP_X`` left in a shared environment
+    block, because the reader prefers the new name.
+    """
+    suffix = _suffix(name)
+    os.environ[f"DATAWRAP_{suffix}"] = value
+    os.environ[f"DATAFLOW_{suffix}"] = value
+
+
 def getenv_brand_str(name: str, default: str = "") -> str:
     """String helper — never returns None."""
     val = getenv_brand(name, default)

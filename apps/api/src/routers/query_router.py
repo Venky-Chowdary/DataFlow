@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from services import connector_store
 import services.query_extract as services_query_extract
+from services.brand_env import getenv_brand
 from services.connector_telemetry import connector_operation, driver_family
 from services.log_redaction import redact_log_text
 from services.safe_errors import public_error, safe_http_exception, user_query_error
@@ -1491,9 +1492,8 @@ def _apply_statement_timeout(conn: Any, db_type: str, *, seconds_override: float
     The deadline frees the caller; this frees the database and the worker, which
     would otherwise keep executing for nobody. Best-effort per dialect.
     """
-    import os
 
-    raw = os.environ.get("DATAFLOW_QUERY_STATEMENT_TIMEOUT_SECONDS", "").strip()
+    raw = getenv_brand("DATAFLOW_QUERY_STATEMENT_TIMEOUT_SECONDS", "").strip()
     try:
         seconds = float(raw) if raw else DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS
     except ValueError:

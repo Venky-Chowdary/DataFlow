@@ -403,7 +403,7 @@ def _build_commit() -> str:
     checkout's HEAD. "unknown" rather than a hardcoded fake.
     """
     env = (
-        os.getenv("DATAFLOW_COMMIT_SHA")
+        getenv_brand("DATAFLOW_COMMIT_SHA")
         or os.getenv("RAILWAY_GIT_COMMIT_SHA")
         or os.getenv("SOURCE_COMMIT")
         or ""
@@ -657,7 +657,7 @@ async def _add_timing_header_response(request: Request, call_next):
             "Content-Security-Policy",
             "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
         )
-    hsts_flag = os.getenv("DATAFLOW_HSTS", "").strip().lower()
+    hsts_flag = getenv_brand("DATAFLOW_HSTS", "").strip().lower()
     forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
     https = request.url.scheme == "https" or forwarded == "https"
     if hsts_flag in {"1", "true", "on", "yes"}:
