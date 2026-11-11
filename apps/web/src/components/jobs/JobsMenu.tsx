@@ -1,4 +1,5 @@
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 export interface JobsMenuItem {
   id: string;
@@ -45,8 +46,9 @@ const MENU_GAP = 4;
 
 /**
  * Button + popup menu, after the Transfer Studio canvas "More actions" menu
- * (`df2-canvas-menu`). The popup is fixed-positioned from the trigger so a
- * scrolling grid never clips it. Arrow keys move, Escape returns focus.
+ * (`df2-canvas-menu`). The popup mounts on <body>, fixed-positioned from the
+ * trigger, so a scrolling grid never clips or covers it. Arrow keys move,
+ * Escape returns focus.
  */
 export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, triggerTabIndex, title, text, trailingIcon }: JobsMenuProps) {
   const [open, setOpen] = useState(false);
@@ -157,7 +159,7 @@ export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, trigg
         {iconOnly ? null : text ?? label}
         {trailingIcon}
       </button>
-      {open && (
+      {open && createPortal(
         <div
           ref={menuRef}
           id={menuId}
@@ -198,7 +200,10 @@ export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, trigg
               <div key={`group-${index}`} role="none" className="df2-jobs-menu-group">{buttons}</div>
             );
           })}
-        </div>
+        </div>,
+        // On <body>: a pinned grid column is its own stacking context and
+        // would paint later rows' cells over a popup left inside it.
+        document.body,
       )}
     </span>
   );

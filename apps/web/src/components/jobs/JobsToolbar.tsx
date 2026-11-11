@@ -70,7 +70,7 @@ export function JobsToolbar({
       className="df2-jobs-toolbar"
       searchValue={search}
       onSearchChange={onSearch}
-      searchPlaceholder="Search jobs, engines or IDs…"
+      searchPlaceholder="Search jobs or IDs…"
       filters={
         <FilterBar variant="inline" ariaLabel="Filter jobs by status">
           <FilterTabs<JobListStatus>
