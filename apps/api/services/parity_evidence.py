@@ -253,10 +253,25 @@ def _drift(recon: dict[str, Any], key_cols: list[str]) -> tuple[set[str], int, l
 
 
 def _check_kind(recon: dict[str, Any]) -> str:
-    from services.job_trust import has_full_checksum_proof
+    """How the run compared values, as the proof classifier files its Gate-8 report.
+
+    One authority with the signed proof pack and the Gate-8 tile
+    (:func:`services.signed_proof_pack.classify_post_write_assurance` and the
+    :mod:`services.reconcile_coverage` scopes): a pre-write preview compared
+    nothing after the write; a writer acknowledgement or a CDC count scope is a
+    count, not a value comparison, whatever sample it carries.
+    """
+    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT
+    from services.signed_proof_pack import classify_post_write_assurance
 
     if not recon:
         return "none"
+    claim = str(classify_post_write_assurance(recon).get("claim_level") or "none")
+    if claim == "pre_write_only":
+        return "none"
+    if claim == "full_checksum":
+        return "full_checksum"
+    counts_only = claim == "writer_ack" or str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT
     ladder = _dict(recon.get("verification_ladder"))
     l5 = _dict(_dict(ladder.get("layers")).get("L5"))
     proof = _dict(recon.get("transform_applied"))
@@ -265,11 +280,9 @@ def _check_kind(recon: dict[str, Any]) -> str:
         or (bool(l5) and not _dict(l5.get("details")).get("skipped"))
         or (proof.get("status") in {"verified", "failed"} and "exact" in str(proof.get("compare_mode") or ""))
     )
-    if has_full_checksum_proof(recon):
-        return "full_checksum"
-    if keyed_population:
+    if keyed_population and not counts_only:
         return "key_diff"
-    if _int(_dict(recon.get("sample_compare")).get("rows_compared")):
+    if not counts_only and _int(_dict(recon.get("sample_compare")).get("rows_compared")):
         return "sampled"
     if _int(recon.get("source_rows")) is not None and _int(recon.get("target_rows")) is not None:
         return "count_only"
