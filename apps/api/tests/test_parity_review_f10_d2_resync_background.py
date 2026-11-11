@@ -137,3 +137,26 @@ def test_the_repair_decide_route_refuses_a_parity_proposal(tmp_path, monkeypatch
     with pytest.raises(HTTPException) as err:
         asyncio.run(decide_repair(proposal.id, DecideBody(approve=True), _Req()))
     assert err.value.status_code == 409 and "Trust Report" in str(err.value.detail)
+
+
+def test_a_resync_that_cannot_start_is_failed_and_recorded(store, captured, tmp_path, monkeypatch):  # noqa: F811
+    from services.agentic_repair import list_proposals
+    from services.parity_fixes import approve_fix
+    from services.parity_report import build_parity_report
+    from src.transfer.engine import UniversalTransferEngine
+
+    src, dst = _corrupting_route(tmp_path)
+    job_id = _run(store, _request(src, dst))
+    report = build_parity_report(store.get_job(job_id), job_id=job_id)
+    resync = next(f for f in report["fixes"] if f["action"] == "resync_keys")
+
+    def refuse(_self, _req):
+        raise RuntimeError("job store unavailable")
+
+    monkeypatch.setattr(UniversalTransferEngine, "_create_pending_job", refuse)
+    after = approve_fix(job_id, resync["id"], actor="ops@example.com", note="go")
+    fix = next(f for f in after["fixes"] if f["id"] == resync["id"])
+    assert fix["status"] == "failed" and "could not start: job store unavailable" in fix["result"]
+    assert not captured
+    failed = [p for p in list_proposals(job_id=job_id) if p.source == "parity"]
+    assert [p.status for p in failed] == ["failed"] and failed[0].apply_result["error"] == "job store unavailable"
