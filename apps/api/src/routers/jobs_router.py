@@ -36,10 +36,14 @@ async def list_jobs(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=1_000_000),
-    status: Literal["all", "running", "completed", "failed"] = Query(default="all"),
+    status: Literal["all", "running", "completed", "failed", "attention"] = Query(default="all"),
     search: str = Query(default="", max_length=120),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
+    source_type: str = Query(default="", max_length=120),
+    destination_type: str = Query(default="", max_length=120),
+    sync_mode: str = Query(default="", max_length=120),
+    verification: Literal["", "failed", "passed", "none"] = Query(default=""),
 ):
     return await list_transfer_jobs(
         request,
@@ -50,6 +54,10 @@ async def list_jobs(
         search=search,
         date_from=date_from,
         date_to=date_to,
+        source_type=source_type,
+        destination_type=destination_type,
+        sync_mode=sync_mode,
+        verification=verification,
     )
 
 

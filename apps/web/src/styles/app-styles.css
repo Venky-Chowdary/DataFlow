@@ -911,11 +911,13 @@ html:has(.df2-app) #root {
   }
 }
 
-/* Drawers / modals full-bleed on phone */
+/* Drawers / modals full-bleed on phone. A drawer mounted inside the shell
+   (Jobs detail) keeps its own header and body layout: only the panel and any
+   in-page drawer element go full width, never the parts inside a panel. */
 @media (max-width: 639px) {
   .df2-app .df2-drawer,
   .df2-app .df2-drawer-panel,
-  .df2-app [class*="df2-drawer"] {
+  .df2-app [class*="df2-drawer"]:not(.df2-drawer *) {
     width: 100% !important;
     max-width: 100vw !important;
   }

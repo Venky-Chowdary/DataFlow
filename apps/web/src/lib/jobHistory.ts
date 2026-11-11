@@ -21,15 +21,30 @@ export interface JobHistory {
   filteredTotal: number;
   /** Per-status counts over that same whole history. */
   statusCounts: JobStatusCounts;
+  /**
+   * Failed runs plus runs whose Gate-8 verification failed, over the whole
+   * history. Absent when the server did not count it — never estimated.
+   */
+  attentionCount?: number;
 }
+
+/** Server-side list status filter; "attention" is failed or failed verification. */
+export type JobListStatus = "all" | "running" | "completed" | "failed" | "attention";
+
+/** Gate-8 verdict filter: failed, recorded and not failed, or no verdict recorded. */
+export type JobVerificationFilter = "failed" | "passed" | "none";
 
 export interface JobHistoryQuery {
   limit: number;
   offset: number;
-  status: "all" | "running" | "completed" | "failed";
+  status: JobListStatus;
   search?: string;
   dateFrom?: string;
   dateTo?: string;
+  sourceType?: string;
+  destinationType?: string;
+  syncMode?: string;
+  verification?: JobVerificationFilter;
 }
 
 export interface JobFilterCounts {
@@ -50,6 +65,7 @@ export function jobHistoryFromResponse(data: {
   total?: number;
   filtered_total?: number;
   status_counts?: JobStatusCounts;
+  attention_count?: number;
 }): JobHistory {
   const jobs = data.jobs || [];
   const counted = Number(data.total || 0);
@@ -61,6 +77,9 @@ export function jobHistoryFromResponse(data: {
     total: counted || jobs.length,
     filteredTotal: Number.isFinite(Number(data.filtered_total)) ? Number(data.filtered_total) : counted || jobs.length,
     statusCounts,
+    ...(Number.isFinite(Number(data.attention_count)) && data.attention_count != null
+      ? { attentionCount: Number(data.attention_count) }
+      : {}),
   };
 }
 

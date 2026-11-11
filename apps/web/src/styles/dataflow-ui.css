@@ -6481,7 +6481,8 @@ html,
   }
 }
 
-/* Tracking IDs — Jobs / Pipelines / Theater / Pilot handoff */
+/* Tracking IDs — Jobs / Pipelines / Theater / Pilot handoff. Theme tokens
+   only: raw light hex made the chip a white block in dark mode. */
 .df2-copy-id {
   display: inline-flex;
   align-items: center;
@@ -6489,11 +6490,11 @@ html,
   max-width: 100%;
   min-width: 0;
   padding: 3px 6px 3px 8px;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  background: #f8fafc;
+  border-radius: var(--df-radius-md, 8px);
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
   font-size: 11px;
-  color: #64748b;
+  color: var(--df-text-secondary);
   vertical-align: middle;
 }
 .df2-copy-id-label {
@@ -6507,7 +6508,7 @@ html,
   font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11.5px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6519,19 +6520,18 @@ html,
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
-  border: none;
-  background: #fff;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-sm, 6px);
   padding: 2px 7px;
   font-size: var(--df-fs-xs);
   font-weight: 700;
-  color: #1d4ed8;
+  color: var(--df-info-text);
   cursor: pointer;
 }
 .df2-copy-id-btn:hover {
-  background: #eff6ff;
-  border-color: #93c5fd;
+  background: var(--df-info-bg);
+  border-color: var(--df-info-border);
 }
 .df2-copy-id.is-compact .df2-copy-id-value {
   max-width: 9.5rem;
