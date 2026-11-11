@@ -65,12 +65,13 @@ describe("Reversibility tab (static)", () => {
     const orders = { ...report, tables: [{ ...report.tables[0], verdict: "partly_reversible" as const }] };
     const html = view(orders);
     const t = text(html);
-    assert.match(t, /status TEXT Fits sample Normalised/);
+    // Contract 11.1.2: a fit on a sample is "Fits sample only" (Execute blocks it until the whole table is checked).
+    assert.match(t, /status TEXT Fits sample only Normalised/);
     assert.match(t, /Fits the 25 observed row\(s\); not proven for rows not sampled\./);
     // Said once: the API's reason carries the data check, so the view does not repeat it.
     assert.equal(t.split("not proven for rows not sampled").length - 1, 1);
     assert.doesNotMatch(html, /df2-badge-live">Fits sample/);
-    assert.match(t, /Conditional columns were checked against 25 observed rows from the plan sample\. A sample never proves the full table\./);
+    assert.match(t, /Conditional columns were checked against 25 observed rows from the plan sample\. A sample never proves the full table: a conditional column that fits only the sample is blocked at Execute unless the whole table is checked\./);
   });
 
   it("the switch off: the gate is not required; on and not reversible: it blocks Execute", () => {

@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { ApiError } from "./api.js";
 import {
+  acknowledgeExitPii,
   declareExitSystem,
   deleteExitSystem,
   downloadExitEvidenceMarkdown,
@@ -23,6 +24,7 @@ import {
   startExitRehearsal,
   updateExitSystem,
   verifyExitEvidence,
+  withdrawExitPii,
 } from "./exitApi.js";
 import { realBoard, realPack, realPlanReversibility, realRunning, realSigned, realVerify } from "../components/exit/realExitPayloads.js";
 
@@ -180,5 +182,23 @@ describe("reversibility client", () => {
     assert.equal(calls[0].method, "PATCH");
     assert.equal(path(calls[0].url), "/transfer/plans/plan-1");
     assert.equal(calls[0].body, '{"policies":{"require_reversibility":true}}');
+  });
+});
+
+describe("PII review client (contract 11.1.7)", () => {
+  it("acknowledges with the trimmed reason and the version, and withdraws", async () => {
+    const calls = mockFetch(() => json({ id: "exs_1", pii_acknowledgement: null }));
+    await acknowledgeExitPii("exs/1", "  DPA clause 9 allows the extract  ", 3);
+    await withdrawExitPii("exs/1");
+    assert.deepEqual(calls.map((c) => [c.method, path(c.url)]), [
+      ["POST", "/exit/systems/exs%2F1/pii-acknowledgement"],
+      ["DELETE", "/exit/systems/exs%2F1/pii-acknowledgement"],
+    ]);
+    assert.deepEqual(JSON.parse(calls[0].body), { reason: "DPA clause 9 allows the extract", expected_version: 3 });
+  });
+
+  it("keeps the API's refusal (a reason too short is a 422)", async () => {
+    mockFetch(() => json({ detail: "acknowledgment_reason is required (at least 8 characters)" }, 422));
+    await assert.rejects(acknowledgeExitPii("exs_1", "ok"), (err: unknown) => err instanceof ApiError && err.status === 422);
   });
 });

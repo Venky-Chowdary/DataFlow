@@ -15,11 +15,13 @@ import { humanize, type ParityApproval, type ParitySignoff, type ParityTone } fr
 /* ── Contract types ─────────────────────────────────────────── */
 
 export type Criticality = "critical" | "important" | "standard";
-export type ReadinessState = "never_rehearsed" | "running" | "proven" | "not_proven" | "incomplete" | "failed";
-export type RehearsalVerdict = "running" | "proven" | "not_proven" | "incomplete" | "failed";
+export type ReadinessState =
+  | "never_rehearsed" | "running" | "proven" | "not_proven" | "incomplete" | "failed" | "needs_pii_review";
+/** `needs_pii_review`: the PII gate held an extract (contract 11.1.5); a PII acknowledgement is the way on. */
+export type RehearsalVerdict = "running" | "proven" | "not_proven" | "incomplete" | "failed" | "needs_pii_review";
 export type RehearsalStage = "inventory" | "extract" | "verify" | "seal" | "sign";
 export type StageStatus = "done" | "running" | "pending" | "failed";
-export type TableStatus = "pending" | "running" | "proven" | "not_proven" | "incomplete" | "failed";
+export type TableStatus = "pending" | "running" | "proven" | "not_proven" | "incomplete" | "failed" | "needs_pii_review";
 export type ValueMethod = "full_checksum" | "key_diff" | "population_digest" | "sampled" | "count_only" | "none";
 export type AnchorStatus = "anchored" | "not_anchored" | "failed";
 
@@ -81,11 +83,24 @@ export interface ExitSystem {
   extract_format: "jsonl" | "csv";
   required_roles: string[];
   running_rehearsal_id?: string | null;
+  /**
+   * Who acknowledged the PII this system's tables hold, when and why (contract 11.1.6). `current` is false once
+   * the system's definition changed: the next rehearsal's extracts are held again until someone acknowledges anew.
+   */
+  pii_acknowledgement?: PiiAcknowledgement | null;
   created_at: string;
   created_by: string;
   updated_at: string;
   updated_by: string;
   readiness: SystemReadiness;
+}
+
+export interface PiiAcknowledgement {
+  actor: string;
+  reason: string;
+  at: string;
+  /** Only on the system: the acknowledgement still applies to its definition. */
+  current?: boolean;
 }
 
 /** The writable fields of an ExitSystem (POST body; PATCH takes any subset). */
@@ -251,8 +266,10 @@ export interface ExitRehearsal {
   finished_at: string | null;
   verdict: RehearsalVerdict;
   verdict_reason: string;
-  /** SHA-256 of what was rehearsed: source connector, tables and keys, window (contract 10.4). */
+  /** SHA-256 of what was rehearsed: source connection, tables and keys, window, extract format (contract 11.1.11). */
   definition_sha256: string;
+  /** The PII acknowledgement this rehearsal's extracts carried (in its signed pack), or null. */
+  pii_acknowledgement?: PiiAcknowledgement | null;
   timeline: Array<{ stage: RehearsalStage; status: StageStatus; started_at: string | null; finished_at: string | null; seconds: number | null }>;
   completeness: {
     tables_declared: number;
@@ -261,6 +278,8 @@ export interface ExitRehearsal {
     tables_not_proven: number;
     tables_incomplete: number;
     tables_failed: number;
+    /** Tables the PII gate held (contract 11.1.5); absent on rehearsals before it. */
+    tables_needs_pii_review?: number;
     /** A running rehearsal carries an empty object until it is verified. */
     value_methods: Partial<Record<ValueMethod, number>>;
     statement: string;
@@ -380,6 +399,7 @@ const STATES: Record<ReadinessState, { label: string; tone: ExitTone }> = {
   failed: { label: "Failed", tone: "danger" },
   running: { label: "Running", tone: "run" },
   never_rehearsed: { label: "Never rehearsed", tone: "muted" },
+  needs_pii_review: { label: "Needs PII review", tone: "warn" },
 };
 
 /**
@@ -421,6 +441,7 @@ const TABLE_STATUS: Record<TableStatus, { label: string; tone: ExitTone }> = {
   failed: { label: "Failed", tone: "danger" },
   running: { label: "Running", tone: "run" },
   pending: { label: "Pending", tone: "muted" },
+  needs_pii_review: { label: "Needs PII review", tone: "warn" },
 };
 
 export function tableStatusPresentation(status: string): { label: string; tone: ExitTone } {
@@ -804,7 +825,8 @@ export function boardFilterMatches(row: Pick<ExitBoardRow, "state" | "overdue"> 
   if (filter === "attention" && row.stale && row.state !== "running") return true;
   if (filter === "overdue") return row.overdue;
   if (filter === "never") return row.state === "never_rehearsed";
-  return row.state === "not_proven" || row.state === "incomplete" || row.state === "failed";
+  return row.state === "not_proven" || row.state === "incomplete" || row.state === "failed"
+    || row.state === "needs_pii_review";
 }
 
 export function boardFilterCounts(rows: Array<Pick<ExitBoardRow, "state" | "overdue"> & { stale?: boolean }>): Record<BoardFilter, number> {
@@ -987,4 +1009,66 @@ export function exitErrorMessage(err: unknown, fallback: string): string {
     return `${fallback} The request did not reach the server. Check your connection and try again.`;
   }
   return reason;
+}
+
+/* ── PII review (contract 11, gap 1) ────────────────────────── */
+
+/** What the system drawer offers for PII: nothing, an acknowledgement to give, or the one given. */
+export interface PiiReviewState {
+  /** The latest rehearsal was held by the PII gate. */
+  held: boolean;
+  acknowledgement: PiiAcknowledgement | null;
+  /** The acknowledgement applies to the system as defined now. */
+  current: boolean;
+  /** The next step, in words. */
+  action: "acknowledge" | "rehearse" | "none";
+  text: string;
+}
+
+export function piiReviewState(system: Pick<ExitSystem, "readiness" | "pii_acknowledgement"> | null | undefined): PiiReviewState {
+  const ack = system?.pii_acknowledgement ?? null;
+  const held = system?.readiness?.state === "needs_pii_review";
+  const current = Boolean(ack && ack.current !== false);
+  if (held && !current) {
+    return {
+      held, acknowledgement: ack, current, action: "acknowledge",
+      text: ack
+        ? "The PII gate held the last rehearsal, and the acknowledgement on file was given for an earlier definition. Acknowledge PII again to rehearse this one."
+        : "The PII gate held the last rehearsal: its tables hold columns that look like PII. Acknowledge PII for this system (your name and reason are audited and kept in the evidence), then rehearse again.",
+    };
+  }
+  if (held && current) {
+    return { held, acknowledgement: ack, current, action: "rehearse", text: "PII is acknowledged for this definition. Rehearse again: the extracts now pass the PII gate as an acknowledged transfer." };
+  }
+  if (ack) {
+    return {
+      held, acknowledgement: ack, current, action: current ? "none" : "acknowledge",
+      text: current ? "PII acknowledged for this definition; rehearsal extracts carry it." : "The PII acknowledgement was given for an earlier definition and no longer applies.",
+    };
+  }
+  return { held, acknowledgement: null, current: false, action: "none", text: "" };
+}
+
+/** The acknowledgement contract's minimum reason length (services.acknowledgment_contract). */
+export const PII_REASON_MIN = 8;
+export const PII_REASON_MAX = 500;
+
+export function piiReasonError(reason: string): string {
+  const text = reason.trim();
+  if (text.length < PII_REASON_MIN) return `Say why the extract may carry this PII (at least ${PII_REASON_MIN} characters).`;
+  if (text.length > PII_REASON_MAX) return `Keep the reason under ${PII_REASON_MAX} characters.`;
+  return "";
+}
+
+/** A table reason split for display: the text, the extract job it names and the server log reference. */
+export function reasonParts(reason: string | null | undefined): { text: string; jobId: string | null; reference: string | null } {
+  const raw = String(reason ?? "");
+  const ref = /\s*Reference ([0-9a-f]{8,64})\.?\s*$/i.exec(raw);
+  const job = /\bextract job ([0-9a-f]{12,40})\b/i.exec(raw);
+  return { text: ref ? raw.slice(0, ref.index).trim() : raw.trim(), jobId: job ? job[1] : null, reference: ref ? ref[1] : null };
+}
+
+/** The verification ran past its cap (contract 11.1.8): the table is not proven, rehearsing again is the fix. */
+export function isVerificationTimeout(reason: string | null | undefined): boolean {
+  return /The verification did not finish within/i.test(String(reason ?? ""));
 }

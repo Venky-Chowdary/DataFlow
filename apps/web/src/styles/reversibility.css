@@ -1517,3 +1517,17 @@ table.df2-table.df2-rev-columns {
     border-radius: var(--df-radius-md);
   }
 }
+
+/* PII review on the system drawer (contract 11.1.7): a reason, then the action. */
+.df2-exit-pii-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--df-space-2);
+  margin-top: var(--df-space-2);
+}
+
+.df2-exit-pii-form textarea {
+  width: 100%;
+  resize: vertical;
+}

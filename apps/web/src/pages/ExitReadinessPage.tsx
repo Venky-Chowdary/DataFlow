@@ -185,6 +185,10 @@ export function ExitReadinessPage({ active = true, connectors = [], focus = null
         rehearsalId={rehearsalId}
         onBack={() => setRehearsalId(null)}
         onOpenJob={onOpenJob}
+        onOpenSystem={(id) => {
+          setRehearsalId(null);
+          setSystemId(id);
+        }}
         onChanged={() => {
           if (activeRef.current) void load();
         }}

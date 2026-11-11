@@ -34,11 +34,13 @@ export interface RehearsalPanelProps {
   rehearsalId: string;
   onBack: () => void;
   onOpenJob?: (jobId: string) => void;
+  /** Open the rehearsed system (its PII review). */
+  onOpenSystem?: (systemId: string) => void;
   /** A rehearsal that finished or was signed changes the board; the page reloads it. */
   onChanged?: () => void;
 }
 
-export function RehearsalPanel({ rehearsalId, onBack, onOpenJob, onChanged }: RehearsalPanelProps) {
+export function RehearsalPanel({ rehearsalId, onBack, onOpenJob, onOpenSystem, onChanged }: RehearsalPanelProps) {
   const { toast } = useToast();
   // Signing attests the rehearsal: job.manage, and the API binds each role to the signer's workspace role.
   const signGate = useWriteGate(PERMISSIONS.jobManage, "sign off an exit rehearsal");
@@ -199,6 +201,7 @@ export function RehearsalPanel({ rehearsalId, onBack, onOpenJob, onChanged }: Re
       pollStopped={pollStopped}
       onBack={onBack}
       onOpenJob={onOpenJob}
+      onOpenSystem={onOpenSystem}
       onRefresh={() => {
         if (pollStopped) setPollEpoch((n) => n + 1);
         void run({ kind: "refresh" }, null, () => fetchExitRehearsal(rehearsalId));

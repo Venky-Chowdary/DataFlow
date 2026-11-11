@@ -43,6 +43,8 @@ import {
   type ExitRehearsal,
   type ExitVerifyResult,
   type RehearsalTable,
+  isVerificationTimeout,
+  reasonParts,
 } from "../../lib/exitReadiness";
 
 export type RehearsalBusy = ParityBusy;
@@ -64,6 +66,8 @@ export interface RehearsalViewProps {
   onVerifyFile: (file: File) => void;
   onSign: (role: string, note: string) => void;
   onOpenJob?: (jobId: string) => void;
+  /** Open the system (its PII review), for a rehearsal the PII gate held. */
+  onOpenSystem?: (systemId: string) => void;
 }
 
 function MatchText({ match, what }: { match: boolean | null; what: string }) {
@@ -108,11 +112,32 @@ function rowsText(table: RehearsalTable): string {
   return table.rows_source === table.rows_extracted ? s : `${s} → ${e}`;
 }
 
+/** A table's reason: its text, the server log reference to quote, and what to do after a verification timeout. */
+function ReasonText({ reason }: { reason: string }) {
+  const parts = reasonParts(reason);
+  return (
+    <>
+      <p className="df2-exit-table-reason">
+        {parts.text}
+        {parts.reference && (
+          <>
+            {" "}
+            <CopyIdChip id={parts.reference} label="Reference" compact />
+          </>
+        )}
+      </p>
+      {isVerificationTimeout(reason) && (
+        <p className="df2-parity-muted">The verification stopped at its time limit, so nothing was proven or disproven: rehearse again.</p>
+      )}
+    </>
+  );
+}
+
 function TableDetail({ table, onOpenJob }: { table: RehearsalTable; onOpenJob?: (jobId: string) => void }) {
   const unprovable = unprovableColumns(table.reason);
   return (
     <div className="df2-exit-table-detail">
-      <p className="df2-exit-table-reason">{table.reason}</p>
+      <ReasonText reason={table.reason} />
       {unprovable.length > 0 && (
         <ul className="df2-exit-diffs" aria-label={`Columns of ${table.name} that cannot be proven`}>
           {unprovable.map((u) => (
@@ -267,6 +292,7 @@ export function RehearsalView({
   onVerifyFile,
   onSign,
   onOpenJob,
+  onOpenSystem,
 }: RehearsalViewProps) {
   const verdict = rehearsalVerdictPresentation(rehearsal.verdict);
   const { completeness, duration, seal, evidence, trend } = rehearsal;
@@ -292,6 +318,7 @@ export function RehearsalView({
       return next;
     });
   const reasonTone = rehearsal.verdict === "failed" || rehearsal.verdict === "incomplete" ? " is-danger" : "";
+  const piiHeld = rehearsal.verdict === "needs_pii_review";
 
   const pickFile = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -360,6 +387,27 @@ export function RehearsalView({
         <p className={`df2-parity-notice${reasonTone}`} role="status">
           <DtIcon name={running ? "clock" : "alert"} size={14} />
           <span>{rehearsal.verdict_reason}</span>
+        </p>
+      )}
+      {piiHeld && (
+        <p className="df2-parity-notice" role="status">
+          <DtIcon name="shield" size={14} />
+          <span>
+            The PII gate held these extracts: nothing was bypassed. Acknowledge PII for {rehearsal.system_name} (your name and
+            reason are audited and kept in the evidence), then rehearse again.
+          </span>
+          {onOpenSystem && (
+            <Button size="sm" onClick={() => onOpenSystem(rehearsal.system_id)}>Open PII review</Button>
+          )}
+        </p>
+      )}
+      {rehearsal.pii_acknowledgement && (
+        <p className="df2-parity-notice is-muted" role="status">
+          <DtIcon name="check" size={14} />
+          <span>
+            PII acknowledged by <b>{rehearsal.pii_acknowledgement.actor}</b> on {formatDateTime(rehearsal.pii_acknowledgement.at)}:{" "}
+            {rehearsal.pii_acknowledgement.reason} (carried by this rehearsal's extracts and its evidence pack).
+          </span>
         </p>
       )}
       {pollStopped && running && (

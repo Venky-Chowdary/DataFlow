@@ -36,8 +36,8 @@ describe("verdict pills", () => {
   it("maps invertibility, and a conditional column by its data check", () => {
     assert.equal(invertibilityPresentation("lossy").tone, "danger");
     assert.equal(invertibilityPresentation("invertible").tone, "ok");
-    // A fit on a sample is not green: it is invertible for the data seen only.
-    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { status: "fits", rows_checked: 25, rows_not_fitting: 0 } }), { label: "Fits sample", tone: "muted" });
+    // A fit on a sample is not green: Execute blocks it unless the whole table was checked (contract 11.1.2).
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { status: "fits", rows_checked: 25, rows_not_fitting: 0 } }), { label: "Fits sample only", tone: "warn" });
     assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { status: "does_not_fit", rows_checked: 25, rows_not_fitting: 4 } }), { label: "Does not fit", tone: "danger" });
     assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: null }), { label: "Not checked", tone: "warn" });
     assert.equal(columnPillPresentation({ invertibility: "lossy", check: null }).label, "Lossy");
@@ -62,7 +62,7 @@ describe("reasons", () => {
   });
 
   it("says what the conditional columns were checked against, never the population", () => {
-    assert.equal(dataCheckedText({ rows: 25, source: "plan_sample" }), "Conditional columns were checked against 25 observed rows from the plan sample. A sample never proves the full table.");
+    assert.equal(dataCheckedText({ rows: 25, source: "plan_sample" }), "Conditional columns were checked against 25 observed rows from the plan sample. A sample never proves the full table: a conditional column that fits only the sample is blocked at Execute unless the whole table is checked.");
     assert.match(dataCheckedText({ rows: 0, source: "none" }), /No observed rows/);
   });
 });
@@ -132,7 +132,7 @@ describe("contract 10 reason codes", () => {
 
   it("the real enum report: a conditional column that fits its sample is never proof", () => {
     const state = realReversibilityEnum.tables[0].columns.find((c) => c.reason_code === "enum")!;
-    assert.equal(columnPillPresentation(state).label, "Fits sample");
+    assert.equal(columnPillPresentation(state).label, "Fits sample only");
     assert.equal(columnReasonLabel(state), "Into an enum");
   });
 });
@@ -143,5 +143,35 @@ describe("preflight wiring", () => {
     assert.equal(reversibilityFromPreflight({ passed: true }), null);
     assert.equal(reversibilityFromPreflight({ reversibility: { verdict: "x" } }), null);
     assert.equal(reversibilityFromPreflight(null), null);
+  });
+});
+
+describe("contract 11: a fit counts only over the whole table; new reason codes", () => {
+  it("a conditional column that fits only the sample reads 'Fits sample only' and says Execute blocks it", async () => {
+    const { realReversibilityReview2 } = await import("../components/exit/realExitPayloads.js");
+    const cols = realReversibilityReview2.tables[0].columns;
+    const email = cols.find((c) => c.source === "email")!;
+    assert.equal(email.check?.covers_population, false);
+    assert.deepEqual(columnPillPresentation(email), { label: "Fits sample only", tone: "warn" });
+    assert.match(checkText(email.check), /Fits the sample \(2 observed rows\), but Execute blocks it unless the whole table is checked/);
+    const whole = { ...email, check: { ...email.check!, covers_population: true } };
+    assert.deepEqual(columnPillPresentation(whole), { label: "Fits whole table", tone: "ok" });
+    assert.match(checkText(whole.check), /the check covered the whole table/);
+    assert.match(dataCheckedText(realReversibilityReview2.data_checked), /2 observed rows of 3,000 from the plan sample/);
+    assert.match(dataCheckedText({ rows: 5, source: "preflight_sample", population_rows: 5 }), /all 5 rows of the table/);
+    assert.match(realReversibilityReview2.gate.message, /CONTACTS: source query/);
+    assert.doesNotMatch(realReversibilityReview2.gate.message, /\(rows\)/);
+  });
+
+  it("labels the new reason codes and row changes", async () => {
+    const { realReversibilityReview2 } = await import("../components/exit/realExitPayloads.js");
+    assert.equal(reasonCodeLabel("byte_length"), "Byte length (UTF-8)");
+    assert.equal(reasonCodeLabel("boolean_domain"), "0/1 into boolean");
+    assert.equal(reasonCodeLabel("timestamp_range"), "TIMESTAMP range (1970–2038)");
+    const rows = realReversibilityReview2.tables[0].columns.find((c) => c.reason_code === "row_change")!;
+    assert.equal(columnReasonLabel(rows), "Source query");
+    assert.equal(columnLabel(rows), "The table (read through a query)");
+    assert.equal(columnReasonLabel({ reason_code: "row_change", transforms: ["skip_footer"] }), "Skipped trailing rows");
+    assert.equal(realReversibilityReview2.tables[0].columns.find((c) => c.source === "name")!.reason_code, "byte_length");
   });
 });

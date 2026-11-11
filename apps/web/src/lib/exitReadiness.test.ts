@@ -52,6 +52,10 @@ import {
   verifyPartsNote,
   windowComparison,
   type ExitRehearsal,
+  isVerificationTimeout,
+  piiReasonError,
+  piiReviewState,
+  reasonParts,
 } from "./exitReadiness.js";
 import {
   ANCHORED,
@@ -410,7 +414,9 @@ describe("the running rehearsal is linked directly", () => {
 
 describe("control totals of a PII column (masked)", () => {
   it("reads Masked (PII), never 0 or blank, and still states the match", () => {
-    const zip = realMasked.tables[0].control_totals.find((t) => t.masked)!;
+    // Since contract 11.1.9 every column is masked unless classified a measure (the id too); zip is one of them.
+    const zip = realMasked.tables[0].control_totals.find((t) => t.column === "zip")!;
+    assert.equal(zip.masked, true);
     assert.equal(zip.column, "zip");
     assert.equal(zip.source?.sum, null);
     assert.equal(controlTotalText(zip, "source", "sum"), "Masked (PII)");
@@ -478,5 +484,45 @@ describe("columns that cannot be proven (json, no declared type)", () => {
     const json = "Nothing differs where measured, but doc is json: the driver hands back a parsed document, so its exact text (key order, duplicate keys, number spelling) cannot be compared, so this table is not proven.";
     assert.deepEqual(unprovableColumns(json), [{ column: "doc", kind: "json", label: "PostgreSQL json (parsed)" }]);
     assert.deepEqual(unprovableColumns(realSigned.tables[0].reason), []);
+  });
+});
+
+describe("contract 11: PII review, reason references, verification limit", () => {
+  it("needs_pii_review reads as its own warning state on the board, a rehearsal and a table, and needs attention", async () => {
+    const { readinessPresentation, rehearsalVerdictPresentation, tableStatusPresentation } = await import("./exitReadiness.js");
+    assert.deepEqual(readinessPresentation("needs_pii_review"), { label: "Needs PII review", tone: "warn" });
+    assert.deepEqual(rehearsalVerdictPresentation("needs_pii_review"), { label: "Needs PII review", tone: "warn" });
+    assert.deepEqual(tableStatusPresentation("needs_pii_review"), { label: "Needs PII review", tone: "warn" });
+    assert.equal(boardFilterMatches({ state: "needs_pii_review", overdue: false }, "attention"), true);
+    assert.equal(boardFilterMatches({ state: "needs_pii_review", overdue: false }, "proven"), false);
+  });
+
+  it("the PII review state: acknowledge when held, rehearse when acknowledged, an earlier definition asks again", async () => {
+    const { realSystemPii, realSystemPiiAcked } = await import("../components/exit/realExitPayloads.js");
+    assert.equal(realSystemPii.readiness.state, "needs_pii_review");
+    const held = piiReviewState(realSystemPii);
+    assert.equal(held.action, "acknowledge");
+    assert.match(held.text, /audited and kept in the evidence/);
+    const acked = piiReviewState(realSystemPiiAcked);
+    assert.equal(acked.action, "rehearse");
+    assert.equal(acked.acknowledgement?.actor, "dpo@example.com");
+    const earlier = piiReviewState({ ...realSystemPiiAcked, pii_acknowledgement: { ...realSystemPiiAcked.pii_acknowledgement!, current: false } });
+    assert.equal(earlier.action, "acknowledge");
+    assert.match(earlier.text, /earlier definition/);
+    assert.equal(piiReviewState({ ...realSystemPii, readiness: { ...realSystemPii.readiness, state: "proven" }, pii_acknowledgement: null }).action, "none");
+    assert.match(piiReasonError("ok"), /at least 8 characters/);
+    assert.equal(piiReasonError("DPA clause 9 allows it"), "");
+  });
+
+  it("splits a reason into its text, the extract job and the server log reference", async () => {
+    const { realFailed } = await import("../components/exit/realExitPayloads.js");
+    const failed = realFailed.tables.find((t) => t.status === "failed")!;
+    const parts = reasonParts(failed.reason);
+    assert.equal(parts.jobId, failed.job_id);
+    assert.match(parts.reference ?? "", /^[0-9a-f]{8,}$/);
+    assert.doesNotMatch(parts.text, /Reference/);
+    assert.deepEqual(reasonParts("Rows match."), { text: "Rows match.", jobId: null, reference: null });
+    assert.equal(isVerificationTimeout("The verification did not finish within its 6.0 h limit (...)"), true);
+    assert.equal(isVerificationTimeout(failed.reason), false);
   });
 });

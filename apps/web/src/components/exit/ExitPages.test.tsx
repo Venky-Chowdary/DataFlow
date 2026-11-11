@@ -15,6 +15,7 @@ import { ExitBoardView, boardMetrics, type ExitBoardViewProps } from "./ExitBoar
 import { RehearsalView, type RehearsalViewProps } from "./RehearsalView.js";
 import { RehearsalPanel } from "./RehearsalPanel.js";
 import { SystemFormDrawer } from "./SystemFormDrawer.js";
+import { PiiReviewCard } from "./SystemDrawer.js";
 import { DurationTrendChart, WindowBar, durationTrendSummary } from "../charts/ExitCharts.js";
 import {
   ANCHORED,
@@ -31,6 +32,7 @@ import {
   verifyFixture,
 } from "./exitFixtures.js";
 import { realBoard, realFailed, realIncomplete, realMasked, realNotProven, realRunning, realSigned, realUnprovable, realVerify } from "./realExitPayloads.js";
+import { realPiiAcked, realPiiHeld, realSystemPii, realSystemPiiAcked } from "./realExitPayloads.js";
 import { STALE_TEXT, formatDate, normalizeRehearsal, type ExitRehearsal } from "../../lib/exitReadiness.js";
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -148,7 +150,7 @@ describe("Page A: the exit readiness board", () => {
       <ExitBoardView readiness={realBoard} query="" onQueryChange={noop} filter="all" onFilterChange={noop} selectedId={null}
         onOpenSystem={noop} onRunRehearsal={noop} onDeclare={noop} canDeclare canRun />,
     ));
-    assert.match(t, /Systems with a proven exit 2 \/ 8/);
+    assert.match(t, new RegExp(`Systems with a proven exit ${realBoard.kpis.systems_proven} / ${realBoard.kpis.systems}`));
     assert.match(t, /Rehearsal failed/);
     assert.match(t, /Rehearsal running Running/);
     const m = boardMetrics(realBoard);
@@ -533,5 +535,70 @@ describe("Exit pages actions (jsdom)", () => {
     assert.match(t, /Name the system\./);
     assert.match(t, /Choose the saved connection/);
     assert.match(t, /Declare at least one table/);
+  });
+});
+
+describe("contract 11: what the second review fixes changed on screen", () => {
+  function pii(system: Parameters<typeof PiiReviewCard>[0]["system"], over: Partial<Parameters<typeof PiiReviewCard>[0]> = {}) {
+    return renderToStaticMarkup(
+      <PiiReviewCard system={system} reason="" onReasonChange={noop} busy={false} error="" canManage onAcknowledge={noop}
+        onWithdraw={noop} {...over} />,
+    );
+  }
+
+  it("rehearsal: a run the PII gate held reads Needs PII review, names the columns, never a value, and offers the review", () => {
+    const html = run(realPiiHeld, { onOpenSystem: noop });
+    const t = text(html);
+    assert.match(t, /Needs PII review/);
+    assert.match(t, /The PII gate held these extracts: nothing was bypassed\. Acknowledge PII for HR people/);
+    assert.match(t, /Open PII review/);
+    assert.doesNotMatch(t, /123-45-60|p1@example\.com/);
+    assert.doesNotMatch(t, /\bProven\b/);
+  });
+
+  it("rehearsal: an acknowledged run shows who acknowledged PII, when and why", () => {
+    const t = text(run(realPiiAcked));
+    assert.match(t, /PII acknowledged by dpo@example\.com on .*DPA clause 9 allows the exit extract \(carried by this rehearsal's extracts and its evidence pack\)/);
+  });
+
+  it("system: the PII review asks for a reason and the action, and is disabled without job.manage", () => {
+    const t = text(pii(realSystemPii));
+    assert.match(t, /PII review The PII gate held the last rehearsal/);
+    assert.match(t, /Why the extract may carry this PII/);
+    assert.match(t, /Acknowledge PII/);
+    const denied = pii(realSystemPii, { canManage: false, manageDeniedReason: "Needs job.manage" });
+    assert.match(denied, /disabled=""[^>]*title="Needs job.manage"|title="Needs job.manage"[^>]*disabled=""/);
+    assert.match(text(pii(realSystemPii, { error: "Say why" })), /Say why/);
+  });
+
+  it("system: an acknowledged system names who, and can withdraw it; a system with neither shows nothing", () => {
+    const t = text(pii(realSystemPiiAcked));
+    assert.match(t, /Acknowledged by dpo@example\.com on .*DPA clause 9 allows the exit extract/);
+    assert.match(t, /Withdraw acknowledgement/);
+    assert.doesNotMatch(t, /Why the extract may carry this PII/);
+    assert.equal(pii({ ...realSystemPii, readiness: { ...realSystemPii.readiness, state: "proven" }, pii_acknowledgement: null }), "");
+  });
+
+  it("rehearsal: a failed extract names its job and quotes the server log reference", () => {
+    const opened = renderToStaticMarkup(
+      <RehearsalView rehearsal={realFailed} busy={null} canSign onBack={noop} onRefresh={noop} onExportMarkdown={noop}
+        onDownloadSigned={noop} onVerifySigned={noop} onVerifyFile={noop} onSign={noop} />,
+    );
+    const failed = realFailed.tables.find((x) => x.status === "failed")!;
+    assert.match(failed.reason, /Reference [0-9a-f]+\./);
+    const t = text(opened);
+    assert.match(t, new RegExp(`The extract job ${failed.job_id} failed`));
+    assert.match(t, /Reference/);
+  });
+
+  it("rehearsal: a verification that hit its limit says to rehearse again", () => {
+    const timedOut = {
+      ...realNotProven,
+      tables: realNotProven.tables.map((x) => ({
+        ...x, status: "incomplete" as const,
+        reason: "The verification did not finish within its 6.0 h limit (the source or the stored part stopped answering or was too slow), so this table is not proven; rehearse it again.",
+      })),
+    };
+    assert.match(text(run(timedOut)), /stopped at its time limit, so nothing was proven or disproven: rehearse again/);
   });
 });

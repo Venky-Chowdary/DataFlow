@@ -19,6 +19,11 @@ export interface ColumnCheck {
   status: ColumnCheckStatus;
   rows_checked: number;
   rows_not_fitting: number;
+  /**
+   * The rows checked are every source row (contract 11.1.2). Only then does a fit count: a sample that fits
+   * stays conditional, and Execute blocks it under require reversibility. Absent on a bare column analysis.
+   */
+  covers_population?: boolean;
 }
 
 export interface ColumnInvertibility {
@@ -68,7 +73,12 @@ export interface ReversibilityReport {
   require_reversibility: boolean;
   gate: ReversibilityGate;
   /** The observed rows conditional columns were checked against: a sample, never the population. */
-  data_checked: { rows: number; source: "plan_sample" | "preflight_sample" | "none" | string };
+  data_checked: {
+    rows: number;
+    source: "plan_sample" | "preflight_sample" | "none" | string;
+    /** The source's row count the check is measured against; null when unknown (contract 11.1.1). */
+    population_rows?: number | null;
+  };
   counts: { invertible: number; conditional: number; lossy: number };
   /** Every lossy column, always. */
   lossy_columns: LossyColumn[];
@@ -103,7 +113,9 @@ export function invertibilityPresentation(inv: string): { label: string; tone: P
 export function columnPillPresentation(col: Pick<ColumnInvertibility, "invertibility" | "check">): { label: string; tone: ParityTone } {
   if (col.invertibility !== "conditional") return invertibilityPresentation(col.invertibility);
   const status = col.check?.status ?? "not_checked";
-  if (status === "fits") return { label: "Fits sample", tone: "muted" };
+  // Only a check over every source row counts (contract 11.1.2); a sample fit is still blocked at Execute.
+  if (status === "fits" && col.check?.covers_population === true) return { label: "Fits whole table", tone: "ok" };
+  if (status === "fits") return { label: "Fits sample only", tone: "warn" };
   if (status === "does_not_fit") return { label: "Does not fit", tone: "danger" };
   return { label: "Not checked", tone: "warn" };
 }
@@ -138,6 +150,10 @@ const REASON_CODES: Record<string, string> = {
   blank_pad: "Blank-padded (CHAR)",
   text_width: "Text width",
   row_change: "Changes rows",
+  // Contract 11.1.3: conditional type mappings checked value by value.
+  byte_length: "Byte length (UTF-8)",
+  boolean_domain: "0/1 into boolean",
+  timestamp_range: "TIMESTAMP range (1970–2038)",
   recipe_lossy: "Recipe step changes values",
   recipe_invertible: "Recipe step (invertible)",
   recipe_conditional: "Recipe step (not checked)",
@@ -153,6 +169,11 @@ const ROW_CHANGES: Record<string, { reason: string; label: string }> = {
   limit: { reason: "Row cap (limit)", label: "All rows (row cap)" },
   source_filter: { reason: "Source filter", label: "All rows (source filter)" },
   rank_rows: { reason: "Top rows only (rank_rows)", label: "All rows (rank_rows step)" },
+  // Contract 11.1.3: the source is read through a query / procedure, or a file read skips data rows.
+  source_query: { reason: "Source query", label: "The table (read through a query)" },
+  source_procedure: { reason: "Stored procedure", label: "The table (read through a procedure)" },
+  skip_rows: { reason: "Skipped leading rows", label: "All rows (leading rows skipped)" },
+  skip_footer: { reason: "Skipped trailing rows", label: "All rows (trailing rows skipped)" },
 };
 
 /** The badge for one column entry: its reason code, or for a row change the step that changes the rows. */
@@ -189,6 +210,12 @@ function plural(n: number, one: string, many = `${one}s`): string {
  */
 export function checkText(check: ColumnCheck | null | undefined): string {
   if (!check) return "";
+  if (check.status === "fits" && check.covers_population === true) {
+    return `Fits every one of its ${plural(check.rows_checked, "value")}; the check covered the whole table.`;
+  }
+  if (check.status === "fits" && check.covers_population === false) {
+    return `Fits the sample (${plural(check.rows_checked, "observed row")}), but Execute blocks it unless the whole table is checked.`;
+  }
   if (check.status === "fits") {
     return `Fits the ${plural(check.rows_checked, "observed row")}; not proven for rows not sampled.`;
   }
@@ -205,7 +232,12 @@ export function dataCheckedText(data: ReversibilityReport["data_checked"] | null
     return "No observed rows were available, so conditional columns are not checked.";
   }
   const where = data.source === "preflight_sample" ? "the Validate sample" : data.source === "plan_sample" ? "the plan sample" : "a sample";
-  return `Conditional columns were checked against ${plural(rows, "observed row")} from ${where}. A sample never proves the full table.`;
+  const population = data.population_rows;
+  if (typeof population === "number" && population > 0 && rows >= population) {
+    return `Conditional columns were checked against all ${plural(population, "row")} of the table (${where} holds every row).`;
+  }
+  const of = typeof population === "number" && population > 0 ? ` of ${population.toLocaleString("en-US")}` : "";
+  return `Conditional columns were checked against ${plural(rows, "observed row")}${of} from ${where}. A sample never proves the full table: a conditional column that fits only the sample is blocked at Execute unless the whole table is checked.`;
 }
 
 /** The gate line beside the switch: what Execute will do. */

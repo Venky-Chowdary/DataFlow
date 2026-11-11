@@ -70,6 +70,24 @@ export async function deleteExitSystem(systemId: string): Promise<void> {
   if (!res.ok) throw await apiErrorFrom(res, "Could not remove this system.");
 }
 
+/* ── PII review (contract 11.1.7) ────────────────────────────── */
+
+/**
+ * Acknowledge the PII a system's tables hold: its rehearsal extracts then pass the PII gate as an acknowledged
+ * transfer. The API records the caller as the actor (never the body); 422 for a reason under 8 characters.
+ */
+export async function acknowledgeExitPii(systemId: string, reason: string, expectedVersion?: number): Promise<ExitSystem> {
+  const body = { reason: reason.trim(), ...(typeof expectedVersion === "number" ? { expected_version: expectedVersion } : {}) };
+  const res = await apiFetch(`${API_BASE}/exit/systems/${enc(systemId)}/pii-acknowledgement`, { method: "POST", body: JSON.stringify(body) });
+  return json(res, "Could not record the PII acknowledgement.");
+}
+
+/** Withdraw it: the next rehearsal's extracts are held by the PII gate again. */
+export async function withdrawExitPii(systemId: string): Promise<ExitSystem> {
+  const res = await apiFetch(`${API_BASE}/exit/systems/${enc(systemId)}/pii-acknowledgement`, { method: "DELETE" });
+  return json(res, "Could not withdraw the PII acknowledgement.");
+}
+
 /* ── Rehearsals (Page B) ─────────────────────────────────────── */
 
 /** Start a rehearsal now (202). 409 while one already runs for the system. */

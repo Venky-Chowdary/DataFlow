@@ -11,7 +11,7 @@ import { Drawer } from "../ui/Drawer";
 import { EmptyState } from "../ui/EmptyState";
 import { LoadingBlock } from "../LoadingState";
 import { DurationTrendChart, WindowBar } from "../charts/ExitCharts";
-import { fetchExitSystem, fetchSystemRehearsals } from "../../lib/exitApi";
+import { acknowledgeExitPii, fetchExitSystem, fetchSystemRehearsals, withdrawExitPii } from "../../lib/exitApi";
 import {
   criticalityPresentation,
   dueText,
@@ -22,6 +22,9 @@ import {
   formatDuration,
   formatWindow,
   measuredVsWindowText,
+  piiReasonError,
+  piiReviewState,
+  PII_REASON_MAX,
   pillClass,
   readinessPresentation,
   rehearsalVerdictPresentation,
@@ -106,6 +109,30 @@ export function SystemDrawer({
     setHistory(null);
     setError("");
   }, [systemId]);
+
+  const [piiReason, setPiiReason] = useState("");
+  const [piiBusy, setPiiBusy] = useState(false);
+  const [piiError, setPiiError] = useState("");
+
+  const recordPii = async (withdraw: boolean) => {
+    if (!system) return;
+    const invalid = withdraw ? "" : piiReasonError(piiReason);
+    if (invalid) {
+      setPiiError(invalid);
+      return;
+    }
+    setPiiBusy(true);
+    try {
+      const next = withdraw ? await withdrawExitPii(system.id) : await acknowledgeExitPii(system.id, piiReason, system.version);
+      if (idRef.current === next.id) setSystem(next);
+      setPiiReason("");
+      setPiiError("");
+    } catch (err) {
+      setPiiError(exitErrorMessage(err, withdraw ? "Could not withdraw the PII acknowledgement." : "Could not record the PII acknowledgement."));
+    } finally {
+      setPiiBusy(false);
+    }
+  };
 
   const shown = system && system.id === systemId ? system : null;
   const readiness = shown?.readiness;
@@ -202,6 +229,18 @@ export function SystemDrawer({
             </p>
           )}
 
+          <PiiReviewCard
+            system={shown}
+            reason={piiReason}
+            onReasonChange={setPiiReason}
+            busy={piiBusy}
+            error={piiError}
+            canManage={canManage}
+            manageDeniedReason={manageDeniedReason}
+            onAcknowledge={() => void recordPii(false)}
+            onWithdraw={() => void recordPii(true)}
+          />
+
           <section className="df2-parity-card" aria-label="What would have to be taken">
             <h3 className="df2-parity-h3">Exit scope</h3>
             <dl className="df2-exit-facts">
@@ -288,5 +327,85 @@ export function SystemDrawer({
         </div>
       )}
     </Drawer>
+  );
+}
+
+export interface PiiReviewCardProps {
+  system: Pick<ExitSystem, "id" | "readiness" | "pii_acknowledgement">;
+  reason: string;
+  onReasonChange: (reason: string) => void;
+  busy: boolean;
+  error: string;
+  canManage: boolean;
+  manageDeniedReason?: string;
+  onAcknowledge: () => void;
+  onWithdraw: () => void;
+}
+
+/**
+ * The system's PII review (contract 11.1.6-7): shown when the PII gate held its last rehearsal or an
+ * acknowledgement is on file. The PII gate is never bypassed; a named person acknowledges it with a reason.
+ */
+export function PiiReviewCard({
+  system,
+  reason,
+  onReasonChange,
+  busy,
+  error,
+  canManage,
+  manageDeniedReason,
+  onAcknowledge,
+  onWithdraw,
+}: PiiReviewCardProps) {
+  const pii = piiReviewState(system);
+  if (!pii.held && !pii.acknowledgement) return null;
+  return (
+    <section className="df2-parity-card" aria-label="PII review">
+      <h3 className="df2-parity-h3">PII review</h3>
+      <p className={`df2-parity-notice${pii.action === "acknowledge" ? "" : " is-muted"}`} role="status">
+        <DtIcon name={pii.action === "acknowledge" ? "alert" : "check"} size={14} />
+        <span>{pii.text}</span>
+      </p>
+      {pii.acknowledgement && (
+        <p className="df2-parity-muted">
+          Acknowledged by <b>{pii.acknowledgement.actor}</b> on {formatDateTime(pii.acknowledgement.at)}: {pii.acknowledgement.reason}
+          {pii.current ? "" : " (an earlier definition)"}
+        </p>
+      )}
+      {pii.action === "acknowledge" && (
+        <div className="df2-exit-pii-form">
+          <label className="df2-parity-muted" htmlFor={`pii-reason-${system.id}`}>Why the extract may carry this PII</label>
+          <textarea
+            id={`pii-reason-${system.id}`}
+            className="df2-input"
+            rows={2}
+            maxLength={PII_REASON_MAX}
+            value={reason}
+            disabled={!canManage || busy}
+            onChange={(e) => onReasonChange(e.target.value)}
+            aria-invalid={Boolean(error) || undefined}
+            aria-describedby={error ? `pii-error-${system.id}` : undefined}
+          />
+          {error && <p id={`pii-error-${system.id}`} className="df2-parity-notice is-danger" role="alert">{error}</p>}
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={onAcknowledge}
+            disabled={!canManage || busy}
+            loading={busy}
+            loadingLabel="Recording…"
+            title={!canManage ? manageDeniedReason : undefined}
+            leadingIcon={<DtIcon name="check" size={14} />}
+          >
+            Acknowledge PII
+          </Button>
+        </div>
+      )}
+      {pii.acknowledgement && pii.action !== "acknowledge" && (
+        <Button size="sm" variant="ghost" onClick={onWithdraw} disabled={!canManage || busy} title={!canManage ? manageDeniedReason : undefined}>
+          Withdraw acknowledgement
+        </Button>
+      )}
+    </section>
   );
 }
