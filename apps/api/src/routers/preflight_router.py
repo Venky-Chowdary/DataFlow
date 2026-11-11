@@ -157,6 +157,8 @@ class PreflightRequest(PolicyFieldsModel):
     acknowledgment_reason: str = ""
     # Pre-ingestion staging (SQL destinations only) — Validate must fail closed.
     write_via_staging: bool = False
+    # The run must be reversible: Validate adds g24_reversibility, as plan preflight and Execute do.
+    require_reversibility: bool = False
     # Execute-applied sort + cap. Validate names the cap (G17); type-fit stays uncapped.
     priority_column: str = ""
     priority_direction: str = "desc"
@@ -235,6 +237,38 @@ def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
 
     ok, msg, _cfg = probe_saved_connector(connector_id)
     return ok, msg
+
+
+def _validate_reversibility(body: Any, source_types: dict[str, str], dest_types: dict[str, str],
+                            result: dict[str, Any]) -> list[dict[str, Any]]:
+    """``g24_reversibility`` for a direct Validate that requires reversibility (else ``[]``).
+
+    The same report Execute builds (``services.reversibility_sources``): the
+    Studio's sample checks conditional columns, and covers the table only when
+    it holds ``row_count`` rows. The report is also returned as ``reversibility``.
+    """
+    if not getattr(body, "require_reversibility", False):
+        return []
+    from types import SimpleNamespace
+
+    from services.reversibility_sources import preflight_gate, request_report
+
+    mappings = [m.model_dump() if hasattr(m, "model_dump") else dict(m) for m in body.mappings or []]
+    request = SimpleNamespace(
+        source={**dict(body.source_config or {}), "format": body.source_type or "",
+                "table": body.source_table or body.source_collection or ""},
+        destination={"kind": body.dest_kind or "", "format": body.dest_type or "",
+                     "table": body.dest_table or body.dest_collection or ""},
+        mappings=mappings, shape_recipe=body.shape_recipe, limit=int(body.row_limit or 0),
+        stream_contracts=list(body.stream_contracts or []), source_filter=None, job_id="",
+        read_options=dict((body.source_config or {}).get("read_options") or {}),
+    )
+    report = request_report(request, mappings, dict(source_types or body.column_types or {}),
+                            {**dict(dest_types or {}), **dict(body.destination_column_types or {})},
+                            sample_rows=[r for r in body.sample_rows or [] if isinstance(r, dict)],
+                            population_rows=int(body.row_count) if body.row_count else None)
+    result["reversibility"] = report
+    return [preflight_gate(report)]
 
 
 @router.post("/run")
@@ -743,9 +777,10 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
                 source_database=str(src_cfg.get("database") or ""),
                 source_config=src_cfg or None,
             )
+    reversibility_gates = _validate_reversibility(body, source_column_types, dest_column_types, result)
     gated = apply_policy_gates(
         result,
-        run_transfer_policy_gates(
+        reversibility_gates + run_transfer_policy_gates(
             sync_mode=body.sync_mode,
             schema_policy=body.schema_policy,
             validation_mode=body.validation_mode,

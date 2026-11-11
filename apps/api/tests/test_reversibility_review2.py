@@ -424,3 +424,46 @@ def test_low_engine_g24_on_a_file_export_follows_the_format(people, fake_store, 
     else:
         assert not result.success and _blocked_by_g24(result), result.error
 
+
+# --------------------------------- pre-existing: direct Validate computes g24 when asked (Validate == Execute)
+
+
+@pytest.fixture
+def validate_client(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from tests import r4_route_harness as h
+
+    h.isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATAFLOW_SEED_DEMO", "false")
+    from src.main import app
+
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.mark.parametrize("transform,status", [("hash_pii", "block"), ("none", "pass")])
+def test_direct_validate_adds_g24_when_reversibility_is_required(validate_client, tmp_path, transform, status):
+    body = {
+        "columns": ["id", "email"], "column_types": {"id": "INTEGER", "email": "TEXT"}, "row_count": 2,
+        "sample_rows": [{"id": 1, "email": "a@x.com"}, {"id": 2, "email": "b@x.com"}],
+        "source_kind": "file", "source_type": "csv", "dest_kind": "database", "dest_type": "sqlite",
+        "dest_database": str(tmp_path / "dst.sqlite"), "dest_table": "people",
+        "destination_column_types": {"id": "INTEGER", "email": "TEXT"},
+        "mappings": [{"source": "id", "target": "id", "confidence": 0.99},
+                     {"source": "email", "target": "email", "confidence": 0.99, "transform": transform}],
+        "compliance_acknowledged": True, "acknowledgment_actor": "ops lead",
+        "acknowledgment_reason": "test of the reversibility gate",
+        "require_reversibility": True,
+    }
+    res = validate_client.post("/api/v1/preflight/run", json=body)
+    assert res.status_code == 200, res.text
+    out = res.json()
+    gate = next((g for g in out.get("gates") or [] if g.get("id") == "g24_reversibility"), None)
+    assert gate is not None and gate["status"] == status, gate
+    assert out["reversibility"]["gate"]["status"] == status
+    # Not asked: no g24 (as before).
+    body.pop("require_reversibility")
+    plain = validate_client.post("/api/v1/preflight/run", json=body).json()
+    assert not any(g.get("id") == "g24_reversibility" for g in plain.get("gates") or [])
