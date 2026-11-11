@@ -99,6 +99,10 @@ export interface ParityFix {
   decided_at?: string | null;
   /** The approver's note; only on decided fixes. */
   note?: string | null;
+  /** The repair approval workflow's record of this decision (services/agentic_repair). */
+  repair_proposal_id?: string;
+  /** A re-sync's own transfer job, while it applies and after. */
+  child_job_id?: string;
 }
 
 export interface ParityRound {
