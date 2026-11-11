@@ -37,6 +37,7 @@ export const reportInitial: ParityReport = {
       "kind": "value",
       "protected": false,
       "rows": 3,
+      "rows_at_least": false,
       "table": "pay"
     },
     {
@@ -55,6 +56,7 @@ export const reportInitial: ParityReport = {
       "kind": "missing_in_destination",
       "protected": false,
       "rows": 1,
+      "rows_at_least": false,
       "table": "pay"
     },
     {
@@ -71,6 +73,7 @@ export const reportInitial: ParityReport = {
       "kind": "value",
       "protected": false,
       "rows": 8,
+      "rows_at_least": false,
       "table": "pay"
     },
     {
@@ -87,6 +90,7 @@ export const reportInitial: ParityReport = {
       "kind": "extra_in_destination",
       "protected": false,
       "rows": 1,
+      "rows_at_least": false,
       "table": "pay"
     }
   ],
@@ -238,6 +242,7 @@ export const reportResynced: ParityReport = {
       "kind": "value",
       "protected": false,
       "rows": 8,
+      "rows_at_least": false,
       "table": "pay"
     },
     {
@@ -254,6 +259,7 @@ export const reportResynced: ParityReport = {
       "kind": "extra_in_destination",
       "protected": false,
       "rows": 1,
+      "rows_at_least": false,
       "table": "pay"
     }
   ],
@@ -413,6 +419,7 @@ export const reportSigned: ParityReport = {
       "kind": "value",
       "protected": false,
       "rows": 8,
+      "rows_at_least": false,
       "table": "pay"
     },
     {
@@ -429,6 +436,7 @@ export const reportSigned: ParityReport = {
       "kind": "extra_in_destination",
       "protected": false,
       "rows": 1,
+      "rows_at_least": false,
       "table": "pay"
     }
   ],

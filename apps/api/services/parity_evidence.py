@@ -52,6 +52,8 @@ class Observation:
     cause: dict[str, Any] | None = None  # set when the evidence itself names the cause
     keys_sample: list[str] = field(default_factory=list)
     sampled: bool = False
+    #: Gate-8 proved the difference without counting its rows: ``rows`` is only a lower bound.
+    at_least: bool = False
 
 
 @dataclass
@@ -403,7 +405,7 @@ def _failure_observations(recon: dict[str, Any], table: str, key_cols: list[str]
         if col and col in by_row:
             continue  # the rows that differ in this column are already named
         out.append(Observation(
-            table=table, kind="value", column=col or None, rows=1,
+            table=table, kind="value", column=col or None, rows=1, at_least=True,
             origin="unattributed" if where.startswith("The re-read") else "ladder_aggregate",
             cause=cause(
                 UNEXPLAINED,
@@ -464,7 +466,7 @@ def _effect_observations(job: dict[str, Any], table: str) -> list[Observation]:
     for src, tgt, tf in _protected_triples(job):
         if tgt in leaked:
             out.append(Observation(
-                table=table, kind="value", column=tgt, rows=1, origin="protection_proof",
+                table=table, kind="value", column=tgt, rows=1, at_least=True, origin="protection_proof",
                 cause=cause(UNEXPLAINED, f"The protection proof found source values in clear despite {tf}.",
                             explained=False),
             ))
@@ -581,6 +583,7 @@ def _count_observations(job: dict[str, Any], ev: TableEvidence) -> list[Observat
     if unnamed > 0:
         out.append(Observation(
             table=ev.name, kind="missing_in_destination", rows=unnamed, origin="row_count",
+            at_least=shortfall,
             cause=cause(
                 UNEXPLAINED,
                 f"The destination holds {dst_n:,} row(s), fewer than the {landed_expected:,} this run "

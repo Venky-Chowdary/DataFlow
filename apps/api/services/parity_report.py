@@ -287,18 +287,24 @@ def _group(ev: TableEvidence, engine: str, acceptances: dict[str, Any]) -> list[
             protected = bool(ob.column and ob.column in ev.protected)
             diff = groups[did] = {
                 "id": did, "table": ev.name, "column": ob.column, "kind": ob.kind,
-                "rows": 0, "keys_sample": [], "cause": dict(found),
+                "rows": 0, "rows_at_least": False, "keys_sample": [], "cause": dict(found),
                 "example": _example(ob, protected), "protected": protected,
-                "_keys": [], "_keyless": 0, "_sampled_keys": [], "_localizing": False,
+                "_keys": [], "_keyless": 0, "_sampled_keys": [], "_sampled_keyless": 0,
+                "_localizing": False,
             }
         diff["_localizing"] = diff["_localizing"] or localizes(ob)
+        # Gate-8 proved a difference without counting its rows: ``rows`` is a lower bound.
+        diff["rows_at_least"] = diff["rows_at_least"] or ob.at_least
         if ob.key:
             if ob.key not in diff["_keys"]:
                 diff["_keys"].append(ob.key)
             if ob.sampled and ob.key not in diff["_sampled_keys"]:
                 diff["_sampled_keys"].append(ob.key)
         else:
-            diff["_keyless"] += max(int(ob.rows or 0), 0)
+            rows = max(int(ob.rows or 0), 0)
+            diff["_keyless"] += rows
+            if ob.sampled:
+                diff["_sampled_keyless"] += rows  # a sampled row Gate-8 stored without its key
             for k in ob.keys_sample:
                 if k not in diff["keys_sample"]:
                     diff["keys_sample"].append(k)
@@ -308,7 +314,8 @@ def _group(ev: TableEvidence, engine: str, acceptances: dict[str, Any]) -> list[
     for diff in groups.values():
         accepted = acceptances.get(diff["id"])
         parts = [diff]
-        if accepted and not diff["cause"]["explained"]:
+        # Nobody can accept rows nobody counted: a lower-bound difference stays open.
+        if accepted and not diff["cause"]["explained"] and not diff["rows_at_least"]:
             parts = _split_accepted(diff, accepted)
         for part in parts:
             part["rows"] = len(part["_keys"]) + part["_keyless"]
@@ -331,12 +338,14 @@ def _split_accepted(diff: dict[str, Any], accepted: dict[str, Any]) -> list[dict
     """
     keys = set(accepted.get("keys") or [])
     keyless = min(diff["_keyless"], max(int(accepted.get("keyless_rows") or 0), 0))
+    sampled_keyless = min(diff["_sampled_keyless"], keyless)
     inside = [k for k in diff["_keys"] if k in keys]
     beyond = [k for k in diff["_keys"] if k not in keys]
     was = diff["cause"]
     covered = {
         **diff, "_keys": inside, "_keyless": keyless,
         "_sampled_keys": [k for k in diff["_sampled_keys"] if k in keys],
+        "_sampled_keyless": sampled_keyless,
         "keys_sample": list(diff["keys_sample"]) if keyless else [],
         "cause": accepted_by_operator(accepted),
     }
@@ -345,6 +354,7 @@ def _split_accepted(diff: dict[str, Any], accepted: dict[str, Any]) -> list[dict
         **diff, "id": difference_id(diff["table"], diff["column"], diff["kind"], was["code"] + "|beyond_acceptance"),
         "_keys": beyond, "_keyless": diff["_keyless"] - keyless,
         "_sampled_keys": [k for k in diff["_sampled_keys"] if k not in keys],
+        "_sampled_keyless": diff["_sampled_keyless"] - sampled_keyless,
         "keys_sample": [] if keyless else list(diff["keys_sample"]),
         "cause": {**was, "detail": was["detail"] + " These rows are beyond what was accepted."},
     }
@@ -372,19 +382,40 @@ def _row_counts(diffs: list[dict[str, Any]], cap: int | None) -> tuple[int, int]
     return differ, bad
 
 
+def _sample_bound(ev: TableEvidence, k: int, bad: int) -> float | None:
+    """One-sided 95% upper bound on the share of rows holding an unexplained difference.
+
+    The Clopper-Pearson bound covers what the sample saw (``k`` of
+    ``sampled_rows``); rows proven unexplained outside the sample (missing
+    rows the counts prove, keys the census named) are added on top, so a
+    clean sample never hides a certain loss.
+    """
+    upper = clopper_pearson_upper(min(k, ev.sampled_rows), ev.sampled_rows)
+    if upper is None or not ev.rows_source:
+        return upper
+    return min(1.0, upper + max(bad - k, 0) / ev.rows_source)
+
+
 def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
     cap = max([n for n in (ev.rows_source, ev.rows_destination) if n is not None], default=None)
     differ, bad = _row_counts(diffs, cap)
-    k = len({key for d in diffs if not d["cause"]["explained"] for key in d["_sampled_keys"]})
+    open_diffs = [d for d in diffs if not d["cause"]["explained"]]
+    # Sampled rows with an unexplained difference: keyed ones once, and those Gate-8 stored without a key.
+    k = len({key for d in open_diffs for key in d["_sampled_keys"]}) + sum(d["_sampled_keyless"] for d in open_diffs)
+    at_least = any(d["rows_at_least"] for d in open_diffs)
     upper = None
     pct: float | None = None
     if ev.check in _FULL_CHECKS and ev.rows_source:
         pct = round(100.0 * max(ev.rows_source - bad, 0) / ev.rows_source, 4)
     elif ev.check == "sampled" and ev.sampled_rows:
-        upper = clopper_pearson_upper(min(k, ev.sampled_rows), ev.sampled_rows)
+        upper = _sample_bound(ev, k, bad)
         pct = round(100.0 * (1.0 - upper), 4) if upper is not None else None
-    if ev.capped or ev.gate8_unaccounted:
-        pct = None  # the census stopped naming keys, or Gate-8 failed on rows it did not name
+        if pct is not None and ev.rows_source:
+            pct = min(pct, round(100.0 * max(ev.rows_source - bad, 0) / ev.rows_source, 4))
+    if at_least:
+        upper = None  # Gate-8 did not count these rows: nothing bounds how many differ
+    if ev.capped or ev.gate8_unaccounted or at_least:
+        pct = None  # the census stopped naming keys, Gate-8 failed on rows it did not name or count
     if bad:
         status = "unexplained"
     elif ev.check in {"none", "count_only"} or ev.capped or ev.gate8_unaccounted:
@@ -398,9 +429,24 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
         "rows_destination": ev.rows_destination, "proven_equal_pct": pct,
         "differences": differ, "explained": differ - bad, "unexplained": bad,
         "status": status, "upper_bound_rate": upper,
-        "_sample": (ev.sampled_rows, k) if ev.check == "sampled" else None,
+        "_sample": (ev.sampled_rows, k, max(bad - k, 0), ev.rows_source or 0) if ev.check == "sampled" else None,
+        "_at_least": at_least,
         "_note": ev.note,
     }
+
+
+def _pooled_bound(tables: list[dict[str, Any]]) -> tuple[int, int, float | None]:
+    """(sampled rows, unexplained rows in them, the bound) over every sampled table."""
+    sampled = [t for t in tables if t["_sample"]]
+    n = sum(t["_sample"][0] for t in sampled)
+    k = sum(t["_sample"][1] for t in sampled)
+    if not n or any(t["_at_least"] for t in sampled):
+        return n, k, None
+    upper = clopper_pearson_upper(min(k, n), n)
+    extra, population = sum(t["_sample"][2] for t in sampled), sum(t["_sample"][3] for t in sampled)
+    if upper is not None and extra and population:
+        upper = min(1.0, upper + extra / population)
+    return n, k, upper
 
 
 def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
@@ -409,34 +455,32 @@ def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
         for t in tables
     } or {"none"}
     method = next(iter(kinds)) if len(kinds) == 1 else "mixed"
-    n = sum(t["_sample"][0] for t in tables if t["_sample"])
-    k = sum(t["_sample"][1] for t in tables if t["_sample"])
-    upper = clopper_pearson_upper(min(k, n), n) if n else None
+    n, k, upper = _pooled_bound(tables)
     full_tables = [t for t in tables if t["check"] in _FULL_CHECKS]
     bad_full = sum(t["unexplained"] for t in full_tables)
+    least = "at least " if any(t["_at_least"] for t in full_tables) else ""
+    bound = (
+        f"With {int(CONFIDENCE_LEVEL * 100)}% confidence at most {format_rate_pct(upper)} of rows hold an "
+        "unexplained difference" if upper is not None else
+        "Gate-8 also found differences it did not count, so nothing bounds how many rows differ"
+    )
     if method == "full":
         statement = (
             "Every row was compared and every difference is explained."
             if not bad_full else
-            f"Every row was compared: {bad_full} row(s) hold a difference no rule explains."
+            f"Every row was compared: {least}{bad_full} row(s) hold a difference no rule explains."
         )
         if not any(t["differences"] for t in full_tables):
             statement = "Every row was compared and no row differs."
     elif method == "sampled":
-        statement = (
-            f"Values were compared on {n:,} sampled row(s). With {int(CONFIDENCE_LEVEL * 100)}% "
-            f"confidence at most {format_rate_pct(upper)} of rows hold an unexplained difference."
-        )
+        statement = f"Values were compared on {n:,} sampled row(s). {bound}."
     elif method == "mixed":
         parts = []
         if full_tables:
             parts.append(f"{len(full_tables)} table(s) were compared in full")
         if n:
-            parts.append(
-                f"values were compared on {n:,} sampled row(s) elsewhere; with "
-                f"{int(CONFIDENCE_LEVEL * 100)}% confidence at most {format_rate_pct(upper)} "
-                "of those tables' rows hold an unexplained difference"
-            )
+            parts.append(f"values were compared on {n:,} sampled row(s) elsewhere; {bound[0].lower()}{bound[1:]} "
+                         "in those tables")
         none = [t["name"] for t in tables if t["check"] in {"count_only", "none"}]
         if none:
             parts.append(f"values were not compared for {', '.join(none[:5])}")
@@ -457,8 +501,9 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
     bad = sum(t["unexplained"] for t in tables)
     if bad:
         names = ", ".join(t["name"] for t in tables if t["unexplained"])
+        least = "At least " if any(t["_at_least"] for t in tables) else ""
         capped = " ".join(t["_note"] for t in tables if t.get("_note") and t["check"] not in {"count_only", "none"})
-        return "unexplained", f"{bad:,} row(s) in {names} hold a difference no rule explains." + (
+        return "unexplained", f"{least}{bad:,} row(s) in {names} hold a difference no rule explains." + (
             f" {capped}" if capped else ""
         )
     noted = [t["_note"] for t in tables if t["status"] == "unverifiable" and t.get("_note")]
@@ -471,17 +516,21 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
             "recorded), so the evidence cannot decide."
         )
     explained = sum(t["explained"] for t in tables)
+    sampled = [t["name"] for t in tables if t["check"] not in _FULL_CHECKS]
+    if sampled:
+        # A sample bounds the rate of unexplained differences; it proves nothing, so a
+        # sampled run is never "explained" (every row) nor "proven".
+        upper = confidence["upper_bound_rate"]
+        return "no_difference_found", (
+            f"No {'unexplained ' if explained else ''}difference was found, but the values of "
+            f"{', '.join(sampled[:5])} were compared on a sample of {confidence['sampled_rows']:,} row(s): "
+            f"with {int(CONFIDENCE_LEVEL * 100)}% confidence at most {format_rate_pct(upper)} of rows hold "
+            "an unexplained difference."
+            + (f" {explained:,} row(s) differ in ways a rule explains." if explained else "")
+        )
     if explained:
         return "explained", f"{explained:,} row(s) differ and every difference is explained."
-    if all(t["check"] in _FULL_CHECKS for t in tables):
-        return "proven", "No differences: the destination matches the source."
-    # A sample that found nothing bounds the difference rate; it proves nothing.
-    sampled = [t["name"] for t in tables if t["check"] not in _FULL_CHECKS]
-    return "no_difference_found", (
-        f"No difference was found, but the values of {', '.join(sampled[:5])} were compared on a "
-        f"sample of {confidence['sampled_rows']:,} row(s): with {int(CONFIDENCE_LEVEL * 100)}% "
-        f"confidence at most {format_rate_pct(confidence['upper_bound_rate'])} of rows differ."
-    )
+    return "proven", "No differences: the destination matches the source."
 
 
 def _sum(values: list[int | None]) -> int | None:

@@ -66,9 +66,11 @@ def remember_report(job_id: str, job: dict[str, Any], report: dict[str, Any]) ->
 
 def _cell(table: dict[str, Any]) -> str:
     status = table.get("status")
+    if status in {"match", "explained"} and table.get("check") == "sampled":
+        # A sample bounds the rate of unexplained differences; only a full compare is proof.
+        return "sampled"
     if status == "match":
-        # A clean sample bounds the difference rate; only a full compare is proof.
-        return "sampled" if table.get("check") == "sampled" else "proven"
+        return "proven"
     if status == "explained":
         return "explained"
     if status == "unexplained":

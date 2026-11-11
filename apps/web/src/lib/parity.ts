@@ -69,6 +69,12 @@ export interface ParityDifference {
   column: string | null;
   kind: ParityDifferenceKind;
   rows: number;
+  /**
+   * True when Gate-8 proved the difference without counting its rows (a
+   * column check, a protection leak, a certain shortfall): ``rows`` is only a
+   * lower bound, so it cannot be accepted, only re-run.
+   */
+  rows_at_least?: boolean;
   keys_sample: string[];
   cause: ParityCause;
   /** Null for protected columns: their values never leave the deployment. */
@@ -235,8 +241,11 @@ export function verdictPresentation(report: Pick<ParityReport, "verdict" | "pari
     case "proven":
       return { label: "Proven equal", tone: "ok" };
     case "no_difference_found":
-      // A clean sample bounds the rate; it is not proof of every row.
-      return { label: "No difference in sample", tone: "ok" };
+      // A sample bounds the rate; it is not proof of every row (explained differences included).
+      return {
+        label: report.parity.explained > 0 ? "No unexplained difference in sample" : "No difference in sample",
+        tone: "ok",
+      };
     case "explained":
       return { label: "Every difference explained", tone: "ok" };
     case "unexplained": {

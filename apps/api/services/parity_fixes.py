@@ -267,7 +267,8 @@ def propose_fixes(job: dict[str, Any], report: dict[str, Any], state: dict[str, 
         rest = [d for d in bad if d["_keyless"] or d["kind"] in {"extra_in_destination", "duplicate_key"}]
         if rest or (resync is not None and not resync["applicable"]):
             proposals.append(_rerun(job, rest or keyed, job_id))
-        proposals += [_accept(d) for d in bad]
+        # Rows nobody counted cannot be accepted: only a re-run can count them.
+        proposals += [_accept(d) for d in bad if not d.get("rows_at_least")]
     return _merge(proposals, state)
 
 

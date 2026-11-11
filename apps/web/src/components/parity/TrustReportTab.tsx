@@ -102,7 +102,12 @@ function DifferenceRow({ diff }: { diff: ParityDifference }) {
           </details>
         )}
       </div>
-      <span className="df2-parity-num df2-parity-muted" aria-label={`${diff.rows} rows`}>
+      <span
+        className="df2-parity-num df2-parity-muted"
+        aria-label={diff.rows_at_least ? `at least ${diff.rows} rows` : `${diff.rows} rows`}
+        title={diff.rows_at_least ? "Gate-8 found this difference without counting its rows; re-run to count them." : undefined}
+      >
+        {diff.rows_at_least ? "≥ " : ""}
         {diff.rows.toLocaleString("en-US")}
       </span>
     </li>
