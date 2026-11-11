@@ -2153,7 +2153,8 @@ def verify_pgvector_table(
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
         with streaming_readback_cursor(conn, engine="postgresql") as cur:
-            cur.execute(f"SELECT source_id, metadata FROM {table_ref}")  # nosec B608
+            # Text, parsed exactly below: psycopg2's jsonb decode rounds (D352).
+            cur.execute(f"SELECT source_id, metadata::text AS metadata FROM {table_ref}")  # nosec B608
             names, raw_rows = dbapi_streaming_rows(cur)
             names = names or ["source_id", "metadata"]
 

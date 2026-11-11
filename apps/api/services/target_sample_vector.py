@@ -55,7 +55,9 @@ def read_pgvector_target_sample(
     )
 
     table_ref = quote_table_ref(table_name, schema or "public", dialect="postgresql")
-    select = "SELECT id, content, source_id, chunk_index, metadata "
+    # ``metadata::text``: psycopg2 decodes jsonb with ``json.loads``, which read
+    # the stored 99999999999.999999 back as 100000000000.0 (D352).
+    select = "SELECT id, content, source_id, chunk_index, metadata::text AS metadata "
     conn = get_connection(
         host=dest.get("host", ""),
         port=dest.get("port", 5432),
