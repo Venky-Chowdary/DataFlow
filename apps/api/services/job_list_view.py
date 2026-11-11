@@ -90,7 +90,6 @@ _VERIFICATION_KEYS = frozenset({
     "target_checksum",
 })
 _VERIFICATION_SAMPLE_KEYS = ("passed", "compared", "alignment", "identity_warning")
-_VERIFICATION_MESSAGE_MAX = 1000
 
 
 def verification_summary_for_list(job: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -108,8 +107,8 @@ def verification_summary_for_list(job: dict[str, Any] | None) -> dict[str, Any] 
         for key, value in recon.items()
         if key in _VERIFICATION_KEYS and (value is None or isinstance(value, (bool, int, float, str)))
     }
-    if isinstance(out.get("message"), str):
-        out["message"] = out["message"][:_VERIFICATION_MESSAGE_MAX]
+    # The message is shipped whole: the classifier reads phrases anywhere in
+    # it, so a cut message could classify differently from the detail card.
     identity = recon.get("identity")
     if isinstance(identity, dict) and isinstance(identity.get("proven"), bool):
         out["identity"] = {"proven": identity["proven"]}
@@ -244,6 +243,11 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
     summary = job.get("destination_summary")
     if isinstance(summary, dict) and summary.get("multi_stream") is True:
         out["multi_stream"] = True
+        streams = summary.get("streams")
+        if isinstance(streams, list):
+            # The detail card relabels on destination_summary.streams; the grid
+            # gets the same count, not the (differently sourced) stream names.
+            out["stream_count"] = len(streams)
     # Preserve reject count if only nested under destination_summary.
     if "rejected_rows" not in out and isinstance(job.get("destination_summary"), dict):
         ds = job["destination_summary"]

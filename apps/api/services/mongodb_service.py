@@ -1348,18 +1348,20 @@ class MongoDBService:
             sync_mode=sync_mode,
             verification=verification,
         )
+        from services.job_list_filters import attention_expr
+
         by_status: dict[str, int] = {}
         attention = 0
-        # One pass: the per-status counts and the "Needs attention" count (failed,
-        # or a Gate-8 verification that recorded ``passed: false``).
-        recon_failed = {"$cond": [{"$eq": ["$reconciliation.passed", False]}, 1, 0]}
+        # One pass: the per-status counts and the "Needs attention" count, with
+        # the very expression the attention list filter matches on.
+        needs_attention = {"$cond": [attention_expr(), 1, 0]}
         for row in collection.aggregate(
             ([{"$match": query}] if query else [])
-            + [{"$group": {"_id": "$status", "n": {"$sum": 1}, "recon_failed": {"$sum": recon_failed}}}]
+            + [{"$group": {"_id": "$status", "n": {"$sum": 1}, "attention": {"$sum": needs_attention}}}]
         ):
             key = str(row.get("_id") or "unknown")
             by_status[key] = int(row.get("n") or 0)
-            attention += by_status[key] if key == "failed" else int(row.get("recon_failed") or 0)
+            attention += int(row.get("attention") or 0)
         return {"total": sum(by_status.values()), "by_status": by_status, "attention": attention}
 
     def count_job_matches(

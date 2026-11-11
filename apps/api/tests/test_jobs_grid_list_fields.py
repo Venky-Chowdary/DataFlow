@@ -21,7 +21,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from services import mongodb_service as mongodb_service_mod
-from services.job_list_filters import job_needs_attention, memory_job_matches, mongo_job_list_query
+from services.job_list_filters import (
+    attention_expr,
+    job_needs_attention,
+    memory_job_matches,
+    mongo_job_list_query,
+    verdict_expr,
+)
 from services.job_list_view import slim_job_for_list, verification_summary_for_list
 from services.mongodb_service import get_mongodb_service
 from src.main import app
@@ -56,7 +62,7 @@ def test_verification_summary_keeps_verdict_scalars_and_drops_heavy_rows():
     assert summary["source_checksum_provenance"] == "independent_source_reread"
     assert summary["identity"] == {"proven": True}
     assert summary["sample_compare"] == {"passed": True, "compared": 5}
-    assert len(summary["message"]) == 1000
+    assert len(summary["message"]) == 5000, "never cut: the classifier reads the whole message"
     for heavy in ("mismatches", "dest_readback", "streams"):
         assert heavy not in summary
     assert slim["multi_stream"] is True
@@ -92,13 +98,13 @@ def test_mongo_query_for_attention_and_facets():
         verification="failed",
     )
     clauses = query["$and"]
-    assert {"$or": [{"status": "failed"}, {"reconciliation.passed": False}]} in clauses
+    assert {"$expr": attention_expr()} in clauses
     assert {"source_type": "postgresql"} in clauses
     assert {"destination_type": "snowflake"} in clauses
     assert {"sync_mode": "upsert"} in clauses
-    assert {"reconciliation.passed": False} in clauses
-    assert mongo_job_list_query(verification="passed") == {"reconciliation.passed": True}
-    assert mongo_job_list_query(verification="none") == {"reconciliation.passed": None}
+    assert {"$expr": verdict_expr("failed")} in clauses
+    assert mongo_job_list_query(verification="passed") == {"$expr": verdict_expr("passed")}
+    assert mongo_job_list_query(verification="none") == {"$expr": verdict_expr("none")}
     # Unknown or empty facets never narrow the query.
     assert mongo_job_list_query(verification="bogus", source_type="  ") == {}
 
@@ -183,3 +189,88 @@ def test_list_counts_attention_and_filters_server_side(client, path):
     assert sorted(job["name"] for job in unverified["jobs"]) == ["broken", "live"]
     assert client.get(f"{path}?verification=passed").json()["filtered_total"] == 1
     assert client.get(f"{path}?verification=bogus").status_code == 422
+
+
+# ── Review follow-ups: one match semantics for list, counts and both stores ──
+
+_EDGE_DOCS = [
+    {"_id": "a", "status": "failed", "workspace_id": "w1", "reconciliation": {"passed": False}},
+    {"_id": "b", "status": "completed", "workspace_id": "w1", "reconciliation": {"passed": False, "mismatches": [1, 2]}},
+    {"_id": "c", "status": "completed", "workspace_id": "w1", "reconciliation": {"passed": True}},
+    {"_id": "d", "status": "completed", "workspace_id": "w1", "reconciliation": None},
+    {"_id": "e", "status": "completed", "workspace_id": "w1"},
+    # Malformed shapes: a list is not a Gate-8 report, and a non-bool verdict is no verdict.
+    {"_id": "f", "status": "completed", "workspace_id": "w1", "reconciliation": [{"passed": False}]},
+    {"_id": "g", "status": "FAILED", "workspace_id": "w1"},
+    {"_id": "h", "status": "failed", "workspace_id": "w2"},
+    {"_id": "i", "status": "completed", "workspace_id": "w1", "reconciliation": {"passed": "no"}},
+]
+_EXPECTED = {
+    "attention": ["a", "b"],
+    "failed": ["a", "b"],
+    "passed": ["c"],
+    "none": ["d", "e", "f", "g", "i"],
+}
+
+
+def _ids(rows):
+    return sorted(row["_id"] for row in rows)
+
+
+def _check_store(store):
+    counts = store.count_jobs(workspace_id="w1")
+    attention = _ids(store.list_jobs(workspace_id="w1", status="attention"))
+    assert attention == _EXPECTED["attention"]
+    assert counts["attention"] == len(attention), "the pivot count is the list it opens"
+    assert store.count_job_matches(workspace_id="w1", status="attention") == len(attention)
+    for verdict in ("failed", "passed", "none"):
+        assert _ids(store.list_jobs(workspace_id="w1", verification=verdict)) == _EXPECTED[verdict], verdict
+    # Status matches exactly, as Mongo does: "FAILED" is not the failed status.
+    assert _ids(store.list_jobs(workspace_id="w1", status="failed")) == ["a"]
+    # A facet is a literal value, never an operator.
+    assert store.list_jobs(workspace_id="w1", source_type='{"$gt": ""}') == []
+
+
+def test_memory_store_attention_and_verification_edge_shapes():
+    from services.mongodb_service import MemoryMongoDBService
+
+    store = MemoryMongoDBService()
+    for doc in _EDGE_DOCS:
+        store._jobs[doc["_id"]] = dict(doc)
+    _check_store(store)
+
+
+def test_live_mongo_matches_the_memory_store():
+    """Mongo and the memory store answer the attention / verification facets alike."""
+    import uuid
+
+    from services.mongodb_service import MongoDBService
+
+    store = MongoDBService()
+    store.db_name = f"jobs_grid_parity_{uuid.uuid4().hex[:8]}"
+    try:
+        db = store.get_database()
+    except ConnectionError:
+        pytest.skip("no local MongoDB")
+    try:
+        db["transfer_jobs"].insert_many([
+            {**doc, "created_at": datetime(2026, 11, index + 1, tzinfo=timezone.utc)}
+            for index, doc in enumerate(_EDGE_DOCS)
+        ])
+        _check_store(store)
+    finally:
+        store.client.drop_database(store.db_name)
+
+
+def test_list_ships_the_classifier_inputs_the_detail_card_uses():
+    long_tail = "x" * 3000 + " Verified by writer; read-back verifier not available."
+    slim = slim_job_for_list({
+        "_id": "m",
+        "status": "completed",
+        "reconciliation": {"passed": True, "message": long_tail},
+        "destination_summary": {"multi_stream": True, "streams": [{"name": "a"}, {"name": "b"}, {"name": "c"}]},
+    })
+    # The classifier reads phrases anywhere in the message: never cut it.
+    assert slim["verification_summary"]["message"] == long_tail
+    assert slim["multi_stream"] is True
+    assert slim["stream_count"] == 3
