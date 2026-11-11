@@ -308,7 +308,7 @@ export const reportResynced: ParityReport = {
       "note": "first try",
       "preview": "upsert pay for id IN (7, 8, 9, 13) — 4 key(s)",
       "repair_proposal_id": "repair_parity_1aa5af88e1d2cfda",
-      "result": "re-sync job resync-child-1 failed: destination locked",
+      "result": "Re-sync job resync-child-1 failed: see the server log for the details.",
       "status": "failed",
       "title": "Re-sync 4 key(s) in pay by upsert"
     },
@@ -491,7 +491,7 @@ export const reportSigned: ParityReport = {
       "note": "first try",
       "preview": "upsert pay for id IN (7, 8, 9, 13) — 4 key(s)",
       "repair_proposal_id": "repair_parity_1aa5af88e1d2cfda",
-      "result": "re-sync job resync-child-1 failed: destination locked",
+      "result": "Re-sync job resync-child-1 failed: see the server log for the details.",
       "status": "failed",
       "title": "Re-sync 4 key(s) in pay by upsert"
     },

@@ -156,7 +156,8 @@ def test_a_resync_that_cannot_start_is_failed_and_recorded(store, captured, tmp_
     monkeypatch.setattr(UniversalTransferEngine, "_create_pending_job", refuse)
     after = approve_fix(job_id, resync["id"], actor="ops@example.com", note="go")
     fix = next(f for f in after["fixes"] if f["id"] == resync["id"])
-    assert fix["status"] == "failed" and "could not start: job store unavailable" in fix["result"]
+    # Class and a fixed sentence only; the raw text is in the server log (re-review 3, M2).
+    assert fix["status"] == "failed" and fix["result"].startswith("The re-sync start failed (RuntimeError)")
     assert not captured
     failed = [p for p in list_proposals(job_id=job_id) if p.source == "parity"]
-    assert [p.status for p in failed] == ["failed"] and failed[0].apply_result["error"] == "job store unavailable"
+    assert [p.status for p in failed] == ["failed"] and failed[0].apply_result["error"] == fix["result"]

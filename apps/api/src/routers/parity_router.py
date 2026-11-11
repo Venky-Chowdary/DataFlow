@@ -124,7 +124,7 @@ async def approve_parity_fix(
     def start_rerun() -> str:
         # The existing re-run route, with its own refusals and audit trail. A
         # refusal wrote nothing, so the fix's claim is released (RerunRefused).
-        from services.parity_apply import RerunRefused
+        from services.parity_apply import RerunRefused, scrub_text
 
         from .connectors_router import rerun_transfer_job
 
@@ -141,7 +141,8 @@ async def approve_parity_fix(
                 ) from exc
             started = future.result()  # it finished as the wait ran out
         except HTTPException as exc:
-            raise RerunRefused(f"the re-run was refused: {_detail_text(exc.detail)}") from exc
+            # The route's own refusal, scrubbed like the audit copy before it is a 409 body.
+            raise RerunRefused(scrub_text(f"the re-run was refused: {_detail_text(exc.detail)}")) from exc
         return str((started or {}).get("job_id") or "")
 
     try:

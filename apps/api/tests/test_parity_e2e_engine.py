@@ -273,7 +273,9 @@ def test_a_failed_write_is_recorded_and_not_counted_as_resolved(store, tmp_path,
     monkeypatch.setattr(parity_apply, "_launch", _locked)
     after = approve_fix(job_id, resync["id"], actor="ops@example.com")
     failed = next(f for f in after["fixes"] if f["id"] == resync["id"])
-    assert failed["status"] == "failed" and "destination locked" in failed["result"]
+    # The child's own error text stays in the server log; the result names the job (re-review 3, M2).
+    assert failed["status"] == "failed" and failed["result"].startswith("Re-sync job ")
+    assert "destination locked" not in failed["result"]
     assert after["rounds"] == []
     assert after["parity"]["unexplained"] == 4
     assert "job.parity.fix_failed" in [e.get("action") for e in list_audit_events(limit=100)]

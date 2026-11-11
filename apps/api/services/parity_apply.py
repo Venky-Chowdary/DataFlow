@@ -25,6 +25,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from services.parity_errors import safe_error
 from services.parity_evidence import request_of, target_to_source
 from services.parity_fixes import (
     APPLYING,
@@ -75,13 +76,13 @@ _VALUE_BEARING = (
 )
 
 
-def safe_result(text: Any, limit: int = 500) -> str:
-    """A fix result or error as it may be stored, signed and audited.
+def scrub_text(text: Any, limit: int = 500) -> str:
+    """An app-authored message (a route's refusal) as it may be shown and audited.
 
-    Database and child-job errors quote row values (PostgreSQL's
-    ``Key (email)=(…)``, ``Failing row contains (…)``, MySQL's ``Duplicate
-    entry '…'``) and sometimes credentials; protected columns are never shown,
-    so no quoted value is kept at all, and secret shapes are redacted.
+    Database and child-job errors never come through here — they go through
+    the allowlist :func:`services.parity_errors.safe_error`. A refusal the
+    platform wrote can still quote a value, so quoted values are stripped and
+    secret shapes redacted.
     """
     from services.log_redaction import redact_log_text
 
@@ -207,10 +208,10 @@ def approve_fix(
             started = start_rerun() if start_rerun is not None else ""
             ok, result = True, f"Started re-run {started}; it gets its own parity report when it completes."
     except RerunRefused as exc:
-        _release(job, job_id, fix_id, actor=actor, reason=safe_result(exc))
+        _release(job, job_id, fix_id, actor=actor, reason=scrub_text(exc))
         raise
     except Exception as exc:  # noqa: BLE001 - a failed write is recorded on the fix, never hidden
-        ok, result = False, safe_result(exc) or "the fix failed"
+        ok, result = False, safe_error(exc, what=f"The {fix['action'].replace('_', ' ')}")
     finally:
         with _APPLYING_LOCK:
             _APPLYING_HERE.discard((job_id, fix_id))
@@ -321,11 +322,11 @@ def _start_resync(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: 
     except Exception as exc:  # noqa: BLE001 - a failed start is recorded on the fix, never hidden
         from services.agentic_repair import record_outcome
 
-        error = safe_result(exc, 400)
+        error = safe_error(exc, what="The re-sync start", limit=400)
         decided = _repair_decision(job_id, fix, approve=True, actor=actor,
                                    apply_fn=lambda _a: {"applied": False, "error": error})
         record_outcome(decided.id, applied=False, result=error, actor=actor)
-        return settle_fix(job_id, fix_id, ok=False, result=f"The re-sync could not start: {error}")
+        return settle_fix(job_id, fix_id, ok=False, result=error)
 
     def link(_job: dict[str, Any], state: dict[str, Any]) -> None:
         record = state["fixes"].get(fix_id) or {}
@@ -339,8 +340,8 @@ def _start_resync(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: 
     try:
         future = _launch(child_id, req)
     except Exception as exc:  # noqa: BLE001 - the scheduler refused: the fix failed
-        return settle_fix(job_id, fix_id, ok=False, result=f"The re-sync job {child_id} could not be scheduled: "
-                          f"{safe_result(exc, 300)}")
+        return settle_fix(job_id, fix_id, ok=False,
+                          result=safe_error(exc, what=f"Scheduling the re-sync job {child_id}"))
     if future is not None and hasattr(future, "add_done_callback"):
         future.add_done_callback(lambda _f: _settle_quietly(job_id))
     settled = settle_pending(job_id)
@@ -388,8 +389,9 @@ def _resync_outcome(record: dict[str, Any], child: dict[str, Any] | None) -> tup
         return False, f"The re-sync job {child_id} is gone, so the fix cannot be confirmed."
     status = str(child.get("status") or "").strip().lower()
     if status in _CHILD_FAILED:
-        error = safe_result(child.get("error") or child.get("message") or status, 300)
-        return False, f"re-sync job {child_id} {status}: {error}"
+        if not (child.get("error") or child.get("message")):
+            return False, f"Re-sync job {child_id} {status}."
+        return False, safe_error(child.get("error") or child.get("message"), what=f"Re-sync job {child_id}")
     if status in UNFINISHED_JOB_STATUSES:
         stall = job_step_stall(child)
         if stall and stall["stall_seconds"] >= stall["fail_seconds"]:

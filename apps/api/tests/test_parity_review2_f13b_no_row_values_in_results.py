@@ -38,9 +38,9 @@ def store(monkeypatch, tmp_path):
     f"Violation of UNIQUE KEY constraint. The duplicate key value is ({SECRET}).",
 ])
 def test_database_errors_lose_their_row_values(text):
-    from services.parity_apply import safe_result
+    from services.parity_errors import safe_error
 
-    assert SECRET not in safe_result(text)
+    assert SECRET not in safe_error(text)
 
 
 def test_a_failed_child_job_error_is_sanitized_in_the_fix_and_the_audit(store, tmp_path):
