@@ -223,3 +223,102 @@ def test_n2_engine_blocks_a_transform_that_fits_only_the_design_sample(tmp_path,
     result = _execute(fake_store, src, dst, mappings=_UPPER)
     assert not result.success and _blocked_by_g24(result), result.error
     assert _dest_rows(dst) is None
+
+
+# ------------------------------------------- N3: type mappings still read as lossless
+
+
+def _pair(stype, ttype, source, dest):
+    from services.reversibility_types import type_pair
+
+    return type_pair(stype, ttype, dest_db=dest, source_db=source)
+
+
+@pytest.mark.parametrize("stype,ttype,source,dest,code", [
+    # integer -> decimal: precision minus scale against the integer's digits
+    ("BIGINT", "NUMBER(10)", "postgresql", "oracle", "narrowing"),
+    ("BIGINT", "NUMBER(18)", "postgresql", "oracle", "narrowing"),
+    ("bigint", "numeric(10)", "postgresql", "postgresql", "narrowing"),
+    ("integer", "numeric(5)", "postgresql", "postgresql", "narrowing"),
+    ("integer", "numeric(10,2)", "postgresql", "postgresql", "narrowing"),
+    ("bigint", "decimal", "postgresql", "mysql", "narrowing"),  # a bare MySQL DECIMAL is DECIMAL(10,0)
+    # integer storage intervals, not bit widths
+    ("INT UNSIGNED", "INT", "mysql", "mysql", "narrowing"),
+    ("INT UNSIGNED", "INTEGER", "mysql", "postgresql", "narrowing"),
+    ("TINYINT", "TINYINT", "mysql", "mssql", "narrowing"),  # -128..127 into 0..255
+    ("int", "bigint", "snowflake", "postgresql", "narrowing"),  # Snowflake INT is NUMBER(38,0)
+    # same spelling, another engine
+    ("text", "text", "postgresql", "mysql", "narrowing"),
+    ("text", "mediumtext", "postgresql", "mysql", "narrowing"),
+    ("DATE", "DATE", "oracle", "postgresql", "truncation"),
+    # normalising JSON carriers
+    ("json", "JSON", "postgresql", "mysql", "json_normalize"),
+    ("json", "JSON", "postgresql", "bigquery", "json_normalize"),
+    ("json", "variant", "postgresql", "snowflake", "json_normalize"),
+    # offset-keeping types
+    ("TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE", "oracle", "oracle", "timezone"),
+    ("TIMESTAMP(6) WITH TIME ZONE", "TIMESTAMPTZ", "oracle", "postgresql", "timezone"),
+    ("DATETIMEOFFSET(6)", "timestamptz", "mssql", "postgresql", "timezone"),
+    # unbounded or typed text into a narrow column
+    ("varchar", "varchar(10)", "postgresql", "postgresql", "narrowing"),
+    ("inet", "varchar(15)", "postgresql", "postgresql", "narrowing"),
+])
+def test_n3_lossy_type_mappings_are_named_lossy(stype, ttype, source, dest, code):
+    assert _pair(stype, ttype, source, dest) == (LOSSY, code)
+
+
+@pytest.mark.parametrize("stype,ttype,source,dest,code,fits,does_not_fit", [
+    ("VARCHAR2(10 CHAR)", "VARCHAR2(10 BYTE)", "oracle", "oracle", "byte_length", ["plain"], ["ééééééé"]),
+    ("VARCHAR2(40 CHAR)", "VARCHAR2(40)", "oracle", "oracle", "byte_length", ["plain"], ["€" * 14]),
+    ("varchar(10)", "VARCHAR2(10)", "postgresql", "oracle", "byte_length", ["abcdefghij"], ["abcdefghié"]),
+    ("TINYINT(1)", "BOOLEAN", "mysql", "postgresql", "boolean_domain", [0, 1, True], [2]),
+    ("DATETIME", "TIMESTAMP", "mysql", "mysql", "timestamp_range",
+     ["2024-05-01 10:00:00"], ["1960-01-01 00:00:00"]),
+    ("date", "TIMESTAMP", "postgresql", "mysql", "timestamp_range", ["2024-05-01"], ["2040-01-01"]),
+])
+def test_n3_conditional_type_mappings_are_checked_value_by_value(stype, ttype, source, dest, code, fits,
+                                                                 does_not_fit):
+    from services.reversibility import CONDITIONAL, classify_mapping
+
+    def col(observed=None):
+        return classify_mapping(_m("c", stype=stype, ttype=ttype), dest_db=dest, source_db=source,
+                                observed=observed)
+
+    assert _pair(stype, ttype, source, dest) == (CONDITIONAL, code)
+    assert col()["check"]["status"] == "not_checked"
+    assert col(fits)["check"]["status"] == "fits"
+    bad = col(fits + does_not_fit)
+    assert bad["check"]["status"] == "does_not_fit" and bad["check"]["rows_not_fitting"] == len(does_not_fit)
+    assert "?" not in bad["reason"]
+
+
+@pytest.mark.parametrize("stype,ttype,source,dest", [
+    ("integer", "numeric(12,2)", "postgresql", "postgresql"),
+    ("bigint", "decimal(19,0)", "postgresql", "mysql"),
+    ("BIGINT", "NUMBER(19)", "postgresql", "oracle"),
+    ("INTEGER", "NUMBER", "postgresql", "oracle"),
+    ("bigint", "numeric", "postgresql", "postgresql"),
+    ("INT UNSIGNED", "BIGINT", "mysql", "postgresql"),
+    ("TINYINT UNSIGNED", "TINYINT", "mysql", "mssql"),  # 0..255 into 0..255
+    ("text", "longtext", "postgresql", "mysql"),
+    ("text", "text", "postgresql", "sqlite"),
+    ("DATE", "DATE", "oracle", "oracle"),
+    ("DATE", "TIMESTAMP", "oracle", "postgresql"),
+    ("date", "datetime", "oracle", "mysql"),
+    ("json", "json", "postgresql", "postgresql"),
+    ("json", "text", "postgresql", "postgresql"),
+    ("jsonb", "JSON", "postgresql", "mysql"),
+    ("timestamptz", "TIMESTAMP WITH TIME ZONE", "postgresql", "oracle"),
+    ("DATETIMEOFFSET", "TIMESTAMP_TZ", "mssql", "snowflake"),
+    ("VARCHAR2(10 BYTE)", "VARCHAR2(10 CHAR)", "oracle", "oracle"),
+    ("varchar(10)", "VARCHAR2(40)", "postgresql", "oracle"),
+    ("inet", "varchar(64)", "postgresql", "postgresql"),
+    ("BOOLEAN", "TINYINT(1)", "postgresql", "mysql"),
+    ("TINYINT(1)", "TINYINT(1)", "mysql", "mysql"),
+    ("TINYINT(1)", "BOOLEAN", "mysql", "mysql"),
+    ("DATETIME", "DATETIME(6)", "mysql", "mysql"),
+])
+def test_n3_lossless_type_mappings_stay_invertible(stype, ttype, source, dest):
+    from services.reversibility import INVERTIBLE
+
+    assert _pair(stype, ttype, source, dest)[0] == INVERTIBLE

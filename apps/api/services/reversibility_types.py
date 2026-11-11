@@ -29,6 +29,8 @@ from typing import Any
 INVERTIBLE, LOSSY, CONDITIONAL = "invertible", "lossy", "conditional"
 
 TEXT = frozenset({"string", "text"})
+#: Families whose text rendering is plain ASCII (one byte per character).
+_ASCII_RENDERED = frozenset({"integer", "decimal", "float", "boolean", "uuid", "date", "datetime", "time"})
 _SAFE_WIDEN = frozenset({("integer", "decimal"), ("date", "datetime"), ("boolean", "integer")})
 _TRUNCATE = frozenset({("datetime", "date"), ("datetime", "time")})
 _ROUND = frozenset({("decimal", "integer"), ("float", "integer"), ("decimal", "float"), ("float", "decimal")})
@@ -39,6 +41,21 @@ _DOUBLE_FLOAT = frozenset({"postgresql", "sqlserver", "sqlite", "snowflake", "re
 #: (SQLite stores text: its declaration says nothing about the digits kept).
 _NO_DECLARED_FSP = frozenset({"sqlite", ""})
 _INT_CARRIER = {8: "TINYINT", 16: "SMALLINT", 32: "INT4", 64: "BIGINT"}
+#: A bare ``VARCHAR`` on engines where it has a width (PostgreSQL: unbounded text).
+_BARE_VARCHAR = {"postgresql": "TEXT", "snowflake": "VARCHAR(16777216)", "redshift": "VARCHAR(256)"}
+#: Oracle / Snowflake integer spellings: all NUMBER(38).
+_NUMBER38_INTS = frozenset({"INT", "INTEGER", "SMALLINT", "BIGINT", "TINYINT", "BYTEINT", "NUMBER"})
+#: Integer digits of a bare DECIMAL / NUMERIC (MySQL DECIMAL(10,0), SQL Server DECIMAL(18,0)).
+_BARE_DECIMAL_DIGITS = {"mysql": 10, "sqlserver": 18}
+#: Engines whose JSON column keeps the document's text (a PostgreSQL ``json``, SQLite / DuckDB text).
+_TEXT_JSON_ENGINES = frozenset({"postgresql", "sqlite", "duckdb", ""})
+#: Typed text with a bounded rendering (longest text a value renders as).
+_TYPED_TEXT_WIDTH = {"INET": 49, "CIDR": 49, "MACADDR": 17, "MACADDR8": 23, "ROWID": 18}
+#: MySQL ``TIMESTAMP`` range, kept clear of any session offset (+-14 h): '1970-01-01 00:00:01' to
+#: '2038-01-19 03:14:07' UTC.
+_MYSQL_TS_RANGE = ("1970-01-02T00:00:00", "2038-01-18T00:00:00")
+#: UTF-8 bytes a character can take (an Oracle byte-semantics column counts bytes).
+_MAX_UTF8 = 4
 _PARAMS = re.compile(r"\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)")
 #: Longest text a value of the family renders as (sign, digits, separators, offset).
 _FLOAT_TEXT = 24  # '-1.7976931348623157e+308'
@@ -83,7 +100,64 @@ def resolve(type_str: str, db: str) -> str:
             return "FLOAT4"
         if eng in _DOUBLE_FLOAT:
             return "FLOAT8"
+    upper = text.upper()
+    if eng == "oracle" and upper == "DATE":
+        return "TIMESTAMP(0)"  # an Oracle DATE keeps the time of day, to the second
+    if upper in {"VARCHAR", "CHARACTER VARYING"} and eng in _BARE_VARCHAR:
+        return _BARE_VARCHAR[eng]
     return text
+
+
+def int_bounds(type_str: str, db: str) -> tuple[int, int] | None:
+    """The integer interval a column of ``type_str`` stores on ``db`` (``None`` when not known).
+
+    The type system's storage bounds, with the engine facts it does not
+    carry: SQL Server's ``TINYINT`` is unsigned (0..255), and an Oracle /
+    Snowflake integer spelling is ``NUMBER(38)``.
+    """
+    from services import type_system as ts
+
+    eng, base = engine(db), _base(type_str)
+    if logical(type_str) not in {"integer", "decimal"}:
+        return None
+    if eng == "sqlserver" and base == "TINYINT":
+        return 0, 255
+    if eng in {"oracle", "snowflake"} and base in _NUMBER38_INTS and logical(type_str) == "integer":
+        return -(10 ** 38 - 1), 10 ** 38 - 1
+    if eng == "mysql" and base == "BIGINT" and "UNSIGNED" in _norm(type_str).upper():
+        return 0, (1 << 64) - 1
+    if logical(type_str) != "integer":
+        return None
+    try:
+        return ts.integer_storage_bounds(_norm(type_str).upper(), dest_db=eng)
+    except Exception:  # noqa: BLE001 - an unreadable spelling decides nothing
+        return None
+
+
+def _int_narrows(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
+    """An integer whose stored interval the destination's does not contain (else the bit-width rule)."""
+    from services import type_system as ts
+
+    src, tgt = int_bounds(stype, source_db), int_bounds(ttype, dest_db)
+    if logical(stype) == "integer" and logical(ttype) == "integer" and src and tgt:
+        return src[0] < tgt[0] or src[1] > tgt[1]
+    return bool(ts.integer_width_would_narrow(stype, ttype, dest_db=dest_db))
+
+
+def _decimal_digits(ttype: str, db: str) -> int | None:
+    """Integer digits a decimal column holds (precision minus scale; a bare spelling per engine)."""
+    match = _PARAMS.search(_norm(ttype))
+    if match:
+        return int(match.group(1)) - int(match.group(2) or 0)
+    return _BARE_DECIMAL_DIGITS.get(engine(db))
+
+
+def _int_into_decimal_narrows(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
+    """An integer cast into a decimal whose integer digits cannot hold the integer's widest value."""
+    bounds, digits = int_bounds(stype, source_db), _decimal_digits(ttype, dest_db)
+    if bounds is None or digits is None:
+        return False
+    return len(str(max(abs(bounds[0]), abs(bounds[1])))) > digits
 
 
 def _fsp(type_str: str, db: str) -> int | None:
@@ -113,7 +187,7 @@ def narrows(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
     checks = (
         lambda: ts.string_width_would_narrow(s, t, dest_db=dest_db),
         lambda: ts.decimal_params_would_narrow(s, t, dest_db=dest_db),
-        lambda: ts.integer_width_would_narrow(s, t, dest_db=dest_db),
+        lambda: _int_narrows(s, t, dest_db=dest_db, source_db=source_db),
         lambda: ts.float_mantissa_would_narrow(s, t, dest_db=dest_db, source_db=source_db),
         lambda: ts.temporal_precision_would_narrow(s, t, dest_db=dest_db),
         lambda: _fsp_narrows(stype, ttype, dest_db=dest_db, source_db=source_db),
@@ -130,17 +204,99 @@ def narrows(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
     return False
 
 
-def timezone_dropped(stype: str, ttype: str, *, dest_db: str) -> bool:
-    """An offset-aware source landing on a naive (wall-clock) destination."""
+def keeps_offset(type_str: str, db: str) -> bool:
+    """A type that stores each value's own UTC offset (or region), not only the instant.
+
+    SQL Server ``DATETIMEOFFSET``, Snowflake ``TIMESTAMP_TZ``, an Oracle (or
+    Snowflake) ``TIMESTAMP WITH TIME ZONE`` and a PostgreSQL ``timetz``. A
+    PostgreSQL ``timestamptz`` stores the instant only.
+    """
+    text, eng = re.sub(r"\s+", " ", _norm(type_str).upper()), engine(db)
+    if "DATETIMEOFFSET" in text or "TIMESTAMP_TZ" in text:
+        return True
+    if logical(type_str) == "time":
+        return eng in {"postgresql", ""} and (text.startswith("TIMETZ") or "WITH TIME ZONE" in text)
+    if "WITH TIME ZONE" in text and "LOCAL" not in text:
+        return eng in {"oracle", "snowflake"}
+    return eng == "snowflake" and text.startswith("TIMESTAMPTZ")
+
+
+def timezone_dropped(stype: str, ttype: str, *, dest_db: str, source_db: str = "") -> bool:
+    """An offset-aware source landing on a naive (wall-clock) destination, or an offset not kept."""
     from services import type_system as ts
 
     sl, tl = logical(stype), logical(ttype)
+    if (sl, tl) in {("time", "time"), ("datetime", "datetime")} and keeps_offset(stype, source_db) \
+            and not keeps_offset(ttype, dest_db):
+        return True
     if sl == "time" and tl == "time":
         return ts.time_timezone_polarity(stype) == "tz" and ts.time_timezone_polarity(ttype) == "ntz"
     if sl == "datetime" and tl == "datetime":
         return (ts.datetime_timezone_polarity(stype) in {"tz", "ltz"}
                 and ts.datetime_timezone_polarity(ttype, dest_db=engine(dest_db)) == "ntz")
     return False
+
+
+def json_normalizes(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
+    """A JSON document kept as text landing on a carrier that normalises it (keys, order, spacing).
+
+    ``jsonb``, MySQL / BigQuery / Oracle ``JSON`` and Snowflake ``VARIANT`` /
+    ``OBJECT`` / ``ARRAY`` store a parsed document; a PostgreSQL ``json`` (and
+    SQLite / DuckDB / MariaDB JSON text) keeps the exact text.
+    """
+    if _base(stype) != "JSON" or engine(source_db) not in _TEXT_JSON_ENGINES \
+            or _norm(source_db).lower().startswith("maria"):
+        return False
+    base, eng = _base(ttype), engine(dest_db)
+    if base == "JSONB" or base in {"VARIANT", "OBJECT"}:
+        return True
+    if base == "ARRAY":
+        return eng == "snowflake"
+    return base == "JSON" and eng in {"mysql", "bigquery", "oracle"} and not _norm(dest_db).lower().startswith("maria")
+
+
+def _byte_semantics(type_str: str, db: str) -> bool:
+    """An Oracle character column sized in bytes (``VARCHAR2(n)`` / ``(n BYTE)``, not ``(n CHAR)``)."""
+    if engine(db) != "oracle" or _base(type_str) not in {"VARCHAR2", "VARCHAR", "CHAR"}:
+        return False
+    return not re.search(r"\(\s*\d+\s+CHAR\s*\)", _norm(type_str).upper())
+
+
+def _bytes_may_overflow(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
+    """Text sized in characters landing in an Oracle column sized in bytes it may not fit."""
+    from services import type_system as ts
+
+    if not _byte_semantics(ttype, dest_db) or _byte_semantics(stype, source_db):
+        return False
+    width, chars = ts.parse_string_carrier_width(ttype), ts.parse_string_carrier_width(stype)
+    return width is not None and (chars is None or chars * _MAX_UTF8 > width)
+
+
+def _mysql_timestamp(ttype: str, dest_db: str) -> bool:
+    return engine(dest_db) == "mysql" and _base(ttype) == "TIMESTAMP"
+
+
+def _tinyint_bool(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
+    """MySQL's ``TINYINT(1)`` (any -128..127 value) into a real boolean.
+
+    Not into another ``TINYINT(1)`` (MySQL's ``BOOLEAN`` is one), which keeps every value.
+    """
+    if logical(ttype) != "boolean" or _base(stype) != "TINYINT" or not _PARAMS.search(_norm(stype)):
+        return False
+    if engine(source_db) not in {"mysql", ""}:
+        return False
+    return not (_base(ttype) == "TINYINT" or (engine(dest_db) == "mysql" and _base(ttype) in {"BOOL", "BOOLEAN"}))
+
+
+def _text_tier_narrows(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
+    """Another engine's unbounded text into a MySQL text tier below ``LONGTEXT`` (same spelling or not)."""
+    from services import type_system as ts
+
+    if engine(dest_db) != "mysql" or engine(source_db) in {"mysql", ""}:
+        return False
+    tier = ts.mysql_text_tier_rank(ttype)
+    return (tier is not None and tier < (ts.mysql_text_tier_rank("LONGTEXT") or 0)
+            and ts.is_unlimited_string_carrier(stype))
 
 
 def _base(type_str: str) -> str:
@@ -167,6 +323,8 @@ def rendered_width(stype: str, *, source_db: str) -> int | None:
         return len("false")
     if family == "uuid":
         return 36
+    if _base(stype) in _TYPED_TEXT_WIDTH:
+        return _TYPED_TEXT_WIDTH[_base(stype)]
     if family == "date":
         return len("YYYY-MM-DD")
     if family in {"datetime", "time"}:
@@ -188,40 +346,66 @@ def _text_width(ttype: str) -> int | None:
 
 
 def type_pair(stype: str, ttype: str, *, dest_db: str, source_db: str) -> tuple[str, str]:
-    """(invertibility, reason code) of a type mapping alone."""
+    """(invertibility, reason code) of a type mapping alone.
+
+    Both spellings are first resolved to the carrier they name on their own
+    engine, so the same spelling on two engines (``text`` on PostgreSQL and on
+    MySQL, ``TINYINT`` on MySQL and SQL Server, an Oracle ``DATE``) is compared
+    by what it stores, never called identity by its letters.
+    """
     from services import type_system as ts
 
-    slog, tlog = logical(stype), logical(ttype)
+    s, t = resolve(stype, source_db), resolve(ttype, dest_db)
+    slog, tlog = logical(s), logical(t)
     if not slog or not tlog:
         return CONDITIONAL, "type_unknown"
-    if narrows(stype, ttype, dest_db=dest_db, source_db=source_db):
+    if narrows(s, t, dest_db=dest_db, source_db=source_db) \
+            or _text_tier_narrows(s, t, dest_db=dest_db, source_db=source_db):
         return LOSSY, "narrowing"
-    if timezone_dropped(stype, ttype, dest_db=dest_db):
+    if timezone_dropped(stype, ttype, dest_db=dest_db, source_db=source_db):
         return LOSSY, "timezone"
-    if _base(stype) == "JSON" and _base(ttype) == "JSONB":
+    if json_normalizes(stype, ttype, dest_db=dest_db, source_db=source_db) \
+            or (_base(stype) == "JSON" and _base(ttype) == "JSONB"):
         return LOSSY, "json_normalize"
     if (slog, tlog) in _TRUNCATE:
         return LOSSY, "truncation"
     if (slog, tlog) in _ROUND:
         return LOSSY, "rounding"
+    if _tinyint_bool(stype, ttype, dest_db=dest_db, source_db=source_db):
+        return CONDITIONAL, "boolean_domain"
+    if _mysql_timestamp(t, dest_db) and slog in {"date", "datetime"}:
+        return CONDITIONAL, "timestamp_range"
     if slog == tlog or {slog, tlog} <= TEXT:
-        if tlog in TEXT and ts.national_charset_would_collapse(stype, ttype, dest_db=engine(dest_db)):
+        if tlog in TEXT and ts.national_charset_would_collapse(s, t, dest_db=engine(dest_db)):
             return CONDITIONAL, "charset"
-        if ts.enum_set_domain_would_reject(stype, ttype):
+        if ts.enum_set_domain_would_reject(s, t):
             return CONDITIONAL, "enum"
-        if tlog in TEXT and ts.is_fixed_char_carrier(ttype) and not ts.is_fixed_char_carrier(stype):
+        if tlog in TEXT and ts.is_fixed_char_carrier(t) and not ts.is_fixed_char_carrier(s):
             return CONDITIONAL, "blank_pad"
-        return INVERTIBLE, ("identity" if _norm(stype).upper() == _norm(ttype).upper() else "widen")
+        width, need = _text_width(t), rendered_width(s, source_db=source_db)
+        if tlog in TEXT and width is not None and need is not None and need > width:
+            return LOSSY, "narrowing"
+        if tlog in TEXT and _bytes_may_overflow(s, t, dest_db=dest_db, source_db=source_db):
+            return CONDITIONAL, "byte_length"
+        same = _norm(stype).upper() == _norm(ttype).upper() and engine(source_db) in {engine(dest_db), ""}
+        return INVERTIBLE, ("identity" if same else "widen")
     if (slog, tlog) in _SAFE_WIDEN:
+        if (slog, tlog) == ("integer", "decimal") and _int_into_decimal_narrows(
+                s, t, dest_db=dest_db, source_db=source_db):
+            return LOSSY, "narrowing"
         return INVERTIBLE, "lossless_cast"
     if tlog in TEXT and slog != "binary":
-        width = _text_width(ttype)
+        width = _text_width(t)
         if width is None:
             return INVERTIBLE, "lossless_cast"
         need = rendered_width(stype, source_db=source_db)
         if need is None:
             return CONDITIONAL, "text_width"
-        return (LOSSY, "narrowing") if need > width else (INVERTIBLE, "lossless_cast")
+        if need > width:
+            return LOSSY, "narrowing"
+        if _bytes_may_overflow(s, t, dest_db=dest_db, source_db=source_db) and slog not in _ASCII_RENDERED:
+            return CONDITIONAL, "byte_length"
+        return INVERTIBLE, "lossless_cast"
     return CONDITIONAL, "cast"
 
 
@@ -239,10 +423,20 @@ def _fits(code: str, text: str, ttype: str) -> bool:
     if code == "text_width":
         width = _text_width(ttype)
         return width is None or len(text) <= width
+    if code == "byte_length":
+        width = ts.parse_string_carrier_width(ttype)
+        return width is None or len(text.encode("utf-8")) <= width
+    if code == "boolean_domain":
+        return text.lower() in {"0", "1", "true", "false"}
+    if code == "timestamp_range":
+        stamp = text.strip().replace(" ", "T")
+        stamp = stamp if "T" in stamp else stamp + "T00:00:00"
+        return _MYSQL_TS_RANGE[0] <= stamp[:19] <= _MYSQL_TS_RANGE[1]
     return False
 
 
-TYPE_CHECKED = frozenset({"charset", "enum", "blank_pad", "text_width"})
+TYPE_CHECKED = frozenset({"charset", "enum", "blank_pad", "text_width", "byte_length", "boolean_domain",
+                          "timestamp_range"})
 
 
 def check_type_values(code: str, values: Iterable[Any], ttype: str,

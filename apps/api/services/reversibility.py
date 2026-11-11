@@ -96,6 +96,11 @@ _REASON = {
     "enum": "is cast {stype} to {ttype}; reversible only if every value is one of its labels",
     "blank_pad": "is padded to the fixed width of {ttype}; reversible only if no value ends in a space",
     "text_width": "is cast {stype} to {ttype}; reversible only if every value's text fits the width",
+    "byte_length": ("is stored in {ttype}, which counts bytes, not characters; reversible only if every value's "
+                    "UTF-8 text fits"),
+    "boolean_domain": "is cast {stype} to {ttype}; reversible only if every value is 0 or 1",
+    "timestamp_range": ("is stored as {ttype}, which holds only 1970-01-01 to 2038-01-19 (UTC) and converts "
+                        "through the session time zone; reversible only if every value is inside that range"),
     "lossless_cast": "is cast {stype} to {ttype} without losing information",
     "type_preserving_bind": "is bound as its own type ({ttype})",
     "omit": "is not written to the destination (omitted)",
