@@ -138,6 +138,7 @@
 
 .df2-parity-ring-card {
   justify-items: center;
+  align-content: center;
   text-align: center;
 }
 
@@ -183,11 +184,35 @@
   color: var(--df-text-tertiary);
 }
 
+/* The KPI tiles lay out by the card's own width, so 3 tiles sit in one row
+   (or one column) and 4 sit in one row or 2 x 2: never a lone tile on a row. */
+.df2-parity-kpi-card {
+  container: parity-kpis / inline-size;
+}
+
 .df2-parity-kpis {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--df-space-2);
   margin: 0;
+}
+
+@container parity-kpis (min-width: 300px) {
+  .df2-parity-kpis.is-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container parity-kpis (min-width: 420px) {
+  .df2-parity-kpis.is-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@container parity-kpis (min-width: 600px) {
+  .df2-parity-kpis.is-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
 .df2-parity-kpi {
@@ -215,6 +240,14 @@
   color: var(--df-text-primary);
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
+}
+
+/* "Unknown", "Not compared": a state, not a figure, so it does not shout like one. */
+.df2-parity-kpi dd.is-unknown {
+  font-size: var(--df-fs-lg);
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-secondary);
+  overflow-wrap: normal;
 }
 
 .df2-parity-kpi dd.df2-mono {

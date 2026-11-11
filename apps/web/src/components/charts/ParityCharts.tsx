@@ -40,7 +40,7 @@ import {
 const CONFIDENCE_WORDS = "95% confidence";
 
 export interface ParityRingProps {
-  /** 0..100; null when the evidence cannot say. */
+  /** 0..100; null when the evidence cannot say: the ring shows a dash and the caption (default "not compared"). */
   pct: number | null;
   tone?: "ok" | "warn" | "danger" | "idle";
   size?: number;
@@ -69,20 +69,29 @@ export function ParityRing({ pct, tone, size = 150, caption, lowerBound = false,
       </div>
     );
   }
+  if (pct == null || !Number.isFinite(pct)) {
+    // No figure: a compact dash (a word overflows the ring) and why, never a sampled bound.
+    const why = caption ?? "not compared";
+    return (
+      <div className="df2-parity-ring" role="img" aria-label={`Share of rows proven equal is unknown (${why})`}>
+        <ProgressRing value={0} exact size={size} radius={size / 2 - 10} tone="idle">
+          <strong className="df2-parity-ring-value">—</strong>
+          <small className="df2-parity-ring-caption">{why}</small>
+        </ProgressRing>
+      </div>
+    );
+  }
   const exact = formatParityPct(pct);
-  const bounded = lowerBound && pct != null && pct < 100;
+  const bounded = lowerBound && pct < 100;
   const label = bounded ? `≥ ${exact}` : exact;
   const resolvedCaption = caption ?? (lowerBound ? "rows equal (sampled bound)" : "rows proven equal");
-  const resolvedTone = pct == null ? "idle" : tone ?? "ok";
-  const aria =
-    pct == null
-      ? "Share of rows proven equal is unknown"
-      : lowerBound
-        ? `At least ${exact} of rows equal, a ${CONFIDENCE_WORDS} bound from a sample`
-        : `${exact} of rows proven equal`;
+  const resolvedTone = tone ?? "ok";
+  const aria = lowerBound
+    ? `At least ${exact} of rows equal, a ${CONFIDENCE_WORDS} bound from a sample`
+    : `${exact} of rows proven equal`;
   return (
     <div className="df2-parity-ring" role="img" aria-label={aria}>
-      <ProgressRing value={pct ?? 0} exact size={size} radius={size / 2 - 10} tone={resolvedTone}>
+      <ProgressRing value={pct} exact size={size} radius={size / 2 - 10} tone={resolvedTone}>
         <strong className="df2-parity-ring-value">{label}</strong>
         <small className="df2-parity-ring-caption">{resolvedCaption}</small>
       </ProgressRing>

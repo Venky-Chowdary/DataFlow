@@ -150,11 +150,20 @@ export function formatStreamNames(names: string[], max = 4): string {
   return `${clean.slice(0, max).join(", ")} +${clean.length - max}`;
 }
 
+/**
+ * "database.collection" from the parts the job has set: "orders" when there is
+ * no database, "" when neither is set (never "." or "undefined.undefined").
+ */
+export function jobDestinationPath(
+  job: Pick<JobEvidenceCarrier, "destination_database" | "destination_collection"> | null | undefined,
+): string {
+  const database = String(job?.destination_database ?? "").trim();
+  const collection = String(job?.destination_collection ?? "").trim();
+  return [database, collection].filter(Boolean).join(".");
+}
+
 function destRouteLabel(job: JobEvidenceCarrier): string {
-  const database = String(job.destination_database || "").trim();
-  const collection = String(job.destination_collection || "").trim();
-  const paired = [database, collection].filter(Boolean).join(".");
-  return paired || String(job.destination_type || "").trim() || "destination";
+  return jobDestinationPath(job) || String(job.destination_type || "").trim() || "destination";
 }
 
 /**

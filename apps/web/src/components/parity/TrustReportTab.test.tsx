@@ -10,7 +10,7 @@ import type { Root } from "react-dom/client";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TrustReportTab, TrustReportView, type TrustReportViewProps } from "./TrustReportTab.js";
-import { provenReport, signedReport, unexplainedReport } from "./parityFixtures.js";
+import { failedRunReport, provenApiWordingReport, provenReport, signedReport, unexplainedReport } from "./parityFixtures.js";
 import type { ParityReport } from "../../lib/parity.js";
 
 const noop = () => {};
@@ -122,7 +122,7 @@ describe("Trust Report states (static)", () => {
     assert.match(t, /Round 1/);
     assert.match(t, /Unexplained 4 → 0/);
     assert.match(t, /Applied/);
-    assert.match(t, /Export Markdown/);
+    assert.match(t, /Download report \(\.md\)/);
   });
 
   it("states an unverifiable verdict's reason up front", () => {
@@ -178,6 +178,157 @@ describe("Trust Report states (static)", () => {
   });
 });
 
+/* ── Polish: defects found on the merged tab ─────────────────── */
+
+/** The header toolbar's markup. */
+function toolbar(html: string): string {
+  return /<header class="df2-parity-toolbar">([\s\S]*?)<\/header>/.exec(html)?.[1] ?? "";
+}
+
+/** Each button in some markup: its classes and visible text. */
+function buttons(html: string): Array<{ cls: string; text: string }> {
+  return [...html.matchAll(/<button[^>]*class="([^"]*)"[^>]*>([\s\S]*?)<\/button>/g)].map((m) => ({
+    cls: m[1],
+    text: text(m[2]).trim(),
+  }));
+}
+
+/** The KPI tiles, in order, as "label: value". */
+function kpis(html: string): string[] {
+  return [...html.matchAll(/<div class="df2-parity-kpi"><dt>([^<]*)<\/dt><dd[^>]*>([\s\S]*?)<\/dd><\/div>/g)].map(
+    (m) => `${m[1]}: ${text(m[2]).trim()}`,
+  );
+}
+
+describe("Trust Report polish: nothing compared reads as nothing compared", () => {
+  it("the ring of a failed run shows a dash and \"not compared\", never a sampled bound", () => {
+    const html = view(failedRunReport(), { jobStatus: "failed" });
+    assert.match(html, /class="df2-parity-ring-value">—</);
+    assert.match(html, /class="df2-parity-ring-caption">not compared</);
+    assert.doesNotMatch(html, /sampled bound/);
+  });
+
+  it("a ring without a figure after a comparison that could not decide says so, not \"not compared\"", () => {
+    const failedGate8 = provenReport({
+      verdict: "unverifiable",
+      verdict_reason: "Gate-8 failed on rows its evidence does not name.",
+      parity: { ...provenReport().parity, proven_equal_pct: null },
+      evidence: { ...provenReport().evidence, reconciliation_passed: false },
+    });
+    const html = view(failedGate8);
+    assert.match(html, /class="df2-parity-ring-caption">not determined</);
+  });
+
+  it("rows differ is \"Not compared\" when no comparison ran, and there is no explained tile", () => {
+    const html = view(failedRunReport(), { jobStatus: "failed" });
+    assert.deepEqual(kpis(html), [
+      "rows in source: Unknown",
+      "rows in destination: Unknown",
+      "rows differ: Not compared",
+    ]);
+    assert.match(html, /<dl class="df2-parity-kpis is-3">/);
+  });
+
+  it("an undecided comparison does not claim zero rows differ", () => {
+    const failedGate8 = provenReport({
+      verdict: "unverifiable",
+      parity: { ...provenReport().parity, proven_equal_pct: null },
+      evidence: { ...provenReport().evidence, reconciliation_passed: false },
+    });
+    assert.ok(kpis(view(failedGate8)).includes("rows differ: Unknown"));
+  });
+
+  it("the explained tile shows only when rows differ, so the grid holds 3 or 4 tiles", () => {
+    const proven = view(provenApiWordingReport());
+    assert.deepEqual(kpis(proven), ["rows in source: 6", "rows in destination: 6", "rows differ: 0"]);
+    assert.match(proven, /<dl class="df2-parity-kpis is-3">/);
+    const differing = view(unexplainedReport());
+    assert.ok(kpis(differing).includes("explained: 8 / 12"));
+    assert.match(differing, /<dl class="df2-parity-kpis is-4">/);
+  });
+});
+
+describe("Trust Report polish: header actions follow the sign-off state", () => {
+  it("sign-off open: Go to sign-off is the primary action", () => {
+    const bar = buttons(toolbar(view(provenReport())));
+    const go = bar.find((b) => b.text === "Go to sign-off");
+    assert.ok(go, bar.map((b) => b.text).join(" | "));
+    assert.match(go.cls, /df2-btn-primary/);
+  });
+
+  it("sign-off blocked: no primary sign-off button, a secondary link says why", () => {
+    const html = view(failedRunReport(), { jobStatus: "failed" });
+    const bar = buttons(toolbar(html));
+    assert.ok(!bar.some((b) => /df2-btn-primary/.test(b.cls)), `no primary action while blocked: ${JSON.stringify(bar)}`);
+    assert.ok(!bar.some((b) => b.text === "Go to sign-off"));
+    const why = bar.find((b) => b.text === "Why sign-off is blocked");
+    assert.ok(why, bar.map((b) => b.text).join(" | "));
+    assert.match(toolbar(html), /title="The evidence cannot decide parity, so there is nothing to sign\."/);
+    // An unexplained report is blocked too.
+    assert.ok(!buttons(toolbar(view(unexplainedReport()))).some((b) => b.text === "Go to sign-off"));
+  });
+
+  it("downloads are labelled by what they download; the signed pack only once signed", () => {
+    const blocked = buttons(toolbar(view(failedRunReport(), { onDownloadSigned: noop })));
+    assert.ok(blocked.some((b) => b.text === "Report (.md)"), blocked.map((b) => b.text).join(" | "));
+    assert.ok(!blocked.some((b) => /pack/i.test(b.text)), "no pack before signing: the API answers 409");
+
+    assert.match(toolbar(view(failedRunReport())), /title="Download the trust report as Markdown/);
+
+    const signed = buttons(toolbar(view(signedReport(), { onDownloadSigned: noop })));
+    assert.ok(signed.some((b) => b.text === "Report (.md)"));
+    const pack = signed.find((b) => b.text === "Signed pack (.json)");
+    assert.ok(pack, signed.map((b) => b.text).join(" | "));
+    assert.match(pack.cls, /df2-btn-primary/);
+    const viewSignoff = signed.find((b) => b.text === "View sign-off");
+    assert.ok(viewSignoff);
+    assert.doesNotMatch(viewSignoff.cls, /df2-btn-primary/);
+  });
+});
+
+describe("Trust Report polish: one verdict, said once", () => {
+  it("the verdict pill shows in the header only, not again under the ring", () => {
+    for (const report of [provenReport(), failedRunReport(), unexplainedReport()]) {
+      const html = view(report);
+      const ringCard = /<div class="df2-parity-card df2-parity-ring-card">([\s\S]*?)<\/div><div class="df2-parity-card/.exec(html)?.[1] ?? "";
+      assert.ok(ringCard, "ring card found");
+      assert.doesNotMatch(ringCard, /df2-badge/);
+      assert.match(toolbar(html), /df2-badge/);
+    }
+  });
+
+  it("a failed run that never reached verification says so plainly", () => {
+    const t = text(view(failedRunReport(), { jobStatus: "failed" }));
+    assert.match(t, /This run failed before verification ran, so the source and destination were never compared\./);
+    assert.doesNotMatch(t, /Gate-8 recorded no reconciliation/);
+    assert.doesNotMatch(t, /No differences were found/);
+    const cancelled = text(view(failedRunReport(), { jobStatus: "cancelled" }));
+    assert.match(cancelled, /This run was cancelled before verification ran/);
+  });
+
+  it("otherwise the notice keeps the API's reason", () => {
+    // A completed job with no reconciliation: the API's reason is the honest one.
+    assert.match(text(view(failedRunReport(), { jobStatus: "completed" })), /Gate-8 recorded no reconciliation for this job/);
+    // A failed job whose Gate-8 did run: the reason names what it found.
+    const ran = provenReport({
+      verdict: "unverifiable",
+      verdict_reason: "Values were not compared for orders (only row counts or nothing was recorded), so the evidence cannot decide.",
+      evidence: { ...provenReport().evidence, reconciliation_passed: false },
+    });
+    const t = text(view(ran, { jobStatus: "failed" }));
+    assert.match(t, /Values were not compared for orders/);
+    assert.doesNotMatch(t, /failed before verification ran/);
+  });
+
+  it("proven: the confidence statement is not repeated by the verdict reason", () => {
+    const t = text(view(provenApiWordingReport()));
+    assert.match(t, /How sure is this\? Every row was compared and no row differs\./);
+    assert.doesNotMatch(t, /No differences: the destination matches the source\./);
+    // A reason that adds information still shows.
+    assert.match(text(view(unexplainedReport())), /4 rows in payments\.amount differ with no known cause\./);
+  });
+});
+
 /* ── Interactive: confirm, disable while running, refresh by version ── */
 
 describe("Trust Report actions (jsdom)", () => {
@@ -225,13 +376,13 @@ describe("Trust Report actions (jsdom)", () => {
 
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-  async function mount() {
+  async function mount(jobStatus = "completed") {
     const { createRoot } = await import("react-dom/client");
     host = document.createElement("div");
     document.body.appendChild(host);
     root = createRoot(host);
     await React.act(async () => {
-      root!.render(<TrustReportTab jobId="job-31" jobStatus="completed" />);
+      root!.render(<TrustReportTab jobId="job-31" jobStatus={jobStatus} />);
       await settle();
     });
     await React.act(async () => {
@@ -280,7 +431,7 @@ describe("Trust Report actions (jsdom)", () => {
     assert.equal(post.body, '{"note":"Widen per ticket 88","expected_version":3}');
     // While the request runs, every action is disabled.
     assert.equal(button("Explain again").disabled, true);
-    assert.equal(button(/Export pack/).disabled, true);
+    assert.equal(button("Report (.md)").disabled, true);
     assert.equal(host!.querySelector(".df2-parity")!.getAttribute("aria-busy"), "true");
 
     const fixed = unexplainedReport({
@@ -364,12 +515,37 @@ describe("Trust Report actions (jsdom)", () => {
     };
     // jsdom has no object URLs; the stubs stay so the delayed revoke still finds one.
     await mount();
-    await click(button(/Export pack/));
+    assert.equal(host!.querySelectorAll(".df2-parity-toolbar button").length, 3, "no signed-pack button before signing");
+    await click(button("Report (.md)"));
     await React.act(async () => settle());
     assert.ok(calls.some((c) => /\/parity-report\/export\?format=markdown$/.test(c.url)));
     assert.equal(made.length, 1);
     assert.equal(await made[0].text(), "# Trust report");
     assert.equal(downloaded, "datawrap-trust-report-job-31.md");
+
+    // Once signed, the header also offers the signed pack, which is the JSON export.
+    await React.act(async () => root!.unmount());
+    host!.remove();
+    calls.length = 0;
+    getReport = () => signedReport({ job_id: "job-31" });
+    await mount();
+    const packs = [...host!.querySelectorAll<HTMLButtonElement>(".df2-parity-toolbar button")].filter((b) =>
+      /signed pack/i.test(b.textContent || ""),
+    );
+    assert.equal(packs.length, 1);
+    await click(packs[0]);
+    await React.act(async () => settle());
+    assert.ok(calls.some((c) => /\/parity-report\/export\?format=json$/.test(c.url)));
+    assert.equal(downloaded, "datawrap-parity-signed-pack-job-31.json");
+  });
+
+  it("tells a failed run that never reached verification apart from the API's generic reason", async () => {
+    getReport = () => failedRunReport({ job_id: "job-31" });
+    await mount("failed");
+    const t = host!.textContent || "";
+    assert.match(t, /This run failed before verification ran/);
+    assert.match(t, /Not compared/);
+    assert.doesNotMatch(t, /Go to sign-off/);
   });
 
   it("offers a retry when the report cannot load", async () => {
