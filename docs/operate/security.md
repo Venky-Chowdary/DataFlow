@@ -5,8 +5,8 @@ how workspaces are kept apart, how secrets and outbound connections are
 handled, and how the audit chain works. Each section says plainly what is
 enforced today and what is not.
 
-Nothing here is a compliance certification. The repository contains no
-certification evidence, and this page makes no such claim.
+Nothing here is a compliance certification, and the repository contains no
+certification evidence.
 
 ## Signing in
 
@@ -73,8 +73,6 @@ Points that surprise people:
   ask questions but cannot start or change anything.
 - An operator runs and repairs pipelines but does not design them: no
   `job.plan`, no `connector.write`, no `schedule.manage`.
-- An editor cannot delete a connector, invite members or change workspace
-  settings.
 - An unknown or missing role name is treated as viewer.
 - `iam.manage` and `scim.provision` act on the whole deployment (API keys,
   service accounts, SCIM). Only a principal whose own account role is admin
@@ -132,9 +130,7 @@ The audit findings were not re-tested for this page.
   [runbooks.md](runbooks.md#reading-an-error-reference).
 - Rotate a connector's stored secrets with
   `POST /api/v1/connectors/saved/{id}/rotate-secrets`.
-
-Not verified for this page: that the redactor catches every credential shape
-in every log line.
+- Not verified: that the redactor catches every credential shape in every log.
 
 ## Outbound connections (egress)
 
@@ -176,8 +172,7 @@ A workspace can record a data region. Enforcement is narrow today:
 - A `data_region` value sent in the request replaces the workspace's region
   for that request.
 
-Treat the region setting as a record, not as a control, for any destination
-other than S3 and DynamoDB outside `us-east-1`.
+Treat the region setting as a record, not as a control, elsewhere.
 
 ## The audit chain
 
@@ -208,8 +203,7 @@ An anchor records the chain head somewhere the application cannot rewrite.
 write still goes to the local file. There is no external, write-once anchor.
 Someone who can rewrite the data directory can rewrite the anchors.
 
-To check a chain from the command line, see
-`apps/api/scripts/audit_chain_check.py`.
+Command-line check: `apps/api/scripts/audit_chain_check.py`.
 
 ## Rate limits
 
