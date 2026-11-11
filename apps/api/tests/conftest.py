@@ -58,6 +58,12 @@ os.environ.setdefault(
     tempfile.mkdtemp(prefix="df-suite-data-"))
 
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
+# Tenant settings, BYOK keys, ACLs and the other control-plane stores move to
+# the shared database whenever one is connected (audit H-5). Tests isolate
+# those stores per test through their files, including the worlds that run
+# users and jobs on a live MongoDB, so the suite pins the file backend; the
+# shared backend is exercised by tests/test_h5_shared_control_plane_stores.py.
+os.environ.setdefault("DATAFLOW_CONTROL_STORE_BACKEND", "file")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 # Engine fixtures stage file sources under pytest's tmp_path.
 os.environ.setdefault("DATAFLOW_SOURCE_PATH_ROOTS", tempfile.gettempdir())

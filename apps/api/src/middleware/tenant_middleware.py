@@ -9,11 +9,16 @@ below is what it exempts.
 
 from __future__ import annotations
 
+import logging
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from services.platform_config import docs_enabled
 from services.tenant_store import resolve_tenant_from_host
+
+logger = logging.getLogger(__name__)
 
 # The bare root is public only as an exact match: as a prefix it would cover
 # every path and switch the tenant IP allowlist off.
@@ -116,7 +121,22 @@ class TenantMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         host = (request.headers.get("host") or "").split(":")[0].strip().lower()
-        tenant = resolve_tenant_from_host(host) if host else None
+        try:
+            tenant = resolve_tenant_from_host(host) if host else None
+        except Exception:  # noqa: BLE001 - the shared tenant store is configured but unreachable
+            # Tenant settings live in the shared control-plane store on a
+            # multi-replica deployment (H-5). Without them the request cannot
+            # be attributed to a tenant, so it is refused rather than served
+            # as if no tenant policy existed. Probes stay answerable: a
+            # database outage must not make Kubernetes restart every API pod.
+            if not _matches_segment_prefix(request.url.path, "/health"):
+                logger.warning("tenant settings unavailable; refusing %s", request.url.path, exc_info=True)
+                return JSONResponse(
+                    {"detail": "Tenant settings are temporarily unavailable. Retry shortly."},
+                    status_code=503,
+                    headers={"Retry-After": "5"},
+                )
+            tenant = None
         if tenant:
             request.state.tenant_id = tenant.id
             request.state.tenant_workspace_id = tenant.workspace_id

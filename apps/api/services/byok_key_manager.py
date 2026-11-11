@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.platform_config import data_dir
+from services.shared_doc_store import SharedDoc, merge_records_by_id
 from services.value_serializer import json_default
 from services.secret_vault import decrypt_secret, encrypt_secret
 
@@ -46,6 +47,22 @@ def _now() -> str:
 
 
 def _load_raw() -> dict[str, Any]:
+    """Key records from the shared control-plane store when one is configured.
+
+    A secret wrapped with a tenant key on one replica must unwrap on every
+    other replica and on the workers (H-5).
+    """
+    data = _DOC.load()
+    if not isinstance(data.get("keys"), list):
+        data["keys"] = []
+    return data
+
+
+def _save(data: dict[str, Any]) -> None:
+    _DOC.save(data)
+
+
+def _file_load() -> dict[str, Any]:
     if not STORE_PATH.exists():
         return {"keys": []}
     try:
@@ -57,11 +74,21 @@ def _load_raw() -> dict[str, Any]:
         return {"keys": []}
 
 
-def _save(data: dict[str, Any]) -> None:
+def _file_save(data: dict[str, Any]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = STORE_PATH.with_suffix(STORE_PATH.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
     tmp.replace(STORE_PATH)
+
+
+_DOC = SharedDoc(
+    "byok_keys",
+    file_load=lambda: _file_load(),
+    file_save=lambda data: _file_save(data),
+    file_path=lambda: STORE_PATH,
+    empty=lambda: {"keys": []},
+    merge=merge_records_by_id("keys"),
+)
 
 
 @dataclass
@@ -185,6 +212,7 @@ def _validate_key_material(key_material: str | bytes | None, provider: str) -> b
     return raw
 
 
+@_DOC.retrying
 def create_key(
     tenant_id: str,
     label: str,
@@ -247,6 +275,7 @@ def get_active_key_for_tenant(tenant_id: str) -> BYOKKey | None:
     return None
 
 
+@_DOC.retrying
 def delete_key(key_id: str) -> bool:
     data = _load_raw()
     before = len(data.get("keys", []))
@@ -257,6 +286,7 @@ def delete_key(key_id: str) -> bool:
     return True
 
 
+@_DOC.retrying
 def rotate_key(tenant_id: str, label: str | None = None, provider: str = "local") -> BYOKKey:
     """Mark existing active keys as rotated and create a new active key."""
     data = _load_raw()

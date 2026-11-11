@@ -21,6 +21,7 @@ from typing import Any
 
 from services.byok_key_manager import is_ip_allowed
 from services.platform_config import data_dir
+from services.shared_doc_store import SharedDoc, merge_records_by_id
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,21 @@ def _load_raw() -> dict[str, Any]:
     Callers append to ``data["tenants"]`` directly, so a file written by an
     older shape — or one missing the key — must not turn a tenant write into a
     KeyError the caller reports as a server fault.
+
+    Read from the shared control-plane store when one is configured, so every
+    API replica enforces the same IP allowlist and require-SSO flag (H-5).
     """
+    data = _DOC.load()
+    if not isinstance(data.get("tenants"), list):
+        data["tenants"] = []
+    return data
+
+
+def _save(data: dict[str, Any]) -> None:
+    _DOC.save(data)
+
+
+def _file_load() -> dict[str, Any]:
     if not STORE_PATH.exists():
         return {"tenants": []}
     try:
@@ -68,11 +83,21 @@ def _load_raw() -> dict[str, Any]:
     return raw
 
 
-def _save(data: dict[str, Any]) -> None:
+def _file_save(data: dict[str, Any]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = STORE_PATH.with_suffix(STORE_PATH.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
     tmp.replace(STORE_PATH)
+
+
+_DOC = SharedDoc(
+    "tenant_settings",
+    file_load=lambda: _file_load(),
+    file_save=lambda data: _file_save(data),
+    file_path=lambda: STORE_PATH,
+    empty=lambda: {"tenants": []},
+    merge=merge_records_by_id("tenants"),
+)
 
 
 def _normalize_domain(domain: str) -> str:
@@ -203,6 +228,7 @@ def _tenants(data: dict[str, Any] | None = None) -> list[Tenant]:
     return [Tenant.from_dict(t) for t in data.get("tenants", []) if isinstance(t, dict)]
 
 
+@_DOC.retrying
 def create_tenant(
     workspace_id: str,
     name: str,
@@ -282,6 +308,7 @@ def get_tenant_by_domain(domain: str, *, verified_only: bool = False) -> Tenant 
     return None
 
 
+@_DOC.retrying
 def ensure_domain_challenge(tenant_id: str) -> Tenant | None:
     """The tenant, with a challenge token for its domain (a pre-D337 record has none)."""
     data = _load_raw()
@@ -294,6 +321,7 @@ def ensure_domain_challenge(tenant_id: str) -> Tenant | None:
     return None
 
 
+@_DOC.retrying
 def mark_custom_domain_verified(tenant_id: str, domain: str) -> Tenant | None:
     """Record a passed DNS challenge for ``domain``.
 
@@ -334,6 +362,7 @@ def list_tenants() -> list[Tenant]:
     return sorted(_tenants(), key=lambda t: t.created_at, reverse=True)
 
 
+@_DOC.retrying
 def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
     data = _load_raw()
     for raw in data.get("tenants", []):
@@ -373,6 +402,7 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
     return None
 
 
+@_DOC.retrying
 def delete_tenant(tenant_id: str) -> bool:
     data = _load_raw()
     before = len(data.get("tenants", []))

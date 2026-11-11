@@ -14,8 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pymongo.errors import PyMongoError
+
 from services.brand_env import getenv_brand
 from services.platform_config import data_dir
+from services.shared_doc_store import SharedLog
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -30,6 +33,11 @@ def _now() -> str:
 def _store_path() -> Path:
     env = (getenv_brand("AUDIT_ANCHOR_STORE", "") or "").strip()
     return Path(env) if env else ANCHOR_STORE
+
+
+# Shared across replicas when a control-plane store is configured, so
+# "latest anchor" is the deployment's, not this pod's (H-5).
+_LOG = SharedLog("audit_tip_anchors", file_path=_store_path, key_field="id")
 
 
 def anchor_provider() -> str:
@@ -56,8 +64,12 @@ def anchor_tip(tip_hash: str, *, event_time: str = "") -> dict[str, Any] | None:
         ),
     }
     # Future: provider == "s3" → PutObject with Object Lock; keep stub fail-safe.
-    path = _store_path()
     try:
+        coll = _LOG.backend()
+        if coll is not None:
+            _LOG.append(coll, receipt)
+            return receipt
+        path = _store_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(receipt, default=json_default) + "\n")
@@ -68,6 +80,15 @@ def anchor_tip(tip_hash: str, *, event_time: str = "") -> dict[str, Any] | None:
 
 
 def latest_anchor() -> dict[str, Any] | None:
+    try:
+        coll = _LOG.backend()
+        if coll is not None:
+            newest = _LOG.records(coll, limit=1)
+            return newest[0] if newest else None
+    except (PyMongoError, RuntimeError, OSError, ValueError) as exc:
+        # Anchors are advisory: an unreachable shared store reads as "no anchor".
+        logger.warning("Audit tip anchor store unavailable: %s", exc)
+        return None
     path = _store_path()
     if not path.exists():
         return None
@@ -86,6 +107,13 @@ def latest_anchor() -> dict[str, Any] | None:
 
 
 def list_anchors(*, limit: int = 20) -> list[dict[str, Any]]:
+    try:
+        coll = _LOG.backend()
+        if coll is not None:
+            return list(reversed(_LOG.records(coll, limit=limit)))
+    except (PyMongoError, RuntimeError, OSError, ValueError) as exc:
+        logger.warning("Audit tip anchor store unavailable: %s", exc)
+        return []
     path = _store_path()
     if not path.exists():
         return []

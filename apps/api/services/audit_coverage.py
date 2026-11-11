@@ -37,6 +37,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "auth.login.sso_required": "A password sign-in was refused because a workspace of the person requires single sign-on.",
     "auth.sso_enforced.break_glass": "A platform administrator signed in with a password although a workspace of theirs requires single sign-on.",
     "system.security_settings.snapshot": "Effective security settings at API startup.",
+    "control_store.imported": "A control-plane store file was imported into the shared store.",
     "acl.grant.create": "A resource ACL grant was created.",
     "acl.grant.revoke": "A resource ACL grant was revoked.",
     "schedule.definition.create": "A schedule definition was created.",

@@ -251,6 +251,18 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[!] RAG initialization warning: {e}")
 
+        # H-5: tenant settings, BYOK keys, ACLs and the other control-plane
+        # stores live in the shared store on a multi-replica deployment. Import
+        # this node's files once (idempotent; the files are left in place).
+        try:
+            from services.shared_doc_store import import_local_files
+
+            imported_stores = await asyncio.to_thread(import_local_files)
+            if imported_stores:
+                print(f"[+] Imported control-plane store file(s) into the shared store: {sorted(imported_stores)}")
+        except Exception as import_exc:  # noqa: BLE001 - a store that cannot be reached fails closed on use
+            print(f"[!] Control-plane store import skipped: {import_exc}")
+
         # Cadence stays up when RAG warm-up fails — otherwise due pipelines
         # sit on Next run forever with Runs=0. Multi-replica API pods set
         # SCHEDULE_LOOP=0; src.scheduler_main owns the loop there.

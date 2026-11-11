@@ -12,6 +12,7 @@ from typing import Any
 
 from services.platform_config import data_dir
 from services.secret_vault import decrypt_secret, encrypt_secret
+from services.shared_doc_store import SharedDoc, merge_records_by_id
 from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "notifications.json"
@@ -67,6 +68,18 @@ class NotificationChannel:
 
 
 def _load_raw() -> dict[str, Any]:
+    """Channels from the shared control-plane store when one is configured (H-5)."""
+    data = _DOC.load()
+    if not isinstance(data.get("channels"), list):
+        data["channels"] = []
+    return data
+
+
+def _save(data: dict[str, Any]) -> None:
+    _DOC.save(data)
+
+
+def _file_load() -> dict[str, Any]:
     path = _store_path()
     if not path.exists():
         return {"channels": []}
@@ -79,12 +92,22 @@ def _load_raw() -> dict[str, Any]:
         return {"channels": []}
 
 
-def _save(data: dict[str, Any]) -> None:
+def _file_save(data: dict[str, Any]) -> None:
     path = _store_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
     tmp.replace(path)
+
+
+_DOC = SharedDoc(
+    "notification_channels",
+    file_load=_file_load,
+    file_save=_file_save,
+    file_path=_store_path,
+    empty=lambda: {"channels": []},
+    merge=merge_records_by_id("channels"),
+)
 
 
 def _channels(data: dict[str, Any]) -> list[NotificationChannel]:
@@ -181,6 +204,7 @@ def _decrypt_config(config: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+@_DOC.retrying
 def create_channel(
     *,
     workspace_id: str,
@@ -242,6 +266,7 @@ def get_channel_decrypted(channel_id: str) -> NotificationChannel | None:
     return channel
 
 
+@_DOC.retrying
 def update_channel(channel_id: str, *, updates: dict[str, Any]) -> NotificationChannel | None:
     data = _load_raw()
     for i, raw in enumerate(data.get("channels", [])):
@@ -263,6 +288,7 @@ def update_channel(channel_id: str, *, updates: dict[str, Any]) -> NotificationC
     return None
 
 
+@_DOC.retrying
 def delete_channel(channel_id: str) -> bool:
     data = _load_raw()
     before = len(data.get("channels", []))
@@ -273,6 +299,7 @@ def delete_channel(channel_id: str) -> bool:
     return True
 
 
+@_DOC.retrying
 def rotate_signing_secret(channel_id: str) -> tuple[NotificationChannel, str] | None:
     """Replace a webhook channel's signing secret; returns the new plaintext once."""
     from services.webhook_signing import SECRET_CONFIG_KEY, new_signing_secret

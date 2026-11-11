@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from services.process_role import (
     ack_backend,
     api_executes_transfers,
@@ -21,6 +23,13 @@ from services.process_role import (
 from services.worker_leases import WorkerLeaseStore
 
 
+@pytest.fixture(autouse=True)
+def _control_store_backend_unset(monkeypatch):
+    """The suite pins the file backend (conftest); a deployment under test here has not."""
+    monkeypatch.delenv("DATAFLOW_CONTROL_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("DATAWRAP_CONTROL_STORE_BACKEND", raising=False)
+
+
 def _honest_api(monkeypatch) -> None:
     monkeypatch.setenv("DATAFLOW_MULTI_REPLICA", "1")
     monkeypatch.setenv("DATAFLOW_WORKER_FLEET", "1")
@@ -28,6 +37,12 @@ def _honest_api(monkeypatch) -> None:
     monkeypatch.setenv("DATAFLOW_SCHEDULE_LOOP", "0")
     monkeypatch.setenv("DATAFLOW_API_CLAIM_LOOP", "0")
     monkeypatch.setenv("DATAFLOW_ACK_BACKEND", "mongo")
+    # The two control-plane stores with no shared backend yet (audit H-5) are
+    # named and accepted; tests/test_h5_shared_control_plane_stores.py covers the refusal.
+    monkeypatch.setenv("DATAFLOW_POD_LOCAL_STORES_ACK", "transfer_plans,pilot_results")
+    monkeypatch.delenv("DATAWRAP_POD_LOCAL_STORES_ACK", raising=False)
+    monkeypatch.delenv("DATAFLOW_CONTROL_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("DATAWRAP_CONTROL_STORE_BACKEND", raising=False)
     for key in (
         "DATAWRAP_MULTI_REPLICA",
         "DATAWRAP_WORKER_FLEET",

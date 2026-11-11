@@ -13,12 +13,16 @@ from typing import Any
 
 from services.ops_events import emit_event
 from services.platform_config import data_dir
+from services.shared_doc_store import SharedLog
 from services.value_serializer import json_default
 from services.workspace_filter import WorkspaceFilter, bound_allows, current_workspace_stamp
 
 STORE_PATH = data_dir() / "preflight_runs.jsonl"
 _LOCK = threading.Lock()
 MAX_RUNS = 500
+# Shared across replicas when a control-plane store is configured: a Validate
+# run saved by one API pod is looked up by id on another (H-5).
+_LOG = SharedLog("preflight_runs", file_path=lambda: STORE_PATH, key_field="run_id")
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +126,11 @@ def get_preflight_run(run_id: str) -> dict[str, Any] | None:
     rid = (run_id or "").strip()
     if not rid:
         return None
+    coll = _LOG.backend()
+    if coll is not None:
+        row = _LOG.get(coll, rid)
+        # A run of another workspace does not exist for this caller (D154).
+        return row if row is not None and bound_allows(row.get("workspace_id")) else None
     for row in reversed(_read_all()):
         if str(row.get("run_id")) == rid:
             # A run of another workspace does not exist for this caller (D154).
@@ -142,6 +151,20 @@ def assign_unscoped_workspaces(workspace_for, *, apply: bool) -> dict[str, int]:
     """
     unscoped = WorkspaceFilter.only("")
     counts = {"assigned": 0, "skipped": 0}
+    coll = _LOG.backend()
+    if coll is not None:
+
+        def stamp(row: dict[str, Any]) -> dict[str, Any] | None:
+            if not unscoped.matches(row.get("workspace_id")):
+                return None
+            ws = (workspace_for(row) or "").strip()
+            counts["assigned" if ws else "skipped"] += 1
+            if not ws or not apply:
+                return None
+            return {**row, "workspace_id": ws}
+
+        _LOG.update_each(coll, stamp)
+        return counts
     if not STORE_PATH.exists():
         return counts
     with _LOCK:
@@ -190,6 +213,11 @@ def _suggest_remediations(blockers: list[Any]) -> list[dict[str, str]]:
 
 
 def _append(record: dict[str, Any]) -> None:
+    coll = _LOG.backend()
+    if coll is not None:
+        _LOG.append(coll, json.loads(json.dumps(record, default=json_default)))
+        _LOG.trim(coll, MAX_RUNS)
+        return
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, default=json_default)
     with _LOCK:
@@ -201,6 +229,9 @@ def _append(record: dict[str, Any]) -> None:
 
 
 def _read_all() -> list[dict[str, Any]]:
+    coll = _LOG.backend()
+    if coll is not None:
+        return _LOG.records(coll, limit=MAX_RUNS)
     if not STORE_PATH.exists():
         return []
     rows: list[dict[str, Any]] = []

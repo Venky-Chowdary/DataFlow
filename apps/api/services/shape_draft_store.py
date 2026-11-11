@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.platform_config import data_dir
+from services.shared_doc_store import SharedDoc, tracked
 from services.shape_models import ShapeError, ShapeRecipe
 from services.workspace_filter import WorkspaceFilter, bound_allows, current_workspace_stamp
 
@@ -24,6 +25,16 @@ def _now() -> str:
 
 
 def _load() -> dict[str, Any]:
+    """Drafts from the shared control-plane store when one is configured (H-5)."""
+    return _DOC.load()
+
+
+def _save(data: dict[str, Any], *, rev: int | None = None) -> None:
+    read_at = rev if rev is not None else getattr(data, "rev", None)
+    _DOC.save(tracked(_capped(data), read_at))
+
+
+def _file_load() -> dict[str, Any]:
     if not STORE_PATH.exists():
         return {}
     try:
@@ -33,8 +44,7 @@ def _load() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _save(data: dict[str, Any]) -> None:
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _capped(data: dict[str, Any]) -> dict[str, Any]:
     # The cap is per workspace: one tenant saving drafts must not evict another's.
     buckets: dict[str, list[tuple[str, Any]]] = {}
     for item in data.items():
@@ -44,7 +54,28 @@ def _save(data: dict[str, Any]) -> None:
     for items in buckets.values():
         ranked = sorted(items, key=lambda it: str(it[1].get("saved_at") or "") if isinstance(it[1], dict) else "")
         kept.update(ranked[-MAX_DRAFTS:])
-    STORE_PATH.write_text(json.dumps(kept, indent=2), encoding="utf-8")
+    return kept
+
+
+def _file_save(data: dict[str, Any]) -> None:
+    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STORE_PATH.write_text(json.dumps(dict(data), indent=2), encoding="utf-8")
+
+
+def _merge_absent_keys(shared: Any, local: Any) -> dict[str, Any]:
+    out = dict(shared) if isinstance(shared, dict) else {}
+    for key, value in (local.items() if isinstance(local, dict) else ()):
+        out.setdefault(key, value)
+    return out
+
+
+_DOC = SharedDoc(
+    "shape_drafts",
+    file_load=lambda: _file_load(),
+    file_save=lambda data: _file_save(data),
+    file_path=lambda: STORE_PATH,
+    merge=_merge_absent_keys,
+)
 
 
 def route_key(source: str, dest: str) -> str:
@@ -65,6 +96,7 @@ def _owner(workspace_id: str | None) -> str:
     return explicit or current_workspace_stamp()
 
 
+@_DOC.retrying
 def save_shape_draft(
     *,
     route_key: str,
@@ -104,6 +136,7 @@ def load_shape_draft(route_key: str, *, workspace_id: str | None = None) -> dict
     return None
 
 
+@_DOC.retrying
 def delete_shape_draft(route_key: str, *, workspace_id: str | None = None) -> None:
     key = route_key.strip()
     data = _load()
@@ -111,6 +144,7 @@ def delete_shape_draft(route_key: str, *, workspace_id: str | None = None) -> No
     _save(data)
 
 
+@_DOC.retrying
 def assign_unscoped_workspaces(workspace_for, *, apply: bool) -> dict[str, int]:
     """Move legacy unscoped drafts into ``workspace_for(draft)``'s workspace (D154 backfill)."""
     unscoped = WorkspaceFilter.only("")
@@ -129,5 +163,5 @@ def assign_unscoped_workspaces(workspace_for, *, apply: bool) -> dict[str, int]:
         record["workspace_id"] = ws
         moved[_storage_key(str(record.get("route_key") or storage_key), ws)] = record
     if apply and counts["assigned"]:
-        _save(moved)
+        _save(moved, rev=getattr(data, "rev", None))
     return counts
