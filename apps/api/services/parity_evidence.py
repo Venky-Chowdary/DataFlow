@@ -426,11 +426,16 @@ def _failure_observations(recon: dict[str, Any], table: str, key_cols: list[str]
     if unattributed.get("l2") == "failed":
         for col in unattributed.get("columns") or [None]:
             columns.setdefault(str(col) if col else "", "The re-read of the keys this run wrote (L2)")
-    if any(o.key and o.origin in {"ladder_l5", "key_census"} for o in named):
-        # The whole population was compared key by key (L5 or the key census):
-        # its named rows localize the aggregate failure, including rows that
-        # move a column's min/max/sum without a value of their own changing.
+    if any(o.key and o.origin == "key_census" for o in named):
+        # The key census hashes whole rows over the whole population: its named
+        # rows localize the aggregate failure of every column, including rows
+        # that move a column's min/max/sum without a value of their own changing.
         columns = {}
+    elif any(o.key and o.origin == "ladder_l5" for o in named):
+        # L5 compares only its focus columns (L4's typed mismatches); L2's untyped
+        # aggregates can fail on a column L5 never compared (re-review 4, finding 1).
+        compared = {str(c) for c in _dict(_dict(layers.get("L5")).get("details")).get("focus_columns") or []}
+        columns = {col: where for col, where in columns.items() if col not in compared}
     by_row = {o.column for o in named if o.kind == "value" and o.column}
     for col, where in columns.items():
         if col and col in by_row:
