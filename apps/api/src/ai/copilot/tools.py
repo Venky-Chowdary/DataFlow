@@ -1032,12 +1032,14 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "list_schedules",
         "description": (
             "List pipeline schedules (Pipelines page) with cadence, next run, last status, "
-            "and bound contract / breaker when one is set."
+            "and bound contract / breaker when one is set. ``total``, ``enabled_count`` and "
+            "``paused_count`` count every pipeline; ``schedules`` is one page (``truncated``)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "default": 20},
+                "state": {"type": "string", "enum": ["", "enabled", "paused"]},
             },
             "required": [],
         },
@@ -3109,11 +3111,18 @@ class DataPilotTools:
 
         facts = collect_workspace_briefing(workspace_id=workspace_id or "")
         attention = [str(a) for a in (facts.get("attention") or []) if a]
+        unreadable = [str(u) for u in (facts.get("unreadable") or [])]
         return ToolResult(
             name="brief_workspace",
             success=True,
             output={
                 "facts": facts,
+                # Which stores could not be read; ``unread`` when none of the
+                # three workspace stores answered, so nothing here is evidence.
+                "degraded": bool(unreadable),
+                "unreadable": unreadable,
+                "unread": {"connectors", "jobs", "pipelines"} <= set(unreadable),
+                "as_of": facts.get("as_of"),
                 "connector_count": facts.get("connector_count", 0),
                 "job_count": facts.get("job_count", 0),
                 "schedule_count": facts.get("schedule_count", 0),
@@ -3980,12 +3989,17 @@ class DataPilotTools:
             )
         return row
 
-    def _list_schedules(self, limit: int = 20) -> ToolResult:
+    def _list_schedules(self, limit: int = 20, state: str = "") -> ToolResult:
         from services.schedule_store import list_schedules
 
-        visible = list_schedules(current_workspace_filter())
-        rows = [self._schedule_summary(s) for s in visible[: max(1, min(int(limit or 20), 100))]]
-        return ToolResult(name="list_schedules", success=True, output={"schedules": rows, "count": len(rows)})
+        from .schedule_questions import schedules_output
+
+        output, refusal = schedules_output(
+            list_schedules(current_workspace_filter()), self._schedule_summary, limit, state
+        )
+        if refusal:
+            return ToolResult(name="list_schedules", success=False, output=None, error=refusal)
+        return ToolResult(name="list_schedules", success=True, output=output)
 
     def _get_schedule(self, schedule_id: str = "", name: str = "") -> ToolResult:
         sched, clarify = self._resolve_schedule(schedule_id, name)

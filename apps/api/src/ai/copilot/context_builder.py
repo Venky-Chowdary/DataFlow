@@ -86,6 +86,43 @@ def _gather(
     return gathered, degraded
 
 
+def workspace_counts(ctx: dict | None) -> dict[str, int | None]:
+    """Connector and job totals a sentence may state, or None where unread.
+
+    ``jobs`` is the counted history, never the length of the recent-jobs page;
+    a source listed in ``context_degraded`` has no number at all.
+    """
+    ctx = ctx or {}
+    degraded = set(ctx.get("context_degraded") or ())
+    connectors = ctx.get("connectors")
+    if "job_counts" in ctx:
+        counts = ctx.get("job_counts") or {}
+    else:
+        # A context assembled by hand (not by ``build``) carries only its own
+        # job rows; they are that caller's whole truth, so they are the count.
+        recent = [j for j in (ctx.get("recent_jobs") or []) if isinstance(j, dict)]
+        counts = {
+            "total": len(recent),
+            "failed": sum(1 for j in recent if str(j.get("status") or "").lower() in {"failed", "error"}),
+        }
+    jobs_unread = bool({"recent_jobs", "job_counts"} & degraded) or "total" not in counts
+    return {
+        "connectors": None if "connectors" in degraded or not isinstance(connectors, list) else len(connectors),
+        "jobs": None if jobs_unread else int(counts.get("total") or 0),
+        "failed_jobs": None if jobs_unread else int(counts.get("failed") or 0),
+    }
+
+
+def _jobs_line(ctx: dict, degraded: set[str]) -> str:
+    total = workspace_counts(ctx)["jobs"]
+    if total is None:
+        return "- recent transfer jobs: could not be read this turn — say so, do not report zero"
+    return (
+        f"- {total} transfer jobs in this workspace "
+        f"(the {len(ctx.get('recent_jobs') or [])} most recent are listed below)"
+    )
+
+
 class PilotContextBuilder:
     """Assembles everything the agent needs to answer any data question."""
 
@@ -112,6 +149,9 @@ class PilotContextBuilder:
         reads: dict[str, tuple[Callable[[], Any], Any]] = {
             "connectors": (self._read_connectors, []),
             "recent_jobs": (self._read_jobs, []),
+            # The whole-history census: ``recent_jobs`` is a page of 8 and its
+            # length was being stated as the number of jobs (audit H3).
+            "job_counts": (self._read_job_counts, {}),
             "transfer_capabilities": (self._read_capabilities, {}),
         }
         if rag_on and message.strip():
@@ -143,6 +183,7 @@ class PilotContextBuilder:
             "training_schema_profiles": self._training_profile_count(),
             "connectors": connectors,
             "recent_jobs": jobs,
+            "job_counts": gathered.get("job_counts") or {},
             "transfer_capabilities": {
                 "live_count": len(capabilities.get("live_combinations", [])),
                 "operations": capabilities.get("operations", []),
@@ -172,7 +213,7 @@ class PilotContextBuilder:
             f"- {ctx['dataset_count']} datasets indexed (uploads + fixtures + transfers)",
             f"- {ctx.get('training_schema_profiles', 620)}+ connector schema profiles in training knowledge",
             _count("connectors", "saved connectors", f"{len(ctx['connectors'])} saved connectors"),
-            _count("recent_jobs", "recent transfer jobs", f"{len(ctx['recent_jobs'])} recent transfer jobs"),
+            _jobs_line(ctx, degraded),
             _count(
                 "transfer_capabilities",
                 "live transfer routes",
@@ -277,6 +318,19 @@ class PilotContextBuilder:
                 limit=8, workspace_filter=current_workspace_filter()
             )
         ]
+
+    def _read_job_counts(self) -> dict:
+        """Total, failed and needs-attention over the whole scoped history."""
+        from services.workspace_filter import current_workspace_filter
+
+        from ...services.mongodb_service import get_mongodb_service
+
+        counts = get_mongodb_service().count_jobs(workspace_filter=current_workspace_filter())
+        return {
+            "total": int(counts.get("total") or 0),
+            "failed": int((counts.get("by_status") or {}).get("failed") or 0),
+            "attention": int(counts.get("attention") or 0),
+        }
 
     def _read_capabilities(self) -> dict:
         from ...transfer.registry import get_capabilities

@@ -20,6 +20,13 @@ from services.value_serializer import json_default
 from services.workspace_filter import current_actor
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
 from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
+from .answer_contract import RenderTracker, result_used
+from .schedule_questions import (
+    ground_schedule_plan,
+    paused_marker,
+    schedule_list_lead,
+    schedule_list_note,
+)
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
@@ -85,8 +92,13 @@ class _UnavailableAnthropic:
 
 
 def _tools_used(turn: "PilotTurn") -> list[dict]:
+    """One entry per tool call. ``used: False`` marks a call that succeeded but
+    is not evidence for the answer: its store was unread, or nothing in the
+    answer was rendered from it (audit H7)."""
+    silent = getattr(turn, "silent", frozenset())
     return [
         {"name": tr.name, "success": tr.success, "summary": _tool_summary(tr)}
+        | ({"used": False} if tr.success and not result_used(tr, silent) else {})
         for tr in turn.tool_results
     ]
 
@@ -109,12 +121,14 @@ def _tool_summary(tr: ToolResult) -> str:
             f"{int(facts.get('connector_count') or 0)} connectors, "
             f"{int(facts.get('job_count') or 0)} jobs"
         )
+    if o.get("unread"):
+        return "store could not be read"
     if tr.name == "list_jobs":
         total = int(o.get("total") or 0) or int(o.get("count") or 0)
         window = int(o.get("count") or 0)
         return f"{total} jobs (latest {window})" if window < total else f"{total} jobs"
     if tr.name == "list_schedules":
-        return f"{o.get('count', 0)} schedules"
+        return f"{o.get('total', o.get('count', 0))} schedules"
     if tr.name == "list_contracts":
         return f"{o.get('count', 0)} contracts"
     if tr.name == "navigate":
@@ -1147,7 +1161,7 @@ def _score_response(resp: CopilotResponse | None) -> float:
         return -1.0
     score = float(resp.confidence or 0)
     tools = resp.tools_used or []
-    ok = sum(1 for t in tools if t.get("success"))
+    ok = sum(1 for t in tools if t.get("success") and t.get("used") is not False)
     fail = sum(1 for t in tools if not t.get("success"))
     method = (resp.method or "").lower()
     answer = resp.answer or ""
@@ -1211,8 +1225,12 @@ def carries_evidence(response: CopilotResponse) -> bool:
     """
     if response.sources:
         return True
+    # A tool that ran is not evidence by itself: an unread store or a result the
+    # answer does not use is marked ``used: False`` and grounds nothing.
     return any(
-        tool.get("success") and str(tool.get("name") or "") not in _UNEVIDENCED_PRODUCT_TOOLS
+        tool.get("success")
+        and tool.get("used") is not False
+        and str(tool.get("name") or "") not in _UNEVIDENCED_PRODUCT_TOOLS
         for tool in response.tools_used or []
     )
 
@@ -1242,7 +1260,8 @@ def _evidence_ceiling(turn: "PilotTurn") -> float:
     measured result — reporting it at 0.96 next to a live count is what made the
     assistant sound equally sure of everything.
     """
-    successes = [tr for tr in turn.tool_results if tr.success]
+    silent = getattr(turn, "silent", frozenset())
+    successes = [tr for tr in turn.tool_results if result_used(tr, silent)]
     if not successes:
         # Nothing was read, nothing was retrieved: this is a clarify or a refusal.
         return 0.4
@@ -1266,6 +1285,8 @@ class PilotTurn:
     actions: list[dict] = field(default_factory=list)
     pending_actions: list[dict] = field(default_factory=list)
     needs_clarification: str = ""
+    #: ids of successful tool results the composer rendered nothing from.
+    silent: set[int] = field(default_factory=set)
 
 
 class DataPilotAgent:
@@ -2239,7 +2260,7 @@ Draft answer:
         from .workspace_intents import ground_plan
 
         planned = ground_plan(message, self._plan_from_memory(message, data_context, history), history)
-        return ground_job_plan(message, planned)
+        return ground_schedule_plan(message, ground_job_plan(message, planned))
 
     def _plan_from_memory(
         self,
@@ -3031,7 +3052,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             labels = ", ".join(f"**{a.get('label')}**" for a in turn.pending_actions if a.get("label"))
             if labels and "Confirm" not in answer:
                 answer = f"{answer}\n\nConfirm to proceed: {labels}.".strip()
-        ok_tools = sum(1 for tr in turn.tool_results if tr.success)
+        ok_tools = sum(1 for tr in turn.tool_results if result_used(tr, turn.silent))
         sources = _sources_from_turn(turn)
         if ok_tools:
             confidence = 0.96
@@ -3067,8 +3088,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
         from .dialogue_acts import is_schedule_health_question
 
         parts: list[str] = []
+        rendered = RenderTracker(parts)
 
         for tr in turn.tool_results:
+            rendered.begin(tr)
             if tr.name == "navigate" and tr.success:
                 screen = tr.output.get("screen", "")
                 labels = {
@@ -3112,7 +3135,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         and (s.get("needs_approval") or s.get("approval_finding"))
                     ]
                     if is_schedule_health_question(message):
-                        lead = f"You have **{len(rows)}** pipeline(s)."
+                        lead = f"You have **{int(tr.output.get('total') or len(rows))}** pipeline(s)."
                         if parked:
                             names = ", ".join(
                                 f"**{s.get('name')}**" for s in parked[:4] if s.get("name")
@@ -3138,22 +3161,29 @@ Respond as Datawrap Pilot — grounded in tool results."""
                                 ),
                                 "",
                             )
-                            lead += f" **{len(enabled)}** enabled."
+                            lead += f" **{int(tr.output.get('enabled_count') or len(enabled))}** enabled."
                             if nxt:
                                 lead += f" Next due: {nxt}."
                         lines = [lead]
                     else:
-                        lines = [f"You have **{len(rows)} pipeline schedule(s)**."]
+                        lines = [schedule_list_lead(tr.output)]
                     for s in rows[:8]:
                         bind = _schedule_bind_phrase(s)
                         lines.append(
                             f"• **{s.get('name')}** · {s.get('interval')}"
                             f"{' · cron ' + s['cron'] if s.get('cron') else ''}"
+                            + paused_marker(s)
                             + (f" · {bind}" if bind else "")
                             + f" · next `{s.get('next_run_at') or '—'}`"
                             + f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
                         )
+                    note = schedule_list_note(tr.output, min(len(rows), 8))
+                    if note:
+                        lines.append(note)
                     parts.append("\n".join(lines))
+                elif int(tr.output.get("total") or 0):
+                    # A state filter matched nothing; the workspace still has pipelines.
+                    parts.append(schedule_list_lead(tr.output))
                 else:
                     if is_schedule_health_question(message):
                         parts.append(
@@ -3860,6 +3890,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         )
                     )
 
+        rendered.close()
+        turn.silent = rendered.silent
         if insight and not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
             if not any(
                 tr.name in (
