@@ -57,6 +57,9 @@ class TableEvidence:
     rows_source: int | None
     rows_destination: int | None
     sampled_rows: int = 0
+    #: How Gate-8 chose its sample (``sample_seed.method``) and that choice in words.
+    sample_method: str = ""
+    sample_description: str = ""
     key_columns: list[str] = field(default_factory=list)
     observations: list[Observation] = field(default_factory=list)
     quarantined_keys: set[str] = field(default_factory=set)
@@ -285,6 +288,37 @@ def _check_kind(recon: dict[str, Any]) -> str:
     if _int(recon.get("source_rows")) is not None and _int(recon.get("target_rows")) is not None:
         return "count_only"
     return "none"
+
+
+#: Gate-8 sample methods that draw uniformly at random from the whole population, so a
+#: Clopper-Pearson bound on the population's difference rate holds. None does today:
+#: Gate-8 samples from the first ``_RECONCILE_SAMPLE_CAP`` rows the run read (stream.py),
+#: then keeps the lowest keys (``keyed_sorted``), the first rows (``positional_sorted``)
+#: or a seeded per-stratum pick among them (``stratified``) — none is a random draw over
+#: the population. Add a method here only when Gate-8 records one that is.
+UNIFORM_RANDOM_SAMPLE_METHODS: frozenset[str] = frozenset()
+
+
+def sample_bound_valid(method: str) -> bool:
+    """Whether a sample of this method supports a population bound (see above)."""
+    return method in UNIFORM_RANDOM_SAMPLE_METHODS
+
+
+def describe_sample(sample_compare: dict[str, Any]) -> tuple[str, str]:
+    """(method, how the rows were chosen, in words) for Gate-8's sample compare."""
+    seed = _dict(sample_compare.get("sample_seed"))
+    method = str(seed.get("method") or "")
+    sort_key = str(seed.get("sort_key") or "").strip()
+    stratum = str(seed.get("stratify_by") or "").strip()
+    if method == "keyed_sorted":
+        how = f"the lowest {sort_key or 'key'} values among the first rows the run read"
+    elif method == "positional_sorted":
+        how = "the first rows the run read"
+    elif method == "stratified":
+        how = f"a pick across {stratum or 'one column'}'s values among the first rows the run read"
+    else:
+        how = "rows Gate-8 picked, not at random"
+    return method, how
 
 
 def evidence_capped(recon: dict[str, Any]) -> bool:
@@ -657,6 +691,7 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
         transforms=column_transforms(job),
         protected=protected_targets(job),
     )
+    ev.sample_method, ev.sample_description = describe_sample(_dict(recon.get("sample_compare")))
     ev.quarantined_keys = quarantined_keys_of(job, key_cols)
     ev.capped = evidence_capped(recon)
     if ev.capped:

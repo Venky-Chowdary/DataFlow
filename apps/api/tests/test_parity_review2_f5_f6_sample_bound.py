@@ -16,12 +16,22 @@ from services.parity_report import build_parity_report
 from services.parity_stats import clopper_pearson_upper
 
 
+@pytest.fixture()
+def random_sample(monkeypatch):
+    """A sample method that is a uniform random draw (none Gate-8 records today, re-review 3 H4):
+    only such a sample supports the Clopper-Pearson bound these tests check."""
+    from services import parity_fixes, parity_report
+
+    monkeypatch.setattr(parity_report, "sample_bound_valid", lambda method: True)
+    monkeypatch.setattr(parity_fixes, "sample_bound_valid", lambda method: True)
+
+
 def _job(recon: dict) -> dict:
     return {"_id": "j", "status": "completed", "reconciliation": recon,
             "destination_summary": {"table": "t", "sync_mode": "full_refresh_overwrite"}}
 
 
-def test_keyless_sample_mismatches_count_in_the_bound():
+def test_keyless_sample_mismatches_count_in_the_bound(random_sample):
     mm = [{"target": "v", "source_value": f"x{i}", "target_value": f"y{i}"} for i in range(50)]
     report = build_parity_report(_job({
         "passed": False, "source_rows": 1_000_000, "target_rows": 1_000_000,
@@ -35,7 +45,7 @@ def test_keyless_sample_mismatches_count_in_the_bound():
     assert "6.29%" in report["confidence"]["statement"]
 
 
-def test_a_clean_sample_does_not_hide_rows_the_counts_prove_missing():
+def test_a_clean_sample_does_not_hide_rows_the_counts_prove_missing(random_sample):
     report = build_parity_report(_job({
         "passed": False, "source_rows": 1000, "target_rows": 500,
         "sample_compare": {"rows_compared": 500, "mismatches": []},

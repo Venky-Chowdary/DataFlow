@@ -187,3 +187,26 @@ describe("TableRunHeatmap", () => {
     assert.match(out, /: Mystery<\/title>/);
   });
 });
+
+describe("a sample that bounds nothing (re-review 3, H4)", () => {
+  it("rings rows checked of the total, never a percentage", () => {
+    const html = renderToStaticMarkup(<ParityRing pct={null} checked={{ checked: 2000, total: 1_000_000 }} />);
+    assert.match(html, /aria-label="2,000 of 1,000,000 rows checked; the other rows were not compared"/);
+    assert.match(html, />2,000</);
+    assert.doesNotMatch(html, /%/);
+    noLiteralColours(html);
+  });
+
+  it("draws a sampled run as a hollow baseline mark, not as a value", () => {
+    const base = summaryFixture();
+    const runs = base.runs.map((r, i) =>
+      i === base.runs.length - 1
+        ? { ...r, proven_equal_pct: null, method: "sampled" as const, rows_checked: 50, rows_total: 900_000 }
+        : { ...r, method: "full" as const },
+    );
+    const html = renderToStaticMarkup(<ParityTrendChart runs={runs} />);
+    assert.match(html, /is-sampled/);
+    assert.match(html, /50 of 900,000 rows checked; not compared in full, so no figure/);
+    assert.match(trendSummary(runs), /1 of \d+ runs were only sampled and have no figure/);
+  });
+});

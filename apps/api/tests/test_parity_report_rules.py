@@ -23,6 +23,16 @@ def _report(job: dict) -> dict:
     return build_parity_report(job, reread=False)
 
 
+@pytest.fixture()
+def random_sample(monkeypatch):
+    """A sample method that is a uniform random draw (none Gate-8 records today, re-review 3 H4):
+    only such a sample supports the Clopper-Pearson bound these tests check."""
+    from services import parity_fixes, parity_report
+
+    monkeypatch.setattr(parity_report, "sample_bound_valid", lambda method: True)
+    monkeypatch.setattr(parity_fixes, "sample_bound_valid", lambda method: True)
+
+
 def _sample(n: int, mismatches: list[dict] | None = None, **extra) -> dict:
     return {"passed": not mismatches, "source_rows": n, "target_rows": n,
             "sample_compare": {"rows_compared": n, "mismatches": mismatches or []}, **extra}
@@ -39,7 +49,7 @@ def test_a_full_key_census_with_no_difference_is_proven():
     assert report["fixes"] == []
 
 
-def test_a_clean_sample_states_its_upper_bound():
+def test_a_clean_sample_states_its_upper_bound(random_sample):
     report = _report(_job(_sample(2000)))
     t = report["tables"][0]
     # A clean sample bounds the rate; it is not proof (review finding 9).
@@ -51,7 +61,7 @@ def test_a_clean_sample_states_its_upper_bound():
     assert "With 95% confidence at most 0.15% of rows" in conf["statement"]
 
 
-def test_differences_in_the_sample_raise_the_bound():
+def test_differences_in_the_sample_raise_the_bound(random_sample):
     mismatches = [{"key": str(i), "source": "v", "target": "v", "source_value": f"x{i}", "target_value": f"y{i}"}
                   for i in range(5)]
     report = _report(_job(_sample(1000, mismatches)))

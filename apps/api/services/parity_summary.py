@@ -83,9 +83,9 @@ def _cell(table: dict[str, Any]) -> str:
 
 def _job_summary(job: dict[str, Any], job_id: str) -> dict[str, Any]:
     stored = state_of(job).get("summary")
-    # A summary stored before tables carried their check cannot tell a sample
-    # from a full compare: recompute it from the stored evidence.
-    if isinstance(stored, dict) and stored.get("verdict") and all(
+    # A summary stored before it carried the check method (tables' check, the run's
+    # method) cannot tell a sample from a full compare: recompute it from the evidence.
+    if isinstance(stored, dict) and stored.get("verdict") and "method" in stored and all(
         "check" in t for t in stored.get("tables") or []
     ):
         return stored
@@ -143,6 +143,10 @@ def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
             "at": job_timestamp_iso(job.get("completed_at") or job.get("created_at") or brief.get("created_at")),
             "name": str(job.get("name") or brief.get("name") or job_id),
             "proven_equal_pct": summary.get("proven_equal_pct"),
+            # How the run compared values: a sampled run has no exact figure to draw.
+            "method": summary.get("method") or "none",
+            "rows_checked": summary.get("rows_checked"),
+            "rows_total": summary.get("rows_total"),
             "unexplained": int(summary.get("unexplained") or 0),
             "verdict": summary.get("verdict") or "unverifiable",
             "drift": drift,

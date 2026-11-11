@@ -37,9 +37,20 @@ export interface ParityConfidence {
   sampled_rows: number;
   differences_in_sample: number;
   level: number;
-  /** Clopper-Pearson one-sided upper bound on the difference rate (0..1). */
+  /** Clopper-Pearson one-sided upper bound on the difference rate (0..1); null when nothing bounds it. */
   upper_bound_rate: number | null;
   statement: string;
+  /**
+   * False when a table was compared on a sample that is not a uniform random
+   * draw (every Gate-8 sample today): it bounds nothing, so there is no
+   * percentage, only the rows checked, and sign-off waits for a full compare.
+   */
+  bound_valid?: boolean;
+  /** Rows whose values were compared, over every table. */
+  rows_checked?: number;
+  rows_total?: number | null;
+  /** How the sampled rows were chosen, in words (e.g. "the first rows the run read"). */
+  sample_description?: string | null;
 }
 
 export interface ParityTable {
@@ -53,6 +64,8 @@ export interface ParityTable {
   unexplained: number;
   status: ParityTableStatus;
   upper_bound_rate: number | null;
+  /** Rows whose values were compared: every row for a full check, the sample's rows otherwise. */
+  rows_checked?: number;
 }
 
 export interface ParityCause {
@@ -204,6 +217,10 @@ export interface ParitySummaryRun {
   verdict: ParityVerdict;
   /** This run's parity is an outlier against the route's earlier runs; null when history is too short. */
   drift: boolean | null;
+  /** How the run compared values; a "sampled" run has no exact figure to draw. */
+  method?: ParityConfidence["method"];
+  rows_checked?: number | null;
+  rows_total?: number | null;
 }
 
 export interface ParitySummary {
@@ -292,12 +309,28 @@ export function formatParityPct(pct: number | null | undefined): string {
  * full: a sampled table contributes its Clopper-Pearson bound, not a count.
  */
 export function parityIsLowerBound(report: Pick<ParityReport, "confidence">): boolean {
-  return report.confidence.method !== "full";
+  return report.confidence.method !== "full" && report.confidence.bound_valid !== false;
+}
+
+/**
+ * Rows checked out of the total, when a sample bounds nothing: the ring shows
+ * this instead of a percentage. Null when every row was compared or a valid
+ * bound exists.
+ */
+export function parityRowsChecked(
+  report: Pick<ParityReport, "confidence">,
+): { checked: number; total: number | null } | null {
+  const c = report.confidence;
+  if (c.method === "full" || c.bound_valid !== false) return null;
+  return { checked: Math.max(0, c.rows_checked ?? c.sampled_rows ?? 0), total: c.rows_total ?? null };
 }
 
 /** Sampled checks state a lower bound, so the figure reads "at least". */
-export function tableParityLabel(table: Pick<ParityTable, "check" | "proven_equal_pct">): string {
+export function tableParityLabel(table: Pick<ParityTable, "check" | "proven_equal_pct"> & Partial<Pick<ParityTable, "rows_checked">>): string {
   const value = formatParityPct(table.proven_equal_pct);
+  if (table.proven_equal_pct == null && table.check === "sampled" && table.rows_checked != null) {
+    return `${table.rows_checked.toLocaleString("en-US")} rows checked`;
+  }
   if (table.proven_equal_pct == null) return value;
   return table.check === "sampled" && table.proven_equal_pct < 100 ? `≥ ${value}` : value;
 }

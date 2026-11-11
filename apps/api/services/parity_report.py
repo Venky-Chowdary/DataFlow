@@ -39,6 +39,7 @@ from services.parity_evidence import (
     localizes,
     mark_unaccounted,
     reread_cells,
+    sample_bound_valid,
     sync_mode_of,
 )
 from services.parity_state import now_iso, state_of
@@ -452,6 +453,13 @@ def _sample_bound(ev: TableEvidence, k: int, outside: int) -> float | None:
     return min(1.0, upper + max(outside, 0) / ev.rows_source)
 
 
+def _rows_checked(ev: TableEvidence) -> int:
+    """Rows whose values were compared: every row for a full check, the sample's rows otherwise."""
+    if ev.check in _FULL_CHECKS:
+        return int(ev.rows_source or 0)
+    return int(ev.sampled_rows or 0) if ev.check == "sampled" else 0
+
+
 def _sampled_rows(diffs: list[dict[str, Any]]) -> int:
     return len({key for d in diffs for key in d["_sampled_keys"]}) + sum(d["_sampled_keyless"] for d in diffs)
 
@@ -476,15 +484,18 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
     # rows it covers still count in the sample's difference rate.
     k = k_open + _sampled_rows(accepted)
     at_least = any(d["rows_at_least"] for d in open_diffs)
+    bound_ok = sample_bound_valid(ev.sample_method)
     upper = None
     pct: float | None = None
     if ev.check in _FULL_CHECKS and ev.rows_source:
         pct = round(100.0 * max(ev.rows_source - bad, 0) / ev.rows_source, 4)
-    elif ev.check == "sampled" and ev.sampled_rows:
+    elif ev.check == "sampled" and ev.sampled_rows and bound_ok:
         upper = _sample_bound(ev, k, bad - k_open)
         pct = round(100.0 * (1.0 - upper), 4) if upper is not None else None
         if pct is not None and ev.rows_source:
             pct = min(pct, round(100.0 * max(ev.rows_source - bad, 0) / ev.rows_source, 4))
+    # A sample that is not a uniform random draw over the population bounds nothing:
+    # no share and no rate, only the rows it checked (re-review 3, H4).
     if at_least:
         upper = None  # Gate-8 did not count these rows: nothing bounds how many differ
     if ev.capped or ev.gate8_unaccounted or at_least:
@@ -502,7 +513,11 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
         "rows_destination": ev.rows_destination, "proven_equal_pct": pct,
         "differences": differ, "explained": differ - bad, "unexplained": bad,
         "status": status, "upper_bound_rate": upper,
-        "_sample": (ev.sampled_rows, k, max(bad - k_open, 0), ev.rows_source or 0) if ev.check == "sampled" else None,
+        "rows_checked": _rows_checked(ev),
+        "_sample": {
+            "n": ev.sampled_rows, "k": k, "k_open": k_open, "outside": max(bad - k_open, 0),
+            "population": ev.rows_source or 0, "bound_ok": bound_ok, "how": ev.sample_description,
+        } if ev.check == "sampled" else None,
         "_accepted": min(sum(len(d["_keys"]) + d["_keyless"] for d in accepted), differ - bad),
         "_at_least": at_least,
         "_note": ev.note,
@@ -510,17 +525,45 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _pooled_bound(tables: list[dict[str, Any]]) -> tuple[int, int, float | None]:
-    """(sampled rows, unexplained rows in them, the bound) over every sampled table."""
-    sampled = [t for t in tables if t["_sample"]]
-    n = sum(t["_sample"][0] for t in sampled)
-    k = sum(t["_sample"][1] for t in sampled)
-    if not n or any(t["_at_least"] for t in sampled):
+    """(sampled rows, differing rows in them, the bound) over every sampled table.
+
+    No bound when any sample is not a uniform random draw (``bound_ok``), or
+    Gate-8 found differences it did not count.
+    """
+    sampled = [t["_sample"] for t in tables if t["_sample"]]
+    n = sum(x["n"] for x in sampled)
+    k = sum(x["k"] for x in sampled)
+    if not n or not all(x["bound_ok"] for x in sampled) or any(t["_at_least"] for t in tables if t["_sample"]):
         return n, k, None
     upper = clopper_pearson_upper(min(k, n), n)
-    extra, population = sum(t["_sample"][2] for t in sampled), sum(t["_sample"][3] for t in sampled)
+    extra, population = sum(x["outside"] for x in sampled), sum(x["population"] for x in sampled)
     if upper is not None and extra and population:
         upper = min(1.0, upper + extra / population)
     return n, k, upper
+
+
+def _unbounded_samples(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sampled tables whose sample bounds nothing (not a uniform random draw)."""
+    return [t for t in tables if t["_sample"] and not t["_sample"]["bound_ok"]]
+
+
+def _unchecked_reason(table: dict[str, Any]) -> str:
+    x = table["_sample"]
+    of = f" of {x['population']:,}" if x["population"] else ""
+    return (f"Only {x['n']:,}{of} rows of {table['name']} were checked ({x['how']}); that is not a random "
+            "sample, so nothing bounds the other rows.")
+
+
+def _checked_sentence(table: dict[str, Any]) -> str:
+    """'No difference in the N rows checked (how); the other M rows were not checked.'"""
+    x = table["_sample"]
+    rest = max(int(x["population"]) - int(x["n"]), 0)
+    other = (f"the other {rest:,} row(s) were not checked" if x["population"]
+             else "the rest of the table was not checked")
+    found = (f"{x['k_open']:,} of the {x['n']:,} row(s) checked hold an unexplained difference"
+             if x["k_open"] else
+             f"No {'unexplained ' if table['differences'] else ''}difference in the {x['n']:,} row(s) checked")
+    return f"{found} ({x['how']}); {other}"
 
 
 def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
@@ -530,6 +573,7 @@ def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
     } or {"none"}
     method = next(iter(kinds)) if len(kinds) == 1 else "mixed"
     n, k, upper = _pooled_bound(tables)
+    unbounded = _unbounded_samples(tables)
     full_tables = [t for t in tables if t["check"] in _FULL_CHECKS]
     bad_full = sum(t["unexplained"] for t in full_tables)
     least = "at least " if any(t["_at_least"] for t in full_tables) else ""
@@ -547,23 +591,34 @@ def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
         if not any(t["differences"] for t in full_tables):
             statement = "Every row was compared and no row differs."
     elif method == "sampled":
-        statement = f"Values were compared on {n:,} sampled row(s). {bound}."
+        statement = (
+            " ".join(f"{_checked_sentence(t)}." for t in unbounded) if unbounded
+            else f"Values were compared on {n:,} sampled row(s). {bound}."
+        )
     elif method == "mixed":
         parts = []
         if full_tables:
             parts.append(f"{len(full_tables)} table(s) were compared in full")
-        if n:
+        if unbounded:
+            parts += [f"{t['name']}: {_checked_sentence(t)}" for t in unbounded]
+        elif n:
             parts.append(f"values were compared on {n:,} sampled row(s) elsewhere; {bound[0].lower()}{bound[1:]} "
                          "in those tables")
         none = [t["name"] for t in tables if t["check"] in {"count_only", "none"}]
         if none:
             parts.append(f"values were not compared for {', '.join(none[:5])}")
-        statement = "; ".join(parts).capitalize() + "."
+        statement = "; ".join(parts)
+        statement = statement[:1].upper() + statement[1:] + "."
     else:
         statement = "No value comparison ran for this job, so nothing bounds the difference rate."
+    first = unbounded[0]["_sample"] if unbounded else None
     return {
         "method": method, "sampled_rows": n, "differences_in_sample": k,
         "level": CONFIDENCE_LEVEL, "upper_bound_rate": upper, "statement": statement,
+        "bound_valid": not unbounded,
+        "rows_checked": sum(int(t.get("rows_checked") or 0) for t in tables),
+        "rows_total": _sum([t["rows_source"] for t in tables]),
+        "sample_description": first["how"] if first else None,
     }
 
 
@@ -591,6 +646,14 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
         )
     explained = sum(t["explained"] for t in tables)
     sampled = [t["name"] for t in tables if t["check"] not in _FULL_CHECKS]
+    unbounded = _unbounded_samples(tables)
+    if unbounded:
+        # Not a random draw: the sample says nothing about the rows it did not check.
+        return "no_difference_found", (
+            " ".join(f"{t['name']}: {_checked_sentence(t)}." for t in unbounded)
+            + " Nothing bounds the rows that were not checked; run full verification to compare every row."
+            + (f" {_explained_split(tables)}." if explained else "")
+        )
     if sampled:
         # A sample bounds the rate of unexplained differences; it proves nothing, so a
         # sampled run is never "explained" (every row) nor "proven".
@@ -616,7 +679,8 @@ def _parity_block(tables: list[dict[str, Any]]) -> dict[str, Any]:
     weighted = [(t["proven_equal_pct"], t["rows_source"] or 0) for t in tables if t["proven_equal_pct"] is not None]
     total = sum(w for _p, w in weighted)
     pct = None
-    if weighted:
+    # One table whose share is unknown (unchecked rows, uncounted differences) makes the whole unknown.
+    if weighted and len(weighted) == len(tables):
         pct = round(sum(p * w for p, w in weighted) / total, 4) if total else round(
             sum(p for p, _w in weighted) / len(weighted), 4
         )
@@ -680,6 +744,11 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
     elif verdict == "unverifiable":
         status = "blocked"
         blocked_reason = "The evidence cannot decide parity, so there is nothing to sign."
+    elif _unbounded_samples(report.get("tables") or []):
+        status = "blocked"
+        blocked_reason = " ".join(
+            _unchecked_reason(t) for t in _unbounded_samples(report.get("tables") or [])
+        ) + " Run full verification before signing."
     elif any(f.get("status") == "applying" for f in report.get("fixes") or []):
         status = "blocked"
         blocked_reason = "A fix is being applied; sign once its re-check is recorded."
@@ -779,6 +848,9 @@ def compact_summary(report: dict[str, Any]) -> dict[str, Any]:
     """What the dashboard needs from a report, stored on the job (no row values)."""
     return {
         "verdict": report["verdict"],
+        "method": report["confidence"]["method"],
+        "rows_checked": report["confidence"].get("rows_checked"),
+        "rows_total": report["confidence"].get("rows_total"),
         "proven_equal_pct": report["parity"]["proven_equal_pct"],
         "unexplained": report["parity"]["unexplained"],
         "rows_source": report["parity"]["rows_source"],

@@ -47,10 +47,28 @@ export interface ParityRingProps {
   caption?: string;
   /** The figure is a sampled lower bound: it reads "≥" and the caption says so. */
   lowerBound?: boolean;
+  /** A sample that bounds nothing: the ring shows rows checked of the total, never a percentage. */
+  checked?: { checked: number; total: number | null } | null;
 }
 
 /** The headline figure: share of rows proven equal, drawn unrounded. */
-export function ParityRing({ pct, tone, size = 150, caption, lowerBound = false }: ParityRingProps) {
+export function ParityRing({ pct, tone, size = 150, caption, lowerBound = false, checked = null }: ParityRingProps) {
+  if (checked) {
+    const share = checked.total ? Math.min(100, (100 * checked.checked) / checked.total) : 0;
+    const of = checked.total != null ? ` of ${checked.total.toLocaleString("en-US")}` : "";
+    return (
+      <div
+        className="df2-parity-ring"
+        role="img"
+        aria-label={`${checked.checked.toLocaleString("en-US")}${of} rows checked; the other rows were not compared`}
+      >
+        <ProgressRing value={share} exact size={size} radius={size / 2 - 10} tone="idle">
+          <strong className="df2-parity-ring-value">{checked.checked.toLocaleString("en-US")}</strong>
+          <small className="df2-parity-ring-caption">{caption ?? `rows checked${of}`}</small>
+        </ProgressRing>
+      </div>
+    );
+  }
   const exact = formatParityPct(pct);
   const bounded = lowerBound && pct != null && pct < 100;
   const label = bounded ? `≥ ${exact}` : exact;
@@ -178,9 +196,22 @@ function runLabel(run: Pick<ParitySummaryRun, "name" | "job_id">): string {
 }
 
 /** One sentence a screen reader hears instead of the line. */
+/** A run compared only on a sample with no figure: drawn as "checked N of M", never as a value. */
+export function isSampledOnly(run: Pick<ParitySummaryRun, "method" | "proven_equal_pct">): boolean {
+  return run.proven_equal_pct == null && (run.method === "sampled" || run.method === "mixed");
+}
+
+function sampledTip(run: ParitySummaryRun): string {
+  const of = run.rows_total != null ? ` of ${run.rows_total.toLocaleString("en-US")}` : "";
+  const checked = run.rows_checked != null ? `${run.rows_checked.toLocaleString("en-US")}${of} rows checked` : "sampled";
+  return `${run.name || run.job_id}: ${checked}; not compared in full, so no figure`;
+}
+
 export function trendSummary(runs: ParitySummaryRun[]): string {
   const known = runs.filter((r) => r.proven_equal_pct != null && Number.isFinite(r.proven_equal_pct));
-  if (known.length === 0) return `No parity figures for the last ${runs.length} runs yet.`;
+  const sampled = runs.filter(isSampledOnly).length;
+  const sampledText = sampled ? ` ${sampled} of ${runs.length} runs were only sampled and have no figure.` : "";
+  if (known.length === 0) return `No parity figures for the last ${runs.length} runs yet.${sampledText}`;
   const values = known.map((r) => r.proven_equal_pct as number);
   const latest = known[known.length - 1];
   const flagged = runs.filter((r) => r.unexplained > 0).length;
@@ -192,7 +223,7 @@ export function trendSummary(runs: ParitySummaryRun[]): string {
     flagged === 0 ? "No run had unexplained differences." : `${flagged} of ${runs.length} runs had unexplained differences.`;
   const drifted = runs.filter((r) => r.drift === true).length;
   const driftText = drifted ? ` ${drifted} of ${runs.length} runs drifted from their route's earlier runs.` : "";
-  return `Parity over the last ${runs.length} runs: ${range}; latest ${formatParityPct(latest.proven_equal_pct)}. ${flaggedText}${driftText}`;
+  return `Parity over the last ${runs.length} runs: ${range}; latest ${formatParityPct(latest.proven_equal_pct)}. ${flaggedText}${driftText}${sampledText}`;
 }
 
 /** Line + area of rows proven equal per run, oldest to newest, on a labelled min/max scale. */
@@ -245,6 +276,20 @@ export function ParityTrendChart({ runs, height = 180 }: { runs: ParitySummaryRu
         ))}
         <path className="df2-parity-trend-area" d={areaPath(points, innerBottom)} />
         <path className="df2-parity-trend-line" d={linePath(points)} />
+        {runs.map((run, i) =>
+          isSampledOnly(run) ? (
+            // Sampled only: a hollow mark on the baseline, never a value on the scale.
+            <circle
+              key={`sampled-${run.job_id}-${i}`}
+              className="df2-parity-point is-sampled"
+              cx={points[i].x}
+              cy={innerBottom}
+              r={3.5}
+            >
+              <title>{sampledTip(run)}</title>
+            </circle>
+          ) : null,
+        )}
         {runs.map((run, i) => {
           const py = points[i].y;
           if (py == null) return null;

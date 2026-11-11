@@ -641,6 +641,13 @@
   stroke-width: 2.5;
 }
 
+/* A run checked only on a sample: hollow, on the baseline, never a value on the scale. */
+.df2-parity-point.is-sampled {
+  fill: var(--df-surface);
+  stroke: var(--df-text-muted);
+  stroke-width: 1.5;
+}
+
 .df2-parity-drift {
   fill: var(--df-warning-text);
   font-family: var(--df-font-sans);

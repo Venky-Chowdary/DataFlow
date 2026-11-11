@@ -24,7 +24,13 @@ import logging
 from typing import Any
 
 from services.parity_classifier import NARROW_COLUMN_CAUSES
-from services.parity_evidence import TableEvidence, job_is_terminal, request_of, target_to_source
+from services.parity_evidence import (
+    TableEvidence,
+    job_is_terminal,
+    request_of,
+    sample_bound_valid,
+    target_to_source,
+)
 from services.parity_state import (  # noqa: F401 - the error types and load_job are re-exported
     MAX_APPLIED_ROUNDS,
     ParityConflict,
@@ -271,6 +277,46 @@ def _rerun(job: dict[str, Any], diffs: list[dict[str, Any]], job_id: str) -> dic
     )
 
 
+#: Gate-8 decline reasons a re-run would hit again (``reconcile_step._maybe_attach_verification_ladder``).
+_STRUCTURAL_LADDER_DECLINES = frozenset({"destination_engine_not_in_ladder", "no_mapped_target_columns"})
+
+
+def full_verification_refusal(job: dict[str, Any], ev: TableEvidence) -> str | None:
+    """Why a re-run would sample again instead of comparing every row, or None.
+
+    There is no separate full-verification engine: Gate-8's verification
+    ladder compares every row (L1-L5) on a run whose population fits
+    ``VERIFICATION_LADDER_MAX_ROWS`` and whose destination it reads. So the
+    fix is the existing re-run, offered only where the ladder could run.
+    """
+    from services.verification_ladder import MAX_LADDER_ROWS
+
+    refusal = rerun_refusal(job)
+    if refusal:
+        return refusal
+    declined = str((job.get("reconciliation") or {}).get("ladder_declined_reason") or "")
+    if (ev.rows_source or 0) > MAX_LADDER_ROWS:
+        return (f"Gate-8 compares every row only up to {MAX_LADDER_ROWS:,} rows (VERIFICATION_LADDER_MAX_ROWS); "
+                f"{ev.name} has {ev.rows_source:,}, so a re-run would sample again. No existing check compares "
+                "every row of a table this size.")
+    if declined in _STRUCTURAL_LADDER_DECLINES:
+        return (f"Gate-8's full compare does not run on this route ({declined.replace('_', ' ')}), so a re-run "
+                "would sample again.")
+    return None
+
+
+def _full_verification(job: dict[str, Any], ev: TableEvidence, job_id: str) -> dict:
+    from services.verification_ladder import MAX_LADDER_ROWS
+
+    return _fix(
+        "rerun", [], title="Run full verification",
+        detail=(f"Re-runs the job (preflight kept). On the new run Gate-8's verification ladder compares every "
+                f"row of {ev.name} (it does so for tables up to {MAX_LADDER_ROWS:,} rows), and that run gets its "
+                "own report to sign. This report stays as it is."),
+        preview=f"POST /api/v1/connectors/jobs/{job_id}/rerun", reason=full_verification_refusal(job, ev),
+    )
+
+
 def _accept(diff: dict[str, Any]) -> dict:
     where = f"{diff['table']}.{diff['column']}" if diff.get("column") else diff["table"]
     return _fix(
@@ -346,6 +392,8 @@ def propose_fixes(job: dict[str, Any], report: dict[str, Any], state: dict[str, 
         if not bad:
             if ev.capped or ev.gate8_unaccounted:
                 proposals.append(_rerun(job, [], job_id))
+            elif ev.check == "sampled" and not sample_bound_valid(ev.sample_method):
+                proposals.append(_full_verification(job, ev, job_id))
             continue
         narrow = [d for d in bad if d["cause"]["code"] in NARROW_COLUMN_CAUSES and d["column"] and d["kind"] == "value"]
         live = _live_types(job, ev, [d["column"] for d in narrow], report) if narrow and reread else {}

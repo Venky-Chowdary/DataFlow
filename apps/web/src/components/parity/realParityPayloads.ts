@@ -8,9 +8,13 @@ import type { ParityReport, ParitySummary } from "../../lib/parity";
 
 export const reportInitial: ParityReport = {
   "confidence": {
+    "bound_valid": true,
     "differences_in_sample": 0,
     "level": 0.95,
     "method": "full",
+    "rows_checked": 40,
+    "rows_total": 40,
+    "sample_description": null,
     "sampled_rows": 0,
     "statement": "Every row was compared: 4 row(s) hold a difference no rule explains.",
     "upper_bound_rate": null
@@ -206,6 +210,7 @@ export const reportInitial: ParityReport = {
       "explained": 9,
       "name": "pay",
       "proven_equal_pct": 90.0,
+      "rows_checked": 40,
       "rows_destination": 40,
       "rows_source": 40,
       "status": "unexplained",
@@ -220,9 +225,13 @@ export const reportInitial: ParityReport = {
 
 export const reportResynced: ParityReport = {
   "confidence": {
+    "bound_valid": true,
     "differences_in_sample": 0,
     "level": 0.95,
     "method": "full",
+    "rows_checked": 40,
+    "rows_total": 40,
+    "sample_description": null,
     "sampled_rows": 0,
     "statement": "Every row was compared and every difference is explained.",
     "upper_bound_rate": null
@@ -383,6 +392,7 @@ export const reportResynced: ParityReport = {
       "explained": 9,
       "name": "pay",
       "proven_equal_pct": 100.0,
+      "rows_checked": 40,
       "rows_destination": 40,
       "rows_source": 40,
       "status": "explained",
@@ -397,9 +407,13 @@ export const reportResynced: ParityReport = {
 
 export const reportSigned: ParityReport = {
   "confidence": {
+    "bound_valid": true,
     "differences_in_sample": 0,
     "level": 0.95,
     "method": "full",
+    "rows_checked": 40,
+    "rows_total": 40,
+    "sample_description": null,
     "sampled_rows": 0,
     "statement": "Every row was compared and every difference is explained.",
     "upper_bound_rate": null
@@ -594,6 +608,7 @@ export const reportSigned: ParityReport = {
       "explained": 9,
       "name": "pay",
       "proven_equal_pct": 100.0,
+      "rows_checked": 40,
       "rows_destination": 40,
       "rows_source": 40,
       "status": "explained",
@@ -637,8 +652,11 @@ export const summary: ParitySummary = {
       "at": "2026-11-11T14:00:00+00:00",
       "drift": null,
       "job_id": "parity-run-1",
+      "method": "full",
       "name": "pay nightly",
       "proven_equal_pct": 100.0,
+      "rows_checked": 40,
+      "rows_total": 40,
       "unexplained": 0,
       "verdict": "explained"
     },
@@ -646,8 +664,11 @@ export const summary: ParitySummary = {
       "at": "2026-11-11T14:00:00+00:00",
       "drift": null,
       "job_id": "parity-run-2",
+      "method": "full",
       "name": "pay nightly",
       "proven_equal_pct": 100.0,
+      "rows_checked": 40,
+      "rows_total": 40,
       "unexplained": 0,
       "verdict": "explained"
     },
@@ -655,8 +676,11 @@ export const summary: ParitySummary = {
       "at": "2026-11-11T14:00:00+00:00",
       "drift": null,
       "job_id": "parity-run-3",
+      "method": "full",
       "name": "pay backfill",
       "proven_equal_pct": 90.0,
+      "rows_checked": 40,
+      "rows_total": 40,
       "unexplained": 4,
       "verdict": "unexplained"
     }

@@ -30,10 +30,12 @@ def _sampled(mismatches: list[dict]) -> dict:
 
 
 def _assert_bounded(report: dict) -> None:
+    # Re-review 3, H4: a Gate-8 sample is not random, so it states the rows it checked, no bound.
     assert report["verdict"] == "no_difference_found", report["verdict_reason"]
-    assert "sample of 2,000 row(s)" in report["verdict_reason"]
-    assert "95% confidence" in report["verdict_reason"]
+    assert "2,000 row(s) checked" in report["verdict_reason"]
+    assert "%" not in report["verdict_reason"]
     assert "every difference is explained" not in report["verdict_reason"]
+    assert report["signoff"]["status"] == "blocked"
     assert _cell(compact_summary(report)["tables"][0]) == "sampled"
 
 

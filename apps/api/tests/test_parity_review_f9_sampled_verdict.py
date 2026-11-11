@@ -20,16 +20,18 @@ def _job(recon: dict) -> dict:
     }
 
 
-def test_a_clean_sample_is_no_difference_found_with_its_bound():
+def test_a_clean_sample_is_no_difference_found_without_a_bound():
+    # Re-review 3, H4 (coordinator decision): Gate-8's sample is not a random draw, so it
+    # bounds nothing: the verdict states the rows checked, and sign-off waits for a full compare.
     report = build_parity_report(_job({
         "passed": True, "source_rows": 5_000_000, "target_rows": 5_000_000,
         "sample_compare": {"rows_compared": 2000, "mismatches": []},
     }), reread=False)
     assert report["verdict"] == "no_difference_found", report["verdict_reason"]
-    assert "sample" in report["verdict_reason"] and "%" in report["verdict_reason"]
+    assert "2,000 row(s) checked" in report["verdict_reason"] and "%" not in report["verdict_reason"]
     assert report["confidence"]["method"] == "sampled"
-    assert 99.8 < report["parity"]["proven_equal_pct"] < 100
-    assert report["signoff"]["status"] == "open"  # nothing unexplained: the bound can be signed
+    assert report["parity"]["proven_equal_pct"] is None
+    assert report["signoff"]["status"] == "blocked"
     summary = compact_summary(report)
     assert summary["verdict"] == "no_difference_found"
     assert _cell(summary["tables"][0]) == "sampled"
