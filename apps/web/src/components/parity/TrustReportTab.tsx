@@ -51,6 +51,7 @@ import {
   parityErrorMessage,
   rereadLabel,
   roleLabel,
+  parityIsLowerBound,
   verdictPresentation,
   type ParityDifference,
   type ParityFix,
@@ -362,7 +363,7 @@ export function TrustReportView({
 
       <div className="df2-parity-hero">
         <div className="df2-parity-card df2-parity-ring-card">
-          <ParityRing pct={parity.proven_equal_pct} tone={ringTone} />
+          <ParityRing pct={parity.proven_equal_pct} tone={ringTone} lowerBound={parityIsLowerBound(report)} />
           <span className={badgeClass(verdict.tone)}>{verdict.label}</span>
         </div>
         <div className="df2-parity-card">
@@ -412,7 +413,9 @@ export function TrustReportView({
               <p className="df2-parity-muted">
                 {report.verdict === "unverifiable"
                   ? "No differences were found, but the check could not cover enough rows to prove a match."
-                  : "No differences. Every checked row matches."}
+                  : report.verdict === "no_difference_found"
+                    ? "No difference in the sampled rows. Rows outside the sample were not compared; the bound above says how many could still differ."
+                    : "No differences. Every checked row matches."}
               </p>
             </>
           ) : (

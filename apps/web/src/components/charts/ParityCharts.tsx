@@ -36,27 +36,36 @@ import {
 
 /* ── Parity ring ─────────────────────────────────────────────── */
 
+const CONFIDENCE_WORDS = "95% confidence";
+
 export interface ParityRingProps {
   /** 0..100; null when the evidence cannot say. */
   pct: number | null;
   tone?: "ok" | "warn" | "danger" | "idle";
   size?: number;
   caption?: string;
+  /** The figure is a sampled lower bound: it reads "≥" and the caption says so. */
+  lowerBound?: boolean;
 }
 
 /** The headline figure: share of rows proven equal, drawn unrounded. */
-export function ParityRing({ pct, tone, size = 150, caption = "rows proven equal" }: ParityRingProps) {
-  const label = formatParityPct(pct);
+export function ParityRing({ pct, tone, size = 150, caption, lowerBound = false }: ParityRingProps) {
+  const exact = formatParityPct(pct);
+  const bounded = lowerBound && pct != null && pct < 100;
+  const label = bounded ? `≥ ${exact}` : exact;
+  const resolvedCaption = caption ?? (lowerBound ? "rows equal (sampled bound)" : "rows proven equal");
   const resolvedTone = pct == null ? "idle" : tone ?? "ok";
+  const aria =
+    pct == null
+      ? "Share of rows proven equal is unknown"
+      : lowerBound
+        ? `At least ${exact} of rows equal, a ${CONFIDENCE_WORDS} bound from a sample`
+        : `${exact} of rows proven equal`;
   return (
-    <div
-      className="df2-parity-ring"
-      role="img"
-      aria-label={pct == null ? "Share of rows proven equal is unknown" : `${label} of rows proven equal`}
-    >
+    <div className="df2-parity-ring" role="img" aria-label={aria}>
       <ProgressRing value={pct ?? 0} exact size={size} radius={size / 2 - 10} tone={resolvedTone}>
         <strong className="df2-parity-ring-value">{label}</strong>
-        <small className="df2-parity-ring-caption">{caption}</small>
+        <small className="df2-parity-ring-caption">{resolvedCaption}</small>
       </ProgressRing>
     </div>
   );
@@ -294,7 +303,7 @@ export function ParityTrendChart({ runs, height = 180 }: { runs: ParitySummaryRu
 
 /* ── Tables × runs heatmap ───────────────────────────────────── */
 
-const HEAT_ORDER: ParityHeatCell[] = ["proven", "explained", "unexplained_small", "unexplained_large", "none"];
+const HEAT_ORDER: ParityHeatCell[] = ["proven", "sampled", "explained", "unexplained_small", "unexplained_large", "none"];
 const HEAT_KNOWN = new Set<string>(HEAT_ORDER);
 
 function heatClass(cell: string): string {

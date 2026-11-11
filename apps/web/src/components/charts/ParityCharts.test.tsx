@@ -40,6 +40,22 @@ describe("ParityRing", () => {
   });
 });
 
+describe("ParityRing on a sampled check (review finding 9)", () => {
+  it("reads at least, and says the figure is a sampled bound", () => {
+    const html = renderToStaticMarkup(<ParityRing pct={99.85} lowerBound />);
+    assert.match(html, />≥ 99\.85%</);
+    assert.match(html, />rows equal \(sampled bound\)</);
+    assert.match(html, /aria-label="At least 99\.85% of rows equal, a 95% confidence bound from a sample"/);
+    assert.doesNotMatch(html, /proven equal/);
+  });
+
+  it("a full compare keeps the exact figure", () => {
+    const html = renderToStaticMarkup(<ParityRing pct={99.85} />);
+    assert.match(html, />99\.85%</);
+    assert.doesNotMatch(html, /≥/);
+  });
+});
+
 describe("TableParityBars", () => {
   const html = renderToStaticMarkup(<TableParityBars tables={unexplainedReport().tables} />);
 

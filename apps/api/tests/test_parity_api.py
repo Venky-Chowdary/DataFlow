@@ -206,7 +206,7 @@ def test_dismiss_explain_and_summary(ent, world):
     assert world["foreign"] not in body["heatmap"]["job_ids"]
     row = body["heatmap"]["cells"][body["heatmap"]["tables"].index("payments")]
     assert row[0] == "unexplained_large"  # 2 of 100 rows is over the 1% "small" line
-    assert body["runs"][1]["verdict"] == "proven"
+    assert body["runs"][1]["verdict"] == "no_difference_found"  # a clean sample is not proof
     assert viewer.get("/api/v1/parity/summary", params={"limit": 0}).status_code == 422
 
 

@@ -666,6 +666,14 @@
   background: color-mix(in srgb, var(--df-brand) 24%, var(--df-surface));
 }
 
+.df2-parity-heat-cell.is-sampled,
+.df2-parity-legend-swatch.is-sampled {
+  fill: color-mix(in srgb, var(--df-brand) 12%, var(--df-surface));
+  background: color-mix(in srgb, var(--df-brand) 12%, var(--df-surface));
+  stroke: color-mix(in srgb, var(--df-brand) 40%, var(--df-surface));
+  stroke-width: 1;
+}
+
 .df2-parity-heat-cell.is-explained,
 .df2-parity-legend-swatch.is-explained {
   fill: color-mix(in srgb, var(--df-brand) 55%, var(--df-surface));

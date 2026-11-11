@@ -42,7 +42,8 @@ def test_a_full_key_census_with_no_difference_is_proven():
 def test_a_clean_sample_states_its_upper_bound():
     report = _report(_job(_sample(2000)))
     t = report["tables"][0]
-    assert report["verdict"] == "proven" and t["check"] == "sampled"
+    # A clean sample bounds the rate; it is not proof (review finding 9).
+    assert report["verdict"] == "no_difference_found" and t["check"] == "sampled"
     assert t["upper_bound_rate"] == pytest.approx(0.0014967, abs=1e-7)
     assert t["proven_equal_pct"] == pytest.approx(99.8503, abs=1e-3)
     conf = report["confidence"]

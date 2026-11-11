@@ -70,7 +70,8 @@ def remember_report(job_id: str, job: dict[str, Any], report: dict[str, Any]) ->
 def _cell(table: dict[str, Any]) -> str:
     status = table.get("status")
     if status == "match":
-        return "proven"
+        # A clean sample bounds the difference rate; only a full compare is proof.
+        return "sampled" if table.get("check") == "sampled" else "proven"
     if status == "explained":
         return "explained"
     if status == "unexplained":
@@ -83,7 +84,11 @@ def _cell(table: dict[str, Any]) -> str:
 
 def _job_summary(job: dict[str, Any], job_id: str) -> dict[str, Any]:
     stored = state_of(job).get("summary")
-    if isinstance(stored, dict) and stored.get("verdict"):
+    # A summary stored before tables carried their check cannot tell a sample
+    # from a full compare: recompute it from the stored evidence.
+    if isinstance(stored, dict) and stored.get("verdict") and all(
+        "check" in t for t in stored.get("tables") or []
+    ):
         return stored
     from services.parity_report import build_parity_report, compact_summary
 

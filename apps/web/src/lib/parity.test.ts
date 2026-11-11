@@ -35,6 +35,8 @@ import {
   tableStatusPresentation,
   unsignedRoles,
   verdictPresentation,
+  parityIsLowerBound,
+  heatCellLabel,
 } from "./parity.js";
 import { provenReport, signedReport, summaryFixture, unexplainedReport } from "../components/parity/parityFixtures.js";
 
@@ -75,6 +77,12 @@ describe("verdicts, statuses and causes", () => {
     const payments = unexplainedReport().tables[2];
     assert.deepEqual(tableStatusPresentation(payments), { label: "4 to resolve", tone: "warn" });
     assert.equal(tableStatusPresentation({ status: "match", unexplained: 0 }).label, "Match");
+    // A clean sample is not a match of every row (review finding 9).
+    assert.equal(tableStatusPresentation({ status: "match", unexplained: 0, check: "sampled" }).label, "No difference in sample");
+    assert.equal(verdictPresentation(provenReport({ verdict: "no_difference_found" })).label, "No difference in sample");
+    assert.equal(heatCellLabel("sampled"), "No difference in sample");
+    assert.equal(parityIsLowerBound(provenReport()), false);
+    assert.equal(parityIsLowerBound(unexplainedReport()), true);
     assert.equal(checkLabel("sampled"), "Count + sampled values");
     assert.equal(checkLabel("some_future_check"), "Some future check");
   });

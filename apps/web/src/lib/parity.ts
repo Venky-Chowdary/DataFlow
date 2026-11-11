@@ -8,14 +8,18 @@
  * render from the API's own label instead of failing.
  */
 
-export type ParityVerdict = "proven" | "explained" | "unexplained" | "unverifiable";
+/**
+ * proven: every table compared in full and nothing differs; no_difference_found: a
+ * sample found nothing, which bounds the difference rate but proves nothing.
+ */
+export type ParityVerdict = "proven" | "no_difference_found" | "explained" | "unexplained" | "unverifiable";
 export type ParityCheck = "full_checksum" | "key_diff" | "sampled" | "count_only" | "none";
 export type ParityTableStatus = "match" | "explained" | "unexplained" | "unverifiable";
 export type ParityDifferenceKind = "missing_in_destination" | "extra_in_destination" | "value" | "duplicate_key";
 export type ParityFixAction = "widen_column" | "resync_keys" | "accept" | "rerun";
 export type ParityFixStatus = "proposed" | "applied" | "failed" | "dismissed";
 export type ParitySignoffStatus = "blocked" | "open" | "signed";
-export type ParityHeatCell = "proven" | "explained" | "unexplained_small" | "unexplained_large" | "none";
+export type ParityHeatCell = "proven" | "sampled" | "explained" | "unexplained_small" | "unexplained_large" | "none";
 
 export interface ParityCounts {
   rows_source: number | null;
@@ -213,6 +217,9 @@ export function verdictPresentation(report: Pick<ParityReport, "verdict" | "pari
   switch (report.verdict) {
     case "proven":
       return { label: "Proven equal", tone: "ok" };
+    case "no_difference_found":
+      // A clean sample bounds the rate; it is not proof of every row.
+      return { label: "No difference in sample", tone: "ok" };
     case "explained":
       return { label: "Every difference explained", tone: "ok" };
     case "unexplained": {
@@ -239,6 +246,14 @@ export function formatParityPct(pct: number | null | undefined): string {
   return `${Number(floored.toFixed(decimals)).toString()}%`;
 }
 
+/**
+ * The headline figure is a lower bound unless every table was compared in
+ * full: a sampled table contributes its Clopper-Pearson bound, not a count.
+ */
+export function parityIsLowerBound(report: Pick<ParityReport, "confidence">): boolean {
+  return report.confidence.method !== "full";
+}
+
 /** Sampled checks state a lower bound, so the figure reads "at least". */
 export function tableParityLabel(table: Pick<ParityTable, "check" | "proven_equal_pct">): string {
   const value = formatParityPct(table.proven_equal_pct);
@@ -258,10 +273,12 @@ export function checkLabel(check: string): string {
   return CHECK_LABELS[check as ParityCheck] ?? humanize(check);
 }
 
-export function tableStatusPresentation(table: Pick<ParityTable, "status" | "unexplained">): { label: string; tone: ParityTone } {
+export function tableStatusPresentation(
+  table: Pick<ParityTable, "status" | "unexplained"> & Partial<Pick<ParityTable, "check">>,
+): { label: string; tone: ParityTone } {
   switch (table.status) {
     case "match":
-      return { label: "Match", tone: "ok" };
+      return table.check === "sampled" ? { label: "No difference in sample", tone: "ok" } : { label: "Match", tone: "ok" };
     case "explained":
       return { label: "Explained", tone: "ok" };
     case "unexplained":
@@ -466,6 +483,7 @@ export function differencesByTable(report: Pick<ParityReport, "tables" | "differ
 /** Heatmap cell words, for the legend and each cell's tooltip. */
 export const HEAT_CELL_LABELS: Record<ParityHeatCell, string> = {
   proven: "Proven",
+  sampled: "No difference in sample",
   explained: "All explained",
   unexplained_small: "Unexplained, small",
   unexplained_large: "Unexplained, large",

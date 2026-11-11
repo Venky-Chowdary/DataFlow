@@ -299,7 +299,7 @@ def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _verdict(job: dict[str, Any], tables: list[dict[str, Any]]) -> tuple[str, str]:
+def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict[str, Any]) -> tuple[str, str]:
     if not job_is_terminal(job):
         return "unverifiable", "The job has not finished; parity is decided once it completes."
     if not isinstance(job.get("reconciliation"), dict) or not job.get("reconciliation"):
@@ -323,7 +323,15 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]]) -> tuple[str, st
     explained = sum(t["explained"] for t in tables)
     if explained:
         return "explained", f"{explained:,} row(s) differ and every difference is explained."
-    return "proven", "No differences: the destination matches the source."
+    if all(t["check"] in _FULL_CHECKS for t in tables):
+        return "proven", "No differences: the destination matches the source."
+    # A sample that found nothing bounds the difference rate; it proves nothing.
+    sampled = [t["name"] for t in tables if t["check"] not in _FULL_CHECKS]
+    return "no_difference_found", (
+        f"No difference was found, but the values of {', '.join(sampled[:5])} were compared on a "
+        f"sample of {confidence['sampled_rows']:,} row(s): with {int(CONFIDENCE_LEVEL * 100)}% "
+        f"confidence at most {format_rate_pct(confidence['upper_bound_rate'])} of rows differ."
+    )
 
 
 def _sum(values: list[int | None]) -> int | None:
@@ -427,7 +435,8 @@ def build_parity_report(job: dict[str, Any], *, reread: bool = True, job_id: str
         diffs = _group(ev, engine, state.get("acceptances") or {})
         differences += diffs
         tables.append(_table(ev, diffs))
-    verdict, reason = _verdict(job, tables)
+    confidence = _confidence(tables)
+    verdict, reason = _verdict(job, tables, confidence)
     parity = _parity_block(tables)
     report: dict[str, Any] = {
         "job_id": job_id or job_id_of(job),
@@ -436,7 +445,7 @@ def build_parity_report(job: dict[str, Any], *, reread: bool = True, job_id: str
         "verdict": verdict,
         "verdict_reason": reason,
         "parity": parity,
-        "confidence": _confidence(tables),
+        "confidence": confidence,
         "tables": tables,
         "differences": differences,
         "explanation": state.get("explanation"),
@@ -458,7 +467,7 @@ def compact_summary(report: dict[str, Any]) -> dict[str, Any]:
         "unexplained": report["parity"]["unexplained"],
         "rows_source": report["parity"]["rows_source"],
         "tables": [
-            {k: t.get(k) for k in ("name", "status", "unexplained", "rows_source", "proven_equal_pct")}
+            {k: t.get(k) for k in ("name", "status", "check", "unexplained", "rows_source", "proven_equal_pct")}
             for t in report["tables"]
         ],
         "signed": report["signoff"]["status"] == "signed",
