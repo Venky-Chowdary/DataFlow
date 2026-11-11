@@ -515,6 +515,25 @@ def destination_lock_wait_seconds() -> int:
     return max(1, min(value, 600))
 
 
+#: What a statement that waited out its session's lock bound raises: SQL Server
+#: 1222, PostgreSQL 55P03 (``lock_timeout``), MySQL/MariaDB 1205.
+LOCK_WAIT_TIMEOUT_SIGNALS: tuple[str, ...] = (
+    "lock request time out period exceeded",
+    "canceling statement due to lock timeout",
+    "lock wait timeout exceeded",
+)
+
+
+def is_lock_wait_timeout(exc: BaseException) -> bool:
+    """True when ``exc`` is another session's lock outlasting the bounded wait.
+
+    The whole :func:`destination_lock_wait_seconds` budget is already spent;
+    the next statement on the same table queues behind the same lock.
+    """
+    text = str(exc).lower()
+    return any(signal in text for signal in LOCK_WAIT_TIMEOUT_SIGNALS)
+
+
 def apply_mssql_session_guards(
     conn: Any,
     *,
