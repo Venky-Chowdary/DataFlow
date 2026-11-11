@@ -51,7 +51,9 @@ _UNREACHABLE = re.compile(
 _HANDSHAKE_TIMEOUT = re.compile(
     r"lost connection to (?:mysql )?server (?:during query|at '?reading initial "
     r"communication packet|at '?handshake)[^)]*\(timed out\)|"
-    r"reading initial communication packet"
+    r"reading initial communication packet|"
+    # services.oracle_handshake_bound (D354): the Oracle connect-timeout bound.
+    r"accepted the tcp connection but did not answer"
 )
 _TIMEOUT = re.compile(
     r"timed out|timeout expired|timeout|sockettimeout|connecttimeout"
