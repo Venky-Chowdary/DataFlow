@@ -21,15 +21,18 @@ spec:
       serviceAccountName: {{ include "dataflow.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
       containers:
         - name: api
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: 8000
+              containerPort: {{ .Values.api.containerPort }}
               protocol: TCP
           env:
+            - name: PORT
+              value: {{ .Values.api.containerPort | quote }}
             {{- include "dataflow.commonEnv" . | nindent 12 }}
             - name: DATAFLOW_PROCESS_ROLE
               value: api
@@ -42,6 +45,16 @@ spec:
             - name: DATAFLOW_ACK_BACKEND
               value: mongo
           {{- include "dataflow.secretEnvFrom" . | nindent 10 }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ .Values.api.preStopSleepSeconds | quote }}]
+          startupProbe:
+            httpGet:
+              path: {{ .Values.api.health.livenessPath }}
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
           livenessProbe:
             httpGet:
               path: {{ .Values.api.health.livenessPath }}
@@ -58,6 +71,10 @@ spec:
             {{- toYaml .Values.api.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "dataflow.runtimeVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "dataflow.runtimeVolumes" . | nindent 8 }}
       nodeSelector:
         {{- toYaml .Values.api.nodeSelector | nindent 8 }}
       tolerations:

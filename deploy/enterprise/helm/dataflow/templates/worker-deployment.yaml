@@ -1,4 +1,7 @@
 {{ if .Values.worker.enabled -}}
+{{- if lt (int .Values.worker.terminationGracePeriodSeconds) (add (int .Values.worker.drainSeconds) 10) }}
+{{- fail "worker.terminationGracePeriodSeconds must be at least worker.drainSeconds + 10: the worker needs the drain period plus time to exit before SIGKILL" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +24,7 @@ spec:
       serviceAccountName: {{ include "dataflow.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
       containers:
         - name: worker
           image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
@@ -43,11 +47,20 @@ spec:
               value: mongo
             - name: DATAFLOW_WORKER_MODE
               value: {{ .Values.worker.mode | quote }}
+            - name: DATAFLOW_METRICS_PORT
+              value: {{ .Values.metrics.port | quote }}
+            - name: DATAFLOW_WORKER_DRAIN_SECONDS
+              value: {{ .Values.worker.drainSeconds | quote }}
           {{- include "dataflow.secretEnvFrom" . | nindent 10 }}
+          {{- include "dataflow.metricsPortAndProbes" . | nindent 10 }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "dataflow.runtimeVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "dataflow.runtimeVolumes" . | nindent 8 }}
       nodeSelector:
         {{- toYaml .Values.worker.nodeSelector | nindent 8 }}
       tolerations:

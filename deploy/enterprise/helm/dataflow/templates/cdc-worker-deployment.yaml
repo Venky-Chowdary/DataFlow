@@ -1,4 +1,7 @@
 {{ if .Values.cdcWorker.enabled -}}
+{{- if lt (int .Values.cdcWorker.terminationGracePeriodSeconds) (add (int .Values.cdcWorker.drainSeconds) 10) }}
+{{- fail "cdcWorker.terminationGracePeriodSeconds must be at least cdcWorker.drainSeconds + 10: the worker needs the drain period plus time to exit before SIGKILL" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +24,7 @@ spec:
       serviceAccountName: {{ include "dataflow.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.cdcWorker.terminationGracePeriodSeconds }}
       containers:
         - name: cdc-worker
           image: "{{ .Values.cdcWorker.image.repository }}:{{ .Values.cdcWorker.image.tag }}"
@@ -43,11 +47,20 @@ spec:
               value: mongo
             - name: DATAFLOW_WORKER_MODE
               value: {{ .Values.cdcWorker.mode | default "cdc" | quote }}
+            - name: DATAFLOW_METRICS_PORT
+              value: {{ .Values.metrics.port | quote }}
+            - name: DATAFLOW_WORKER_DRAIN_SECONDS
+              value: {{ .Values.cdcWorker.drainSeconds | quote }}
           {{- include "dataflow.secretEnvFrom" . | nindent 10 }}
+          {{- include "dataflow.metricsPortAndProbes" . | nindent 10 }}
           resources:
             {{- toYaml .Values.cdcWorker.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "dataflow.runtimeVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "dataflow.runtimeVolumes" . | nindent 8 }}
       nodeSelector:
         {{- toYaml .Values.cdcWorker.nodeSelector | nindent 8 }}
       tolerations:
