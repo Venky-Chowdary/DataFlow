@@ -1102,6 +1102,7 @@ def _stamp_create_new_mapping_target_type(
         src_type, stamp, dest_db_type
     )
     stamp = refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
+    stamp = oracle_unsized_varchar_stamp(src_type, stamp, dest_db_type)
     # A file has no column width. Re-inheriting VARCHAR(16777216) from a
     # warehouse source would make Map look like an unread Snowflake sink and
     # would quarantine later rows that exceed a sample-sized width.
@@ -1123,6 +1124,32 @@ def _stamp_create_new_mapping_target_type(
         source_type=src_type,
     )
     return collated
+
+
+#: A varying-character type declared with no length (PostgreSQL ``varchar``,
+#: and the unsized ``VARCHAR`` a column-transform pipeline outputs).
+_UNSIZED_VARCHAR_RE: Final = re.compile(
+    r"^(?:VARCHAR2?|CHAR(?:ACTER)?\s+VARYING)$", re.IGNORECASE
+)
+
+
+def oracle_unsized_varchar_stamp(src_type: str, stamp: str, dest_db_type: str) -> str:
+    """Oracle create-new stamp for an unsized VARCHAR is ``CLOB`` (D357).
+
+    An unsized VARCHAR has no width to carry, so the writer creates it
+    unbounded (``CLOB``) and never clamps it to an invented width: the same
+    rule as a width over the VARCHAR2 cap (``_string_ddl_for_dest``) and as
+    ``VARCHAR(MAX)``. The stamp said ``VARCHAR2(4000)`` (the logical-string
+    default), so the plan promised a type the table never had — on every
+    transformed text column. A bounded ``VARCHAR(n)`` keeps ``VARCHAR2(n CHAR)``.
+    """
+    if (dest_db_type or "").strip().lower() != "oracle":
+        return stamp
+    if not _UNSIZED_VARCHAR_RE.match(strip_identity_qualifier(src_type).strip()):
+        return stamp
+    if strip_identity_qualifier(stamp).strip().upper() != DEFAULT_DDL["oracle"]:
+        return stamp
+    return "CLOB"
 
 
 def refuse_boolean_invent_from_numeric_source(
