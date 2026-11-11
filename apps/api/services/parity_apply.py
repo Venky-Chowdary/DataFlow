@@ -233,8 +233,11 @@ def approve_fix(
     finally:
         with _APPLYING_LOCK:
             _APPLYING_HERE.discard((job_id, fix_id))
+    # The write already happened: its outcome is settled first, so a repair-workflow record that
+    # fails afterwards (the proposal store unavailable) never leaves the fix "applying".
+    after = settle_fix(job_id, fix_id, ok=ok, result=result)
     _record_repair(job_id, fix, actor=actor, ok=ok, result=result)
-    return settle_fix(job_id, fix_id, ok=ok, result=result)
+    return after
 
 
 def _record_repair(job_id: str, fix: dict[str, Any], *, actor: str, ok: bool, result: str) -> None:
