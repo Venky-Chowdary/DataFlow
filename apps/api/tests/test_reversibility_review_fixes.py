@@ -342,3 +342,53 @@ def test_c3_a_cast_into_text_of_unknown_rendered_width_is_checked_by_width():
     assert (col["invertibility"], col["reason_code"]) == (CONDITIONAL, "text_width"), col
     assert _col("interval", "varchar(8)", observed=["1 day"])["check"]["status"] == "fits"
     assert _col("interval", "varchar(8)", observed=["1 day 02:00:00"])["check"]["status"] == "does_not_fit"
+
+
+# ----------------------------------- H5: a schedule carries require_reversibility to its runs
+
+_SCHED_CONN = {"_id": "src-pg", "id": "src-pg", "type": "postgresql", "host": "h", "port": 5432,
+               "database": "db", "schema": "public", "username": "u", "password": "p"}
+
+
+@pytest.fixture
+def schedule_store(tmp_path, monkeypatch):
+    import services.schedule_store as store
+
+    monkeypatch.setattr(store, "STORE_PATH", tmp_path / "schedules.json")
+    return store
+
+
+def _schedule_body(**extra):
+    return {"name": f"rev-{uuid.uuid4().hex[:6]}", "source_connector_id": "src-pg", "source_table": "orders",
+            "dest_connector_id": "dst-pg", "dest_table": f"orders_{uuid.uuid4().hex[:6]}", "interval": "hourly",
+            "sync_mode": "full_refresh_overwrite", "mappings": [{"source": "id", "target": "id"}], **extra}
+
+
+def test_h5_a_schedule_stores_require_reversibility_and_its_runs_carry_it(schedule_store):
+    import services.schedule_runner as runner
+
+    dst = {**_SCHED_CONN, "id": "dst-pg", "_id": "dst-pg"}
+    plain = schedule_store.create_schedule(_schedule_body())
+    assert plain.require_reversibility is False
+    assert runner.build_schedule_request(plain, _SCHED_CONN, dst).require_reversibility is False
+    required = schedule_store.create_schedule(_schedule_body(require_reversibility=True))
+    reloaded = schedule_store.get_schedule(required.id)
+    assert reloaded.require_reversibility is True and reloaded.to_dict()["require_reversibility"] is True
+    assert runner.build_schedule_request(reloaded, _SCHED_CONN, dst).require_reversibility is True
+    schedule_store.update_schedule(plain.id, {"require_reversibility": True})
+    assert schedule_store.get_schedule(plain.id).require_reversibility is True
+
+
+def test_h5_the_schedule_routes_accept_and_return_the_flag(schedule_store):
+    from src.routers.schedules_router import (
+        ScheduleCreate,
+        ScheduleResponse,
+        ScheduleSummaryResponse,
+        ScheduleUpdate,
+    )
+
+    assert ScheduleCreate(**_schedule_body(require_reversibility=True)).model_dump()["require_reversibility"] is True
+    assert ScheduleUpdate(require_reversibility=True).model_dump(exclude_none=True) == {"require_reversibility": True}
+    sched = schedule_store.create_schedule(_schedule_body(require_reversibility=True))
+    assert ScheduleResponse.from_schedule(sched).require_reversibility is True
+    assert ScheduleSummaryResponse.from_schedule(sched).require_reversibility is True

@@ -621,6 +621,7 @@ def build_schedule_request(
         contract_id=contract_id,
         enforce_contract=bool(contract_id),
         require_signed_contract=require_signed,
+        require_reversibility=bool(getattr(sched, "require_reversibility", False)),
         compliance_acknowledged=(
             acks.compliance
             or bool(getattr(sched, "compliance_acknowledged", False))
