@@ -195,7 +195,7 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str, resolved:
             fresh.append(Observation(table=ev.name, kind="extra_in_destination", key=key,
                                      origin="reread", sampled=sampled))
             continue
-        before = len(fresh)
+        found_here: list[Observation] = []
         # A row the run's own Map stage would hold out has no written image: grade it raw.
         for column, want in (expected or raw).items():
             ctx = _ctx(ev, column, engine)
@@ -206,30 +206,53 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str, resolved:
             )
             if found is None or (found["code"] == "transform_applied" and column in aggregated):
                 continue
-            fresh.append(Observation(
+            found_here.append(Observation(
                 table=ev.name, kind="value", column=column, key=key, expected=want,
                 dest=dest.get(column), raw=raw.get(column), raw_known=True, origin="reread",
                 cause=found, sampled=sampled,
             ))
-        if len(fresh) == before and key not in resolved:
-            fresh.append(_cannot_recheck(ev, key, named, sampled))
+        fresh += found_here
+        if key not in resolved:
+            fresh += [_cannot_recheck(ev, key, kind, column, sampled)
+                      for kind, column in _named_cells(keyed, key) if not _rechecked(kind, column, found_here)]
     done = set(cells)
     ev.observations = [o for o in ev.observations if not (o.key in done and o.cause is None)] + fresh
     ev.reread = {"status": "ok", "keys": len(done), **({"cached_at": cached_at} if cached_at else {})}
-    still = {o.key for o in fresh}
+    still = {o.key for o in fresh if not (o.cause or {}).get("explained")}
     ev.resolved_now = sorted(done - still)
     if done & resolved - still:
         ev.resolved_by_fix = True
 
 
-def _cannot_recheck(ev: TableEvidence, key: str, named: set[str], sampled: bool) -> Observation:
-    """An evidence-named key both sides now hold equal: the run's difference cannot be re-checked."""
-    kind = next((k for k in ("missing_in_destination", "extra_in_destination") if k in named), "value")
+def _named_cells(keyed: list[Observation], key: str) -> list[tuple[str, str | None]]:
+    """The (kind, column) cells the evidence named for one key, in order."""
+    return list(dict.fromkeys((o.kind, o.column) for o in keyed if o.key == key))
+
+
+def _rechecked(kind: str, column: str | None, found: list[Observation]) -> bool:
+    """Whether the re-read of a row both sides hold re-checks one cell the evidence named.
+
+    A named cell is re-checked only by a difference on that same cell; a row
+    the census named without a column only by an unexplained difference on
+    it (an explained one — CHAR padding, a protected column — is not what
+    Gate-8's fingerprint compare saw). A row named missing or extra that both
+    sides hold now cannot be re-checked.
+    """
+    if kind != "value":
+        return False
+    if column is not None:
+        return any(o.column == column for o in found)
+    return any(not (o.cause or {}).get("explained") for o in found)
+
+
+def _cannot_recheck(ev: TableEvidence, key: str, kind: str, column: str | None, sampled: bool) -> Observation:
+    """A cell the evidence named that both sides now hold equal: the run's difference cannot be re-checked."""
+    where = f"column {column} of this row" if column else "this row"
     return Observation(
-        table=ev.name, kind=kind, key=key, origin="reread", sampled=sampled,
+        table=ev.name, kind=kind, column=column, key=key, origin="reread", sampled=sampled,
         cause=cause(
             UNEXPLAINED,
-            f"Gate-8 named this row ({kind.replace('_', ' ')}), but both sides now hold equal values, so the "
+            f"Gate-8 named {where} ({kind.replace('_', ' ')}), but both sides now hold it equal, so the "
             "difference it saw cannot be re-checked: the source or the destination changed after the run. "
             "Accept it with a note if that change is expected, or re-run the job.",
             explained=False,
