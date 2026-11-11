@@ -9036,6 +9036,21 @@ def run_reconciliation(
                 note = f"transform proof {label} — {proof.get('reason')}"
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"
+    if isinstance(dest_summary, dict) and isinstance(recon, dict):
+        # D355: a protecting transform that left a source value in clear is a
+        # failed run, even when every digest above agrees with what was written.
+        from .protection_proof import apply_protection_proof, protection_proof
+
+        proof_dest, proof_source = _bind_endpoints_to_last_stream(
+            endpoint, source_endpoint, dest_summary
+        )
+        apply_protection_proof(recon, protection_proof(
+            endpoint=proof_dest,
+            source_endpoint=proof_source,
+            dest_summary=dest_summary,
+            mappings=mappings,
+            shape_recipe=shape_recipe,
+        ))
     # X-37: with DATAFLOW_ENGINE_DIGEST=1 the L3 ladder already re-read both
     # populations and digested them with the same canonical algorithm — a
     # real full_checksum on an engine-copy route, not count-only. Promote it
