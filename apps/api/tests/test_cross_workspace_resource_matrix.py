@@ -306,6 +306,67 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             "workspace_id": workspace_b,
         },
     )
+    # Reversibility Proof: a declared exit system of B and one finished rehearsal of it.
+    from services import exit_inventory, exit_store
+
+    monkeypatch.setattr(exit_store, "STORE_PATH", resource_matrix / "exit_inventory.json")
+    monkeypatch.setattr(exit_store, "_db", lambda: None)
+    exit_system = exit_inventory.declare(
+        {
+            "name": "B_EXIT_SYSTEM_SENTINEL",
+            "source": {"connector_id": connector.id},
+            "tables": [{"name": "B_EXIT_TABLE_SENTINEL", "key_columns": ["id"]}],
+            "exit_window_hours": 24,
+        },
+        workspace_id=workspace_b,
+        actor="matrix",
+    )
+    exit_rehearsal = exit_store.insert(
+        exit_store.REHEARSALS,
+        {
+            "id": "exr_bmatrix00001",
+            "system_id": exit_system["id"],
+            "system_name": "B_EXIT_SYSTEM_SENTINEL",
+            "workspace_id": workspace_b,
+            "n": 1,
+            "trigger": "manual",
+            "actor": "matrix",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:05:00Z",
+            "verdict": "proven",
+            "verdict_reason": "B_EXIT_REHEARSAL_SENTINEL",
+            "source": dict(exit_system["source"]),
+            "extract_format": "jsonl",
+            "window_seconds": 86400,
+            "definition_sha256": exit_inventory.definition_sha256(exit_system),
+            "pii_acknowledgement": None,
+            "required_roles": list(exit_system["required_roles"]),
+            "tables": [
+                {
+                    "name": "B_EXIT_TABLE_SENTINEL",
+                    "schema": None,
+                    "key_columns": ["id"],
+                    "job_id": "B_JOB_ID",
+                    "status": "proven",
+                    "reason": "B_EXIT_REHEARSAL_SENTINEL",
+                }
+            ],
+            "approvals": [],
+            "signed": None,
+            "_verify": None,
+        },
+    )
+    exit_owner_headers = {"X-Workspace-Id": workspace_b}
+    # Not a vacuous 404: the same ids answer B's own caller, sentinels and all.
+    for owner_path, sentinel in (
+        (f"/api/v1/exit/systems/{exit_system['id']}", "B_EXIT_SYSTEM_SENTINEL"),
+        (f"/api/v1/exit/systems/{exit_system['id']}/rehearsals", exit_rehearsal["id"]),
+        (f"/api/v1/exit/rehearsals/{exit_rehearsal['id']}", "B_EXIT_REHEARSAL_SENTINEL"),
+        (f"/api/v1/exit/rehearsals/{exit_rehearsal['id']}/evidence?format=markdown", "B_EXIT_REHEARSAL_SENTINEL"),
+    ):
+        owned = admin.get(owner_path, headers=exit_owner_headers)
+        assert owned.status_code == 200, f"{owner_path}: {owned.status_code} {owned.text}"
+        assert sentinel in owned.text, f"{owner_path} does not return B's resource to B's own caller"
     mongo = _MongoFixture(workspace_b)
     connectors_module = importlib.import_module("src.routers.connectors_router")
     monkeypatch.setattr(connectors_module, "get_mongodb_service", lambda: mongo)
@@ -317,6 +378,7 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
     covered = 0
     skipped = 0
     allowlisted = 0
+    exit_probed: set[tuple[str, str]] = set()
     for method, template, params in rows:
         key = (method, template)
         if key in ALLOWLISTED_WITH_REASON:
@@ -359,6 +421,10 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             # Platform-admin-only sandbox teardown (C18), probed against B like
             # break-glass: the A-only editor must neither delete B nor learn it.
             values = {"workspace_id": workspace_b}
+        elif template.startswith("/api/v1/exit/systems/{system_id}"):
+            values = {"system_id": exit_system["id"]}
+        elif template.startswith("/api/v1/exit/rehearsals/{rehearsal_id}"):
+            values = {"rehearsal_id": exit_rehearsal["id"]}
         elif template.startswith("/api/v1/team/workspaces/{workspace_id}/invites"):
             values = {"workspace_id": workspace_b, "invite_id": "B_INVITE_SENTINEL"}
         elif template.startswith("/api/v1/team/workspaces/{workspace_id}/members"):
@@ -403,6 +469,13 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
                 body = {"email": "B_MEMBER_SENTINEL@example.com", "role": "viewer"}
             if template.endswith("/members"):
                 body = {"email": "B_MEMBER_SENTINEL@example.com", "role": "viewer"}
+            if template.endswith("/pii-acknowledgement"):
+                body = {"reason": "matrix probe of another workspace's system"}
+            if template.endswith("/signoff"):
+                body = {"role": "engineering", "note": "matrix probe"}
+        if template.startswith("/api/v1/exit/systems/{system_id}") and method == "PATCH":
+            # The exit bodies refuse unknown fields (422) before the workspace check would run.
+            body = {"name": "matrix update"}
         response = _request(editor, method, path, body=body)
         assert response.status_code in {403, 404}, (
             f"unexpected response for {method} {template}: {response.status_code} {response.text}"
@@ -419,11 +492,58 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             "B_MEMBER_SENTINEL",
             "B_BENCH_SENTINEL",
             "B_JOURNAL_SENTINEL",
+            "B_EXIT_SYSTEM_SENTINEL",
+            "B_EXIT_TABLE_SENTINEL",
+            "B_EXIT_REHEARSAL_SENTINEL",
         ):
             assert sentinel not in response.text, f"{method} {template} leaked {sentinel}"
+        if template.startswith("/api/v1/exit/"):
+            exit_probed.add((method, template))
         covered += 1
 
     assert journal_dir.is_dir(), "a cross-workspace journal DELETE removed workspace B's journal"
+    # Every exit route with an id was really called from workspace A, and none of them changed B.
+    assert exit_probed == {
+        ("GET", "/api/v1/exit/systems/{system_id}"),
+        ("PATCH", "/api/v1/exit/systems/{system_id}"),
+        ("DELETE", "/api/v1/exit/systems/{system_id}"),
+        ("POST", "/api/v1/exit/systems/{system_id}/pii-acknowledgement"),
+        ("DELETE", "/api/v1/exit/systems/{system_id}/pii-acknowledgement"),
+        ("POST", "/api/v1/exit/systems/{system_id}/rehearsals"),
+        ("GET", "/api/v1/exit/systems/{system_id}/rehearsals"),
+        ("GET", "/api/v1/exit/rehearsals/{rehearsal_id}"),
+        ("POST", "/api/v1/exit/rehearsals/{rehearsal_id}/signoff"),
+        ("GET", "/api/v1/exit/rehearsals/{rehearsal_id}/evidence"),
+    }, sorted(exit_probed)
+    kept = exit_store.get(exit_store.SYSTEMS, exit_system["id"])
+    assert kept is not None, "an A-only editor deleted workspace B's exit system"
+    assert kept["name"] == "B_EXIT_SYSTEM_SENTINEL" and kept.get("pii_acknowledgement") is None
+    assert kept["version"] == exit_system["version"], "a cross-workspace write changed B's exit system"
+    after_rehearsal = exit_store.get(exit_store.REHEARSALS, exit_rehearsal["id"])
+    assert after_rehearsal is not None and after_rehearsal["approvals"] == []
+    assert exit_inventory.rehearsals_of(exit_system["id"]) == [after_rehearsal], "a rehearsal of B was started from A"
+    # The id-less exit reads are scoped too: A's board and list never show B's system.
+    for listing in ("/api/v1/exit/readiness", "/api/v1/exit/systems"):
+        listed = _request(editor, "GET", listing)
+        assert listed.status_code == 200, listed.text
+        assert "B_EXIT_SYSTEM_SENTINEL" not in listed.text and exit_system["id"] not in listed.text
+    # Verify takes a pack, not an id: naming B's rehearsal in a forged pack discloses nothing of B.
+    forged = _request(
+        editor,
+        "POST",
+        "/api/v1/exit/evidence/verify",
+        body={
+            "kind": "exit_evidence",
+            "system_id": exit_system["id"],
+            "rehearsal_id": exit_rehearsal["id"],
+            "content_sha256": "0" * 64,
+            "signature": {"alg": "HMAC-SHA256", "key_id": "k", "value": "0" * 64},
+        },
+    )
+    assert forged.status_code == 200, forged.text
+    assert forged.json()["ok"] is False and forged.json()["signature_ok"] is False
+    for sentinel in ("B_EXIT_SYSTEM_SENTINEL", "B_EXIT_TABLE_SENTINEL", "B_EXIT_REHEARSAL_SENTINEL"):
+        assert sentinel not in forged.text
     assert team_store.get_workspace(workspace_b) is not None, "an A-only editor deleted workspace B"
     assert covered > 0
     print(
