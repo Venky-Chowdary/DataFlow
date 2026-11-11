@@ -191,3 +191,79 @@ def test_c1_engine_blocks_a_required_reversible_run_with_a_source_filter(people,
     result = _execute(fake_store, src, dst, source_filter={"column": "id", "op": "lte", "value": 3})
     assert not result.success and _blocked_by_g24(result), result.error
     assert _dest_rows(dst) is None
+
+
+# ------------------------------------- C2: a recipe step that overwrites a column
+
+
+def _recipe_columns(table):
+    return [c for c in table["columns"] if c["reason_code"].startswith("recipe_")]
+
+
+@pytest.mark.parametrize("step", [
+    {"op": "constant_column", "options": {"to": "email", "value": "x"}},
+    {"op": "derive_column", "options": {"to": "email", "expression": "id"}},
+    {"op": "surrogate_key", "options": {"to": "email"}},
+    {"op": "flatten_json", "column": "doc", "options": {"keys": ["email"]}},
+])
+def test_c2_a_producing_step_that_overwrites_a_source_column_is_lossy(step):
+    table = analyze_table(table="people", mappings=_TYPED + [_m("doc", stype="TEXT", ttype="TEXT")],
+                          source_columns=["id", "email", "doc"], recipe_steps=[step],
+                          recipe_input_columns=["id", "email", "doc"])
+    [entry] = _recipe_columns(table)
+    assert entry["invertibility"] == LOSSY and entry["reason_code"] == "recipe_lossy", entry
+    assert entry["source"] == "email" and "overwrit" in entry["reason"]
+    assert table["verdict"] != REVERSIBLE
+
+
+def test_c2_a_producing_step_into_a_new_column_stays_invertible():
+    table = analyze_table(table="people", mappings=_TYPED + [_m("full", stype="TEXT", ttype="TEXT")],
+                          source_columns=["id", "email", "full"],
+                          recipe_steps=[{"op": "derive_column", "options": {"to": "full", "expression": "email"}}],
+                          recipe_input_columns=["id", "email"])
+    [entry] = _recipe_columns(table)
+    assert entry["invertibility"] == INVERTIBLE and entry["source"] == "full"
+    assert table["verdict"] == REVERSIBLE
+
+
+def test_c2_a_column_made_by_an_earlier_step_then_overwritten_is_lossy():
+    steps = [{"op": "derive_column", "options": {"to": "full", "expression": "email"}},
+             {"op": "constant_column", "options": {"to": "full", "value": "x"}}]
+    table = analyze_table(table="people", mappings=_TYPED, source_columns=["id", "email"],
+                          recipe_steps=steps, recipe_input_columns=["id", "email"])
+    kinds = [c["invertibility"] for c in _recipe_columns(table)]
+    assert kinds == [INVERTIBLE, LOSSY]
+
+
+def test_c2_without_the_pre_recipe_columns_a_known_target_is_not_assumed_new():
+    table = analyze_table(table="people", mappings=_TYPED, source_columns=["id", "email"],
+                          recipe_steps=[{"op": "constant_column", "options": {"to": "email", "value": "x"}}])
+    [entry] = _recipe_columns(table)
+    assert entry["invertibility"] == CONDITIONAL and entry["check"]["status"] == "not_checked"
+    assert table["verdict"] != REVERSIBLE
+
+
+def test_c2_rank_rows_keeps_only_some_rows():
+    table = analyze_table(table="people", mappings=_TYPED, source_columns=["id", "email"],
+                          recipe_steps=[{"op": "rank_rows", "options": {"order_by": "id", "limit": 3}}],
+                          recipe_input_columns=["id", "email"])
+    [entry] = _row_changes(table)
+    assert entry["transforms"] == ["rank_rows"] and entry["invertibility"] == LOSSY
+
+
+def test_c2_engine_blocks_a_recipe_that_overwrites_a_mapped_column(people, fake_store):
+    src, dst = people
+    recipe = {"steps": [{"op": "constant_column", "options": {"to": "email", "value": "x"}}]}
+    result = _execute(fake_store, src, dst, shape_recipe=recipe)
+    assert not result.success and _blocked_by_g24(result), result.error
+    assert "people.email" in str(result.error)
+    assert _dest_rows(dst) is None
+
+
+def test_c2_engine_lets_a_recipe_that_adds_a_column_pass_g24(people, fake_store):
+    src, dst = people
+    recipe = {"steps": [{"op": "derive_column", "options": {"to": "full", "expression": "email"}}]}
+    mappings = [dict(m, confidence=0.99) for m in _TYPED + [_m("full", stype="TEXT", ttype="TEXT")]]
+    result = _execute(fake_store, src, dst, shape_recipe=recipe, mappings=mappings)
+    assert result.success, result.error
+    assert _dest_rows(dst) == 10

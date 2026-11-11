@@ -56,15 +56,16 @@ _LOSSY_STEPS = frozenset({
     "drop_column", "keep_columns", "null_if", "round_number", "truncate_number", "absolute", "clamp",
     "hash_identity", "hash_pii", "mask_pii", "strip_characters", "set_value", "concat_columns",
 })
-#: Recipe steps that change which rows land (a filter, a merge, a reshape).
+#: Recipe steps that change which rows land (a filter, a top-N, a merge, a reshape).
 _ROW_STEPS = frozenset({
     "filter_rows", "divert_rows", "dedupe_rows", "aggregate", "union", "join", "router", "unnest_json",
-    "nest_json", "lookup", "scd2",
+    "nest_json", "lookup", "scd2", "rank_rows",
 })
-#: Recipe steps that add or rename without touching an existing value.
+#: Recipe steps that add or rename without touching an existing value - as long as
+#: the column they write (``options.to`` / ``keys``) is new: written onto a column
+#: the row already holds, they overwrite it (``recipe_lossy``).
 _INVERTIBLE_STEPS = frozenset({
-    "rename_column", "sort_rows", "rank_rows", "constant_column", "derive_column", "surrogate_key",
-    "flatten_json",
+    "rename_column", "sort_rows", "constant_column", "derive_column", "surrogate_key", "flatten_json",
 })
 #: Target logical type -> the engine cast that binds a text value into it.
 _CAST_FOR: dict[str, str] = {
@@ -324,21 +325,63 @@ def classify_mapping(
     return _entry(source, target, stype, ttype, transforms, INVERTIBLE, code)
 
 
-def classify_recipe_step(step: Mapping[str, Any]) -> dict[str, Any] | None:
-    """A shape-recipe step's own row (``None`` for a disabled step)."""
+def _shape_step(op: str, column: str | None, options: Mapping[str, Any]) -> Any:
+    from services.shape_models import ShapeStep
+
+    return ShapeStep(op=op, column=column or "", options=dict(options))
+
+
+def classify_recipe_step(
+    step: Mapping[str, Any],
+    columns: list[str] | None = None,
+    *,
+    known: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    """A shape-recipe step's own row (``None`` for a disabled step).
+
+    ``columns`` is the row's column set as it stands before this step (the
+    source columns, then each earlier step's effect); it is advanced in place.
+    A step that adds a column (``constant_column``, ``derive_column``, ...) is
+    invertible only when the column it writes is new: written onto a column the
+    row already holds it overwrites those values. With ``columns=None`` (the
+    pre-recipe columns are not known) a written name among ``known`` is not
+    assumed new: the step is conditional and unchecked.
+    """
     if step.get("enabled") is False:
         return None
     op = _norm(step.get("op")).lower()
     options = step.get("options") if isinstance(step.get("options"), Mapping) else {}
     column = _norm(step.get("column") or options.get("column")) or None
+    unchecked = {"status": "not_checked", "rows_checked": 0, "rows_not_fitting": 0}
+    shaped = _shape_step(op, column, options)
     if op in _ROW_STEPS:
-        return _entry(None, None, None, None, [op], LOSSY, "row_change", op=op)
-    if op in _LOSSY_STEPS:
-        return _entry(column, column, None, None, [op], LOSSY, "recipe_lossy", op=op)
-    if op in _INVERTIBLE_STEPS:
-        return _entry(column, column, None, None, [op], INVERTIBLE, "recipe_invertible", op=op)
-    check = {"status": "not_checked", "rows_checked": 0, "rows_not_fitting": 0}
-    return _entry(column, column, None, None, [op], CONDITIONAL, "recipe_conditional", check, op=op)
+        entry = _entry(None, None, None, None, [op], LOSSY, "row_change", op=op)
+    elif op in _LOSSY_STEPS:
+        entry = _entry(column, column, None, None, [op], LOSSY, "recipe_lossy", op=op)
+    elif op in _INVERTIBLE_STEPS:
+        writes = [str(w) for w in shaped.writes if str(w or "").strip()]
+        present = {c.lower() for c in (columns if columns is not None else known)}
+        if op == "rename_column" and column:
+            present.discard(column.lower())
+        hit = next((w for w in writes if w.lower() in present), None)
+        target = (writes[0] if writes else None) if op != "rename_column" else column
+        if hit is None:
+            entry = _entry(target, target, None, None, [op], INVERTIBLE, "recipe_invertible", op=op)
+        elif columns is not None:
+            entry = _entry(hit, hit, None, None, [op], LOSSY, "recipe_lossy", op=op)
+            entry["reason"] = (f"{hit} is overwritten by the recipe step {op}, which writes onto a column the row "
+                               "already holds; the original values are not kept.")
+        else:
+            entry = _entry(hit, hit, None, None, [op], CONDITIONAL, "recipe_conditional", unchecked, op=op)
+            entry["reason"] = (f"{hit} is written by the recipe step {op}; whether it overwrites a source column "
+                               "could not be decided (the columns before the recipe are not known).")
+    else:
+        entry = _entry(column, column, None, None, [op], CONDITIONAL, "recipe_conditional", unchecked, op=op)
+    if columns is not None:
+        from services.shape_models import _apply_column_effect
+
+        _apply_column_effect(shaped, columns)
+    return entry
 
 
 def _effective(entry: dict[str, Any]) -> str:
@@ -415,8 +458,13 @@ def analyze_table(
     source_db: str = "",
     row_limit: int = 0,
     source_filter: Mapping[str, Any] | None = None,
+    recipe_input_columns: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """One table's ReversibilityTable (contract 1)."""
+    """One table's ReversibilityTable (contract 1).
+
+    ``recipe_input_columns`` are the columns the shape recipe reads (before any
+    step); ``None`` when they are not known.
+    """
     stypes = {str(k): str(v) for k, v in (source_types or {}).items()}
     ttypes = {str(k): str(v) for k, v in (target_types or {}).items()}
     columns: list[dict[str, Any]] = []
@@ -436,9 +484,12 @@ def analyze_table(
     for name in source_columns:
         if _norm(name) and _norm(name).lower() not in mapped:
             columns.append(_entry(_norm(name), None, stypes.get(_norm(name)), None, [], LOSSY, "dropped"))
+    inputs = [str(c) for c in recipe_input_columns] if recipe_input_columns is not None else None
+    known = [str(c) for c in source_columns] + [str(m.get("source") or "") for m in mappings
+                                                 if isinstance(m, Mapping)]
     for step in recipe_steps:
         if isinstance(step, Mapping):
-            row = classify_recipe_step(step)
+            row = classify_recipe_step(step, inputs, known=known)
             if row is not None:
                 columns.append(row)
     columns.extend(population_entries(row_limit, source_filter))

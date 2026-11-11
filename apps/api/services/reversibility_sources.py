@@ -15,6 +15,8 @@ from typing import Any
 from services.reversibility import analyze_table, build_report, gate_for
 
 POLICY = "require_reversibility"
+#: Where Execute keeps the columns its shape recipe read (set when the runner opens; never serialised).
+_RECIPE_INPUTS = "_reversibility_recipe_inputs"
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -67,6 +69,25 @@ def _table(dest: Any, src: Any) -> str:
     return "destination"
 
 
+def note_recipe_inputs(request: Any, columns: Any) -> None:
+    """Execute opened its shape recipe on ``columns`` (the read, before any step).
+
+    The gate runs later on the shaped columns, where a column a step created and
+    a source column a step overwrote look alike; this keeps the difference.
+    """
+    try:
+        setattr(request, _RECIPE_INPUTS, [str(c) for c in columns or []])
+    except (AttributeError, TypeError):
+        pass
+
+
+def _recipe_inputs(recipe: Any, columns: Any) -> list[str] | None:
+    """The recipe's input columns when known; ``None`` without a recipe to read them."""
+    if not _steps(recipe):
+        return None
+    return [str(c) for c in columns] if columns else None
+
+
 def plan_requires_reversibility(policies: Mapping[str, Any] | None) -> bool:
     return _truthy(_dict(policies).get(POLICY))
 
@@ -83,6 +104,8 @@ def plan_report(plan: Any) -> dict[str, Any]:
         source_types=dict(plan.source_schema or {}),
         target_types=dict(plan.target_schema or {}),
         recipe_steps=_steps(policies.get("shape_recipe")),
+        # The plan's source columns are the read before the recipe (the shaped image is derived).
+        recipe_input_columns=_recipe_inputs(policies.get("shape_recipe"), plan.source_columns),
         key_columns=_key_columns(policies.get("stream_contracts")),
         sample_rows=sample,
         dest_db=_engine(plan.destination),
@@ -109,6 +132,9 @@ def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
         # The destination types the run recorded (Map stamps, the DDL it ran, Gate-8's digest types).
         target_types=dest_types_of(job),
         recipe_steps=_steps(req.get("shape_recipe")),
+        recipe_input_columns=_recipe_inputs(
+            req.get("shape_recipe"),
+            _dict(_dict(job.get("destination_summary")).get("shape_proof")).get("input_columns")),
         key_columns=_key_columns(req.get("stream_contracts")),
         dest_db=_engine(dst),
         source_db=_engine(src),
@@ -136,6 +162,8 @@ def request_report(
         source_types=dict(column_types or {}),
         target_types=dict(dest_types or {}),
         recipe_steps=_steps(getattr(request, "shape_recipe", None)),
+        recipe_input_columns=_recipe_inputs(getattr(request, "shape_recipe", None),
+                                            getattr(request, _RECIPE_INPUTS, None)),
         key_columns=_key_columns(getattr(request, "stream_contracts", None)),
         sample_rows=list(sample_rows or []),
         dest_db=_engine(dst),
