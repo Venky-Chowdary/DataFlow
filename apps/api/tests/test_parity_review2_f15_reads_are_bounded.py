@@ -141,3 +141,27 @@ def test_the_mongo_store_reads_a_batch():
         assert set(got) == {a, b} and got[b]["name"] == "b"
     finally:
         svc.client.drop_database(svc.db_name)
+
+
+def test_a_decision_reads_both_sides_once_not_again_in_its_compare_and_swap(monkeypatch, tmp_path):
+    import services.mongodb_service as mongodb_service
+    from services import audit_log
+    from services.mongodb_service import MemoryMongoDBService
+    from services.parity_fixes import approve_fix
+
+    svc = MemoryMongoDBService()
+    monkeypatch.setattr(mongodb_service, "get_mongodb_service", lambda: svc)
+    monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setenv("DATAFLOW_LLM_ENABLED", "false")
+    reads = _counting(monkeypatch)
+    job_id = svc.create_transfer_job({
+        "name": "n", "workspace_id": "w",
+        "reconciliation": {"passed": False, "source_rows": 100, "target_rows": 100, "culprit_keys": {"changed": ["7"]}},
+        "destination_summary": {"table": "t", "primary_key_columns": ["id"], "sync_mode": "full_refresh_overwrite"},
+    })
+    svc.update_job_status(job_id, "completed")
+    report = pr.build_parity_report(svc.get_job(job_id), job_id=job_id, cache="use")
+    accept = next(f for f in report["fixes"] if f["action"] == "accept")
+    reads.clear()
+    approve_fix(job_id, accept["id"], actor="ops@example.com", note="known")
+    assert len(reads) == 1, "the decision re-read once; its compare-and-swap reused that read"

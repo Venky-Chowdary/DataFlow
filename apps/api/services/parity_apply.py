@@ -126,7 +126,9 @@ def summarized(job: dict[str, Any], state: dict[str, Any], job_id: str) -> dict[
     """
     from services.parity_report import build_parity_report, compact_summary
 
-    report = build_parity_report({**job, "parity": state}, reread=True, job_id=job_id)
+    # The decision just read both sides fresh at this version: reuse that read (no second
+    # re-read per compare-and-swap attempt).
+    report = build_parity_report({**job, "parity": state}, reread=True, job_id=job_id, cache="use")
     state["summary"] = compact_summary(report)
     return report
 
