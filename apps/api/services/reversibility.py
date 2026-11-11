@@ -131,6 +131,31 @@ def _transform_of(mapping: Mapping[str, Any]) -> str:
     return (canon if canon is not None else _norm(raw)).lower() if _norm(raw) else ""
 
 
+#: governance_ops family (the migration certificate's mask / hash / redact) -> reason code.
+_FAMILY_CODE = {"mask": "mask_pii", "hash": "hash_pii", "redact": "redact"}
+
+
+def _lossy_transform(mapping: Mapping[str, Any], transform: str) -> str | None:
+    """The lossy transform a mapping applies, by the governance certificate's own families.
+
+    Aliases (``mask``, ``md5``, ``anonymize``, ...) resolve through
+    :func:`services.governance_ops.classify_governance_transform`; a
+    parameterised form (``mask_pii:email``) by its name, and a chain
+    (``trim|hash_pii``) by any of its steps.
+    """
+    from services.governance_ops import classify_governance_transform
+
+    if transform == "vector":
+        return "vector"
+    raw = _norm(mapping.get("transform") or mapping.get("engine_transform"))
+    for part in [raw, transform, *raw.split("|")]:
+        for candidate in (part, re.split(r"[:(]", part)[0]):
+            hit = classify_governance_transform(candidate.strip())
+            if hit:
+                return _FAMILY_CODE[hit[1]]
+    return None
+
+
 def _is_omitted(mapping: Mapping[str, Any], transform: str) -> bool:
     return bool(
         mapping.get("omit") or mapping.get("omitted") or mapping.get("intentional_omit")
@@ -257,8 +282,9 @@ def classify_mapping(
     values = list(observed or [])
     if _is_omitted(mapping, transform):
         return _entry(source, None, stype, None, transforms, LOSSY, "omit")
-    if transform in _LOSSY_TRANSFORMS:
-        code, text = _LOSSY_TRANSFORMS[transform]
+    lossy = _lossy_transform(mapping, transform)
+    if lossy is not None:
+        code, text = _LOSSY_TRANSFORMS[lossy]
         out = _entry(source, target, stype, ttype, transforms, LOSSY, "omit")
         out.update(reason_code=code, reason=f"{source or target} {text}.")
         return out

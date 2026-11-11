@@ -349,7 +349,8 @@ def rehearsal_summary(rehearsal: dict[str, Any] | None, system: dict[str, Any] |
         "fits_window": duration.get("fits_window") if rehearsal.get("verdict") == "proven" else None,
         "tables_declared": comp.get("tables_declared", 0),
         "tables_proven": comp.get("tables_proven", 0), "total_bytes": seal.get("total_bytes"),
-        "signed": (rehearsal.get("signoff") or {}).get("status") == "signed",
+        # The stored signature (``signoff`` is a computed view, never stored).
+        "signed": isinstance(rehearsal.get("signed"), dict) and bool(rehearsal["signed"].get("signature")),
         "current": (None if system is None else
                     bool(rehearsal.get("definition_sha256")) and rehearsal.get("definition_sha256")
                     == definition_sha256(system)),

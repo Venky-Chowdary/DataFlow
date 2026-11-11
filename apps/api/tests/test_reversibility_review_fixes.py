@@ -471,3 +471,45 @@ def test_m4_execute_blocks_a_normalising_transform_whose_read_rows_change(names,
     result = _execute(fake_store, src, dst, mappings=_TRIM_MAPS)
     assert not result.success and _blocked_by_g24(result), result.error
     assert "people.email" in str(result.error)
+
+
+# ------------------------------------------------------------------- Low items
+
+
+@pytest.mark.parametrize("transform,code", [
+    ("mask", "mask_pii"), ("pii_mask", "mask_pii"), ("mask_pii:email", "mask_pii"), ("mask_pii(email)", "mask_pii"),
+    ("hash", "hash_pii"), ("md5", "hash_pii"), ("sha256", "hash_pii"), ("anonymize", "redact"),
+    ("encrypt", "redact"), ("trim|hash_pii", "hash_pii"),
+])
+def test_low_governance_aliases_are_lossy_by_the_certificate_s_own_families(transform, code):
+    col = classify_mapping(_m("email", transform=transform, stype="TEXT", ttype="TEXT"))
+    assert (col["invertibility"], col["reason_code"]) == (LOSSY, code), col
+
+
+def test_low_a_lossy_key_declared_only_in_the_source_catalog_makes_the_table_not_reversible(monkeypatch):
+    from services import source_schema_authority as ssa
+    from services.reversibility import NOT_REVERSIBLE
+    from services.reversibility_sources import execute_gate, job_report, plan_report
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    monkeypatch.setattr(ssa, "endpoint_primary_key_columns", lambda _endpoint: ["email"])
+    monkeypatch.setattr(ssa, "live_source_primary_key_columns", lambda **_kw: ["email"])
+    maps = [_m("email", transform="hash_pii", stype="TEXT", ttype="TEXT"), _m("note", stype="TEXT", ttype="TEXT")]
+    req = TransferRequest(
+        source=EndpointConfig(kind="database", format="postgresql", table="people", connector_id="c1"),
+        destination=EndpointConfig(kind="database", format="postgresql", table="people"),
+        mappings=maps, require_reversibility=True)
+    planned = (maps, {"email": "TEXT", "note": "TEXT"}, {"email": "TEXT", "note": "TEXT"})
+    assert execute_gate(req, planned)["details"]["verdict"] == NOT_REVERSIBLE
+    job = {"transfer_request": {
+        "source": {"format": "postgresql", "table": "people", "connector_id": "c1"},
+        "destination": {"format": "postgresql", "table": "people"},
+        "column_types": {"email": "TEXT", "note": "TEXT"}, "mappings": maps}}
+    assert job_report(job, "j")["verdict"] == NOT_REVERSIBLE
+    rev = SimpleNamespace(mappings=maps)
+    plan = SimpleNamespace(
+        id="p", source={"format": "postgresql", "table": "people", "connector_id": "c1"},
+        destination={"format": "postgresql", "table": "people"}, source_columns=["email", "note"],
+        source_schema={"email": "TEXT", "note": "TEXT"}, target_schema={"email": "TEXT", "note": "TEXT"},
+        sample_rows=[], policies={}, active_revision=lambda: rev)
+    assert plan_report(plan)["verdict"] == NOT_REVERSIBLE

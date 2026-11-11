@@ -605,3 +605,26 @@ def test_w4_a_failed_extract_reason_has_no_driver_text_e2e(world):  # noqa: F811
     assert failed["status"] == "failed"
     assert "no such table" not in failed["reason"].lower() and "driver" not in failed["reason"].lower()
     assert failed["reason"].startswith("The extract job failed")
+
+
+# ------------------------------------------------------------------- Low items
+
+
+def test_low_the_signed_flag_and_the_pilot_signoff_read_the_stored_signature(world):  # noqa: F811
+    from services import exit_store
+    from services.exit_inventory import rehearsal_summary
+    from services.workspace_filter import WorkspaceFilter, bound_workspace_filter
+    from src.ai.copilot.tools import DataPilotTools
+
+    out, _pack = _signed_rehearsal(world)
+    doc = exit_store.get(exit_store.REHEARSALS, out["id"])
+    assert rehearsal_summary(doc)["signed"] is True
+    with bound_workspace_filter(WorkspaceFilter.only("ws1")):
+        pilot = DataPilotTools().execute("explain_exit_rehearsal", {"rehearsal_id": out["id"]})
+    assert pilot.success and pilot.output["signoff"] == "signed"
+
+
+def test_low_numeric_columns_dead_code_is_gone():
+    from services import exit_completeness
+
+    assert not hasattr(exit_completeness, "numeric_columns")

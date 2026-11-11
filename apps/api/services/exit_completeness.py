@@ -155,19 +155,6 @@ def _decimal(value: Any) -> Decimal | None:
         return None
 
 
-def numeric_columns(sample: Iterable[dict[str, Any]], columns: list[str]) -> list[str]:
-    """Columns whose every non-null source value is a number (bool excluded)."""
-    seen: dict[str, bool] = {}
-    for row in sample:
-        for col in columns:
-            value = row.get(col)
-            if value is None:
-                continue
-            ok = isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
-            seen[col] = seen.get(col, True) and ok
-    return [c for c in columns if seen.get(c)]
-
-
 def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns: list[str],
                  numeric: list[str] | None, *, types: dict[str, str] | None = None,
                  engine: str = "") -> Profile:

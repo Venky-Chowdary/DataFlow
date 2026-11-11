@@ -48,6 +48,35 @@ def _limit(value: Any) -> int:
         return 0
 
 
+def _catalog_keys_of_endpoint(endpoint: Any) -> list[str]:
+    """The source catalog's primary key (the key rows are matched back on when no contract names one)."""
+    if endpoint is None or str(getattr(endpoint, "kind", "") or "") != "database":
+        return []
+    try:
+        import copy
+
+        from services.source_schema_authority import endpoint_primary_key_columns
+
+        return list(endpoint_primary_key_columns(copy.deepcopy(endpoint)))
+    except Exception:  # noqa: BLE001 - an unread catalog names no key
+        return []
+
+
+def _catalog_keys_of_saved(source: Mapping[str, Any]) -> list[str]:
+    """The catalog primary key of a stored source (plan / job) that names its saved connector."""
+    connector_id = str(source.get("connector_id") or "").strip()
+    table = str(source.get("table") or source.get("collection") or "").strip()
+    if not connector_id or not table:
+        return []
+    try:
+        from services.source_schema_authority import live_source_primary_key_columns
+
+        return list(live_source_primary_key_columns(
+            source_connector_id=connector_id, source_table=table, source_schema=str(source.get("schema") or "")))
+    except Exception:  # noqa: BLE001 - an unread catalog names no key
+        return []
+
+
 def _steps(recipe: Any) -> list[dict[str, Any]]:
     return [s for s in _dict(recipe).get("steps") or [] if isinstance(s, dict)]
 
@@ -106,7 +135,8 @@ def plan_report(plan: Any) -> dict[str, Any]:
         recipe_steps=_steps(policies.get("shape_recipe")),
         # The plan's source columns are the read before the recipe (the shaped image is derived).
         recipe_input_columns=_recipe_inputs(policies.get("shape_recipe"), plan.source_columns),
-        key_columns=_key_columns(policies.get("stream_contracts")),
+        key_columns=(_key_columns(policies.get("stream_contracts"))
+                     or _catalog_keys_of_saved(_dict(plan.source))),
         sample_rows=sample,
         dest_db=_engine(plan.destination),
         source_db=_engine(plan.source),
@@ -135,7 +165,7 @@ def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
         recipe_input_columns=_recipe_inputs(
             req.get("shape_recipe"),
             _dict(_dict(job.get("destination_summary")).get("shape_proof")).get("input_columns")),
-        key_columns=_key_columns(req.get("stream_contracts")),
+        key_columns=_key_columns(req.get("stream_contracts")) or _catalog_keys_of_saved(src),
         dest_db=_engine(dst),
         source_db=_engine(src),
         row_limit=_limit(req.get("limit")),
@@ -164,7 +194,8 @@ def request_report(
         recipe_steps=_steps(getattr(request, "shape_recipe", None)),
         recipe_input_columns=_recipe_inputs(getattr(request, "shape_recipe", None),
                                             getattr(request, _RECIPE_INPUTS, None)),
-        key_columns=_key_columns(getattr(request, "stream_contracts", None)),
+        key_columns=(_key_columns(getattr(request, "stream_contracts", None))
+                     or _catalog_keys_of_endpoint(src)),
         sample_rows=list(sample_rows or []),
         dest_db=_engine(dst),
         source_db=_engine(src),
