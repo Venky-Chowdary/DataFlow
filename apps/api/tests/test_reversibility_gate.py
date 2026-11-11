@@ -332,3 +332,18 @@ def test_engine_blocks_a_required_reversible_run_with_a_hashed_column(tmp_path, 
 
     allowed = _run(fake_store, src, dst, require=False, transform="hash_pii")
     assert allowed.success, allowed.error
+
+
+def test_job_report_reads_the_types_the_run_recorded():
+    from services.reversibility_sources import job_report
+
+    job = {"transfer_request": {
+        "source": {"format": "postgresql", "table": "t"}, "destination": {"format": "postgresql", "table": "t"},
+        "column_types": {"id": "INTEGER", "email": "TEXT"},
+        "mappings": [{"source": "id", "target": "id", "target_type": "BIGINT"},
+                     {"source": "email", "target": "email", "target_type": "TEXT"}],
+        "require_reversibility": True,
+    }}
+    report = job_report(job, "job-1")
+    assert report["scope"] == "job" and report["verdict"] == REVERSIBLE
+    assert report["gate"]["status"] == "pass" and report["data_checked"]["source"] == "none"

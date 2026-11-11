@@ -519,8 +519,18 @@ def public(doc: dict[str, Any]) -> dict[str, Any]:
 
     out = {k: v for k, v in doc.items() if not str(k).startswith("_")
            and k not in {"approvals", "signed", "source", "extract_format", "required_roles", "window_seconds"}}
-    for key, empty in (("completeness", {}), ("seal", {}), ("duration", {})):
-        out.setdefault(key, empty)
+    # A running rehearsal carries the full shape, with nothing measured yet.
+    n = len(doc.get("tables") or [])
+    out.setdefault("completeness", {
+        "tables_declared": n, "tables_extracted": 0, "tables_proven": 0, "tables_not_proven": 0,
+        "tables_incomplete": 0, "tables_failed": sum(1 for t in doc.get("tables") or [] if t.get("status") == "failed"),
+        "value_methods": {}, "statement": "The rehearsal is still extracting or verifying."})
+    out.setdefault("seal", {"algorithm": "sha256-merkle-rfc6962", "merkle_root": None, "parts_count": 0,
+                            "total_bytes": 0, "storage": None, "parts": []})
+    out.setdefault("duration", {"basis": "measured", "measured_seconds": None, "extract_seconds": None,
+                                "verify_seconds": None, "window_seconds": int(doc.get("window_seconds") or 0),
+                                "fits_window": None, "margin_pct": None,
+                                "statement": "Not measured yet: the rehearsal is still running."})
     out["timeline"] = timeline(doc)
     out["trend"] = trend(doc)
     out["signoff"] = signoff_block(doc)

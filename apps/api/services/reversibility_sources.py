@@ -88,7 +88,7 @@ def plan_report(plan: Any) -> dict[str, Any]:
 
 def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
     """A job's ReversibilityReport from its stored request (no rows are read)."""
-    from services.parity_evidence import mappings_of, request_of
+    from services.parity_evidence import dest_types_of, mappings_of, request_of
 
     req = request_of(job)
     src, dst = _dict(req.get("source")), _dict(req.get("destination"))
@@ -97,6 +97,8 @@ def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
         mappings=mappings_of(job),
         source_columns=list(_dict(req.get("column_types")).keys()),
         source_types={str(k): str(v) for k, v in _dict(req.get("column_types")).items()},
+        # The destination types the run recorded (Map stamps, the DDL it ran, Gate-8's digest types).
+        target_types=dest_types_of(job),
         recipe_steps=_steps(req.get("shape_recipe")),
         key_columns=_key_columns(req.get("stream_contracts")),
         dest_db=_engine(dst),

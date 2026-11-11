@@ -209,6 +209,12 @@ def test_one_rehearsal_at_a_time(world):
 
     system = _system(tables=[{"name": "events"}])
     first = start(system, actor="a@example.com")
+    from services.exit_rehearsal import public
+
+    running = public(first)
+    if running["verdict"] == "running":  # a running rehearsal has the full shape, nothing measured
+        assert running["completeness"]["tables_declared"] == 1 and running["seal"]["merkle_root"] is None
+        assert running["duration"]["measured_seconds"] is None and running["signoff"]["status"] == "blocked"
     with pytest.raises(ExitConflict):
         start(get_system(system["id"]), actor="b@example.com")
     _wait(first)
