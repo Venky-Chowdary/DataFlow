@@ -20,7 +20,9 @@ from typing import Any
 
 from services.parity_classifier import (
     ACCEPTED_BY_OPERATOR,
+    TRANSFORM_APPLIED,
     UNEXPLAINED,
+    WHITESPACE,
     CellContext,
     accepted_by_operator,
     cause,
@@ -231,6 +233,10 @@ def _named_cells(keyed: list[Observation], key: str) -> list[tuple[str, str | No
     return list(dict.fromkeys((o.kind, o.column) for o in keyed if o.key == key))
 
 
+#: Explained causes Gate-8's own compare never sees: they cannot re-check a cell it named.
+_UNSEEN_BY_GATE8 = frozenset({TRANSFORM_APPLIED, WHITESPACE})
+
+
 def _rechecked(kind: str, column: str | None, found: list[Observation]) -> bool:
     """Whether the re-read of a row both sides hold re-checks one cell the evidence named.
 
@@ -243,7 +249,9 @@ def _rechecked(kind: str, column: str | None, found: list[Observation]) -> bool:
     if kind != "value":
         return False
     if column is not None:
-        return any(o.column == column for o in found)
+        # Gate-8 compares the written image (after the Map transform) and strips CHAR padding:
+        # a transform or a padding difference is not the difference it saw (re-review 4, finding 6).
+        return any(o.column == column and (o.cause or {}).get("code") not in _UNSEEN_BY_GATE8 for o in found)
     return any(not (o.cause or {}).get("explained") for o in found)
 
 
