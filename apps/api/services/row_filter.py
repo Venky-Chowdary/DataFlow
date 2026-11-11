@@ -44,21 +44,79 @@ def canonical_filter_op(raw: Any) -> str:
     return op
 
 
+#: Keys a predicate node may carry. Anything else is a shape this filter does
+#: not understand, and a filter that is not understood is refused, never
+#: skipped: the operator declared rows to keep out.
+_LEAF_KEYS = frozenset({"column", "field", "op", "operator", "value"})
+_JOINERS = ("and", "or")
+_NULL_OPS = frozenset({"is_null", "is_not_null"})
+
+FILTER_SHAPE_HELP = (
+    'a predicate {"column": <name>, "op": <operator>, "value": <value>} or a '
+    'composition {"and": [...]} / {"or": [...]} of predicates'
+)
+
+
 def canonical_filter_spec(spec: dict[str, Any] | None) -> dict[str, Any]:
-    """``spec`` with every operator in its word form (ValueError on an unknown one)."""
-    node = dict(spec or {})
-    for joiner in ("and", "or"):
-        if joiner in node:
-            node[joiner] = [
-                canonical_filter_spec(child) if isinstance(child, dict) else child
-                for child in (node.get(joiner) or [])
-            ]
-            return node
+    """``spec`` validated, with every operator in its word form.
+
+    The one validator of a row filter. ValueError when any node is not a
+    predicate this module can evaluate: no ``column``, an unknown operator, an
+    unknown key (``{"sql": ...}``, ``{"where": ...}``, ``{"region": "EU"}``), an
+    empty composition or an invalid regular expression. Such a node used to
+    compare an absent column with a blank value and match every row, so the
+    whole table landed under a filter that was declared and reported verified.
+    """
+    if spec is None:
+        return {}
+    if not isinstance(spec, dict):
+        raise ValueError(f"A filter must be {FILTER_SHAPE_HELP}; got {type(spec).__name__}.")
+    node = dict(spec)
     if not node:
         return node
+    joiners = [j for j in _JOINERS if j in node]
+    if joiners:
+        joiner = joiners[0]
+        extra = sorted(str(k) for k in node if k != joiner)
+        if extra:
+            raise ValueError(
+                f"A filter {joiner!r} node carries nothing else; found {', '.join(extra)}. "
+                f"Use {FILTER_SHAPE_HELP}."
+            )
+        children = node[joiner]
+        if not isinstance(children, (list, tuple)) or not children:
+            raise ValueError(f"A filter {joiner!r} node needs a non-empty list of predicates.")
+        node[joiner] = [canonical_filter_spec(_child_node(child, joiner)) for child in children]
+        return node
+    unknown = sorted(str(k) for k in node if k not in _LEAF_KEYS)
+    if unknown:
+        raise ValueError(
+            f"Unsupported filter key(s): {', '.join(unknown)}. Use {FILTER_SHAPE_HELP}."
+        )
+    column = node.get("column") or node.get("field")
+    if not isinstance(column, str) or not column.strip():
+        raise ValueError(
+            f"A filter predicate needs a column name. Use {FILTER_SHAPE_HELP}."
+        )
     key = "operator" if node.get("operator") else "op"
     node[key] = canonical_filter_op(node.get(key) or "eq")
+    if node[key] == "regex":
+        try:
+            re.compile(_cell_text(_to_scalar(node.get("value"))))
+        except re.error as exc:
+            raise ValueError(
+                f"Filter on {column!r} has an invalid regular expression: {exc}."
+            ) from None
     return node
+
+
+def _child_node(child: Any, joiner: str) -> dict[str, Any]:
+    if not isinstance(child, dict) or not child:
+        raise ValueError(
+            f"Every entry of a filter {joiner!r} list must be a predicate; "
+            f"got {child!r}."
+        )
+    return child
 
 
 def _to_scalar(value: Any) -> Any:
@@ -173,7 +231,13 @@ def _matches(record: dict[str, Any], spec: dict[str, Any]) -> bool:
     if "or" in spec:
         return any(_matches(record, child) for child in spec["or"] if child)
 
-    column = spec.get("column") or spec.get("field") or ""
+    column = spec.get("column") or spec.get("field")
+    if not column:
+        # Never match-all: a predicate that names no column cannot be judged
+        # (canonical_filter_spec refuses it before a run starts).
+        raise ValueError(
+            f"A filter predicate needs a column name. Use {FILTER_SHAPE_HELP}."
+        )
     op = canonical_filter_op(spec.get("operator") or spec.get("op") or "eq")
     value = record.get(column)
     return _compare_values(value, spec.get("value"), op)
