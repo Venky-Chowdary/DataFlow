@@ -92,6 +92,8 @@ def _job_summary(job: dict[str, Any], job_id: str) -> dict[str, Any]:
 
 def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
     """KPIs, the per-run trend (newest last) and the table x run heatmap."""
+    from services.job_status import job_timestamp_iso
+
     store = job_store()
     listed = store.list_jobs(limit=limit, workspace_filter=workspace_filter)
     rows: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
@@ -116,7 +118,8 @@ def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
                 logger.info("parity drift unavailable (%s)", type(exc).__name__)
         runs.append({
             "job_id": job_id,
-            "at": str(job.get("completed_at") or job.get("created_at") or brief.get("created_at") or ""),
+            # ISO-8601 UTC: Mongo hands job timestamps back naive (QA MX3-19).
+            "at": job_timestamp_iso(job.get("completed_at") or job.get("created_at") or brief.get("created_at")),
             "name": str(job.get("name") or brief.get("name") or job_id),
             "proven_equal_pct": summary.get("proven_equal_pct"),
             "unexplained": int(summary.get("unexplained") or 0),

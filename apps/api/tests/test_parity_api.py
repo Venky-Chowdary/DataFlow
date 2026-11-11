@@ -10,6 +10,8 @@ summary.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from r8_ent_harness import ent  # noqa: F401
@@ -199,6 +201,8 @@ def test_dismiss_explain_and_summary(ent, world):
     assert body["kpis"]["runs_with_unexplained"] == 1
     assert body["kpis"]["most_drifting_table"] == "payments"
     assert [r["name"] for r in body["runs"]] == ["payments nightly", "clean run"]  # newest last
+    # ISO-8601 UTC, not str() of the naive datetime Mongo returns ("2026-11-11 14:00:00.123000").
+    assert all(re.fullmatch(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z", r["at"]) for r in body["runs"]), body["runs"]
     assert world["foreign"] not in body["heatmap"]["job_ids"]
     row = body["heatmap"]["cells"][body["heatmap"]["tables"].index("payments")]
     assert row[0] == "unexplained_large"  # 2 of 100 rows is over the 1% "small" line
