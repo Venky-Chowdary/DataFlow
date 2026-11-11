@@ -1856,6 +1856,16 @@ def _dispatch_transfer(
             resync_mode=resync_mode,
             triggered_by=triggered_by,
         )
+        # D361: a schedule saved before create/update refused a recipe its
+        # history route cannot apply parks on that reason and its way out,
+        # before a job exists, instead of failing every beat inside Execute.
+        from services.history_route_recipe import schedule_recipe_refusal
+
+        recipe_refusal = schedule_recipe_refusal(
+            getattr(request, "shape_recipe", None), str(getattr(request, "sync_mode", "") or "")
+        )
+        if recipe_refusal:
+            raise ValueError(f"Schedule cannot run — {recipe_refusal}")
         # D276: a saved local-disk destination on the hosted cloud (SQLite, a
         # DuckDB file, a local Iceberg warehouse/catalog) is refused at this run's
         # preflight, before a job exists, instead of failing mid-write. Judged on
