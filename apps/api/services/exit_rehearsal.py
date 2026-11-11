@@ -216,12 +216,62 @@ def _live_tables(doc: dict[str, Any], jobs: dict[str, dict[str, Any]]) -> list[d
     return out
 
 
+def _update_retrying(rehearsal_id: str, mutate: Any, attempts: int = 5) -> dict[str, Any] | None:
+    """``exit_store.update`` retried over concurrent writes; ``None`` when ``mutate`` refuses."""
+    for _ in range(attempts):
+        try:
+            return exit_store.update(REHEARSALS, rehearsal_id, mutate)[0]
+        except ExitConflict:
+            return None
+        except exit_store.StoreConflict:
+            continue
+    return None
+
+
+class _Lease:
+    """Keeps a verification claim fresh while the verifier runs (a heartbeat, not a fixed age).
+
+    A claim is taken over only when its timestamp is older than ``VERIFY_STALE``,
+    so a live verifier refreshes it every quarter of that window. A verifier that
+    died stops refreshing and its claim goes stale; one that is merely slow keeps
+    it, and is the one that closes the rehearsal.
+    """
+
+    def __init__(self, rehearsal_id: str, claim_id: str) -> None:
+        import threading
+
+        self._stop = threading.Event()
+        self._rid, self._claim = rehearsal_id, claim_id
+        self._thread = threading.Thread(target=self._beat, daemon=True, name=f"exit-verify-lease-{rehearsal_id}")
+        self._thread.start()
+
+    def _refresh(self, current: dict[str, Any]) -> None:
+        held = current.get("_verify") or {}
+        if current.get("verdict") != "running" or held.get("id") != self._claim:
+            raise ExitConflict("the claim was lost")
+        current["_verify"] = {**held, "at": now_iso()}
+
+    def _beat(self) -> None:
+        interval = max(VERIFY_STALE.total_seconds() / 4, 0.05)
+        while not self._stop.wait(interval):
+            try:
+                if _update_retrying(self._rid, self._refresh) is None:
+                    return
+            except Exception as exc:  # noqa: BLE001 - a missed beat is retried on the next one
+                logger.info("exit rehearsal %s: claim refresh failed (%s)", self._rid, type(exc).__name__)
+
+    def release(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=30)
+
+
 def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
     """Verify, seal and close a rehearsal whose extract jobs have all finished.
 
     Returns the stored document (unchanged while jobs still run). Exactly one
-    caller verifies: the verification is claimed by compare-and-swap, and a
-    claim older than an hour is taken over. ``inline=False`` (a page read, the
+    caller verifies: the verification is claimed by compare-and-swap and kept
+    fresh by its verifier (:class:`_Lease`); only a claim nobody refreshed for
+    ``VERIFY_STALE`` (its verifier died) is taken over. ``inline=False`` (a page read, the
     scheduler beat, a sign-off attempt) never runs the verification on the
     caller's thread — it re-reads both whole populations — but starts it in
     the background and answers with the tables "Verifying.".
@@ -256,7 +306,11 @@ def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
         exit_store.update(REHEARSALS, rehearsal_id, claim)
     except (ExitConflict, exit_store.StoreConflict):
         return exit_store.get(REHEARSALS, rehearsal_id)
-    result = verify(doc, jobs)
+    lease = _Lease(rehearsal_id, claim_id)
+    try:
+        result = verify(doc, jobs)
+    finally:
+        lease.release()
 
     def close(current: dict[str, Any]) -> None:
         if (current.get("_verify") or {}).get("id") != claim_id:
@@ -264,9 +318,8 @@ def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
         current.update(result)
         current["_verify"] = None
 
-    try:
-        closed, _ = exit_store.update(REHEARSALS, rehearsal_id, close)
-    except (ExitConflict, exit_store.StoreConflict):
+    closed = _update_retrying(rehearsal_id, close)
+    if closed is None:
         return exit_store.get(REHEARSALS, rehearsal_id)
     _release_system(doc["system_id"], rehearsal_id)
     system = {"id": doc["system_id"], "workspace_id": doc["workspace_id"]}

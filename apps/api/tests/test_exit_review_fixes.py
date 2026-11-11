@@ -217,3 +217,37 @@ def test_h1_no_row_value_reaches_the_view_the_export_or_pilot_e2e(world):  # noq
     assert pilot.success, pilot.error
     for text in (json.dumps(out), render_markdown(stored), json.dumps(pilot.output)):
         assert "alice@example.com" not in text and "__DF_SQL_NULL__" not in text
+
+
+# ------------------------------- H2: a verification longer than the stale window finishes once
+
+
+def test_h2_a_long_verification_holds_its_claim_and_closes_exactly_once(world, monkeypatch):  # noqa: F811
+    import time
+    from datetime import timedelta
+
+    from services import exit_rehearsal
+    from services.exit_store import REHEARSALS, get
+    from tests.test_exit_rehearsal_e2e import _wait
+
+    real_verify = exit_rehearsal.verify
+    runs = []
+
+    def slow_verify(doc, jobs):
+        runs.append(time.monotonic())
+        time.sleep(1.5)  # stands for a full-population re-read longer than the stale window
+        return real_verify(doc, jobs)
+
+    monkeypatch.setattr(exit_rehearsal, "VERIFY_STALE", timedelta(seconds=1))
+    monkeypatch.setattr(exit_rehearsal, "verify", slow_verify)
+    monkeypatch.setattr(exit_rehearsal, "settle_quietly", lambda rid: exit_rehearsal.settle(rid))
+    first = exit_rehearsal.start(_system(tables=[{"name": "events"}]), actor="a@example.com")
+    _wait(first)
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline and get(REHEARSALS, first["id"])["verdict"] == "running":
+        exit_rehearsal.settle(first["id"], inline=False)  # page poll / scheduler beat
+        time.sleep(0.2)
+    doc = get(REHEARSALS, first["id"])
+    assert doc["verdict"] == "proven", doc["verdict_reason"]
+    assert len(runs) == 1, f"{len(runs)} verifications started"
+    assert doc["_verify"] is None
