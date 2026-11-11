@@ -417,10 +417,19 @@ def approve_fix(
     before = report["parity"]["unexplained"]
 
     if fix["action"] == "accept":
+        if not note.strip():
+            raise ParityInvalid("Accepting a difference needs a note: say why it is acceptable.")
+        scope = {
+            d["id"]: {"keys": list(d["_keys"]), "keyless_rows": int(d["_keyless"]), "rows": int(d["rows"])}
+            for d in report["differences"] if d["id"] in fix["difference_ids"]
+        }
+
         def accept(job_now: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
             _still_proposed(state, fix_id)
             for did in fix["difference_ids"]:
-                state["acceptances"][did] = {"by": actor, "at": now_iso(), "note": note, "fix_id": fix_id}
+                # Exactly the rows the person saw: later rows with the same cause are not covered.
+                state["acceptances"][did] = {"by": actor, "at": now_iso(), "note": note, "fix_id": fix_id,
+                                             **scope.get(did, {"keys": [], "keyless_rows": 0, "rows": 0})}
             state["fixes"][fix_id] = {
                 **record, "status": "applied", "applied_at": now_iso(),
                 "result": f"Accepted {len(fix['difference_ids'])} difference(s).",

@@ -135,6 +135,9 @@ export function FixCard({ fix, busy, canAct, onApprove, onDismiss }: FixCardProp
   const [confirming, setConfirming] = useState<"approve" | "dismiss" | null>(null);
   const [note, setNote] = useState("");
   const noteId = useId();
+  // Accepting records a risk on the signed report: the API refuses it without a note (422).
+  const noteRequired = fix.action === "accept" && confirming === "approve";
+  const noteMissing = noteRequired && !note.trim();
   const status = fixStatusPresentation(fix.status);
   const actionable = isFixActionable(fix);
   const decision = decisionLines(fix);
@@ -187,7 +190,7 @@ export function FixCard({ fix, busy, canAct, onApprove, onDismiss }: FixCardProp
           aria-label={confirming === "approve" ? "Confirm this fix" : "Confirm dismissing this fix"}
           onSubmit={(e) => {
             e.preventDefault();
-            if (anyBusy) return;
+            if (anyBusy || noteMissing) return;
             if (confirming === "approve") onApprove(fix.id, note);
             else onDismiss(fix.id, note);
           }}
@@ -200,7 +203,7 @@ export function FixCard({ fix, busy, canAct, onApprove, onDismiss }: FixCardProp
           </p>
           <div className="df2-field">
             <label className="df2-label" htmlFor={noteId}>
-              Note {fix.action === "accept" && confirming === "approve" ? "(recorded with the acceptance)" : "(optional)"}
+              Note {noteRequired ? "(required: why is this acceptable?)" : "(optional)"}
             </label>
             <textarea
               id={noteId}
@@ -210,6 +213,8 @@ export function FixCard({ fix, busy, canAct, onApprove, onDismiss }: FixCardProp
               value={note}
               onChange={(e) => setNote(e.target.value)}
               disabled={anyBusy}
+              required={noteRequired}
+              aria-required={noteRequired || undefined}
             />
           </div>
           <div className="df2-parity-actions">
@@ -217,7 +222,8 @@ export function FixCard({ fix, busy, canAct, onApprove, onDismiss }: FixCardProp
               type="submit"
               variant={confirming === "approve" ? "primary" : "default"}
               size="sm"
-              disabled={anyBusy}
+              disabled={anyBusy || noteMissing}
+              title={noteMissing ? "Say why these rows are acceptable; the note is recorded with the acceptance." : undefined}
               loading={mine}
               loadingLabel={confirming === "approve" ? "Applying and re-checking…" : "Dismissing…"}
             >

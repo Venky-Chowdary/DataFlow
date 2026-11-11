@@ -187,18 +187,47 @@ def _group(ev: TableEvidence, engine: str, acceptances: dict[str, Any]) -> list[
                     diff["keys_sample"].append(k)
     out = []
     for diff in groups.values():
-        diff["rows"] = len(diff["_keys"]) + diff["_keyless"]
-        diff["keys_sample"] = (diff["_keys"] + diff["keys_sample"])[:MAX_KEYS_SAMPLE]
         accepted = acceptances.get(diff["id"])
+        parts = [diff]
         if accepted and not diff["cause"]["explained"]:
-            was = diff["cause"]
-            diff["cause"] = accepted_by_operator(accepted)
-            diff["cause"]["detail"] += f" Diagnosed as: {was['label'].lower()} — {was['detail']}"
-        if diff["rows"] > 0:
-            out.append(diff)
+            parts = _split_accepted(diff, accepted)
+        for part in parts:
+            part["rows"] = len(part["_keys"]) + part["_keyless"]
+            part["keys_sample"] = (part["_keys"] + part["keys_sample"])[:MAX_KEYS_SAMPLE]
+            if part["rows"] > 0:
+                out.append(part)
     order = {"value": 0, "missing_in_destination": 1, "extra_in_destination": 2, "duplicate_key": 3}
     out.sort(key=lambda d: (d["cause"]["explained"], order.get(d["kind"], 9), d["column"] or "", d["id"]))
     return out
+
+
+def _split_accepted(diff: dict[str, Any], accepted: dict[str, Any]) -> list[dict[str, Any]]:
+    """The accepted rows (explained, same id) and what lies beyond them (unexplained).
+
+    An acceptance names the keys and the keyless row count a person saw; a
+    later difference with the same signature on other keys, or more rows,
+    is not covered. An acceptance recorded without its rows covers nothing.
+    """
+    keys = set(accepted.get("keys") or [])
+    keyless = min(diff["_keyless"], max(int(accepted.get("keyless_rows") or 0), 0))
+    inside = [k for k in diff["_keys"] if k in keys]
+    beyond = [k for k in diff["_keys"] if k not in keys]
+    was = diff["cause"]
+    covered = {
+        **diff, "_keys": inside, "_keyless": keyless,
+        "_sampled_keys": [k for k in diff["_sampled_keys"] if k in keys],
+        "keys_sample": list(diff["keys_sample"]) if keyless else [],
+        "cause": accepted_by_operator(accepted),
+    }
+    covered["cause"]["detail"] += f" Diagnosed as: {was['label'].lower()} — {was['detail']}"
+    rest = {
+        **diff, "id": difference_id(diff["table"], diff["column"], diff["kind"], was["code"] + "|beyond_acceptance"),
+        "_keys": beyond, "_keyless": diff["_keyless"] - keyless,
+        "_sampled_keys": [k for k in diff["_sampled_keys"] if k not in keys],
+        "keys_sample": [] if keyless else list(diff["keys_sample"]),
+        "cause": {**was, "detail": was["detail"] + " These rows are beyond what was accepted."},
+    }
+    return [covered, rest]
 
 
 # ── tables, confidence, verdict ──────────────────────────────────────────────

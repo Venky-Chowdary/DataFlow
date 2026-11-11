@@ -290,6 +290,22 @@ describe("Trust Report actions (jsdom)", () => {
     assert.equal(button("Explain again").disabled, false);
   });
 
+  it("will not accept a difference without a note (review finding 6)", async () => {
+    getReport = () => {
+      const r = unexplainedReport();
+      const accept = { ...r.fixes[0], id: "fix-accept", action: "accept" as const, title: "Accept 4 row(s)", preview: null };
+      return { ...r, fixes: [accept] };
+    };
+    await mount();
+    await click(button("Mark as accepted"));
+    const confirm = button("Confirm and apply");
+    assert.equal(confirm.disabled, true, "no note, no acceptance");
+    assert.match(host!.textContent || "", /required: why is this acceptable\?/);
+    await type(host!.querySelector<HTMLTextAreaElement>(".df2-parity-confirm textarea")!, "Known source rounding");
+    assert.equal(button("Confirm and apply").disabled, false);
+    assert.equal(calls.filter((c) => c.method === "POST").length, 0);
+  });
+
   it("does not roll back to an older version, and re-reads instead", async () => {
     onPost = async () => new Response(JSON.stringify(unexplainedReport({ version: 2, verdict_reason: "STALE" })), { status: 200 });
     getReport = () => unexplainedReport({ version: 3 });

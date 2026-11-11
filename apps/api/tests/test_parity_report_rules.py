@@ -193,7 +193,9 @@ def test_round_limit_dismissal_and_retry_ids():
 def test_an_accepted_difference_is_explained_and_names_the_approver():
     report = _report(_keyed(2))
     diff = report["differences"][0]
-    accepted = _report(_keyed(2, parity={"acceptances": {diff["id"]: {"by": "o@x.com", "note": "fine"}}}))
+    # An acceptance names the rows it covers (review finding 6); one recorded without them covers nothing.
+    scope = {"keys": list(diff["keys_sample"]), "keyless_rows": diff["rows"] - len(diff["keys_sample"])}
+    accepted = _report(_keyed(2, parity={"acceptances": {diff["id"]: {"by": "o@x.com", "note": "fine", **scope}}}))
     cause = accepted["differences"][0]["cause"]
     assert cause["code"] == "accepted_by_operator" and cause["explained"]
     assert "o@x.com: fine" in cause["detail"] and "Diagnosed as" in cause["detail"]
