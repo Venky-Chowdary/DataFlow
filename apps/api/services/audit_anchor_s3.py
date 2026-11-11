@@ -156,6 +156,35 @@ def verify_location(location: dict[str, Any], digest: str, *, s3: Any = None,
     return {"status": "anchored", "retention": held, "reason": None}
 
 
+def find_location(digest: str, *, kind: str, around: Any = None, s3: Any = None) -> dict[str, Any] | None:
+    """The bucket location of ``digest``'s anchor, looked up in the bucket (no local index).
+
+    Keys are ``<prefix>/<kind>/YYYY/MM/DD/<digest>-<n>.json``; the day of
+    ``around`` and the day after are listed (an anchor is written right after
+    signing). Every version under the key is a candidate; the first one that
+    reads back ``anchored`` wins, else the last one found (it then reads back
+    as the failure it is).
+    """
+    name = bucket()
+    when = _aware(around) if around is not None else None
+    if not name or when is None:
+        return None
+    s3 = s3 or client()
+    found: dict[str, Any] | None = None
+    for day in (when, when + timedelta(days=1)):
+        stem = object_key(kind, digest, day).rsplit("-", 1)[0] + "-"
+        try:
+            listed = s3.list_object_versions(Bucket=name, Prefix=stem)
+        except Exception:  # noqa: BLE001 - an unreadable bucket finds nothing; verify says not anchored
+            return found
+        for version in listed.get("Versions") or []:
+            location = {"bucket": name, "key": version["Key"], "version_id": version.get("VersionId")}
+            if verify_location(location, digest, s3=s3)["status"] == "anchored":
+                return location
+            found = location
+    return found
+
+
 def put_anchor(digest: str, *, kind: str, subject: str, event_time: str = "", s3: Any = None,
                now: datetime | None = None) -> dict[str, Any]:
     """Write one compliance-mode anchor and confirm it.

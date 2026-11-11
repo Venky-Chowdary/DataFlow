@@ -15,6 +15,8 @@ from typing import Any
 from services.reversibility import analyze_table, build_report, gate_for
 
 POLICY = "require_reversibility"
+#: Where Execute keeps the columns its shape recipe read (set when the runner opens; never serialised).
+_RECIPE_INPUTS = "_reversibility_recipe_inputs"
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -39,6 +41,42 @@ def _key_columns(stream_contracts: Any) -> list[str]:
     return []
 
 
+def _limit(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _catalog_keys_of_endpoint(endpoint: Any) -> list[str]:
+    """The source catalog's primary key (the key rows are matched back on when no contract names one)."""
+    if endpoint is None or str(getattr(endpoint, "kind", "") or "") != "database":
+        return []
+    try:
+        import copy
+
+        from services.source_schema_authority import endpoint_primary_key_columns
+
+        return list(endpoint_primary_key_columns(copy.deepcopy(endpoint)))
+    except Exception:  # noqa: BLE001 - an unread catalog names no key
+        return []
+
+
+def _catalog_keys_of_saved(source: Mapping[str, Any]) -> list[str]:
+    """The catalog primary key of a stored source (plan / job) that names its saved connector."""
+    connector_id = str(source.get("connector_id") or "").strip()
+    table = str(source.get("table") or source.get("collection") or "").strip()
+    if not connector_id or not table:
+        return []
+    try:
+        from services.source_schema_authority import live_source_primary_key_columns
+
+        return list(live_source_primary_key_columns(
+            source_connector_id=connector_id, source_table=table, source_schema=str(source.get("schema") or "")))
+    except Exception:  # noqa: BLE001 - an unread catalog names no key
+        return []
+
+
 def _steps(recipe: Any) -> list[dict[str, Any]]:
     return [s for s in _dict(recipe).get("steps") or [] if isinstance(s, dict)]
 
@@ -60,6 +98,25 @@ def _table(dest: Any, src: Any) -> str:
     return "destination"
 
 
+def note_recipe_inputs(request: Any, columns: Any) -> None:
+    """Execute opened its shape recipe on ``columns`` (the read, before any step).
+
+    The gate runs later on the shaped columns, where a column a step created and
+    a source column a step overwrote look alike; this keeps the difference.
+    """
+    try:
+        setattr(request, _RECIPE_INPUTS, [str(c) for c in columns or []])
+    except (AttributeError, TypeError):
+        pass
+
+
+def _recipe_inputs(recipe: Any, columns: Any) -> list[str] | None:
+    """The recipe's input columns when known; ``None`` without a recipe to read them."""
+    if not _steps(recipe):
+        return None
+    return [str(c) for c in columns] if columns else None
+
+
 def plan_requires_reversibility(policies: Mapping[str, Any] | None) -> bool:
     return _truthy(_dict(policies).get(POLICY))
 
@@ -76,10 +133,15 @@ def plan_report(plan: Any) -> dict[str, Any]:
         source_types=dict(plan.source_schema or {}),
         target_types=dict(plan.target_schema or {}),
         recipe_steps=_steps(policies.get("shape_recipe")),
-        key_columns=_key_columns(policies.get("stream_contracts")),
+        # The plan's source columns are the read before the recipe (the shaped image is derived).
+        recipe_input_columns=_recipe_inputs(policies.get("shape_recipe"), plan.source_columns),
+        key_columns=(_key_columns(policies.get("stream_contracts"))
+                     or _catalog_keys_of_saved(_dict(plan.source))),
         sample_rows=sample,
         dest_db=_engine(plan.destination),
         source_db=_engine(plan.source),
+        row_limit=_limit(policies.get("row_limit")),
+        source_filter=_dict(policies.get("source_filter")),
     )
     return build_report([table], scope="plan", subject_id=str(plan.id),
                         require=plan_requires_reversibility(policies),
@@ -100,9 +162,14 @@ def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
         # The destination types the run recorded (Map stamps, the DDL it ran, Gate-8's digest types).
         target_types=dest_types_of(job),
         recipe_steps=_steps(req.get("shape_recipe")),
-        key_columns=_key_columns(req.get("stream_contracts")),
+        recipe_input_columns=_recipe_inputs(
+            req.get("shape_recipe"),
+            _dict(_dict(job.get("destination_summary")).get("shape_proof")).get("input_columns")),
+        key_columns=_key_columns(req.get("stream_contracts")) or _catalog_keys_of_saved(src),
         dest_db=_engine(dst),
         source_db=_engine(src),
+        row_limit=_limit(req.get("limit")),
+        source_filter=_dict(req.get("source_filter")),
     )
     return build_report([table], scope="job", subject_id=job_id,
                         require=_truthy(req.get(POLICY)), data_rows=0, data_source="none")
@@ -114,7 +181,7 @@ def request_report(
     column_types: Mapping[str, str] | None,
     dest_types: Mapping[str, str] | None,
     *,
-    sample_rows: list[dict[str, Any]] | None = None,
+    sample_rows: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Execute's view: the run's planned mappings and types (Validate == Execute)."""
     src, dst = getattr(request, "source", None), getattr(request, "destination", None)
@@ -125,10 +192,15 @@ def request_report(
         source_types=dict(column_types or {}),
         target_types=dict(dest_types or {}),
         recipe_steps=_steps(getattr(request, "shape_recipe", None)),
-        key_columns=_key_columns(getattr(request, "stream_contracts", None)),
+        recipe_input_columns=_recipe_inputs(getattr(request, "shape_recipe", None),
+                                            getattr(request, _RECIPE_INPUTS, None)),
+        key_columns=(_key_columns(getattr(request, "stream_contracts", None))
+                     or _catalog_keys_of_endpoint(src)),
         sample_rows=list(sample_rows or []),
         dest_db=_engine(dst),
         source_db=_engine(src),
+        row_limit=_limit(getattr(request, "limit", 0)),
+        source_filter=_dict(getattr(request, "source_filter", None)),
     )
     return build_report([table], scope="job", subject_id=str(getattr(request, "job_id", "") or ""),
                         require=True, data_rows=len(sample_rows or []), data_source="preflight_sample")
@@ -145,14 +217,18 @@ def preflight_gate(report: Mapping[str, Any]) -> dict[str, Any]:
     return gate
 
 
-def execute_gate(request: Any, planned: tuple[Any, Any, Any] | None) -> dict[str, Any] | None:
+def execute_gate(request: Any, planned: tuple[Any, ...] | None) -> dict[str, Any] | None:
     """``g24_reversibility`` for Execute when the request requires reversibility, else ``None``."""
     if not _truthy(getattr(request, POLICY, False)):
         return None
-    mappings, column_types, dest_types = planned or (None, None, None)
+    mappings, column_types, dest_types = tuple(planned or (None, None, None))[:3]
+    # The design sample Execute read (when the caller has one): conditional columns are
+    # checked against it, as Validate checks them against the plan sample.
+    sample = [r for r in (tuple(planned)[3] if planned and len(planned) > 3 else None) or []
+              if isinstance(r, Mapping)]
     if column_types is None:
         column_types = dict(getattr(request, "column_types", None) or {})
-    return preflight_gate(request_report(request, mappings, column_types, dest_types))
+    return preflight_gate(request_report(request, mappings, column_types, dest_types, sample_rows=sample))
 
 
 def stamp_plan_requirement(request: Any, policies: Mapping[str, Any] | None) -> None:

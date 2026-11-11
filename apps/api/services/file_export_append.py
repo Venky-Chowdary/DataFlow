@@ -103,11 +103,26 @@ def land_export_bytes(
         export_path = str(generated_export_path(name))
         with open(export_path, "wb") as fh:
             fh.write(export_bytes)
+    sha256, size = _file_sha256(export_path)
     return {
         "filename": name,
         "path": export_path,
         "download_url": f"/api/v1/transfer/download/{name}",
+        # The bytes as written: a later read of the file is checked against these.
+        "sha256": sha256,
+        "size_bytes": size,
     }
+
+
+def _file_sha256(path: str) -> tuple[str, int]:
+    import hashlib
+
+    digest, size = hashlib.sha256(), 0
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
 
 
 def _first_line(data: bytes) -> bytes:

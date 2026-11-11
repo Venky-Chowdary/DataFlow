@@ -3444,7 +3444,7 @@ class UniversalTransferEngine:
                     pf,
                     _engine_module._execute_policy_gates_for_request(
                         request, source_columns=columns, resume=resume,
-                        planned=(mappings, schema, dest_schema_types),
+                        planned=(mappings, schema, dest_schema_types, sample_rows),
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),

@@ -9,8 +9,9 @@ column, deterministically:
 * **lossy** - hashing, masking, redaction, an omitted or dropped column, any
   narrowing the type system recognises (string, decimal, integer, float,
   temporal, binary, interval, bit width), truncation (datetime to date/time),
-  rounding (to integer, decimal to float, float to decimal), concatenation, and
-  recipe steps that change values or rows;
+  rounding (to integer, decimal to float, float to decimal), concatenation,
+  recipe steps that change values or rows, and a row cap or source filter (only
+  part of the source lands);
 * **conditional** - invertible only when the observed values round-trip
   exactly: a cast out of text, a normalising transform (trim, case, unicode,
   e-mail, ...), ``replace:`` / ``default:`` / ``assume_timezone:``, or a column
@@ -36,9 +37,19 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from services.reversibility_types import (
+    CONDITIONAL,
+    INVERTIBLE,
+    LOSSY,
+    TEXT,
+    TYPE_CHECKED,
+    check_type_values,
+    logical,
+    type_pair,
+)
+
 GATE_ID = "g24_reversibility"
 
-INVERTIBLE, LOSSY, CONDITIONAL = "invertible", "lossy", "conditional"
 REVERSIBLE, PARTLY, NOT_REVERSIBLE = "reversible", "partly_reversible", "not_reversible"
 
 #: Map transforms that never change a value the engine binds.
@@ -55,30 +66,36 @@ _LOSSY_STEPS = frozenset({
     "drop_column", "keep_columns", "null_if", "round_number", "truncate_number", "absolute", "clamp",
     "hash_identity", "hash_pii", "mask_pii", "strip_characters", "set_value", "concat_columns",
 })
-#: Recipe steps that change which rows land (a filter, a merge, a reshape).
+#: Recipe steps that change which rows land (a filter, a top-N, a merge, a reshape).
 _ROW_STEPS = frozenset({
     "filter_rows", "divert_rows", "dedupe_rows", "aggregate", "union", "join", "router", "unnest_json",
-    "nest_json", "lookup", "scd2",
+    "nest_json", "lookup", "scd2", "rank_rows",
 })
-#: Recipe steps that add or rename without touching an existing value.
+#: Recipe steps that add or rename without touching an existing value - as long as
+#: the column they write (``options.to`` / ``keys``) is new: written onto a column
+#: the row already holds, they overwrite it (``recipe_lossy``).
 _INVERTIBLE_STEPS = frozenset({
-    "rename_column", "sort_rows", "rank_rows", "constant_column", "derive_column", "surrogate_key",
-    "flatten_json",
+    "rename_column", "sort_rows", "constant_column", "derive_column", "surrogate_key", "flatten_json",
 })
 #: Target logical type -> the engine cast that binds a text value into it.
 _CAST_FOR: dict[str, str] = {
     "integer": "integer", "decimal": "decimal", "float": "decimal", "boolean": "boolean",
     "date": "date", "datetime": "datetime", "time": "time", "json": "json",
 }
-_TEXT = frozenset({"string", "text"})
-_SAFE_WIDEN = frozenset({("integer", "decimal"), ("date", "datetime"), ("boolean", "integer")})
-_TRUNCATE = frozenset({("datetime", "date"), ("datetime", "time")})
-_ROUND = frozenset({("decimal", "integer"), ("float", "integer"), ("decimal", "float"), ("float", "decimal")})
+
 
 _REASON = {
     "identity": "is copied unchanged",
     "rename": "is renamed to {target}; the values are copied unchanged",
     "widen": "widens {stype} to {ttype}; every value fits",
+    "timezone": "drops the time zone ({stype} to {ttype}); the original offset cannot be recovered",
+    "json_normalize": ("is stored as {ttype}, which keeps one value per key in its own key order and spacing; "
+                       "the original {stype} text cannot be rebuilt"),
+    "charset": ("narrows the character set ({stype} to {ttype}); reversible only if every character survives "
+                "the code page (checked as plain ASCII)"),
+    "enum": "is cast {stype} to {ttype}; reversible only if every value is one of its labels",
+    "blank_pad": "is padded to the fixed width of {ttype}; reversible only if no value ends in a space",
+    "text_width": "is cast {stype} to {ttype}; reversible only if every value's text fits the width",
     "lossless_cast": "is cast {stype} to {ttype} without losing information",
     "type_preserving_bind": "is bound as its own type ({ttype})",
     "omit": "is not written to the destination (omitted)",
@@ -104,38 +121,6 @@ def _norm(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _logical(type_str: str) -> str:
-    """The logical family, or "" when no type is declared (the type system reads "" as string)."""
-    if not _norm(type_str):
-        return ""
-    from services.type_system import normalize_logical_type
-
-    return normalize_logical_type(type_str)
-
-
-def _narrows(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
-    """Any narrowing the type system already names (one rule set with preflight)."""
-    from services import type_system as ts
-
-    checks = (
-        lambda: ts.string_width_would_narrow(stype, ttype, dest_db=dest_db),
-        lambda: ts.decimal_params_would_narrow(stype, ttype, dest_db=dest_db),
-        lambda: ts.integer_width_would_narrow(stype, ttype, dest_db=dest_db),
-        lambda: ts.float_mantissa_would_narrow(stype, ttype, dest_db=dest_db, source_db=source_db),
-        lambda: ts.temporal_precision_would_narrow(stype, ttype, dest_db=dest_db),
-        lambda: ts.binary_width_would_narrow(stype, ttype),
-        lambda: ts.interval_precision_would_narrow(stype, ttype),
-        lambda: ts.bitstring_width_would_narrow(stype, ttype),
-    )
-    for check in checks:
-        try:
-            if check():
-                return True
-        except Exception:  # noqa: BLE001 - a helper that cannot read a spelling decides nothing
-            continue
-    return False
-
-
 def _transform_of(mapping: Mapping[str, Any]) -> str:
     from services.transform_engine import normalize_engine_transform
 
@@ -144,6 +129,31 @@ def _transform_of(mapping: Mapping[str, Any]) -> str:
         raw = mapping.get("engine_transform") or ""
     canon = normalize_engine_transform(str(raw))
     return (canon if canon is not None else _norm(raw)).lower() if _norm(raw) else ""
+
+
+#: governance_ops family (the migration certificate's mask / hash / redact) -> reason code.
+_FAMILY_CODE = {"mask": "mask_pii", "hash": "hash_pii", "redact": "redact"}
+
+
+def _lossy_transform(mapping: Mapping[str, Any], transform: str) -> str | None:
+    """The lossy transform a mapping applies, by the governance certificate's own families.
+
+    Aliases (``mask``, ``md5``, ``anonymize``, ...) resolve through
+    :func:`services.governance_ops.classify_governance_transform`; a
+    parameterised form (``mask_pii:email``) by its name, and a chain
+    (``trim|hash_pii``) by any of its steps.
+    """
+    from services.governance_ops import classify_governance_transform
+
+    if transform == "vector":
+        return "vector"
+    raw = _norm(mapping.get("transform") or mapping.get("engine_transform"))
+    for part in [raw, transform, *raw.split("|")]:
+        for candidate in (part, re.split(r"[:(]", part)[0]):
+            hit = classify_governance_transform(candidate.strip())
+            if hit:
+                return _FAMILY_CODE[hit[1]]
+    return None
 
 
 def _is_omitted(mapping: Mapping[str, Any], transform: str) -> bool:
@@ -208,7 +218,7 @@ def _overflow(values: Sequence[Any], ttype: str, tlogical: str) -> dict[str, Any
         if text is None:
             continue
         checked += 1
-        if tlogical in _TEXT and len(text) > width:
+        if tlogical in TEXT and len(text) > width:
             failing += 1
         elif tlogical == "decimal" and scale is not None:
             try:
@@ -253,24 +263,6 @@ def _entry(source: str | None, target: str | None, stype: str | None, ttype: str
     }
 
 
-def _type_pair(stype: str, ttype: str, *, dest_db: str, source_db: str) -> tuple[str, str]:
-    """(invertibility, reason code) of a type mapping alone."""
-    slog, tlog = _logical(stype), _logical(ttype)
-    if not slog or not tlog:
-        return CONDITIONAL, "type_unknown"
-    if _narrows(stype, ttype, dest_db=dest_db, source_db=source_db):
-        return LOSSY, "narrowing"
-    if (slog, tlog) in _TRUNCATE:
-        return LOSSY, "truncation"
-    if (slog, tlog) in _ROUND:
-        return LOSSY, "rounding"
-    if slog == tlog or {slog, tlog} <= _TEXT:
-        return INVERTIBLE, ("identity" if _norm(stype).upper() == _norm(ttype).upper() else "widen")
-    if (slog, tlog) in _SAFE_WIDEN or (tlog in _TEXT and slog != "binary"):
-        return INVERTIBLE, "lossless_cast"
-    return CONDITIONAL, "cast"
-
-
 def classify_mapping(
     mapping: Mapping[str, Any],
     *,
@@ -290,18 +282,19 @@ def classify_mapping(
     values = list(observed or [])
     if _is_omitted(mapping, transform):
         return _entry(source, None, stype, None, transforms, LOSSY, "omit")
-    if transform in _LOSSY_TRANSFORMS:
-        code, text = _LOSSY_TRANSFORMS[transform]
+    lossy = _lossy_transform(mapping, transform)
+    if lossy is not None:
+        code, text = _LOSSY_TRANSFORMS[lossy]
         out = _entry(source, target, stype, ttype, transforms, LOSSY, "omit")
         out.update(reason_code=code, reason=f"{source or target} {text}.")
         return out
     if transform.startswith("concat:"):
         return _entry(source, target, stype, ttype, transforms, LOSSY, "concat")
-    kind, code = _type_pair(stype, ttype, dest_db=dest_db, source_db=source_db)
+    kind, code = type_pair(stype, ttype, dest_db=dest_db, source_db=source_db)
     if kind == LOSSY:
-        check = _overflow(values, ttype, _logical(ttype)) if code == "narrowing" else None
+        check = _overflow(values, ttype, logical(ttype)) if code == "narrowing" else None
         return _entry(source, target, stype, ttype, transforms, LOSSY, code, check)
-    slog, tlog = _logical(stype), _logical(ttype)
+    slog, tlog = logical(stype), logical(ttype)
     if transform and transform not in _IDENTITY:
         from services.mapping_quality import _is_passthrough_transform
 
@@ -315,6 +308,8 @@ def classify_mapping(
         side = "source" if not slog else "destination"
         cast = _CAST_FOR.get(tlog)
         check = check_values(values, cast) if (code == "cast" and cast) else None
+        if code in TYPE_CHECKED:
+            check = check_type_values(code, values, ttype, strict_text)
         if check is None:
             check = {"status": "not_checked", "rows_checked": 0, "rows_not_fitting": 0}
         return _entry(source, target, stype, ttype, transforms, CONDITIONAL, code, check, side=side)
@@ -323,21 +318,63 @@ def classify_mapping(
     return _entry(source, target, stype, ttype, transforms, INVERTIBLE, code)
 
 
-def classify_recipe_step(step: Mapping[str, Any]) -> dict[str, Any] | None:
-    """A shape-recipe step's own row (``None`` for a disabled step)."""
+def _shape_step(op: str, column: str | None, options: Mapping[str, Any]) -> Any:
+    from services.shape_models import ShapeStep
+
+    return ShapeStep(op=op, column=column or "", options=dict(options))
+
+
+def classify_recipe_step(
+    step: Mapping[str, Any],
+    columns: list[str] | None = None,
+    *,
+    known: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    """A shape-recipe step's own row (``None`` for a disabled step).
+
+    ``columns`` is the row's column set as it stands before this step (the
+    source columns, then each earlier step's effect); it is advanced in place.
+    A step that adds a column (``constant_column``, ``derive_column``, ...) is
+    invertible only when the column it writes is new: written onto a column the
+    row already holds it overwrites those values. With ``columns=None`` (the
+    pre-recipe columns are not known) a written name among ``known`` is not
+    assumed new: the step is conditional and unchecked.
+    """
     if step.get("enabled") is False:
         return None
     op = _norm(step.get("op")).lower()
     options = step.get("options") if isinstance(step.get("options"), Mapping) else {}
     column = _norm(step.get("column") or options.get("column")) or None
+    unchecked = {"status": "not_checked", "rows_checked": 0, "rows_not_fitting": 0}
+    shaped = _shape_step(op, column, options)
     if op in _ROW_STEPS:
-        return _entry(None, None, None, None, [op], LOSSY, "row_change", op=op)
-    if op in _LOSSY_STEPS:
-        return _entry(column, column, None, None, [op], LOSSY, "recipe_lossy", op=op)
-    if op in _INVERTIBLE_STEPS:
-        return _entry(column, column, None, None, [op], INVERTIBLE, "recipe_invertible", op=op)
-    check = {"status": "not_checked", "rows_checked": 0, "rows_not_fitting": 0}
-    return _entry(column, column, None, None, [op], CONDITIONAL, "recipe_conditional", check, op=op)
+        entry = _entry(None, None, None, None, [op], LOSSY, "row_change", op=op)
+    elif op in _LOSSY_STEPS:
+        entry = _entry(column, column, None, None, [op], LOSSY, "recipe_lossy", op=op)
+    elif op in _INVERTIBLE_STEPS:
+        writes = [str(w) for w in shaped.writes if str(w or "").strip()]
+        present = {c.lower() for c in (columns if columns is not None else known)}
+        if op == "rename_column" and column:
+            present.discard(column.lower())
+        hit = next((w for w in writes if w.lower() in present), None)
+        target = (writes[0] if writes else None) if op != "rename_column" else column
+        if hit is None:
+            entry = _entry(target, target, None, None, [op], INVERTIBLE, "recipe_invertible", op=op)
+        elif columns is not None:
+            entry = _entry(hit, hit, None, None, [op], LOSSY, "recipe_lossy", op=op)
+            entry["reason"] = (f"{hit} is overwritten by the recipe step {op}, which writes onto a column the row "
+                               "already holds; the original values are not kept.")
+        else:
+            entry = _entry(hit, hit, None, None, [op], CONDITIONAL, "recipe_conditional", unchecked, op=op)
+            entry["reason"] = (f"{hit} is written by the recipe step {op}; whether it overwrites a source column "
+                               "could not be decided (the columns before the recipe are not known).")
+    else:
+        entry = _entry(column, column, None, None, [op], CONDITIONAL, "recipe_conditional", unchecked, op=op)
+    if columns is not None:
+        from services.shape_models import _apply_column_effect
+
+        _apply_column_effect(shaped, columns)
+    return entry
 
 
 def _effective(entry: dict[str, Any]) -> str:
@@ -384,6 +421,22 @@ def rollback_note(table: str, verdict: str) -> tuple[str, str]:
     return "keep_source_as_fallback", f"{table} needs the source kept as the fallback until sign-off."
 
 
+def population_entries(row_limit: int = 0, source_filter: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    """A row cap or a source filter writes only part of the source: a lossy ``row_change``."""
+    out = []
+    if int(row_limit or 0) > 0:
+        entry = _entry(None, None, None, None, ["limit"], LOSSY, "row_change", op="limit")
+        entry["reason"] = (f"the row cap (limit {int(row_limit)}) writes at most {int(row_limit)} source row(s), "
+                           "so the rows left out cannot be rebuilt from the destination.")
+        out.append(entry)
+    if source_filter:
+        entry = _entry(None, None, None, None, ["source_filter"], LOSSY, "row_change", op="source_filter")
+        entry["reason"] = ("the source filter writes only the rows it matches, so the rows it leaves out "
+                           "cannot be rebuilt from the destination.")
+        out.append(entry)
+    return out
+
+
 def analyze_table(
     *,
     table: str,
@@ -396,8 +449,15 @@ def analyze_table(
     sample_rows: Sequence[Mapping[str, Any]] = (),
     dest_db: str = "",
     source_db: str = "",
+    row_limit: int = 0,
+    source_filter: Mapping[str, Any] | None = None,
+    recipe_input_columns: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """One table's ReversibilityTable (contract 1)."""
+    """One table's ReversibilityTable (contract 1).
+
+    ``recipe_input_columns`` are the columns the shape recipe reads (before any
+    step); ``None`` when they are not known.
+    """
     stypes = {str(k): str(v) for k, v in (source_types or {}).items()}
     ttypes = {str(k): str(v) for k, v in (target_types or {}).items()}
     columns: list[dict[str, Any]] = []
@@ -417,11 +477,15 @@ def analyze_table(
     for name in source_columns:
         if _norm(name) and _norm(name).lower() not in mapped:
             columns.append(_entry(_norm(name), None, stypes.get(_norm(name)), None, [], LOSSY, "dropped"))
+    inputs = [str(c) for c in recipe_input_columns] if recipe_input_columns is not None else None
+    known = [str(c) for c in source_columns] + [str(m.get("source") or "") for m in mappings
+                                                 if isinstance(m, Mapping)]
     for step in recipe_steps:
         if isinstance(step, Mapping):
-            row = classify_recipe_step(step)
+            row = classify_recipe_step(step, inputs, known=known)
             if row is not None:
                 columns.append(row)
+    columns.extend(population_entries(row_limit, source_filter))
     verdict, reason = table_verdict(columns, key_columns)
     kind, note = rollback_note(table, verdict)
     return {"name": table, "verdict": verdict, "reason": reason, "rollback": kind,

@@ -29,6 +29,7 @@ from services.exit_inventory import (
     ExitConflict,
     ExitInvalid,
     audit,
+    definition_sha256,
     now_iso,
     parse_ts,
     rehearsals_of,
@@ -156,6 +157,7 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
         "verdict": "running", "verdict_reason": "The rehearsal is still extracting or verifying.",
         "source": dict(system.get("source") or {}), "extract_format": system.get("extract_format") or "jsonl",
         "window_seconds": int(system.get("exit_window_hours") or 0) * 3600,
+        "definition_sha256": definition_sha256(system),
         "required_roles": list(system.get("required_roles") or default_roles()),
         "tables": tables, "approvals": [], "signed": None, "_verify": None,
     })
@@ -216,12 +218,62 @@ def _live_tables(doc: dict[str, Any], jobs: dict[str, dict[str, Any]]) -> list[d
     return out
 
 
+def _update_retrying(rehearsal_id: str, mutate: Any, attempts: int = 5) -> dict[str, Any] | None:
+    """``exit_store.update`` retried over concurrent writes; ``None`` when ``mutate`` refuses."""
+    for _ in range(attempts):
+        try:
+            return exit_store.update(REHEARSALS, rehearsal_id, mutate)[0]
+        except ExitConflict:
+            return None
+        except exit_store.StoreConflict:
+            continue
+    return None
+
+
+class _Lease:
+    """Keeps a verification claim fresh while the verifier runs (a heartbeat, not a fixed age).
+
+    A claim is taken over only when its timestamp is older than ``VERIFY_STALE``,
+    so a live verifier refreshes it every quarter of that window. A verifier that
+    died stops refreshing and its claim goes stale; one that is merely slow keeps
+    it, and is the one that closes the rehearsal.
+    """
+
+    def __init__(self, rehearsal_id: str, claim_id: str) -> None:
+        import threading
+
+        self._stop = threading.Event()
+        self._rid, self._claim = rehearsal_id, claim_id
+        self._thread = threading.Thread(target=self._beat, daemon=True, name=f"exit-verify-lease-{rehearsal_id}")
+        self._thread.start()
+
+    def _refresh(self, current: dict[str, Any]) -> None:
+        held = current.get("_verify") or {}
+        if current.get("verdict") != "running" or held.get("id") != self._claim:
+            raise ExitConflict("the claim was lost")
+        current["_verify"] = {**held, "at": now_iso()}
+
+    def _beat(self) -> None:
+        interval = max(VERIFY_STALE.total_seconds() / 4, 0.05)
+        while not self._stop.wait(interval):
+            try:
+                if _update_retrying(self._rid, self._refresh) is None:
+                    return
+            except Exception as exc:  # noqa: BLE001 - a missed beat is retried on the next one
+                logger.info("exit rehearsal %s: claim refresh failed (%s)", self._rid, type(exc).__name__)
+
+    def release(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=30)
+
+
 def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
     """Verify, seal and close a rehearsal whose extract jobs have all finished.
 
     Returns the stored document (unchanged while jobs still run). Exactly one
-    caller verifies: the verification is claimed by compare-and-swap, and a
-    claim older than an hour is taken over. ``inline=False`` (a page read, the
+    caller verifies: the verification is claimed by compare-and-swap and kept
+    fresh by its verifier (:class:`_Lease`); only a claim nobody refreshed for
+    ``VERIFY_STALE`` (its verifier died) is taken over. ``inline=False`` (a page read, the
     scheduler beat, a sign-off attempt) never runs the verification on the
     caller's thread — it re-reads both whole populations — but starts it in
     the background and answers with the tables "Verifying.".
@@ -256,7 +308,11 @@ def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
         exit_store.update(REHEARSALS, rehearsal_id, claim)
     except (ExitConflict, exit_store.StoreConflict):
         return exit_store.get(REHEARSALS, rehearsal_id)
-    result = verify(doc, jobs)
+    lease = _Lease(rehearsal_id, claim_id)
+    try:
+        result = verify(doc, jobs)
+    finally:
+        lease.release()
 
     def close(current: dict[str, Any]) -> None:
         if (current.get("_verify") or {}).get("id") != claim_id:
@@ -264,9 +320,8 @@ def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
         current.update(result)
         current["_verify"] = None
 
-    try:
-        closed, _ = exit_store.update(REHEARSALS, rehearsal_id, close)
-    except (ExitConflict, exit_store.StoreConflict):
+    closed = _update_retrying(rehearsal_id, close)
+    if closed is None:
         return exit_store.get(REHEARSALS, rehearsal_id)
     _release_system(doc["system_id"], rehearsal_id)
     system = {"id": doc["system_id"], "workspace_id": doc["workspace_id"]}
@@ -293,8 +348,10 @@ def _part(table: str, ds: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     path = str(ds.get("path") or "")
     if not path:
         return None, ""
+    # The SHA-256 and size the export recorded when it wrote the file (empty on an older job).
     return {"table": table, "name": str(ds.get("filename") or ""), "storage": "local_file", "object_key": None,
-            "size_bytes": 0, "sha256": "", "verified_on_read": False, "upload_parts": None}, path
+            "size_bytes": int(ds.get("size_bytes") or 0), "sha256": str(ds.get("sha256") or ""),
+            "verified_on_read": False, "upload_parts": None}, path
 
 
 def _parity(job: dict[str, Any], job_id: str) -> dict[str, Any]:
@@ -307,15 +364,33 @@ def _parity(job: dict[str, Any], job_id: str) -> dict[str, Any]:
 
 
 def _failed_reason(job: dict[str, Any]) -> str:
-    from services.parity_apply import scrub_text
+    """Why the extract job failed, allowlisted: a child job's error quotes row values (contract 20)."""
+    from services.parity_errors import safe_error
 
-    error = scrub_text(str(job.get("error") or job.get("message") or "no error was recorded"))[:300]
-    return f"The extract job ended {job.get('status') or 'without a status'}: {error}"
+    status = str(job.get("status") or "without a status")
+    error = job.get("error") or job.get("message")
+    if not error:
+        return f"The extract job ended {status}; no error was recorded."
+    what = "The extract job" if status.lower() == "failed" else f"The extract job ({status})"
+    return safe_error(error, what=what, event=ERROR_EVENT)
+
+
+def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> dict[str, str]:
+    """The source table's declared column types (they steer the digest of both sides)."""
+    from services.source_schema_authority import endpoint_source_column_types
+
+    return endpoint_source_column_types(_source_endpoint(doc["source"], table, doc["workspace_id"]))
 
 
 def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     """One table's RehearsalTable (contract 4) from its finished job."""
-    from services.exit_completeness import judge_table, profile_extract, profile_rows, source_columns_and_rows
+    from services.exit_completeness import (
+        judge_table,
+        profile_extract,
+        profile_rows,
+        resolve_keys,
+        source_columns_and_rows,
+    )
     from services.parity_errors import safe_error
 
     out = {**table, "rows_source": None, "rows_extracted": None,
@@ -342,11 +417,19 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         gaps.append(f"Parity Studio could not read the extract job's evidence ({type(exc).__name__})")
     keys = list(table.get("key_columns") or [])
     source = extract = None
+    types: dict[str, str] = {}
+    engine = ""
     try:
         endpoint = _source_endpoint(doc["source"], table, doc["workspace_id"])
+        engine = str(getattr(endpoint, "format", "") or "").lower()
+        types = _declared_types(doc, table)
         columns, rows, close = source_columns_and_rows(endpoint)
+        keys, missing = resolve_keys(keys, columns)
+        if missing:
+            gaps.append(f"the declared key column(s) {', '.join(missing)} are not columns of the table, so the "
+                        "key set was not measured")
         try:
-            source = profile_rows(rows, columns, keys, None)
+            source = profile_rows(rows, columns, keys, None, types=types, engine=engine)
         finally:
             close()
     except Exception as exc:  # noqa: BLE001 - not measured is a named gap, never a pass
@@ -357,18 +440,20 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         extract, digest, size = profile_extract(
             part, local_path=local_path, fmt=doc["extract_format"],
             columns=source.columns if source else [], key_columns=keys,
-            numeric=sorted(source.totals) if source else [],
+            numeric=sorted(source.totals) if source else [], types=types, engine=engine,
         )
-        if part["storage"] == "object_store":
+        if part["sha256"]:
             seal_ok = digest == part["sha256"] and size == part["size_bytes"]
         else:
+            # Nothing was recorded at write time: the bytes read are sealed, but not verified.
             part.update(sha256=digest, size_bytes=size)
-            seal_ok = True
+            gaps.append("the stored part has no SHA-256 recorded when it was written, so it could not be "
+                        "verified on read")
         part["verified_on_read"] = bool(seal_ok)
     except Exception as exc:  # noqa: BLE001 - an unreadable or expired part cannot be proven
         logger.info("exit rehearsal extract read-back failed for %s", table["name"], exc_info=True)
         gaps.append(f"the stored part could not be read back ({safe_error(exc, what='the read', event=ERROR_EVENT)})")
-    if part["storage"] == "local_file" and not part["sha256"]:
+    if not part["sha256"]:
         part = None
     judged = judge_table(name=table["name"], source=source, extract=extract, key_columns=keys,
                          seal_ok=seal_ok, parity=parity, not_measured=gaps)
@@ -406,12 +491,24 @@ def _hours(seconds: float) -> str:
 
 
 def duration_block(extract_seconds: float | None, verify_seconds: float, window_seconds: int,
-                   total_bytes: int) -> dict[str, Any]:
-    """Duration (contract 4.2): measured clocks only."""
+                   total_bytes: int, *, verdict: str) -> dict[str, Any]:
+    """Duration (contract 4.2): measured clocks only.
+
+    Only a ``proven`` rehearsal is compared with the window: a run that failed,
+    left tables out or could not be proven did not extract the system, so how
+    long it took says nothing about whether an exit fits.
+    """
     measured = None if extract_seconds is None else int(round(extract_seconds + verify_seconds))
     if measured is None:
         statement = "The duration was not measured: an extract job carries no start or end time."
         return {"basis": "measured", "measured_seconds": None, "extract_seconds": None,
+                "verify_seconds": int(round(verify_seconds)), "window_seconds": window_seconds,
+                "fits_window": None, "margin_pct": None, "statement": statement}
+    if verdict != "proven":
+        statement = (f"Measured {_hours(measured)} (extract {_hours(extract_seconds or 0)}, verify "
+                     f"{_hours(verify_seconds)}), but the rehearsal is not proven "
+                     f"({str(verdict).replace('_', ' ')}), so it is not compared with the window.")
+        return {"basis": "measured", "measured_seconds": measured, "extract_seconds": int(round(extract_seconds or 0)),
                 "verify_seconds": int(round(verify_seconds)), "window_seconds": window_seconds,
                 "fits_window": None, "margin_pct": None, "statement": statement}
     fits = measured <= window_seconds if window_seconds else None
@@ -468,7 +565,7 @@ def verify(doc: dict[str, Any], jobs: dict[str, dict[str, Any]]) -> dict[str, An
                          "value_methods": methods, "statement": statement},
         "seal": seal,
         "duration": duration_block(extract_seconds, verify_seconds, int(doc.get("window_seconds") or 0),
-                                   total_bytes),
+                                   total_bytes, verdict=verdict),
         "_timeline": {"extract_started": _iso(first), "extract_finished": _iso(last),
                       "verify_started": _iso(verify_started), "verify_finished": _iso(finished)},
     }
@@ -525,6 +622,16 @@ def trend(doc: dict[str, Any]) -> dict[str, Any]:
     return {"points": points, "growth_pct_rows": growth, "projection": projection}
 
 
+#: RehearsalTable fields not measured yet (a pending / running / failed-to-start table).
+_UNMEASURED_TABLE: dict[str, Any] = {
+    "rows_source": None, "rows_extracted": None,
+    "key_set": {"source_sha256": None, "extract_sha256": None, "match": None},
+    "row_set": {"source_sha256": None, "extract_sha256": None, "match": None},
+    "control_totals": [], "differences": [], "extract_seconds": None, "part": None,
+    "value_parity": {"method": None, "parity_verdict": None, "unexplained": None, "report": None},
+}
+
+
 def public(doc: dict[str, Any]) -> dict[str, Any]:
     """ExitRehearsal (contract 4): stored state plus the computed timeline, trend and sign-off."""
     from services.exit_evidence import evidence_block, signoff_block
@@ -532,6 +639,8 @@ def public(doc: dict[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in doc.items() if not str(k).startswith("_")
            and k not in {"approvals", "signed", "source", "extract_format", "required_roles", "window_seconds"}}
     # A running rehearsal carries the full shape, with nothing measured yet.
+    out["tables"] = [{**_UNMEASURED_TABLE, **{k: v for k, v in t.items() if not str(k).startswith("_")}}
+                     for t in doc.get("tables") or []]
     n = len(doc.get("tables") or [])
     out.setdefault("completeness", {
         "tables_declared": n, "tables_extracted": 0, "tables_proven": 0, "tables_not_proven": 0,

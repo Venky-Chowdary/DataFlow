@@ -38,6 +38,8 @@ def _system(**over):
 
 
 def _rehearsal(n, verdict, started, measured=None, **over):
+    from services.exit_inventory import definition_sha256
+
     doc = {
         "id": f"exr_{n}", "system_id": "exs_1", "workspace_id": "ws", "n": n, "verdict": verdict,
         "started_at": started, "finished_at": started if verdict != "running" else None,
@@ -45,6 +47,7 @@ def _rehearsal(n, verdict, started, measured=None, **over):
         "duration": {"measured_seconds": measured, "window_seconds": 720 * 3600,
                      "fits_window": None if measured is None else measured <= 720 * 3600},
         "seal": {"total_bytes": 100}, "signoff": {"status": "open"},
+        "definition_sha256": definition_sha256(_system()),
     }
     doc.update(over)
     return doc
@@ -58,7 +61,8 @@ def test_a_never_rehearsed_system_is_overdue_after_its_period():
 
     fresh = readiness(_system(created_at="2026-11-01T00:00:00Z"), [], now=NOW)
     assert fresh == {"state": "never_rehearsed", "overdue": False, "next_due_at": "2027-01-30T00:00:00Z",
-                     "last_rehearsal": None, "last_proven_rehearsal": None}
+                     "running_rehearsal_id": None, "stale": False, "stale_reason": None, "last_rehearsal": None,
+                     "last_proven_rehearsal": None}
     stale = readiness(_system(created_at="2026-01-01T00:00:00Z"), [], now=NOW)
     assert stale["overdue"] is True
 

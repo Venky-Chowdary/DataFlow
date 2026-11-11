@@ -8,6 +8,7 @@ import pytest
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
     from services import exit_store
+    from services.exit_inventory import definition_sha256
 
     monkeypatch.setattr(exit_store, "STORE_PATH", tmp_path / "exit.json")
     monkeypatch.setattr(exit_store, "_db", lambda: None)
@@ -29,6 +30,7 @@ def store(tmp_path, monkeypatch):
         "duration": {"statement": "Measured 1.0 h", "measured_seconds": 3600, "window_seconds": 2592000,
                      "fits_window": True},
         "seal": {"merkle_root": "sha256:" + "a" * 64, "parts_count": 1}, "required_roles": ["engineering"],
+        "definition_sha256": definition_sha256(exit_store.get(exit_store.SYSTEMS, "exs_a")),
     })
     return exit_store
 

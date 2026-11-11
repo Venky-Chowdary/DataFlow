@@ -114,6 +114,7 @@ def explain_exit_rehearsal(rehearsal_id: str = "", system_id: str = "") -> "Tool
         return _result(name, error="Which rehearsal? Give a rehearsal id (exr_...) or a system id (exs_...).")
     if not rehearsal:
         return _result(name, error="That rehearsal or system was not found in this workspace.")
+    from services.exit_evidence import signoff_block
     from services.exit_rehearsal import settle
 
     rehearsal = settle(rehearsal["id"], inline=False) or rehearsal
@@ -131,7 +132,7 @@ def explain_exit_rehearsal(rehearsal_id: str = "", system_id: str = "") -> "Tool
         "duration": duration.get("statement"), "measured_seconds": duration.get("measured_seconds"),
         "window_seconds": duration.get("window_seconds"), "fits_window": duration.get("fits_window"),
         "merkle_root": seal.get("merkle_root"), "parts": seal.get("parts_count"),
-        "signoff": (rehearsal.get("signoff") or {}).get("status"),
+        "signoff": signoff_block(rehearsal)["status"],
         "open": exit_link(str(rehearsal.get("system_id") or ""), rehearsal["id"]),
         "note": NOTE,
     })
