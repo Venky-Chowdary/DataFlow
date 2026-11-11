@@ -244,9 +244,12 @@ def _start_resync(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: 
         req = _resync_request(job, job_id, fix, actor)
         child_id = get_transfer_engine()._create_pending_job(req)
     except Exception as exc:  # noqa: BLE001 - a failed start is recorded on the fix, never hidden
+        from services.agentic_repair import record_outcome
+
         error = str(exc)[:400]
-        _repair_decision(job_id, fix, approve=True, actor=actor,
-                         apply_fn=lambda _a: {"applied": False, "error": error})
+        decided = _repair_decision(job_id, fix, approve=True, actor=actor,
+                                   apply_fn=lambda _a: {"applied": False, "error": error})
+        record_outcome(decided.id, applied=False, result=error, actor=actor)
         return settle_fix(job_id, fix_id, ok=False, result=f"The re-sync could not start: {error}")
 
     def link(_job: dict[str, Any], state: dict[str, Any]) -> None:
