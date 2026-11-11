@@ -206,6 +206,15 @@ def dest_types_of(job: dict[str, Any]) -> dict[str, str]:
     return types
 
 
+def source_types_of(job: dict[str, Any]) -> dict[str, str]:
+    """Target column -> the source column's declared type, as the run's mappings record it."""
+    return {
+        str(m.get("target") or m.get("source")): str(m["source_type"])
+        for m in mappings_of(job)
+        if m.get("source_type")
+    }
+
+
 def quarantined_keys_of(job: dict[str, Any], key_cols: list[str]) -> set[str]:
     from src.transfer.reconcile_step import _rejected_key
 
@@ -505,6 +514,7 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
         sampled_rows=_int(_dict(recon.get("sample_compare")).get("rows_compared")) or 0,
         key_columns=key_cols,
         dest_types=dest_types_of(job),
+        source_types=source_types_of(job),
         transforms=column_transforms(job),
         protected=protected_targets(job),
     )

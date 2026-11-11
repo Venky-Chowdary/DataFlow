@@ -21,6 +21,7 @@ from services.parity_classifier import CellContext  # noqa: E402
 from services.parity_stats import binomial_cdf, clopper_pearson_upper  # noqa: E402
 
 PLAIN = CellContext()
+FLOAT_SOURCE = CellContext(source_type="DOUBLE PRECISION")
 TEXT = CellContext(dest_type="TEXT")
 words = st.text(alphabet=st.characters(min_codepoint=33, max_codepoint=0x2FF), min_size=1, max_size=20)
 SETTINGS = settings(max_examples=150, deadline=None)
@@ -85,8 +86,11 @@ def test_same_binary64_is_explained_float_precision(x):
     longer = format(Decimal(x), "f")  # every digit of the double
     shortest = repr(x)
     assume(Decimal(longer) != Decimal(shortest))
-    found = pc.classify_value(expected=longer, dest=shortest, ctx=PLAIN)
+    found = pc.classify_value(expected=longer, dest=shortest, ctx=FLOAT_SOURCE)
     assert found["code"] == "float_precision" and found["explained"] is True
+    # Without a float column on either side the same binary64 explains nothing (review finding 2).
+    plain = pc.classify_value(expected=longer, dest=shortest, ctx=PLAIN)
+    assert plain is not None and plain["explained"] is False
 
 
 @SETTINGS

@@ -331,9 +331,11 @@ def numeric_scale(source: str | None, dest: str | None, ctx: CellContext) -> dic
         if source != dest:
             return cause(NUMERIC_SCALE, "The same number written with a different scale.", explained=True)
         return None
+    if _float_column(ctx):
+        return None  # any digit difference on a float column is a float question
     s_scale, d_scale = _scale(source), _scale(dest)
-    if d_scale >= s_scale or float(a) == float(b):
-        return None  # the same binary64 is a float question
+    if d_scale >= s_scale:
+        return None
     step = Decimal(1).scaleb(-d_scale)
     for rounding in (ROUND_HALF_UP, ROUND_HALF_EVEN, ROUND_DOWN):
         if a.quantize(step, rounding=rounding) == b:
@@ -346,30 +348,44 @@ def numeric_scale(source: str | None, dest: str | None, ctx: CellContext) -> dic
     return None
 
 
+def _float_column(ctx: CellContext) -> bool:
+    """A floating-point column on either side: binary rounding is its representation."""
+    return bool(_FLOAT_FAMILY.search(ctx.source_type or "") or _FLOAT_FAMILY.search(ctx.dest_type or ""))
+
+
 def float_precision(source: str | None, dest: str | None, ctx: CellContext) -> dict | None:
     """The two numbers agree to binary floating-point precision.
 
-    Explained when they are the same binary64, or within binary32 precision on
-    a single-precision destination column; otherwise digits were lost.
+    Explained only where a float column on either side makes binary rounding
+    the expected representation: the same binary64, or binary32 rounding on a
+    single-precision destination column. On an integer or DECIMAL column (or an
+    unknown type) agreeing as binary64 is no excuse — 9007199254740993 and
+    9007199254740992 are the same double yet different BIGINTs — so the lost
+    digits are unexplained.
     """
     a, b = _decimal(source), _decimal(dest)
     if a is None or b is None or a == b:
         return None
     fa, fb = float(a), float(b)
-    if fa == fb:
-        return cause(FLOAT_PRECISION, "Both values are the same binary64 number.", explained=True)
     scale = max(abs(fa), abs(fb))
     rel = abs(fa - fb) / scale if scale else 0.0
     if rel > 2.0 ** -23:
         return None
-    single = bool(_FLOAT32.search(ctx.dest_type or ""))
-    floaty = bool(_FLOAT_FAMILY.search(ctx.dest_type or ""))
-    if rel <= 2.0 ** -51 and floaty:
+    if not _float_column(ctx):
+        return cause(
+            FLOAT_PRECISION,
+            "Digits were lost to floating-point rounding on a column that is not a float "
+            "(numeric precision loss).",
+            explained=False,
+        )
+    if fa == fb:
+        return cause(FLOAT_PRECISION, "Both values are the same binary64 number.", explained=True)
+    if rel <= 2.0 ** -51:
         return cause(FLOAT_PRECISION, "Rounded to double precision by the float column.", explained=True)
-    if single:
+    if _FLOAT32.search(ctx.dest_type or ""):
         return cause(FLOAT_PRECISION, "Rounded to single precision by the REAL column.", explained=True)
     return cause(
-        FLOAT_PRECISION, "Digits were lost to floating-point rounding on a non-float column.",
+        FLOAT_PRECISION, "Digits were lost beyond the float column's precision.",
         explained=False,
     )
 
