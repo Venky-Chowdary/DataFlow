@@ -80,3 +80,39 @@ def test_a_source_change_during_the_rehearsal_is_reported(pg):
     assert out["verdict"] == "incomplete"
     kinds = {d["kind"] for d in t["differences"]}
     assert "changed_rows" in kinds and "control_total" in kinds
+
+
+def test_review2_exact_types_are_proven_on_a_clean_postgres_extract(world, monkeypatch):  # noqa: F811
+    """Review 2 (N5 / N8): unconstrained numeric scale, double residue, timetz and timestamptz keep every
+    value exactly in the JSONL extract, and the exact digest still proves it (no false negative)."""
+    from services import schedule_runner
+    from tests.test_parity_live_pg import _pg_cfg
+
+    cfg = _pg_cfg()
+    try:
+        conn = psycopg2.connect(host=cfg["host"], port=cfg["port"], dbname=cfg["database"],
+                                user=cfg["username"], password=cfg["password"], connect_timeout=3)
+    except psycopg2.Error as exc:
+        pytest.skip(f"PostgreSQL not reachable for the live rehearsal test: {type(exc).__name__}")
+    conn.autocommit = True
+    table = f"exit_r2_{uuid.uuid4().hex[:10]}"
+    saved = {"name": "pg", "type": "postgresql", "host": cfg["host"], "port": cfg["port"],
+             "database": cfg["database"], "username": cfg["username"], "password": cfg["password"],
+             "schema": "public"}
+    monkeypatch.setattr(schedule_runner, "_resolve_connector_for_schedule", lambda _c, _s: dict(saved))
+    with conn.cursor() as cur:
+        cur.execute(f"""CREATE TABLE {table} (id BIGINT PRIMARY KEY, n NUMERIC, f DOUBLE PRECISION, t TIMETZ,
+                        at TIMESTAMPTZ)""")  # nosec B608 - generated test name
+        cur.execute(f"""INSERT INTO {table} VALUES
+                        (1, 1.50, 0.1::float8 + 0.2::float8, '10:00:00+02', '2026-01-01 10:00:00+02'),
+                        (2, 1.5, 1.0000000000000002, '08:00:00+00', '2026-01-01 08:00:00+00'),
+                        (3, 100, -0.0, '23:59:59.5-05:30', '2026-06-01 00:00:00.123456+00'),
+                        (4, 12345678901234567890.123456789, 123456789.12345679, NULL, NULL)""")  # nosec B608
+    try:
+        out = _run(_pg_system(table))
+        t = out["tables"][0]
+        assert out["verdict"] == "proven", (t["reason"], t["differences"])
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
+        conn.close()

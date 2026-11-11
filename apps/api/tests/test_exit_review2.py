@@ -194,3 +194,93 @@ def _totals_of(src, ext):
     out = judge_table(name="t", source=src, extract=ext, key_columns=["id"], seal_ok=True,
                       parity={"check": "count_only", "verdict": "unverifiable", "unexplained": 0}, not_measured=[])
     return {c["column"]: c for c in out["control_totals"]}, out
+
+
+# ---------------------- N5 / N8: the typed digest compares every value exactly, and timetz matches itself
+
+
+def _same(source, extract, ddl, engine):
+    from services.exit_completeness import profile_rows
+
+    a = profile_rows([{"c": source}], ["c"], [], None, types={"c": ddl}, engine=engine)
+    b = profile_rows([{"c": extract}], ["c"], [], [], types={"c": ddl}, engine=engine)
+    return a.row_set_sha256 == b.row_set_sha256
+
+
+def _tz(hours):
+    from datetime import timedelta, timezone
+
+    return timezone(timedelta(hours=hours))
+
+
+@pytest.mark.parametrize("source,extract,ddl,engine", [
+    (0.1 + 0.2, 0.3, "double precision", "postgresql"),
+    (1.0000000000000002, 1.0, "double precision", "postgresql"),
+    (123456789.12345679, 123456789.1234568, "double precision", "postgresql"),
+    (0.1 + 0.2, "0.3", "float8", "postgresql"),
+    ("__dt__2024-01-01T13:05:00", "2024-01-01", "DATE", "oracle"),
+    ("__dt__2024-01-01T10:00:00+02:00", "2024-01-01T08:00:00+00:00", "datetimeoffset", "sqlserver"),
+    ("__dt__2024-01-01T10:00:00+02:00", "2024-01-01T08:00:00+00:00", "TIMESTAMP WITH TIME ZONE", "oracle"),
+    ("__dt__2024-01-01T10:00:00+00:00", "2024-01-01T10:00:00", "timestamptz", "postgresql"),
+    ("__dec__1.50", "1.5", "numeric", "postgresql"),
+    ("__dec__1.50", 1.5, "numeric", "postgresql"),
+    ("__time__10:00:00+02:00", "10:00:00+00:00", "timetz", "postgresql"),
+])
+def test_n5_values_that_differ_within_their_type_are_told_apart(source, extract, ddl, engine):
+    assert not _same(_value(source), extract, ddl, engine)
+
+
+@pytest.mark.parametrize("source,extract,ddl,engine", [
+    (0.1 + 0.2, 0.30000000000000004, "double precision", "postgresql"),
+    (0.1 + 0.2, "0.30000000000000004", "double precision", "postgresql"),
+    (-0.0, "-0.0", "double precision", "postgresql"),
+    (float("nan"), "NaN", "double precision", "postgresql"),
+    ("__dt__2024-01-01T13:05:00", "2024-01-01T13:05:00", "DATE", "oracle"),
+    ("__dt__2024-01-01T13:05:00", "2024-01-01 13:05:00", "DATE", "oracle"),
+    ("__dt__2024-01-01T10:00:00+02:00", "2024-01-01T10:00:00+02:00", "datetimeoffset", "sqlserver"),
+    ("__dt__2024-01-01T10:00:00+00:00", "2024-01-01 12:00:00+02:00", "timestamptz", "postgresql"),
+    ("__dec__1.50", "1.50", "numeric", "postgresql"),
+    ("__dec__1.50", "__frac__1.50", "numeric", "postgresql"),
+    ("__dec__100", 100, "numeric", "postgresql"),
+    ("__dec__12345678901234567890.123456789", "12345678901234567890.123456789", "numeric", "postgresql"),
+    ("__dec__1.5000", 1.5, "numeric(12,4)", "postgresql"),  # a fixed scale still compares by value
+    ("__time__10:00:00+02:00", "10:00:00+02:00", "timetz", "postgresql"),
+    ("__time__10:00:00+02:00", "10:00:00+02", "time with time zone", "postgresql"),
+])
+def test_n5_a_value_and_its_exact_extract_rendering_still_match(source, extract, ddl, engine):
+    assert _same(_value(source), _value(extract), ddl, engine)
+
+
+def _value(spec):
+    """Driver-shaped source values from a short spelling (``__dt__`` ISO, ``__dec__``, ``__time__``)."""
+    from datetime import datetime, time
+    from decimal import Decimal
+
+    if not isinstance(spec, str):
+        return spec
+    if spec.startswith("__dt__"):
+        return datetime.fromisoformat(spec[6:])
+    if spec.startswith("__dec__"):
+        return Decimal(spec[7:])
+    if spec.startswith("__time__"):
+        return time.fromisoformat(spec[8:])
+    if spec.startswith("__frac__"):
+        from services.value_serializer import json_loads_exact
+
+        return json_loads_exact(spec[8:], keep_literals=True)
+    return spec
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "csv"])
+def test_n5_a_clean_extract_of_exact_floats_is_still_proven_e2e(world, fmt):  # noqa: F811
+    import sqlite3
+
+    conn = sqlite3.connect(str(world["src"]))
+    with conn:
+        conn.execute("CREATE TABLE ratios (id INTEGER PRIMARY KEY, r REAL, note TEXT)")
+        conn.executemany("INSERT INTO ratios VALUES (?, ?, ?)", [
+            (1, 0.1 + 0.2, "a"), (2, 1.0000000000000002, "b"), (3, -0.0, "c"), (4, 123456789.12345679, None),
+            (5, 1e-300, "e"), (6, None, "f")])
+    conn.close()
+    out = _run(_system(name=f"Ratios {fmt}", tables=[{"name": "ratios"}], extract_format=fmt))
+    assert out["verdict"] == "proven", out["tables"][0]["reason"]

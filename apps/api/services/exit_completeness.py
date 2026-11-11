@@ -171,8 +171,17 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
     """
     from services.reconciliation_api import FingerprintAccumulator, iter_row_fingerprints
 
+    from services.exit_value_tokens import token, token_kind
+
     eng = str(engine or "").strip().lower()
     exact, typed, uncompared = digest_plan(list(columns), dict(types or {}), eng)
+    # Types Gate-8's typed kernel folds within (a double to 15 digits, a timetz to a wall clock, ...)
+    # are compared by an exact token of what the type stores (review 2, N5 / N8).
+    tokens = {c: kind for c in columns if c not in uncompared
+              and (kind := token_kind(_declared(dict(types or {}), c), eng))}
+    for col in tokens:
+        typed.pop(col, None)
+        exact.discard(col)
     prof = Profile(columns=list(columns), uncompared=uncompared)
     keys = [c for c in key_columns if c in columns]
     totals: dict[str, dict[str, Decimal]] = {}
@@ -200,7 +209,8 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
                 t = totals.setdefault(col, {"sum": Decimal(0), "min": value, "max": value})
                 t["sum"] += value
                 t["min"], t["max"] = min(t["min"], value), max(t["max"], value)
-            yield {c: (_exact(row.get(c)) if c in exact else row.get(c)) for c in columns}
+            yield {c: (_exact(row.get(c)) if c in exact
+                       else _exact(token(tokens[c], row.get(c))) if c in tokens else row.get(c)) for c in columns}
 
     full_acc = FingerprintAccumulator(keep_fingerprints=False)
     key_acc = FingerprintAccumulator(keep_fingerprints=False)
@@ -274,7 +284,8 @@ def profile_extract(part: dict[str, Any], *, local_path: str, fmt: str, columns:
     reader = HashingReader(stream)
     try:
         buffered = io.BufferedReader(reader, buffer_size=1 << 20)
-        records = _iter_artifact_records(buffered, name=str(part.get("name") or ""), fmt=fmt)
+        # JSON numbers keep the text they were written with (an unconstrained numeric's scale).
+        records = _iter_artifact_records(buffered, name=str(part.get("name") or ""), fmt=fmt, exact_numbers=True)
         first: dict[str, Any] | None = None
         rest: Iterator[dict[str, Any]] = iter(())
         iterator = iter(records)
