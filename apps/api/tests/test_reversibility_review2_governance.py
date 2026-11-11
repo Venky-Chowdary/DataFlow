@@ -99,3 +99,31 @@ def test_n6_the_pilot_tool_schema_offers_require_reversibility():
 
     tool = next(t for t in TOOL_DEFINITIONS if t["name"] == "create_schedule")
     assert tool["input_schema"]["properties"]["require_reversibility"]["type"] == "boolean"
+
+
+# ------------------------------------------- Low: one helper each, not a copy per module
+
+
+def test_low_the_schedule_flag_is_read_by_the_reversibility_rule_not_a_copy():
+    import services.schedule_store as schedule_store
+    from services.reversibility_sources import flag
+
+    assert not hasattr(schedule_store, "_truthy_flag")
+    for raw, expected in (("on", True), ("TRUE", True), ("0", False), ("", False), (1, True), (None, False)):
+        assert flag(raw) is expected
+        assert PipelineSchedule.from_dict({**_BASE, "require_reversibility": raw}).require_reversibility is expected
+
+
+def test_low_the_file_export_sha_is_the_journal_s_file_digest(tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+
+    import services.file_export_append as fea
+
+    assert not hasattr(fea, "_file_sha256")
+    monkeypatch.setenv("DATAWRAP_EXPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+    body = b"a,b\n1,2\n"
+    out = fea.land_export_bytes(SimpleNamespace(output_path="", extra={}, format="csv"), body, job_id="j1",
+                                sync_mode="full_refresh_overwrite", export_name="export.csv")
+    assert out["sha256"] == hashlib.sha256(body).hexdigest() and out["size_bytes"] == len(body)

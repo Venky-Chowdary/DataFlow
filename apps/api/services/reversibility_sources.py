@@ -23,7 +23,8 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _truthy(value: Any) -> bool:
+def flag(value: Any) -> bool:
+    """``require_reversibility`` as sent: a bool, or a form / query / stored string ("1", "true", "yes", "on")."""
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
@@ -131,7 +132,7 @@ def _recipe_inputs(recipe: Any, columns: Any) -> list[str] | None:
 
 
 def plan_requires_reversibility(policies: Mapping[str, Any] | None) -> bool:
-    return _truthy(_dict(policies).get(POLICY))
+    return flag(_dict(policies).get(POLICY))
 
 
 def plan_report(plan: Any) -> dict[str, Any]:
@@ -191,7 +192,7 @@ def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
         read_window=_read_window(src, req.get("read_options") or src.get("read_options")),
     )
     return build_report([table], scope="job", subject_id=job_id,
-                        require=_truthy(req.get(POLICY)), data_rows=0, data_source="none")
+                        require=flag(req.get(POLICY)), data_rows=0, data_source="none")
 
 
 def request_report(
@@ -247,7 +248,7 @@ def preflight_gate(report: Mapping[str, Any]) -> dict[str, Any]:
 
 def execute_gate(request: Any, planned: tuple[Any, ...] | None) -> dict[str, Any] | None:
     """``g24_reversibility`` for Execute when the request requires reversibility, else ``None``."""
-    if not _truthy(getattr(request, POLICY, False)):
+    if not flag(getattr(request, POLICY, False)):
         return None
     planned = tuple(planned or ())
     mappings, column_types, dest_types = (planned + (None, None, None))[:3]

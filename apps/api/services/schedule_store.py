@@ -163,12 +163,6 @@ def import_file_schedules_into_mongo(*, force: bool = False) -> int:
     return len(file_schedules)
 
 
-def _truthy_flag(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
 @dataclass
 class PipelineSchedule:
     id: str
@@ -353,6 +347,9 @@ class PipelineSchedule:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PipelineSchedule:
+        # The reversibility rule reads its own flag (one parser for plans, requests and schedules).
+        from services.reversibility_sources import flag as _reversibility_flag
+
         cdc_extras = _schedule_cdc_extras(data)
         return cls(
             id=data["id"],
@@ -415,7 +412,7 @@ class PipelineSchedule:
                     bool((data.get("contract_id") or "").strip()),
                 )
             ),
-            require_reversibility=_truthy_flag(data.get("require_reversibility")),
+            require_reversibility=_reversibility_flag(data.get("require_reversibility")),
             date_locale=str(data.get("date_locale") or "").strip(),
             number_locale=str(data.get("number_locale") or "").strip(),
             shape_recipe=dict(data.get("shape_recipe") or {})
