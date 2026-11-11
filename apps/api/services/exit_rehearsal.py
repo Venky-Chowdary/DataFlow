@@ -476,12 +476,24 @@ def _hours(seconds: float) -> str:
 
 
 def duration_block(extract_seconds: float | None, verify_seconds: float, window_seconds: int,
-                   total_bytes: int) -> dict[str, Any]:
-    """Duration (contract 4.2): measured clocks only."""
+                   total_bytes: int, *, verdict: str) -> dict[str, Any]:
+    """Duration (contract 4.2): measured clocks only.
+
+    Only a ``proven`` rehearsal is compared with the window: a run that failed,
+    left tables out or could not be proven did not extract the system, so how
+    long it took says nothing about whether an exit fits.
+    """
     measured = None if extract_seconds is None else int(round(extract_seconds + verify_seconds))
     if measured is None:
         statement = "The duration was not measured: an extract job carries no start or end time."
         return {"basis": "measured", "measured_seconds": None, "extract_seconds": None,
+                "verify_seconds": int(round(verify_seconds)), "window_seconds": window_seconds,
+                "fits_window": None, "margin_pct": None, "statement": statement}
+    if verdict != "proven":
+        statement = (f"Measured {_hours(measured)} (extract {_hours(extract_seconds or 0)}, verify "
+                     f"{_hours(verify_seconds)}), but the rehearsal is not proven "
+                     f"({str(verdict).replace('_', ' ')}), so it is not compared with the window.")
+        return {"basis": "measured", "measured_seconds": measured, "extract_seconds": int(round(extract_seconds or 0)),
                 "verify_seconds": int(round(verify_seconds)), "window_seconds": window_seconds,
                 "fits_window": None, "margin_pct": None, "statement": statement}
     fits = measured <= window_seconds if window_seconds else None
@@ -538,7 +550,7 @@ def verify(doc: dict[str, Any], jobs: dict[str, dict[str, Any]]) -> dict[str, An
                          "value_methods": methods, "statement": statement},
         "seal": seal,
         "duration": duration_block(extract_seconds, verify_seconds, int(doc.get("window_seconds") or 0),
-                                   total_bytes),
+                                   total_bytes, verdict=verdict),
         "_timeline": {"extract_started": _iso(first), "extract_finished": _iso(last),
                       "verify_started": _iso(verify_started), "verify_finished": _iso(finished)},
     }

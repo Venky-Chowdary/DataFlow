@@ -345,7 +345,9 @@ def rehearsal_summary(rehearsal: dict[str, Any] | None, system: dict[str, Any] |
         "id": rehearsal["id"], "n": rehearsal.get("n"), "started_at": rehearsal.get("started_at"),
         "finished_at": rehearsal.get("finished_at"), "verdict": rehearsal.get("verdict"),
         "measured_seconds": duration.get("measured_seconds"), "window_seconds": duration.get("window_seconds"),
-        "fits_window": duration.get("fits_window"), "tables_declared": comp.get("tables_declared", 0),
+        # Only a proven run is compared with the window (contract 4.2).
+        "fits_window": duration.get("fits_window") if rehearsal.get("verdict") == "proven" else None,
+        "tables_declared": comp.get("tables_declared", 0),
         "tables_proven": comp.get("tables_proven", 0), "total_bytes": seal.get("total_bytes"),
         "signed": (rehearsal.get("signoff") or {}).get("status") == "signed",
         "current": (None if system is None else
@@ -425,7 +427,8 @@ def board(systems: list[dict[str, Any]], *, now: datetime | None = None) -> dict
         for item in system.get("regulatory_dates") or []:
             if item.get("date", "") >= current.date().isoformat():
                 upcoming.append((item["date"], item.get("label") or "", system["id"]))
-    measured = [r for r in rows if isinstance(r["measured_seconds"], (int, float))]
+    # The longest *proven* exit: a failed or partial run's clock is not an exit's duration.
+    measured = [r for r in rows if r["state"] == "proven" and isinstance(r["measured_seconds"], (int, float))]
     longest = max(measured, key=lambda r: r["measured_seconds"], default=None)
     upcoming.sort()
     return {

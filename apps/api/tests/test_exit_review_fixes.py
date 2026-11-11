@@ -300,3 +300,50 @@ def test_h3_an_unrelated_edit_keeps_the_proof_and_the_label_counts_the_rehearsal
     row = board([current])["systems"][0]
     assert row["completeness_label"] == "Proven, 1 table" and row["fits_window"] is True
     assert row["window_seconds"] == ready["last_rehearsal"]["window_seconds"] == 720 * 3600
+
+
+# --------------------------- H4: only a proven rehearsal is compared with the window
+
+
+@pytest.mark.parametrize("verdict", ["failed", "incomplete", "not_proven"])
+def test_h4_a_rehearsal_that_is_not_proven_has_no_window_verdict(verdict):
+    from services.exit_rehearsal import duration_block
+
+    out = duration_block(0.0, 0.0, 3600, 10, verdict=verdict)
+    assert out["measured_seconds"] == 0 and out["fits_window"] is None and out["margin_pct"] is None
+    assert "not proven" in out["statement"] and "fits the window" not in out["statement"]
+    proven = duration_block(10.0, 0.0, 3600, 10, verdict="proven")
+    assert proven["fits_window"] is True and proven["margin_pct"] is not None
+
+
+def test_h4_a_failed_rehearsal_reads_no_fits_window_e2e(world):  # noqa: F811
+    from services.exit_inventory import board, get_system, readiness
+
+    system = _system(tables=[{"name": "events"}, {"name": "no_such_table"}])
+    out = _run(system)
+    assert out["verdict"] == "failed"
+    assert out["duration"]["fits_window"] is None and out["duration"]["margin_pct"] is None
+    ready = readiness(get_system(system["id"]))
+    assert ready["last_rehearsal"]["fits_window"] is None
+    assert board([get_system(system["id"])])["kpis"]["longest_measured_seconds"] is None
+
+
+def test_h4_the_longest_measured_kpi_counts_proven_rehearsals_only(tmp_path, monkeypatch):
+    from services import exit_store
+    from services.exit_inventory import board, definition_sha256
+
+    monkeypatch.setattr(exit_store, "STORE_PATH", tmp_path / "exit.json")
+    monkeypatch.setattr(exit_store, "_db", lambda: None)
+    systems = [{"id": f"exs_{i}", "workspace_id": "ws", "name": f"s{i}", "source": {"connector_id": "c"},
+                "tables": [{"name": "t"}], "exit_window_hours": 1, "created_at": "2026-11-01T00:00:00Z"}
+               for i in (1, 2)]
+    for system, verdict, seconds in ((systems[0], "proven", 100), (systems[1], "failed", 5000)):
+        exit_store.insert(exit_store.REHEARSALS, {
+            "id": f"exr_{system['id']}", "system_id": system["id"], "workspace_id": "ws", "n": 1, "verdict": verdict,
+            "started_at": "2026-11-02T00:00:00Z", "finished_at": "2026-11-02T00:10:00Z",
+            "definition_sha256": definition_sha256(system),
+            "duration": {"measured_seconds": seconds, "window_seconds": 3600, "fits_window": seconds <= 3600}})
+    kpis = board(systems)["kpis"]
+    assert kpis["longest_measured_seconds"] == 100 and kpis["longest_measured_system_id"] == "exs_1"
+    rows = {r["id"]: r for r in board(systems)["systems"]}
+    assert rows["exs_2"]["fits_window"] is None  # a stored figure from a failed run is not shown as fitting

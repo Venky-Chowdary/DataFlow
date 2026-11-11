@@ -141,13 +141,13 @@ def test_merkle_root_is_rfc6962_and_order_independent():
 
 
 def test_duration_is_measured_or_says_not_measured():
-    measured = duration_block(3600.0, 120.0, 30 * 24 * 3600, 2048)
+    measured = duration_block(3600.0, 120.0, 30 * 24 * 3600, 2048, verdict="proven")
     assert measured["measured_seconds"] == 3720 and measured["fits_window"] is True
     assert measured["margin_pct"] == pytest.approx(99.86, abs=0.01)
     assert "measured, not projected" in measured["statement"]
-    too_slow = duration_block(7200.0, 0.0, 3600, 0)
+    too_slow = duration_block(7200.0, 0.0, 3600, 0, verdict="proven")
     assert too_slow["fits_window"] is False and too_slow["margin_pct"] == -100.0
-    unknown = duration_block(None, 5.0, 3600, 0)
+    unknown = duration_block(None, 5.0, 3600, 0, verdict="proven")
     assert unknown["measured_seconds"] is None and unknown["fits_window"] is None
     assert "not measured" in unknown["statement"]
 
