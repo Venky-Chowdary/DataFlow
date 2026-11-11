@@ -388,3 +388,73 @@ def test_h6_a_source_read_error_reaches_the_reason_allowlisted(world, monkeypatc
     reason = out["tables"][0]["reason"]
     assert out["tables"][0]["status"] == "not_proven" and "could not be re-read" in reason
     assert "alice" not in reason and "hunter2" not in reason and "22P02" in reason
+
+
+# ------------------------------------------------- M1 / M2: anchor read-back on verify
+
+
+@pytest.fixture()
+def lock_bucket(monkeypatch, tmp_path):
+    import boto3
+    from moto import mock_aws
+
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    for name in ("DATAFLOW_S3_ENDPOINT", "DATAWRAP_S3_ENDPOINT", "AWS_ENDPOINT_URL",
+                 "DATAFLOW_AUDIT_ANCHOR_S3_ENDPOINT", "DATAWRAP_AUDIT_ANCHOR_S3_ENDPOINT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_PROVIDER", "s3")
+    monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_S3_BUCKET", "exit-anchors")
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="exit-anchors", ObjectLockEnabledForBucket=True)
+        yield s3
+
+
+def test_m1_a_receipt_that_failed_reads_back_failed(lock_bucket, monkeypatch, tmp_path):
+    from services import audit_anchor
+
+    monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_STORE", str(tmp_path / "anchors.jsonl"))
+    lock_bucket.create_bucket(Bucket="no-lock")
+    monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_S3_BUCKET", "no-lock")
+    digest = "cd" * 32
+    receipt = audit_anchor.anchor_digest(digest, kind="exit_evidence", subject="exit_evidence:s:r")
+    assert receipt["status"] == "failed" and receipt["location"] is None
+    checked = audit_anchor.verify_receipt(audit_anchor.find_receipt(digest, kind="exit_evidence"), digest=digest)
+    assert checked["status"] == "failed" and "Object Lock" in checked["reason"]
+
+
+def _signed_rehearsal(world):  # noqa: F811
+    from services import exit_store
+    from services.exit_evidence import sign_off, signed_pack
+
+    out = _run(_system(tables=[{"name": "orders"}], required_roles=["engineering"]))
+    assert out["verdict"] == "proven", out["verdict_reason"]
+    sign_off(out["id"], role="engineering", actor="eng@example.com", signer_role="operator")
+    return out, signed_pack(exit_store.get(exit_store.REHEARSALS, out["id"]))
+
+
+def test_m1_a_pack_whose_anchor_failed_at_signing_does_not_verify(world, monkeypatch):  # noqa: F811
+    from services.exit_evidence import verify_pack
+
+    monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_PROVIDER", "s3")
+    monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_S3_BUCKET", "")
+    _out, pack = _signed_rehearsal(world)
+    result = verify_pack(pack)
+    assert result["anchor"]["status"] == "failed" and result["ok"] is False
+
+
+def test_m2_another_replica_without_the_local_index_still_finds_the_anchor(world, lock_bucket, monkeypatch):  # noqa: F811
+    from services import exit_store
+    from services.exit_evidence import verify_pack
+
+    out, pack = _signed_rehearsal(world)
+    assert verify_pack(pack)["anchor"]["status"] == "anchored"
+    # Another replica: its local receipt index is empty.
+    monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_STORE", str(world["tmp"] / "other_replica.jsonl"))
+    assert verify_pack(pack)["anchor"]["status"] == "anchored"
+    # ... and even without the rehearsal record, the bucket itself is listed.
+    monkeypatch.setattr(exit_store, "get", lambda *_a, **_k: None)
+    found = verify_pack(pack)
+    assert found["anchor"]["status"] == "anchored" and found["ok"] is True

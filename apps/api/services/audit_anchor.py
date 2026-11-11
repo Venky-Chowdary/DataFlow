@@ -141,6 +141,10 @@ def verify_receipt(receipt: dict[str, Any] | None, *, digest: str = "") -> dict[
     if digest and value != digest:
         return {**base, "status": "failed", "retention": None,
                 "reason": "the receipt names a different digest"}
+    if receipt.get("status") == "failed" and not isinstance(receipt.get("location"), dict):
+        # The anchor was attempted and not confirmed: that is a failure, never "not anchored".
+        return {**base, "status": "failed", "retention": None,
+                "reason": str(receipt.get("reason") or "the anchor could not be confirmed when it was written")}
     if receipt.get("provider") != "s3" or not isinstance(receipt.get("location"), dict):
         return {**base, "status": "not_anchored", "retention": None,
                 "reason": str(receipt.get("reason") or "the receipt is not a write-once anchor")}
@@ -174,6 +178,22 @@ def find_receipt(digest: str, *, kind: str = "") -> dict[str, Any] | None:
     matches = [r for r in _receipts()
                if str(r.get("digest") or r.get("tip_hash") or "") == digest and (not kind or r.get("kind") == kind)]
     return next((r for r in matches if r.get("status") == "anchored"), matches[0] if matches else None)
+
+
+def find_bucket_receipt(digest: str, *, kind: str, around: Any = None) -> dict[str, Any] | None:
+    """A receipt rebuilt from the S3 anchor bucket itself (the authority), for a replica
+    whose local index does not hold one. ``around`` is when the digest was anchored
+    (the key is date-partitioned); ``None`` when the provider is not S3 or nothing is there."""
+    if anchor_provider() != "s3" or not (digest or "").strip():
+        return None
+    from services.audit_anchor_s3 import find_location
+
+    location = find_location(digest, kind=kind, around=around)
+    if location is None:
+        return None
+    return {"id": None, "provider": "s3", "kind": kind, "subject": None, "digest": digest, "tip_hash": digest,
+            "anchored_at": None, "event_time": None, "status": "anchored", "anchored": True,
+            "location": location, "retention": None, "reason": None, "honesty": S3_HONESTY}
 
 
 def latest_anchor() -> dict[str, Any] | None:

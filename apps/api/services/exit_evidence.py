@@ -211,9 +211,31 @@ def signed_pack(doc: dict[str, Any]) -> dict[str, Any] | None:
     return (signed or {}).get("pack")
 
 
+def _receipt_for(pack: dict[str, Any], digest: str) -> dict[str, Any] | None:
+    """The pack's anchor receipt, wherever this replica can find it.
+
+    The rehearsal record (shared store) keeps the receipt made at signing; the
+    local index is this process's own; the S3 bucket is the authority and is
+    listed when neither holds one. Whatever is found is read back by the caller.
+    """
+    from services import exit_store
+    from services.audit_anchor import find_bucket_receipt, find_receipt
+
+    doc = exit_store.get(exit_store.REHEARSALS, str(pack.get("rehearsal_id") or "")) or {}
+    signed = doc.get("signed") if isinstance(doc.get("signed"), dict) else {}
+    stored = signed.get("anchor") if signed.get("content_sha256") == digest else None
+    if isinstance(stored, dict) and stored.get("status") == "anchored":
+        return stored
+    local = find_receipt(digest, kind=PACK_KIND)
+    if local and local.get("status") == "anchored":
+        return local
+    return (find_bucket_receipt(digest, kind=PACK_KIND, around=pack.get("issued_at"))
+            or stored or local)
+
+
 def verify_pack(pack: Any) -> dict[str, Any]:
     """Verify an Exit Evidence Pack: signature, Merkle root, and its anchor read back now (contract 5.2)."""
-    from services.audit_anchor import find_receipt, verify_receipt
+    from services.audit_anchor import verify_receipt
     from services.exit_completeness import merkle_root
     from services.signed_proof_pack import verify_signed_proof_pack
 
@@ -234,7 +256,7 @@ def verify_pack(pack: Any) -> dict[str, Any]:
     if not merkle_ok:
         errors.append("the Merkle root does not match the parts listed in the pack")
     digest = str(pack.get("content_sha256") or "")
-    anchor = verify_receipt(find_receipt(digest, kind=PACK_KIND), digest=digest)
+    anchor = verify_receipt(_receipt_for(pack, digest), digest=digest)
     if anchor["status"] == "failed":
         errors.append(f"the anchor could not be confirmed: {anchor.get('reason')}")
     return {"ok": not errors, "errors": errors, "kind": PACK_KIND, "content_sha256": checked["content_sha256"],
