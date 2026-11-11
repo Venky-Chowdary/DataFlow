@@ -28,6 +28,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from services.atomic_file import write_json_atomic
+from services.fingerprint_rules import FINGERPRINT_VERSION, VERSION_KEY
 from services.platform_config import data_dir
 
 logger = logging.getLogger(__name__)
@@ -207,13 +208,25 @@ def resolve_target(endpoint: Any) -> ContinuityTarget | None:
     )
 
 
+#: Gate-8 Python fingerprint under rules version 1. Retired: those rules are
+#: gone, so a baseline carrying this name (or no name — it predates the field)
+#: can no longer be recomputed and is never compared with a fresh digest.
 LEGACY_ALGO = "gate8_python_v0"
+#: Gate-8 Python fingerprint under the current rules; the name carries the
+#: fingerprint version so a rule change retires it the same way.
+GATE8_ALGO = f"gate8_python_fp{FINGERPRINT_VERSION}"
+
+
+def is_retired_algo(algo: str | None) -> bool:
+    """A Gate-8 Python algorithm of an older fingerprint version."""
+    name = str(algo or LEGACY_ALGO)
+    return name.startswith("gate8_python_") and name != GATE8_ALGO
 
 
 def preferred_algo(db_type: str) -> str:
     from services.continuity_digest import ALGO, SUPPORTED
 
-    return ALGO if db_type in SUPPORTED else LEGACY_ALGO
+    return ALGO if db_type in SUPPORTED else GATE8_ALGO
 
 
 def fingerprint(
@@ -233,16 +246,18 @@ def fingerprint(
             table=target.table,
             path=target.path,
         )
-    if algo != LEGACY_ALGO:
+    if algo != GATE8_ALGO:
+        # A retired algorithm cannot be recomputed (see ``_rebaseline_retired``).
         return None
-    fp = _legacy_fingerprint(target)
+    fp = _gate8_fingerprint(target)
     if fp is not None:
-        fp["algo"] = LEGACY_ALGO
+        fp["algo"] = GATE8_ALGO
+        fp[VERSION_KEY] = FINGERPRINT_VERSION
     return fp
 
 
-def _legacy_fingerprint(target: ContinuityTarget) -> dict[str, Any] | None:
-    """Gate-8 Python fingerprint (baselines written before ``engine_v1``)."""
+def _gate8_fingerprint(target: ContinuityTarget) -> dict[str, Any] | None:
+    """Gate-8 Python fingerprint, for engines without an in-engine digest."""
     from services.reconciliation import EMPTY_POPULATION_DIGEST, verify_target
 
     rows, checksum = verify_target(
@@ -326,6 +341,7 @@ def save_baseline(key: str, fp: dict[str, Any], job_id: str) -> None:
         "rows": int(fp["rows"]),
         "checksum": str(fp["checksum"]),
         "algo": str(fp.get("algo") or LEGACY_ALGO),
+        VERSION_KEY: fp.get(VERSION_KEY),
         "columns": fp.get("columns"),
         "unreadable": bool(fp.get("unreadable")),
         "job_id": job_id,
@@ -543,6 +559,64 @@ def _upgrade_algo(target: ContinuityTarget, baseline: dict[str, Any]) -> None:
     save_baseline(target.key, fp, str(baseline.get("job_id") or "algo-upgrade"))
 
 
+def _rebaseline_retired(
+    target: ContinuityTarget, baseline: dict[str, Any]
+) -> ContinuityViolation | None:
+    """Carry a baseline of a retired fingerprint version over to the current one.
+
+    Its digest was computed under rules that no longer exist, so comparing it
+    with a fresh digest would report every such table as "changed since the
+    last verified run". The row count is version-independent and is still
+    enforced; the value digest is re-read and recorded under the current
+    version, with an audit event saying the values were not re-proven.
+    """
+    old_algo = str(baseline.get("algo") or LEGACY_ALGO)
+    try:
+        current = fingerprint(target)
+    except Exception:  # noqa: BLE001 — unreadable is decided by compare()
+        logger.warning("continuity re-read failed for %s", target.table, exc_info=True)
+        current = None
+    if current is None:
+        missing = None
+        try:
+            missing = destination_missing(target)
+        except Exception:  # noqa: BLE001 — unknown stays unknown
+            missing = None
+        return compare(target.table, baseline, None, dest_missing=missing)
+    if int(current.get("rows") or 0) != int(baseline.get("rows") or 0):
+        return compare(
+            target.table,
+            baseline,
+            {"rows": int(current.get("rows") or 0), "checksum": "", "algo": old_algo},
+        )
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="append_continuity.fingerprint_version_rebaselined",
+        resource=f"table:{target.table}",
+        actor="system",
+        level="warning",
+        outcome="success",
+        details={
+            "db_type": target.db_type,
+            "table": target.table,
+            "from_algo": old_algo,
+            "to_algo": str(current.get("algo") or ""),
+            "to_fingerprint_version": FINGERPRINT_VERSION,
+            "verified_rows": baseline.get("rows"),
+            "baseline_job_id": baseline.get("job_id"),
+            "values_reproven": False,
+            "note": (
+                "The stored value digest was computed under retired fingerprint "
+                "rules and cannot be compared. The row count matched; the digest "
+                "was re-read and recorded under the current rules."
+            ),
+        },
+    )
+    save_baseline(target.key, current, str(baseline.get("job_id") or "fingerprint-upgrade"))
+    return None
+
+
 def destination_missing(target: ContinuityTarget) -> bool | None:
     """Whether the baselined table is gone — ``None`` when it cannot be decided.
 
@@ -594,6 +668,8 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
         )
     if not baseline:
         return None
+    if is_retired_algo(baseline.get("algo")) and not baseline.get("unreadable"):
+        return _rebaseline_retired(target, baseline)
     try:
         current = fingerprint(target, str(baseline.get("algo") or LEGACY_ALGO))
     except Exception:  # noqa: BLE001

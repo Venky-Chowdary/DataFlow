@@ -30,6 +30,7 @@ from services.parity_classifier import (
     classify_value,
     concurrent_source_update,
 )
+from services.fingerprint_rules import FINGERPRINT_VERSION, VERSION_KEY, stored_fingerprint_version
 from services.parity_evidence import (
     MAX_KEYS_SAMPLE,
     Observation,
@@ -807,6 +808,24 @@ def _evidence_block(job: dict[str, Any], tables_ev: list[TableEvidence]) -> dict
         "protection_proof": str(protection.get("status") or "") or None,
         "transform_proof": str(transform.get("status") or "") or None,
         "reread": {ev.name: ev.reread for ev in tables_ev if ev.reread},
+        # Rules this report's cell compares ran under, the rules the run's
+        # digests were computed under, and the rules that proved the keys
+        # recorded as resolved (services.fingerprint_rules).
+        "fingerprint": _fingerprint_block(job, recon),
+    }
+
+
+def _fingerprint_block(job: dict[str, Any], recon: dict[str, Any]) -> dict[str, Any]:
+    state = job.get("parity") if isinstance(job.get("parity"), dict) else {}
+    resolved = state.get("resolved") if isinstance(state.get("resolved"), dict) else {}
+    return {
+        VERSION_KEY: FINGERPRINT_VERSION,
+        "run": stored_fingerprint_version(recon),
+        "resolved_keys": (
+            stored_fingerprint_version({VERSION_KEY: state.get("resolved_fingerprint_version")})
+            if any(resolved.values())
+            else None
+        ),
     }
 
 
@@ -827,6 +846,19 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
             "signed_verdict": sealed_report.get("verdict"),
             "drift_since_signing": (content_sha256(report) != attested) if attested else None,
         }
+        sealed_rules = stored_fingerprint_version(
+            (sealed_report.get("evidence") or {}).get("fingerprint") or {}
+        )
+        if sealed_rules != FINGERPRINT_VERSION:
+            # Signed under other fingerprint rules: a different reading of the
+            # same stored cells is a rule change, not data that moved. The
+            # sealed pack still verifies as signed; drift is not asserted.
+            drift["drift_since_signing"] = None
+            drift["drift_not_comparable"] = {
+                "reason": "fingerprint_version",
+                "signed_under": sealed_rules,
+                "current": FINGERPRINT_VERSION,
+            }
     else:
         approvals, invalidated = valid_approvals(state, content_sha256(report))
     blocked_reason = None
