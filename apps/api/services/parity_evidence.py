@@ -26,13 +26,7 @@ MAX_REREAD_KEYS = 200
 MAX_KEYS_SAMPLE = 20
 
 _PROTECTING = frozenset({"mask_pii", "hash_pii", "redact"})
-#: Gate-8 names at most this many culprit keys per kind (reconcile_step).
-_CULPRIT_LIMIT = 32
 _OVERWRITE_MODES = frozenset({"full_refresh_overwrite", "mirror"})
-_TERMINAL_DONE = frozenset({
-    "completed", "completed_with_quarantine", "completed_with_warnings", "failed",
-    "cancelled", "success", "error",
-})
 
 
 @dataclass
@@ -300,8 +294,11 @@ def evidence_capped(recon: dict[str, Any]) -> bool:
     named = len(_dict(ladder.get("localization")).get("rows") or [])
     if l5.get("capped") or (_int(l5.get("mismatch_count")) or 0) > named:
         return True
+    # Gate-8 names at most this many culprit keys per kind: a full list may stop short.
+    from src.transfer.reconcile_step import _CULPRIT_KEYS_LIMIT
+
     for holder in (recon, _dict(recon.get("transform_applied"))):
-        if any(len(keys or []) >= _CULPRIT_LIMIT for keys in _dict(holder.get("culprit_keys")).values()):
+        if any(len(keys or []) >= _CULPRIT_KEYS_LIMIT for keys in _dict(holder.get("culprit_keys")).values()):
             return True
     return False
 
@@ -737,7 +734,10 @@ def mark_unaccounted(ev: TableEvidence, recon: dict[str, Any]) -> None:
 
 
 def job_is_terminal(job: dict[str, Any]) -> bool:
-    return str(job.get("status") or "").strip().lower() in _TERMINAL_DONE
+    """A finished job (completed, with quarantine or warnings, failed, cancelled): the trust card's rule."""
+    from services.job_trust import is_terminal_status
+
+    return is_terminal_status(job.get("status"))
 
 
 # ── bounded keyed re-read ────────────────────────────────────────────────────

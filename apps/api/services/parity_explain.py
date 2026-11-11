@@ -13,7 +13,6 @@ from templates.
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import logging
 import re
@@ -31,6 +30,10 @@ _SYSTEM = (
     "\"fix_order\": [<fix ids from the list, most useful first>]}."
 )
 _JSON = re.compile(r"\{.*\}", re.S)
+
+
+class _ExplainTimeout(TimeoutError):
+    """The model did not answer within the explanation deadline."""
 
 
 def _timeout_seconds() -> float:
@@ -146,18 +149,24 @@ def explain_report(report: dict[str, Any]) -> dict[str, Any]:
     facts = grounded_facts(report, include_values=not metadata_only_enabled())
     prompt = "Parity report facts (JSON):\n" + json.dumps(facts, default=str, sort_keys=True)
     columns = sorted({d["column"] for d in report["differences"] if d.get("column")})
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    from src.ai.copilot.tool_deadline import run_with_deadline
+
+    def timed_out(message: str) -> None:
+        raise _ExplainTimeout(message)
+
     try:
-        future = pool.submit(_generate, prompt, str(report.get("job_id") or ""), columns)
-        response = future.result(timeout=_timeout_seconds())
-    except concurrent.futures.TimeoutError:
+        # The shared bounded executor (deadline, per-workspace share), not a pool of its own.
+        response = run_with_deadline(
+            "parity_explain",
+            lambda: _generate(prompt, str(report.get("job_id") or ""), columns),
+            timed_out, seconds=_timeout_seconds(),
+        )
+    except _ExplainTimeout:
         logger.info("parity explanation: model timed out; using the template")
         return template
     except Exception as exc:  # noqa: BLE001 - any provider fault falls back to the template
         logger.info("parity explanation: model failed (%s); using the template", type(exc).__name__)
         return template
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
     if not getattr(response, "success", False):
         return template
     parsed = _parse(str(getattr(response, "content", "") or ""), {f["id"] for f in report["fixes"]})

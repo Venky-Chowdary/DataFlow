@@ -16,7 +16,6 @@ and a client may pin ``expected_version`` (409 on mismatch).
 
 from __future__ import annotations
 
-import contextlib
 import threading
 import uuid
 
@@ -71,11 +70,8 @@ def store(request, monkeypatch, tmp_path):
     monkeypatch.setattr(mongodb_service, "get_mongodb_service", lambda: svc)
     monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
     monkeypatch.setenv("DATAFLOW_LLM_ENABLED", "false")
-    # A process lock (the old design) must not mask the race: each "replica" gets its own.
-    from services import parity_fixes, parity_state
-
-    for mod in (parity_state, parity_fixes):
-        monkeypatch.setattr(mod, "job_lock", lambda _jid: contextlib.nullcontext(), raising=False)
+    # No process lock exists to mask the race (the old ``job_lock`` is gone): the
+    # threads below race exactly as replicas do, on the store's compare-and-swap.
     yield svc
     if request.param == "mongo":
         svc.client.drop_database(svc.db_name)
