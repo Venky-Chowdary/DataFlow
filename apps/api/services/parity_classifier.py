@@ -225,8 +225,9 @@ def whitespace(source: str | None, dest: str | None, ctx: CellContext) -> dict |
     if padded:
         return cause(WHITESPACE, "The fixed-width CHAR column pads with trailing spaces.", explained=True)
     if source.strip() == dest.strip():
-        where = "Trailing" if source.lstrip() == dest.lstrip() else (
-            "Leading" if source.rstrip() == dest.rstrip() else "Leading and trailing"
+        # Equal once the right ends are stripped: only trailing whitespace differs (and vice versa).
+        where = "Trailing" if source.rstrip() == dest.rstrip() else (
+            "Leading" if source.lstrip() == dest.lstrip() else "Leading and trailing"
         )
         return cause(WHITESPACE, f"{where} whitespace differs.", explained=False)
     return cause(WHITESPACE, "Whitespace inside the value differs.", explained=False)
