@@ -103,7 +103,7 @@ describe("real backend payloads (static)", () => {
     assert.doesNotMatch(t, /Sign as/);
     assert.match(t, /hmac-sha256:5e5e…5e5e/);
     assert.match(t, /Download signed pack/);
-    assert.match(t, /Export Markdown/);
+    assert.match(t, /Download report \(\.md\)/);
   });
 
   it("summary: KPIs, trend and heatmap from the workspace summary", () => {

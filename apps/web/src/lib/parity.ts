@@ -313,10 +313,14 @@ export function verdictPresentation(
 /** What the Differences card says when the report lists none: never "none found" for a failed Gate-8. */
 export function noDifferencesText(
   report: Pick<ParityReport, "verdict"> & {
-    confidence: Pick<ParityReport["confidence"], "bound_valid">;
+    confidence: Pick<ParityReport["confidence"], "bound_valid"> & Partial<Pick<ParityReport["confidence"], "method">>;
     evidence: Pick<ParityReport["evidence"], "reconciliation_passed">;
   },
 ): string {
+  if (report.verdict === "unverifiable" && report.confidence.method === "none" && report.evidence.reconciliation_passed == null) {
+    // Nothing looked for differences, so "none found" would be a claim the data does not make.
+    return "Nothing was compared, so this report cannot say whether any row differs.";
+  }
   if (report.verdict === "unverifiable") {
     return report.evidence.reconciliation_passed === false
       ? "Gate-8 failed this run, but its evidence names no row that differs, so parity cannot be shown. Re-run the job to localize the difference."
@@ -349,8 +353,76 @@ export function formatParityPct(pct: number | null | undefined): string {
  * The headline figure is a lower bound unless every table was compared in
  * full: a sampled table contributes its Clopper-Pearson bound, not a count.
  */
-export function parityIsLowerBound(report: Pick<ParityReport, "confidence">): boolean {
-  return report.confidence.method !== "full" && report.confidence.bound_valid !== false;
+export function parityIsLowerBound(
+  report: Pick<ParityReport, "confidence"> & { parity?: Pick<ParityCounts, "proven_equal_pct"> },
+): boolean {
+  const c = report.confidence;
+  // Only a sample bounds anything: "none" compared nothing, and with no figure there is no bound to state.
+  if (c.method !== "sampled" && c.method !== "mixed") return false;
+  if (report.parity && report.parity.proven_equal_pct == null) return false;
+  return c.bound_valid !== false;
+}
+
+/** True when no value comparison ran at all (a run that never reached verification, counts only). */
+export function nothingCompared(report: Pick<ParityReport, "confidence">): boolean {
+  return report.confidence.method === "none";
+}
+
+/** The ring's caption when there is no figure: honest about whether anything was compared. */
+export function parityUnknownCaption(report: Pick<ParityReport, "confidence">): string {
+  return nothingCompared(report) ? "not compared" : "not determined";
+}
+
+/**
+ * The "rows differ" tile. Zero reads as a clean result, so it shows only when a
+ * comparison decided it; otherwise the tile says nothing was compared, or that
+ * the count is unknown.
+ */
+export function rowsDifferLabel(report: Pick<ParityReport, "verdict" | "parity" | "confidence">): string {
+  if (report.parity.rows_differ > 0) return formatCount(report.parity.rows_differ);
+  if (nothingCompared(report)) return "Not compared";
+  if (report.verdict === "unverifiable") return "Unknown";
+  return formatCount(report.parity.rows_differ);
+}
+
+/** Job statuses whose run ended without finishing (lowercase). */
+const STOPPED_RUN: Record<string, string> = { failed: "failed", cancelled: "was cancelled", canceled: "was cancelled" };
+
+/**
+ * The notice above an unverifiable report. A run that failed (or was cancelled)
+ * before Gate-8 recorded anything is said plainly; otherwise the API's reason.
+ * Null when the verdict is decided.
+ */
+export function unverifiableNotice(
+  report: Pick<ParityReport, "verdict" | "verdict_reason" | "parity" | "confidence"> & {
+    evidence: Pick<ParityReport["evidence"], "reconciliation_passed">;
+  },
+  jobStatus?: string | null,
+): string | null {
+  if (report.verdict !== "unverifiable") return null;
+  const stopped = STOPPED_RUN[String(jobStatus || "").trim().toLowerCase()];
+  const noReconciliation =
+    report.evidence.reconciliation_passed == null &&
+    nothingCompared(report) &&
+    report.parity.rows_source == null &&
+    report.parity.rows_destination == null;
+  if (stopped && noReconciliation) {
+    return `This run ${stopped} before verification ran, so the source and destination were never compared.`;
+  }
+  const reason = (report.verdict_reason || "").trim();
+  return reason || null;
+}
+
+/**
+ * The verdict reason under the confidence statement, or "" when it would only
+ * repeat it: a proven report's reason restates "nothing differs", and an
+ * unverifiable report's reason is the notice at the top.
+ */
+export function verdictReasonDetail(report: Pick<ParityReport, "verdict" | "verdict_reason" | "confidence">): string {
+  const reason = (report.verdict_reason || "").trim();
+  if (!reason || report.verdict === "unverifiable" || report.verdict === "proven") return "";
+  const fold = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return fold(reason) === fold(report.confidence.statement || "") ? "" : reason;
 }
 
 /**
@@ -601,6 +673,23 @@ export function signoffBlockedReason(report: Pick<ParityReport, "signoff" | "par
       : "Sign-off is not open for this report yet.";
   }
   return "";
+}
+
+/**
+ * The header's sign-off shortcut. Primary only while sign-off is open; a
+ * blocked report gets a secondary link to the panel that says why, and a
+ * signed one a link to the record.
+ */
+export function signoffShortcut(report: Pick<ParityReport, "signoff" | "parity" | "verdict">): {
+  state: "open" | "blocked" | "signed";
+  label: string;
+  primary: boolean;
+  title?: string;
+} {
+  if (report.signoff.status === "signed") return { state: "signed", label: "View sign-off", primary: false };
+  const blocked = signoffBlockedReason(report);
+  if (blocked) return { state: "blocked", label: "Why sign-off is blocked", primary: false, title: blocked };
+  return { state: "open", label: "Go to sign-off", primary: true };
 }
 
 /** "hmac-sha256:9f3c…a71e": enough to compare by eye; the full value is in the title. */

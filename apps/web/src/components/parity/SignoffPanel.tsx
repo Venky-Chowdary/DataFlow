@@ -44,6 +44,8 @@ export interface SignoffCopy {
   /** "What the pack contains", without the signature line (the panel adds it). */
   packItems: ReactNode[];
   exportLabel: string;
+  /** Tooltip of the report download: which report, and that it is the live reading. */
+  exportTitle: string;
   signedNote: string;
   downloadTitle: string;
   noRoles: string;
@@ -79,7 +81,8 @@ const PARITY_COPY: SignoffCopy = {
     "Transforms applied, PII protection proof, schema changes",
     "Approvals with names, roles and times",
   ],
-  exportLabel: "Export Markdown",
+  exportLabel: "Download report (.md)",
+  exportTitle: "The trust report as Markdown, as it reads now.",
   signedNote: "The exported pack carries this signature, so anyone can check it was not changed.",
   downloadTitle: "The signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature.",
   noRoles: "No roles are required to sign this report.",
@@ -282,8 +285,9 @@ export function SignoffPanel({ report, subject: given, copy: copyOverride, busy,
               onClick={onExport}
               disabled={anyBusy}
               loading={exporting}
-              loadingLabel="Exporting…"
+              loadingLabel="Downloading…"
               leadingIcon={<DtIcon name="download" size={14} />}
+              title={copy.exportTitle}
             >
               {copy.exportLabel}
             </Button>
@@ -298,7 +302,7 @@ export function SignoffPanel({ report, subject: given, copy: copyOverride, busy,
                 leadingIcon={<DtIcon name="download" size={14} />}
                 title={copy.downloadTitle}
               >
-                Download signed pack
+                Download signed pack (.json)
               </Button>
             )}
           </div>

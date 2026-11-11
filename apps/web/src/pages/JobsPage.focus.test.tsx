@@ -377,6 +377,32 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
   });
 });
 
+describe("Jobs header destination (undefined.undefined)", () => {
+  function destinationLabel() {
+    // The detail opens in the shared Drawer, which may mount outside the host.
+    const endpoints = [...document.querySelectorAll(".df2-jobs-v3-summary-endpoint")];
+    const dest = endpoints.find((e) => e.querySelector("span")?.textContent === "Destination");
+    assert.ok(dest);
+    return dest.querySelector("strong")?.textContent || "";
+  }
+
+  it("names the destination from the parts the job has, never undefined", async () => {
+    mobile = false;
+    const bare = { ...jobs[0], destination_collection: undefined, destination_type: "sqlite" } as TransferJob;
+    detailRecords.set(bare._id, bare);
+    await render([bare], bare._id);
+    await settle();
+    assert.equal(destinationLabel(), "sqlite");
+
+    // A collection and no database (the list fixtures' shape): the header showed "undefined.synthetic_target".
+    const tableOnly = { ...jobs[0], _id: "synthetic-table-only" } as TransferJob;
+    detailRecords.set(tableOnly._id, tableOnly);
+    await render([tableOnly], tableOnly._id);
+    await settle();
+    assert.equal(destinationLabel(), "synthetic_target");
+  });
+});
+
 after(() => {
   globalThis.fetch = originalFetch;
   dom.window.close();
