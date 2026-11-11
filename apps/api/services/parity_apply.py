@@ -25,6 +25,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES
 from services.parity_errors import safe_error
 from services.parity_evidence import request_of, target_to_source
 from services.parity_fixes import (
@@ -52,8 +53,9 @@ logger = logging.getLogger(__name__)
 SIGNED_IS_FINAL = "This report is signed, and a signed report is final; re-run the job for a new report."
 #: A claim with nothing applying it after this long is settled as failed (the API restarted mid-apply).
 STALE_CLAIM_SECONDS = 3600
-_CHILD_OK = frozenset({"completed", "completed_with_quarantine", "completed_with_warnings", "success"})
-_CHILD_FAILED = frozenset({"failed", "cancelled", "canceled", "error"})
+#: A finished re-sync job: the platform's own status sets (services.job_status).
+_CHILD_OK = COMPLETED_STATUSES
+_CHILD_FAILED = TERMINAL_STATUSES - COMPLETED_STATUSES
 
 #: (job id, fix id) of the write fixes this process is applying right now.
 _APPLYING_HERE: set[tuple[str, str]] = set()

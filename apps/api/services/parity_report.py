@@ -43,6 +43,7 @@ from services.parity_evidence import (
     sync_mode_of,
 )
 from services.parity_state import now_iso, state_of
+from services.reconciliation import STORED_MISMATCH_VALUE_CHARS
 from services.parity_stats import CONFIDENCE_LEVEL, clopper_pearson_upper, format_rate_pct
 
 logger = logging.getLogger(__name__)
@@ -76,8 +77,8 @@ def _ctx(ev: TableEvidence, column: str | None, engine: str) -> CellContext:
 
 #: Origins whose cells are the values Gate-8 itself stored for a cell it found different.
 _STORED_CELL_ORIGINS = frozenset({"sample_compare", "ladder_l5"})
-#: ``reconciliation.py`` keeps at most this many characters of a stored sample value.
-STORED_VALUE_LIMIT = 120
+#: Gate-8 keeps at most this many characters of a stored sample value (its own constant).
+STORED_VALUE_LIMIT = STORED_MISMATCH_VALUE_CHARS
 
 
 def _classify(ob: Observation, ev: TableEvidence, engine: str) -> dict[str, Any] | None:
