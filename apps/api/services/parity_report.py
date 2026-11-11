@@ -329,7 +329,17 @@ def _example(ob: Observation, protected: bool) -> dict[str, Any] | None:
         return None
     if ob.origin in {"recipe_effect", "protection", "write_witness", "row_count", "quarantine"}:
         return None
-    return {"source": ob.raw if ob.raw_known else ob.expected, "destination": ob.dest}
+    example = {"source": ob.raw if ob.raw_known else ob.expected, "destination": ob.dest}
+    if ob.origin == "sample_compare":
+        return example  # Gate-8 stored these through pii_guard already
+    # Live re-read cells and the ladder's localization values were never masked: the same
+    # pii_guard rule Gate-8 applies to its stored mismatches (a sensitive column name or a
+    # value that looks like PII is masked) before they reach the API, the pack or a model.
+    from services.pii_guard import _redact_mismatch_entry
+
+    masked = _redact_mismatch_entry({"source": ob.column or "", "target": ob.column or "",
+                                     "source_value": example["source"], "target_value": example["destination"]})
+    return {"source": masked["source_value"], "destination": masked["target_value"]}
 
 
 def _group(ev: TableEvidence, engine: str, acceptances: dict[str, Any]) -> list[dict[str, Any]]:
