@@ -501,9 +501,17 @@ def delete_ai_provider_key_route(provider: str, request: Request):
     return updated
 
 
-@router.post("/ai-providers/{provider}/test")
+@router.post(
+    "/ai-providers/{provider}/test",
+    dependencies=[Depends(platform_settings_guard("ai_providers", "test"))],
+)
 def test_ai_provider(provider: str):
     """Live-check the stored key for a provider without asking for it again.
+
+    Platform administrators only, like saving the key: the check spends the
+    deployment's own provider key on a live call and says whether one is
+    stored, which no single workspace's administrator should be able to do
+    (found by tests/test_tenancy_route_scoping.py).
 
     Sync on purpose: the check does blocking network I/O.
     """
