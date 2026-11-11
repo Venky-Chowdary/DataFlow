@@ -11,17 +11,18 @@ The rule now has one owner on each side:
 
 * the classifier reads the source's real fractional digits (explicit or the
   engine default) and the measured population — whole milliseconds pass,
-  anything finer, or nothing measured, stays a truncation;
-* the writer refuses a cell with a non-zero digit below the millisecond unless
-  the operator accepted the risk on that column, and reports the accepted
-  truncation instead of hiding it.
+  anything finer stays a truncation; nothing measured is left to the writer
+  (D148: the values decide, not the declaration);
+* the writer refuses the whole batch holding a non-zero digit below the
+  millisecond unless a signed contract accepted the risk on that column, and
+  reports how many values the accepted truncation touched instead of hiding it.
 """
 
 from __future__ import annotations
 
 import socket
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 
@@ -77,12 +78,16 @@ def test_measured_microseconds_stay_a_truncation(engine, source_type):
 
 
 @pytest.mark.parametrize("engine,source_type", ROUTES)
-def test_unmeasured_sub_millisecond_column_stays_a_truncation(engine, source_type):
-    """A sample nobody took is not proof the column holds whole milliseconds."""
+def test_unmeasured_sub_millisecond_column_is_left_to_the_write_guard(engine, source_type):
+    """Unmeasured is not proof either way; the writer checks every value (D148).
+
+    Preflight passes provisionally only because the batch guard refuses any
+    sub-millisecond value it meets (see the writer tests below).
+    """
     eff = _declared(engine, source_type)
     with bind_source_engine(engine):
-        assert is_lossy_coercion(eff, "date", dest_db="mongodb") is True
-        assert is_lossy_coercion(eff, "date", dest_db="mongodb", population=[None, ""]) is True
+        assert is_lossy_coercion(eff, "date", dest_db="mongodb") is False
+        assert is_lossy_coercion(eff, "date", dest_db="mongodb", population=[None, ""]) is False
 
 
 def test_declared_zone_keeps_the_columns_precision():
@@ -153,6 +158,20 @@ def _capturing_client(captured: dict):
     return _Client()
 
 
+def _contract() -> dict:
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    return create_migration_risk_contract(
+        column="ts",
+        source_type="TIMESTAMPTZ(6)",
+        destination_type="date",
+        approved_by="risk-approver@example.com",
+        reason="Accept millisecond truncation",
+        execution_policy="CAST_AND_CONTINUE",
+        expected_precision_loss=True,
+    ).to_dict()
+
+
 def _write(monkeypatch, rows, *, acknowledged: bool, error_policy: str = "quarantine"):
     from connectors.mongodb_writer import write_mapped_rows
 
@@ -164,6 +183,7 @@ def _write(monkeypatch, rows, *, acknowledged: bool, error_policy: str = "quaran
     mapping = {"source": "ts", "target": "ts", "source_type": "TIMESTAMPTZ(6)"}
     if acknowledged:
         mapping["risk_acknowledged"] = True
+        mapping["risk_contract"] = _contract()
     result = write_mapped_rows(
         host="localhost",
         port=27017,
@@ -183,17 +203,18 @@ def _write(monkeypatch, rows, *, acknowledged: bool, error_policy: str = "quaran
     return result, captured
 
 
-def test_writer_quarantines_a_microsecond_cell_and_writes_the_rest(monkeypatch):
+def test_writer_refuses_the_whole_batch_holding_a_microsecond_cell(monkeypatch):
+    """D148: never a partial write, never a truncation — whatever the policy."""
     result, captured = _write(
         monkeypatch,
         ["2024-01-01T10:00:00.123+00:00", "2024-01-01T10:00:00.123456+00:00"],
         acknowledged=False,
     )
-    assert result.rows_written == 1
-    assert len(captured["docs"]) == 1
-    assert captured["docs"][0]["ts"] == datetime(2024, 1, 1, 10, 0, 0, 123000, tzinfo=timezone.utc)
-    assert len(result.rejected_details) == 1
-    assert "finer digits" in result.rejected_details[0]["reason"]
+    assert result.ok is False
+    assert result.rows_written == 0
+    assert not captured.get("docs")
+    assert "ts (1 value)" in result.error
+    assert "Nothing from this batch was written" in result.error
 
 
 def test_writer_truncates_under_an_accepted_risk_and_says_so(monkeypatch):
@@ -202,7 +223,32 @@ def test_writer_truncates_under_an_accepted_risk_and_says_so(monkeypatch):
     )
     assert result.ok is True, result.error
     assert result.rows_written == 1
-    assert any("sub-millisecond digits truncated" in w for w in result.warnings)
+    assert captured["docs"][0]["ts"].microsecond == 123456  # BSON floors on encode
+    assert any(
+        "ts: 1 value with sub-millisecond digits truncated" in w for w in result.warnings
+    ), result.warnings
+    assert result.meta["ms_truncated_values"] == {"ts": 1}
+
+
+def test_bare_risk_flag_without_a_contract_does_not_license_truncation(monkeypatch):
+    from connectors.mongodb_writer import write_mapped_rows
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "connectors.mongodb_common._mongo_client",
+        lambda *_args, **_kwargs: _capturing_client(captured),
+    )
+    result = write_mapped_rows(
+        host="localhost", port=27017, database="dataflow_test", username="",
+        password="", connection_string="", ssl=False, schema="dataflow_test",
+        table_name="instant_precision", headers=["ts"],
+        data_rows=[["2024-01-01T10:00:00.123456+00:00"]],
+        mappings=[{"source": "ts", "target": "ts", "source_type": "TIMESTAMPTZ(6)",
+                   "risk_acknowledged": True}],
+        column_types={"ts": "TIMESTAMPTZ(6)"},
+        error_policy="quarantine",
+    )
+    assert result.ok is False and not captured.get("docs")
 
 
 def _reachable(host: str, port: int) -> bool:
@@ -214,7 +260,7 @@ def _reachable(host: str, port: int) -> bool:
 
 
 @pytest.mark.skipif(not _reachable("localhost", 27017), reason="MongoDB not reachable")
-def test_live_mongo_round_trip_keeps_milliseconds_and_refuses_microseconds():
+def test_live_mongo_refuses_a_batch_holding_microseconds_before_it_lands():
     import pymongo
 
     from connectors.mongodb_writer import write_mapped_rows
@@ -245,10 +291,12 @@ def test_live_mongo_round_trip_keeps_milliseconds_and_refuses_microseconds():
     client = pymongo.MongoClient("localhost", 27017, serverSelectionTimeoutMS=2000)
     try:
         docs = list(client["dataflow_test"][collection].find({}, {"_id": 0}))
-        assert result.rows_written == 1, result.error
-        assert len(result.rejected_details) == 1
-        assert len(docs) == 1
-        assert docs[0]["ts"].microsecond == 123000
+        # D148: the batch is refused before anything lands — no truncated
+        # document, and no partial batch either.
+        assert result.ok is False
+        assert result.rows_written == 0
+        assert "ts (1 value)" in result.error
+        assert docs == []
     finally:
         client["dataflow_test"].drop_collection(collection)
         client.close()

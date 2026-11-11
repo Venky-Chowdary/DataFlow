@@ -1,6 +1,6 @@
 """The public origin (scheme + host) that links handed to users must use.
 
-QA round 11: the MCP manifest named ``http://dataflow-api-production-722b.up.railway.app``
+QA round 11: the MCP manifest named ``http://<internal-railway-host>``
 because it echoed ``request.base_url``. Behind the web nginx the Host header is
 the Railway backend (nginx rewrites it so the edge routes the request) and the
 scheme is plain http (TLS ends at the edge), so the request itself cannot say

@@ -337,6 +337,22 @@ def _is_missing_value_signal(message: str, details: dict[str, Any]) -> bool:
     return all(_MISSING_VALUE_RE.search(i) for i in issues)
 
 
+def _millisecond_count_note(gates: list[dict[str, Any]]) -> str:
+    """D148: the value-level millisecond check's count, for the fidelity root.
+
+    The type path alone says a column *may* lose digits; this names how many
+    values would, so the root does not read as a declaration-only refusal.
+    """
+    for g in gates or []:
+        if (
+            str(g.get("id") or "") == "g3_millisecond_fit"
+            and g.get("status") == "block"
+            and g.get("message")
+        ):
+            return f". {g['message']}"
+    return ""
+
+
 def _is_fidelity_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -1000,6 +1016,42 @@ def quarantine_retry_fix(job_id: str) -> str:
     )
 
 
+def _confidence_floor_by_mode() -> str:
+    """Which validation modes move G4's floor — none of the writing ones below 0.75."""
+    from services.validation_mode_contract import confidence_floor_for_mode
+
+    balanced = confidence_floor_for_mode("balanced")
+    return (
+        f"validation_mode does not lower this floor below {balanced:g}: balanced, "
+        f"lenient and migration all use {balanced:g} (strict "
+        f"{confidence_floor_for_mode('strict'):g}). Lenient holds out cells that "
+        "fail to cast; it does not accept a low-confidence mapping"
+    )
+
+
+_CONFIDENCE_FLOOR_BY_MODE = _confidence_floor_by_mode()
+
+
+def _mapping_confidence_fix(columns: list[str]) -> str:
+    """G4's way out on every surface (D329): Studio Map, or a signed acceptance.
+
+    A verified continue-policy contract on the pair clears G4 like
+    ``user_override`` (D197); ``risk_acceptance`` is how MCP and REST sign one.
+    """
+    from services.risk_acceptance import RISK_ACCEPTANCE_SURFACES
+
+    named = ", ".join(columns[:8])
+    return (
+        "Open Map → review low-confidence pairs → Approve with evidence or remap "
+        "to the correct target → re-run Validate. Without Studio, sign the "
+        "reviewed pairs: pass risk_acceptance {approved_by, reason, "
+        "execution_policy: TRANSFORM_AND_CONTINUE (a column transform) or "
+        "CAST_AND_CONTINUE"
+        + (f", columns: [{named}]" if named else "")
+        + f"}} to {RISK_ACCEPTANCE_SURFACES}. {_CONFIDENCE_FLOOR_BY_MODE}."
+    )
+
+
 def _pending_widen_paths(preflight: dict[str, Any]) -> dict[str, str]:
     """``column -> "OLD → NEW"`` for every approvable destination widen.
 
@@ -1189,6 +1241,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     f"Fidelity risk across type path — impacts "
                     f"{len(absorbed)} gate check(s); open Map for column detail"
                 )
+            summary += _millisecond_count_note(fidelity_gates)
             widening = _pending_widen_paths(preflight)
             if cols and all(c.lower() in widening for c in cols):
                 # Every "collapse" is a source column that widened past an
@@ -1328,7 +1381,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 fidelity_root.summary = (
                     f"{len(merged_cols)} column(s) collapse fidelity on write"
                     f" ({col_label}) — impacts {len(merged_absorbed)} gate check(s)"
-                )
+                ) + _millisecond_count_note(gates)
             else:
                 fidelity_root.summary = (
                     f"Fidelity risk across type path — impacts "
@@ -1512,14 +1565,11 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 affected_rows_sample=sample_n,
                 estimated_total_rows=est_n,
                 risk_level="high",
-                recommended_fix=(
-                    "Open Map → review low-confidence pairs → Approve with evidence "
-                    "or remap to the correct target → re-run Validate."
-                ),
+                recommended_fix=_mapping_confidence_fix(cols),
                 alternative_fixes=[
                     "Improve source/target column names for lexical match",
                     "Approve with user_override after human review",
-                    "Lower validation mode only when Discovery/Migration mode is intentional",
+                    _CONFIDENCE_FLOOR_BY_MODE,
                 ],
                 recovery_strategy=(
                     "After Map approve/remap, re-Validate. No write occurs until G4 passes."

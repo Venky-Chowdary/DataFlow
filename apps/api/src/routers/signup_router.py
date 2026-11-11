@@ -286,59 +286,35 @@ async def verify_email(body: VerifyRequest, request: Request, response: Response
     return {**result, **issue_browser_session(response, session, result["user"]["email"])}
 
 
-def _session_summary(doc: dict, *, current_jti: str = "") -> dict:
-    return {
-        "jti": doc["jti"],
-        "device_id": doc.get("device_id", ""),
-        "ip": doc.get("ip", ""),
-        "ua": doc.get("ua", ""),
-        "created_at": doc.get("created_at"),
-        "last_seen_at": doc.get("last_seen_at"),
-        "absolute_expires_at": doc.get("absolute_expires_at"),
-        "current": doc["jti"] == current_jti,
-    }
-
-
-def _current_jti(request: Request) -> str:
-    jti = getattr(request.state, "cookie_session_jti", "") or ""
-    if not jti:
-        auth = request.headers.get("Authorization", "")
-        if auth.lower().startswith("bearer "):
-            from src.services import auth_service
-            jti = auth_service.token_jti(auth[7:].strip()) or ""
-    return jti
-
-
-@router.get("/sessions")
-async def list_sessions(request: Request):
-    """P3-3: the caller's own sessions (cookie or bearer auth)."""
+def _session_email(request: Request) -> str:
     email = getattr(request.state, "user_email", "") or ""
     if not email:
         from services.api_errors import ApiError
         raise ApiError(401, "auth_required", "authentication required")
-    from services.auth_state import get_auth_state
+    return email
 
-    current = _current_jti(request)
-    return {"sessions": [
-        _session_summary(doc, current_jti=current)
-        for doc in get_auth_state().list_sessions(email)
-    ]}
+
+@router.get("/sessions")
+async def list_sessions(request: Request):
+    """P3-3: the caller's own sessions (cookie or bearer auth).
+
+    Read from the one session registry every sign-in writes (D338)."""
+    from services import session_registry
+
+    email = _session_email(request)
+    current = session_registry.current_session_id(request)
+    return {"sessions": session_registry.list_sessions(email, current=current)}
 
 
 @router.delete("/sessions/{jti}")
 async def revoke_session(jti: str, request: Request):
     """P3-3: revoke one of the caller's own sessions."""
-    email = getattr(request.state, "user_email", "") or ""
-    if not email:
-        from services.api_errors import ApiError
-        raise ApiError(401, "auth_required", "authentication required")
-    from services.auth_state import get_auth_state
+    from services import session_registry
 
-    doc = get_auth_state().get_session(jti)
-    if not doc or doc.get("user_id") != email:
+    email = _session_email(request)
+    if not session_registry.revoke_one(email, jti):
         from services.api_errors import ApiError
         raise ApiError(404, "not_found", "no such session")
-    get_auth_state().revoke_session(jti)
     from services.audit_coverage import record_security_event
     record_security_event("session.revoked", outcome="succeeded",
                           actor=email, session_id=jti)
@@ -348,19 +324,11 @@ async def revoke_session(jti: str, request: Request):
 @router.delete("/sessions")
 async def revoke_other_sessions(request: Request):
     """P3-3: revoke every session except the one making the request."""
-    email = getattr(request.state, "user_email", "") or ""
-    if not email:
-        from services.api_errors import ApiError
-        raise ApiError(401, "auth_required", "authentication required")
-    from services.auth_state import get_auth_state
+    from services import session_registry
 
-    current = _current_jti(request)
-    state = get_auth_state()
-    revoked = 0
-    for doc in state.list_sessions(email):
-        if doc["jti"] != current:
-            state.revoke_session(doc["jti"])
-            revoked += 1
+    email = _session_email(request)
+    current = session_registry.current_session_id(request)
+    revoked = session_registry.revoke_others(email, current=current)
     if revoked:
         from services.audit_coverage import record_security_event
         record_security_event("session.revoked", outcome="succeeded",

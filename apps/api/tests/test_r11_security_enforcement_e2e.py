@@ -290,7 +290,7 @@ def test_save_response_reports_enforcement_from_the_posture_function(ent, one_pr
 # ── MCP manifest origin ─────────────────────────────────────────────────────
 
 
-INTERNAL = "dataflow-api-production-722b.up.railway.app"
+INTERNAL = "api-service-0000.up.railway.app"
 
 
 def test_mcp_manifest_never_names_the_internal_host_or_http(ent, monkeypatch):
@@ -358,9 +358,19 @@ def test_unset_hop_count_and_a_private_peer_never_block_and_say_not_enforced(ent
     key = ent.bearer(ent.api_key(role="viewer", workspace_id=ws), ws)
     # Every caller looks like Railway's proxy (CGNAT / RFC 1918).
     admin = _peer(ent, ent.admin, "100.64.0.9")
-    saved = admin.post("/api/v1/workspace/tenant", json={"workspace_id": ws, "name": "Hops", "ip_allowlist": LIST},
+    # D336: a NEW list is not saved while the server cannot enforce it...
+    refused = admin.post("/api/v1/workspace/tenant",
+                         json={"workspace_id": ws, "name": "Hops", "ip_allowlist": LIST},
+                         headers={"X-Workspace-Id": ws})
+    assert refused.status_code == 409 and "would not be enforced" in refused.json()["detail"]
+    # ...and a list saved before that (or re-sent unchanged) is admitted, never blocks.
+    saved = admin.post("/api/v1/workspace/tenant", json={"workspace_id": ws, "name": "Hops"},
                        headers={"X-Workspace-Id": ws})
-    # The lock-out guard does not refuse over the proxy's address...
+    from services.tenant_store import update_tenant
+
+    update_tenant(saved.json()["id"], ip_allowlist=LIST)
+    saved = admin.patch(f"/api/v1/workspace/tenant/{saved.json()['id']}", json={"ip_allowlist": LIST},
+                        headers={"X-Workspace-Id": ws})
     assert saved.status_code == 200, saved.text
     ip = saved.json()["enforcement"]["ip_allowlist"]
     # ...and the response says the list is NOT enforced, and why.

@@ -173,6 +173,11 @@ def cors_origins() -> list[str]:
     default = "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
     raw = os.getenv("CORS_ORIGINS", default if not is_railway() else "")
     origins = [o.strip() for o in raw.split(",") if o.strip()]
+    if is_railway():
+        # Exact origins only: the hosted app's own public web origins.
+        from services.brand import PUBLIC_WEB_ORIGINS
+
+        origins.extend(PUBLIC_WEB_ORIGINS)
 
     domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
     if domain:
@@ -190,25 +195,11 @@ def cors_origins() -> list[str]:
     if extra:
         origins.extend(o.strip() for o in extra.split(",") if o.strip())
 
-    # Tenant custom domains configured via workspace APIs — customers set these
-    # so the SPA at https://data.customer.com can call the API with credentials.
-    if getenv_brand("CORS_INCLUDE_TENANT_DOMAINS", "1").lower() not in ("0", "false", "no"):
-        try:
-            from services.tenant_store import list_tenants
-
-            for tenant in list_tenants():
-                host = (tenant.custom_domain or "").strip().lower()
-                # A record predating workspace scoping serves no workspace, so
-                # its domain is not a browser origin we trust with credentials —
-                # the same refusal domain resolution already makes.
-                if not host or not tenant.workspace_id:
-                    continue
-                if host.startswith("http://") or host.startswith("https://"):
-                    origins.append(host.rstrip("/"))
-                else:
-                    origins.append(f"https://{host}")
-        except Exception:
-            pass
+    # Tenant custom domains are NOT listed here (D337): a saved domain is only
+    # a claim, and this list is read once at startup and trusted for every
+    # request. services.cors_policy.TenantAwareCORSMiddleware admits a tenant
+    # origin live, only once its DNS challenge passed and only on requests
+    # scoped to that tenant's workspace.
 
     seen: set[str] = set()
     unique: list[str] = []
@@ -217,6 +208,19 @@ def cors_origins() -> list[str]:
             seen.add(o)
             unique.append(o)
     return unique or ["http://localhost:5173"]
+
+
+def cors_origin_regex() -> str | None:
+    """An explicit operator-set CORS origin pattern, else ``None``.
+
+    There is no default pattern. The old Railway default accepted any
+    ``https://*.up.railway.app`` origin with credentials, and anyone can host
+    a site there, so a stranger's page could make signed-in calls to the API
+    (same class as D337). Browser origins are named exactly in
+    :func:`cors_origins` instead.
+    """
+    raw = os.getenv("CORS_ORIGIN_REGEX", "").strip()
+    return raw or None
 
 
 def docs_enabled() -> bool:
@@ -337,7 +341,31 @@ def enforce_production_config() -> None:
 
 
 def public_url() -> str:
-    """Public API base URL used for retry/resume links in notifications."""
+    """Public API base URL for absolute links handed to users (MCP OAuth metadata).
+
+    ``DATAWRAP_PUBLIC_URL``, else the configured public origin
+    (``services.public_origin.configured_origin``: public API origin, then the
+    web origin the browser reaches the API through). Never this service's own
+    ``RAILWAY_PUBLIC_DOMAIN``: on the API service that is the internal backend
+    host (D339). ``""`` when nothing is configured.
+    """
+    explicit = getenv_brand("PUBLIC_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    from services.public_origin import configured_origin
+
+    return configured_origin()
+
+
+def api_service_url() -> str:
+    """This API service's own base URL, for protocol metadata only (MCP OAuth).
+
+    Kept on the resolution MCP OAuth was deployed with: ``DATAWRAP_PUBLIC_URL``,
+    else this service's ``RAILWAY_PUBLIC_DOMAIN``. The audience is a value MCP
+    clients and the identity provider already hold, so it must not move with
+    the user-facing origin (D339 changed only :func:`public_url`); set
+    ``DATAWRAP_MCP_OAUTH_AUDIENCE`` to change it on purpose.
+    """
     explicit = getenv_brand("PUBLIC_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
@@ -374,7 +402,11 @@ def email_provider_config() -> dict[str, Any]:
 
 
 def web_url() -> str:
-    """Public web UI base URL used for clickable job links."""
+    """Public web UI base URL used for clickable job links.
+
+    Only the configured web origin: this process is the API service, whose
+    ``RAILWAY_PUBLIC_DOMAIN`` is the internal backend host, not the web UI (D339).
+    """
     explicit = getenv_brand("WEB_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
@@ -383,10 +415,6 @@ def web_url() -> str:
         if web_domain.startswith("http"):
             return web_domain.rstrip("/")
         return f"https://{web_domain}"
-    if is_railway():
-        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
-        if domain:
-            return f"https://{domain}"
     return ""
 
 

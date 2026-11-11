@@ -472,8 +472,13 @@ def test_an_unscoped_record_is_not_a_trusted_browser_origin(stores, monkeypatch)
     monkeypatch.delenv("CORS_ORIGINS", raising=False)
 
     origins = platform_config.cors_origins()
-    assert "https://scoped.example.com" in origins
+    # D337: no saved tenant domain is a static origin; verified ones are
+    # admitted live by services.cors_policy, workspace-scoped.
+    assert "https://scoped.example.com" not in origins
     assert "https://legacy.example.com" not in origins
+    from services import cors_policy
+
+    assert cors_policy.tenant_custom_origin_allowed("https://legacy.example.com") is False
 
 
 def _foreign_tenant(admin) -> tuple[str, str, TestClient]:

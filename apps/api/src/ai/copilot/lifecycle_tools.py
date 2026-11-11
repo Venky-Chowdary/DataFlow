@@ -244,6 +244,42 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "list_cdc_mapping_reviews",
+        "description": (
+            "List the CDC mapping reviews on a saved source: tables whose schema "
+            "changed while CDC was reading them. An open review holds the "
+            "schedules that read that table (and only that table) until it is "
+            "acknowledged. Read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string", "description": "Saved source connector name"},
+                "table": {"type": "string", "description": "Only reviews on this table"},
+                "status": {"type": "string", "description": "open (default), acknowledged or all"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "acknowledge_cdc_mapping_review",
+        "description": (
+            "Stage acknowledging one CDC mapping review after the mapping for its "
+            "table was checked, so the schedules on that table may run again. "
+            "Does not remap columns; CDC stays at-least-once. Pending action "
+            "until Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "review_id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["review_id"],
+        },
+    },
+    {
         "name": "rebaseline_transfer",
         "description": (
             "Accept the current destination as the append-continuity baseline for "
@@ -492,6 +528,7 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "rebaseline_transfer": "rebaseline_transfer",
     "recover_schedule_destination": "recover_schedule_destination",
     "cleanup_cdc_captures": "cleanup_cdc_captures",
+    "acknowledge_cdc_mapping_review": "acknowledge_cdc_mapping_review",
 }
 
 
@@ -1958,6 +1995,87 @@ def list_cdc_captures(connector_id: str = "", name: str = "") -> ToolResult:
             error=f"Could not read the source's replication slots: {exc}",
         )
     return _tool_result("list_cdc_captures", success=True, output={**brief, **inv})
+
+
+def list_cdc_mapping_reviews(
+    connector_id: str = "", name: str = "", table: str = "", status: str = "open"
+) -> ToolResult:
+    """The reviews GET /api/v1/cdc/mapping-reviews lists, by saved source (D346)."""
+    tool = "list_cdc_mapping_reviews"
+    conn, err = _connector(tool, connector_id, name)
+    if err:
+        return err
+    assert conn is not None
+    brief = _connector_brief(conn)
+    if not brief["connector_id"]:
+        return _unresolved_id_error(tool, conn)
+    wanted = str(status or "open").strip().lower() or "open"
+    if wanted not in {"open", "acknowledged", "all"}:
+        return _tool_result(tool, success=False, output=None,
+                            error="status must be open, acknowledged or all.")
+    from services.cdc_mapping_review import (
+        acknowledge_remedy,
+        list_reviews,
+        review_matches_table,
+        review_source_keys,
+    )
+
+    cfg = dict(conn)
+    reviews: dict[str, dict[str, Any]] = {}
+    for key in review_source_keys(cfg, brief["connector_id"]):
+        for row in list_reviews(source_key=key, status=wanted, limit=200):
+            if table and not review_matches_table(
+                str(row.get("table") or ""), table, str(cfg.get("schema") or "")
+            ):
+                continue
+            reviews.setdefault(str(row.get("id") or ""), row)
+    rows = list(reviews.values())
+    out: dict[str, Any] = {**brief, "reviews": rows, "count": len(rows)}
+    open_ids = [str(r.get("id") or "") for r in rows if r.get("status") == "open"]
+    if open_ids:
+        out["next"] = (
+            "Check the mapping for each table, then acknowledge its review: "
+            + acknowledge_remedy(open_ids[0])
+        )
+    return _tool_result(tool, success=True, output=out)
+
+
+def stage_acknowledge_cdc_mapping_review(review_id: str = "", reason: str = "") -> ToolResult:
+    """Stage the acknowledge; Confirm runs the REST route that owns it."""
+    tool = "acknowledge_cdc_mapping_review"
+    rid = str(review_id or "").strip()
+    if not rid:
+        return _tool_result(tool, success=False, output=None, error=(
+            "review_id is required — copy it from the refusal or from list_cdc_mapping_reviews."
+        ))
+    from services.cdc_mapping_review import list_reviews
+
+    review = next(
+        (r for r in list_reviews(status="open", limit=10_000) if r.get("id") == rid), None
+    )
+    if review is None:
+        return _tool_result(tool, success=False, output=None, error=(
+            f"No open CDC mapping review “{rid}” in this workspace. "
+            "List them with list_cdc_mapping_reviews."
+        ))
+    table = str(review.get("table") or "")
+    return _stage(
+        tool,
+        payload={"review_id": rid, "reason": str(reason or "")},
+        preview={
+            "review_id": rid,
+            "table": table,
+            "source_key": review.get("source_key"),
+            "columns": list(review.get("column_names") or []),
+            "flagged_at": review.get("created_at"),
+            "effect": (
+                f"Schedules that read {table} on this source may run again. "
+                "Acknowledging does not remap columns; CDC stays at-least-once."
+            ),
+        },
+        label=f"Acknowledge CDC mapping review on {table}",
+        destructive=False,
+    )
 
 
 def stage_cleanup_cdc_captures(

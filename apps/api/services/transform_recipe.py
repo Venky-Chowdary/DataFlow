@@ -69,7 +69,7 @@ _ENGINE_OP_TO_SHAPE: dict[str, tuple[str, dict[str, Any]]] = {
     "text": ("cast_column", {"to_type": "text"}),
     "hash_pii": ("hash_pii", {}),
     "mask_pii": ("mask_pii", {}),
-    "normalize_unicode": ("normalize_unicode", {}),
+    "normalize_unicode": ("normalize_unicode", {"form": "NFKC", "collapse_whitespace": True}),
     "strip_controls": ("strip_characters", {"characters": "controls"}),
 }
 
@@ -82,13 +82,31 @@ _ON_ERROR_TO_SHAPE = {"fail": "refuse"}
 #: Engine parameterized ops that map onto shape options faithfully.
 #: ``assume_timezone:`` is a timestamp cast with a zone: both attach the zone
 #: through ``transform_engine.attach_timezone`` (gap refused, PostgreSQL fold).
-#: ``concat:`` (suffix literal) has no faithful shape step, so it refuses to
-#: compile — listed here so the refusal is deliberate, not an unhandled branch.
+#: ``concat:TEXT`` appends a literal suffix: it compiles to ``set_value`` with
+#: an expression that keeps NULL as NULL, as the Map transform does (D330).
 _ENGINE_PREFIX_TO_SHAPE = (
     ("replace:", "replace"),
     ("default:", "default_if_null"),
     ("assume_timezone:", "cast_column"),
+    ("concat:", "set_value"),
 )
+
+
+def _concat_suffix_expression(column: str, suffix: str) -> str:
+    """``concat:SUFFIX`` on ``column`` as a shape expression.
+
+    The column is a ``[name]`` reference and the suffix a quoted literal (the
+    quote doubled), so neither can change the expression's structure. NULL
+    stays NULL: the engine's ``concat:`` never turns a missing value into the
+    bare suffix.
+    """
+    if not column or "]" in column:
+        raise ValueError(
+            f"concat: on column {column!r} cannot be expressed as a shape step "
+            "(the column name cannot be referenced); rename the column first"
+        )
+    literal = "'" + suffix.replace("'", "''") + "'"
+    return f"if(is_null([{column}]), null, concat([{column}], {literal}))"
 
 
 def _now() -> str:
@@ -373,12 +391,17 @@ def _substitute_params(value: Any, bound: dict[str, Any]) -> Any:
     )
 
 
-def _step_to_shape_wire(step: RecipeStep) -> dict[str, Any]:
+def _step_to_shape_wire(step: RecipeStep, *, engine_names: bool = False) -> dict[str, Any]:
     """One recipe step → one shape-catalog wire step.
 
     Refuses (raises ValueError naming the step) when the op cannot reach the
     shape engine faithfully — a recipe that half-compiles is worse than one
     that refuses to bind.
+
+    ``engine_names`` says the op is a Map transform name (MCP
+    ``column_transforms``), so an engine id that is also a shape op name
+    (``normalize_unicode``) compiles to what the Map transform does, not to
+    the shape op of the same name (D332).
     """
     from services.shape_models import STEP_CATALOG
 
@@ -386,7 +409,9 @@ def _step_to_shape_wire(step: RecipeStep) -> dict[str, Any]:
     if step.output_column and "to" not in options:
         options["to"] = step.output_column
 
-    if step.op in STEP_CATALOG:
+    if step.op in STEP_CATALOG and not (
+        engine_names and normalize_engine_transform(step.op) in _ENGINE_OP_TO_SHAPE
+    ):
         op = step.op
     else:
         prefix_hit = next(
@@ -402,6 +427,9 @@ def _step_to_shape_wire(step: RecipeStep) -> dict[str, Any]:
             elif prefix_hit == "assume_timezone:":
                 op = "cast_column"
                 options = {"to_type": "timestamp", "timezone": arg.strip()}
+            elif prefix_hit == "concat:":
+                op = "set_value"
+                options = {"expression": _concat_suffix_expression(step.column, arg)}
             else:  # default:
                 op = "default_if_null"
                 options = {"value": arg}

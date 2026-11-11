@@ -325,6 +325,40 @@ def _row_hash(
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+def _version_unchanged(
+    snap: dict[str, Any] | None,
+    hydrated: dict[str, Any],
+    new_hash: str,
+    target_cols: list[str],
+    *,
+    tracked: list[str] | None = None,
+    stamp_set: set[str] | None = None,
+) -> bool:
+    """Whether the incoming row carries the current version's values.
+
+    The stored ``row_hash`` was taken over the columns the table had when the
+    version was written. After an additive column it no longer covers the
+    current column set, so every key hashed as changed and an unchanged row
+    was closed and re-opened value-identical (D348). A hash mismatch is
+    therefore settled on the values the hash covers, compared cell by cell
+    with the same wire the hash uses: a new column that is NULL on both sides
+    is no change, a real value anywhere still is.
+    """
+    if snap is None:
+        return False
+    if str(snap.get("hash") or "") == new_hash:
+        return True
+    from connectors.writer_common import conflict_key_wire
+
+    stamps = stamp_set or _STAMP_SET
+    attrs = snap.get("attrs") or {}
+    return all(
+        conflict_key_wire(hydrated.get(c)) == conflict_key_wire(attrs.get(c))
+        for c in (list(tracked) if tracked else target_cols)
+        if c not in stamps
+    )
+
+
 def _hydrate_scd2_omit(
     row: dict[str, Any],
     current_attrs: dict[str, Any] | None,
@@ -396,6 +430,42 @@ def _ensure_scd_columns(
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
+def _add_new_data_columns(
+    engine: Any,
+    table_obj: Any,
+    dialect_name: str,
+    target_cols: list[str],
+) -> list[str]:
+    """ADD (nullable) mapped columns an existing history table lacks.
+
+    Called only when the run's schema policy approved additive evolution
+    (``backfill_new_fields``: propagate_columns, or an acknowledged review):
+    the same ADD COLUMN overwrite and upsert writers apply, typed exactly as
+    this table's CREATE would type the column. Closed versions keep NULL in
+    it. Without it a propagate run refused the new column, or inserted into a
+    column the table does not have (D347). An ALTER that fails fails the run.
+    """
+    import sqlalchemy as sa
+
+    existing = {
+        str(c["name"]).casefold()
+        for c in sa.inspect(engine).get_columns(table_obj.name, schema=table_obj.schema)
+    }
+    qualified = _qualified_name(table_obj.name, table_obj.schema, dialect_name)
+    added: list[str] = []
+    for name in target_cols:
+        if not name or str(name).casefold() in existing or name not in table_obj.c:
+            continue
+        type_ddl = table_obj.c[name].type.compile(dialect=engine.dialect)
+        col_quoted = quote_stored_identifier(dialect_name, name)
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(f"ALTER TABLE {qualified} ADD COLUMN {col_quoted} {type_ddl}")
+            )
+        added.append(str(name))
+    return added
+
+
 def _build_scd_table(
     engine: Any,
     table_name: str,
@@ -407,8 +477,12 @@ def _build_scd_table(
     *,
     mappings: list[dict[str, Any]] | None = None,
     source_schema_catalog: dict[str, Any] | None = None,
+    add_new_columns: bool = False,
 ) -> Any:
     """Build or reflect the destination table with SCD2 audit columns.
+
+    ``add_new_columns`` is the run's approved additive evolution: mapped
+    columns an existing table lacks are added (nullable) before the merge.
 
     ``source_schema_catalog`` is the source's create-new fidelity catalog. A
     CREATE that never saw it took the server default collation, so a MySQL
@@ -472,6 +546,8 @@ def _build_scd_table(
     )
     if table_exists:
         _ensure_scd_columns(engine, table_obj, dialect_name, cols)
+        if add_new_columns:
+            _add_new_data_columns(engine, table_obj, dialect_name, list(target_cols))
     else:
         table_obj.create(engine, checkfirst=True)
     return table_obj
@@ -1301,7 +1377,10 @@ def _merge_scd2_bundle(
             dialect=dialect_name,
         )
         hydrated[cols["row_hash"]] = new_hash
-        if key in current_hashes and current_hashes[key] == new_hash:
+        if key in current_hashes and _version_unchanged(
+            snap, hydrated, new_hash, target_cols,
+            tracked=tracked or None, stamp_set=stamps,
+        ):
             # Tracked attributes unchanged — Type-1 refresh of untracked
             # columns on the current row, only where they actually differ.
             if cols.get("type1") and snap is not None and untracked_cols:
@@ -1373,8 +1452,12 @@ def apply_scd2(
     complete_snapshot: bool = False,
     scd2_opts: dict[str, Any] | None = None,
     source_endpoint: Any = None,
+    add_new_columns: bool = False,
 ) -> dict[str, Any]:
     """Apply an SCD2 merge against the SQL destination.
+
+    ``add_new_columns`` (the run's ``backfill_new_fields``) adds mapped columns
+    an existing history table lacks before the merge (D347).
 
     ``source_endpoint`` is the run's source; its create-new catalog (keys,
     nullability, collation) reaches the history table's CREATE exactly as on
@@ -1487,6 +1570,7 @@ def apply_scd2(
                 db_type, cols,
                 mappings=mappings,
                 source_schema_catalog=source_schema_catalog,
+                add_new_columns=add_new_columns,
             )
             # Window start for the Gate-8 version recount: every stamp this
             # call writes is >= this instant. Callers that split the run
@@ -2072,7 +2156,10 @@ def preview_scd2_merge(
                                 "attrs": dict(hydrated),
                             }
                             continue
-                        if str(snap.get("hash") or "") != new_hash:
+                        if not _version_unchanged(
+                            snap, hydrated, new_hash, target_cols,
+                            tracked=tracked or None, stamp_set=stamps,
+                        ):
                             closes.append(label)
                             opens.append(label)
                             snaps[key] = {

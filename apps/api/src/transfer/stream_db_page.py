@@ -63,11 +63,12 @@ def _boundary_rows_already_landed(run, headers: list[str], rows: list[list[str]]
             )
         )
         match_cols = all_cols
-        if (
+        keyed_append = bool(
             not requires_upsert(cfg.effective_sync)
             and cfg.pk_target_cols
             and all(c in all_cols for c in cfg.pk_target_cols)
-        ):
+        )
+        if keyed_append:
             match_cols = [cursor_dest_col] + [
                 c for c in cfg.pk_target_cols if c != cursor_dest_col
             ]
@@ -75,8 +76,12 @@ def _boundary_rows_already_landed(run, headers: list[str], rows: list[list[str]]
             # A run that ADDs a column (approved schema evolution) re-reads
             # tie peers whose new column the destination does not have yet.
             # Selecting it failed the read, which fails open: every peer was
-            # delivered twice. Compare on the columns the table holds, and
-            # keep a peer only when its new columns carry a value.
+            # delivered twice. Compare on the columns the table holds. An
+            # upsert keeps a peer whose new columns carry a value (it rewrites
+            # that key in place); an append never does — the destination
+            # already holds that row version, and a DEFAULT on the added
+            # column gives every re-read peer a value, so keeping it appended
+            # the watermark row a second time (D335).
             landed = read_target_sample(
                 cfg.dest_bind_dialect or cfg.dest_type,
                 cfg.dest_cfg,
@@ -91,7 +96,7 @@ def _boundary_rows_already_landed(run, headers: list[str], rows: list[list[str]]
             read_cols = [c for c in all_cols if c.lower() in live_cols] or all_cols
             cur._boundary_fps_state["new_cols"] = [
                 c for c in all_cols if c.lower() not in live_cols
-            ] if landed else []
+            ] if landed and requires_upsert(cfg.effective_sync) else []
             match_cols = [c for c in match_cols if c in read_cols] or match_cols
             cur._boundary_fps_state["match_cols"] = match_cols
             dest_rows = read_target_sample(
@@ -144,10 +149,49 @@ def _boundary_rows_already_landed(run, headers: list[str], rows: list[list[str]]
                 len(drop),
                 str(cur_val),
             )
+            if keyed_append:
+                _record_landed_boundary_keys(
+                    run, headers, [rows[boundary_idx[i]] for i in drop]
+                )
         return {boundary_idx[i] for i in drop}
     except Exception as exc:  # fail open — dedupe must never lose a row
         _stream.logger.warning("Boundary dedupe skipped (fail-open): %s", exc)
         return set()
+
+
+#: dest_summary list of ``{target key column: value}`` for keyed-append tie
+#: peers the boundary dedupe left in place (an earlier run's write).
+LANDED_BOUNDARY_KEYS = "incremental_window_landed_keys"
+
+
+def _record_landed_boundary_keys(run, headers: list[str], rows: list[list[str]]) -> None:
+    """Name the tie peers an earlier run delivered, by destination key.
+
+    They sit inside this run's inclusive window but are not its write, so the
+    verification ladder grades neither side of them — a column this run added
+    (D335: ``ADD COLUMN tier DEFAULT 1``) has a source value on such a row and
+    no destination value, and an append never rewrites the stored row.
+    """
+    cfg = run.cfg
+    summary = getattr(run.tally, "dest_summary", None)
+    if not isinstance(summary, dict) or not cfg.pk_target_cols:
+        return
+    to_source = {
+        str(m.get("target") or ""): str(m.get("source") or "")
+        for m in cfg.mappings or []
+        if isinstance(m, dict) and m.get("target") and m.get("source")
+    }
+    positions = {}
+    for col in cfg.pk_target_cols:
+        idx = header_column_index(headers or [], to_source.get(col, col))
+        if idx is None:
+            return
+        positions[col] = idx
+    recorded = summary.setdefault(LANDED_BOUNDARY_KEYS, [])
+    for row in rows:
+        key = {c: row[i] if i < len(row) else None for c, i in positions.items()}
+        if key not in recorded:
+            recorded.append(key)
 
 
 def _rows_after_watermark_matrix(

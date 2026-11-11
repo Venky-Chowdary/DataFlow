@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../../components/Toast";
-import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, rotateByokKey, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
+import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, rotateByokKey, SecurityPosture, Tenant, updateTenant, verifyTenantCustomDomain } from "../../lib/api";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import { TENANT_SAVED_EVENT, WORKSPACE_CHANGED_EVENT, concreteWorkspaceId, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
@@ -39,6 +39,7 @@ export function TenantSettings() {
   const [dataRegion, setDataRegion] = useState("us-east-1");
   const [securityContact, setSecurityContact] = useState("");
   const [mfaRequired, setMfaRequired] = useState(false);
+  const [ssoEnforced, setSsoEnforced] = useState(false);
   const [sessionTimeout, setSessionTimeout] = useState(8);
   // A saved timeout is enforced unless the admin unticks this (QA round 11).
   const [enforceTimeout, setEnforceTimeout] = useState(true);
@@ -97,6 +98,7 @@ export function TenantSettings() {
           setDataRegion(t.data_region || "us-east-1");
           setSecurityContact(t.security_contact_email);
           setMfaRequired(t.mfa_required);
+          setSsoEnforced(Boolean(t.sso_enforced));
           setSessionTimeout(t.session_timeout_hours);
           setEnforceTimeout(Boolean(t.enforce_session_timeout));
           setIpAllowlist((t.ip_allowlist || []).join("\n"));
@@ -143,6 +145,7 @@ export function TenantSettings() {
         byok_key_id: tenant?.byok_key_id || "",
         security_contact_email: securityContact.trim(),
         mfa_required: mfaRequired,
+        sso_enforced: ssoEnforced,
         session_timeout_hours: Math.max(1, Math.min(24, Number(sessionTimeout) || 8)),
         enforce_session_timeout: enforceTimeout,
         ip_allowlist: ipAllowlist.split("\n").map((s) => s.trim()).filter(Boolean),
@@ -168,6 +171,21 @@ export function TenantSettings() {
       toast({ title: "Save failed", message: err instanceof Error ? err.message : "Could not save tenant settings", tone: "error" });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const [verifyingDomain, setVerifyingDomain] = useState(false);
+  const verifyDomain = async () => {
+    if (!allowManage() || !tenant) return;
+    setVerifyingDomain(true);
+    try {
+      const next = await verifyTenantCustomDomain(tenant.id);
+      setTenant(next);
+      toast({ title: "Custom domain verified", message: `https://${next.custom_domain} is now accepted as a browser origin for this workspace.`, tone: "success" });
+    } catch (err) {
+      toast({ title: "Domain not verified", message: err instanceof Error ? err.message : "Could not verify the custom domain", tone: "warning" });
+    } finally {
+      setVerifyingDomain(false);
     }
   };
 
@@ -255,6 +273,27 @@ export function TenantSettings() {
             <div className="df2-settings-field">
               <label htmlFor="tenant-domain">Custom domain</label>
               <input id="tenant-domain" className="df2-input" value={customDomain} onChange={(e) => setCustomDomain(e.target.value)} placeholder="transfers.example.com" />
+              {tenant?.custom_domain && tenant.custom_domain_verification && (
+                <div className="df2-settings-hint" data-testid="tenant-domain-verification">
+                  {tenant.custom_domain_verification.verified ? (
+                    <p>Verified: https://{tenant.custom_domain} is accepted as a browser origin for this workspace.</p>
+                  ) : (
+                    <>
+                      <p>
+                        Not verified: the API does not accept this domain as a browser origin until you prove you own it.
+                        Publish this DNS record, then verify.
+                      </p>
+                      <p>
+                        <code>{tenant.custom_domain_verification.record_name}</code> TXT{" "}
+                        <code>{tenant.custom_domain_verification.record_value}</code>
+                      </p>
+                      <Button variant="secondary" disabled={verifyingDomain || !manage.allowed} onClick={verifyDomain}>
+                        {verifyingDomain ? "Verifying…" : "Verify domain"}
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
             <div className="df2-settings-field">
               <label htmlFor="tenant-region">Data region</label>
@@ -271,7 +310,7 @@ export function TenantSettings() {
               <input id="tenant-timeout" className="df2-input" type="number" min={1} max={24} value={sessionTimeout} onChange={(e) => setSessionTimeout(Number(e.target.value))} />
               <label className="df2-settings-hint" htmlFor="tenant-timeout-enforce">
                 <input id="tenant-timeout-enforce" type="checkbox" checked={enforceTimeout} onChange={(e) => setEnforceTimeout(e.target.checked)} />{" "}
-                Enforce as idle timeout — sign members out after this many idle hours (API keys are not affected).
+                Enforce as idle timeout — sign members out after this many idle hours; new sign-ins also expire after this many hours (API keys are not affected).
               </label>
             </div>
           </div>
@@ -287,6 +326,21 @@ export function TenantSettings() {
               </p>
             </div>
             <button type="button" role="switch" aria-checked={mfaRequired} aria-label="Require two-factor authentication" className={`df2-switch ${mfaRequired ? "on" : ""}`} onClick={() => setMfaRequired((v) => !v)}>
+              <span className="df2-switch-thumb" />
+            </button>
+          </div>
+
+          <div className="df2-settings-policy-row df2-team-spaced">
+            <div>
+              <h3>Require single sign-on</h3>
+              <p>
+                Members of this workspace must sign in through your deployment&apos;s single sign-on; password
+                sign-in is refused. Platform administrators keep an audited password break-glass; API keys and
+                SCIM are not affected. The SSO provider itself is configured deployment-wide by your platform
+                administrator. Turn this on from a session that signed in with SSO.
+              </p>
+            </div>
+            <button type="button" role="switch" aria-checked={ssoEnforced} aria-label="Require single sign-on" className={`df2-switch ${ssoEnforced ? "on" : ""}`} onClick={() => setSsoEnforced((v) => !v)}>
               <span className="df2-switch-thumb" />
             </button>
           </div>

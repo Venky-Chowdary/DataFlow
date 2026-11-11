@@ -387,6 +387,7 @@
   "POST /api/v1/workspace/tenant": "workspace.manage",
   "POST /api/v1/workspace/tenant/byok-keys": "workspace.manage",
   "POST /api/v1/workspace/tenant/byok-keys/{key_id}/rotate": "workspace.manage",
+  "POST /api/v1/workspace/tenant/{tenant_id}/custom-domain/verify": "workspace.manage",
   "POST /auth/change-password": "account.self",
   "POST /auth/email/change": "account.self",
   "POST /auth/email/change/confirm": "account.self",

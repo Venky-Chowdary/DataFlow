@@ -57,6 +57,8 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
             "rows_expanded",
             # Older images of a key the upsert kept the latest of (D89).
             "collapsed_duplicate_rows",
+            # Values a millisecond carrier truncated under the ack (D148).
+            "ms_truncated_values",
         ):
             if key in meta and meta[key] is not None:
                 out[key] = meta[key]

@@ -865,10 +865,10 @@ class UniversalTransferEngine:
         self._resolve_saved_connectors(request)
         stamp_kafka_source(request)
         from connectors.sql_identifiers import unsafe_destination_identifier_reason
-
-        ident_err = unsafe_destination_identifier_reason(
-            str(request.destination.format or ""),
-            str(request.destination.table or request.destination.collection or ""),
+        from services.local_file_policy import local_destination_refusal  # D276: local disk, before any write
+        dest = request.destination
+        ident_err = local_destination_refusal(dest) or (
+            unsafe_destination_identifier_reason(str(dest.format or ""), str(dest.table or dest.collection or ""))
         )
         if ident_err:
             try:
@@ -2510,7 +2510,7 @@ class UniversalTransferEngine:
                                 # SCD2 never narrows its read (bind_batch_incremental),
                                 # so an unlimited read is the whole source population.
                                 complete_snapshot=not int(request.limit or 0),
-                                scd2_opts=_scd2_opts,
+                                scd2_opts=_scd2_opts, add_new_columns=backfill_fields,
                                 source_endpoint=request.source,
                             ),
                             budget=RetryBudget(
@@ -3444,7 +3444,8 @@ class UniversalTransferEngine:
                 pf = apply_policy_gates(
                     pf,
                     _engine_module._execute_policy_gates_for_request(
-                        request, source_columns=columns, resume=resume
+                        request, source_columns=columns, resume=resume,
+                        planned=(mappings, schema, dest_schema_types),
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
@@ -4058,7 +4059,6 @@ class UniversalTransferEngine:
             if lost is not None:
                 return lost
             verified = True
-
 
             if effective_sync == "cdc" and isinstance(dest_summary, dict):
                 from services.cdc_catchup import unread_postgres_change

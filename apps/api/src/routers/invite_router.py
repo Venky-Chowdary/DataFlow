@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
@@ -59,7 +59,23 @@ async def accept(body: InviteAcceptBody, request: Request, response: Response) -
         ua=request.headers.get("user-agent", "")[:512], device_id=body.device_id)
     session = result.pop("session", None)
     if session is not None:
+        from services.api_errors import ApiError
+        from services.sso_enforcement import refuse_password_sign_in
+
+        email = result["user"]["email"]
+        try:
+            # D343: a workspace that requires SSO gets a member who signs in
+            # through SSO, not a password session opened by the invitation.
+            refuse_password_sign_in(email, request=request, resource="/invites/accept")
+        except (ApiError, HTTPException) as refusal:
+            from services.auth_state import get_auth_state
+
+            get_auth_state().revoke_session(session["jti"])
+            if not isinstance(refusal, ApiError):
+                raise
+            result["sso_required"] = {"message": refusal.message, **refusal.extra}
+            return result
         from src.services.browser_session import issue_browser_session
 
-        result.update(issue_browser_session(response, session, result["user"]["email"]))
+        result.update(issue_browser_session(response, session, email))
     return result

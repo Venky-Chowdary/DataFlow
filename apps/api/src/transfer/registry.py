@@ -148,6 +148,22 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
 
     src_fmt = _resolve(source_format)
     dst_fmt = _resolve(dest_format)
+    d_kind = (dest_kind or "").strip().lower()
+    if d_kind in {"database", "file", "file_export"}:
+        # D276: SQLite and file exports land on the server's own disk; not a
+        # destination on the hosted cloud (env reads only). DuckDB and Iceberg
+        # depend on the path, judged where the endpoint is known.
+        try:
+            from services.local_file_policy import local_destination_refusal
+        except ImportError:  # loaded standalone (test_registry.py)
+            local_destination_refusal = None  # type: ignore[assignment]
+        refusal = (
+            local_destination_refusal(dst_fmt, None if d_kind == "database" else {"kind": d_kind})
+            if local_destination_refusal
+            else None
+        )
+        if refusal:
+            return False, refusal
 
     # Source-only SaaS connectors can feed any live destination.
     if source_kind == "database" and _source_only_supported(src_fmt):
@@ -349,12 +365,25 @@ def get_capabilities() -> dict:
             "status": "live",
         }
 
+    from services.local_file_policy import (
+        DESTINATION_UNAVAILABLE_LABEL,
+        local_destination_refusal,
+        local_variant_notes,
+    )
+
     combos: list[dict] = []
     seen_combos: set[tuple[str, str, str, str]] = set()
+    sqlite_dest_refused = local_destination_refusal("sqlite") is not None
+    # D276: a file export lands on the writing server's disk (exports_dir()).
+    file_export_refusal = local_destination_refusal("csv", {"kind": "file_export"})
 
     def _add(sk: str, sf: str, dk: str, df: str, op: str) -> None:
         key = (sk, sf.lower(), dk, df.lower())
-        if key in seen_combos:
+        if (
+            key in seen_combos
+            or (sqlite_dest_refused and dk == "database" and key[3] == "sqlite")
+            or (file_export_refusal and dk == "file_export")
+        ):
             return
         seen_combos.add(key)
         combos.append(_combo(sk, sf, dk, df, op))
@@ -379,6 +408,9 @@ def get_capabilities() -> dict:
 
     source_dbs = []
     dest_dbs = []
+    # D276: a destination this host refuses stays listed, disabled, with why —
+    # the picker shows "Not available on cloud" instead of silently dropping it.
+    dest_unavailable: list[dict[str, str]] = []
     for cid in live_catalog:
         driver = resolve_driver_type(cid)
         if driver in _FILE_FORMATS:
@@ -388,7 +420,13 @@ def get_capabilities() -> dict:
         if source_ready(caps) or _source_only_ready(caps):
             source_dbs.append(cid)
         if dest_ready(caps):
-            dest_dbs.append(cid)
+            refusal = local_destination_refusal(cid)
+            if refusal:
+                dest_unavailable.append(
+                    {"id": cid, "reason": DESTINATION_UNAVAILABLE_LABEL, "message": refusal}
+                )
+            else:
+                dest_dbs.append(cid)
 
     drivers = transfer_live_driver_types()
     try:
@@ -429,7 +467,15 @@ def get_capabilities() -> dict:
         "live_combinations": combos,
         "source_formats": LIVE_SOURCE_FORMATS,
         "destination_databases": dest_dbs,
-        "destination_file_formats": LIVE_DEST_FILE_FORMATS,
+        "destination_databases_unavailable": dest_unavailable,
+        # DuckDB / Iceberg stay offered (MotherDuck, remote warehouse + catalog);
+        # their local-file variant is refused here, with why.
+        "destination_local_variants_unavailable": local_variant_notes(dest_dbs),
+        "destination_file_formats": [] if file_export_refusal else LIVE_DEST_FILE_FORMATS,
+        "destination_file_formats_unavailable": [
+            {"id": fmt, "reason": DESTINATION_UNAVAILABLE_LABEL, "message": file_export_refusal}
+            for fmt in (LIVE_DEST_FILE_FORMATS if file_export_refusal else [])
+        ],
         "source_databases": source_dbs,
         "transfer_live_drivers": drivers,
         "transfer_live_count": summary["transfer_live_count"],

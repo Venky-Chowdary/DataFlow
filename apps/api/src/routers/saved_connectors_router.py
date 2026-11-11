@@ -231,7 +231,6 @@ def _can_access_connector(request: Request, conn: Any, *, write: bool = False) -
     """
     actor = _actor_email(request)
     scope = tenant_scope(request)
-    is_admin = scope.unrestricted
     if not scope.allows(conn.workspace_id):
         return False
     # The RBAC permission comes from the actor's role, not from this
@@ -239,7 +238,7 @@ def _can_access_connector(request: Request, conn: Any, *, write: bool = False) -
     if write and not scope.can_write(conn.workspace_id):
         return False
     try:
-        from services.resource_acl import assert_resource_acl
+        from services.resource_acl import acl_exempt, assert_resource_acl
 
         assert_resource_acl(
             tenant_id=conn.workspace_id or "",
@@ -247,7 +246,7 @@ def _can_access_connector(request: Request, conn: Any, *, write: bool = False) -
             resource_id=str(getattr(conn, "id", "") or ""),
             principal=actor,
             min_role="editor" if write else "viewer",
-            is_admin=is_admin,
+            is_admin=acl_exempt(scope, conn.workspace_id or ""),
         )
     except PermissionError:
         return False
@@ -336,6 +335,13 @@ def save_connector(
     if existing is not None:
         data = _preserve_masked_secrets(data, existing)
     _refuse_unsafe_egress(data, existing)
+    if existing is None:
+        from src.transfer.connector_capabilities import planned_driver_message
+
+        # D345: a new connector of a Planned type whose driver is not installed
+        # could never connect; refuse it instead of saving a dead connector.
+        if not_installed := planned_driver_message(str(data.get("type") or "")):
+            raise HTTPException(status_code=422, detail=f"{not_installed} Nothing was saved.")
     try:
         conn = create_connector(data)
     except ValueError as exc:

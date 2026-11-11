@@ -1163,7 +1163,9 @@ def custom_domain_card() -> CapabilityCard:
             "Yes — a tenant can set a custom domain (tenant.custom_domain, "
             "for example data.customer.com) and point DNS at the Datawrap "
             "web host. "
-            "API CORS accepts that origin via TenantAwareCORSMiddleware."
+            "API CORS accepts that origin only after a DNS TXT ownership check "
+            "passes (POST /workspace/tenant/{id}/custom-domain/verify), and "
+            "only for requests scoped to the tenant's workspace."
         ),
         source_module="src/routers/workspace_router.py · custom_domain_cors",
         category="enterprise",

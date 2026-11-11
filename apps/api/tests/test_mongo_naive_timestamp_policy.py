@@ -47,10 +47,18 @@ def test_bson_date_keeps_the_time_of_day_for_an_offset_source():
 
 
 def test_sub_millisecond_precision_is_not_preserved():
-    """BSON date counts milliseconds — microseconds are truncated on write."""
+    """BSON date counts milliseconds — a measured microsecond is a truncation.
+
+    Unmeasured, the declaration alone no longer decides (D148): the write-time
+    guard refuses any batch holding a sub-millisecond value.
+    """
+    assert document_instant_wire_preserved(
+        "TIMESTAMPTZ(6)", "date", dest_db="mongodb",
+        population=["2024-01-01T00:00:00.123456+00:00"],
+    ) is False
     assert document_instant_wire_preserved(
         "TIMESTAMPTZ(6)", "date", dest_db="mongodb"
-    ) is False
+    ) is True
     assert document_instant_wire_preserved(
         "TIMESTAMPTZ(3)", "date", dest_db="mongodb"
     ) is True

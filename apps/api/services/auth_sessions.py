@@ -117,7 +117,11 @@ def _session_row(jti: str) -> dict[str, Any] | None:
     doc = _mongo(lambda c: c.find_one({"_id": jti}, {"_id": False, "expires_dt": False}))
     with _LOCK:
         local = _load()["sessions"].get(jti)
-    rows = [r for r in (doc, local) if isinstance(r, dict) and r]
+    return _merge(doc, local)
+
+
+def _merge(*candidates: Any) -> dict[str, Any] | None:
+    rows = [r for r in candidates if isinstance(r, dict) and r]
     if not rows:
         return None
     merged: dict[str, Any] = {}
@@ -137,11 +141,24 @@ def _session_row(jti: str) -> dict[str, Any] | None:
 # ── API ───────────────────────────────────────────────────────────────────
 
 
-def create_session(email: str, *, expires_at: int, amr: list[str] | None = None) -> str:
+def create_session(
+    email: str,
+    *,
+    expires_at: int,
+    amr: list[str] | None = None,
+    ip: str = "",
+    ua: str = "",
+    device_id: str = "",
+    cookie_jti: str = "",
+) -> str:
     """Persist a new session and return its jti.
 
     ``amr`` records how the session was authenticated (``pwd``, ``otp``,
     ``recovery``, ``sso``) for the workspace MFA policy (services.mfa_enforcement).
+    ``ip``/``ua``/``device_id`` are what "Active sessions" shows (D338). ``cookie_jti`` pairs
+    the browser cookie session (services.auth_state) opened by the same sign-in,
+    so revoking this session signs that cookie out too; it is never sent to the
+    client inside the bearer token.
     """
     jti = uuid.uuid4().hex
     issued = time.time()
@@ -153,7 +170,12 @@ def create_session(email: str, *, expires_at: int, amr: list[str] | None = None)
         "created_at_f": issued,
         "expires_at": int(expires_at),
         "revoked_at": None,
+        "ip": str(ip or "")[:64],
+        "ua": str(ua or "")[:512],
+        "device_id": str(device_id or "")[:128],
     }
+    if cookie_jti:
+        row["cookie_jti"] = str(cookie_jti)
     if amr:
         row["amr"] = sorted({str(m) for m in amr})
     expires_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
@@ -212,12 +234,53 @@ def revoke_session(jti: str) -> bool:
     return True
 
 
-def revoke_all_for_email(email: str) -> int:
-    """Revoke every active session for ``email`` (password rotate / force logout)."""
+def get_session(jti: str) -> dict[str, Any] | None:
+    """The merged session row (with its ``jti``), or ``None``."""
+    row = _session_row(jti)
+    return {**row, "jti": jti} if row else None
+
+
+def list_active(email: str) -> list[dict[str, Any]]:
+    """Every live (not revoked, not expired) session of ``email``, newest activity first.
+
+    One Mongo query plus one file read — the "Active sessions" list, not a
+    per-request path.
+    """
+    normalized = email.strip().lower()
+    now = int(time.time())
+    docs = _mongo(
+        lambda c: list(c.find({"email": normalized, "expires_at": {"$gte": now}}, {"expires_dt": False})),
+        default=[],
+    ) or []
+    remote = {str(d.pop("_id")): d for d in docs}
+    with _LOCK:
+        local = {
+            jti: row for jti, row in _load()["sessions"].items()
+            if isinstance(row, dict) and str(row.get("email") or "").strip().lower() == normalized
+        }
+    out: list[dict[str, Any]] = []
+    for jti in set(remote) | set(local):
+        row = _merge(remote.get(jti), local.get(jti))
+        if not row or row.get("revoked_at") is not None or int(row.get("expires_at") or 0) < now:
+            continue
+        out.append({**row, "jti": jti})
+    return sorted(out, key=lambda r: int(r.get("last_seen_at") or 0), reverse=True)
+
+
+def revoke_all_for_email(email: str, *, keep_jti: str = "") -> int:
+    """Revoke every active session for ``email`` (password rotate / force logout).
+
+    ``keep_jti``: the one session left signed in (the caller's own, on a
+    password change or "sign out everywhere else").
+    """
     normalized = email.strip().lower()
     now = int(time.time())
     ids = _mongo(
-        lambda c: [d["_id"] for d in c.find({"email": normalized, "revoked_at": None}, {"_id": 1})],
+        lambda c: [
+            d["_id"]
+            for d in c.find({"email": normalized, "revoked_at": None}, {"_id": 1})
+            if d["_id"] != keep_jti
+        ],
         default=[],
     ) or []
     if ids:
@@ -227,7 +290,7 @@ def revoke_all_for_email(email: str) -> int:
         data = _load()
         changed = False
         for jti, row in list(data["sessions"].items()):
-            if not isinstance(row, dict) or row.get("revoked_at") is not None:
+            if not isinstance(row, dict) or row.get("revoked_at") is not None or jti == keep_jti:
                 continue
             if str(row.get("email") or "").strip().lower() != normalized:
                 continue

@@ -34,6 +34,8 @@ def _boundary_append_dedupe(
 
     ``new_cols`` are columns this run adds: the destination has no history for
     them, so a peer that carries a value there is new information and is kept.
+    Only an upsert passes them (it rewrites the key in place); an append
+    passes none, since keeping such a peer appends the same row twice (D335).
 
     The peers are remapped exactly as the writer maps them — ``remap_dest_types``
     is the write path's type basis (``fingerprint_dest_types``) — and hashed on

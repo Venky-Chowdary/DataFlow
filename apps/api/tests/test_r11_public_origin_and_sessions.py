@@ -12,7 +12,7 @@ import pytest
 from starlette.requests import Request
 
 
-def _request(headers: dict[str, str], *, host: str = "dataflow-api-production-722b.up.railway.app",
+def _request(headers: dict[str, str], *, host: str = "api-service-0000.up.railway.app",
              scheme: str = "http") -> Request:
     raw = [(b"host", host.encode())] + [(k.lower().encode(), v.encode()) for k, v in headers.items()]
     return Request({"type": "http", "scheme": scheme, "server": (host, 80), "path": "/",

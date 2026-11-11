@@ -73,7 +73,8 @@ def list_resource_acls(
         "resource_types": sorted(RESOURCE_TYPES),
         "honesty": (
             "When any grants exist on a resource, non-grantees are denied even if coarse "
-            "RBAC would allow. No grants → fall through to workspace RBAC."
+            "RBAC would allow; admins of the workspace and platform admins keep access. "
+            "No grants → fall through to workspace RBAC."
         ),
     }
 

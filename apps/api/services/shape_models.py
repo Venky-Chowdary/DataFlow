@@ -217,7 +217,11 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         "parse_boolean",
         "Parse true/t/1 and false/f/0 — informal yes/Y/2 refuse",
     ),
-    _StepDef("normalize_unicode", "Apply a Unicode normal form", options=("form",)),
+    _StepDef(
+        "normalize_unicode",
+        "Apply a Unicode normal form",
+        options=("form", "collapse_whitespace"),
+    ),
     _StepDef(
         "set_value",
         "Overwrite a column with an expression",
@@ -1024,6 +1028,18 @@ def _normalize_options(
         if form not in ("NFC", "NFD", "NFKC", "NFKD"):
             raise ShapeError(f"{where}: '{form}' is not a Unicode normal form")
         out["form"] = form
+        if "collapse_whitespace" in out:
+            collapse = out["collapse_whitespace"]
+            if not isinstance(collapse, bool):
+                raise ShapeError(f"{where}: collapse_whitespace must be true or false")
+            # collapse_whitespace is the Map transform normalize_unicode
+            # (NFKC + format controls dropped + whitespace collapsed): it has
+            # one form, so a different one cannot be half-honoured (D332).
+            if collapse and form != "NFKC":
+                raise ShapeError(
+                    f"{where}: collapse_whitespace applies the NFKC transform; "
+                    f"set form to NFKC (not {form}) or drop collapse_whitespace"
+                )
 
     if op == "strip_characters":
         kind = str(out.get("characters") or "").strip().casefold()

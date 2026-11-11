@@ -1816,6 +1816,19 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
     if op == "parse_boolean":
         return _call("to_boolean", value)
     if op == "normalize_unicode":
+        if options.get("collapse_whitespace"):
+            # The Map transform of the same name, so a pipeline step and a
+            # single-step column transform write the same value (D332):
+            # NFKC, invisible format/control characters dropped, every run of
+            # whitespace (tab, newline, CR included) collapsed to one space.
+            if is_blank(value):
+                return None
+            from services.transform_engine import apply_transform
+
+            normalized, err = apply_transform(value, "normalize_unicode")
+            if err:
+                raise EvalError(err)
+            return normalized
         return _call("normalize_unicode", value, options.get("form", "NFC"))
     if op == "cast_column":
         return _cast(

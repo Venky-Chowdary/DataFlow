@@ -495,35 +495,43 @@ def build_schedule_request(
     contract_id = str(bind.get("contract_id") or "").strip()
     require_signed = bool(bind.get("require_signed_contract", False))
 
-    # Fail-closed: open CDC Map-review for this source pauses scheduled runs.
+    # Fail-closed: an open CDC Map-review holds the schedules that read the
+    # table it was flagged on — not every schedule of the source (D346).
     sync_l = str(getattr(sched, "sync_mode", "") or "").strip().lower()
     is_cdc_like = sync_l in {"cdc", "incremental", "incremental_append", "incremental_deduped"}
     try:
-        from services.cdc_mapping_review import open_review_for_source
-        from services.cdc_schema_history import connection_fingerprint
+        from services.cdc_mapping_review import (
+            LIST_REMEDY,
+            acknowledge_remedy,
+            open_review_for_tables,
+            review_source_keys,
+        )
+        from services.cdc_multi_table import normalize_table_list
         from services.connector_store import get_connector
 
         src_conn = get_connector(sched.source_connector_id, workspace_id=sched.workspace_id or None)
         if src_conn is not None:
             cfg = src_conn.to_dict()
-            source_keys = [
-                connection_fingerprint(cfg, connector_id=src_conn.id),
-                connection_fingerprint(cfg),
-            ]
-            table = (sched.source_table or "").strip()
-            seen: set[str] = set()
-            for source_key in source_keys:
-                if not source_key or source_key in seen:
-                    continue
-                seen.add(source_key)
-                review = open_review_for_source(source_key, table) or open_review_for_source(
-                    source_key, ""
+            tables = normalize_table_list([
+                *normalize_table_list(sched.source_table or ""),
+                *(
+                    str(c.get("stream") or c.get("name") or "")
+                    for c in (sched.stream_contracts or [])
+                    if isinstance(c, dict)
+                ),
+            ])
+            for source_key in review_source_keys(cfg, src_conn.id):
+                review = open_review_for_tables(
+                    source_key, tables, default_schema=str(cfg.get("schema") or "")
                 )
                 if review:
                     raise ValueError(
                         f"CDC mapping review required before schedule run "
-                        f"(review_id={review.get('id')}, table={review.get('table')}). "
-                        "Open Map, review fidelity, acknowledge the review, then re-enable."
+                        f"(review_id={review.get('id')}, table={review.get('table')}): "
+                        "the source table changed schema while CDC was reading it. "
+                        "Review the mapping for that table, then acknowledge the review "
+                        f"({acknowledge_remedy(str(review.get('id') or ''))}). "
+                        f"Open reviews: {LIST_REMEDY.replace('<key>', source_key)}."
                     )
     except ValueError:
         raise
@@ -1835,6 +1843,12 @@ def _dispatch_transfer(
 
     authorized_drift = False
     try:
+        from services.local_file_policy import (
+            local_destination_refusal,
+            local_file_destinations_allowed,
+            sqlite_destination_allowed,
+        )
+
         request = build_schedule_request(
             sched,
             src,
@@ -1842,6 +1856,16 @@ def _dispatch_transfer(
             resync_mode=resync_mode,
             triggered_by=triggered_by,
         )
+        # D276: a saved local-disk destination on the hosted cloud (SQLite, a
+        # DuckDB file, a local Iceberg warehouse/catalog) is refused at this run's
+        # preflight, before a job exists, instead of failing mid-write. Judged on
+        # the endpoint the run would write (connector + schedule location).
+        # Env-only check first; nothing to judge on a self-hosted install.
+        if not (local_file_destinations_allowed() and sqlite_destination_allowed()):
+            destination = getattr(request, "destination", None)
+            refusal = local_destination_refusal(destination) if destination is not None else None
+            if refusal:
+                raise ValueError(refusal)
         authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
         emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)

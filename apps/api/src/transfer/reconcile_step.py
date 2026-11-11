@@ -253,9 +253,9 @@ def _proof_source_batches(
             source_endpoint=source_endpoint, src_cfg=src_cfg, read_cols=read_cols
         )
         return
-    from .proof_api_source import is_api_source, iter_api_source_batches
+    from .proof_api_source import is_reader_source, iter_api_source_batches
 
-    if is_api_source(src_type):
+    if is_reader_source(src_type, src_cfg):
         yield from iter_api_source_batches(
             source_endpoint=source_endpoint,
             src_type=src_type,
@@ -290,6 +290,24 @@ def _proof_source_batches(
                 qcols = _snowflake_projection(
                     conn, source_endpoint, src_cfg, read_cols
                 )[0]
+            elif src_type in {"postgresql", "postgres"}:
+                # D331: see what the write's reader saw. It carries inet,
+                # interval, json, ranges… as engine text; the driver's decode
+                # renders them differently ('10.0.0.1' vs '10.0.0.1/32'), so
+                # an untouched row read as "changed in source during run".
+                from connectors.postgresql_reader import text_carry_select_sql
+
+                with conn.connection.cursor() as _cur:
+                    qcols = text_carry_select_sql(
+                        _cur,
+                        str(
+                            getattr(source_endpoint, "schema", "")
+                            or src_cfg.get("schema")
+                            or "public"
+                        ),
+                        str(source_endpoint.table or ""),
+                        list(read_cols),
+                    ) or qcols
             for batch in iter_select_row_dicts(
                 conn,
                 sa.text(f"SELECT {qcols} FROM {table_ref}"),  # nosec B608
@@ -618,13 +636,23 @@ class _PinStore:
         return out
 
     def drift_stats(self) -> tuple[int, int, int]:
-        """(exp keys unpinned, exp key count, dest-only key count)."""
+        """(exp keys unpinned and unproven, exp key count, dest-only key count).
+
+        D331: a key whose destination row equals the recipe output of the
+        re-read is proven whatever its pin says. The pin compares the write
+        reader's rendering with the re-read's (PG ``inet::text`` keeps
+        ``/32``, the driver does not), so counting every unpinned key told
+        the operator 3 of 3 rows changed on a source nobody touched while
+        2 of them read back exact.
+        """
         drift_n = int(
             self.db.execute(
                 "SELECT count(*) FROM exp e "
                 "LEFT JOIN pin p ON e.k = p.k "
                 "LEFT JOIN rawh r ON e.k = r.k "
-                "WHERE p.h IS NULL OR p.h IS NOT r.h"
+                "LEFT JOIN destk d ON e.k = d.k "
+                "WHERE (p.h IS NULL OR p.h IS NOT r.h) "
+                "AND (d.k IS NULL OR d.fp IS NOT e.fp)"
             ).fetchone()[0]
         )
         n_keys = int(
@@ -984,6 +1012,7 @@ def _transform_applied_proof_impl(
     mappings: list[dict] | None,
     source_schema: dict[str, str] | None,
     recon: dict[str, Any],
+    validation_mode: str = "strict",
 ) -> dict[str, Any] | None:
     """G-1: prove the approved recipe actually ran on a shaped run.
 
@@ -1022,11 +1051,23 @@ def _transform_applied_proof_impl(
                 "by the row ledger and dedupe winner checks"
             ),
         }
-    if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
+    from .connector_capabilities import resolve_driver_type
+    from .proof_api_source import proof_unavailable_reason
+
+    if source_endpoint is None:
         return {
             "status": "unverifiable",
-            "reason": "independent source re-read requires a database endpoint",
+            "reason": (
+                "transform proof not available — the run's source was not "
+                "handed to the verifier, so the transforms are not proven"
+            ),
         }
+    _unavailable = proof_unavailable_reason(
+        source_endpoint, resolve_driver_type(source_endpoint.format or "")
+    )
+    if _unavailable:
+        # D327: say plainly that nothing was proven; never a driver error.
+        return {"status": "unverifiable", "reason": _unavailable}
 
     import sqlalchemy as sa
 
@@ -1103,19 +1144,20 @@ def _transform_applied_proof_impl(
         return str(dest_types.get(col) or dest_types.get(col.lower()) or "")
 
     def _src_norm(v: Any, ddl: str = "") -> str:
-        # Source-side hash normalization — must match stream._pin_norm on
-        # the write ledger: declared text compares literally, numeric/date
-        # columns canonicalize so COPY-text and driver reprs hash alike.
-        if v is None:
-            return _NULL_SENTINEL
+        # Source-side hash — the write ledger's own chain: the SQL readers
+        # put every decoded cell on the wire with cell_to_string, then the
+        # ledger hashes it with _pin_norm. D331: a separate normalization
+        # here hashed Decimal('1.500') as '1.5' against the wire's '1.500'
+        # (and a TIMETZ time against its ISO text), so every untouched row
+        # holding such a value read as "changed in source during run".
+        from services.value_serializer import cell_to_string
+
+        from .stream_pin_ledger import _pin_norm
+
         try:
-            if isinstance(v, str) and ddl and _TEXT_FAMILY_DDL_RE.match(
-                str(ddl).strip()
-            ):
-                return v
-            return normalize_cell(v, ddl_type=str(ddl or ""), engine=src_type)
+            return _pin_norm(cell_to_string(v, preserve_sql_null=True), ddl)
         except Exception:
-            return str(v)
+            return _NULL_SENTINEL if v is None else str(v)
 
     def _src_ddl(col: str) -> str:
         ss = source_schema or {}
@@ -1320,6 +1362,25 @@ def _transform_applied_proof_impl(
         RunWindow.from_summary(dest_summary) if scope_pk and not scd2_opts else None
     )
 
+    from services.mapping_constraints import write_mappings as _write_mappings
+
+    _map_stage_on = bool(_write_mappings(mappings))
+
+    def _map_stage(shaped: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
+        # D325: the writer runs each mapping's Map transform after the recipe;
+        # the expected image is what that same stage wrote, not the bare
+        # recipe output.
+        if not _map_stage_on:
+            return [{} for _ in shaped]
+        return _shaped_rows_as_written(
+            shaped,
+            mappings=mappings,
+            target_cols=digest_cols,
+            dest_types=dest_types,
+            dest_type=dest_db_type,
+            validation_mode=validation_mode,
+        )
+
     def _expected_iter():
         nonlocal raw_count
         _extra = (
@@ -1383,11 +1444,15 @@ def _transform_applied_proof_impl(
                             ).hexdigest()[:16],
                         )
                     )
+            written = _map_stage(outs)
             for i, out in enumerate(outs):
-                orow = {
+                shaped_t = {
                     map_source_to_target(k, mappings): v
                     for k, v in out.items()
                 }
+                if written[i] is None:
+                    continue  # the writer's Map stage held this row out
+                orow = {**shaped_t, **written[i]}
                 if _is_kept(orow, pin_key_cols):
                     continue
                 _fpm_buf.append(("e", _fph(orow)))
@@ -1418,19 +1483,23 @@ def _transform_applied_proof_impl(
                         (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
                     )
                     if origin[i] is not None:
+                        # The SQL oracle recomputes the recipe stage only.
                         _eo_buf.append(
                             (
                                 tc,
                                 _vh(_key_norm(origin[i].get(sc))),
-                                _vh(_val_norm(orow.get(tc), _val_ddl(tc))),
+                                _vh(_val_norm(shaped_t.get(tc), _val_ddl(tc))),
                             )
                         )
                 yield orow
             _flush_ms()
-        for out in runner.drain() or []:
+        _drained = list(runner.drain() or [])
+        for out, written in zip(_drained, _map_stage(_drained)):
+            if written is None:
+                continue
             orow = {
-                map_source_to_target(k, mappings): v
-                for k, v in out.items()
+                **{map_source_to_target(k, mappings): v for k, v in out.items()},
+                **written,
             }
             _fpm_buf.append(("e", _fph(orow)))
             if keyed:
@@ -1483,9 +1552,14 @@ def _transform_applied_proof_impl(
             dest_types=dest_types,
         )
     except Exception as exc:  # the proof must not crash the verifier
+        # D327: driver/dialect text stays in the log, not the job message.
+        _logger.warning("transform proof: source re-read failed: %s", exc)
         return {
             "status": "unverifiable",
-            "reason": f"expected-output recompute failed: {exc!s}"[:300],
+            "reason": (
+                "the source could not be re-read to recompute the recipe "
+                "output, so the transforms are not proven"
+            ),
         }
     exp_n = pin_store.side_count("e")
 
@@ -1517,8 +1591,14 @@ def _transform_applied_proof_impl(
     else:
         qs = '"'
     # A Mongo source has no SQL table: the SQL oracle and the tracked-equality
-    # join below are SQL-source only and already skip on an empty ref.
-    src_ref_sql = "" if src_type == "mongodb" else warehouse_sql_table_ref(
+    # join below are SQL-source only and already skip on an empty ref. Nor does
+    # a query / procedure extract (D333): its rows are the statement's result,
+    # not the base table's — selecting its alias names there fails.
+    from services.procedure_source import is_callable_source
+
+    src_ref_sql = "" if (
+        src_type == "mongodb" or is_callable_source(src_cfg)
+    ) else warehouse_sql_table_ref(
         src_type,
         src_cfg,
         str(
@@ -1532,6 +1612,7 @@ def _transform_applied_proof_impl(
     oracle_exprs: dict[str, str] = {}
     oracle_ok = (
         src_type in _ORACLE_DIALECTS
+        and bool(src_ref_sql)
         and bool(declared_src)
         and not any(
             str(st.get("op") or "") in _TRANSFORM_PROOF_POPULATION_OPS
@@ -1871,11 +1952,13 @@ def _transform_applied_proof_impl(
                             dest_types=dest_types,
                         )
         except Exception as exc:
+            _logger.warning("transform proof: destination read-back failed: %s", exc)
             return {
                 "status": "unverifiable",
-                "reason": f"key-scoped destination read failed: {exc!s}"[
-                    :300
-                ],
+                "reason": (
+                    "the destination could not be read back to compare with "
+                    "the recipe output, so the transforms are not proven"
+                ),
                 "recipe_hash": str(
                     dest_summary.get("shape_recipe_hash") or ""
                 ),
@@ -2143,20 +2226,15 @@ def _transform_applied_proof_impl(
         # a missing/differing destination row on a stable key as a
         # provable defect (naming the key), not source drift.
         if not (pop_ops and actual_rows == raw_count):
+            # D327: this run has no pinned keys, so there are no key counts to
+            # give — the base reported "0 of 0 keys changed in source during
+            # run" here. Say what was measured.
             reason = (
-                "source changed during run — re-read returned "
-                f"{exp_n} recipe-applied rows but "
-                f"{actual_label} holds {actual_rows}"
+                f"the source re-read gives {exp_n} rows after the recipe but "
+                f"{actual_label} holds {actual_rows} (the source changed "
+                "during run, or rows were held out), so the transforms "
+                "are not proven"
             )
-            if pin_store is not None:
-                pin_store.flush()
-                _drift_n, _n_keys, _donly = pin_store.drift_stats()
-                reason = (
-                    "source changed during run — "
-                    f"{_drift_n + _donly} of {_n_keys + _donly} keys "
-                    f"changed in source during run; "
-                    f"{_n_keys - _drift_n} proven"
-                )
             return {
                 "status": "unverifiable",
                 "reason": reason,
@@ -2354,13 +2432,21 @@ def _transform_applied_proof_impl(
 
     if drift:
         drift_reason = (
-            "source changed during run — the re-read population no "
-            "longer matches what was written"
+            # D327: no pinned key separates a source change from a wrong
+            # value here — claiming "source changed" was a guess.
+            "the destination does not match the recipe output of the "
+            "source as re-read now, and the proof cannot tell a change in "
+            "the source during the run from a wrong value, so the "
+            "transforms are not proven"
         )
         if drift_counts and drift_counts[1]:
+            # D331: an unpinned key is not proof the source changed — the
+            # write's reader and the re-read can render one value two ways.
             drift_reason = (
-                f"source changed during run — {drift_counts[0]} of "
-                f"{drift_counts[1]} keys changed in source during run; "
+                f"{drift_counts[0]} of {drift_counts[1]} keys do not hold "
+                "the recipe output and their source rows no longer read "
+                "back as this run read them (changed in source during run, "
+                "or read back in a different form); "
                 f"{drift_counts[1] - drift_counts[0]} proven"
             )
         return {
@@ -2591,6 +2677,31 @@ def _source_rows_as_written(
         dest_kind=dest_type,
     )
     return [dict(zip(target_cols, row)) for row in mapped]
+
+
+def _shaped_rows_as_written(
+    shaped: list[dict],
+    **as_written: Any,
+) -> list[dict | None]:
+    """Each shaped row's target image after the writer's Map stage.
+
+    D325 — a column's single Map transform (``replace:``, ``default:``,
+    ``currency``…) runs on the mapping after the recipe, in the writer's own
+    ``map_rows_for_fingerprint`` path. The transform proof recomputed the
+    recipe only, so every correct Map-transformed cell read as unexplained
+    drift and failed the job. ``None`` marks a row the writer held out.
+    One call per batch; a batch that lost a row is re-mapped row by row so
+    every output stays paired with its own input.
+    """
+    if not shaped:
+        return []
+    mapped = _source_rows_as_written(shaped, **as_written)
+    if len(mapped) == len(shaped):
+        return list(mapped)
+    return [
+        (_source_rows_as_written([row], **as_written) or [None])[0]
+        for row in shaped
+    ]
 
 
 def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
@@ -3578,6 +3689,16 @@ def _maybe_attach_verification_ladder(
     # dedupe_skip kept the stored row for a key that was already there: that row
     # is not this run's write, so neither side of it is graded against the source.
     _kept_keys = dedupe_skip_kept_keys(dest_summary, key_cols)
+    # D335 — so is a keyed-append tie peer the inclusive seed re-read and the
+    # boundary dedupe left in place: an earlier run wrote it.
+    _kept_keys |= {
+        k
+        for k in (
+            _ladder_key(_d, key_cols)
+            for _d in dest_summary.get("incremental_window_landed_keys") or []
+        )
+        if k is not None
+    }
     if _kept_keys:
         source_rows = [
             r for r in source_rows
@@ -6404,6 +6525,12 @@ def _run_reconciliation_impl(
             stamped["physical_state"] = dict(physical_state)
         stamped = _apply_n5_gate8_extensions(stamped, n5_ctx)
         rounded = list(carrier_ctx.get("rounded_columns") or [])
+        ms_proof = carrier_ctx.get("millisecond_fit")
+        if ms_proof:
+            # D148: every value of these columns passed the write-time guard as
+            # a whole millisecond, so the carrier dropped nothing from them.
+            fit = set(ms_proof.get("fit_columns") or [])
+            rounded = [c for c in rounded if c.get("column") not in fit]
         if rounded:
             # Both digests were taken at the destination carrier's granularity,
             # so a match here proves every cell the destination *can* hold. The
@@ -6429,6 +6556,12 @@ def _run_reconciliation_impl(
                 "Source and target checksums match at the destination's granularity",
             )
             stamped["message"] = f"{headline}{note}"
+        if ms_proof:
+            stamped["millisecond_fit"] = ms_proof
+            if stamped.get("passed"):
+                stamped["message"] = (
+                    f"{str(stamped.get('message') or '').rstrip()} {ms_proof['message']}"
+                ).strip()
         stamped = _name_row_on_checksum_only_failure(stamped, full_compare_ctx)
         stamped = _localize_checksum_mismatch(stamped, dest_summary)
         stamped = qualify_multi_stream_reconciliation(stamped, dest_summary)
@@ -6753,6 +6886,21 @@ def _run_reconciliation_impl(
             dest_types=dest_types,
             dest_engine=db_type,
             measured_fractional_digits=_measured_fractional_digits(),
+        )
+        from services.millisecond_fit import (
+            EVIDENCE_ATTR,
+            TRUNCATED_KEY,
+            millisecond_fit_proof,
+        )
+
+        carrier_ctx["millisecond_fit"] = millisecond_fit_proof(
+            mapping_dicts,
+            source_schema=source_schema,
+            dest_types=dest_types,
+            dest_engine=db_type,
+            source_db=str(getattr(source_endpoint, "format", "") or ""),
+            preflight=getattr(endpoint, EVIDENCE_ATTR, None),
+            truncated=(dest_summary or {}).get(TRUNCATED_KEY),
         )
     except Exception as exc:
         logging.getLogger(__name__).warning(
@@ -8778,11 +8926,13 @@ def run_reconciliation(
                 mappings=mappings,
                 source_schema=source_schema,
                 recon=recon,
+                validation_mode=validation_mode,
             )
         except Exception as exc:
+            _logger.warning("transform proof errored: %s", exc)
             proof = {
                 "status": "unverifiable",
-                "reason": f"transform-applied proof errored: {exc!s}"[:300],
+                "reason": "the transform proof could not run, so the transforms are not proven",
             }
         if proof:
             # Plain statement of which compare ran — exact per-row multiset

@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 def _fetch_es_physical_types(
-    client: Any, index: str, target_cols: list[str]
+    client: Any,
+    index: str,
+    target_cols: list[str],
+    field_types: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], Exception | None]:
     """Read committed index mapping → logical carriers for rematerialize.
 
@@ -31,6 +34,8 @@ def _fetch_es_physical_types(
 
     Returns ``(physical, None)`` on success or ``({}, exc)`` on probe failure
     so callers can fail-closed on auth (never soft-empty → Map invent).
+    ``field_types``, when given, receives each field's raw Elasticsearch type
+    (a ``date`` keeps milliseconds, a ``date_nanos`` does not narrow them).
     """
     from connectors.elasticsearch_mapping import (
         carrier_for_es_field_type,
@@ -71,6 +76,8 @@ def _fetch_es_physical_types(
         if not isinstance(info, dict):
             info = {"type": "text"}
         es_type = str(info.get("type") or "text")
+        if field_types is not None:
+            field_types[name] = es_type
         declared = carrier_from_es_property(info)
         if declared:
             # A previous run of this route declared the carrier — an ES field type
@@ -467,6 +474,9 @@ def write_mapped_rows(
     # upsert / CDC and hide collisions. Always require resolvable document identity.
     requires_identity = True
 
+    # Raw Elasticsearch field type per declared field: which ``date`` fields
+    # narrow a finer source to milliseconds (D148).
+    es_field_types: dict[str, str] = {}
     client = _client(cfg)
     try:
         index_exists = bool(client.indices.exists(index=index))
@@ -511,6 +521,9 @@ def write_mapped_rows(
             if declared_props:
                 body["mappings"] = {"properties": declared_props}
             client.indices.create(index=index, body=body)
+            es_field_types.update(
+                {name: str(prop.get("type") or "") for name, prop in declared_props.items()}
+            )
             for name, prop in declared_props.items():
                 # Bind values through the carrier the field now declares, so the
                 # write and the next run's reread agree on one carrier.
@@ -521,7 +534,9 @@ def write_mapped_rows(
         if index_exists:
             from connectors.saas_common import is_auth_error
 
-            physical, map_exc = _fetch_es_physical_types(client, index, target_cols)
+            physical, map_exc = _fetch_es_physical_types(
+                client, index, target_cols, field_types=es_field_types
+            )
             if map_exc is not None:
                 # Document store — never cite information_schema. Auth and other
                 # get_mapping failures both refuse (cannot prove live field types).
@@ -586,6 +601,7 @@ def write_mapped_rows(
                             ),
                         )
                     for name, prop in new_props.items():
+                        es_field_types[name] = str(prop.get("type") or "")
                         carrier = carrier_from_es_property(prop)
                         if carrier:
                             physical[name] = carrier
@@ -742,6 +758,49 @@ def write_mapped_rows(
                 rejected_details=list(rejected_details),
             )
 
+        # D148: an Elasticsearch ``date`` keeps milliseconds (``date_nanos``
+        # does not narrow). Every guarded cell is checked before the bulk; an
+        # unacknowledged sub-millisecond value refuses the whole batch.
+        from services.millisecond_fit import (
+            TRUNCATED_KEY,
+            floor_to_millisecond,
+            guard_batch,
+            narrowing_acknowledged,
+            truncation_warnings,
+        )
+        from services.type_system import LOGICAL_DATE, LOGICAL_DATETIME, normalize_logical_type
+
+        ms_guard = guard_batch(
+            mapped_rows,
+            target_cols,
+            [
+                c
+                for c, t in zip(target_cols, tgt_types)
+                if normalize_logical_type(t) in {LOGICAL_DATE, LOGICAL_DATETIME}
+                and es_field_types.get(c) != "date_nanos"
+            ],
+            acknowledged={
+                str(m.get("target") or m.get("source") or "")
+                for m in mappings or []
+                if narrowing_acknowledged(m)
+            },
+            carrier_label="Elasticsearch date",
+        )
+        if ms_guard.refusal:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=index,
+                target_schema=host or "localhost",
+                checksum="",
+                chunks_completed=0,
+                error=ms_guard.refusal,
+                rejected_details=list(rejected_details),
+            )
+        # Acknowledged: store what the carrier keeps, so _source and the
+        # indexed instant agree.
+        ms_floor_idx = {i for i, c in enumerate(target_cols) if c in ms_guard.truncated}
+
         if conflict:
             from connectors.writer_common import (
                 partition_dense_upsert_rows,
@@ -802,7 +861,10 @@ def write_mapped_rows(
                             "carrier under partial Studio — refuse Map logical "
                             "wire invent"
                         )
-                    source[target_cols[i]] = _to_es_value(value, wire)
+                    bound = _to_es_value(value, wire)
+                    source[target_cols[i]] = (
+                        floor_to_millisecond(bound) if i in ms_floor_idx else bound
+                    )
             except (ValueError, TypeError) as cell_exc:
                 rejected_details.append({
                     "row": row_idx + 1,
@@ -941,10 +1003,21 @@ def write_mapped_rows(
             else "",
             chunks_completed=1,
             error=err_msg,
-            warnings=(errors + [str(e) for e in (bulk_errors or [])[:5]])[:10],
+            warnings=(
+                errors
+                + truncation_warnings(ms_guard.truncated, "Elasticsearch date")
+                + [str(e) for e in (bulk_errors or [])[:5]]
+            )[:10],
             rejected_rows=len({str(d.get("row")) for d in all_rejected if d.get("row") not in (None, "")}),
             rejected_details=list(all_rejected),
-            meta=gate8_writer_meta(mapped_rows, target_cols) if not fail_closed else {},
+            meta=(
+                {
+                    **gate8_writer_meta(mapped_rows, target_cols),
+                    **({TRUNCATED_KEY: dict(ms_guard.truncated)} if ms_guard.truncated else {}),
+                }
+                if not fail_closed
+                else {}
+            ),
         )
     except Exception as exc:
         return WriteResult(

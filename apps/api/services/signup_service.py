@@ -522,10 +522,20 @@ def queue_welcome(*, email: str, name: str, workspace_name: str,
 
 
 def check_new_password(password: str) -> None:
-    """Length + breach checks every path that sets a first password shares."""
+    """The one password policy every path that sets a password applies (D340):
+    signup, invite-accept, reset, change-password and an admin-set password.
+
+    Length, then the bundled offline list of common breached passwords (always
+    on, no network), then HIBP (on in production, fail-open)."""
     if not (MIN_PASSWORD_LEN <= len(password or "") <= MAX_PASSWORD_LEN):
         raise ApiError(400, "invalid_password",
                        f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
+    from services.breached_passwords import is_breached_password
+
+    if is_breached_password(password):
+        raise ApiError(400, "pwned_password",
+                       "that password is one of the most common breached "
+                       "passwords — choose a different one")
     _refuse_pwned_password(password)
 
 
@@ -932,8 +942,9 @@ def _forgot_response(challenge_id: str) -> dict[str, Any]:
 
 
 def _refuse_pwned_password(password: str) -> None:
-    """P4-3: flag-gated HIBP check. ``-1`` (unknown / outage) is fail-open
-    by design — a HIBP outage must never block a real signup or reset."""
+    """P4-3: HIBP check (on in production, services.hibp.enabled). ``-1``
+    (unknown / outage) is fail-open by design — a HIBP outage must never
+    block a real signup or reset; the offline list has already run."""
     from services import hibp
 
     if hibp.pwned_count(password) > 0:
@@ -1053,7 +1064,10 @@ def confirm_password_reset(*, token: str,
         raise ApiError(410, "link_expired", "this account no longer exists")
     user_store.set_password(email=email, password=new_password,
                             algo="argon2id")
-    get_auth_state().revoke_all_for_user(email)
+    # Bearer and cookie sessions alike (D338): a reset signs everything out.
+    from services import session_registry
+
+    session_registry.revoke_all(email)
     record_security_event("password.reset.used", outcome="succeeded",
                           actor=email, session_id=doc["id"],
                           details={"ip": ip})

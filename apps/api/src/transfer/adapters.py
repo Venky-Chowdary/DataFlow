@@ -152,7 +152,11 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     meta = getattr(result, "meta", None)
     if isinstance(meta, dict) and meta:
         # Promote Gate-8 sample / identity stamps into destination_summary.
-        for key in ("reconcile_sample", "written_ids", "source_row_count", "rows_expanded"):
+        # ``ms_truncated_values``: values a ms carrier truncated under the ack (D148).
+        for key in (
+            "reconcile_sample", "written_ids", "source_row_count", "rows_expanded",
+            "ms_truncated_values",
+        ):
             if key in meta and meta[key] is not None:
                 out[key] = meta[key]
     return out
@@ -1460,6 +1464,13 @@ def write_destination_database(
     )
 
     cfg = resolve_connector_config(endpoint)
+    from services.local_file_policy import local_destination_refusal
+
+    # D276: the last door before a server-local SQLite/DuckDB/Iceberg file (replay,
+    # query export…); judged on the resolved config (saved path, catalog, warehouse).
+    refusal = local_destination_refusal(str(cfg.get("type") or endpoint.format or ""), cfg)
+    if refusal:
+        raise ValueError(refusal)
     from services.procedure_destination import (
         DEST_ROW_MODES,
         assert_dest_procedure_sync_allowed,

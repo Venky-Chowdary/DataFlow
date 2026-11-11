@@ -84,12 +84,69 @@ def _normalize_domain(domain: str) -> str:
     return d
 
 
+_LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+_TLD = re.compile(r"^(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$")
+
+
+def _validate_domain(domain: str) -> str:
+    """A custom domain as a normalized DNS host name, or ``""`` to clear it.
+
+    It becomes a DNS challenge name and, once proven, a browser origin, so
+    anything that is not a plain host name (spaces, a path, an IP address, a
+    single label) is refused rather than stored (D337/D341).
+    """
+    raw = str(domain or "").strip()
+    if not raw:
+        return ""
+    bare = re.sub(r"^https?://", "", raw.lower()).rstrip("/")
+    d = _normalize_domain(raw).rstrip(".")
+    labels = d.split(".")
+    valid = (
+        not any(c in bare for c in "/?#:@ \t")  # a path, port or credentials is not a host name
+        and 0 < len(d) <= 253
+        and len(labels) >= 2
+        and all(_LABEL.match(label) for label in labels)
+        and bool(_TLD.match(labels[-1]))
+    )
+    if not valid:
+        raise ValueError(
+            f"Invalid custom domain {raw[:80]!r}: use a host name such as data.example.com "
+            "(letters, digits and hyphens; no spaces, paths, ports or IP addresses)"
+        )
+    return d
+
+
+def _new_domain_challenge() -> str:
+    import secrets
+
+    return secrets.token_hex(16)
+
+
+def _set_custom_domain(raw: dict[str, Any], domain: str) -> None:
+    """Store ``domain``; a changed (or cleared) domain loses its proof."""
+    if domain == _normalize_domain(str(raw.get("custom_domain") or "")) and domain:
+        raw["custom_domain"] = domain
+        if not raw.get("custom_domain_challenge"):  # saved before D337
+            raw["custom_domain_challenge"] = _new_domain_challenge()
+        return
+    raw["custom_domain"] = domain
+    raw["custom_domain_verified"] = False
+    raw["custom_domain_verified_at"] = ""
+    raw["custom_domain_challenge"] = _new_domain_challenge() if domain else ""
+
+
 @dataclass
 class Tenant:
     id: str
     workspace_id: str = ""
     name: str = ""
     custom_domain: str = ""  # e.g. dataflow.wellsfargo.com
+    # D337: a custom domain is a credentialed CORS origin only once its DNS
+    # TXT challenge passed (services.custom_domain_verification). Changing
+    # the domain clears the proof and issues a new challenge token.
+    custom_domain_verified: bool = False
+    custom_domain_verified_at: str = ""
+    custom_domain_challenge: str = ""
     data_region: str = ""      # e.g. us-east-1
     byok_key_id: str = ""
     security_contact_email: str = ""
@@ -101,6 +158,9 @@ class Tenant:
     # with until the hours are saved again (docs/DEPLOYMENT.md, backfill note).
     enforce_session_timeout: bool = True
     ip_allowlist: list[str] = field(default_factory=list)
+    # D343: members must sign in through the deployment's SSO provider; their
+    # password sign-in is refused (services.sso_enforcement).
+    sso_enforced: bool = False
     # Connector egress. Empty means private ranges stay refused. This is not
     # the inbound API allowlist, and it is not a deploy setting.
     egress_allowlist: list[str] = field(default_factory=list)
@@ -117,6 +177,9 @@ class Tenant:
             workspace_id=data.get("workspace_id", ""),
             name=data.get("name", ""),
             custom_domain=data.get("custom_domain", ""),
+            custom_domain_verified=bool(data.get("custom_domain_verified", False)),
+            custom_domain_verified_at=str(data.get("custom_domain_verified_at", "") or ""),
+            custom_domain_challenge=str(data.get("custom_domain_challenge", "") or ""),
             data_region=data.get("data_region", ""),
             byok_key_id=data.get("byok_key_id", ""),
             security_contact_email=data.get("security_contact_email", ""),
@@ -124,6 +187,7 @@ class Tenant:
             session_timeout_hours=int(data.get("session_timeout_hours", 8)),
             enforce_session_timeout=bool(data.get("enforce_session_timeout", True)),
             ip_allowlist=list(data.get("ip_allowlist", []) or []),
+            sso_enforced=bool(data.get("sso_enforced", False)),
             egress_allowlist=list(data.get("egress_allowlist", []) or []),
             created_at=data.get("created_at", _now()),
             updated_at=data.get("updated_at", _now()),
@@ -151,8 +215,10 @@ def create_tenant(
     enforce_session_timeout: bool = True,
     ip_allowlist: list[str] | None = None,
     egress_allowlist: list[str] | None = None,
+    sso_enforced: bool = False,
 ) -> Tenant:
     """Create a new tenant bound to a workspace."""
+    custom_domain = _validate_domain(custom_domain)
     if custom_domain and get_tenant_by_domain(custom_domain):
         raise ValueError(f"Custom domain '{custom_domain}' is already in use")
 
@@ -168,16 +234,18 @@ def create_tenant(
     tenant = Tenant(
         id=str(uuid.uuid4()),
         workspace_id=workspace_id or "",
-        name=name.strip()[:128] or "Tenant",
-        custom_domain=custom_domain.strip()[:253],
+        name=_validate_name(name) or "Tenant",
+        custom_domain=custom_domain,
+        custom_domain_challenge=_new_domain_challenge() if custom_domain else "",
         data_region=_validate_region(data_region),
         byok_key_id=byok_key_id,
-        security_contact_email=security_contact_email.strip()[:128],
+        security_contact_email=_validate_contact_email(security_contact_email),
         mfa_required=mfa_required,
         session_timeout_hours=max(1, min(24, int(session_timeout_hours))),
         enforce_session_timeout=bool(enforce_session_timeout),
         ip_allowlist=_validate_allowlist(ip_allowlist or []),
         egress_allowlist=_validate_egress_allowlist(egress_allowlist or []),
+        sso_enforced=bool(sso_enforced),
     )
     data["tenants"].append(tenant.to_dict())
     _save(data)
@@ -194,7 +262,12 @@ def get_tenant(tenant_id: str) -> Tenant | None:
     return None
 
 
-def get_tenant_by_domain(domain: str) -> Tenant | None:
+def get_tenant_by_domain(domain: str, *, verified_only: bool = False) -> Tenant | None:
+    """The tenant that claims ``domain``.
+
+    ``verified_only`` (browser-origin trust, D337) answers only a tenant whose
+    DNS ownership challenge passed; a merely saved domain is a claim, not proof.
+    """
     target = _normalize_domain(domain)
     if not target:
         return None
@@ -203,7 +276,40 @@ def get_tenant_by_domain(domain: str) -> Tenant | None:
         # workspace, so host routing cannot decide what data it would serve:
         # resolving it would answer a client domain out of an empty scope.
         if t.normalized_domain == target and t.workspace_id:
+            if verified_only and not t.custom_domain_verified:
+                return None
             return t
+    return None
+
+
+def ensure_domain_challenge(tenant_id: str) -> Tenant | None:
+    """The tenant, with a challenge token for its domain (a pre-D337 record has none)."""
+    data = _load_raw()
+    for raw in data.get("tenants", []):
+        if isinstance(raw, dict) and raw.get("id") == tenant_id:
+            if raw.get("custom_domain") and not raw.get("custom_domain_challenge"):
+                raw["custom_domain_challenge"] = _new_domain_challenge()
+                _save(data)
+            return Tenant.from_dict(raw)
+    return None
+
+
+def mark_custom_domain_verified(tenant_id: str, domain: str) -> Tenant | None:
+    """Record a passed DNS challenge for ``domain``.
+
+    Only services.custom_domain_verification calls this, after the TXT record
+    matched. A domain changed since the lookup started is not marked.
+    """
+    data = _load_raw()
+    for raw in data.get("tenants", []):
+        if isinstance(raw, dict) and raw.get("id") == tenant_id:
+            if not domain or _normalize_domain(str(raw.get("custom_domain") or "")) != domain:
+                return None
+            raw["custom_domain_verified"] = True
+            raw["custom_domain_verified_at"] = _now()
+            raw["updated_at"] = _now()
+            _save(data)
+            return Tenant.from_dict(raw)
     return None
 
 
@@ -233,19 +339,19 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
     for raw in data.get("tenants", []):
         if isinstance(raw, dict) and raw.get("id") == tenant_id:
             if "custom_domain" in kwargs:
-                new_domain = _normalize_domain(kwargs["custom_domain"])
+                new_domain = _validate_domain(kwargs["custom_domain"])
                 existing = get_tenant_by_domain(new_domain)
                 if existing and existing.id != tenant_id:
                     raise ValueError(f"Custom domain '{new_domain}' is already in use")
-                raw["custom_domain"] = new_domain[:253]
+                _set_custom_domain(raw, new_domain)
             if "name" in kwargs:
-                raw["name"] = kwargs["name"].strip()[:128]
+                raw["name"] = _validate_name(kwargs["name"])
             if "data_region" in kwargs:
                 raw["data_region"] = _validate_region(kwargs["data_region"])
             if "byok_key_id" in kwargs:
                 raw["byok_key_id"] = kwargs["byok_key_id"]
             if "security_contact_email" in kwargs:
-                raw["security_contact_email"] = kwargs["security_contact_email"].strip()[:128]
+                raw["security_contact_email"] = _validate_contact_email(kwargs["security_contact_email"])
             if "mfa_required" in kwargs:
                 raw["mfa_required"] = bool(kwargs["mfa_required"])
             if "session_timeout_hours" in kwargs:
@@ -259,6 +365,8 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
                 raw["ip_allowlist"] = _validate_allowlist(kwargs["ip_allowlist"])
             if "egress_allowlist" in kwargs:
                 raw["egress_allowlist"] = _validate_egress_allowlist(kwargs["egress_allowlist"])
+            if "sso_enforced" in kwargs:
+                raw["sso_enforced"] = bool(kwargs["sso_enforced"])
             raw["updated_at"] = _now()
             _save(data)
             return Tenant.from_dict(raw)
@@ -275,16 +383,58 @@ def delete_tenant(tenant_id: str) -> bool:
     return True
 
 
+def supported_regions() -> list[str]:
+    """Regions a tenant may record (D341).
+
+    The built-in cloud regions, this deployment's ``DATAWRAP_DEFAULT_REGION``,
+    and any private-cloud / on-prem region tags the operator declares in
+    ``DATAWRAP_DATA_REGIONS`` (comma-separated, ``[a-z0-9-]{2,32}`` each). A
+    workspace admin can no longer invent one (``moon-1``).
+    """
+    extra = {
+        tag.strip().lower()
+        for tag in (getenv_brand("DATA_REGIONS", "") or "").split(",")
+        if re.fullmatch(r"[a-z0-9-]{2,32}", tag.strip().lower())
+    }
+    return sorted(_ALLOWED_REGIONS | extra | {default_region().lower()})
+
+
 def _validate_region(region: str) -> str:
     r = (region or "").strip().lower()
     if not r:
         return ""
-    if r in _ALLOWED_REGIONS:
+    allowed = supported_regions()
+    if r in allowed:
         return r
-    # Accept free-form region tags for private-cloud / on-prem SaaS nodes.
-    if re.match(r"^[a-z0-9-]{2,32}$", r):
-        return r
-    raise ValueError(f"Unsupported data region: {region}")
+    raise ValueError(f"Unsupported data region {str(region)[:40]!r}: use one of {', '.join(allowed)}")
+
+
+#: Markup and control characters: a tenant name is shown in the UI, the
+#: posture and the compliance report, so it is plain text (D341).
+_UNSAFE_TEXT = re.compile(r"[<>\x00-\x1f\x7f]")
+
+
+def _validate_name(name: str) -> str:
+    n = str(name or "").strip()
+    if len(n) > 128:
+        raise ValueError("Tenant name is longer than 128 characters")
+    if _UNSAFE_TEXT.search(n):
+        raise ValueError("Tenant name may not contain <, > or control characters")
+    return n
+
+
+def _validate_contact_email(email: str) -> str:
+    e = str(email or "").strip()
+    if not e:
+        return ""
+    from services.user_store import validate_email
+
+    try:
+        if len(e) > 128 or _UNSAFE_TEXT.search(e):
+            raise ValueError(e)
+        return validate_email(e)
+    except ValueError:
+        raise ValueError(f"Invalid security contact email {e[:80]!r}: use an address such as security@example.com") from None
 
 
 def _validate_egress_allowlist(entries: list[str]) -> list[str]:
@@ -302,17 +452,25 @@ def _validate_egress_allowlist(entries: list[str]) -> list[str]:
 
 
 def _validate_allowlist(entries: list[str]) -> list[str]:
+    """Normalize an inbound IP allowlist; an invalid entry is refused (D336).
+
+    Dropping it silently stored ``[]`` for a list of one typo, and the admin
+    read "saved" for a control that held nothing.
+    """
     out: list[str] = []
     for e in entries:
-        e = e.strip()
+        e = str(e or "").strip()
         if not e:
             continue
         try:
             # Accept single IP or CIDR; normalize to network string.
             network = ipaddress.ip_network(e, strict=False)
-            out.append(str(network))
         except ValueError:
-            logger.warning("Ignoring invalid allowlist entry: %s", e)
+            raise ValueError(
+                f"Invalid IP allowlist entry {e!r}: use an IP address or a CIDR range "
+                "such as 203.0.113.0/24"
+            ) from None
+        out.append(str(network))
     return out
 
 

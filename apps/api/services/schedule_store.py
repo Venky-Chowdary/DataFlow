@@ -1446,6 +1446,22 @@ def _guard_schedule_destination(connector_id: str, table: str) -> None:
         raise ValueError(reason)
 
 
+def _refuse_unavailable_destination(data: Mapping[str, Any]) -> None:
+    """D276: a schedule into a destination this host refuses (on the hosted cloud:
+    SQLite, a local DuckDB file, a local Iceberg warehouse/catalog).
+
+    Every run would be refused at its preflight, so the save is refused now.
+    """
+    from services.local_file_policy import endpoint_local_destination_refusal
+
+    refusal = endpoint_local_destination_refusal(
+        {"connector_id": data.get("dest_connector_id"), "database": data.get("dest_database")},
+        workspace_id=str(data.get("workspace_id") or "") or None,
+    )
+    if refusal:
+        raise ValueError(refusal)
+
+
 def _assert_schedule_connectors_allowed(data: Mapping[str, Any], *, require_taps: bool) -> None:
     """Refuse a schedule over an admin-only connector for a non-admin request principal.
 
@@ -1511,6 +1527,7 @@ def create_schedule(
     data = canonicalize_policy_fields(data)
     data = _stamp_request_workspace(data)
     _assert_schedule_connectors_allowed(data, require_taps=bool(data.get("enabled", True)))
+    _refuse_unavailable_destination(data)
     payload = dict(data)
     from services.duplicate_policy import validate_schedule_file_policy
 
@@ -2035,6 +2052,7 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
             str(merged.get("dest_table") or "") != str(s.dest_table or "")
             or str(merged.get("dest_connector_id") or "") != str(s.dest_connector_id or "")
         ):
+            _refuse_unavailable_destination(merged)
             _guard_schedule_destination(
                 str(merged.get("dest_connector_id") or ""),
                 str(merged.get("dest_table") or ""),

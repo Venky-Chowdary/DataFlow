@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.effective_role import workspace_id_from_request_headers
 from services.brand import PRODUCT_SLUG
@@ -51,7 +51,56 @@ class WorkspaceSettingsBody(BaseModel):
     studio_canvas: bool | None = None
 
 
-class TenantCreateBody(BaseModel):
+class _TenantFieldChecks(BaseModel):
+    """Field-level 422s for tenant create/patch (D341), with the store's rules.
+
+    The store validates again for any caller that bypasses the route.
+    """
+
+    @field_validator("name", check_fields=False)
+    @classmethod
+    def _check_name(cls, v: str | None) -> str | None:
+        from services.tenant_store import _validate_name
+
+        return None if v is None else _validate_name(v)
+
+    @field_validator("custom_domain", check_fields=False)
+    @classmethod
+    def _check_domain(cls, v: str | None) -> str | None:
+        from services.tenant_store import _validate_domain
+
+        return None if v is None else _validate_domain(v)
+
+    @field_validator("data_region", check_fields=False)
+    @classmethod
+    def _check_region(cls, v: str | None) -> str | None:
+        from services.tenant_store import _validate_region
+
+        return None if v is None else _validate_region(v)
+
+    @field_validator("security_contact_email", check_fields=False)
+    @classmethod
+    def _check_email(cls, v: str | None) -> str | None:
+        from services.tenant_store import _validate_contact_email
+
+        return None if v is None else _validate_contact_email(v)
+
+    @field_validator("ip_allowlist", check_fields=False)
+    @classmethod
+    def _check_ip_allowlist(cls, v: list[str] | None) -> list[str] | None:
+        from services.tenant_store import _validate_allowlist
+
+        return None if v is None else _validate_allowlist(v)
+
+    @field_validator("egress_allowlist", check_fields=False)
+    @classmethod
+    def _check_egress_allowlist(cls, v: list[str] | None) -> list[str] | None:
+        from services.tenant_store import _validate_egress_allowlist
+
+        return None if v is None else _validate_egress_allowlist(v)
+
+
+class TenantCreateBody(_TenantFieldChecks):
     workspace_id: str = Field(default="", max_length=128)
     name: str = Field(default="", max_length=128)
     custom_domain: str = Field(default="", max_length=253)
@@ -64,9 +113,11 @@ class TenantCreateBody(BaseModel):
     enforce_session_timeout: bool = Field(default=True)
     ip_allowlist: list[str] = Field(default_factory=list)
     egress_allowlist: list[str] = Field(default_factory=list)
+    # D343: refuse password sign-in for this workspace's members.
+    sso_enforced: bool = Field(default=False)
 
 
-class TenantUpdateBody(BaseModel):
+class TenantUpdateBody(_TenantFieldChecks):
     name: str | None = Field(default=None, max_length=128)
     custom_domain: str | None = Field(default=None, max_length=253)
     data_region: str | None = Field(default=None, max_length=32)
@@ -79,6 +130,7 @@ class TenantUpdateBody(BaseModel):
     enforce_session_timeout: bool | None = Field(default=None)
     ip_allowlist: list[str] | None = Field(default=None)
     egress_allowlist: list[str] | None = Field(default=None)
+    sso_enforced: bool | None = Field(default=None)
 
 
 class BYOKKeyCreateBody(BaseModel):
@@ -1060,18 +1112,42 @@ def _authorized_request_tenant(request: Request):
 
 def _tenant_with_enforcement(tenant: Tenant, request: Request) -> dict[str, Any]:
     """The saved tenant plus what is enforced now (same source as the posture)."""
+    from services.custom_domain_verification import challenge
     from services.security_enforcement import enforcement_status
 
-    return {**tenant.to_dict(), "enforcement": enforcement_status(tenant, request)}
+    return {
+        **tenant.to_dict(),
+        "custom_domain_verification": challenge(tenant),
+        "enforcement": enforcement_status(tenant, request),
+    }
 
 
-def _refuse_self_lockout(request: Request, entries: list[str], workspace_id: str) -> None:
-    """400 when the list would shut out the admin saving it (audited)."""
+def _refuse_self_lockout(
+    request: Request, entries: list[str], workspace_id: str, stored: list[str] | None = None
+) -> None:
+    """Refuse an IP allowlist save that is invalid (422), that this deployment
+    could not enforce (409, D336), or that would shut out the admin saving it
+    (400). Each refusal of a well-formed list is audited."""
     from services.audit_coverage import record_security_event
     from services.client_ip import client_ip_from_request
-    from services.ip_allowlist_policy import lockout_refusal
+    from services.ip_allowlist_policy import UNENFORCEABLE_REASON, lockout_refusal, unenforceable_refusal
+    from services.tenant_store import _validate_allowlist
 
-    message = lockout_refusal(request, entries)
+    try:
+        normalized = _validate_allowlist(list(entries or []))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    unenforceable = unenforceable_refusal(request, normalized, list(stored or []))
+    if unenforceable:
+        record_security_event(
+            "workspace.ip_allowlist.unenforceable_refused", outcome="failed", request=request,
+            resource="/workspace/tenant", reason_code=UNENFORCEABLE_REASON, level="warn",
+            details={"workspace_id": workspace_id, "client_ip": client_ip_from_request(request),
+                     "entries": len(normalized)},
+            workspace_id=workspace_id,
+        )
+        raise HTTPException(status_code=409, detail=unenforceable)
+    message = lockout_refusal(request, normalized)
     if not message:
         return
     record_security_event(
@@ -1150,6 +1226,10 @@ async def post_tenant(body: TenantCreateBody, request: Request):
 
         assert_may_require_mfa(request)
     _refuse_self_lockout(request, body.ip_allowlist, workspace_id)
+    if body.sso_enforced:
+        from services.sso_enforcement import assert_may_enforce_sso
+
+        assert_may_enforce_sso(request)
     try:
         tenant = create_tenant(
             workspace_id=workspace_id,
@@ -1163,6 +1243,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             enforce_session_timeout=body.enforce_session_timeout,
             ip_allowlist=body.ip_allowlist,
             egress_allowlist=body.egress_allowlist,
+            sso_enforced=body.sso_enforced,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1195,7 +1276,11 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
 
         assert_may_require_mfa(request)
     if body.ip_allowlist is not None:
-        _refuse_self_lockout(request, body.ip_allowlist, tenant.workspace_id)
+        _refuse_self_lockout(request, body.ip_allowlist, tenant.workspace_id, tenant.ip_allowlist)
+    if body.sso_enforced and not tenant.sso_enforced:
+        from services.sso_enforcement import assert_may_enforce_sso
+
+        assert_may_enforce_sso(request)
     try:
         updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -1212,9 +1297,58 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
             "fields": sorted(body.model_dump(exclude_none=True).keys()),
             **({"mfa_required": body.mfa_required} if body.mfa_required is not None
                and body.mfa_required != tenant.mfa_required else {}),
+            **({"sso_enforced": body.sso_enforced} if body.sso_enforced is not None
+               and body.sso_enforced != tenant.sso_enforced else {}),
         },
     )
     return _tenant_with_enforcement(updated, request)
+
+
+_DOMAIN_REFUSALS = {
+    "txt_record_not_found": "No TXT record was found at {name}.",
+    "txt_record_mismatch": "The TXT record at {name} does not hold the expected value.",
+    "domain_changed_during_verification": "The custom domain changed while it was being verified.",
+}
+
+
+@router.post("/tenant/{tenant_id}/custom-domain/verify")
+async def verify_tenant_custom_domain(tenant_id: str, request: Request):
+    """Prove DNS ownership of the tenant's custom domain (D337).
+
+    Until this passes, the domain is stored but is not a CORS origin. The
+    only way to set ``custom_domain_verified`` is a matching TXT record.
+    """
+    from services.audit_coverage import record_security_event
+    from services.custom_domain_verification import challenge, verify
+
+    tenant = get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    _require_tenant_admin(request, tenant.workspace_id)
+    if not tenant.custom_domain:
+        raise HTTPException(status_code=400, detail="Set a custom domain before verifying it")
+    outcome = await asyncio.to_thread(verify, tenant_id)
+    details = {"tenant_id": tenant_id, "workspace_id": tenant.workspace_id,
+               "custom_domain": tenant.custom_domain, "reason": outcome.reason}
+    record_security_event(
+        "workspace.tenant.custom_domain.verify", outcome="succeeded" if outcome.verified else "failed",
+        request=request, resource=f"/workspace/tenant/{tenant_id}/custom-domain/verify",
+        reason_code=outcome.reason, level="info" if outcome.verified else "warn",
+        details=details, workspace_id=tenant.workspace_id,
+    )
+    if not outcome.verified:
+        block = challenge(outcome.tenant or tenant)
+        why = _DOMAIN_REFUSALS.get(outcome.reason, "The domain could not be verified.")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{why.format(name=block.get('record_name'))} Publish a TXT record named "
+                f"{block.get('record_name')} with the value {block.get('record_value')}, wait for "
+                "DNS to update, and verify again. Until then the domain is not accepted as a "
+                "browser origin."
+            ),
+        )
+    return _tenant_with_enforcement(outcome.tenant, request)
 
 
 @router.delete("/tenant/{tenant_id}")
@@ -1306,6 +1440,26 @@ async def rotate_tenant_byok_key(key_id: str, request: Request):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _custom_domain_cors(tenant: Tenant | None) -> dict[str, Any]:
+    """Whether the API accepts the tenant's custom domain as a browser origin (D337)."""
+    from services.custom_domain_verification import challenge
+
+    domain = (tenant.custom_domain or "").strip() if tenant else ""
+    verified = bool(tenant and domain and tenant.custom_domain_verified)
+    return {
+        "enabled": verified,
+        "origin": f"https://{domain}" if verified else None,
+        "verification": challenge(tenant) if tenant else {"status": "not_configured", "verified": False},
+        "hint": (
+            "Set the custom domain (e.g. data.customer.com), publish the TXT record shown "
+            "under verification, then verify it. The API accepts https://<domain> as a "
+            "credentialed browser origin only after DNS ownership is verified, and only on "
+            "requests scoped to this workspace. Changing the domain requires verifying again. "
+            "The primary app origin is configured by your platform administrator."
+        ),
+    }
+
+
 def _security_posture(tenant: Tenant | None = None, request: Request | None = None) -> dict[str, Any]:
     from services.byok_key_manager import key_status_summary
     from services.cdc_effectively_once import (
@@ -1336,19 +1490,7 @@ def _security_posture(tenant: Tenant | None = None, request: Request | None = No
         "tenant_id": tenant.id if tenant else None,
         "workspace_id": tenant.workspace_id if tenant else None,
         "custom_domain": tenant.custom_domain if tenant else None,
-        "custom_domain_cors": {
-            "enabled": True,
-            "origin": (
-                f"https://{(tenant.custom_domain or '').strip()}"
-                if tenant and (tenant.custom_domain or "").strip()
-                else None
-            ),
-            "hint": (
-                "Set the custom domain (e.g. data.customer.com) and point its DNS to the "
-                "Datawrap web host; the API accepts that origin as soon as it is saved. "
-                "The primary app origin is configured by your platform administrator."
-            ),
-        },
+        "custom_domain_cors": _custom_domain_cors(tenant),
         "data_region": region,
         "environment": "production" if prod else "development",
         "encryption_at_rest": encryption_ready,
@@ -1368,6 +1510,8 @@ def _security_posture(tenant: Tenant | None = None, request: Request | None = No
         # True only when the tenant requires it AND sign-in is enforced
         # (services.mfa_enforcement holds password sessions without a factor).
         "mfa_enforced": mfa_block["enforced"],
+        # D343: password sign-in refused for members (SSO provider is deployment-wide).
+        "sso_enforced": bool(enforcement["sso"]["enforced"]),
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
         # Idle timeout on sign-in sessions (services.session_policy); API keys
         # and the absolute token lifetime are separate.

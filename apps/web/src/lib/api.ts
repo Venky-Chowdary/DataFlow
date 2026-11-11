@@ -154,7 +154,17 @@ async function readApiRefusal(
     role = typeof data?.effective_role === "string" ? data.effective_role : "";
     const raw = data?.detail ?? data?.error ?? data?.message;
     if (typeof raw === "string" && raw.trim()) detail = raw;
-    else if (raw && typeof raw === "object") {
+    else if (Array.isArray(raw) && raw.length) {
+      // FastAPI field-level 422: name each refused field (D341).
+      const parts = raw
+        .map((e) => {
+          const loc = Array.isArray(e?.loc) ? e.loc.filter((p: unknown) => p !== "body").join(".") : "";
+          const msg = typeof e?.msg === "string" ? e.msg.replace(/^Value error, /, "") : "";
+          return msg ? (loc ? `${loc}: ${msg}` : msg) : "";
+        })
+        .filter(Boolean);
+      if (parts.length) detail = parts.join("; ");
+    } else if (raw && typeof raw === "object") {
       if (typeof raw.error === "string") detail = raw.error;
       else if (typeof raw.message === "string") detail = raw.message;
     }
@@ -4882,10 +4892,15 @@ export type Tenant = {
   workspace_id: string;
   name: string;
   custom_domain: string;
+  /** D337: set only by a passed DNS TXT check; an unverified domain gets no CORS. */
+  custom_domain_verified?: boolean;
+  custom_domain_verification?: CustomDomainVerification;
   data_region: string;
   byok_key_id: string;
   security_contact_email: string;
   mfa_required: boolean;
+  /** D343: members must sign in through SSO (password sign-in refused). */
+  sso_enforced?: boolean;
   session_timeout_hours: number;
   enforce_session_timeout?: boolean;
   ip_allowlist: string[];
@@ -4894,6 +4909,15 @@ export type Tenant = {
   updated_at: string;
   /** What is enforced now (read and save responses; same source as the posture). */
   enforcement?: TenantEnforcement;
+};
+
+export type CustomDomainVerification = {
+  status: "not_configured" | "pending_dns_verification" | "verified";
+  verified: boolean;
+  verified_at?: string | null;
+  record_type?: "TXT";
+  record_name?: string;
+  record_value?: string | null;
 };
 
 export type ControlStatus = "enforced" | "audit_only" | "untrusted_client_ip" | "recorded_only" | "not_configured";
@@ -5021,6 +5045,13 @@ export async function createTenant(body: Omit<Tenant, "id" | "created_at" | "upd
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not create tenant"));
+  return res.json();
+}
+
+/** D337: look up the tenant's DNS TXT challenge; 409 explains what is missing. */
+export async function verifyTenantCustomDomain(tenantId: string): Promise<Tenant> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/${tenantId}/custom-domain/verify`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not verify the custom domain"));
   return res.json();
 }
 

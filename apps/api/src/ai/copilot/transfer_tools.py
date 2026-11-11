@@ -1036,12 +1036,16 @@ def plan_transfer(
 
     from src.transfer.connector_capabilities import (
         destination_only_source_refusal,
-        source_only_destination_refusal,
+        destination_refusal,
     )
 
     # D139: a source-only connector is not a destination; say so before any gate.
-    not_a_destination = source_only_destination_refusal(
-        str(dst_conn.get("type") or dst_conn.get("format") or "")
+    # D276: nor a local-disk destination on the hosted cloud (SQLite, a DuckDB file,
+    # a local Iceberg warehouse/catalog): judged on the saved connector's fields.
+    not_a_destination = destination_refusal(
+        str(dst_conn.get("type") or dst_conn.get("format") or ""),
+        str(dst_conn.get("connection_string") or ""),
+        cfg=dst_conn,
     )
     if not_a_destination:
         return _tool_result(tool, success=False, error=not_a_destination)
@@ -1051,6 +1055,13 @@ def plan_transfer(
     )
     if not_a_source:
         return _tool_result(tool, success=False, error=not_a_source)
+    # D345: a Planned connector whose driver is not installed here cannot be
+    # planned or run; say so before the gates blame the destination or DDL.
+    from src.transfer.connector_capabilities import planned_driver_message
+
+    for conn in (dst_conn, src_conn):
+        if not_installed := planned_driver_message(str(conn.get("type") or conn.get("format") or "")):
+            return _tool_result(tool, success=False, error=not_installed)
 
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
 
@@ -1730,6 +1741,14 @@ def _ground_data_rules(
         # Bind to the source's own spelling: the filter runs against read rows,
         # whose keys carry the DDL's case.
         spec = _rebind_filter_columns(spec, known)
+        # ``>`` / ``>=`` … are spellings of gt / gte …: the plan and the run
+        # carry the word form; an unknown operator is refused with the list.
+        from services.row_filter import canonical_filter_spec
+
+        try:
+            spec = canonical_filter_spec(spec)
+        except ValueError as exc:
+            return out, f"source_filter: {exc}"
         out["source_filter"] = spec
         out["filter_description"] = _describe_row_filter(spec)
 

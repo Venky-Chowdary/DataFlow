@@ -41,6 +41,11 @@ LEGACY_PRODUCT_NAME = "DataFlow"
 #: (downloads, the MCP server name). Not used for objects in customer systems.
 PRODUCT_SLUG = "datawrap"
 
+#: The public web origins the hosted product serves its app from. The API's
+#: CORS allowlist starts from these on the hosted cloud; any other browser
+#: origin must be named exactly (CORS_ORIGINS / WEB_DOMAIN / CORS_EXTRA_ORIGINS).
+PUBLIC_WEB_ORIGINS = ("https://datawrap.io", "https://www.datawrap.io")
+
 #: GitOps manifests (QA r12 #4a). What an export writes: Datawrap names only.
 GITOPS_API_VERSION = "datawrap.io/v1"
 GITOPS_GENERATOR = f"{PRODUCT_SLUG}-gitops-export"

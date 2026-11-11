@@ -995,9 +995,9 @@ def is_lossy_coercion(
     if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
         return False
     # Document store ``date`` is an instant, not a calendar day — the time of
-    # day survives. Sub-millisecond sources not measured to whole milliseconds
-    # are excluded and fall through to temporal_precision_would_narrow, which
-    # names the truncation.
+    # day survives. A measured sub-millisecond value is excluded and falls
+    # through to temporal_precision_would_narrow, which names the truncation;
+    # an unmeasured one is left to the write-time guard (D148).
     if document_instant_wire_preserved(
         source_type, target_type, dest_db=dest_db, population=population
     ):

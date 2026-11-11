@@ -4,7 +4,10 @@ Grant shape: (tenant_id, resource_type, resource_id, principal, role)
 
 Roles: viewer < editor < owner (same ranking spirit as team_store).
 Coarse path RBAC still applies; ACL further restricts instance access when
-any grants exist for that resource.
+any grants exist for that resource — for everyone except platform admins and
+the admins of the resource's workspace (:func:`acl_exempt`, D342). A
+workspace admin can grant and revoke every ACL in that workspace, so hiding a
+resource from them protected nothing and looked like the resource was gone.
 """
 
 from __future__ import annotations
@@ -191,6 +194,20 @@ def principal_role_for_resource(
             return None
         return "__open__"  # no ACL configured → fall through to coarse RBAC
     return max(grants, key=lambda g: _ROLE_RANK.get(g.role, 0)).role
+
+
+def acl_exempt(scope: Any, workspace_id: str) -> bool:
+    """Platform admin, or admin of the resource's own workspace (D342).
+
+    Never another workspace's admin: the role comes from the actor's
+    membership in ``workspace_id`` (an API key: its own workspace and role).
+    """
+    if getattr(scope, "unrestricted", False):
+        return True
+    ws = str(workspace_id or "").strip()
+    if not ws:
+        return False
+    return dict(getattr(scope, "memberships", ()) or ()).get(ws, "") == "admin"
 
 
 def assert_resource_acl(

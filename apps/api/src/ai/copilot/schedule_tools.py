@@ -91,8 +91,15 @@ def create_schedule(
     in_file_dedupe: str = "block",
     file_wait_seconds: int = 0,
     shared_destination_acknowledged: bool = False,
+    risk_acceptance: dict[str, Any] | None = None,
 ):
-    """Stage a pipeline schedule for explicit Confirm. This creates nothing itself."""
+    """Stage a pipeline schedule for explicit Confirm. This creates nothing itself.
+
+    ``risk_acceptance`` is the same object ``start_transfer`` takes: the plan
+    signs it onto the mappings a gate requires, and the signed Migration Risk
+    Contracts travel on the schedule's stored mappings, so every unattended
+    run replays that approval (D329).
+    """
     tool = "create_schedule"
     spec = parse_cadence(cadence)
     if not spec.resolved:
@@ -159,6 +166,7 @@ def create_schedule(
         schema_drift_acknowledged=bool(schema_drift_acknowledged),
         shared_destination_acknowledged=bool(shared_destination_acknowledged),
         pii_acknowledgement=pii_acknowledgement,
+        risk_acceptance=risk_acceptance,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)
@@ -200,10 +208,18 @@ def create_schedule(
         decision = _transfer_decision(preflight) or (
             "blocked" if not preflight.get("passed") else "review"
         )
+        blockers = (preflight.get("blockers") or [])[:4]
         listed = "; ".join(
-            f"{b.get('id')}: {b.get('message')}"
-            for b in (preflight.get("blockers") or [])[:4]
-            if b.get("message")
+            f"{b.get('id')}: {b.get('message')}" for b in blockers if b.get("message")
+        )
+        # The way out travels with the refusal, as start_transfer's does (D329).
+        fixes = "; ".join(
+            fix
+            for fix in (
+                str((b.get("details") or {}).get("recommended_fix") or "").strip()
+                for b in blockers
+            )
+            if fix
         )
         return _tool_result(
             tool,
@@ -214,6 +230,7 @@ def create_schedule(
                 "it — an unattended run would fail the same way every night"
                 + (f" — {listed}" if listed else "")
                 + (f" (run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
+                + (f" To proceed: {fixes}" if fixes else "")
             ),
         )
 

@@ -1205,6 +1205,25 @@ def source_only_destination_refusal(dest_type: str) -> str | None:
     )
 
 
+def destination_refusal(
+    dest_type: str, connection_string: str = "", cfg: Any = None
+) -> str | None:
+    """Why this connector cannot be a destination *on this host*, or ``None``.
+
+    The source-only refusal (D139) plus the hosted-cloud local-disk policy (D276:
+    SQLite, a local DuckDB file, a local Iceberg warehouse/catalog). ``cfg`` is
+    the saved connector's fields; without it only the type is judged. Every
+    planning surface asks this one question before any gate runs.
+    """
+    from services.local_file_policy import local_destination_refusal
+
+    if cfg is None and connection_string:
+        cfg = {"connection_string": connection_string}
+    return local_destination_refusal(dest_type, cfg) or (
+        source_only_destination_refusal(dest_type)
+    )
+
+
 def destination_only_source_refusal(source_type: str) -> str | None:
     """The one sentence for "this connector cannot be a source" (D273).
 
@@ -1229,6 +1248,38 @@ def destination_only_source_refusal(source_type: str) -> str | None:
         f"{label} is a destination-only connector: {PRODUCT_NAME} has no {label} "
         "reader, so it cannot be a transfer source. Use it as the destination, or "
         "choose a source such as PostgreSQL, MySQL, MongoDB or S3."
+    )
+
+
+#: Every refusal for a Planned connector whose driver is not on this server
+#: starts with this, so the error humanizer keeps it as operator copy.
+PLANNED_DRIVER_PREFIX = "Not available on this server:"
+
+
+def planned_driver_message(connector_type: str) -> str:
+    """The one honest refusal for a Planned type whose driver is not installed.
+
+    Databricks is listed (Planned) but ``databricks-sqlalchemy`` is kept off the
+    API image (requirements-databricks.txt), so every call on such a connector
+    fails before any connection. That used to read "Authentication failed.
+    Check username, password..." or the SQLAlchemy dialect text (D345). ``""``
+    when the driver loads, or when the type is a Certified connector missing a
+    package on this machine (an environment gap, reported as such elsewhere).
+    """
+    kind = str(connector_type or "").strip().lower()
+    if not kind:
+        return ""
+    driver = resolve_driver_type(kind)
+    if driver_available(driver, kind):
+        return ""
+    entry = enrich_catalog_entry({"id": kind, "name": kind, "status": "planned"})
+    if entry.get("environment_gap") or entry.get("certification_tier") != "planned":
+        return ""
+    label = kind.replace("_", " ").title()
+    return (
+        f"{PLANNED_DRIVER_PREFIX} {label} support is not installed here, so {label} "
+        "connectors are Planned and cannot be tested, browsed, sampled or used in a "
+        "transfer. No connection was attempted, so nothing was sent to the host."
     )
 
 

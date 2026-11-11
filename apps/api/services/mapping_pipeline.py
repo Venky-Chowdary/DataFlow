@@ -822,7 +822,17 @@ def assert_mappings_executable(
 
     missing_contracts = lossy_mappings_missing_risk_contracts(work)
     if missing_contracts:
-        sample = "; ".join(missing_contracts[:8])
+        # Name both types and a reachable way out, not only the jargon (D334).
+        typed = {
+            str(m.get("source") or "").lower(): (
+                f"{m.get('source')} ({m.get('source_type') or '?'} → "
+                f"{m.get('target_type') or m.get('dest_type') or '?'})"
+            )
+            for m in work
+            if isinstance(m, dict) and (m.get("source_type") or m.get("target_type"))
+        }
+        named = [typed.get(str(c).lower(), c) for c in missing_contracts]
+        sample = "; ".join(named[:8])
         more = (
             f" (+{len(missing_contracts) - 8} more)"
             if len(missing_contracts) > 8
@@ -830,7 +840,12 @@ def assert_mappings_executable(
         )
         raise ValueError(
             f"{len(missing_contracts)} lossy mapping(s) lack a verified Migration "
-            f"Risk Contract (execution policy): {sample}{more}"
+            f"Risk Contract (execution policy): {sample}{more}. The source value may "
+            "not survive the destination column as declared. Widen the destination "
+            "column to the source type (schema_policy=propagate_columns widens a "
+            "same-family column itself), or accept the loss with a signed contract: "
+            "risk_acceptance on plan_transfer / start_transfer / retry_job, or a "
+            "risk_contract on the schedule's mapping row (PATCH /api/v1/schedules/{id})."
         )
 
 

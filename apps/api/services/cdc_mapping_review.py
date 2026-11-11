@@ -144,10 +144,84 @@ def acknowledge_review(review_id: str) -> dict[str, Any] | None:
     return updated
 
 
-def open_review_for_source(source_key: str, table: str = "") -> dict[str, Any] | None:
-    """Latest open review for a CDC source (optional table filter)."""
-    for row in list_reviews(source_key=source_key, status="open", limit=20):
-        if table and row.get("table") != table:
-            continue
-        return row
+#: The two doors that release a held review: the MCP tools Pilot exposes and
+#: the REST routes of ``cdc_mapping_review_router`` (D346).
+LIST_REMEDY = "MCP tool list_cdc_mapping_reviews, or GET /api/v1/cdc/mapping-reviews?source_key=<key>"
+
+
+def acknowledge_remedy(review_id: str) -> str:
+    """How a caller acknowledges one review, by both doors."""
+    rid = str(review_id or "").strip() or "<review_id>"
+    return (
+        f"MCP tool acknowledge_cdc_mapping_review with review_id '{rid}', or "
+        f"POST /api/v1/cdc/mapping-reviews/{rid}/acknowledge"
+    )
+
+
+def review_source_keys(cfg: dict[str, Any], connector_id: str = "") -> list[str]:
+    """Every source key a CDC reader may have flagged a review under.
+
+    A reader stamps ``connector:<id>`` when it knows its saved connector and the
+    host fingerprint otherwise, so both are looked up.
+    """
+    from services.cdc_schema_history import connection_fingerprint
+
+    keys: list[str] = []
+    for key in (
+        connection_fingerprint(cfg, connector_id=connector_id) if connector_id else "",
+        connection_fingerprint(cfg),
+    ):
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _table_parts(table: str, default_schema: str = "") -> tuple[str, str]:
+    from connectors.sql_identifiers import split_qualified_table
+
+    schema, name = split_qualified_table(str(table or ""), default_schema or None)
+    return str(schema or "").casefold(), str(name or "").casefold()
+
+
+def review_matches_table(review_table: str, table: str, default_schema: str = "") -> bool:
+    """Whether a review flagged on ``review_table`` concerns ``table``.
+
+    Readers stamp the table in their own spelling (``"public"."orders"``,
+    ``dbo.orders``, ``orders``) while a schedule stores the operator's spelling,
+    so both are unquoted and compared case-insensitively. A side that names no
+    schema matches on the table name alone (the hold stays on when the schema
+    cannot tell them apart). An empty table matches nothing: an unnamed table
+    is never a wildcard for every table of the source (D346).
+    """
+    r_schema, r_name = _table_parts(review_table)
+    t_schema, t_name = _table_parts(table, default_schema)
+    if not r_name or not t_name or r_name != t_name:
+        return False
+    return not (r_schema and t_schema) or r_schema == t_schema
+
+
+def open_review_for_tables(
+    source_key: str, tables: list[str], *, default_schema: str = ""
+) -> dict[str, Any] | None:
+    """Latest open review on a CDC source that concerns one of ``tables``.
+
+    A review holds the table it was flagged on, never every table that shares
+    the source connector; no table named means nothing is held (D346).
+    """
+    wanted = [str(t or "").strip() for t in tables or [] if str(t or "").strip()]
+    if not wanted:
+        return None
+    # The store is read whole either way; the bound only keeps reviews on
+    # other tables of a busy source from hiding this table's review.
+    for row in list_reviews(source_key=source_key, status="open", limit=10_000):
+        review_table = str(row.get("table") or "")
+        if any(review_matches_table(review_table, t, default_schema) for t in wanted):
+            return row
     return None
+
+
+def open_review_for_source(
+    source_key: str, table: str = "", *, default_schema: str = ""
+) -> dict[str, Any] | None:
+    """Latest open review for ``table`` on a CDC source (``""`` matches nothing)."""
+    return open_review_for_tables(source_key, [table], default_schema=default_schema)

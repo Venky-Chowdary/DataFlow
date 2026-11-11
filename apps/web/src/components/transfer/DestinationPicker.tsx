@@ -4,6 +4,7 @@ import { DtIcon } from "../DtIcon";
 import { FilterTabs } from "../ui/FilterTabs";
 import { Connector } from "../../lib/types";
 import { getConnectorDefaults } from "../../lib/connectorTypes";
+import type { UnavailableDestType } from "../../lib/destinationAvailability";
 
 /** Curated engines shown first — matches TransferPage FALLBACK_DEST_TYPES. */
 const FEATURED_DEST_IDS = ["postgresql", "mongodb", "mysql", "snowflake", "bigquery"] as const;
@@ -15,6 +16,8 @@ interface DestinationPickerProps {
   connectorId: string;
   destType: string;
   liveDestTypes: { id: string; label: string }[];
+  /** From /transfer/capabilities ``destination_databases_unavailable``; shown disabled. */
+  unavailableDestTypes?: UnavailableDestType[];
   onSelectConnector: (id: string) => void;
   onSelectManual: () => void;
   onSelectType: (type: string) => void;
@@ -31,6 +34,7 @@ export function DestinationPicker({
   connectorId,
   destType,
   liveDestTypes,
+  unavailableDestTypes = [],
   onSelectConnector,
   onSelectManual,
   onSelectType,
@@ -100,11 +104,16 @@ export function DestinationPicker({
     return [...featured, ...rest];
   }, [liveDestTypes]);
 
+  const unavailableEngines = useMemo(
+    () => unavailableDestTypes.filter((d) => matchesEngineQuery(d, query)),
+    [unavailableDestTypes, query],
+  );
+
   const selectedOutsideFeatured = Boolean(
     destType && !FEATURED_DEST_IDS.includes(destType as (typeof FEATURED_DEST_IDS)[number]),
   );
 
-  const showMoreEngines = otherEngines.length > 0;
+  const showMoreEngines = otherEngines.length > 0 || unavailableEngines.length > 0;
   const moreEnginesVisible = query ? otherEngines : otherEngines.slice(0, 8);
 
   const openNew = () => {
@@ -232,6 +241,11 @@ export function DestinationPicker({
                 {allEnginesForSelect.map((d) => (
                   <option key={d.id} value={d.id}>{d.label}</option>
                 ))}
+                {unavailableDestTypes.map((d) => (
+                  <option key={`unavailable-${d.id}`} value={d.id} disabled>
+                    {d.label} ({d.reason})
+                  </option>
+                ))}
               </select>
             </label>
           </div>
@@ -304,6 +318,21 @@ export function DestinationPicker({
                   >
                     <ConnectorIcon id={d.id} size={14} />
                     <span>{d.label}</span>
+                  </button>
+                ))}
+                {unavailableEngines.map((d) => (
+                  <button
+                    key={`unavailable-${d.id}`}
+                    type="button"
+                    role="listitem"
+                    className="df2-dest-engine-tile is-unavailable"
+                    disabled
+                    aria-disabled="true"
+                    title={d.message || `${d.label}: ${d.reason}`}
+                  >
+                    <ConnectorIcon id={d.id} size={14} />
+                    <span>{d.label}</span>
+                    <span className="df2-label-hint">{d.reason}</span>
                   </button>
                 ))}
               </div>

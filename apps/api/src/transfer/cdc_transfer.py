@@ -2226,7 +2226,14 @@ def _run_cdc_multi_stream(
             from services.cdc_lease import CdcLeaseConflict
             from services.error_handling import TransferCancelled
 
-            if isinstance(exc, (CdcLeaseConflict, CdcDestinationSessionError, TransferCancelled)):
+            from .cdc_added_columns import CdcAddedColumnRefused
+
+            # A refused added column (D344) is the answer, not a reader fault:
+            # the sequential fallback would read the same held changes.
+            if isinstance(
+                exc,
+                (CdcLeaseConflict, CdcDestinationSessionError, TransferCancelled, CdcAddedColumnRefused),
+            ):
                 raise
             if not _shared_reader_left_no_trace(shared_progress):
                 raise
@@ -2391,6 +2398,31 @@ def _run_cdc_shared_multi_table(
                 stream_name=name,
             ),
         }
+
+    # D344 — each table's column set when the shared capture opened. A row
+    # image carrying another column is propagated or refused before it is
+    # applied. A table whose catalog cannot be read keeps the old behaviour
+    # rather than refuse its own columns.
+    from services.reflection_cache import invalidate_named_tables
+
+    from .adapters_introspect import _introspect_table_schema_rich
+
+    def _shared_source_types(table: str) -> dict[str, str]:
+        invalidate_named_tables(table)
+        live, _nulls, _keys = _introspect_table_schema_rich(src_type, src_cfg, table, [])
+        return dict(live or {})
+
+    for name, cfg_s in stream_cfg.items():
+        try:
+            live_cols = list(_shared_source_types(name))
+        except Exception as exc:  # noqa: BLE001 - see above
+            logger.warning("CDC start columns unreadable for %s: %s", name, exc)
+            live_cols = []
+        cfg_s["started_columns"] = (
+            [*live_cols, *(str(m.get("source") or "") for m in cfg_s["mappings"] or [])]
+            if live_cols
+            else None
+        )
 
     shared_key = shared_route_cursor_key(
         engine=src_type,
@@ -2693,6 +2725,22 @@ def _run_cdc_shared_multi_table(
             pk_target = _pk_columns(pk_joined)
         else:
             pk_target = [map_source_to_target(c, use_maps) or c for c in pk_source]
+        if cfg.get("started_columns") is not None and (change.inserts or change.updates):
+            from .cdc_added_columns import propagation_note, shared_stream_mappings
+
+            use_maps, new_here = shared_stream_mappings(
+                cfg,
+                change,
+                use_maps,
+                stream=stream,
+                propagate=bool(backfill_new_fields),
+                exactly_once=bool(eos_active),
+                dest_db=dest_type,
+                source_types=lambda _cols, _t=stream: _shared_source_types(_t),
+                imaged=_change_column_names(change),
+            )
+            if new_here:
+                ddl_log.append(propagation_note(new_here, table=stream, dest_table=stream))
         if original_dest_table is not None or original_dest_collection is not None:
             if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
                 destination.collection = stream
@@ -2705,6 +2753,7 @@ def _run_cdc_shared_multi_table(
             aliases=(stream,),
         )
         col_types = dict(schema)
+        col_types.update(cfg.get("added_types") or {})
         if change.inserts or change.updates and not cfg.get("mappings_inherited"):
             sample = (change.inserts or change.updates)[0]
             headers = list(sample.keys())
@@ -2794,6 +2843,14 @@ def _run_cdc_shared_multi_table(
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
         dest_summary = _note_inherited_map(dest_summary, inherit_note)
+        if cfg.get("added_maps"):
+            from .cdc_added_columns import propagation_note
+
+            _added = [str(m.get("source") or "") for m in cfg["added_maps"]]
+            dest_summary = _note_inherited_map(
+                dest_summary, propagation_note(_added, table=stream, dest_table=stream)
+            )
+            dest_summary["schema_propagation"] = {"added_columns": _added}
         _record_quarantined_key_deletes(
             shared_accum, change, list(pk_source or []), str(job_id or ""), destination
         )
@@ -3487,6 +3544,27 @@ def _run_cdc_single_stream(
         list(schema.keys()), inherited=mappings_inherited
     )
     column_types = {c: schema.get(c, "string") for c in headers}
+    # D344 — the columns this capture started with. A row image carrying any
+    # other column (a source ADD COLUMN mid-capture) is propagated or refused
+    # before it is applied, never written without it.
+    started_columns = [*headers, *(str(m.get("source") or "") for m in mappings or [])]
+    # A column the source table already had when this capture opened is a
+    # deliberate omission from the mapping, not a source ADD COLUMN: only a
+    # column the live catalog did not list then counts as added (as the shared
+    # consumer does). An unreadable catalog keeps the mapped set.
+    try:
+        from services.reflection_cache import invalidate_named_tables
+
+        from .adapters_introspect import _introspect_table_schema_rich
+
+        invalidate_named_tables(table_name)
+        _live_at_start, _nulls, _keys = _introspect_table_schema_rich(
+            src_type, src_cfg, table_name, []
+        )
+        started_columns.extend(str(c) for c in (_live_at_start or {}))
+    except Exception:  # noqa: BLE001 - fall back to the mapped column set
+        logger.debug("CDC start catalog unreadable for %s", table_name, exc_info=True)
+    added_columns: list[str] = []
     source_schema_catalog = _cdc_source_schema_catalog(
         src_type, src_cfg, table_name, headers, column_types
     )
@@ -3881,6 +3959,46 @@ def _run_cdc_single_stream(
     max_poll_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
     txn_hold_sleep = float(getenv_brand("CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
 
+    def _source_types(cols: list[str]) -> dict[str, str]:
+        from services.reflection_cache import invalidate_named_tables
+
+        from .adapters_introspect import _introspect_table_schema_rich
+
+        invalidate_named_tables(table_name)
+        live, _nulls, _keys = _introspect_table_schema_rich(src_type, src_cfg, table_name, [])
+        return dict(live or {})
+
+    def _adopt_added_columns(change: ChangeBatch) -> None:
+        """Propagate (or refuse) source columns added since the capture began."""
+        nonlocal mappings, headers, column_types
+        from .cdc_added_columns import (
+            added_source_columns,
+            adopt_added_columns,
+            propagation_note,
+        )
+
+        new_cols = added_source_columns(
+            _change_column_names(change), [*started_columns, *added_columns]
+        )
+        if not new_cols:
+            return
+        mappings, headers, column_types = adopt_added_columns(
+            new_cols,
+            mappings=list(mappings or []),
+            headers=headers,
+            column_types=column_types,
+            propagate=bool(backfill_new_fields),
+            table=str(table_name),
+            dest_table=str(dest_table or ""),
+            dest_db=dest_type,
+            source_types=_source_types,
+            records=[*change.inserts, *change.updates],
+        )
+        added_columns.extend(new_cols)
+        ddl_log.append(
+            propagation_note(new_cols, table=str(table_name), dest_table=str(dest_table or ""))
+        )
+
     def _apply_and_checkpoint(
         change: ChangeBatch,
         *,
@@ -3930,6 +4048,8 @@ def _run_cdc_single_stream(
         # Dual-writer fence: renew lease before sink apply. Zombie after steal
         # must not upsert. Still at-least-once — new holder may redeliver.
         _assert_cdc_lease_before_apply(cdc)
+        if not mappings_inherited and (change.inserts or change.updates):
+            _adopt_added_columns(change)
 
         with _cdc_span(
             "cdc.apply_batch",
@@ -3966,6 +4086,16 @@ def _run_cdc_single_stream(
                     getattr(getattr(cdc, "_lease", None), "generation", 0) or 0
                 ),
             )
+        if added_columns:
+            from .cdc_added_columns import propagation_note
+
+            dest_summary = _note_inherited_map(
+                dest_summary,
+                propagation_note(
+                    added_columns, table=str(table_name), dest_table=str(dest_table or "")
+                ),
+            )
+            dest_summary["schema_propagation"] = {"added_columns": list(added_columns)}
         state.rows_written += rows_written
         state.rows_skipped += int((dest_summary or {}).get("rows_skipped") or 0)
         state.source_changes_read += len(change.inserts) + len(change.updates)
@@ -4102,6 +4232,7 @@ def _run_cdc_single_stream(
                     "replication_lag_bytes": lag_fields.get("replication_lag_bytes"),
                     "cdc_heartbeat_at": lag_fields.get("cdc_heartbeat_at"),
                     "cdc_last_ddl_at": lag_fields.get("cdc_last_ddl_at"),
+                    "cdc_added_columns": list(added_columns),
                     "cdc_plugin": lag_fields.get("cdc_plugin"),
                     "cdc_slot_name": lag_fields.get("cdc_slot_name"),
                     "cdc_delivery": lag_fields.get("cdc_delivery"),
@@ -4565,6 +4696,10 @@ def _run_cdc_single_stream(
                             len(missing_image),
                             [item["key_id"] for item in evidence["keys"]],
                         )
+                        if added_columns:
+                            # D344: say why — a source ADD COLUMN ... DEFAULT
+                            # fills rows no change event will ever carry.
+                            evidence["added_columns"] = list(added_columns)
                         raise CdcDriftRequiresFencedRepair(evidence)
                 else:
                     attempted = len(missing_image)

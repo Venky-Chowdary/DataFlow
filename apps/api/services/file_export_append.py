@@ -64,8 +64,14 @@ def land_export_bytes(
     operator's file rather than replacing it.
     """
     from services.export_paths import generated_export_path, resolve_export_path
+    from services.local_file_policy import local_destination_refusal
     from services.sync_cursor import is_append_sync, resolve_effective_sync_mode
 
+    # D276: the last door before a job's export lands on this server's own disk
+    # (the engine refuses the run before it reads a row; this covers any other caller).
+    refusal = local_destination_refusal("file_export", {"kind": "file_export"})
+    if refusal:
+        raise ValueError(refusal)
     fmt = str(getattr(destination, "format", "") or "")
     ext = os.path.splitext(export_name)[1].lstrip(".") or fmt or "json"
     configured = str(getattr(destination, "output_path", "") or "").strip()

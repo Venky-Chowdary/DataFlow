@@ -17,6 +17,49 @@ _FILTER_OPS = frozenset({
     "is_null", "is_not_null",
 })
 
+#: Other spellings of the operators above. A symbol is only ever looked up
+#: here and replaced by its word form; it never reaches a query (D328).
+FILTER_OP_ALIASES = {
+    "=": "eq", "==": "eq", "!=": "ne", "<>": "ne", ">": "gt", ">=": "gte",
+    "<": "lt", "<=": "lte", "not in": "not_in", "notin": "not_in",
+    "isnull": "is_null", "is null": "is_null", "notnull": "is_not_null",
+    "is not null": "is_not_null", "starts_with": "startswith", "ends_with": "endswith",
+}
+
+#: The operator list an error and the MCP tool schema show.
+FILTER_OPS_HELP = (
+    "eq (=, ==), ne (!=, <>), gt (>), gte (>=), lt (<), lte (<=), in, not_in, "
+    "contains, startswith, endswith, regex, is_null, is_not_null"
+)
+
+
+def canonical_filter_op(raw: Any) -> str:
+    """The word-form operator ``raw`` names; ValueError listing the accepted set."""
+    text = " ".join(str(raw if raw is not None else "eq").split()).lower() or "eq"
+    op = FILTER_OP_ALIASES.get(text, text)
+    if op not in _FILTER_OPS:
+        raise ValueError(
+            f"Unsupported filter operator: {raw}. Use one of: {FILTER_OPS_HELP}."
+        )
+    return op
+
+
+def canonical_filter_spec(spec: dict[str, Any] | None) -> dict[str, Any]:
+    """``spec`` with every operator in its word form (ValueError on an unknown one)."""
+    node = dict(spec or {})
+    for joiner in ("and", "or"):
+        if joiner in node:
+            node[joiner] = [
+                canonical_filter_spec(child) if isinstance(child, dict) else child
+                for child in (node.get(joiner) or [])
+            ]
+            return node
+    if not node:
+        return node
+    key = "operator" if node.get("operator") else "op"
+    node[key] = canonical_filter_op(node.get(key) or "eq")
+    return node
+
 
 def _to_scalar(value: Any) -> Any:
     """Unwrap single-element lists that APIs sometimes send as scalars."""
@@ -131,9 +174,7 @@ def _matches(record: dict[str, Any], spec: dict[str, Any]) -> bool:
         return any(_matches(record, child) for child in spec["or"] if child)
 
     column = spec.get("column") or spec.get("field") or ""
-    op = (spec.get("operator") or spec.get("op") or "eq").lower()
-    if op not in _FILTER_OPS:
-        raise ValueError(f"Unsupported filter operator: {op}")
+    op = canonical_filter_op(spec.get("operator") or spec.get("op") or "eq")
     value = record.get(column)
     return _compare_values(value, spec.get("value"), op)
 

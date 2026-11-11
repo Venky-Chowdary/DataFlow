@@ -2033,7 +2033,7 @@ TRANSFORM_SEMANTICS: dict[str, dict[str, Any]] = {
     "mask_pii": {"semantics": "one-way PII mask", "deterministic": True, "lossy": True},
     "redact": {"semantics": "one-way constant redaction token", "deterministic": True, "lossy": True},
     "omit": {"semantics": "column not written", "deterministic": True, "lossy": True},
-    "phone": {"semantics": "normalize phone number", "deterministic": True, "lossy": True},
+    "phone": {"semantics": "normalize phone number: formatting dropped; a leading + country code is kept as E.164 (+15551234567); without one the national digits are written (no region assumed)", "deterministic": True, "lossy": True},
     "email": {"semantics": "normalize email address", "deterministic": True, "lossy": True},
     "url": {"semantics": "normalize URL", "deterministic": True, "lossy": True},
     "iban": {"semantics": "normalize IBAN", "deterministic": True, "lossy": True},
@@ -2970,12 +2970,15 @@ def apply_transform(
             if transform == "phone":
                 digits = _digits_only(out)
                 # E.164-ish: at least 7 digits; refuse embedded letters.
-                if len(digits.replace("+", "")) < 7:
+                if len(digits.replace("+", "")) < 7 or digits.count("+") > 1:
                     return None, f"Invalid phone: {text!r}"
                 if re.search(r"[A-Za-z]", out):
                     return None, f"Invalid phone: {text!r}"
-                # Preserve operator-visible formatting on string targets (Map Ready).
-                return out, None
+                # Normalize, as the catalog says (D330): formatting is dropped
+                # and a leading + (country code) is kept, so '+1 (555) 123-4567'
+                # becomes the E.164 '+15551234567'. No region is assumed: a
+                # number without one is written as its national digits.
+                return digits, None
             if transform == "postal":
                 compact = out.upper().replace(" ", "")
                 # Accept national formats (US ZIP, CA, UK outward+inward) — refuse

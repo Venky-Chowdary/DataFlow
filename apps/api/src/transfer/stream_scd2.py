@@ -45,7 +45,11 @@ def _qualified(table: str, schema: str | None, dialect: str = "") -> str:
 SCD2_STAGING_PREFIX = "_dataflow_stg_"
 
 
-def _staging_endpoint(destination: EndpointConfig, job_id: str) -> EndpointConfig:
+def _staging_endpoint(
+    destination: EndpointConfig,
+    job_id: str,
+    mappings: list[dict] | None = None,
+) -> EndpointConfig:
     """Clone a destination endpoint for use as a per-transfer staging table.
 
     The name carries the job it belongs to *and* an age stamp: a job's retry can
@@ -66,7 +70,38 @@ def _staging_endpoint(destination: EndpointConfig, job_id: str) -> EndpointConfi
         for k, v in (destination.extra or {}).items()
         if k not in {"duplicate_policy", "allow_duplicates"}
     }
+    _type_staging_like_evolved_target(extra, mappings)
     return replace(destination, table=name, collection=name, extra=extra)
+
+
+def _type_staging_like_evolved_target(
+    extra: dict[str, Any], mappings: list[dict] | None
+) -> None:
+    """Type the spool like the target this run leaves behind, added columns included.
+
+    The spool is CREATEd from the target's probed live types. A column this
+    run adds (propagate_columns: ``create_new`` with its planned
+    ``target_type``) is not in that probe yet, so the spool's CREATE refused
+    it as untyped ("live schema is missing mapped field(s)") and a mirror /
+    SCD2 run never reached the ADD COLUMN that overwrite and upsert apply
+    (D347). Only a planned ADD with its stamped type is filled in; any other
+    gap still fails closed.
+    """
+    from services.mapping_constraints import write_mappings
+
+    for key in ("schema_types", "destination_column_types"):
+        live = extra.get(key)
+        if not isinstance(live, dict) or not live:
+            continue
+        typed = dict(live)
+        have = {str(c).lower() for c in typed}
+        for m in write_mappings(list(mappings or [])):
+            target = str(m.get("target") or "").strip()
+            stamp = str(m.get("target_type") or "").strip()
+            if target and stamp and m.get("create_new") and target.lower() not in have:
+                typed[target] = stamp
+                have.add(target.lower())
+        extra[key] = typed
 
 
 def _reap_orphan_spools(
@@ -158,7 +193,7 @@ def stream_scd2_mirror_transfer(
 
     digest_types = target_fingerprint_types(mappings, schema)
 
-    staging = _staging_endpoint(destination, job_id or "")
+    staging = _staging_endpoint(destination, job_id or "", mappings)
     staging_qualified = _qualified(staging.table, schema_name, dest_type)
     target_qualified = _qualified(destination.table or staging.table, schema_name,
                                   dest_type)
@@ -315,6 +350,7 @@ def stream_scd2_mirror_transfer(
                         validation_mode=validation_mode,
                         scd2_opts=scd2_opts,
                         source_endpoint=source,
+                        add_new_columns=backfill_new_fields,
                     )
                     rejected_all.extend(list(summary.get("rejected_details") or []))
                     if summary.get("ok") is False:

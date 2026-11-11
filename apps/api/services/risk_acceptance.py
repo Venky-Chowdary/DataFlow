@@ -1,6 +1,7 @@
 """One way in for an operator's ``risk_acceptance`` on every route (QA r12 D2).
 
-MCP ``plan_transfer`` / ``start_transfer`` / ``rerun_job`` / ``retry_job`` and
+MCP ``plan_transfer`` / ``start_transfer`` / ``create_schedule`` / ``rerun_job`` /
+``retry_job`` and
 REST ``POST /transfer/run`` (form field), ``POST /connectors/jobs/{id}/retry``
 and ``/rerun`` (JSON body) all accept the same object::
 
@@ -21,7 +22,8 @@ from typing import Any
 #: Where the operator passes the acceptance, by surface. Quoted by the
 #: cast-failure remediation so the message names a field that exists.
 RISK_ACCEPTANCE_SURFACES = (
-    "MCP plan_transfer / start_transfer / rerun_job / retry_job (risk_acceptance), "
+    "MCP plan_transfer / start_transfer / create_schedule / rerun_job / retry_job "
+    "(risk_acceptance), "
     "REST POST /api/v1/transfer/run (form field risk_acceptance, JSON-encoded), or "
     "REST POST /api/v1/connectors/jobs/{job_id}/retry or /rerun "
     '(JSON body {"risk_acceptance": {...}})'

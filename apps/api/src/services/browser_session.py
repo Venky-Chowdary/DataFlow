@@ -28,7 +28,11 @@ def issue_browser_session(response: Response, session: dict[str, Any], email: st
     from src.services.auth_service import create_token
 
     try:
-        token, expires_at = create_token(email)
+        # One listed session (D338): the Bearer row records the cookie's jti so
+        # revoking it signs the cookie out too.
+        token, expires_at = create_token(
+            email, ip=str(session.get("ip") or ""), ua=str(session.get("ua") or ""),
+            device_id=str(session.get("device_id") or ""), cookie_jti=str(session["jti"]))
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"token": token, "expires_at": expires_at, "must_change_password": False}

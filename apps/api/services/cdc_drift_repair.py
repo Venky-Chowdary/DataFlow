@@ -71,6 +71,14 @@ def cdc_drift_operator_message(evidence: dict[str, Any]) -> str:
         "fence, then resume. This is state convergence / reconciliation, not log "
         "replay."
     )
+    added = [str(c) for c in evidence.get("added_columns") or [] if c]
+    if added:
+        names = ", ".join(added)
+        message += (
+            f" Column(s) {names} were added to the source during this capture and "
+            f"to {dest}; a value the source gave existing rows (a DEFAULT) arrives "
+            "with no change event, so those rows differ until repaired."
+        )
     if evidence.get("capture_pending") is True:
         reason = _CAPTURE_PENDING_REASONS.get(
             str(evidence.get("capture_pending_reason") or ""),

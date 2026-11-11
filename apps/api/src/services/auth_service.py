@@ -327,17 +327,43 @@ def _legacy_tokens_allowed() -> bool:
     return not is_production()
 
 
-def create_token(email: str, *, amr: list[str] | None = None) -> tuple[str, int]:
+def _token_ttl_for(email: str) -> int:
+    """The platform TTL, capped by the strictest enforced workspace session
+    timeout of this person (D342), so the ``expires_at`` a client stores is
+    the policy the workspace admin saved, not always 24 h. The idle timeout
+    is still enforced server-side on every request (services.session_policy).
+    """
+    ttl = _read_token_ttl_sec()
+    from services.session_policy import idle_timeout_seconds
+
+    policy = idle_timeout_seconds(email.strip().lower())
+    return min(ttl, policy) if policy else ttl
+
+
+def create_token(
+    email: str,
+    *,
+    amr: list[str] | None = None,
+    ip: str = "",
+    ua: str = "",
+    device_id: str = "",
+    cookie_jti: str = "",
+) -> tuple[str, int]:
     """Mint Bearer token with server-side session (``jti``) — Phase D3.
 
     ``amr``: how the person authenticated (``pwd``/``otp``/``recovery``/``sso``),
     read by the workspace MFA policy. Omitted means password-only.
+    The session is registered in the one store "Active sessions" lists
+    (services.session_registry, D338); ``ip``/``ua``/``device_id`` describe it there and
+    ``cookie_jti`` pairs a browser cookie session opened by the same sign-in.
     """
     from services.auth_sessions import create_session
 
-    expires = int(time.time()) + _read_token_ttl_sec()
+    expires = int(time.time()) + _token_ttl_for(email)
     email_n = email.strip().lower()
-    jti = create_session(email_n, expires_at=expires, amr=amr)
+    jti = create_session(
+        email_n, expires_at=expires, amr=amr, ip=ip, ua=ua, device_id=device_id, cookie_jti=cookie_jti
+    )
     payload = f"{email_n}:{expires}:{jti}"
     sig = hmac.new(_token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}:{sig}", expires

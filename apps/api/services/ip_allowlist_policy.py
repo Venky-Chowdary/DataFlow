@@ -26,6 +26,12 @@ host as on a custom domain, for sign-in sessions and API keys alike
   count) nothing is blocked; the request is audited as
   ``tenant.ip_allowlist.would_block`` with reason ``client_ip_untrusted`` and
   the posture reports the list as not enforced.
+* **No silent save (D336).** For the same reason a NEW list is not saved
+  while the caller's address cannot be trusted: :func:`unenforceable_refusal`
+  turns the save into a 409 that says the list would not be enforced, so no
+  client can read a 200 as "this list now blocks". Clearing the list, and
+  re-sending the list already stored, stay allowed. The operator fixes it by
+  setting ``DATAWRAP_TRUSTED_PROXY_COUNT`` (services/client_ip.py).
 """
 
 from __future__ import annotations
@@ -140,7 +146,7 @@ def warn_if_hop_count_unset(logger: Any) -> bool:
         "%d workspace IP allowlist(s) are saved but DATAWRAP_TRUSTED_PROXY_COUNT is unset: "
         "they are enforced only for public client addresses; requests that resolve to a "
         "private/proxy address are admitted and audited (client_ip_untrusted). Set the hop "
-        "count (docs/DEPLOYMENT.md).", listed,
+        "count (see services/client_ip.py).", listed,
     )
     return True
 
@@ -176,6 +182,30 @@ def lockout_refusal(request: Any, entries: list[str] | None) -> str | None:
         f"This IP allowlist does not include your current IP address ({ip or 'unknown'}). "
         "Saving it would lock you out of this workspace. Add your address, or a range "
         "that contains it, and save again." + proxy_hint(ip)
+    )
+
+
+UNENFORCEABLE_REASON = "ip_allowlist_not_enforced"
+
+
+def unenforceable_refusal(request: Any, entries: list[str], stored: list[str]) -> str | None:
+    """The message refusing a new list the server could not enforce, or ``None``.
+
+    ``entries`` is the normalized list being saved and ``stored`` the list on
+    file. Only the caller's own resolved address is judged: a client-supplied
+    ``X-Forwarded-For`` never counts without the hop count (services.client_ip).
+    """
+    if not entries or set(entries) == set(stored or []):
+        return None
+    ip = client_ip_from_request(request)
+    if client_ip_trusted(ip):
+        return None
+    return (
+        "This IP allowlist was not saved: it would not be enforced on this deployment. "
+        f"The server sees your request as coming from {ip or 'an unknown address'}, a private "
+        "or proxy address, because the platform's proxy hop count is not configured, so it "
+        "cannot tell real client addresses apart. Ask your platform administrator to set it, "
+        "then save the list again."
     )
 
 

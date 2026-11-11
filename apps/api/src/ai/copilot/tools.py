@@ -111,7 +111,13 @@ _ROUTE_ID_PROPS: dict[str, dict] = {
 _ROW_RULE_PROPS: dict[str, dict] = {
     "source_filter": {
         "type": "object",
-        "description": "Row filter applied to the source read, e.g. {\"column\": \"region\", \"op\": \"=\", \"value\": \"EU\"}.",
+        "description": (
+            "Row filter applied to the source read, e.g. {\"column\": \"qty\", \"op\": \"gt\", "
+            "\"value\": 1}. Combine conditions with {\"and\": [...]} or {\"or\": [...]}. "
+            "op is one of: eq (=, ==), ne (!=, <>), gt (>), gte (>=), lt (<), lte (<=), "
+            "in / not_in (value is a list), contains, startswith, endswith, regex, "
+            "is_null, is_not_null (no value). Symbols are accepted as the word form."
+        ),
     },
     "dedupe_key": {
         "type": "string",
@@ -1255,6 +1261,19 @@ TOOL_DEFINITIONS: list[dict] = [
                         "acknowledgement a one-shot Confirm records on the job."
                     ),
                 },
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "The start_transfer risk_acceptance object {approved_by, "
+                        "reason, execution_policy (QUARANTINE_ROW, CAST_AND_CONTINUE, "
+                        "TRANSFORM_AND_CONTINUE, SKIP_ROW, STOP_COLUMN), "
+                        "on_cast_failure?, columns?}. It signs a Migration Risk "
+                        "Contract on each mapping a gate requires (lossy, "
+                        "value-changing or below the confidence floor); the signed "
+                        "contracts are stored on the schedule's mappings and every "
+                        "unattended run replays them. Omitted means nothing is signed."
+                    ),
+                },
             },
             "required": ["cadence"],
         },
@@ -1953,6 +1972,8 @@ class DataPilotTools:
             "clear_cursor_resnapshot": self._clear_cursor_resnapshot,
             "list_cdc_captures": self._list_cdc_captures,
             "cleanup_cdc_captures": self._cleanup_cdc_captures,
+            "list_cdc_mapping_reviews": self._list_cdc_mapping_reviews,
+            "acknowledge_cdc_mapping_review": self._acknowledge_cdc_mapping_review,
             "rebaseline_transfer": self._rebaseline_transfer,
             "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
@@ -3550,21 +3571,22 @@ class DataPilotTools:
             except ImportError:
                 gate_ids = []
 
-        from src.transfer.connector_capabilities import source_only_destination_refusal
+        from src.transfer.connector_capabilities import destination_refusal
 
         # D139: the generic sketch listed every gate for a destination that has
         # no writer. Name the saved connector's engine, or the engine itself.
-        dest_type = destination
+        dest_type, dest_saved = destination, None
         try:
             from services.connector_store import list_connectors
 
             for saved in list_connectors():
                 if str(getattr(saved, "name", "") or "").strip().casefold() == destination.casefold():
-                    dest_type = str(getattr(saved, "type", "") or destination)
+                    dest_type, dest_saved = str(getattr(saved, "type", "") or destination), saved
                     break
         except Exception:  # noqa: BLE001 - the store is a hint here, not a gate
             pass
-        not_a_destination = source_only_destination_refusal(dest_type)
+        # D139 source-only; D276 local disk (a saved DuckDB/Iceberg is judged on its path).
+        not_a_destination = destination_refusal(dest_type, cfg=dest_saved)
         if not_a_destination:
             return ToolResult(
                 name="plan_transfer_route", success=False, output=None, error=not_a_destination
@@ -4248,6 +4270,18 @@ class DataPilotTools:
             connector_id, name, slot_names, include_unregistered, reason
         )
 
+    def _list_cdc_mapping_reviews(
+        self, connector_id: str = "", name: str = "", table: str = "", status: str = "open"
+    ) -> ToolResult:
+        from .lifecycle_tools import list_cdc_mapping_reviews
+
+        return list_cdc_mapping_reviews(connector_id, name, table, status)
+
+    def _acknowledge_cdc_mapping_review(self, review_id: str = "", reason: str = "") -> ToolResult:
+        from .lifecycle_tools import stage_acknowledge_cdc_mapping_review
+
+        return stage_acknowledge_cdc_mapping_review(review_id, reason)
+
     def _rebaseline_transfer(
         self,
         connector_id: str = "",
@@ -4776,6 +4810,7 @@ class DataPilotTools:
         duplicate_policy: str = "",
         in_file_dedupe: str = "block",
         file_wait_seconds: int = 0,
+        risk_acceptance: dict | None = None,
     ) -> ToolResult:
         from .schedule_tools import create_schedule
 
@@ -4814,6 +4849,7 @@ class DataPilotTools:
             duplicate_policy=duplicate_policy,
             in_file_dedupe=in_file_dedupe,
             file_wait_seconds=file_wait_seconds,
+            risk_acceptance=risk_acceptance,
         )
 
     def _analyze_result(
