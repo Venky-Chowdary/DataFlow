@@ -806,7 +806,7 @@ function AppShell({
                     schedules={schedules}
                     onOpenConnectors={() => setScreen("connectors")}
                     onOpenJobs={() => setScreen("jobs")}
-                    onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
+                    onOpenJob={(jobId, panel) => navigateFromSearch({ screen: "jobs", jobId, panel })}
                     onOpenPipeline={(scheduleId) =>
                       navigateFromSearch({ screen: "schedules", scheduleId })
                     }
