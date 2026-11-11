@@ -194,30 +194,31 @@ def _accept(diff: dict[str, Any]) -> dict:
 
 
 def _live_types(job: dict[str, Any], ev: TableEvidence, columns: list[str]) -> dict[str, Any]:
-    """Catalog types of the narrow columns on both sides (best effort, metadata only)."""
+    """Catalog types of the narrow columns on both sides (best effort, metadata only).
+
+    The source side is :func:`services.value_readback._live_source_types` — the
+    one source introspection, with its source-read driver translation and its
+    catalog guard.
+    """
+    from services.dialect_profiles import schema_from_cfg
     from services.parity_evidence import _endpoints
+    from services.value_readback import _live_source_types
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.adapters_introspect import _introspect_table_schema
     from src.transfer.connector_capabilities import resolve_driver_type
-    from services.dialect_profiles import schema_from_cfg
 
     out: dict[str, Any] = {"source": {}, "dest": {}}
     try:
         _req, source, destination = _endpoints(job)
         t2s = target_to_source(job)
-        for side, endpoint, cols in (
-            ("source", source, [t2s.get(c, c) for c in columns]),
-            ("dest", destination, columns),
-        ):
-            cfg = resolve_connector_config(endpoint)
-            db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or "")).lower()
-            types = _introspect_table_schema(db_type, cfg, str(endpoint.table or ""), cols) or {}
-            if side == "source":
-                out["source"] = {c: types.get(t2s.get(c, c)) for c in columns if types.get(t2s.get(c, c))}
-            else:
-                out["dest"] = {c: types.get(c) for c in columns if types.get(c)}
-                out["dialect"] = db_type
-                out["schema"] = schema_from_cfg(db_type, cfg)
+        types = _live_source_types(source, [t2s.get(c, c) for c in columns])
+        out["source"] = {c: types.get(t2s.get(c, c)) for c in columns if types.get(t2s.get(c, c))}
+        cfg = resolve_connector_config(destination)
+        db_type = resolve_driver_type(str(cfg.get("type") or destination.format or "")).lower()
+        types = _introspect_table_schema(db_type, cfg, str(destination.table or ""), columns) or {}
+        out["dest"] = {c: types.get(c) for c in columns if types.get(c)}
+        out["dialect"] = db_type
+        out["schema"] = schema_from_cfg(db_type, cfg)
     except Exception as exc:  # noqa: BLE001 - types are advisory; the fix says what is unknown
         logger.info("parity: live column types unavailable (%s)", type(exc).__name__)
     if not out.get("dialect"):
