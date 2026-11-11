@@ -61,11 +61,21 @@ ALLOWLISTED_WITH_REASON = {
     ("DELETE", "/api/v1/team/workspaces/{workspace_id}"): (
         "Platform-admin-only workspace lifecycle route; the A-only editor cannot mutate it."
     ),
+    ("GET", "/api/v1/evidence/entries/{index}/proof"): (
+        "An inclusion proof is a list of hashes of the deployment's log, not workspace data."
+    ),
 }
 ROUTE_SKIPPED_WITH_REASON = {
     ("POST", "/api/v1/connectors/jobs/{job_id}/resume"): (
         "Resume requires a serialized transfer request query parameter and can start work."
     ),
+    # Evidence Ledger entries need real signed packs in the log; another workspace's
+    # entry, receipt and withdrawal are probed (404) in tests/test_ledger_routes.py.
+    ("GET", "/api/v1/evidence/entries/{index}"): "Covered by tests/test_ledger_routes.py (404).",
+    ("POST", "/api/v1/evidence/entries/{index}/withdraw"): "Covered by tests/test_ledger_routes.py (404).",
+    ("GET", "/api/v1/evidence/receipts/{content_sha256}"): "Covered by tests/test_ledger_routes.py (404).",
+    ("GET", "/api/v1/evidence/keys/{key_id}"): "Covered by tests/test_ledger_routes.py (404).",
+    ("POST", "/api/v1/evidence/keys/{key_id}/retire"): "Covered by tests/test_ledger_routes.py (404).",
 }
 PREFLIGHT_RUN_XFAIL = (
     "GET",

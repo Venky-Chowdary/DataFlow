@@ -57,6 +57,9 @@ _PUBLIC_PREFIXES = (
     "/api/v1/catalog",
     # Contact Sales lead form (D103) — visitors have no session.
     "/api/v1/contact-sales",
+    # Evidence Ledger public verification: the pack and receipt are the input,
+    # the verdict the only output (rate-limited in evidence_router).
+    "/api/v1/evidence/public/verify",
     "/catalog",
     "/.well-known/oauth-protected-resource",
 )

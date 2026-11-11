@@ -270,6 +270,9 @@ _PUBLIC_PATHS = {
     # in contact_router defend it; a session can never be required.
     "/api/v1/contact-sales",
     "/api/v1/contact-sales/config",
+    # Evidence Ledger: a caller presenting a pack and its receipt gets the
+    # verdict and nothing else; evidence_router rate-limits it per address.
+    "/api/v1/evidence/public/verify",
     "/.well-known/oauth-protected-resource",
     "/.well-known/oauth-protected-resource/api/v1/mcp",
 }
@@ -396,6 +399,10 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/exit/", Permission.JOB_READ),
     # Any other exit route not ruled above is a management action.
     ("*", "/api/v1/exit/", Permission.JOB_MANAGE),
+    # Evidence Ledger reads: public keys, checkpoints, entries, proofs, receipts.
+    ("GET", "/api/v1/evidence/", Permission.AUDIT_READ),
+    # Any other evidence route not ruled below changes keys or the log's anchor.
+    ("*", "/api/v1/evidence/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/query/", Permission.QUERY_USE),
@@ -492,6 +499,17 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/exit/systems/{system_id}/rehearsals", Permission.JOB_RUN),
     ("POST", "/api/v1/exit/rehearsals/{rehearsal_id}/signoff", Permission.JOB_MANAGE),
     ("POST", "/api/v1/exit/evidence/verify", Permission.JOB_READ),
+    # Evidence Ledger. Verifying is a read. A workspace's signing keys are its
+    # own settings (workspace.manage, with write access to that workspace);
+    # anchoring the deployment's log is a platform action (the router requires
+    # a platform administrator). Withdrawing a pack reverses a sign-off, so it
+    # is the sign-off's permission: job.manage in the pack's workspace.
+    ("POST", "/api/v1/evidence/verify", Permission.AUDIT_READ),
+    ("POST", "/api/v1/evidence/keys", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/evidence/keys/rotate", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/evidence/keys/{key_id}/retire", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/evidence/checkpoint/anchor", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/evidence/entries/{index}/withdraw", Permission.JOB_MANAGE),
     ("POST", "/api/v1/transfer/analyze", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/analyze-file", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/introspect", Permission.JOB_PLAN),

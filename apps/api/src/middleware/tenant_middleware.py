@@ -50,6 +50,8 @@ _PUBLIC_PREFIXES = (
     "/api/v1/invites/accept",
     "/api/v1/public/email-events",
     "/api/v1/contact-sales",
+    # Evidence Ledger public verification (pack and receipt in, verdict out).
+    "/api/v1/evidence/public/verify",
     "/api/v1/catalog",
     "/api/v1/status",
     "/auth/signup",

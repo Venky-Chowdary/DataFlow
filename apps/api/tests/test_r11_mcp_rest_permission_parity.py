@@ -42,6 +42,8 @@ REST_TWIN: dict[str, tuple[str, str]] = {
     "get_exit_readiness": ("GET", "/api/v1/exit/readiness"),
     "explain_exit_rehearsal": ("GET", "/api/v1/exit/rehearsals/exr-1"),
     "check_reversibility": ("GET", "/api/v1/transfer/plans/p-1/reversibility"),
+    "list_evidence_entries": ("GET", "/api/v1/evidence/entries"),
+    "verify_evidence": ("POST", "/api/v1/evidence/verify"),
     "open_job": ("GET", "/api/v1/jobs/job-1"),
     "get_preflight_run": ("GET", "/api/v1/preflight/runs/run-1"),
     "list_contracts": ("GET", "/api/v1/contracts"),

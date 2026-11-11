@@ -80,6 +80,9 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "explain_exit_rehearsal": (Permission.JOB_READ, READ),
     # GET /transfer/plans/{id}/reversibility is the plan read (job.plan).
     "check_reversibility": (Permission.JOB_PLAN, READ),
+    # Evidence Ledger reads mirror GET /evidence/entries and POST /evidence/verify.
+    "list_evidence_entries": (Permission.AUDIT_READ, READ),
+    "verify_evidence": (Permission.AUDIT_READ, READ),
     "list_contracts": (Permission.JOB_READ, READ),
     "list_schedules": (Permission.SCHEDULE_READ, READ),
     "get_schedule": (Permission.SCHEDULE_READ, READ),

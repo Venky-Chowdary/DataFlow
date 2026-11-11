@@ -33,7 +33,7 @@ def _check(status: str, detail: str, **more: Any) -> dict[str, Any]:
     return {"status": status, "detail": detail, **more}
 
 
-def _consistency(receipt: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
+def _consistency(receipt: dict[str, Any], statement: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
     try:
         size, index = int(checkpoint.get("tree_size")), int(receipt.get("leaf_index"))
     except (TypeError, ValueError):
@@ -46,7 +46,7 @@ def _consistency(receipt: dict[str, Any], checkpoint: dict[str, Any]) -> dict[st
         return _check(FAILED, f"the log's root at size {size} is not the receipt's: the log was rewritten, "
                               "or the receipt is not from this log")
     entry = ledger_log.get_entry(index)
-    if not entry or entry.get("leaf_hash") != receipt.get("leaf_hash"):
+    if not entry or entry.get("leaf_hash") != verifier.leaf_hash(verifier.statement_bytes(statement)).hex():
         return _check(FAILED, f"the log's entry {index} is not this statement")
     return _check(PASSED, f"the log still holds this leaf at index {index} and this root at size {size}")
 
@@ -62,7 +62,7 @@ def _signatures_ok(entry: dict[str, Any]) -> bool:
             and entry.get("leaf_hash") == verifier.leaf_hash(verifier.statement_bytes(statement)).hex())
 
 
-def _withdrawal(statement: dict[str, Any]) -> dict[str, Any]:
+def _withdrawal(statement: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
     if statement.get("kind") == verifier.WITHDRAWAL:
         return _check(PASSED, "this entry is itself a withdrawal")
     found = ledger_log.withdrawal_of(str(statement.get("content_sha256") or ""))
@@ -71,9 +71,21 @@ def _withdrawal(statement: dict[str, Any]) -> dict[str, Any]:
     if not _signatures_ok(found):
         return _check(FAILED, "the log holds a withdrawal of this pack that does not verify")
     detail = (found.get("statement") or {}).get("withdrawal") or {}
+    # The reason is the workspace's own words: a caller without a session is told when, not why.
     info = {"leaf_index": found.get("index"), "withdrawn_at": found.get("issued_at"),
-            "reason": detail.get("reason"), "superseded_by": detail.get("superseded_by")}
+            "reason": None if public else detail.get("reason"), "superseded_by": detail.get("superseded_by")}
     return _check(PASSED, f"the pack was withdrawn at {info['withdrawn_at']}", withdrawal=info)
+
+
+_NOT_THIS_LOG = "not consulted: the receipt is not from this deployment's log"
+
+
+def _public_anchor(check: dict[str, Any], anchor: dict[str, Any] | None) -> tuple[dict[str, Any],
+                                                                                dict[str, Any] | None]:
+    """The anchor answer without the store's own details (bucket, object, error text)."""
+    generic = {PASSED: "anchored in a write-once store, read back now",
+               FAILED: "the anchor could not be confirmed", NOT_CHECKED: "Not anchored."}
+    return _check(check["status"], generic[check["status"]]), ({"status": anchor.get("status")} if anchor else None)
 
 
 def _guarded(name: str, run: Callable[[], dict[str, Any]]) -> dict[str, Any]:
@@ -93,11 +105,14 @@ def stored_receipt(pack: dict[str, Any], *, allows: Callable[[Any], bool] | None
 
 
 def verify_online(pack: dict[str, Any] | None, receipt: dict[str, Any] | None = None, *,
-                  search: bool = False, allows: Callable[[Any], bool] | None = None) -> dict[str, Any]:
+                  search: bool = False, allows: Callable[[Any], bool] | None = None,
+                  public: bool = False) -> dict[str, Any]:
     """The EvidenceVerdict for a pack (and receipt), with the log and the anchor consulted.
 
     ``search`` looks the receipt up by the pack's digest when the pack carries
-    none (never done for a caller without a session).
+    none (never done for a caller without a session). ``public`` is that
+    caller: the answer then holds verdicts only — no withdrawal reason, no
+    anchor location or store error text.
     """
     if receipt is None and isinstance(pack, dict) and isinstance(pack.get("ledger"), dict):
         receipt = pack["ledger"]
@@ -117,14 +132,19 @@ def verify_online(pack: dict[str, Any] | None, receipt: dict[str, Any] | None = 
     except Exception as exc:  # noqa: BLE001 - no registry: the signatures read "not checked"
         logger.error("evidence key registry could not be read (%s)", type(exc).__name__, exc_info=exc)
         keys = verifier.KeySet()
-    from services.ledger_anchor import verify_checkpoint
+    consistency = _guarded("consistency", lambda: _consistency(receipt, statement, checkpoint))
+    anchor: dict[str, Any] | None = None
+    if consistency["status"] == FAILED:
+        # A receipt that is not this log's says nothing about this log's withdrawals or anchors.
+        withdrawal = anchor_check = _check(NOT_CHECKED, _NOT_THIS_LOG)
+    else:
+        from services.ledger_anchor import verify_checkpoint
 
-    anchor_check, anchor = verify_checkpoint(checkpoint)
-    overrides = {
-        "consistency": _guarded("consistency", lambda: _consistency(receipt, checkpoint)),
-        "withdrawal": _guarded("withdrawal", lambda: _withdrawal(statement)),
-        "anchor": anchor_check,
-    }
+        withdrawal = _guarded("withdrawal", lambda: _withdrawal(statement, public=public))
+        anchor_check, anchor = verify_checkpoint(checkpoint)
+        if public:
+            anchor_check, anchor = _public_anchor(anchor_check, anchor)
+    overrides = {"consistency": consistency, "withdrawal": withdrawal, "anchor": anchor_check}
     return verifier.verify_evidence(pack, receipt, keys, overrides=overrides, mode="online", anchor=anchor)
 
 

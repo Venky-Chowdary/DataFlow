@@ -33,6 +33,7 @@ from ..rag.query_analysis import (
 from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
 from .exit_tools import EXIT_TOOL_DEFINITIONS
+from .ledger_tools import LEDGER_TOOL_DEFINITIONS
 from .parity_tools import PARITY_TOOL_DEFINITIONS
 from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
@@ -1667,6 +1668,7 @@ TOOL_DEFINITIONS: list[dict] = [
     *LIFECYCLE_TOOL_DEFINITIONS,
     *PARITY_TOOL_DEFINITIONS,
     *EXIT_TOOL_DEFINITIONS,
+    *LEDGER_TOOL_DEFINITIONS,
 ]
 
 TOOL_FAMILIES: list[dict] = [
@@ -1730,6 +1732,8 @@ TOOL_FAMILIES: list[dict] = [
             "get_exit_readiness",
             "explain_exit_rehearsal",
             "check_reversibility",
+            "list_evidence_entries",
+            "verify_evidence",
             "navigate",
             "get_preflight_run",
             "remediate_validation",
@@ -1940,6 +1944,8 @@ class DataPilotTools:
             "get_exit_readiness": self._get_exit_readiness,
             "explain_exit_rehearsal": self._explain_exit_rehearsal,
             "check_reversibility": self._check_reversibility,
+            "list_evidence_entries": self._list_evidence_entries,
+            "verify_evidence": self._verify_evidence,
             "compare_datasets": self._compare_datasets,
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
@@ -2935,6 +2941,16 @@ class DataPilotTools:
         from .exit_tools import check_reversibility
 
         return check_reversibility(plan_id=plan_id, job_id=job_id)
+
+    def _list_evidence_entries(self, kind: str = "", limit: int = 20) -> ToolResult:
+        from .ledger_tools import list_evidence_entries
+
+        return list_evidence_entries(kind=kind, limit=limit)
+
+    def _verify_evidence(self, content_sha256: str = "", job_id: str = "", rehearsal_id: str = "") -> ToolResult:
+        from .ledger_tools import verify_evidence
+
+        return verify_evidence(content_sha256=content_sha256, job_id=job_id, rehearsal_id=rehearsal_id)
 
     def _remediate_validation(
         self,

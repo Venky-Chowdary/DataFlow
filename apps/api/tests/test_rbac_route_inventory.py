@@ -36,6 +36,7 @@ PUBLIC_ROUTES = frozenset(
         ("GET", "/api/v1/catalog/suggested/destinations"),
         ("GET", "/api/v1/catalog/suggested/sources"),
         ("POST", "/api/v1/contact-sales"),
+        ("POST", "/api/v1/evidence/public/verify"),
         ("POST", "/api/v1/invites/accept"),
         ("POST", "/api/v1/invites/inspect"),
         ("GET", "/api/v1/status"),
