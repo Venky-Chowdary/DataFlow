@@ -347,3 +347,44 @@ def test_h4_the_longest_measured_kpi_counts_proven_rehearsals_only(tmp_path, mon
     assert kpis["longest_measured_seconds"] == 100 and kpis["longest_measured_system_id"] == "exs_1"
     rows = {r["id"]: r for r in board(systems)["systems"]}
     assert rows["exs_2"]["fits_window"] is None  # a stored figure from a failed run is not shown as fitting
+
+
+# ------------------------------------- H6: tests for the mutants the suite did not catch
+
+
+def test_h6_an_approval_is_bound_to_the_content_it_attested(world):  # noqa: F811
+    from services import exit_store
+    from services.exit_evidence import content_sha256, sign_off, signoff_block
+
+    out = _run(_system(tables=[{"name": "orders"}]))
+    assert out["verdict"] == "proven", out["verdict_reason"]
+    doc = exit_store.get(exit_store.REHEARSALS, out["id"])
+    changed = json.loads(json.dumps(doc))
+    changed["tables"][0]["rows_source"] = int(changed["tables"][0]["rows_source"]) + 1
+    assert content_sha256(changed) != content_sha256(doc)
+
+    sign_off(out["id"], role="engineering", actor="eng@example.com", signer_role="operator")
+
+    def alter(current):
+        current["tables"][0]["rows_source"] = int(current["tables"][0]["rows_source"]) + 1
+
+    exit_store.update(exit_store.REHEARSALS, out["id"], alter)
+    view = signoff_block(exit_store.get(exit_store.REHEARSALS, out["id"]))
+    assert [a["role"] for a in view["invalidated_approvals"]] == ["engineering"] and view["approvals"] == []
+    sign_off(out["id"], role="data_owner", actor="owner@example.com", signer_role="editor")
+    after = sign_off(out["id"], role="compliance", actor="audit@example.com", signer_role="admin")
+    assert not after.get("signed"), "a stale approval completed the sign-off"
+    assert signoff_block(after)["status"] == "open"
+
+
+def test_h6_a_source_read_error_reaches_the_reason_allowlisted(world, monkeypatch):  # noqa: F811
+    from services import exit_completeness
+
+    def unreadable(_endpoint, **_kw):
+        raise RuntimeError("invalid input syntax for type integer: \"alice@example.com\" password=hunter2")
+
+    monkeypatch.setattr(exit_completeness, "source_columns_and_rows", unreadable)
+    out = _run(_system(tables=[{"name": "orders"}]))
+    reason = out["tables"][0]["reason"]
+    assert out["tables"][0]["status"] == "not_proven" and "could not be re-read" in reason
+    assert "alice" not in reason and "hunter2" not in reason and "22P02" in reason

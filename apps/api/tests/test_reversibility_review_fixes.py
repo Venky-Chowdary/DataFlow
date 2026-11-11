@@ -392,3 +392,51 @@ def test_h5_the_schedule_routes_accept_and_return_the_flag(schedule_store):
     sched = schedule_store.create_schedule(_schedule_body(require_reversibility=True))
     assert ScheduleResponse.from_schedule(sched).require_reversibility is True
     assert ScheduleSummaryResponse.from_schedule(sched).require_reversibility is True
+
+
+# ------------------------------------- H6: tests for the mutants the suite did not catch
+
+
+def test_h6_a_lossy_key_declared_on_the_stream_contract_makes_every_report_not_reversible():
+    from services.reversibility import NOT_REVERSIBLE
+    from services.reversibility_sources import execute_gate, job_report, plan_report
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    maps = [_m("email", transform="hash_pii", stype="TEXT", ttype="TEXT"), _m("note", stype="TEXT", ttype="TEXT")]
+    contracts = [{"name": "people", "selected": True, "primary_key": ["email"]}]
+    job = {"transfer_request": {
+        "source": {"format": "postgresql", "table": "people"}, "destination": {"format": "postgresql", "table": "people"},
+        "column_types": {"email": "TEXT", "note": "TEXT"}, "mappings": maps, "stream_contracts": contracts}}
+    assert job_report(job, "j")["verdict"] == NOT_REVERSIBLE
+    req = TransferRequest(
+        source=EndpointConfig(kind="database", format="postgresql", table="people"),
+        destination=EndpointConfig(kind="database", format="postgresql", table="people"),
+        mappings=maps, stream_contracts=contracts, require_reversibility=True)
+    gate = execute_gate(req, (maps, {"email": "TEXT", "note": "TEXT"}, {"email": "TEXT", "note": "TEXT"}))
+    assert gate["details"]["verdict"] == NOT_REVERSIBLE
+    rev = SimpleNamespace(mappings=maps)
+    plan = SimpleNamespace(
+        id="p", source={"format": "postgresql", "table": "people"},
+        destination={"format": "postgresql", "table": "people"}, source_columns=["email", "note"],
+        source_schema={"email": "TEXT", "note": "TEXT"}, target_schema={"email": "TEXT", "note": "TEXT"},
+        sample_rows=[], policies={"stream_contracts": contracts}, active_revision=lambda: rev)
+    assert plan_report(plan)["verdict"] == NOT_REVERSIBLE
+
+
+def test_h6_a_lossless_run_passes_g24_at_execute_and_lands_every_row(people, fake_store, monkeypatch):
+    import services.reversibility_sources as rs
+
+    seen = []
+    real = rs.execute_gate
+
+    def spy(request, planned):
+        gate = real(request, planned)
+        seen.append(gate)
+        return gate
+
+    monkeypatch.setattr(rs, "execute_gate", spy)
+    src, dst = people
+    result = _execute(fake_store, src, dst)
+    assert result.success, result.error
+    assert _dest_rows(dst) == 10
+    assert seen and all(g["status"] == "pass" for g in seen), seen
