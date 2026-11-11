@@ -79,7 +79,7 @@ def test_c1_execute_request_with_a_limit_or_filter_blocks_g24():
     planned = (_TYPED, {"id": "INTEGER", "email": "TEXT"}, {"id": "INTEGER", "email": "TEXT"})
     assert execute_gate(req(), planned)["status"] == "pass"
     capped = execute_gate(req(limit=2), planned)
-    assert capped["status"] == "block" and "(rows)" in capped["message"]
+    assert capped["status"] == "block" and "t: row cap" in capped["message"]  # review 2 gap 2: by kind
     assert capped["details"]["lossy_columns"][0]["reason_code"] == "row_change"
     filtered = execute_gate(req(source_filter={"column": "id", "op": "lte", "value": 3}), planned)
     assert filtered["status"] == "block"

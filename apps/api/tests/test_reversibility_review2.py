@@ -353,3 +353,24 @@ def test_n7_validate_blocks_default_on_a_sampled_null_like_execute():
     note = report["tables"][0]["columns"][1]
     assert note["check"]["status"] == "does_not_fit"
     assert report["gate"]["status"] == "block"
+
+
+# ------------------------------------------------- gap 2: the g24 message names row changes once
+
+
+def test_gap2_the_gate_message_names_each_table_s_row_changes_once_by_kind():
+    from services.reversibility import analyze_table, build_report
+
+    table = analyze_table(
+        table="events", mappings=_TYPED, source_columns=["id", "email"], row_limit=5,
+        source_filter={"column": "id", "op": "lte", "value": 3},
+        recipe_steps=[{"op": "rank_rows", "options": {"partition_by": ["id"], "order_by": "id", "keep": 1}}],
+    )
+    report = build_report([table], scope="job", subject_id="j", require=True, data_rows=0, data_source="none")
+    message = report["gate"]["message"]
+    assert "(rows)" not in message
+    assert message.count("events") == 1, message
+    clause = message.split("it is not: ", 1)[1].split(".", 1)[0]
+    assert clause.startswith("events: ")
+    assert sorted(clause[len("events: "):].split(", ")) == ["row cap", "source filter", "top rows only"]
+    assert len(report["lossy_columns"]) == 3  # every row change is still listed with its reason

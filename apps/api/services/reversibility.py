@@ -636,6 +636,21 @@ def build_report(
     return report
 
 
+#: How the gate message names a row change (``transforms[0]`` of a ``row_change`` entry).
+_ROW_CHANGE_LABEL = {
+    "limit": "row cap", "source_filter": "source filter", "rank_rows": "top rows only",
+    "source_query": "source query", "source_procedure": "stored procedure", "skip_rows": "skipped leading rows",
+    "skip_footer": "skipped trailing rows", "filter_rows": "row filter", "divert_rows": "diverted rows",
+    "dedupe_rows": "dedupe", "unnest_json": "unnest", "nest_json": "nest", "scd2": "SCD2 history",
+}
+
+
+def row_change_label(entry: Mapping[str, Any]) -> str:
+    """A row change's kind in words ("row cap", "source filter", "top rows only", ...)."""
+    op = str((entry.get("transforms") or ["row change"])[0])
+    return _ROW_CHANGE_LABEL.get(op, op.replace("_", " "))
+
+
 def gate_for(report: Mapping[str, Any]) -> dict[str, Any]:
     """``g24_reversibility``: skip unless required; block until every table is reversible."""
     if not report.get("require_reversibility"):
@@ -643,12 +658,18 @@ def gate_for(report: Mapping[str, Any]) -> dict[str, Any]:
                 "message": "Reversibility is not required for this transfer; the analysis is shown for review."}
     if report.get("verdict") == REVERSIBLE:
         return {"id": GATE_ID, "status": "pass", "message": "Every table is reversible."}
-    open_cols = [
-        f"{t['name']}.{c.get('source') or c.get('target') or '(rows)'}"
-        + (" (fits the sample only; the whole table was not checked)" if _sample_only(c) else "")
-        for t in report.get("tables") or [] for c in t["columns"] if _effective(c) != INVERTIBLE
-    ]
-    shown = ", ".join(open_cols[:12]) + (f" (+{len(open_cols) - 12} more)" if len(open_cols) > 12 else "")
+    items: list[str] = []
+    for t in report.get("tables") or []:
+        open_ = [c for c in t["columns"] if _effective(c) != INVERTIBLE]
+        # Each table's row changes once, by kind ("events: row cap, source filter"), never "events.(rows)" each.
+        kinds = list(dict.fromkeys(row_change_label(c) for c in open_ if c["reason_code"] == "row_change"))
+        if kinds:
+            items.append(f"{t['name']}: {', '.join(kinds)}")
+        items.extend(dict.fromkeys(
+            f"{t['name']}.{c.get('source') or c.get('target') or '(column)'}"
+            + (" (fits the sample only; the whole table was not checked)" if _sample_only(c) else "")
+            for c in open_ if c["reason_code"] != "row_change"))
+    shown = "; ".join(items[:12]) + (f" (+{len(items) - 12} more)" if len(items) > 12 else "")
     return {
         "id": GATE_ID, "status": "block",
         "message": ("This transfer must be reversible, and it is not: " + shown
