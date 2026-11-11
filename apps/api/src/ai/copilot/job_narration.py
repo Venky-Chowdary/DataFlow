@@ -187,6 +187,9 @@ def _last_job(jobs: list[dict], ask: JobAsk | None, status: str, census: dict) -
         f"Your last transfer job `{latest.get('id', '?')}` is "
         f"**{state.upper()}** — {route} ({records})."
     ]
+    if latest.get("verification_passed") is False:
+        # A completed status is not a clean bill: say what the Jobs page flags.
+        lines.append("Its Gate-8 verification **failed** — open the job's Trust Report before relying on it.")
     err = str(latest.get("error") or "").strip()
     if err:
         lines.append(f"Error: {err}")

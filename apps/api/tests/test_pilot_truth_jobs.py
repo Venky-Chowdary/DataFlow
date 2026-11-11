@@ -83,6 +83,15 @@ def test_failed_question_when_the_last_job_did_not_fail(ledger):
     assert set(pt.listed_job_ids(response.answer)) - {newest} <= set(pt.job_ids(status="failed"))
 
 
+def test_last_job_that_completed_but_failed_verification_is_not_reported_clean(monkeypatch):
+    pt.reset_workspace(monkeypatch)
+    pt.seed_job("completed", minutes_ago=9)
+    last = pt.seed_job("completed", minutes_ago=1, reconciliation={"passed": False, "rows_differ": 7})
+    response = pt.ask(pt.agent(), "what is the status of my last transfer")
+    assert last in response.answer and "COMPLETED" in response.answer
+    assert "verification **failed**" in response.answer
+
+
 def test_no_failures_never_lists_other_jobs_as_failed(monkeypatch):
     pt.reset_workspace(monkeypatch)
     for i in range(4):
