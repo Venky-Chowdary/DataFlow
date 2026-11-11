@@ -198,6 +198,10 @@ def widen_statements(job: dict[str, Any], table: str, column: str, new_type: str
                 raw.commit()
         finally:
             raw.close()
+    if not dry_run:
+        from services.reflection_cache import invalidate_named_tables
+
+        invalidate_named_tables(table)  # after any DDL: no write binds against the old, narrow type
     return ran
 
 
