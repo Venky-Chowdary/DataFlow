@@ -48,6 +48,39 @@ except Exception:
     MAX_LADDER_ROWS = 250_000
 
 
+def ladder_coverage_limit(rows: int, limit: int | None = None) -> dict[str, Any]:
+    """The verdict's statement that the in-memory ladder did not cover this run.
+
+    L2 aggregates and L4/L5 localisation load both populations into memory and
+    stop at ``MAX_LADDER_ROWS``. A run past it is not verified by those layers;
+    the verdict says so instead of leaving their absence to be read as a pass.
+    """
+    budget = int(limit if limit is not None else MAX_LADDER_ROWS)
+    return {
+        "kind": "verification_ladder_max_rows",
+        "rows": int(rows),
+        "limit": budget,
+        "layers_not_run": ["L2", "L4", "L5"],
+        "note": (
+            f"Coverage limit: {int(rows):,} rows exceed the {budget:,}-row in-memory "
+            "verification limit, so column aggregates (L2) and cell localisation "
+            "(L4/L5) did not run. Row balance (L1) and any full-population digest "
+            "(L3) are the only evidence."
+        ),
+    }
+
+
+def stamp_coverage_limit(report: dict[str, Any], rows: int, limit: int | None = None) -> dict[str, Any]:
+    """Put the ladder's coverage limit on a Gate-8 report: field, verdict qualifier, message."""
+    info = ladder_coverage_limit(rows, limit)
+    report["coverage_limit"] = info
+    report["verification_verdict_qualifier"] = "coverage_limited"
+    message = str(report.get("message") or "").rstrip()
+    if info["note"] not in message:
+        report["message"] = f"{message} {info['note']}".strip()
+    return report
+
+
 class PopulationTooLarge(RuntimeError):
     """Raised by the readers before an oversized population reaches memory."""
 
@@ -1182,6 +1215,9 @@ def run_five_layer_verification(
             "population_proof": False,
             "population_checksum_proof": False,
             "skipped": True,
+            "coverage_limit": ladder_coverage_limit(
+                max(len(source_rows), len(target_rows), src_n, tgt_n)
+            ),
             "reason": (
                 f"Population exceeds VERIFICATION_LADDER_MAX_ROWS={MAX_LADDER_ROWS}; "
                 "refuse in-memory L2/L4/L5. Gate-8 L1/L3 checksum still applies."
@@ -1448,6 +1484,9 @@ def attach_ladder_to_reconcile_report(
     if not ladder:
         return out
     out["verification_ladder"] = ladder
+    limit = ladder.get("coverage_limit")
+    if isinstance(limit, dict):
+        stamp_coverage_limit(out, int(limit.get("rows") or 0), int(limit.get("limit") or 0) or None)
     # Evidence changed — recompute the fidelity claim from the single procedure.
     from services.signed_proof_pack import apply_fidelity_veto
 

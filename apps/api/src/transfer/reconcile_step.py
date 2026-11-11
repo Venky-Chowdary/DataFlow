@@ -2917,7 +2917,11 @@ def _ladder_declined(report: dict[str, Any], rows: int, budget: int) -> dict[str
         "localization": {},
         "localization_summary": "",
     }
-    return out
+    # The cut-off is a coverage limit of the verdict, never a silent pass.
+    from services.verification_ladder import ladder_coverage_limit, stamp_coverage_limit
+
+    out["verification_ladder"]["coverage_limit"] = ladder_coverage_limit(rows, budget)
+    return stamp_coverage_limit(out, rows, budget)
 
 
 def _ladder_declined_for_shape(
@@ -9103,7 +9107,15 @@ def run_reconciliation(
     # real full_checksum on an engine-copy route, not count-only. Promote it
     # over the "no rows entered this process" stamp instead of telling the
     # operator to set the flag they already set.
-    if _engine_digest_enabled() and not recon.get("checksum_match"):
+    # Strict validation never settles for the count on a same-engine copy:
+    # where the ladder re-read and digested both populations, that digest is
+    # the verdict (it used to need the flag, and the run passed on COUNT(*)
+    # with assurance_level none).
+    _strict_count_only = (
+        str(validation_mode or "").strip().lower() in {"strict", "maximum"}
+        and _engine_count_proof_only(dest_summary) is not None
+    )
+    if (_engine_digest_enabled() or _strict_count_only) and not recon.get("checksum_match"):
         _l3_run = recon.get("verification_ladder") or {}
         _l3_layer = (_l3_run.get("layers") or {}).get("L3") or {}
         _l3_details = _l3_layer.get("details") or {}
