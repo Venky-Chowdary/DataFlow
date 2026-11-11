@@ -19,6 +19,7 @@ import logging
 from typing import Any
 
 from services.parity_classifier import (
+    ACCEPTED_BY_OPERATOR,
     UNEXPLAINED,
     CellContext,
     accepted_by_operator,
@@ -278,6 +279,25 @@ def _apply_resolved(ev: TableEvidence, resolved: set[str]) -> None:
 
 
 # ── grouping ─────────────────────────────────────────────────────────────────
+
+
+def accounts_for_gate8_failure(diff: dict[str, Any]) -> bool:
+    """Whether a surviving difference accounts for a failed Gate-8 — decided per cause.
+
+    * an **unexplained** difference Gate-8's own evidence localized (a sampled
+      cell, an L5 / key-census row, a witnessed loss, a column aggregate, a
+      count gap, a duplicate key): yes — it is a difference Gate-8 saw;
+    * ``accepted_by_operator``: yes — it is such a difference a person accepted;
+    * every **explained** cause: no. ``quarantined`` rows are held out of
+      Gate-8's compare already; ``concurrent_source_update``,
+      ``transform_applied``, ``out_of_scope_population`` and the
+      representation-only rules (whitespace padding, normal form, scale,
+      binary rounding, time zone, Oracle NULL) say why *a* row differs as
+      expected, not why Gate-8 failed. A failure they alone "explain" stays
+      unverifiable until a re-run localizes it.
+    """
+    found = diff["cause"]
+    return bool(diff["_localizing"]) and (not found["explained"] or found["code"] == ACCEPTED_BY_OPERATOR)
 
 
 def _example(ob: Observation, protected: bool) -> dict[str, Any] | None:
@@ -684,7 +704,7 @@ def build_parity_report(
     for ev in tables_ev:
         diffs = _group(ev, engine, state.get("acceptances") or {})
         if (ev is tables_ev[0] and gate8_failed(recon) and not ev.gate8_unaccounted
-                and not ev.resolved_by_fix and not any(d["_localizing"] for d in diffs)):
+                and not ev.resolved_by_fix and not any(accounts_for_gate8_failure(d) for d in diffs)):
             # Gate-8 failed, and no difference that accounts for it survived classification.
             mark_unaccounted(ev, recon)
         differences += diffs
