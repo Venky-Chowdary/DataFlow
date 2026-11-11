@@ -139,6 +139,8 @@ def plan_report(plan: Any) -> dict[str, Any]:
     rev = plan.active_revision() if plan is not None else None
     policies = _dict(getattr(plan, "policies", None))
     sample = [r for r in getattr(plan, "sample_rows", None) or [] if isinstance(r, Mapping)]
+    # The plan's source row count (0 = not known): the sample covers the table only when it holds every row.
+    population = _limit(getattr(plan, "row_count_estimate", 0)) or None
     table = analyze_table(
         table=_table(plan.destination, plan.source),
         mappings=list((rev.mappings if rev else None) or []),
@@ -157,10 +159,11 @@ def plan_report(plan: Any) -> dict[str, Any]:
         source_filter=_dict(policies.get("source_filter")),
         read_window=_read_window(_dict(plan.source),
                                  _dict(plan.source).get("read_options") or policies.get("read_options")),
+        population_rows=population,
     )
     return build_report([table], scope="plan", subject_id=str(plan.id),
                         require=plan_requires_reversibility(policies),
-                        data_rows=len(sample), data_source="plan_sample")
+                        data_rows=len(sample), data_source="plan_sample", population_rows=population)
 
 
 def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
@@ -198,8 +201,14 @@ def request_report(
     dest_types: Mapping[str, str] | None,
     *,
     sample_rows: list[Any] | None = None,
+    population_rows: int | None = None,
 ) -> dict[str, Any]:
-    """Execute's view: the run's planned mappings and types (Validate == Execute)."""
+    """Execute's view: the run's planned mappings and types (Validate == Execute).
+
+    ``population_rows`` is the source row count Execute measured (``None``:
+    unknown); conditional columns count as fitting only when the sample is the
+    whole population.
+    """
     src, dst = getattr(request, "source", None), getattr(request, "destination", None)
     table = analyze_table(
         table=_table(dst, src),
@@ -218,9 +227,11 @@ def request_report(
         row_limit=_limit(getattr(request, "limit", 0)),
         source_filter=_dict(getattr(request, "source_filter", None)),
         read_window=_read_window(src, getattr(request, "read_options", None)),
+        population_rows=population_rows,
     )
     return build_report([table], scope="job", subject_id=str(getattr(request, "job_id", "") or ""),
-                        require=True, data_rows=len(sample_rows or []), data_source="preflight_sample")
+                        require=True, data_rows=len(sample_rows or []), data_source="preflight_sample",
+                        population_rows=population_rows)
 
 
 def preflight_gate(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -238,14 +249,18 @@ def execute_gate(request: Any, planned: tuple[Any, ...] | None) -> dict[str, Any
     """``g24_reversibility`` for Execute when the request requires reversibility, else ``None``."""
     if not _truthy(getattr(request, POLICY, False)):
         return None
-    mappings, column_types, dest_types = tuple(planned or (None, None, None))[:3]
-    # The design sample Execute read (when the caller has one): conditional columns are
-    # checked against it, as Validate checks them against the plan sample.
-    sample = [r for r in (tuple(planned)[3] if planned and len(planned) > 3 else None) or []
-              if isinstance(r, Mapping)]
+    planned = tuple(planned or ())
+    mappings, column_types, dest_types = (planned + (None, None, None))[:3]
+    # The design sample Execute read and the source row count it measured (when the caller
+    # has them): conditional columns are checked against the sample, and count as fitting
+    # only when that sample is every source row (review 2, N2: fail closed).
+    sample = [r for r in (planned[3] if len(planned) > 3 else None) or [] if isinstance(r, Mapping)]
+    total = planned[4] if len(planned) > 4 else None
+    population = None if total is None or isinstance(total, bool) else _limit(total)
     if column_types is None:
         column_types = dict(getattr(request, "column_types", None) or {})
-    return preflight_gate(request_report(request, mappings, column_types, dest_types, sample_rows=sample))
+    return preflight_gate(request_report(request, mappings, column_types, dest_types, sample_rows=sample,
+                                         population_rows=population))
 
 
 def stamp_plan_requirement(request: Any, policies: Mapping[str, Any] | None) -> None:

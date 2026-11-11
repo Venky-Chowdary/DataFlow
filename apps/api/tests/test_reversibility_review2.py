@@ -31,11 +31,13 @@ from tests.test_reversibility_review_fixes import (  # noqa: E402,F401  (fixture
 def _req(source_extra=None, read_options=None, **kw):
     from src.transfer.models import EndpointConfig, TransferRequest
 
-    return TransferRequest(
+    body = dict(
         source=EndpointConfig(kind="database", format="sqlite", database=":memory:", table="t",
                               extra=dict(source_extra or {})),
         destination=EndpointConfig(kind="database", format="sqlite", database=":memory:", table="t"),
-        mappings=_TYPED, require_reversibility=True, read_options=dict(read_options or {}), **kw)
+        mappings=_TYPED, require_reversibility=True, read_options=dict(read_options or {}))
+    body.update(kw)
+    return TransferRequest(**body)
 
 
 _PLANNED = (_TYPED, {"id": "INTEGER", "email": "TEXT"}, {"id": "INTEGER", "email": "TEXT"})
@@ -139,5 +141,85 @@ def test_n1_engine_blocks_a_required_reversible_csv_read_that_skips_rows(tmp_pat
     job_id = "rev" + uuid.uuid4().hex[:12]
     fake_store.update_job_status(job_id, "pending", transfer_request={})
     result = UniversalTransferEngine().execute_tracked(req, job_id)
+    assert not result.success and _blocked_by_g24(result), result.error
+    assert _dest_rows(dst) is None
+
+
+# ------------------------- N2: a sample that fits is not the population (fail closed at Execute)
+
+
+_UPPER = [dict(_m("id", stype="INTEGER", ttype="INTEGER"), confidence=0.99),
+          dict(_m("email", transform="uppercase", stype="TEXT", ttype="TEXT"), confidence=0.99)]
+
+
+def _upper_table(**kw):
+    from services.reversibility import analyze_table
+
+    return analyze_table(table="people", mappings=_UPPER, source_columns=["id", "email"],
+                         sample_rows=[{"id": 1, "email": "A@X.COM"}, {"id": 2, "email": "B@X.COM"}], **kw)
+
+
+def test_n2_a_conditional_column_fits_only_when_the_check_covered_the_whole_population():
+    from services.reversibility import CONDITIONAL, PARTLY, REVERSIBLE
+
+    whole = _upper_table(population_rows=2)
+    email = whole["columns"][1]
+    assert email["check"]["status"] == "fits" and email["check"]["covers_population"] is True
+    assert whole["verdict"] == REVERSIBLE
+
+    sampled = _upper_table(population_rows=3000)
+    email = sampled["columns"][1]
+    assert email["invertibility"] == CONDITIONAL and email["check"]["status"] == "fits"
+    assert email["check"]["covers_population"] is False
+    assert "fits the sample" in email["reason"]
+    assert "will be blocked at Execute unless the whole table is checked" in email["reason"]
+    assert sampled["verdict"] == PARTLY
+    # An unknown population is not assumed to be the sample (fail closed).
+    assert _upper_table()["verdict"] == PARTLY
+
+
+def test_n2_execute_blocks_when_its_sample_is_not_the_whole_table():
+    from services.reversibility_sources import execute_gate
+
+    def req():
+        return _req(mappings=_UPPER)
+
+    types = {"id": "INTEGER", "email": "TEXT"}
+    rows = [{"id": 1, "email": "A@X.COM"}, {"id": 2, "email": "B@X.COM"}]
+    assert execute_gate(req(), (_UPPER, types, types, rows, 2))["status"] == "pass"
+    blocked = execute_gate(req(), (_UPPER, types, types, rows, 3000))
+    assert blocked["status"] == "block" and "t.email" in blocked["message"]
+    assert "whole table" in blocked["message"]
+    # Without a source row count Execute cannot know the sample is the table: it blocks.
+    assert execute_gate(req(), (_UPPER, types, types, rows))["status"] == "block"
+
+
+def test_n2_validate_says_the_same_as_execute_for_a_sampled_plan():
+    from services.reversibility_sources import plan_report
+
+    rev = SimpleNamespace(mappings=_UPPER)
+    plan = SimpleNamespace(
+        id="p", source={"format": "postgresql", "table": "people"},
+        destination={"format": "postgresql", "table": "people"}, source_columns=["id", "email"],
+        source_schema={"id": "INTEGER", "email": "TEXT"}, target_schema={"id": "INTEGER", "email": "TEXT"},
+        sample_rows=[{"id": 1, "email": "A@X.COM"}], policies={"require_reversibility": True},
+        row_count_estimate=3000, active_revision=lambda: rev)
+    report = plan_report(plan)
+    assert report["gate"]["status"] == "block"
+    assert report["data_checked"] == {"rows": 1, "source": "plan_sample", "population_rows": 3000}
+    email = report["tables"][0]["columns"][1]
+    assert "will be blocked at Execute unless the whole table is checked" in email["reason"]
+    plan.row_count_estimate = 1
+    assert plan_report(plan)["gate"]["status"] == "pass"
+
+
+def test_n2_engine_blocks_a_transform_that_fits_only_the_design_sample(tmp_path, fake_store):  # noqa: F811
+    from tests.test_reversibility_review_fixes import _exec
+
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _exec(src, "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT)")
+    rows = [(i, f"U{i}@EXAMPLE.COM") for i in range(1, 3000)] + [(3000, "mixed3000@Example.com")]
+    _exec(src, "INSERT INTO people VALUES (?, ?)", rows)
+    result = _execute(fake_store, src, dst, mappings=_UPPER)
     assert not result.success and _blocked_by_g24(result), result.error
     assert _dest_rows(dst) is None

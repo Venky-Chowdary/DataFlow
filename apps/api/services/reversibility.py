@@ -254,7 +254,13 @@ def _entry(source: str | None, target: str | None, stype: str | None, ttype: str
     if source and target and source != target and code != "rename":
         reason += f" (renamed to {target})"
     if kind == CONDITIONAL and check:
-        if check["status"] == "fits":
+        if check["status"] == "fits" and check.get("covers_population") is True:
+            reason += (f"; every one of its {check['rows_checked']} value(s) round-trips and the check covered "
+                       "the whole table, so it is invertible")
+        elif check["status"] == "fits" and check.get("covers_population") is False:
+            reason += (f"; it fits the sample ({check['rows_checked']} observed value(s) round-trip), but will be "
+                       "blocked at Execute unless the whole table is checked (rows not sampled are not proven)")
+        elif check["status"] == "fits":
             reason += (f"; every one of the {check['rows_checked']} observed value(s) round-trips, "
                        "so it is invertible for the data seen (rows not sampled are not proven)")
         elif check["status"] == "does_not_fit":
@@ -270,6 +276,13 @@ def _entry(source: str | None, target: str | None, stype: str | None, ttype: str
     }
 
 
+def _covered(check: dict[str, Any], covers_population: bool | None) -> dict[str, Any]:
+    """The check, with whether it covered the whole source population (when that is said)."""
+    if covers_population is None:
+        return check
+    return {**check, "covers_population": bool(covers_population)}
+
+
 def classify_mapping(
     mapping: Mapping[str, Any],
     *,
@@ -278,8 +291,14 @@ def classify_mapping(
     dest_db: str = "",
     source_db: str = "",
     observed: Sequence[Any] | None = None,
+    covers_population: bool | None = None,
 ) -> dict[str, Any]:
-    """The invertibility of one mapped column (see the module docstring)."""
+    """The invertibility of one mapped column (see the module docstring).
+
+    ``covers_population`` says whether ``observed`` is every row of the source
+    (``None``: not said). A conditional column whose check fits counts as
+    invertible only when it is (:func:`_effective`, fail closed).
+    """
     source = _norm(mapping.get("source")) or None
     target = _norm(mapping.get("target")) or source
     stype = _norm(mapping.get("source_type")) or _norm(source_type)
@@ -309,7 +328,7 @@ def classify_mapping(
             return _entry(source, target, stype, ttype, [], INVERTIBLE, "type_preserving_bind")
         tcode = next((c for c in ("replace", "default", "assume_timezone") if transform.startswith(c)),
                      "normalize")
-        check = check_values(values, transform)
+        check = _covered(check_values(values, transform), covers_population)
         return _entry(source, target, stype, ttype, transforms, CONDITIONAL, tcode, check, transform=transform)
     if kind == CONDITIONAL:
         side = "source" if not slog else "destination"
@@ -319,7 +338,8 @@ def classify_mapping(
             check = check_type_values(code, values, ttype, strict_text)
         if check is None:
             check = {"status": "not_checked", "rows_checked": 0, "rows_not_fitting": 0}
-        return _entry(source, target, stype, ttype, transforms, CONDITIONAL, code, check, side=side)
+        return _entry(source, target, stype, ttype, transforms, CONDITIONAL, code,
+                      _covered(check, covers_population), side=side)
     if code == "identity" and source and target and source != target:
         code = "rename"
     return _entry(source, target, stype, ttype, transforms, INVERTIBLE, code)
@@ -385,10 +405,24 @@ def classify_recipe_step(
 
 
 def _effective(entry: dict[str, Any]) -> str:
-    """A conditional column that fits the data seen counts as invertible."""
-    if entry["invertibility"] == CONDITIONAL and (entry.get("check") or {}).get("status") == "fits":
+    """A conditional column counts as invertible only when its check fits *the whole population*.
+
+    A sample that fits says nothing about the rows not sampled, so the column
+    stays conditional (and g24 blocks it under require_reversibility) unless
+    the rows checked were every source row (fail closed).
+    """
+    check = entry.get("check") or {}
+    if (entry["invertibility"] == CONDITIONAL and check.get("status") == "fits"
+            and check.get("covers_population") is True):
         return INVERTIBLE
     return entry["invertibility"]
+
+
+def _sample_only(entry: dict[str, Any]) -> bool:
+    """A conditional column that fits the sample, but the sample is not the whole table."""
+    check = entry.get("check") or {}
+    return (entry["invertibility"] == CONDITIONAL and check.get("status") == "fits"
+            and check.get("covers_population") is not True)
 
 
 def table_verdict(columns: list[dict[str, Any]], key_columns: Iterable[str] = ()) -> tuple[str, str]:
@@ -484,18 +518,23 @@ def analyze_table(
     source_filter: Mapping[str, Any] | None = None,
     recipe_input_columns: Sequence[str] | None = None,
     read_window: Mapping[str, Any] | None = None,
+    population_rows: int | None = None,
 ) -> dict[str, Any]:
     """One table's ReversibilityTable (contract 1).
 
     ``recipe_input_columns`` are the columns the shape recipe reads (before any
     step); ``None`` when they are not known. ``read_window`` is how the source
     is read: ``{read_mode, skip_rows, skip_footer}`` (a query or procedure in
-    place of the table, data rows a file read drops).
+    place of the table, data rows a file read drops). ``population_rows`` is
+    the source's row count (``None``: unknown): ``sample_rows`` covers the
+    population only when it holds that many rows.
     """
     stypes = {str(k): str(v) for k, v in (source_types or {}).items()}
     ttypes = {str(k): str(v) for k, v in (target_types or {}).items()}
     columns: list[dict[str, Any]] = []
     mapped: set[str] = set()
+    rows = [row for row in sample_rows if isinstance(row, Mapping)]
+    covers = population_rows is not None and len(rows) >= max(0, int(population_rows))
     for mapping in mappings:
         if not isinstance(mapping, Mapping):
             continue
@@ -503,10 +542,10 @@ def analyze_table(
         target = _norm(mapping.get("target")) or source
         if source:
             mapped.add(source.lower())
-        observed = [row.get(source) for row in sample_rows if isinstance(row, Mapping)] if source else []
+        observed = [row.get(source) for row in rows] if source else []
         columns.append(classify_mapping(
             mapping, source_type=stypes.get(source, ""), target_type=ttypes.get(target, ""),
-            dest_db=dest_db, source_db=source_db, observed=observed,
+            dest_db=dest_db, source_db=source_db, observed=observed, covers_population=covers,
         ))
     for name in source_columns:
         if _norm(name) and _norm(name).lower() not in mapped:
@@ -537,8 +576,13 @@ def build_report(
     require: bool,
     data_rows: int,
     data_source: str,
+    population_rows: int | None = None,
 ) -> dict[str, Any]:
-    """The ReversibilityReport around analysed tables (contract 1)."""
+    """The ReversibilityReport around analysed tables (contract 1).
+
+    ``population_rows`` (the source's row count, ``None`` when unknown) is shown
+    next to the rows checked: a check covers the population only when they match.
+    """
     counts = {INVERTIBLE: 0, CONDITIONAL: 0, LOSSY: 0}
     lossy: list[dict[str, Any]] = []
     for table in tables:
@@ -560,7 +604,8 @@ def build_report(
         "scope": scope, "subject_id": subject_id,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "verdict": verdict, "verdict_reason": reason, "require_reversibility": bool(require),
-        "data_checked": {"rows": int(data_rows), "source": data_source if data_rows else "none"},
+        "data_checked": {"rows": int(data_rows), "source": data_source if data_rows else "none",
+                         "population_rows": None if population_rows is None else int(population_rows)},
         "counts": {"invertible": counts[INVERTIBLE], "conditional": counts[CONDITIONAL], "lossy": counts[LOSSY]},
         "lossy_columns": lossy, "tables": tables,
         "rollback_note": " ".join(t["rollback_note"] for t in tables),
@@ -578,6 +623,7 @@ def gate_for(report: Mapping[str, Any]) -> dict[str, Any]:
         return {"id": GATE_ID, "status": "pass", "message": "Every table is reversible."}
     open_cols = [
         f"{t['name']}.{c.get('source') or c.get('target') or '(rows)'}"
+        + (" (fits the sample only; the whole table was not checked)" if _sample_only(c) else "")
         for t in report.get("tables") or [] for c in t["columns"] if _effective(c) != INVERTIBLE
     ]
     shown = ", ".join(open_cols[:12]) + (f" (+{len(open_cols) - 12} more)" if len(open_cols) > 12 else "")

@@ -133,8 +133,9 @@ def test_a_normalising_transform_fits_only_when_it_changes_nothing():
     assert clean["check"]["status"] == "fits"
     assert dirty["check"]["status"] == "does_not_fit"
     assert unseen["check"]["status"] == "not_checked"
+    # Review 2 (N2): a check that fits counts only when it covered the whole table.
     table_clean = analyze_table(table="t", mappings=[_m("name", transform="trim", stype="TEXT", ttype="TEXT")],
-                                source_columns=["name"], sample_rows=[{"name": "a"}])
+                                source_columns=["name"], sample_rows=[{"name": "a"}], population_rows=1)
     assert table_clean["verdict"] == REVERSIBLE
     table_unseen = analyze_table(table="t", mappings=[_m("name", transform="upper", stype="TEXT", ttype="TEXT")],
                                  source_columns=["name"])
@@ -263,7 +264,7 @@ def test_plan_report_reads_the_active_revision_and_the_plan_sample():
     )
     report = plan_report(plan)
     assert report["scope"] == "plan" and report["require_reversibility"] is True
-    assert report["data_checked"] == {"rows": 2, "source": "plan_sample"}
+    assert report["data_checked"] == {"rows": 2, "source": "plan_sample", "population_rows": None}
     assert report["verdict"] == PARTLY
     assert report["gate"]["status"] == "block"
     amount = next(c for c in report["tables"][0]["columns"] if c["source"] == "amount")

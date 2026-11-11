@@ -269,10 +269,11 @@ def _execute_policy_gates_for_request(
     Execute must match or CDC/SCD2/staging falsely block (or skip) after Approve.
 
     ``planned`` is the run's ``(mappings, source types, destination types[,
-    design sample rows])``: with it, a datetime narrowed onto a millisecond
-    carrier gets its value-level answer (D148, ``services.millisecond_fit``) and
-    the reversibility gate checks conditional columns against the rows Execute
-    read, as Validate does against the plan sample.
+    design sample rows[, source row count]])``: with it, a datetime narrowed onto
+    a millisecond carrier gets its value-level answer (D148,
+    ``services.millisecond_fit``) and the reversibility gate checks conditional
+    columns against the rows Execute read, as Validate does against the plan
+    sample (fitting only when those rows are the whole source).
     """
     from services.preflight_cursor_gate import read_scope_for_transfer_request
     from services.preflight_service import run_transfer_policy_gates
