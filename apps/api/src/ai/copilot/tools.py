@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from services.ops_events import emit_event
+from services.remediation_actions import STUDIO, kinds_for
+from services.remediation_actions import action as remediation_action
 from services.value_serializer import json_default
 from services.workspace_filter import bound_allows, current_workspace_filter
 
@@ -479,16 +481,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": [
-                        "normalize_control_chars",
-                        "open_bad_data_fix",
-                        "quarantine_and_rerun",
-                        "review_mappings",
-                        "rerun_preflight",
-                    ],
-                },
+                "kind": {"type": "string", "enum": list(kinds_for(STUDIO))},
                 "run_id": {"type": "string"},
                 **_WORKSPACE_PROP,
             },
@@ -2910,14 +2903,9 @@ class DataPilotTools:
         run_id: str = "",
         workspace_id: str = "",
     ) -> ToolResult:
-        allowed = {
-            "normalize_control_chars",
-            "open_bad_data_fix",
-            "quarantine_and_rerun",
-            "review_mappings",
-            "rerun_preflight",
-        }
-        if kind not in allowed:
+        allowed = kinds_for(STUDIO)
+        chosen = remediation_action(kind, STUDIO)
+        if chosen is None:
             return ToolResult(
                 name="remediate_validation",
                 success=False,
@@ -2938,19 +2926,12 @@ class DataPilotTools:
                         "Ask the user for the pf_… ID shown on Validate."
                     ),
                 )
-        labels = {
-            "normalize_control_chars": "Normalize control characters…",
-            "open_bad_data_fix": "Fix bad data…",
-            "quarantine_and_rerun": "Quarantine bad rows and re-run…",
-            "review_mappings": "Open Map step to review mappings",
-            "rerun_preflight": "Re-run Validate",
-        }
-        requires_confirm = kind in {"open_bad_data_fix", "quarantine_and_rerun"}
+        requires_confirm = chosen.requires_confirm
         ack_id = ""
         if requires_confirm:
             from .ack_ledger import get_ack_ledger
 
-            destructive = kind == "quarantine_and_rerun"
+            destructive = chosen.destructive
             payload = {
                 "remediation_kind": kind,
                 "run_id": cited or None,
@@ -2963,7 +2944,7 @@ class DataPilotTools:
                 preview={
                     "remediation_kind": kind,
                     "run_id": cited or None,
-                    "label": labels[kind],
+                    "label": chosen.label,
                     "destructive": destructive,
                 },
             )
@@ -2973,11 +2954,11 @@ class DataPilotTools:
             output={
                 "action": "studio",
                 "kind": kind,
-                "label": labels[kind],
+                "label": chosen.label,
                 "run_id": cited or None,
                 "risk": "mutate" if requires_confirm else "safe",
                 "requires_confirm": requires_confirm,
-                "destructive": kind == "quarantine_and_rerun",
+                "destructive": chosen.destructive,
                 "ui_only": not requires_confirm,
                 **({"ack_id": ack_id} if ack_id else {}),
                 "note": (
