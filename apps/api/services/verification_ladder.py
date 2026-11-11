@@ -104,8 +104,17 @@ def layer_l1_row_balance(
     target_rows_before: int | None = None,
     keyed_cardinality: bool = False,
     keyed_expected_delta: int | None = None,
+    rows_shaped_out: int = 0,
+    rows_source_filtered: int = 0,
+    rows_expanded: int = 0,
+    retained_rows: int = 0,
 ) -> LayerReport:
     """L1 — the same three cardinality identities ``row_conservation`` closes.
+
+    The expected count is ``services.expected_rows.expected_destination_rows``,
+    the function Gate-8 and row conservation use: rows a declared source
+    filter or an approved recipe removed on the read are not expected at the
+    destination, and rows a recipe added are.
 
     Overwrite: ``source - dropped - skipped == dest COUNT(*)``.
     Append: ``dest - dest_before == expected`` (Full Append dest-Δ —
@@ -120,9 +129,22 @@ def layer_l1_row_balance(
     classified as new or existing, so with hold-outs the keyed identity is the
     bound ``expected - dropped <= dest Δ <= expected``.
     """
-    dropped = max(max(int(rejected_rows or 0), 0) - max(int(coerced_null_rows or 0), 0), 0)
+    from services.expected_rows import expected_destination_rows, held_out_rows
+
+    dropped = held_out_rows(rejected_rows, coerced_null_rows)
     skipped = max(int(rows_skipped or 0), 0)
-    batch_expected = max(int(source_rows) - dropped - skipped, 0)
+    removed = max(int(rows_shaped_out or 0), 0) + max(int(rows_source_filtered or 0), 0)
+    added = max(int(rows_expanded or 0), 0) + max(int(retained_rows or 0), 0)
+    batch_expected = expected_destination_rows(
+        int(source_rows),
+        rejected_rows=rejected_rows,
+        coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
+        retained_rows=retained_rows,
+    )
     target = int(target_rows)
     details: dict[str, Any] = {
         "source_rows": int(source_rows),
@@ -135,6 +157,13 @@ def layer_l1_row_balance(
         "target_rows_before": target_rows_before,
         "keyed_expected_delta": keyed_expected_delta,
     }
+    if removed or added:
+        details.update(
+            rows_shaped_out=max(int(rows_shaped_out or 0), 0),
+            rows_source_filtered=max(int(rows_source_filtered or 0), 0),
+            rows_expanded=max(int(rows_expanded or 0), 0),
+            retained_rows=max(int(retained_rows or 0), 0),
+        )
     if keyed_cardinality:
         details["equation"] = "target - target_rows_before == inserts - deletes"
         if keyed_expected_delta is None or target_rows_before is None:
@@ -167,6 +196,8 @@ def layer_l1_row_balance(
             details=details,
         )
     equation = "source - dropped - skipped == target"
+    if removed or added:
+        equation = "source + added - dropped - skipped - removed_on_read == target"
     if allow_extra_rows and target_rows_before is not None:
         delta = target - int(target_rows_before)
         ok = delta == batch_expected
@@ -1108,6 +1139,10 @@ def run_five_layer_verification(
     keyed_expected_delta: int | None = None,
     l2_skip_reason: str = "",
     scoped_to_written_keys: bool = False,
+    rows_shaped_out: int = 0,
+    rows_source_filtered: int = 0,
+    rows_expanded: int = 0,
+    retained_rows: int = 0,
 ) -> dict[str, Any]:
     """Execute L1–L5 on two in-memory populations (SQL-loaded or buffered).
 
@@ -1169,6 +1204,10 @@ def run_five_layer_verification(
         target_rows_before=target_rows_before,
         keyed_cardinality=keyed_cardinality,
         keyed_expected_delta=keyed_expected_delta,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
+        retained_rows=retained_rows,
     )
 
     src_agg = compute_column_aggregates(source_rows, cols)

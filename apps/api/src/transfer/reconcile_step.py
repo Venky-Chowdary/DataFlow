@@ -18,6 +18,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
+from services.expected_rows import expected_destination_rows
 from services.ops_events import emit_event
 from services.dest_precount import (
     OVERWRITE_SOURCE_KEYS_KEY,
@@ -113,6 +114,26 @@ def _read_target_sample_retrying(purpose: str, *args: Any, **kwargs: Any) -> lis
             purpose, attempts, transient, kwargs.get("table_name"), exc,
         )
         raise _SampleReadExhausted(exc, attempts=attempts, transient=transient) from exc
+
+
+def _read_side_row_terms(dest_summary: dict[str, Any] | None) -> dict[str, int]:
+    """Rows a declared filter / an approved recipe removed or added on the read.
+
+    The same three terms for Gate-8's expected count and ladder L1. A reader
+    that reports only its removal total (``rows_removed_on_read``) attributes
+    what the recipe did not remove to the source filter.
+    """
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    shaped = int(summary.get("rows_shaped_out", 0) or 0)
+    filtered = int(summary.get("rows_source_filtered", 0) or 0)
+    removed = int(summary.get("rows_removed_on_read", 0) or 0)
+    if "rows_source_filtered" not in summary and removed > shaped + filtered:
+        filtered = removed - shaped
+    return {
+        "rows_shaped_out": shaped,
+        "rows_source_filtered": filtered,
+        "rows_expanded": int(summary.get("rows_expanded", 0) or 0),
+    }
 
 
 def _finalize_reconcile(
@@ -3824,6 +3845,9 @@ def _maybe_attach_verification_ladder(
         target_rows_before=dest_before,
         keyed_cardinality=keyed,
         keyed_expected_delta=census.expected_delta if keyed and census else None,
+        # Rows removed or added on the read: L1 expects what Gate-8 expects
+        # (services.expected_rows), or a correct filtered load fails L1.
+        **_read_side_row_terms(dest_summary),
         # maximum: always run L4/L5. strict/balanced: localize only on L3 fail.
         always_localize=str(validation_mode or "").lower() == "maximum",
         # A table re-read is the pre-image. Crosswalks, masks, and renames
@@ -6637,22 +6661,17 @@ def _run_reconciliation_impl(
     # they belong to the source population this run counted — and they are
     # deliberately not at the destination, so conservation has to name them
     # instead of reading their absence as short delivery.
-    rows_shaped_out = int(dest_summary.get("rows_shaped_out", 0) or 0)
-    rows_expanded = int(dest_summary.get("rows_expanded", 0) or 0)
     # Rows a declared source filter removed on the read. The source population
     # this run counted includes them (the source paged and counted them), so the
     # filter has to be stated here for the same reason a recipe does.
-    rows_source_filtered = int(dest_summary.get("rows_source_filtered", 0) or 0)
     # The streaming reader counts every row it removed on the read — a declared
     # filter's and a recipe's — for committed pages only, and cumulatively across
     # resumes. When it reports that, it is the authoritative removal total: the
     # recipe's own tally covers this pass alone.
-    rows_removed_on_read = int(dest_summary.get("rows_removed_on_read", 0) or 0)
-    if (
-        "rows_source_filtered" not in dest_summary
-        and rows_removed_on_read > rows_shaped_out + rows_source_filtered
-    ):
-        rows_source_filtered = rows_removed_on_read - rows_shaped_out
+    _read_terms = _read_side_row_terms(dest_summary)
+    rows_shaped_out = _read_terms["rows_shaped_out"]
+    rows_expanded = _read_terms["rows_expanded"]
+    rows_source_filtered = _read_terms["rows_source_filtered"]
     # A resumed pass reads and writes only the tail of the population, while the
     # destination read-back is always full-table. Comparing the two directly
     # reports a mismatch on data that is correct, so the resumed slice must be
@@ -6699,14 +6718,14 @@ def _run_reconciliation_impl(
         source_rows = resume_full_source_rows
     elif resumed_from:
         source_rows += resumed_from
-    expected_written = max(
-        source_rows
-        + rows_expanded
-        - dropped_rows
-        - rows_skipped
-        - rows_shaped_out
-        - rows_source_filtered,
-        0,
+    expected_written = expected_destination_rows(
+        source_rows,
+        rejected_rows=rejected_rows,
+        coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
     )
     # Destinations with no read-back are accounted from writer counts, so rows a
     # previous pass already committed have to be added back or a correct resume

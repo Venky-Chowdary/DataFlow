@@ -60,6 +60,7 @@ from services.transform_engine import (
     set_strict_number_reading,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
+from services.expected_rows import expected_destination_rows, held_out_rows
 from services.fingerprint_rules import (
     FINGERPRINT_VERSION,
     NAN as _NAN_TOKEN,
@@ -1150,16 +1151,17 @@ def reconcile(
     # current on the destination — retained, not written by this run. The
     # expected-current count is source rows plus those retained keys.
     retained_rows = max(int(retained_rows or 0), 0)
-    dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
-    expected_rows = max(
-        source_rows
-        + rows_expanded
-        + retained_rows
-        - dropped_rows
-        - rows_skipped
-        - rows_shaped_out
-        - rows_source_filtered,
-        0,
+    dropped_rows = held_out_rows(rejected_rows, coerced_null_rows)
+    # The one identity L1 and row conservation close too (services.expected_rows).
+    expected_rows = expected_destination_rows(
+        source_rows,
+        rejected_rows=rejected_rows,
+        coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
+        retained_rows=retained_rows,
     )
     if (
         not source_checksum
