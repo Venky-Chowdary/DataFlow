@@ -78,3 +78,37 @@ def physical_select_list(columns: list[str], quote: str) -> str:
                 f"{quote_sql_identifier(phys, quote)} AS {quote_sql_identifier(name, quote)}"
             )
     return ", ".join(parts)
+
+
+def oracle_physical_projection(
+    sa_conn: Any, schema: str | None, table: str, columns: list[str]
+) -> tuple[str, Any]:
+    """``SELECT`` list and column-ref resolver over Oracle's stored spellings (D356).
+
+    The Oracle writer creates unquoted (upper-case) columns, so the proof's
+    ``"note"`` was ORA-00904 on every Oracle destination and the transforms
+    were never compared. The catalog (:func:`resolve_object_identity`) names
+    the stored column; a name it does not know keeps its physical spelling so
+    Oracle still reports the real error.
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+    from services.sql_object_identity import resolve_object_identity
+
+    physical = {name: physical_column(name) for name in columns}
+    ident = resolve_object_identity(
+        sa_conn,
+        table,
+        schema or None,
+        columns=list(dict.fromkeys(physical.values())),
+        dialect="oracle",
+    )
+
+    def ref(name: str) -> str:
+        phys = physical.get(name) or physical_column(name)
+        return quote_sql_identifier(ident.columns.get(phys, phys), '"')
+
+    parts = []
+    for name in columns:
+        stored, alias = ref(name), quote_sql_identifier(name, '"')
+        parts.append(stored if stored == alias else f"{stored} AS {alias}")
+    return ", ".join(parts), ref
