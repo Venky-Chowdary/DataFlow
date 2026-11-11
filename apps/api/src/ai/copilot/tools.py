@@ -39,7 +39,9 @@ from .tool_permissions import current_caller_role, denial_message, is_tool_allow
 from .transfer_rules import parse_transfer_data_rules
 from .unsupported_question import (
     asks_a_commercial_question,
+    asks_unreadable_live_metric,
     commercial_question_output,
+    live_metric_output,
     is_answerable_subject,
     unsupported_question_output,
 )
@@ -2769,6 +2771,7 @@ class DataPilotTools:
                 "message": job.get("message"),
                 "error": operator_failure_text(job.get("error"), failure_reason),
                 "created_at": job_timestamp_iso(job.get("created_at")),
+                "started_at": job_timestamp_iso(job.get("started_at")),
                 "updated_at": job_timestamp_iso(job.get("updated_at")),
                 "completed_at": job_timestamp_iso(job.get("completed_at")),
                 "governance": job_governance(job),
@@ -3150,6 +3153,8 @@ class DataPilotTools:
                 success=True,
                 output=commercial_question_output(query),
             )
+        if asks_unreadable_live_metric(query):
+            return ToolResult(name="explain_product", success=True, output=live_metric_output(query))
 
         # Direct high-value FAQ snippets (beat generic intent templates).
         direct: list[tuple[re.Pattern[str], str, str]] = [

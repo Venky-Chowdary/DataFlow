@@ -22,7 +22,9 @@ from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
 from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
 from .answer_contract import RenderTracker, result_used
 from .schedule_questions import (
+    asks_next_run,
     ground_schedule_plan,
+    next_run_lead,
     paused_marker,
     schedule_list_lead,
     schedule_list_note,
@@ -1274,7 +1276,7 @@ def _evidence_ceiling(turn: "PilotTurn") -> float:
         for tr in successes
         if isinstance(tr.output, dict)
     }
-    if bases and bases <= {"unsupported_question"}:
+    if bases and bases <= {"unsupported_question", "live_metric_unsupported"}:
         return 0.2
     return 0.7
 
@@ -2259,6 +2261,11 @@ Draft answer:
         from .job_questions import ground_job_plan
         from .workspace_intents import ground_plan
 
+        from .unsupported_question import asks_unreadable_live_metric
+
+        if asks_unreadable_live_metric(message):
+            # No tool takes this reading; ``explain_product`` owns the decline.
+            return [("explain_product", {"query": message})]
         planned = ground_plan(message, self._plan_from_memory(message, data_context, history), history)
         return ground_schedule_plan(message, ground_job_plan(message, planned))
 
@@ -3193,7 +3200,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     else:
                         parts.append("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
             elif tr.name == "get_schedule" and tr.success:
-                parts.append(_render_schedule_detail(tr.output or {}))
+                detail = _render_schedule_detail(tr.output or {})
+                if asks_next_run(message):
+                    detail = f"{next_run_lead(tr.output or {})}\n{detail}"
+                parts.append(detail)
             elif tr.name == "run_schedule_now" and tr.success:
                 parts.append(_render_schedule_run(tr.output or {}))
             elif tr.name in LIFECYCLE_TOOL_NAMES and tr.success:
@@ -3250,6 +3260,9 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     f"rejected: {job.get('rejected_rows') or 0} · "
                     f"coerced NULL: {job.get('coerced_null_rows') or 0}.",
                 ]
+                took = job_duration_line(job)
+                if took:
+                    lines.append(f"It {took}.")
                 route = job.get("route") or {}
                 if route.get("source_table") or route.get("dest_table"):
                     lines.append(
