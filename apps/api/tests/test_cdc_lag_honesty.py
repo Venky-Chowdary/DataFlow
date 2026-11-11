@@ -35,13 +35,20 @@ def test_wal_catch_up_is_zero_seconds_even_if_last_event_old():
     obs = observe_cdc_lag(
         last_event_commit_at=old,
         last_heartbeat_at=now,
-        replication_lag_bytes=4096,  # well inside catch-up band
+        replication_lag_bytes=0,  # nothing unapplied, and the consumer is alive
         now=now,
     )
     assert obs["cdc_lag_seconds"] == 0.0
     assert obs["cdc_lag_basis"] == LAG_BASIS_WAL_BYTES
     assert obs["freshness_severity"] == "ok"
     assert obs["caught_up"] is True
+    # Unapplied bytes inside the jitter band are healthy but are not 0 s lag
+    # (audit M2); see tests/test_audit11_trust_caps_and_lag_honesty.py.
+    band = observe_cdc_lag(
+        last_event_commit_at=old, last_heartbeat_at=now, replication_lag_bytes=4096, now=now,
+    )
+    assert band["caught_up"] is False and band["cdc_lag_seconds"] is None
+    assert band["freshness_severity"] == "ok"
 
 
 def test_commit_timestamp_lag_when_behind_bytes():
@@ -132,13 +139,13 @@ def test_cdc_lag_fields_promotes_basis():
         _last_heartbeat_at = datetime.now(timezone.utc)
 
         def replication_lag_bytes(self):
-            return 2048
+            return 0
 
         def replication_lag_seconds(self):
             from services.cdc_lag_honesty import observe_cdc_lag
 
             return observe_cdc_lag(
-                replication_lag_bytes=2048,
+                replication_lag_bytes=0,
                 last_heartbeat_at=self._last_heartbeat_at,
             ).get("cdc_lag_seconds")
 
