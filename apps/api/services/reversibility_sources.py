@@ -62,6 +62,42 @@ def _read_window(source: Any, read_options: Any) -> dict[str, Any]:
             "skip_footer": _limit(options.get("skip_footer"))}
 
 
+#: File exports whose every value keeps its own text (JSON strings, exact numbers, null distinct from
+#: ""): the file holds each column as the source typed it. CSV / TSV (and other file formats) write
+#: NULL and empty text alike and drop the type, so their columns stay ``type_unknown``.
+_EXACT_TEXT_EXPORTS = frozenset({"jsonl", "ndjson"})
+
+
+def _file_export_view(dst: Any, mappings: list[Any], source_types: Mapping[str, str],
+                      dest_types: Mapping[str, str] | None) -> tuple[list[Any], dict[str, str]]:
+    """(mappings, destination types) as a file export holds them.
+
+    A file has no column types of its own, so a type Map stamped on its
+    mapping says nothing about what the file keeps. A JSON Lines export keeps
+    each value exactly, so a column's destination type is its source type (a
+    re-serialised ``json`` is ``jsonb``: key order and duplicates are not
+    kept); any other format is ``type_unknown`` (fail closed).
+    """
+    from services.reversibility_types import logical
+
+    kind = str((dst.get("kind") if isinstance(dst, Mapping) else getattr(dst, "kind", "")) or "").lower()
+    if kind != "file_export":
+        return mappings, dict(dest_types or {})
+    rows = [{k: v for k, v in m.items() if k != "target_type"} if isinstance(m, Mapping) else m for m in mappings]
+    if _engine(dst) not in _EXACT_TEXT_EXPORTS:
+        return rows, {}
+    out: dict[str, str] = {}
+    for m in rows:
+        if not isinstance(m, Mapping) or not str(m.get("source") or "").strip():
+            continue
+        source = str(m["source"]).strip()
+        stype = str(m.get("source_type") or source_types.get(source) or "")
+        if stype:
+            target = str(m.get("target") or source).strip()
+            out[target] = "JSONB" if logical(stype) == "json" and stype.strip().lower() != "jsonb" else stype
+    return rows, out
+
+
 def _catalog_keys_of_endpoint(endpoint: Any) -> list[str]:
     """The source catalog's primary key (the key rows are matched back on when no contract names one)."""
     if endpoint is None or str(getattr(endpoint, "kind", "") or "") != "database":
@@ -173,13 +209,15 @@ def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
 
     req = request_of(job)
     src, dst = _dict(req.get("source")), _dict(req.get("destination"))
+    source_types = {str(k): str(v) for k, v in _dict(req.get("column_types")).items()}
+    # The destination types the run recorded (Map stamps, the DDL it ran, Gate-8's digest types).
+    rows, target_types = _file_export_view(dst, mappings_of(job), source_types, dest_types_of(job))
     table = analyze_table(
         table=_table(dst, src),
-        mappings=mappings_of(job),
-        source_columns=list(_dict(req.get("column_types")).keys()),
-        source_types={str(k): str(v) for k, v in _dict(req.get("column_types")).items()},
-        # The destination types the run recorded (Map stamps, the DDL it ran, Gate-8's digest types).
-        target_types=dest_types_of(job),
+        mappings=rows,
+        source_columns=list(source_types.keys()),
+        source_types=source_types,
+        target_types=target_types,
         recipe_steps=_steps(req.get("shape_recipe")),
         recipe_input_columns=_recipe_inputs(
             req.get("shape_recipe"),
@@ -211,12 +249,14 @@ def request_report(
     whole population.
     """
     src, dst = getattr(request, "source", None), getattr(request, "destination", None)
+    rows, target_types = _file_export_view(dst, list(mappings or getattr(request, "mappings", None) or []),
+                                           dict(column_types or {}), dest_types)
     table = analyze_table(
         table=_table(dst, src),
-        mappings=list(mappings or getattr(request, "mappings", None) or []),
+        mappings=rows,
         source_columns=list((column_types or {}).keys()),
         source_types=dict(column_types or {}),
-        target_types=dict(dest_types or {}),
+        target_types=target_types,
         recipe_steps=_steps(getattr(request, "shape_recipe", None)),
         recipe_input_columns=_recipe_inputs(getattr(request, "shape_recipe", None),
                                             getattr(request, _RECIPE_INPUTS, None)),

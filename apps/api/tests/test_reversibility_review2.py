@@ -374,3 +374,53 @@ def test_gap2_the_gate_message_names_each_table_s_row_changes_once_by_kind():
     assert clause.startswith("events: ")
     assert sorted(clause[len("events: "):].split(", ")) == ["row cap", "source filter", "top rows only"]
     assert len(report["lossy_columns"]) == 3  # every row change is still listed with its reason
+
+
+# ------------------------------------------- Low: a JSONL file export keeps every value's own text
+
+
+_UNTYPED = [{"source": "id", "target": "id"}, {"source": "email", "target": "email"}]
+
+
+def _file_req(fmt):
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    return TransferRequest(
+        source=EndpointConfig(kind="database", format="postgresql", database="db", table="t"),
+        destination=EndpointConfig(kind="file_export", format=fmt, output_path=f"out.{fmt}"),
+        mappings=_UNTYPED, require_reversibility=True)
+
+
+def test_low_a_jsonl_file_export_takes_its_destination_types_from_the_source():
+    from services.reversibility_sources import request_report
+
+    types = {"id": "BIGINT", "email": "TEXT"}
+    report = request_report(_file_req("jsonl"), _UNTYPED, types, None)
+    assert report["verdict"] == "reversible", [c["reason"] for c in report["tables"][0]["columns"]]
+    doc = request_report(_file_req("jsonl"), [{"source": "doc", "target": "doc"}], {"doc": "json"}, None)
+    assert doc["tables"][0]["columns"][0]["reason_code"] == "json_normalize"
+
+
+def test_low_a_csv_file_export_stays_type_unknown_because_null_and_empty_text_collapse():
+    from services.reversibility_sources import request_report
+
+    report = request_report(_file_req("csv"), _UNTYPED, {"id": "BIGINT", "email": "TEXT"}, None)
+    codes = {c["reason_code"] for c in report["tables"][0]["columns"]}
+    assert codes == {"type_unknown"} and report["verdict"] != "reversible"
+
+
+@pytest.mark.parametrize("fmt,passes", [("jsonl", True), ("csv", False)])
+def test_low_engine_g24_on_a_file_export_follows_the_format(people, fake_store, tmp_path, monkeypatch, fmt,  # noqa: F811
+                                                            passes):
+    from src.transfer.models import EndpointConfig
+
+    monkeypatch.setenv("DATAWRAP_EXPORTS_DIR", str(tmp_path / "exports"))
+    src, _dst = people
+    name = f"people_{uuid.uuid4().hex[:8]}.{fmt}"
+    result = _execute(fake_store, src, tmp_path / name, mappings=[dict(m, confidence=0.99) for m in _UNTYPED],
+                      destination=EndpointConfig(kind="file_export", format=fmt, output_path=name))
+    if passes:
+        assert result.success, result.error
+    else:
+        assert not result.success and _blocked_by_g24(result), result.error
+
