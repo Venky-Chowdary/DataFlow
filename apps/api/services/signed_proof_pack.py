@@ -803,6 +803,7 @@ def build_signed_proof_pack(
     anchor_in_chain: bool = False,
     governance_operations: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
+    parity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -917,6 +918,9 @@ def build_signed_proof_pack(
         or (preflight_summary or {}).get("control_totals")
         or {},
     }
+    if parity:
+        # Parity Studio sign-off: the verdict people signed and its own signature.
+        body["parity"] = parity
     from services.ai_egress import proof_pack_ai_egress
 
     body["ai_egress"] = proof_pack_ai_egress(job_id)
@@ -1154,4 +1158,39 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         anchor_in_chain=True,
         governance_operations=_collect_governance_for_pack(job),
         timing=_timing_for_pack(dest),
+        parity=parity_section_for_pack(job),
     )
+
+
+def parity_section_for_pack(job: dict[str, Any]) -> dict[str, Any] | None:
+    """The signed Parity Studio verdict on a job, as the proof pack carries it."""
+    state = job.get("parity") if isinstance(job.get("parity"), dict) else {}
+    signed = state.get("signed") if isinstance(state.get("signed"), dict) else None
+    if not signed:
+        return None
+    report = (signed.get("pack") or {}).get("parity") or {}
+    return {
+        "verdict": report.get("verdict"),
+        "unexplained": (report.get("parity") or {}).get("unexplained"),
+        "approvals": (report.get("signoff") or {}).get("approvals") or [],
+        "signed_at": signed.get("signed_at"),
+        "content_sha256": signed.get("content_sha256"),
+        "signature": signed.get("signature"),
+    }
+
+
+def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str) -> dict[str, Any]:
+    """Sign a final parity report with the proof-pack key and format.
+
+    Same envelope as the proof pack (``content_sha256`` + HMAC bound to the job
+    id), so ``POST /transfer/proof-pack/verify`` verifies it unchanged.
+    """
+    body = {
+        "version": PROOF_PACK_VERSION,
+        "kind": "parity_report",
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+        "job_id": job_id,
+        "actor": actor,
+        "parity": report,
+    }
+    return sign_body(body, subject=job_id)

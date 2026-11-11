@@ -390,6 +390,8 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/mcp/", Permission.AI_USE),
     # Job history under its own name (QA enterprise #50): a read every role holds.
     ("GET", "/api/v1/jobs/", Permission.JOB_READ),
+    # Parity Studio's workspace summary reads stored job evidence only.
+    ("GET", "/api/v1/parity/", Permission.JOB_READ),
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/query/", Permission.QUERY_USE),
@@ -463,6 +465,13 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ),
     ("POST", "/api/v1/transfer/{job_id}/rollback/execute", Permission.JOB_MANAGE),
     ("POST", "/api/v1/repair/proposals/{proposal_id}/decide", Permission.JOB_MANAGE),
+    # Parity Studio. Explaining and signing are reads of the report (a compliance
+    # approver may hold only job.read); applying a fix writes through the
+    # transfer path, so it is the permission that runs transfers.
+    ("POST", "/api/v1/jobs/{job_id}/parity-report/explain", Permission.JOB_READ),
+    ("POST", "/api/v1/jobs/{job_id}/parity-report/signoff", Permission.JOB_READ),
+    ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/approve", Permission.JOB_RUN),
+    ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/dismiss", Permission.JOB_RUN),
     ("POST", "/api/v1/transfer/analyze", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/analyze-file", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/introspect", Permission.JOB_PLAN),
