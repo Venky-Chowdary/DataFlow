@@ -215,6 +215,10 @@ describe("JobsGrid", () => {
     assert.ok(menu);
     const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
     assert.deepEqual(items.map((i) => i.textContent), ["Open details", "Copy job ID"]);
+    await act(async () => {
+      host.querySelector(".df2-jobs-grid-scroll")!.dispatchEvent(new dom.window.Event("scroll"));
+    });
+    assert.ok(document.querySelector('[role="menu"]'), "scrolling the grid moves the menu with its row, not closes it");
     await key(menu, "ArrowDown");
     assert.equal(document.activeElement, items[1]);
     await act(async () => (items[1] as HTMLButtonElement).click());

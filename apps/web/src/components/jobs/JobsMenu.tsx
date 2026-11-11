@@ -60,21 +60,27 @@ export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, trigg
     if (refocus) triggerRef.current?.focus();
   }, []);
 
-  useLayoutEffect(() => {
-    if (!open) return;
+  /** Place the popup under the trigger (above it near the bottom edge); false when the trigger left the viewport. */
+  const place = useCallback((): boolean => {
     const trigger = triggerRef.current;
     const menu = menuRef.current;
-    if (!trigger) return;
+    if (!trigger) return false;
     const rect = trigger.getBoundingClientRect();
-    const width = menu?.offsetWidth || 220;
-    const height = menu?.offsetHeight || 0;
     const viewportW = window.innerWidth || document.documentElement.clientWidth;
     const viewportH = window.innerHeight || document.documentElement.clientHeight;
+    if (rect.bottom < 0 || rect.top > viewportH) return false;
+    const width = menu?.offsetWidth || 220;
+    const height = menu?.offsetHeight || 0;
     const left = Math.max(8, Math.min(rect.right - width, viewportW - width - 8));
     const below = rect.bottom + MENU_GAP;
     const top = height && below + height > viewportH - 8 ? Math.max(8, rect.top - height - MENU_GAP) : below;
     setPosition({ top, left });
-  }, [open]);
+    return true;
+  }, []);
+
+  useLayoutEffect(() => {
+    if (open) place();
+  }, [open, place]);
 
   useEffect(() => {
     if (!open) return;
@@ -85,7 +91,10 @@ export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, trigg
       if (menuRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
       close(false);
     };
-    const onViewportChange = () => close(false);
+    // A scrolling grid moves the trigger: follow it, close once it is gone.
+    const onViewportChange = () => {
+      if (!place()) close(false);
+    };
     document.addEventListener("mousedown", onPointer);
     window.addEventListener("resize", onViewportChange);
     window.addEventListener("scroll", onViewportChange, true);
@@ -94,7 +103,7 @@ export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, trigg
       window.removeEventListener("resize", onViewportChange);
       window.removeEventListener("scroll", onViewportChange, true);
     };
-  }, [open, close]);
+  }, [open, close, place]);
 
   const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const entries = Array.from(
