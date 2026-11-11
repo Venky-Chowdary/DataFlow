@@ -121,6 +121,13 @@ def _norm(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _transform_of(mapping: Mapping[str, Any]) -> str:
     from services.transform_engine import normalize_engine_transform
 
@@ -421,8 +428,25 @@ def rollback_note(table: str, verdict: str) -> tuple[str, str]:
     return "keep_source_as_fallback", f"{table} needs the source kept as the fallback until sign-off."
 
 
-def population_entries(row_limit: int = 0, source_filter: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
-    """A row cap or a source filter writes only part of the source: a lossy ``row_change``."""
+#: Why each kind of row change leaves rows out (``transforms[0]`` of a ``row_change`` entry).
+_READ_ROW_CHANGES = {
+    "source_query": ("the source is a query, so the table cannot be rebuilt from what it returns (a query can "
+                     "select, filter or rewrite rows and values)."),
+    "source_procedure": ("the source is a stored procedure's result, so the table cannot be rebuilt from what it "
+                         "returns."),
+    "skip_rows": "the read skips the first {n} data row(s), so those rows cannot be rebuilt from the destination.",
+    "skip_footer": "the read skips the last {n} data row(s), so those rows cannot be rebuilt from the destination.",
+}
+
+
+def population_entries(row_limit: int = 0, source_filter: Mapping[str, Any] | None = None, *,
+                       read_mode: str = "table", skip_rows: int = 0, skip_footer: int = 0) -> list[dict[str, Any]]:
+    """What writes only part of the source (or not the table itself): a lossy ``row_change`` each.
+
+    A row cap, a source filter, a query or a stored procedure read in place of
+    the table, and a file read window that drops data rows (``skip_rows`` /
+    ``skip_footer``).
+    """
     out = []
     if int(row_limit or 0) > 0:
         entry = _entry(None, None, None, None, ["limit"], LOSSY, "row_change", op="limit")
@@ -433,6 +457,13 @@ def population_entries(row_limit: int = 0, source_filter: Mapping[str, Any] | No
         entry = _entry(None, None, None, None, ["source_filter"], LOSSY, "row_change", op="source_filter")
         entry["reason"] = ("the source filter writes only the rows it matches, so the rows it leaves out "
                            "cannot be rebuilt from the destination.")
+        out.append(entry)
+    ops = [("source_query", 0)] if read_mode == "query" else []
+    ops += [("source_procedure", 0)] if read_mode == "procedure" else []
+    ops += [(op, int(n or 0)) for op, n in (("skip_rows", skip_rows), ("skip_footer", skip_footer)) if int(n or 0) > 0]
+    for op, n in ops:
+        entry = _entry(None, None, None, None, [op], LOSSY, "row_change", op=op)
+        entry["reason"] = _READ_ROW_CHANGES[op].format(n=n)
         out.append(entry)
     return out
 
@@ -452,11 +483,14 @@ def analyze_table(
     row_limit: int = 0,
     source_filter: Mapping[str, Any] | None = None,
     recipe_input_columns: Sequence[str] | None = None,
+    read_window: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One table's ReversibilityTable (contract 1).
 
     ``recipe_input_columns`` are the columns the shape recipe reads (before any
-    step); ``None`` when they are not known.
+    step); ``None`` when they are not known. ``read_window`` is how the source
+    is read: ``{read_mode, skip_rows, skip_footer}`` (a query or procedure in
+    place of the table, data rows a file read drops).
     """
     stypes = {str(k): str(v) for k, v in (source_types or {}).items()}
     ttypes = {str(k): str(v) for k, v in (target_types or {}).items()}
@@ -485,7 +519,10 @@ def analyze_table(
             row = classify_recipe_step(step, inputs, known=known)
             if row is not None:
                 columns.append(row)
-    columns.extend(population_entries(row_limit, source_filter))
+    window = dict(read_window or {})
+    columns.extend(population_entries(row_limit, source_filter, read_mode=str(window.get("read_mode") or "table"),
+                                      skip_rows=_count(window.get("skip_rows")),
+                                      skip_footer=_count(window.get("skip_footer"))))
     verdict, reason = table_verdict(columns, key_columns)
     kind, note = rollback_note(table, verdict)
     return {"name": table, "verdict": verdict, "reason": reason, "rollback": kind,

@@ -48,6 +48,19 @@ def _limit(value: Any) -> int:
         return 0
 
 
+def _read_window(source: Any, read_options: Any) -> dict[str, Any]:
+    """How the source is read: a query / procedure in place of the table, data rows a file read drops."""
+    from services.procedure_source import MODE_QUERY, source_read_mode_of
+
+    try:
+        mode = source_read_mode_of(source)
+    except Exception:  # noqa: BLE001 - an ambiguous or unknown read mode is not the table: fail closed
+        mode = MODE_QUERY
+    options = _dict(read_options)
+    return {"read_mode": mode, "skip_rows": _limit(options.get("skip_rows")),
+            "skip_footer": _limit(options.get("skip_footer"))}
+
+
 def _catalog_keys_of_endpoint(endpoint: Any) -> list[str]:
     """The source catalog's primary key (the key rows are matched back on when no contract names one)."""
     if endpoint is None or str(getattr(endpoint, "kind", "") or "") != "database":
@@ -142,6 +155,8 @@ def plan_report(plan: Any) -> dict[str, Any]:
         source_db=_engine(plan.source),
         row_limit=_limit(policies.get("row_limit")),
         source_filter=_dict(policies.get("source_filter")),
+        read_window=_read_window(_dict(plan.source),
+                                 _dict(plan.source).get("read_options") or policies.get("read_options")),
     )
     return build_report([table], scope="plan", subject_id=str(plan.id),
                         require=plan_requires_reversibility(policies),
@@ -170,6 +185,7 @@ def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
         source_db=_engine(src),
         row_limit=_limit(req.get("limit")),
         source_filter=_dict(req.get("source_filter")),
+        read_window=_read_window(src, req.get("read_options") or src.get("read_options")),
     )
     return build_report([table], scope="job", subject_id=job_id,
                         require=_truthy(req.get(POLICY)), data_rows=0, data_source="none")
@@ -201,6 +217,7 @@ def request_report(
         source_db=_engine(src),
         row_limit=_limit(getattr(request, "limit", 0)),
         source_filter=_dict(getattr(request, "source_filter", None)),
+        read_window=_read_window(src, getattr(request, "read_options", None)),
     )
     return build_report([table], scope="job", subject_id=str(getattr(request, "job_id", "") or ""),
                         require=True, data_rows=len(sample_rows or []), data_source="preflight_sample")
