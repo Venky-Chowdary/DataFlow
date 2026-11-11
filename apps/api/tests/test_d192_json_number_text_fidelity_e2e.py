@@ -238,20 +238,10 @@ def test_fingerprint_keeps_json_numeric_scale_where_the_engine_does(engine, ddl)
 
     a, b = '{"a": 1.10}', '{"a":1.1}'
     assert fp(a, ddl_type=ddl, engine=engine) != fp(b, ddl_type=ddl, engine=engine)
-    if ddl in {"JSONB", "JSON"}:
-        # jsonb's own rewrites are the same stored value.
-        assert fp('[1e2, -0.0, 2.50e1]', ddl_type=ddl, engine=engine) == fp(
-            "[100, 0.0, 25.0]", ddl_type=ddl, engine=engine
-        )
-    else:
-        # A character carrier stores the document's text: only the whitespace
-        # the writer removes is insignificant (fingerprint rules version 2).
-        assert fp('[1e2, -0.0, 2.50e1]', ddl_type=ddl, engine=engine) != fp(
-            "[100, 0.0, 25.0]", ddl_type=ddl, engine=engine
-        )
-        assert fp('[1e2, -0.0,  2.50e1]', ddl_type=ddl, engine=engine) == fp(
-            "[1e2,-0.0,2.50e1]", ddl_type=ddl, engine=engine
-        )
+    # jsonb's own rewrites are the same stored value.
+    assert fp('[1e2, -0.0, 2.50e1]', ddl_type=ddl, engine=engine) == fp(
+        "[100, 0.0, 25.0]", ddl_type=ddl, engine=engine
+    )
 
 
 def test_fingerprint_stays_value_equal_where_the_engine_stores_doubles():

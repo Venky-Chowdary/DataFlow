@@ -12,10 +12,17 @@ Intended equality per declared destination type (version 2)
   CITEXT, CLOB, STRING, ENUM, SET, NAME ... — decided from the logical type,
   see :func:`is_text_family`): exact text. No number, boolean, date or JSON
   re-reading: ``'01234'`` is not ``'1234'``, ``'true'`` is not ``'1'``. The
-  only folds are the destination's own equality: blank padding of a fixed
-  width CHAR, and a declared case / accent / width / kana insensitive
-  collation. A typed value headed for a character column is compared as the
-  wire text the writer binds for it (``cell_to_string``).
+  folds that remain are the destination's own equality — blank padding of a
+  fixed width CHAR, a declared case / accent / width / kana insensitive
+  collation — and two carrier rules: a valid JSON document compares as the
+  document (key order and insignificant whitespace are not the value, number
+  scale is), because a character column is the JSON carrier on engines
+  without a JSON type and the two Gate-8 sides can be steered by the declared
+  JSON type and the physical text type of one column; and SQLite TEXT is that
+  engine's temporal carrier (it has no temporal storage class), so the two
+  separator spellings of one instant are equal there, and only there. A typed
+  value headed for a character column is compared as the wire text the writer
+  binds for it (``cell_to_string``).
 * **Exact numbers** (NUMERIC / DECIMAL / NUMBER, with or without a scale, and
   integers): by numeric value, every significant digit kept. Trailing
   fractional zeros are not significant (``1.50`` equals ``1.5`` — the engine's

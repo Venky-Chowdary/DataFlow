@@ -74,9 +74,9 @@ def test_text_family_is_never_folded_as_a_number(engine, ddl, left, right):
         ("true", "1"),
         ("TRUE", "t"),
         ("false", "0"),
-        ('{"a": 1, "b":2}', '{"b":2,"a":1}'),
         ('{"a": 1.10}', '{"a": 1.1}'),
-        ("[1e2]", "[100]"),
+        ('{"a": "x y"}', '{"a": "xy"}'),
+        ("{a: 1}", "{a:1}"),
     ],
 )
 def test_declared_text_column_compares_as_text(engine, ddl, left, right):
@@ -111,14 +111,21 @@ def test_sqlite_text_is_the_temporal_carrier():
 
 
 @pytest.mark.parametrize("engine,ddl", _NATIONAL_TEXT)
-def test_json_document_in_text_ignores_only_insignificant_whitespace(engine, ddl):
-    """The writer stores a JSON document bound for a text carrier compacted."""
-    assert _digest(engine, ddl, '{"a": [1, 2], "b": "x y"}') == _digest(
+def test_json_document_in_a_text_carrier_compares_as_the_document(engine, ddl):
+    """A character column is the JSON carrier where the engine has no JSON type.
+
+    The write pass can be steered by the declared JSON type and the read-back
+    by the physical text type of the same column, so a valid JSON document
+    compares as the document on both: key order and insignificant whitespace
+    are not the value. Number scale is (D192), and so is every string.
+    """
+    assert _digest(engine, ddl, '{"b": "x y", "a": [1, 2]}') == _digest(
         engine, ddl, '{"a":[1,2],"b":"x y"}'
     )
-    assert _digest(engine, ddl, '{"b": "x y"}') != _digest(engine, ddl, '{"b": "xy"}')
-    # Not a JSON document: plain text, spaces and all.
-    assert _digest(engine, ddl, "{a: 1}") != _digest(engine, ddl, "{a:1}")
+    assert fp('{"b": 1, "a": 2}', ddl_type=ddl, engine=engine) == fp(
+        '{"a": 2, "b": 1}', ddl_type="JSON", engine=engine
+    )
+    assert _digest(engine, ddl, '{"a": [1, 2]}') != _digest(engine, ddl, '{"a": [2, 1]}')
 
 
 def test_typed_value_into_text_column_matches_the_wire_text_the_writer_binds():

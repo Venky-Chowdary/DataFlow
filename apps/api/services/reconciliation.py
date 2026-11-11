@@ -80,7 +80,6 @@ from services.value_serializer import (
     is_reader_null_cell,
     json_default,
     canonical_json_text,
-    compact_json_text,
     json_loads_exact,
     load_http_json,
     operator_binary_cell_text,
@@ -3649,16 +3648,20 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # document are different stored values. The destination's own equality
     # (blank pad, collation) was applied above; nothing else folds.
     if _text_declared:
-        if text.lstrip()[:1] in ("{", "["):
-            # The one re-render a writer provably applies to text: a JSON
-            # document bound for a character carrier (SQL Server / Oracle have
-            # no JSON type) is stored with its insignificant whitespace
-            # removed. Key order, number spelling and string escapes stay.
+        if text.startswith(("{", "[")):
+            # A character column is the JSON carrier on engines without a JSON
+            # type (SQLite, SQL Server, Oracle), and the two sides of Gate-8 can
+            # be steered by different spellings of that one column (declared
+            # JSON on the write pass, physical TEXT on the read-back). A valid
+            # JSON document therefore compares as the document: key order and
+            # insignificant whitespace are not the value, number scale is
+            # (1.10 is not 1.1 — D192).
             try:
-                json.loads(text, parse_float=Decimal, parse_constant=_reject_json_constant)
-            except (ValueError, TypeError, RecursionError):
-                return _text_cell(text)
-            return compact_json_text(text)
+                canon = canonical_json_text(text, keep_scale=True)
+                if canon is not None and canon.startswith(("{", "[")):
+                    return canon
+            except (json.JSONDecodeError, TypeError):
+                pass
         if (
             text
             and text[0].isdigit()
