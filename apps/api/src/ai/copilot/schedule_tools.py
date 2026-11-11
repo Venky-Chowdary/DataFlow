@@ -92,13 +92,15 @@ def create_schedule(
     file_wait_seconds: int = 0,
     shared_destination_acknowledged: bool = False,
     risk_acceptance: dict[str, Any] | None = None,
+    require_reversibility: bool = False,
 ):
     """Stage a pipeline schedule for explicit Confirm. This creates nothing itself.
 
     ``risk_acceptance`` is the same object ``start_transfer`` takes: the plan
     signs it onto the mappings a gate requires, and the signed Migration Risk
     Contracts travel on the schedule's stored mappings, so every unattended
-    run replays that approval (D329).
+    run replays that approval (D329). ``require_reversibility`` makes every run
+    carry the reversibility gate (g24): a run that is not reversible is blocked.
     """
     tool = "create_schedule"
     spec = parse_cadence(cadence)
@@ -321,6 +323,7 @@ def create_schedule(
         "procedure_params": source.get("procedure_params") or {},
         "contract_id": str(bound.get("contract_id") or ""),
         "require_signed_contract": bool(bound.get("require_signed_contract", False)),
+        "require_reversibility": bool(require_reversibility),
         "schema_drift_acknowledged": bool(schema_drift_acknowledged),
         "enabled": True,
         "duplicate_policy": str(duplicate_policy or ""),
@@ -395,6 +398,11 @@ def create_schedule(
     if policy:
         preview["duplicate_policy"] = policy
     preview["in_file_dedupe"] = dedupe
+    if payload["require_reversibility"]:
+        preview["require_reversibility"] = True
+        preview["reversibility_note"] = (
+            "Every run must be reversible: the reversibility gate blocks a run whose mapping, row "
+            "changes or types lose data.")
     if payload["contract_id"]:
         preview["contract_id"] = payload["contract_id"]
         preview["require_signed_contract"] = payload["require_signed_contract"]

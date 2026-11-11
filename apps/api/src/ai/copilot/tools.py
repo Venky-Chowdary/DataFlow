@@ -1226,6 +1226,13 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "contract_id": {"type": "string"},
                 "require_signed_contract": {"type": "boolean"},
+                "require_reversibility": {
+                    "type": "boolean",
+                    "description": (
+                        "Every run must be reversible (the g24 reversibility gate blocks a run that "
+                        "is not). Set it when the operator asks for a reversible / undoable pipeline."
+                    ),
+                },
                 "column_transforms": {
                     "type": "object",
                     "description": (
@@ -4824,6 +4831,7 @@ class DataPilotTools:
         in_file_dedupe: str = "block",
         file_wait_seconds: int = 0,
         risk_acceptance: dict | None = None,
+        require_reversibility: bool = False,
     ) -> ToolResult:
         from .schedule_tools import create_schedule
 
@@ -4863,6 +4871,7 @@ class DataPilotTools:
             in_file_dedupe=in_file_dedupe,
             file_wait_seconds=file_wait_seconds,
             risk_acceptance=risk_acceptance,
+            require_reversibility=bool(require_reversibility),
         )
 
     def _analyze_result(
