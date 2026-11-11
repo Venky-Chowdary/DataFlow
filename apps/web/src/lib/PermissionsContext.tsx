@@ -26,6 +26,7 @@ import {
 
 export const PERMISSIONS = {
   connectorWrite: "connector.write",
+  jobRead: "job.read",
   jobRun: "job.run",
   jobManage: "job.manage",
   jobPlan: "job.plan",
