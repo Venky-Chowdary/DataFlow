@@ -193,6 +193,14 @@ export interface TransferJob {
    * still has destination_summary.streams. Absent on a single-table job.
    */
   stream_names?: string[];
+  /**
+   * List rows only: the scalar fields of the stored Gate-8 report, so the Jobs
+   * grid classifies a run with the detail card's rules. Absent when no verdict
+   * was recorded. The full report stays on the detail document.
+   */
+  verification_summary?: Gate8ReconciliationPayload;
+  /** List rows only: destination_summary.multi_stream of a multi-table run. */
+  multi_stream?: boolean;
   source_connector_id?: string;
   dest_connector_id?: string;
   destination_type: string;
