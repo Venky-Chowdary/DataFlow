@@ -112,6 +112,16 @@ def main() -> int:
     stop = threading.Event()
     grace = worker_drain_seconds()
     install_stop_signals(stop, log, what="worker", grace_seconds=grace)
+    # /health for probes and an authenticated /metrics, when a port is configured (M-7).
+    try:
+        from src.metrics_app import start_metrics_server
+
+        start_metrics_server(
+            role="worker",
+            health=lambda: {"draining": stop.is_set(), "inflight": len(fleet_inflight_job_ids())},
+        )
+    except Exception:  # noqa: BLE001 - metrics must never stop a worker from claiming
+        log.exception("Metrics endpoint failed to start; the worker continues without it")
     try:
         run_fleet_loop(
             run_fleet_job,

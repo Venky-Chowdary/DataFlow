@@ -13,7 +13,7 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
@@ -658,6 +658,15 @@ async def _add_timing_header_response(request: Request, call_next):
         )
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
+    # M-7: request count and latency by route template (never the raw path).
+    from services.ops_metrics import record_http_request, route_template
+
+    record_http_request(
+        method=request.method,
+        route=route_template(request.scope),
+        status_code=response.status_code,
+        duration_seconds=process_time,
+    )
     response.headers["X-Correlation-ID"] = correlation_id
     if trace_id:
         response.headers["X-Trace-Id"] = trace_id
@@ -871,13 +880,10 @@ async def health_ready():
 
 @app.get("/metrics")
 async def prometheus_metrics():
-    """Prometheus exposition format for job/CDC/quarantine ops metrics."""
-    from services.ops_metrics import prometheus_text
+    """Prometheus exposition format: HTTP, job-store and CDC ops metrics."""
+    from src.metrics_app import metrics_response
 
-    return PlainTextResponse(
-        content=prometheus_text(),
-        media_type="text/plain; version=0.0.4; charset=utf-8",
-    )
+    return await metrics_response()
 
 
 @app.get("/api/v1")

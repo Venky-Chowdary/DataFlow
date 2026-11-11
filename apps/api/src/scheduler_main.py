@@ -60,6 +60,13 @@ def main() -> int:
     except Exception:
         log.exception("Schedule file import failed; the loop will retry")
 
+    try:
+        from src.metrics_app import start_metrics_server
+
+        start_metrics_server(role="scheduler")
+    except Exception:  # noqa: BLE001 - metrics must never stop the beat
+        log.exception("Metrics endpoint failed to start; the scheduler continues without it")
+
     log.info("Datawrap scheduler starting (cadence only, no transfer execution)")
     async def _run_until_signalled() -> None:
         # SIGTERM (Kubernetes) and SIGINT cancel the beat between ticks, so the
