@@ -316,8 +316,26 @@ def running_rehearsal(system_id: str) -> dict[str, Any] | None:
 # ------------------------------------------------------------------ readiness
 
 
-def rehearsal_summary(rehearsal: dict[str, Any] | None) -> dict[str, Any] | None:
-    """RehearsalSummary (contract 3)."""
+def definition_sha256(system: dict[str, Any]) -> str:
+    """What a rehearsal proves about a system: its source, its tables and keys, its window.
+
+    Stored on every rehearsal at start; readiness counts a proof only while the
+    system still has this definition (a name, a criticality or a schedule may
+    change without touching the proof).
+    """
+    import hashlib
+    import json
+
+    tables = sorted(({"name": str(t.get("name") or ""), "schema": t.get("schema") or None,
+                      "key_columns": [str(k) for k in t.get("key_columns") or []]}
+                     for t in system.get("tables") or []), key=lambda t: (t["name"], str(t["schema"] or "")))
+    body = {"connector_id": str((system.get("source") or {}).get("connector_id") or ""), "tables": tables,
+            "exit_window_hours": int(system.get("exit_window_hours") or 0)}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def rehearsal_summary(rehearsal: dict[str, Any] | None, system: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """RehearsalSummary (contract 3); ``current`` when ``system`` still has the definition it rehearsed."""
     if not rehearsal:
         return None
     comp = rehearsal.get("completeness") or {}
@@ -330,6 +348,9 @@ def rehearsal_summary(rehearsal: dict[str, Any] | None) -> dict[str, Any] | None
         "fits_window": duration.get("fits_window"), "tables_declared": comp.get("tables_declared", 0),
         "tables_proven": comp.get("tables_proven", 0), "total_bytes": seal.get("total_bytes"),
         "signed": (rehearsal.get("signoff") or {}).get("status") == "signed",
+        "current": (None if system is None else
+                    bool(rehearsal.get("definition_sha256")) and rehearsal.get("definition_sha256")
+                    == definition_sha256(system)),
     }
 
 
@@ -343,13 +364,21 @@ def readiness(system: dict[str, Any], rehearsals: list[dict[str, Any]] | None = 
     last_started = rows[0] if rows else None
     basis = parse_ts((last_started or {}).get("started_at")) or parse_ts(system.get("created_at")) or current
     due = basis + timedelta(days=int(system.get("rehearsal_every_days") or DEFAULT_EVERY_DAYS))
-    state = "running" if running else (finished[0].get("verdict") if finished else "never_rehearsed")
+    latest = finished[0] if finished else None
+    stale = bool(latest) and (latest or {}).get("definition_sha256") != definition_sha256(system)
+    state = "running" if running else ((latest or {}).get("verdict") if latest else "never_rehearsed")
+    if state == "proven" and stale:
+        state = "not_proven"
     return {
         "state": state if state in STATES else "failed",
         "overdue": current > due,
         "next_due_at": _iso(due),
-        "last_rehearsal": rehearsal_summary(finished[0] if finished else running),
-        "last_proven_rehearsal": rehearsal_summary(next((r for r in finished if r.get("verdict") == "proven"), None)),
+        "stale": stale,
+        "stale_reason": (f"The system's source, tables, keys or window changed since rehearsal {latest.get('n')}; "
+                         "rehearse it again to prove the current definition.") if stale and latest else None,
+        "last_rehearsal": rehearsal_summary(latest or running, system),
+        "last_proven_rehearsal": rehearsal_summary(next((r for r in finished if r.get("verdict") == "proven"), None),
+                                                   system),
     }
 
 
@@ -359,7 +388,9 @@ def public_system(system: dict[str, Any], rehearsals: list[dict[str, Any]] | Non
     return out
 
 
-def _label(state: str, tables: int) -> str:
+def _label(state: str, tables: int, stale: bool = False) -> str:
+    if stale and state == "not_proven":
+        return "Not proven (changed since the last rehearsal)"
     return {
         "proven": f"Proven, {tables} table{'s' if tables != 1 else ''}",
         "never_rehearsed": "Never rehearsed",
@@ -386,8 +417,10 @@ def board(systems: list[dict[str, Any]], *, now: datetime | None = None) -> dict
             "last_rehearsal_at": last.get("started_at"), "last_rehearsal_id": last.get("id"),
             "measured_seconds": last.get("measured_seconds"),
             "window_seconds": int(system.get("exit_window_hours") or 0) * 3600,
-            "fits_window": last.get("fits_window"),
-            "completeness_label": _label(ready["state"], tables),
+            # Measured against the window the rehearsal ran under: shown only while that is still the window.
+            "fits_window": last.get("fits_window") if last.get("current") else None,
+            "stale": ready["stale"],
+            "completeness_label": _label(ready["state"], int(last.get("tables_proven") or 0), ready["stale"]),
         })
         for item in system.get("regulatory_dates") or []:
             if item.get("date", "") >= current.date().isoformat():

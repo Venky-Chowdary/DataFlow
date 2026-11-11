@@ -251,3 +251,52 @@ def test_h2_a_long_verification_holds_its_claim_and_closes_exactly_once(world, m
     assert doc["verdict"] == "proven", doc["verdict_reason"]
     assert len(runs) == 1, f"{len(runs)} verifications started"
     assert doc["_verify"] is None
+
+
+# --------------------------- H3: readiness follows the system definition the rehearsal proved
+
+
+def _proven_events_system():
+    system = _system(tables=[{"name": "events"}])
+    out = _run(system)
+    assert out["verdict"] == "proven", out["verdict_reason"]
+    return system, out
+
+
+@pytest.mark.parametrize("change", [
+    {"tables": [{"name": "events"}, {"name": "orders"}, {"name": "never_extracted"}]},
+    {"tables": [{"name": "events", "key_columns": ["kind"]}]},
+    {"exit_window_hours": 1},
+    {"source": {"connector_id": "other-db"}},
+])
+def test_h3_a_changed_system_is_no_longer_proven_by_an_older_rehearsal(world, change):  # noqa: F811
+    from services.exit_inventory import board, get_system, readiness, update
+
+    system, out = _proven_events_system()
+    assert out["definition_sha256"]
+    before = board([get_system(system["id"])])
+    assert before["kpis"]["systems_proven"] == 1 and before["systems"][0]["completeness_label"] == "Proven, 1 table"
+    update(system["id"], change, actor="x", expected_version=None)
+    current = get_system(system["id"])
+    ready = readiness(current)
+    assert ready["state"] == "not_proven" and ready["stale"] is True and ready["stale_reason"]
+    assert ready["last_rehearsal"]["current"] is False
+    row = board([current])
+    assert row["kpis"]["systems_proven"] == 0
+    assert row["systems"][0]["state"] == "not_proven" and row["systems"][0]["stale"] is True
+    assert not row["systems"][0]["completeness_label"].startswith("Proven")
+    assert row["systems"][0]["fits_window"] is None
+
+
+def test_h3_an_unrelated_edit_keeps_the_proof_and_the_label_counts_the_rehearsal(world):  # noqa: F811
+    from services.exit_inventory import board, get_system, readiness, update
+
+    system, _out = _proven_events_system()
+    update(system["id"], {"description": "renamed", "criticality": "standard", "rehearsal_every_days": 30},
+           actor="x", expected_version=None)
+    current = get_system(system["id"])
+    ready = readiness(current)
+    assert ready["state"] == "proven" and ready["stale"] is False and ready["last_rehearsal"]["current"] is True
+    row = board([current])["systems"][0]
+    assert row["completeness_label"] == "Proven, 1 table" and row["fits_window"] is True
+    assert row["window_seconds"] == ready["last_rehearsal"]["window_seconds"] == 720 * 3600

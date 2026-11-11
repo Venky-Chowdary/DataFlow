@@ -29,6 +29,7 @@ from services.exit_inventory import (
     ExitConflict,
     ExitInvalid,
     audit,
+    definition_sha256,
     now_iso,
     parse_ts,
     rehearsals_of,
@@ -156,6 +157,7 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
         "verdict": "running", "verdict_reason": "The rehearsal is still extracting or verifying.",
         "source": dict(system.get("source") or {}), "extract_format": system.get("extract_format") or "jsonl",
         "window_seconds": int(system.get("exit_window_hours") or 0) * 3600,
+        "definition_sha256": definition_sha256(system),
         "required_roles": list(system.get("required_roles") or default_roles()),
         "tables": tables, "approvals": [], "signed": None, "_verify": None,
     })
