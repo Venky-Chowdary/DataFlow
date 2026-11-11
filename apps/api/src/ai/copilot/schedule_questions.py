@@ -93,6 +93,90 @@ def paused_marker(row: dict[str, Any]) -> str:
     return " · paused" if row.get("enabled") is False else ""
 
 
+def render_schedule_list(
+    output: dict[str, Any], *, health: bool, bind_phrase: Callable[[dict], str]
+) -> str:
+    """The pipelines answer: counted lead, then the page of rows read.
+
+    ``health`` is the "why are my schedules not running" register; ``bind_phrase``
+    is the agent's contract/breaker phrase for one row.
+    """
+    rows = output.get("schedules", [])
+    if rows:
+        enabled = [
+            s for s in rows
+            if isinstance(s, dict) and s.get("enabled")
+        ]
+        failed_last = [
+            s for s in rows
+            if isinstance(s, dict)
+            and str(s.get("last_status") or "").lower() in {"failed", "error"}
+        ]
+        parked = [
+            s for s in rows
+            if isinstance(s, dict)
+            and (s.get("needs_approval") or s.get("approval_finding"))
+        ]
+        if health:
+            lead = f"You have **{int(output.get('total') or len(rows))}** pipeline(s)."
+            if parked:
+                names = ", ".join(
+                    f"**{s.get('name')}**" for s in parked[:4] if s.get("name")
+                )
+                lead += (
+                    f" **{len(parked)}** are parked on approval"
+                    + (f" ({names})" if names else "")
+                    + " — they will not tick until someone approves."
+                )
+            elif failed_last:
+                lead += (
+                    f" **{len(failed_last)}** last run failed. "
+                    "Ask me for that pipeline and I'll open the finding."
+                )
+            elif not enabled:
+                lead += " None are enabled, so they will not fire."
+            else:
+                nxt = next(
+                    (
+                        str(s.get("next_run_at") or "").strip()
+                        for s in enabled
+                        if s.get("next_run_at")
+                    ),
+                    "",
+                )
+                lead += f" **{int(output.get('enabled_count') or len(enabled))}** enabled."
+                if nxt:
+                    lead += f" Next due: {nxt}."
+            lines = [lead]
+        else:
+            lines = [schedule_list_lead(output)]
+        for s in rows[:8]:
+            bind = bind_phrase(s)
+            lines.append(
+                f"• **{s.get('name')}** · {s.get('interval')}"
+                f"{' · cron ' + s['cron'] if s.get('cron') else ''}"
+                + paused_marker(s)
+                + (f" · {bind}" if bind else "")
+                + f" · next `{s.get('next_run_at') or '—'}`"
+                + f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
+            )
+        note = schedule_list_note(output, min(len(rows), 8))
+        if note:
+            lines.append(note)
+        return ("\n".join(lines))
+    elif int(output.get("total") or 0):
+        # A state filter matched nothing; the workspace still has pipelines.
+        return (schedule_list_lead(output))
+    else:
+        if health:
+            return (
+                "No pipelines are scheduled yet, so nothing is running "
+                "on a cadence. Create one on **Pipelines** after a transfer."
+            )
+        else:
+            return ("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
+
+
 def asks_next_run(message: str) -> bool:
     return bool(_NEXT_RUN_RE.search(message or ""))
 

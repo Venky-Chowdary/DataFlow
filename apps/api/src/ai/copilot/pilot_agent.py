@@ -26,9 +26,7 @@ from .schedule_questions import (
     asks_next_run,
     ground_schedule_plan,
     next_run_lead,
-    paused_marker,
-    schedule_list_lead,
-    schedule_list_note,
+    render_schedule_list,
 )
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
@@ -3142,80 +3140,13 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name in ("open_job", "open_schedule", "start_transfer_studio") and tr.success:
                 parts.append(f"{tr.output.get('label') or 'Opening that screen'} for you.")
             elif tr.name == "list_schedules" and tr.success:
-                rows = tr.output.get("schedules", [])
-                if rows:
-                    enabled = [
-                        s for s in rows
-                        if isinstance(s, dict) and s.get("enabled")
-                    ]
-                    failed_last = [
-                        s for s in rows
-                        if isinstance(s, dict)
-                        and str(s.get("last_status") or "").lower() in {"failed", "error"}
-                    ]
-                    parked = [
-                        s for s in rows
-                        if isinstance(s, dict)
-                        and (s.get("needs_approval") or s.get("approval_finding"))
-                    ]
-                    if is_schedule_health_question(message):
-                        lead = f"You have **{int(tr.output.get('total') or len(rows))}** pipeline(s)."
-                        if parked:
-                            names = ", ".join(
-                                f"**{s.get('name')}**" for s in parked[:4] if s.get("name")
-                            )
-                            lead += (
-                                f" **{len(parked)}** are parked on approval"
-                                + (f" ({names})" if names else "")
-                                + " — they will not tick until someone approves."
-                            )
-                        elif failed_last:
-                            lead += (
-                                f" **{len(failed_last)}** last run failed. "
-                                "Ask me for that pipeline and I'll open the finding."
-                            )
-                        elif not enabled:
-                            lead += " None are enabled, so they will not fire."
-                        else:
-                            nxt = next(
-                                (
-                                    str(s.get("next_run_at") or "").strip()
-                                    for s in enabled
-                                    if s.get("next_run_at")
-                                ),
-                                "",
-                            )
-                            lead += f" **{int(tr.output.get('enabled_count') or len(enabled))}** enabled."
-                            if nxt:
-                                lead += f" Next due: {nxt}."
-                        lines = [lead]
-                    else:
-                        lines = [schedule_list_lead(tr.output)]
-                    for s in rows[:8]:
-                        bind = _schedule_bind_phrase(s)
-                        lines.append(
-                            f"• **{s.get('name')}** · {s.get('interval')}"
-                            f"{' · cron ' + s['cron'] if s.get('cron') else ''}"
-                            + paused_marker(s)
-                            + (f" · {bind}" if bind else "")
-                            + f" · next `{s.get('next_run_at') or '—'}`"
-                            + f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
-                        )
-                    note = schedule_list_note(tr.output, min(len(rows), 8))
-                    if note:
-                        lines.append(note)
-                    parts.append("\n".join(lines))
-                elif int(tr.output.get("total") or 0):
-                    # A state filter matched nothing; the workspace still has pipelines.
-                    parts.append(schedule_list_lead(tr.output))
-                else:
-                    if is_schedule_health_question(message):
-                        parts.append(
-                            "No pipelines are scheduled yet, so nothing is running "
-                            "on a cadence. Create one on **Pipelines** after a transfer."
-                        )
-                    else:
-                        parts.append("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
+                parts.append(
+                    render_schedule_list(
+                        tr.output,
+                        health=is_schedule_health_question(message),
+                        bind_phrase=_schedule_bind_phrase,
+                    )
+                )
             elif tr.name == "get_schedule" and tr.success:
                 detail = _render_schedule_detail(tr.output or {})
                 if asks_next_run(message):
