@@ -43,6 +43,8 @@ from services.parity_stats import CONFIDENCE_LEVEL, clopper_pearson_upper, forma
 logger = logging.getLogger(__name__)
 
 _FULL_CHECKS = frozenset({"full_checksum", "key_diff"})
+#: How a protected value (a key included) is shown.
+PROTECTED = "protected"
 
 
 def job_id_of(job: dict[str, Any]) -> str:
@@ -96,7 +98,7 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str) -> None:
         ev.reread = {"status": "not_needed", "keys": 0}
         return
     try:
-        cells = reread_cells(job, ev, keys)
+        cells = _bounded_reread(job, ev, keys)
     except Exception as exc:  # noqa: BLE001 - an unreadable side keeps the stored evidence
         logger.info("parity re-read skipped for %s: %s", ev.name, type(exc).__name__)
         ev.reread = {"status": "failed", "keys": 0, "reason": _reread_reason(exc)}
@@ -106,6 +108,20 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str) -> None:
     for key, row in cells.items():
         raw, expected, dest = row.get("raw"), row.get("expected"), row.get("dest")
         if raw is None and dest is None:
+            named = {o.kind for o in keyed if o.key == key}
+            if named <= {"extra_in_destination"}:
+                continue  # the extra row is gone from the destination: resolved
+            kind = "missing_in_destination" if "missing_in_destination" in named else "value"
+            fresh.append(Observation(
+                table=ev.name, kind=kind, key=key, origin="reread",
+                cause=cause(
+                    UNEXPLAINED,
+                    f"Neither side holds this key now: the source removed it after the run, so the row the "
+                    f"evidence named ({kind.replace('_', ' ')}) cannot be re-checked. Accept it with a note "
+                    "if that removal was intended.",
+                    explained=False,
+                ),
+            ))
             continue
         if raw is not None and dest is None:
             if not (row.get("held_out") and key in ev.quarantined_keys):
@@ -135,7 +151,34 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str) -> None:
     ev.resolved_now = sorted(done - {o.key for o in fresh})
 
 
+def _reread_seconds() -> float:
+    from services.brand_env import getenv_brand
+
+    try:
+        return max(1.0, min(600.0, float(getenv_brand("PARITY_REREAD_TIMEOUT", "30") or 30)))
+    except ValueError:
+        return 30.0
+
+
+class RereadTimeout(TimeoutError):
+    """The bounded re-read did not finish in time."""
+
+
+def _bounded_reread(job: dict[str, Any], ev: TableEvidence, keys: list[str]) -> dict[str, dict[str, Any]]:
+    """The keyed re-read, under the connector executor's deadline and statement budget."""
+    from src.ai.copilot.tool_deadline import run_with_deadline
+
+    def timed_out(message: str) -> Any:
+        raise RereadTimeout(message)
+
+    return run_with_deadline(
+        "parity_reread", lambda: reread_cells(job, ev, keys), timed_out, seconds=_reread_seconds(),
+    )
+
+
 def _reread_reason(exc: Exception) -> str:
+    if isinstance(exc, RereadTimeout):
+        return f"the re-read did not finish within {_reread_seconds():g}s; the stored evidence stands"
     if isinstance(exc, LookupError):
         return str(exc)
     return f"the source or destination could not be re-read ({type(exc).__name__})"
@@ -185,6 +228,8 @@ def _group(ev: TableEvidence, engine: str, acceptances: dict[str, Any]) -> list[
             for k in ob.keys_sample:
                 if k not in diff["keys_sample"]:
                     diff["keys_sample"].append(k)
+    # A protected key column (hash_pii, mask_pii, redact, omit) never shows its values.
+    key_protected = any(c in ev.protected for c in ev.key_columns)
     out = []
     for diff in groups.values():
         accepted = acceptances.get(diff["id"])
@@ -194,6 +239,8 @@ def _group(ev: TableEvidence, engine: str, acceptances: dict[str, Any]) -> list[
         for part in parts:
             part["rows"] = len(part["_keys"]) + part["_keyless"]
             part["keys_sample"] = (part["_keys"] + part["keys_sample"])[:MAX_KEYS_SAMPLE]
+            if key_protected and part["keys_sample"]:
+                part["keys_sample"] = [PROTECTED]
             if part["rows"] > 0:
                 out.append(part)
     order = {"value": 0, "missing_in_destination": 1, "extra_in_destination": 2, "duplicate_key": 3}

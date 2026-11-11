@@ -485,6 +485,18 @@ def _protected_triples(job: dict[str, Any]) -> list[tuple[str, str, str]]:
     return protected_columns(mappings_of(job), _dict(request_of(job).get("shape_recipe")))
 
 
+def _skip_policy(dest: dict[str, Any]) -> str:
+    """The duplicate handling the run recorded for its skipped rows, or "" when none was."""
+    policy = str(dest.get("duplicate_policy") or "").strip()
+    if policy and policy.lower() not in {"append", "none", "allow"}:
+        return policy
+    if str(dest.get("in_file_dedupe") or "").strip():
+        return f"in-file dedupe, {dest['in_file_dedupe']}"
+    if (_int(dest.get("collapsed_duplicate_rows")) or 0) > 0 or dest.get("skipped_identity_keys"):
+        return "duplicate keys collapsed"
+    return ""
+
+
 #: Origins that name a missing or extra row by key inside this run's count gap.
 _COUNTED_ORIGINS = frozenset({"sample_compare", "ladder_l5", "key_census"})
 _KEYED_MODES = frozenset({"upsert", "incremental_deduped", "cdc", "scd2"})
@@ -528,10 +540,16 @@ def _count_observations(job: dict[str, Any], ev: TableEvidence) -> list[Observat
             cause=cause(TRANSFORM_APPLIED, "Rows your recipe filtered or diverted, as configured.", explained=True),
         ))
     if skipped > 0:
+        policy = _skip_policy(dest)
         out.append(Observation(
             table=ev.name, kind="missing_in_destination", rows=skipped, origin="writer_policy",
-            cause=cause(TRANSFORM_APPLIED, "Rows the run's duplicate policy skipped, as configured.",
-                        explained=True),
+            cause=cause(TRANSFORM_APPLIED, f"Rows the run's duplicate policy ({policy}) skipped, as configured.",
+                        explained=True) if policy else cause(
+                UNEXPLAINED,
+                f"The writer skipped {skipped:,} row(s) and the run recorded no duplicate policy or other "
+                "reason for it.",
+                explained=False,
+            ),
         ))
     counted = [o for o in ev.observations if o.key and o.origin in _COUNTED_ORIGINS]
     already = ev.quarantined_keys | ev.drifted_keys

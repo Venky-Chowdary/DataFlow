@@ -68,7 +68,9 @@ def _fix(action: str, diffs: list[dict[str, Any]], *, title: str, detail: str,
     }
 
 
-def _keys_preview(table: str, key_col: str, keys: list[str]) -> str:
+def _keys_preview(table: str, key_col: str, keys: list[str], *, protected: bool = False) -> str:
+    if protected:
+        return f"upsert {table} for {key_col} IN ({len(keys)} protected key(s)) — {len(keys)} key(s)"
     shown = ", ".join(keys[:20]) + (f" … (+{len(keys) - 20})" if len(keys) > 20 else "")
     return f"upsert {table} for {key_col} IN ({shown}) — {len(keys)} key(s)"
 
@@ -101,7 +103,9 @@ def _resync(job: dict[str, Any], ev: TableEvidence, diffs: list[dict[str, Any]],
         detail += " Widen the column first, or the same cut repeats."
     return _fix(
         "resync_keys", diffs, title=f"Re-sync {len(keys)} key(s) in {ev.name} by upsert",
-        detail=detail, preview=_keys_preview(ev.name, key_col or "key", keys), reason=reason,
+        detail=detail, reason=reason,
+        preview=_keys_preview(ev.name, key_col or "key", keys,
+                              protected=any(c in ev.protected for c in ev.key_columns)),
         keys=keys, table=ev.name, key_column=key_col,
     )
 
