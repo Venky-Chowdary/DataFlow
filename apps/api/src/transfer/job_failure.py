@@ -539,6 +539,15 @@ def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, s
         prior = None
     kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
     message = str(blocked)
+    measured = getattr(blocked, "rows_committed_measured", None)
+    if isinstance(measured, int) and measured >= 0:
+        # The destination was re-counted after the failure (audit H3): that is
+        # the run's committed total, and the note that carries it replaces the
+        # writer tallies ("N rows were already written") that disagreed with it.
+        note = str(getattr(blocked, "failed_batch_undo_note", "") or "")
+        if note and note not in message:
+            message = f"{message.rstrip()} {note}"
+        return measured, message
     try:
         incoming = max(0, int(getattr(blocked, "rows_written", 0) or 0))
     except (TypeError, ValueError):

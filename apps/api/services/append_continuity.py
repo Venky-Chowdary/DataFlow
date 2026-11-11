@@ -651,6 +651,7 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
     if target is None:
         return None
     try:
+        pending = unfinished_append(target)
         baseline = load_baseline(target.key)
     except ContinuityStoreCorrupt as exc:
         logger.error("append continuity: %s", exc)
@@ -666,6 +667,10 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
                 "store_error": str(exc),
             },
         )
+    if pending:
+        # A failed append left rows here (audit H3): say that, rather than
+        # "changed outside this pipeline", and never append on top of them.
+        return _unfinished_violation(target, pending)
     if not baseline:
         return None
     if is_retired_algo(baseline.get("algo")) and not baseline.get("unreadable"):
@@ -756,6 +761,9 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
     if target is None:
         return
     _clear_accepted_reset(target)
+    # A run of this route succeeded and was verified: whatever an earlier
+    # failed append left behind is part of the state it just proved.
+    clear_unfinished_append(target)
     mode = effective_sync_mode(request)
     if mode is None or not (
         is_append_sync(mode) or is_overwrite_sync(mode) or requires_upsert(mode)
@@ -791,6 +799,100 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
 #: next append start a new history from the watermark. One-shot: the next
 #: verified run's baseline clears it (QA C9).
 ACCEPTED_RESET_PREFIX = "accepted_reset:"
+
+
+#: A full-refresh append that failed after committing rows into a table that
+#: already held some. The rows cannot be removed (no key list is the batch),
+#: so the next append would write them a second time. The marker makes that
+#: next append a refusal until the state is settled: an audited rebaseline, or
+#: any run of the route that succeeds (a full-refresh overwrite rebuilds it).
+UNFINISHED_APPEND_PREFIX = "unfinished_append:"
+_UNFINISHED_CHECKSUM = "unfinished-append:rows_before="
+UNFINISHED_RECOVERY_HINT = (
+    "To recover: remove the failed run's rows and accept the destination "
+    f"({REBASELINE_REMEDY}; audited, a reason is required), accept it as it is "
+    "the same way if those rows should stay, or re-run with "
+    "full_refresh_overwrite to rebuild the table from the source."
+)
+
+
+def record_unfinished_append(
+    endpoint: Any, *, job_id: str, rows_before: int, rows_committed: int
+) -> bool:
+    """Remember that ``job_id`` left ``rows_committed`` rows behind when it failed."""
+    if int(rows_committed or 0) <= 0:
+        return False
+    target = resolve_target(endpoint)
+    if target is None:
+        return False
+    save_baseline(
+        UNFINISHED_APPEND_PREFIX + target.key,
+        {
+            "rows": int(rows_committed),
+            "checksum": f"{_UNFINISHED_CHECKSUM}{int(rows_before)}",
+            "algo": "marker",
+        },
+        str(job_id or ""),
+    )
+    return True
+
+
+def unfinished_append(target: ContinuityTarget | None) -> dict[str, Any] | None:
+    """The unsettled failed append on this table, or ``None``."""
+    if target is None:
+        return None
+    entry = load_baseline(UNFINISHED_APPEND_PREFIX + target.key)
+    checksum = str((entry or {}).get("checksum") or "")
+    if not entry or not checksum.startswith(_UNFINISHED_CHECKSUM):
+        return None
+    try:
+        rows_before = int(checksum[len(_UNFINISHED_CHECKSUM):])
+    except ValueError:
+        rows_before = 0
+    return {
+        "job_id": str(entry.get("job_id") or ""),
+        "rows_committed": int(entry.get("rows") or 0),
+        "rows_before": rows_before,
+        "recorded_at": entry.get("recorded_at"),
+    }
+
+
+def clear_unfinished_append(target: ContinuityTarget | None) -> dict[str, Any] | None:
+    """Drop the marker; returns what it held. Never raises."""
+    try:
+        pending = unfinished_append(target)
+        if pending:
+            clear_baseline(UNFINISHED_APPEND_PREFIX + target.key)  # type: ignore[union-attr]
+        return pending
+    except Exception:  # noqa: BLE001
+        logger.warning("unfinished-append marker not cleared", exc_info=True)
+        return None
+
+
+def _unfinished_violation(
+    target: ContinuityTarget, pending: dict[str, Any]
+) -> ContinuityViolation:
+    committed, before = int(pending["rows_committed"]), int(pending["rows_before"])
+    return ContinuityViolation(
+        f"Verification failed for table '{target.table}': an earlier append "
+        f"(job {pending['job_id'] or 'unknown'}) failed after committing "
+        f"{committed:,} row(s) to it and those rows were left in place (the table "
+        f"held {before:,} row(s) before that run). Appending the source again "
+        "would write them a second time. Nothing was written; the destination "
+        f"is unchanged. {UNFINISHED_RECOVERY_HINT}",
+        {
+            "reason": "destination_continuity_mismatch",
+            "error_code": CONTINUITY_ERROR_CODE,
+            "verification_status": "failed",
+            "table": target.table,
+            "mismatch": "unfinished_append",
+            "unfinished_job_id": pending["job_id"],
+            "rows_committed": committed,
+            "rows_before": before,
+            "recorded_at": pending.get("recorded_at"),
+            "recovery": UNFINISHED_RECOVERY_HINT,
+        },
+    )
 
 
 def _accepted_reset_key(target: ContinuityTarget) -> str:
@@ -941,6 +1043,10 @@ def rebaseline(
         previous = None
         store_error = str(exc)
     rebaseline_id = f"rebaseline-{uuid.uuid4().hex[:12]}"
+    try:
+        settled = unfinished_append(target)
+    except ContinuityStoreCorrupt:
+        settled = None
     prev_view = (
         {
             "rows": previous.get("rows"),
@@ -968,6 +1074,12 @@ def rebaseline(
             "store_error": store_error,
             "current": dict(current) if current else None,
             "destination_missing": removal,
+            # A failed append's leftover rows the operator accepts with this.
+            "unfinished_append_settled": (
+                {k: settled[k] for k in ("job_id", "rows_committed", "rows_before")}
+                if settled
+                else None
+            ),
             # Shared keys left alone: runs that key on them (an endpoint built
             # from the inline host) keep the old baseline.
             "skipped_shared_keys": skipped_shared_keys,
@@ -990,6 +1102,7 @@ def rebaseline(
             clear_baseline(key)
         else:
             save_baseline(key, current, rebaseline_id)
+    clear_unfinished_append(target)
     reset_key = _accepted_reset_key(target)
     if reset_key and (removal or int((current or {}).get("rows") or 0) == 0):
         # The entry's presence is the marker; job_id names the audited

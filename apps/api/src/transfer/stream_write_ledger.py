@@ -181,9 +181,14 @@ def _undo_failed_write(run: Any, exc: BaseException) -> BaseException:
             destination=run.cfg.destination,
             dest_summary=run.tally.dest_summary,
             sync_mode=run.cfg.effective_sync,
+            job_id=str(getattr(run.cfg, "job_id", "") or ""),
         )
         if note:
             setattr(exc, "failed_batch_undo_note", note)
+        measured = (run.tally.dest_summary or {}).get("rows_committed_before_failure")
+        if isinstance(measured, int):
+            # What the destination holds of this run, counted — not a writer tally.
+            setattr(exc, "rows_committed_measured", measured)
     except Exception:  # noqa: BLE001 - undo must not hide the write failure
         logging.getLogger(__name__).warning("Failed-write undo did not run", exc_info=True)
     return exc
