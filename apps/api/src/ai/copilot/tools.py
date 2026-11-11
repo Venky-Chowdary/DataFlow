@@ -169,7 +169,7 @@ _WORKSPACE_PROP: dict[str, dict] = {
 TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "list_datasets",
-        "description": "List every dataset available — uploads, fixtures, and transfer history.",
+        "description": "List the datasets available — this workspace's uploaded files and the built-in industry templates.",
         "input_schema": {
             "type": "object",
             "properties": {},

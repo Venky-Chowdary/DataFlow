@@ -75,7 +75,9 @@ class CopilotDataAnalyst:
         return pick_dataset(self.feeder.feed_all(), hint)
 
     def analyze_schema(self, schema: UniversalSchema) -> DataInsight:
-        cache_key = schema.name
+        # The file and its shape, not just the name: a re-upload, or another
+        # workspace's same-named upload, must not be described from old bytes.
+        cache_key = "|".join((schema.name, schema.path, str(schema.row_count), ",".join(schema.columns)))
         if cache_key in self._cache:
             return self._cache[cache_key]
 

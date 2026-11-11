@@ -210,7 +210,7 @@ class PilotContextBuilder:
 
         parts = [
             "## Platform State",
-            f"- {ctx['dataset_count']} datasets indexed (uploads + fixtures + transfers)",
+            f"- {ctx['dataset_count']} datasets indexed (this workspace's uploads + built-in industry templates)",
             f"- {ctx.get('training_schema_profiles', 620)}+ connector schema profiles in training knowledge",
             _count("connectors", "saved connectors", f"{len(ctx['connectors'])} saved connectors"),
             _jobs_line(ctx, degraded),

@@ -7,6 +7,7 @@ Ingest schemas from uploaded files, connectors, and industry templates for AI tr
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,41 @@ _FEED_CACHE_TTL_S = 60.0
 
 #: Parseable dataset extensions in the upload directory.
 _DATASET_SUFFIXES = (".csv", ".json", ".jsonl", ".tsv", ".ndjson")
+
+
+def _default_dataset_dirs() -> list[str]:
+    """Where uploaded datasets live: the deployment's upload directory.
+
+    Resolved on every read (``DATAFLOW_UPLOAD_DIR``, a mounted volume, or
+    ``apps/api/uploads``), so the feeder reads the directory uploads are
+    actually written to. ``DATAFLOW_PILOT_DATASET_DIRS`` adds directories
+    (``os.pathsep``-separated) for a deployment that curates extra datasets;
+    nothing inside the application tree is listed by default — the image ships
+    ``tests/fixtures``, and those are not anyone's datasets.
+    """
+    from services.brand_env import getenv_brand
+    from services.platform_config import upload_dir
+
+    dirs = [str(upload_dir())]
+    for extra in (getenv_brand("PILOT_DATASET_DIRS", "") or "").split(os.pathsep):
+        if extra.strip() and extra.strip() not in dirs:
+            dirs.append(extra.strip())
+    return dirs
+
+
+def _visible_to_caller(path: str) -> bool:
+    """Whether the bound caller's workspace scope covers the upload at ``path``.
+
+    An upload belongs to the workspace recorded when it was stored. A file
+    with no upload record is unowned: a workspace-bound caller does not see
+    it, a single-tenant (unbound) caller still does.
+    """
+    if not path:
+        return True  # industry templates and catalog profiles are not files
+    from services.file_parser import upload_workspace_for_path
+    from services.workspace_filter import bound_allows
+
+    return bound_allows(upload_workspace_for_path(path) or "")
 
 
 def _is_dataset_file(file_path: Path) -> bool:
@@ -58,19 +94,33 @@ class UniversalDataFeeder:
     def __init__(self, upload_dirs: list[str] | None = None):
         #: upload stem -> why the parser refused it (round 10).
         self.unreadable: dict[str, str] = {}
-        base = Path(__file__).resolve().parents[3]  # apps/api
-        default_dirs = [
-            str(base / "uploads"),
-            str(base / "src" / "uploads"),
-            str(base / "tests" / "fixtures"),
-            str(base.parent / "api" / "uploads"),
-        ]
-        self.upload_dirs = upload_dirs or default_dirs
+        self._explicit_dirs: list[str] | None = list(upload_dirs) if upload_dirs else None
         self._parser = None
+        # Both caches hold every dataset on disk; what a caller is shown is
+        # filtered by workspace on each read, never cached per caller.
         self._feed_cache: list[UniversalSchema] | None = None
         self._feed_cache_at: float = 0.0
-        self._name_cache: list[tuple[str, str | None]] | None = None
+        self._name_cache: list[tuple[str, str | None, str]] | None = None
         self._name_cache_at: float = 0.0
+        self._cached_dirs: tuple[str, ...] = ()
+
+    @property
+    def upload_dirs(self) -> list[str]:
+        return list(self._explicit_dirs) if self._explicit_dirs is not None else _default_dataset_dirs()
+
+    @upload_dirs.setter
+    def upload_dirs(self, dirs: list[str] | None) -> None:
+        self._explicit_dirs = list(dirs) if dirs else None
+        self.invalidate_cache()
+
+    def _dirs_changed(self) -> bool:
+        """True (and the caches dropped) when the configured directories moved."""
+        current = tuple(self.upload_dirs)
+        if current == self._cached_dirs:
+            return False
+        self.invalidate_cache()
+        self._cached_dirs = current
+        return True
 
     @property
     def parser(self):
@@ -85,10 +135,22 @@ class UniversalDataFeeder:
         Returns ``(name, industry_or_none)`` for uploads + industry templates.
         """
         now = time.monotonic()
-        if self._name_cache is not None and (now - self._name_cache_at) < _FEED_CACHE_TTL_S:
-            return self._name_cache
+        self._dirs_changed()
+        if self._name_cache is None or (now - self._name_cache_at) >= _FEED_CACHE_TTL_S:
+            self._name_cache = self._index_names()
+            self._name_cache_at = now
+        seen: set[str] = set()
+        visible: list[tuple[str, str | None]] = []
+        for name, industry, path in self._name_cache:
+            if name.lower() in seen or not _visible_to_caller(path):
+                continue
+            seen.add(name.lower())
+            visible.append((name, industry))
+        return visible
 
-        names: list[tuple[str, str | None]] = []
+    def _index_names(self) -> list[tuple[str, str | None, str]]:
+        """``(name, industry, path)`` for every dataset file and industry template."""
+        names: list[tuple[str, str | None, str]] = []
         seen: set[str] = set()
         for upload_dir in self.upload_dirs:
             path = Path(upload_dir)
@@ -98,22 +160,17 @@ class UniversalDataFeeder:
                 for file_path in path.iterdir():
                     if not _is_dataset_file(file_path):
                         continue
-                    stem = file_path.stem
-                    key = stem.lower()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    names.append((stem, None))
+                    # Same-named uploads of different workspaces are both kept:
+                    # which one a caller sees is decided per read.
+                    names.append((file_path.stem, None, str(file_path.resolve())))
+                    seen.add(file_path.stem.lower())
             except OSError as exc:
                 logger.warning("Could not list %s: %s", upload_dir, exc)
 
         for key in INDUSTRY_SCHEMAS:
             if key.lower() not in seen:
                 seen.add(key.lower())
-                names.append((key, key))
-
-        self._name_cache = names
-        self._name_cache_at = now
+                names.append((key, key, ""))
         return names
 
     def scan_uploads(self) -> list[UniversalSchema]:
@@ -184,15 +241,24 @@ class UniversalDataFeeder:
         return schemas
 
     def feed_all(self, *, force: bool = False) -> list[UniversalSchema]:
-        """Collect schemas from all universal data sources (TTL-cached)."""
+        """Schemas from all universal data sources that the caller may see.
+
+        The parse is TTL-cached for every caller; the workspace filter is
+        applied on each read, so one workspace's upload is never handed to
+        another from the cache.
+        """
         now = time.monotonic()
         if (
-            not force
-            and self._feed_cache is not None
-            and (now - self._feed_cache_at) < _FEED_CACHE_TTL_S
+            force
+            or self._dirs_changed()
+            or self._feed_cache is None
+            or (now - self._feed_cache_at) >= _FEED_CACHE_TTL_S
         ):
-            return self._feed_cache
+            self._feed_cache = self._collect_all()
+            self._feed_cache_at = now
+        return [s for s in self._feed_cache if _visible_to_caller(s.path)]
 
+    def _collect_all(self) -> list[UniversalSchema]:
         seen = set()
         all_schemas = []
 
@@ -208,13 +274,12 @@ class UniversalDataFeeder:
         sources = self.scan_uploads() + self.load_industry_schemas() + catalog_schemas
 
         for schema in sources:
-            key = (schema.name, tuple(sorted(schema.columns[:8])))
+            # The file is part of the identity: two workspaces can each hold an
+            # upload with the same name and columns.
+            key = (schema.name, tuple(sorted(schema.columns[:8])), schema.path)
             if key not in seen:
                 seen.add(key)
                 all_schemas.append(schema)
-
-        self._feed_cache = all_schemas
-        self._feed_cache_at = now
         return all_schemas
 
     def invalidate_cache(self) -> None:

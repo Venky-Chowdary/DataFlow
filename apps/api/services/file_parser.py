@@ -543,6 +543,32 @@ def resolve_attached_upload_path(file_id: str) -> str:
     return publish_upload_path(str(record.get("path") or ""))
 
 
+_STORED_UPLOAD_NAME = re.compile(r"^([0-9a-f]{16})_")
+
+
+def upload_workspace_for_path(path: str | Path) -> str | None:
+    """The workspace that owns the upload stored at ``path``.
+
+    ``""`` for an upload registered with no workspace, ``None`` when no upload
+    record names this file (it was not stored through ``store_upload``). The
+    file id is read from the stored name, so a record another replica wrote is
+    found through the shared registry.
+    """
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        return None
+    named = _STORED_UPLOAD_NAME.match(resolved.name)
+    record = get_file(named.group(1)) if named else None
+    if not record:
+        return None
+    try:
+        same_file = Path(str(record.get("path") or "")).resolve() == resolved
+    except OSError:
+        same_file = False
+    return str(record.get("workspace_id") or "") if same_file else None
+
+
 def get_file(file_id: str) -> dict | None:
     record = _file_registry.get(file_id)
     if not record:
