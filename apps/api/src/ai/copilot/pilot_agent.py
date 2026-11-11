@@ -21,6 +21,7 @@ from services.workspace_filter import current_actor
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
 from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
 from .answer_contract import RenderTracker, result_used
+from .pilot_egress import history_for_model, model_payload, narration_allowed
 from .schedule_questions import (
     asks_next_run,
     ground_schedule_plan,
@@ -1440,6 +1441,9 @@ class DataPilotAgent:
         local = self._local_agent(message, history or [], ctx, data_context)
         if engine == "local":
             return local
+        # Everything below may leave the box. The transcript is the client's copy
+        # of earlier answers — sampled rows included — so it is gated first.
+        history = history_for_model(history)
         # Composed conversation turns (calendar, create-connection, refuse) are
         # already the answer. Native OpenAI must not race Help retrieval over them.
         if (local.method or "") == "pilot_conversation":
@@ -1955,7 +1959,12 @@ class DataPilotAgent:
             tr = self.tools.execute(name, args)
         turn.tool_results.append(tr)
         self._append_tool_actions(turn, tr)
-        payload = json.dumps(tr.output if tr.success else {"error": tr.error}, default=json_default)
+        # What the model is handed is not what the app shows: under the
+        # metadata-only policy a row-returning result is reduced to its shape.
+        payload = json.dumps(
+            model_payload(tr.name, tr.output) if tr.success else {"error": tr.error},
+            default=json_default,
+        )
         if len(payload) > _NATIVE_TOOL_OUTPUT_CHARS:
             payload = json.dumps({
                 "truncated": True,
@@ -2106,6 +2115,11 @@ class DataPilotAgent:
         ) and not local.pending_actions:
             return local
 
+        # A draft built from cell values is not narrated under metadata-only:
+        # the rewrite could not keep the rows without the rows being sent.
+        if not narration_allowed(local.answer, tools):
+            return local
+
         provider = None
         method = "llm_polish"
         try:
@@ -2152,7 +2166,10 @@ Draft answer:
 {local.answer}
 """
         try:
-            response = provider.generate(prompt, system=system, max_tokens=900)
+            from services.ai_egress import egress_scope
+
+            with egress_scope(purpose="pilot.narration"):
+                response = provider.generate(prompt, system=system, max_tokens=900)
         except Exception:
             return local
         if not response.success or not (response.content or "").strip():
