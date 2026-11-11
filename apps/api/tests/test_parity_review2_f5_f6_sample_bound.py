@@ -48,7 +48,9 @@ def test_a_clean_sample_does_not_hide_rows_the_counts_prove_missing():
     assert "at most 0.60%" not in report["confidence"]["statement"]
 
 
-def test_an_acceptance_of_keyless_sampled_rows_moves_them_out_of_k():
+def test_an_acceptance_of_keyless_sampled_rows_keeps_them_in_k():
+    # Re-review 3, H3 reversed round 2's rule: an acceptance covers the rows a person
+    # saw, never the unseen population, so the accepted sampled rows stay in k.
     mm = [{"target": "v", "source_value": f"x{i}", "target_value": f"y{i}"} for i in range(4)]
     job = _job({"passed": False, "source_rows": 10_000, "target_rows": 10_000,
                 "sample_compare": {"rows_compared": 1000, "mismatches": mm}})
@@ -56,5 +58,5 @@ def test_an_acceptance_of_keyless_sampled_rows_moves_them_out_of_k():
     job["parity"] = {"version": 1, "acceptances": {did: {"by": "a", "note": "ok", "keys": [], "keyless_rows": 4,
                                                          "rows": 4}}}
     report = build_parity_report(job, reread=False)
-    assert report["confidence"]["differences_in_sample"] == 0
+    assert report["confidence"]["differences_in_sample"] == 4
     assert report["verdict"] == "no_difference_found"

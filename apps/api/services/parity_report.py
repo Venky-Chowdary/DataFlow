@@ -438,7 +438,7 @@ def _row_counts(diffs: list[dict[str, Any]], cap: int | None) -> tuple[int, int]
     return differ, bad
 
 
-def _sample_bound(ev: TableEvidence, k: int, bad: int) -> float | None:
+def _sample_bound(ev: TableEvidence, k: int, outside: int) -> float | None:
     """One-sided 95% upper bound on the share of rows holding an unexplained difference.
 
     The Clopper-Pearson bound covers what the sample saw (``k`` of
@@ -449,22 +449,39 @@ def _sample_bound(ev: TableEvidence, k: int, bad: int) -> float | None:
     upper = clopper_pearson_upper(min(k, ev.sampled_rows), ev.sampled_rows)
     if upper is None or not ev.rows_source:
         return upper
-    return min(1.0, upper + max(bad - k, 0) / ev.rows_source)
+    return min(1.0, upper + max(outside, 0) / ev.rows_source)
+
+
+def _sampled_rows(diffs: list[dict[str, Any]]) -> int:
+    return len({key for d in diffs for key in d["_sampled_keys"]}) + sum(d["_sampled_keyless"] for d in diffs)
+
+
+def _explained_split(tables: list[dict[str, Any]]) -> str:
+    """How the explained rows split: by a classifier rule, or by an operator's acceptance."""
+    accepted = sum(t["_accepted"] for t in tables)
+    by_rule = sum(t["explained"] for t in tables) - accepted
+    parts = ([f"{by_rule:,} row(s) differ in ways a rule explains"] if by_rule else []) + (
+        [f"{accepted:,} row(s) were accepted by an operator"] if accepted else [])
+    return "; ".join(parts)
 
 
 def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
     cap = max([n for n in (ev.rows_source, ev.rows_destination) if n is not None], default=None)
     differ, bad = _row_counts(diffs, cap)
     open_diffs = [d for d in diffs if not d["cause"]["explained"]]
+    accepted = [d for d in diffs if d["cause"]["code"] == ACCEPTED_BY_OPERATOR]
     # Sampled rows with an unexplained difference: keyed ones once, and those Gate-8 stored without a key.
-    k = len({key for d in open_diffs for key in d["_sampled_keys"]}) + sum(d["_sampled_keyless"] for d in open_diffs)
+    k_open = _sampled_rows(open_diffs)
+    # An acceptance covers the rows a person saw, not the population the sample stands for: the
+    # rows it covers still count in the sample's difference rate.
+    k = k_open + _sampled_rows(accepted)
     at_least = any(d["rows_at_least"] for d in open_diffs)
     upper = None
     pct: float | None = None
     if ev.check in _FULL_CHECKS and ev.rows_source:
         pct = round(100.0 * max(ev.rows_source - bad, 0) / ev.rows_source, 4)
     elif ev.check == "sampled" and ev.sampled_rows:
-        upper = _sample_bound(ev, k, bad)
+        upper = _sample_bound(ev, k, bad - k_open)
         pct = round(100.0 * (1.0 - upper), 4) if upper is not None else None
         if pct is not None and ev.rows_source:
             pct = min(pct, round(100.0 * max(ev.rows_source - bad, 0) / ev.rows_source, 4))
@@ -485,7 +502,8 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
         "rows_destination": ev.rows_destination, "proven_equal_pct": pct,
         "differences": differ, "explained": differ - bad, "unexplained": bad,
         "status": status, "upper_bound_rate": upper,
-        "_sample": (ev.sampled_rows, k, max(bad - k, 0), ev.rows_source or 0) if ev.check == "sampled" else None,
+        "_sample": (ev.sampled_rows, k, max(bad - k_open, 0), ev.rows_source or 0) if ev.check == "sampled" else None,
+        "_accepted": min(sum(len(d["_keys"]) + d["_keyless"] for d in accepted), differ - bad),
         "_at_least": at_least,
         "_note": ev.note,
     }
@@ -582,10 +600,10 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
             f"{', '.join(sampled[:5])} were compared on a sample of {confidence['sampled_rows']:,} row(s): "
             f"with {int(CONFIDENCE_LEVEL * 100)}% confidence at most {format_rate_pct(upper)} of rows hold "
             "an unexplained difference."
-            + (f" {explained:,} row(s) differ in ways a rule explains." if explained else "")
+            + (f" {_explained_split(tables)}." if explained else "")
         )
     if explained:
-        return "explained", f"{explained:,} row(s) differ and every difference is explained."
+        return "explained", f"{explained:,} row(s) differ and none is unexplained: {_explained_split(tables)}."
     return "proven", "No differences: the destination matches the source."
 
 

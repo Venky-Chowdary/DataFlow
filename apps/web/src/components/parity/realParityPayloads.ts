@@ -391,7 +391,7 @@ export const reportResynced: ParityReport = {
     }
   ],
   "verdict": "explained",
-  "verdict_reason": "9 row(s) differ and every difference is explained.",
+  "verdict_reason": "9 row(s) differ and none is unexplained: 9 row(s) differ in ways a rule explains.",
   "version": 8
 };
 
@@ -602,7 +602,7 @@ export const reportSigned: ParityReport = {
     }
   ],
   "verdict": "explained",
-  "verdict_reason": "9 row(s) differ and every difference is explained.",
+  "verdict_reason": "9 row(s) differ and none is unexplained: 9 row(s) differ in ways a rule explains.",
   "version": 11
 };
 
