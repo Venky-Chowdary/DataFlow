@@ -9,8 +9,9 @@ column, deterministically:
 * **lossy** - hashing, masking, redaction, an omitted or dropped column, any
   narrowing the type system recognises (string, decimal, integer, float,
   temporal, binary, interval, bit width), truncation (datetime to date/time),
-  rounding (to integer, decimal to float, float to decimal), concatenation, and
-  recipe steps that change values or rows;
+  rounding (to integer, decimal to float, float to decimal), concatenation,
+  recipe steps that change values or rows, and a row cap or source filter (only
+  part of the source lands);
 * **conditional** - invertible only when the observed values round-trip
   exactly: a cast out of text, a normalising transform (trim, case, unicode,
   e-mail, ...), ``replace:`` / ``default:`` / ``assume_timezone:``, or a column
@@ -384,6 +385,22 @@ def rollback_note(table: str, verdict: str) -> tuple[str, str]:
     return "keep_source_as_fallback", f"{table} needs the source kept as the fallback until sign-off."
 
 
+def population_entries(row_limit: int = 0, source_filter: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    """A row cap or a source filter writes only part of the source: a lossy ``row_change``."""
+    out = []
+    if int(row_limit or 0) > 0:
+        entry = _entry(None, None, None, None, ["limit"], LOSSY, "row_change", op="limit")
+        entry["reason"] = (f"the row cap (limit {int(row_limit)}) writes at most {int(row_limit)} source row(s), "
+                           "so the rows left out cannot be rebuilt from the destination.")
+        out.append(entry)
+    if source_filter:
+        entry = _entry(None, None, None, None, ["source_filter"], LOSSY, "row_change", op="source_filter")
+        entry["reason"] = ("the source filter writes only the rows it matches, so the rows it leaves out "
+                           "cannot be rebuilt from the destination.")
+        out.append(entry)
+    return out
+
+
 def analyze_table(
     *,
     table: str,
@@ -396,6 +413,8 @@ def analyze_table(
     sample_rows: Sequence[Mapping[str, Any]] = (),
     dest_db: str = "",
     source_db: str = "",
+    row_limit: int = 0,
+    source_filter: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One table's ReversibilityTable (contract 1)."""
     stypes = {str(k): str(v) for k, v in (source_types or {}).items()}
@@ -422,6 +441,7 @@ def analyze_table(
             row = classify_recipe_step(step)
             if row is not None:
                 columns.append(row)
+    columns.extend(population_entries(row_limit, source_filter))
     verdict, reason = table_verdict(columns, key_columns)
     kind, note = rollback_note(table, verdict)
     return {"name": table, "verdict": verdict, "reason": reason, "rollback": kind,

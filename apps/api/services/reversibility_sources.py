@@ -39,6 +39,13 @@ def _key_columns(stream_contracts: Any) -> list[str]:
     return []
 
 
+def _limit(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _steps(recipe: Any) -> list[dict[str, Any]]:
     return [s for s in _dict(recipe).get("steps") or [] if isinstance(s, dict)]
 
@@ -80,6 +87,8 @@ def plan_report(plan: Any) -> dict[str, Any]:
         sample_rows=sample,
         dest_db=_engine(plan.destination),
         source_db=_engine(plan.source),
+        row_limit=_limit(policies.get("row_limit")),
+        source_filter=_dict(policies.get("source_filter")),
     )
     return build_report([table], scope="plan", subject_id=str(plan.id),
                         require=plan_requires_reversibility(policies),
@@ -103,6 +112,8 @@ def job_report(job: dict[str, Any], job_id: str) -> dict[str, Any]:
         key_columns=_key_columns(req.get("stream_contracts")),
         dest_db=_engine(dst),
         source_db=_engine(src),
+        row_limit=_limit(req.get("limit")),
+        source_filter=_dict(req.get("source_filter")),
     )
     return build_report([table], scope="job", subject_id=job_id,
                         require=_truthy(req.get(POLICY)), data_rows=0, data_source="none")
@@ -129,6 +140,8 @@ def request_report(
         sample_rows=list(sample_rows or []),
         dest_db=_engine(dst),
         source_db=_engine(src),
+        row_limit=_limit(getattr(request, "limit", 0)),
+        source_filter=_dict(getattr(request, "source_filter", None)),
     )
     return build_report([table], scope="job", subject_id=str(getattr(request, "job_id", "") or ""),
                         require=True, data_rows=len(sample_rows or []), data_source="preflight_sample")
