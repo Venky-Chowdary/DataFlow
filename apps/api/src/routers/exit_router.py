@@ -277,7 +277,7 @@ async def export_exit_evidence(
     rehearsal_id: str, request: Request, format: Literal["json", "markdown"] = Query(default="json"),
 ):
     """The signed Exit Evidence Pack (json, 409 until signed) or a readable Markdown report."""
-    from services.exit_evidence import render_markdown, signed_pack
+    from services.exit_evidence import exported_pack, render_markdown, signed_pack
     from services.exit_inventory import audit
 
     doc = _visible_rehearsal(rehearsal_id, request)
@@ -288,7 +288,7 @@ async def export_exit_evidence(
           actor=actor_from_request(request),
           details={"rehearsal_id": rehearsal_id, "format": format, "signed": bool(pack)})
     if format == "json":
-        return pack
+        return await asyncio.to_thread(exported_pack, doc, actor=actor_from_request(request))
     return PlainTextResponse(await asyncio.to_thread(render_markdown, doc), media_type="text/markdown")
 
 

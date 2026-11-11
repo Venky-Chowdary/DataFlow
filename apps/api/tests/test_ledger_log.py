@@ -28,7 +28,8 @@ def ledger(tmp_path, monkeypatch):
     """The ledger on an isolated file store, with the stub anchor provider."""
     from services import ledger_log, ledger_store
 
-    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    (tmp_path / "data").mkdir(exist_ok=True)
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_STORE", str(tmp_path / "anchors.jsonl"))
     monkeypatch.delenv("DATAFLOW_AUDIT_ANCHOR_PROVIDER", raising=False)
     monkeypatch.delenv("DATAWRAP_AUDIT_ANCHOR_PROVIDER", raising=False)
@@ -198,7 +199,7 @@ def test_the_self_check_catches_a_rewritten_leaf_and_a_removed_entry(ledger, tmp
         _append(ledger, n)
         ledger.checkpoint()
     assert ledger.audit_log() == {"ok": True, "tree_size": 5, "checkpoints_checked": 5, "problems": []}
-    path = tmp_path / "evidence_ledger.json"
+    path = tmp_path / "data" / "evidence_ledger.json"
     original = path.read_text()
 
     data = json.loads(original)
@@ -239,7 +240,7 @@ def test_a_client_holding_an_older_checkpoint_detects_a_rewritten_log(ledger, tm
 
     # The operator rewrites leaf 3 (statement and leaf hash), drops the checkpoints that would
     # give it away, and issues new, validly signed ones over the rewritten history.
-    path = tmp_path / "evidence_ledger.json"
+    path = tmp_path / "data" / "evidence_ledger.json"
     data = json.loads(path.read_text())
     target = data["evidence_ledger_entries"]["3"]
     target["statement"]["content_sha256"] = "e" * 64

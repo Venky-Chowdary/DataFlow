@@ -313,13 +313,19 @@ def hmac_sha256_hex(secret: bytes, text: str) -> str:
     return hmac.new(secret, text.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+#: A pack's Evidence Ledger receipt (:mod:`services.ledger_packs`). Like
+#: ``signature`` it travels beside the signed body, outside the content hash.
+LEDGER_KEY = "ledger"
+ENVELOPE_KEYS = ("content_sha256", "signature", LEDGER_KEY)
+
+
 def sign_body(body: dict[str, Any], *, subject: str) -> dict[str, Any]:
     """Return ``body`` plus its content hash and HMAC over ``hash:subject``.
 
     The subject binds a signature to the thing it describes, so a pack signed
     for one job cannot be replayed as evidence for another.
     """
-    body = json_ready_body(body)
+    body = {k: v for k, v in json_ready_body(body).items() if k != LEDGER_KEY}
     content_sha256 = sha256_hex(canonical_json(body))
     return {
         **body,
@@ -335,7 +341,7 @@ def sign_body(body: dict[str, Any], *, subject: str) -> dict[str, Any]:
 def verify_body(payload: dict[str, Any], *, subject: str) -> tuple[str, list[str]]:
     """Recompute hash + HMAC for a signed body. Returns (actual_hash, errors)."""
     errors: list[str] = []
-    body = {k: v for k, v in payload.items() if k not in ("content_sha256", "signature")}
+    body = {k: v for k, v in payload.items() if k not in ENVELOPE_KEYS}
     actual_hash = sha256_hex(canonical_json(body))
     if str(payload.get("content_sha256") or "") != actual_hash:
         errors.append("content_sha256 mismatch")
@@ -955,7 +961,7 @@ def pack_body_digest_excluding_anchor(pack: dict[str, Any]) -> str:
     body = {
         k: v
         for k, v in pack.items()
-        if k not in ("content_sha256", "signature", "chain_anchor")
+        if k not in (*ENVELOPE_KEYS, "chain_anchor")
     }
     return sha256_hex(canonical_json(body))
 
@@ -993,7 +999,15 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
                 "was altered after it was sealed, or the anchor belongs to another pack"
             )
     kind = str(pack.get("kind")) if pack.get("kind") in {PARITY_PACK_KIND, EXIT_PACK_KIND} else "proof_pack"
-    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash, "kind": kind}
+    # The Evidence Ledger verdict on the pack's receipt ("HMAC only" for a pack without one).
+    from services.ledger_verify import evidence_for_pack
+
+    evidence = evidence_for_pack(pack)
+    if evidence["verdict"] == "failed":
+        failed = ", ".join(c["id"] for c in evidence["checks"] if c["status"] == "failed")
+        errors.append(f"the Evidence Ledger receipt does not verify ({failed})")
+    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash, "kind": kind,
+            "evidence": evidence}
 
 
 def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
@@ -1102,7 +1116,7 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
             and str(dest.get("checksum_mode") or "") == "source_reread"
         ):
             reconciliation["source_checksum_provenance"] = "independent_source_reread"
-    return build_signed_proof_pack(
+    pack = build_signed_proof_pack(
         job_id=str(job.get("_id") or job.get("id") or ""),
         reconciliation=reconciliation,
         mapping_proof=mapping_proof or None,
@@ -1161,6 +1175,10 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         timing=_timing_for_pack(dest),
         parity=parity_section_for_pack(job),
     )
+    # Beside the HMAC: a public-key signature and a transparency-log receipt (Evidence Ledger).
+    from services.ledger_packs import with_ledger
+
+    return with_ledger(pack, workspace_id=str(job.get("workspace_id") or ""), actor=actor)
 
 
 def parity_section_for_pack(job: dict[str, Any]) -> dict[str, Any] | None:

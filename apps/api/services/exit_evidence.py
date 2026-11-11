@@ -176,6 +176,10 @@ def sign_off(rehearsal_id: str, *, role: str, actor: str, signer_role: str, note
                    "content_sha256": digest})
     if pack:
         after = _anchor(rehearsal_id, pack, system=system, actor=actor) or after
+        # The pack is stored: add its public-key signature and ledger entry (never blocks the sign-off).
+        from services.ledger_packs import issue
+
+        issue(pack, workspace_id=str(doc.get("workspace_id") or ""), actor=actor)
     return after
 
 
@@ -214,6 +218,13 @@ def signed_pack(doc: dict[str, Any]) -> dict[str, Any] | None:
     return (signed or {}).get("pack")
 
 
+def exported_pack(doc: dict[str, Any], *, actor: str) -> dict[str, Any] | None:
+    """The signed pack as exported: with its Evidence Ledger receipt under ``ledger`` when one exists."""
+    from services.ledger_packs import with_ledger
+
+    return with_ledger(signed_pack(doc), workspace_id=str(doc.get("workspace_id") or ""), actor=actor)
+
+
 def _receipt_for(pack: dict[str, Any], digest: str) -> dict[str, Any] | None:
     """The pack's anchor receipt, wherever this replica can find it.
 
@@ -246,7 +257,7 @@ def verify_pack(pack: Any) -> dict[str, Any]:
         return {"ok": False, "errors": ["this is not an Exit Evidence Pack (kind exit_evidence)"],
                 "kind": str((pack or {}).get("kind") or "") if isinstance(pack, dict) else "",
                 "content_sha256": None, "signature_ok": False, "merkle_ok": False, "merkle_root": None,
-                "anchor": verify_receipt(None), "parts_reread": False, "note": PARTS_NOTE}
+                "anchor": verify_receipt(None), "parts_reread": False, "note": PARTS_NOTE, "evidence": None}
     checked = verify_signed_proof_pack(pack)
     errors = list(checked["errors"])
     claimed = pack.get("merkle_root")
@@ -264,7 +275,7 @@ def verify_pack(pack: Any) -> dict[str, Any]:
         errors.append(f"the anchor could not be confirmed: {anchor.get('reason')}")
     return {"ok": not errors, "errors": errors, "kind": PACK_KIND, "content_sha256": checked["content_sha256"],
             "signature_ok": not checked["errors"], "merkle_ok": merkle_ok, "merkle_root": claimed,
-            "anchor": anchor, "parts_reread": False, "note": PARTS_NOTE}
+            "anchor": anchor, "parts_reread": False, "note": PARTS_NOTE, "evidence": checked.get("evidence")}
 
 
 def _pii_line(ack: Any) -> str:

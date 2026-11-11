@@ -156,6 +156,10 @@ def sign_off(
     if pack:
         audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
               details={"signed": True, "content_sha256": pack["content_sha256"], "roles": sorted(roles)})
+        # The pack is stored: add its public-key signature and ledger entry (never blocks the sign-off).
+        from services.ledger_packs import issue
+
+        issue(pack, workspace_id=str(job.get("workspace_id") or ""), actor=actor)
     after["version"] = int(state["version"])
     return after
 
@@ -164,6 +168,13 @@ def signed_pack(job: dict[str, Any]) -> dict[str, Any] | None:
     state = state_of(job)
     signed = state.get("signed") if isinstance(state.get("signed"), dict) else None
     return (signed or {}).get("pack")
+
+
+def exported_pack(job: dict[str, Any], *, actor: str) -> dict[str, Any] | None:
+    """The signed pack as exported: with its Evidence Ledger receipt under ``ledger`` when one exists."""
+    from services.ledger_packs import with_ledger
+
+    return with_ledger(signed_pack(job), workspace_id=str(job.get("workspace_id") or ""), actor=actor)
 
 
 def _pct(value: Any) -> str:

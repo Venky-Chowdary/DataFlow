@@ -216,7 +216,7 @@ async def export_parity_report(
     job_id: str, request: Request, format: Literal["markdown", "json"] = Query(default="markdown"),
 ):
     """Markdown evidence pack, or (``format=json``) the signed pack the verify route checks."""
-    from services.parity_signoff import export_markdown, signed_pack
+    from services.parity_signoff import export_markdown, exported_pack, signed_pack
     from services.parity_state import audit
 
     job = _visible_job(job_id, request)
@@ -224,7 +224,7 @@ async def export_parity_report(
     if format == "json":
         if not pack:
             raise HTTPException(status_code=409, detail="The report is not signed yet.")
-        out: Any = pack
+        out: Any = await asyncio.to_thread(exported_pack, job, actor=actor_from_request(request))
     else:
         out = await asyncio.to_thread(export_markdown, job, job_id)
     audit("job.parity.exported", job=job, job_id=job_id, actor=actor_from_request(request),
