@@ -38,6 +38,7 @@ def summarize_listed_job(doc: dict[str, Any]) -> dict[str, Any]:
         error = message
     from services.job_list_filters import job_verdict
     from services.job_status import job_stall_seconds, job_timestamp_iso
+    from services.secret_config import mask_secrets_in_text
 
     stall = job_stall_seconds(doc)
     return {
@@ -57,8 +58,9 @@ def summarize_listed_job(doc: dict[str, Any]) -> dict[str, Any]:
         "status": doc.get("status"),
         "records": doc.get("records_processed") or doc.get("rows_processed") or 0,
         "rejected_rows": int(rejected or 0),
-        "error": error[:240] or None,
-        "message": message[:240] or None,
+        # Driver errors can embed a connection URI; mask it like any tool error.
+        "error": mask_secrets_in_text(error)[:240] or None,
+        "message": mask_secrets_in_text(message)[:240] or None,
         "stalled": stall > 0,
         "stall_seconds": int(stall),
         "created_at": job_timestamp_iso(doc.get("created_at")),

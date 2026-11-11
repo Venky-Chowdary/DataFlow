@@ -35,6 +35,7 @@ from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
 from .parity_tools import PARITY_TOOL_DEFINITIONS
 from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
+from .tool_errors import safe_tool_error, unhandled_tool_error
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
 from .unsupported_question import (
@@ -75,6 +76,10 @@ def _tool_executed(
     if result.success:
         outcome, level = "succeeded", None
     else:
+        # The one place every failed dispatch passes: nothing a caller is shown
+        # (chat answer, tools_used summary, MCP result) carries a credential.
+        if isinstance(result.error, str):
+            result.error = safe_tool_error(result.error)
         outcome = "failed"
         # An unhandled exception is a defect (ERROR); a refused or rejected call
         # is an expected outcome the operator can act on (WARNING).
@@ -2019,7 +2024,7 @@ class DataPilotTools:
             )
         except Exception as e:
             return _tool_executed(
-                ToolResult(name=name, success=False, output=None, error=str(e)),
+                ToolResult(name=name, success=False, output=None, error=unhandled_tool_error(name, e)),
                 started,
                 reason="exception",
                 error=e,
@@ -2769,7 +2774,7 @@ class DataPilotTools:
                 "progress_pct": job.get("progress_pct"),
                 "reconcile_pct": job.get("reconcile_pct"),
                 "message": job.get("message"),
-                "error": operator_failure_text(job.get("error"), failure_reason),
+                "error": safe_tool_error(operator_failure_text(job.get("error"), failure_reason)) or None,
                 "created_at": job_timestamp_iso(job.get("created_at")),
                 "started_at": job_timestamp_iso(job.get("started_at")),
                 "updated_at": job_timestamp_iso(job.get("updated_at")),
