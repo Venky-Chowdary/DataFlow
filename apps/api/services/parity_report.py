@@ -880,9 +880,20 @@ def build_parity_report(
     return report
 
 
-def compact_summary(report: dict[str, Any]) -> dict[str, Any]:
-    """What the dashboard needs from a report, stored on the job (no row values)."""
+def summary_stamp(job: dict[str, Any]) -> dict[str, str]:
+    """The job state a stored summary was computed for: a different one makes it stale."""
+    return {"job_status": str(job.get("status") or "").strip().lower(),
+            "job_updated_at": str(job.get("updated_at") or "")}
+
+
+def compact_summary(report: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:
+    """What the dashboard needs from a report, stored on the job (no row values).
+
+    With ``job`` the summary carries :func:`summary_stamp`, so a reader can tell
+    a summary computed before the job finished (or changed) from a current one.
+    """
     return {
+        **(summary_stamp(job) if job is not None else {}),
         "verdict": report["verdict"],
         "method": report["confidence"]["method"],
         "rows_checked": report["confidence"].get("rows_checked"),

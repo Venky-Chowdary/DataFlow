@@ -37,10 +37,13 @@ def remember_report(job_id: str, job: dict[str, Any], report: dict[str, Any]) ->
     A read persists nothing else: keys a re-read proved equal are recomputed
     by the next re-read, and only a fix's re-check round records them.
     """
+    from services.parity_evidence import job_is_terminal
     from services.parity_report import compact_summary
 
+    if not job_is_terminal(job):
+        return  # a running job's report is "unverifiable" now and stale the moment it finishes
     state = state_of(job)
-    summary = compact_summary(report)
+    summary = compact_summary(report, job)
     if {k: v for k, v in (state.get("summary") or {}).items() if k != "at"} == {
         k: v for k, v in summary.items() if k != "at"
     }:
@@ -82,7 +85,13 @@ def _cell(table: dict[str, Any]) -> str:
 
 
 def _job_summary(job: dict[str, Any], job_id: str) -> dict[str, Any]:
+    from services.parity_report import summary_stamp
+
     stored = state_of(job).get("summary")
+    # A summary computed for another job state (stored while the job ran, before a later
+    # update, or without its stamp) is recomputed: completion does not bump the version.
+    if isinstance(stored, dict) and any(stored.get(k) != v for k, v in summary_stamp(job).items()):
+        stored = None
     # A summary stored before it carried the check method (tables' check, the run's
     # method) cannot tell a sample from a full compare: recompute it from the evidence.
     if isinstance(stored, dict) and stored.get("verdict") and "method" in stored and all(

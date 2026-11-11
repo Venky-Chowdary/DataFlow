@@ -79,7 +79,9 @@ def test_a_sampled_run_is_not_counted_fully_proven(monkeypatch):
             return [{"_id": "job-1"}]
 
         def get_job(self, job_id):
-            return {"_id": "job-1", "status": "completed", "parity": {"summary": compact_summary(report)}}
+            # A summary stamped for this job state (re-review 3, M4: an unstamped one is recomputed).
+            return {"_id": "job-1", "status": "completed",
+                    "parity": {"summary": compact_summary(report, {"status": "completed"})}}
 
     monkeypatch.setattr(parity_summary, "job_store", lambda: Store())
     summary = parity_summary.build_summary(None, limit=5)

@@ -93,7 +93,7 @@ def test_differences_in_the_sample_are_counted_not_bounded():
 def test_the_dashboard_run_carries_its_method_and_no_figure(monkeypatch):
     from services import parity_summary
 
-    summary = compact_summary(build_parity_report(_job(10_000), reread=False))
+    summary = compact_summary(build_parity_report(_job(10_000), reread=False), {"status": "completed"})
     assert summary["method"] == "sampled" and summary["proven_equal_pct"] is None
     assert summary["rows_checked"] == 50 and summary["rows_total"] == 10_000
 

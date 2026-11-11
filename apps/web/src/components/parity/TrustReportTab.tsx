@@ -645,7 +645,8 @@ export interface TrustReportTabProps {
   onOpenDetail?: () => void;
 }
 
-const IN_FLIGHT = new Set(["running", "pending", "queued"]);
+// Statuses of a run that has not finished (job_status UNFINISHED_JOB_STATUSES): no report yet.
+const IN_FLIGHT = new Set(["running", "pending", "queued", "retrying"]);
 
 export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: TrustReportTabProps) {
   const { toast } = useToast();

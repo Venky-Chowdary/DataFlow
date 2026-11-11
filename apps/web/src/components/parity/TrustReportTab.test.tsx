@@ -47,6 +47,9 @@ describe("Trust Report states (static)", () => {
   it("waits for a run that is still in flight instead of asking for a report", () => {
     const html = renderToStaticMarkup(<TrustReportTab jobId="job-31" jobStatus="running" />);
     assert.match(text(html), /The trust report appears when this run finishes/);
+    // A retrying run has not finished either (re-review 3, M4): no report is read for it.
+    const retrying = renderToStaticMarkup(<TrustReportTab jobId="job-31" jobStatus="retrying" />);
+    assert.match(text(retrying), /The trust report appears when this run finishes/);
   });
 
   it("proven: one verdict, no differences, sign-off open", () => {
