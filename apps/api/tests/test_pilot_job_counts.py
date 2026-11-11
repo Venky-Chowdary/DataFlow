@@ -101,6 +101,6 @@ def test_memory_store_counts_by_status_over_every_job():
             "workspace_id": "w1" if i < 4 else "w2",
         }
 
-    assert store.count_jobs() == {"total": 7, "by_status": {"failed": 3, "completed": 4}}
+    assert store.count_jobs() == {"total": 7, "by_status": {"failed": 3, "completed": 4}, "attention": 3}
     scoped = store.count_jobs(workspace_id="w1")
     assert scoped["total"] == 4

@@ -65,6 +65,66 @@ _LIST_KEEP_KEYS = frozenset({
 })
 
 
+# Scalars the Jobs grid needs to classify a run's Gate-8 verdict with the same
+# rules as the detail card (``classifyGate8Status``). Never the mismatch rows,
+# sample rows or per-stream ledgers — those stay on GET /jobs/{id}.
+_VERIFICATION_KEYS = frozenset({
+    "passed",
+    "message",
+    "phase",
+    "coverage",
+    "checksum_scope",
+    "assurance_level",
+    "checksum_match",
+    "preview",
+    "post_write_pending",
+    "unproven",
+    "skipped_readback",
+    "migration_proven",
+    "verification_mode",
+    "source_rows",
+    "target_rows",
+    "job_dest_count",
+    "source_checksum",
+    "source_checksum_provenance",
+    "target_checksum",
+})
+_VERIFICATION_SAMPLE_KEYS = ("passed", "compared", "alignment", "identity_warning")
+_VERIFICATION_MESSAGE_MAX = 1000
+
+
+def verification_summary_for_list(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A bounded copy of the stored Gate-8 report, for the Jobs grid's Verification column.
+
+    Read from the document the list query already returned: no extra lookup.
+    ``None`` when the run recorded no verdict, so the grid can say so instead
+    of guessing one.
+    """
+    recon = job.get("reconciliation") if job else None
+    if not isinstance(recon, dict) or not recon:
+        return None
+    out: dict[str, Any] = {
+        key: value
+        for key, value in recon.items()
+        if key in _VERIFICATION_KEYS and (value is None or isinstance(value, (bool, int, float, str)))
+    }
+    if isinstance(out.get("message"), str):
+        out["message"] = out["message"][:_VERIFICATION_MESSAGE_MAX]
+    identity = recon.get("identity")
+    if isinstance(identity, dict) and isinstance(identity.get("proven"), bool):
+        out["identity"] = {"proven": identity["proven"]}
+    sample = recon.get("sample_compare")
+    if isinstance(sample, dict):
+        kept = {
+            key: sample[key]
+            for key in _VERIFICATION_SAMPLE_KEYS
+            if isinstance(sample.get(key), (bool, int, float, str))
+        }
+        if kept:
+            out["sample_compare"] = kept
+    return out or None
+
+
 def schedule_id_from_job(job: dict[str, Any] | None) -> str:
     """Schedule id for list rows. The list drops ``transfer_request``.
 
@@ -176,6 +236,14 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
     stream_names = _stream_names_for_list(job)
     if len(stream_names) >= 2:
         out["stream_names"] = stream_names
+    verification = verification_summary_for_list(job)
+    if verification:
+        out["verification_summary"] = verification
+    # The detail card relabels a last-table digest on a multi-table run; the
+    # grid needs the same flag to apply the same rule.
+    summary = job.get("destination_summary")
+    if isinstance(summary, dict) and summary.get("multi_stream") is True:
+        out["multi_stream"] = True
     # Preserve reject count if only nested under destination_summary.
     if "rejected_rows" not in out and isinstance(job.get("destination_summary"), dict):
         ds = job["destination_summary"]

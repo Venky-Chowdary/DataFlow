@@ -22,6 +22,10 @@ SEARCH_FIELDS = (
     "job_id",
 )
 SEARCH_MAX = 120
+# "Needs attention" on the Jobs page: a failed run, or a run whose Gate-8
+# verification recorded ``passed: false`` (its differences were not explained).
+ATTENTION_STATUS = "attention"
+VERIFICATION_FILTERS = ("failed", "passed", "none")
 
 
 def status_values(status: str | None) -> tuple[str, ...] | None:
@@ -32,6 +36,33 @@ def status_values(status: str | None) -> tuple[str, ...] | None:
         return tuple(sorted(COMPLETED_STATUSES | {"success", "succeeded"}))
     if value == "failed":
         return ("failed",)
+    return None
+
+
+def _verification_passed(job: dict[str, Any]) -> Any:
+    recon = job.get("reconciliation")
+    return recon.get("passed") if isinstance(recon, dict) else None
+
+
+def job_needs_attention(job: dict[str, Any]) -> bool:
+    """Failed, or its Gate-8 verification failed — the Jobs page "Needs attention" pivot."""
+    status = str(job.get("status") or "").strip().lower()
+    return status == "failed" or _verification_passed(job) is False
+
+
+def _exact(value: str | None) -> str:
+    return str(value or "").strip()[:SEARCH_MAX]
+
+
+def _verification_clause(value: str | None) -> dict[str, Any] | None:
+    verdict = _exact(value).lower()
+    if verdict == "failed":
+        return {"reconciliation.passed": False}
+    if verdict == "passed":
+        return {"reconciliation.passed": True}
+    if verdict == "none":
+        # Missing or null: no Gate-8 verdict was recorded for the run.
+        return {"reconciliation.passed": None}
     return None
 
 
@@ -48,6 +79,10 @@ def mongo_job_list_query(
     search: str = "",
     date_from: date | None = None,
     date_to: date | None = None,
+    source_type: str | None = None,
+    destination_type: str | None = None,
+    sync_mode: str | None = None,
+    verification: str | None = None,
 ) -> dict[str, Any]:
     clauses: list[dict[str, Any]] = []
     if base:
@@ -56,6 +91,19 @@ def mongo_job_list_query(
     statuses = status_values(status)
     if statuses:
         clauses.append({"status": {"$in": list(statuses)}})
+    elif str(status or "").strip().lower() == ATTENTION_STATUS:
+        clauses.append({"$or": [{"status": "failed"}, {"reconciliation.passed": False}]})
+
+    for field, value in (
+        ("source_type", source_type),
+        ("destination_type", destination_type),
+        ("sync_mode", sync_mode),
+    ):
+        if _exact(value):
+            clauses.append({field: _exact(value)})
+    verdict = _verification_clause(verification)
+    if verdict:
+        clauses.append(verdict)
 
     needle = str(search or "").strip()[:SEARCH_MAX]
     if needle:
@@ -117,11 +165,30 @@ def memory_job_matches(
     search: str = "",
     date_from: date | None = None,
     date_to: date | None = None,
+    source_type: str | None = None,
+    destination_type: str | None = None,
+    sync_mode: str | None = None,
+    verification: str | None = None,
 ) -> bool:
     statuses = status_values(status)
     job_status = str(job.get("status") or "unknown").strip().lower()
     if statuses and job_status not in statuses:
         return False
+    if str(status or "").strip().lower() == ATTENTION_STATUS and not job_needs_attention(job):
+        return False
+    for field, value in (
+        ("source_type", source_type),
+        ("destination_type", destination_type),
+        ("sync_mode", sync_mode),
+    ):
+        if _exact(value) and str(job.get(field) or "").strip() != _exact(value):
+            return False
+    verdict = _exact(verification).lower()
+    if verdict in VERIFICATION_FILTERS:
+        passed = _verification_passed(job)
+        expected = {"failed": False, "passed": True, "none": None}[verdict]
+        if passed is not expected:
+            return False
 
     needle = str(search or "").strip()[:SEARCH_MAX].casefold()
     if needle:

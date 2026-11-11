@@ -1327,6 +1327,10 @@ class MongoDBService:
         search: str = "",
         date_from: date | None = None,
         date_to: date | None = None,
+        source_type: str = "",
+        destination_type: str = "",
+        sync_mode: str = "",
+        verification: str = "",
     ) -> dict[str, Any]:
         """Job total and per-status breakdown over the whole history, not a page of it."""
         from services.job_list_filters import mongo_job_list_query
@@ -1339,14 +1343,24 @@ class MongoDBService:
             search=search,
             date_from=date_from,
             date_to=date_to,
+            source_type=source_type,
+            destination_type=destination_type,
+            sync_mode=sync_mode,
+            verification=verification,
         )
         by_status: dict[str, int] = {}
+        attention = 0
+        # One pass: the per-status counts and the "Needs attention" count (failed,
+        # or a Gate-8 verification that recorded ``passed: false``).
+        recon_failed = {"$cond": [{"$eq": ["$reconciliation.passed", False]}, 1, 0]}
         for row in collection.aggregate(
             ([{"$match": query}] if query else [])
-            + [{"$group": {"_id": "$status", "n": {"$sum": 1}}}]
+            + [{"$group": {"_id": "$status", "n": {"$sum": 1}, "recon_failed": {"$sum": recon_failed}}}]
         ):
-            by_status[str(row.get("_id") or "unknown")] = int(row.get("n") or 0)
-        return {"total": sum(by_status.values()), "by_status": by_status}
+            key = str(row.get("_id") or "unknown")
+            by_status[key] = int(row.get("n") or 0)
+            attention += by_status[key] if key == "failed" else int(row.get("recon_failed") or 0)
+        return {"total": sum(by_status.values()), "by_status": by_status, "attention": attention}
 
     def count_job_matches(
         self,
@@ -1357,6 +1371,10 @@ class MongoDBService:
         search: str = "",
         date_from: date | None = None,
         date_to: date | None = None,
+        source_type: str = "",
+        destination_type: str = "",
+        sync_mode: str = "",
+        verification: str = "",
     ) -> int:
         from services.job_list_filters import mongo_job_list_query
 
@@ -1366,6 +1384,10 @@ class MongoDBService:
             search=search,
             date_from=date_from,
             date_to=date_to,
+            source_type=source_type,
+            destination_type=destination_type,
+            sync_mode=sync_mode,
+            verification=verification,
         )
         return int(self.get_database()["transfer_jobs"].count_documents(query))
 
@@ -1380,6 +1402,10 @@ class MongoDBService:
         search: str = "",
         date_from: date | None = None,
         date_to: date | None = None,
+        source_type: str = "",
+        destination_type: str = "",
+        sync_mode: str = "",
+        verification: str = "",
     ) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
         from services.connector_request_limits import bounded_job_list_limit
@@ -1402,6 +1428,10 @@ class MongoDBService:
             search=search,
             date_from=date_from,
             date_to=date_to,
+            source_type=source_type,
+            destination_type=destination_type,
+            sync_mode=sync_mode,
+            verification=verification,
         )
         jobs = []
         # Projection drops the heaviest arrays at the Mongo layer when possible.
@@ -2022,20 +2052,28 @@ class MemoryMongoDBService:
         search: str = "",
         date_from: date | None = None,
         date_to: date | None = None,
+        source_type: str = "",
+        destination_type: str = "",
+        sync_mode: str = "",
+        verification: str = "",
     ) -> dict[str, Any]:
         """Job total and per-status breakdown over the whole history, not a page of it."""
-        from services.job_list_filters import memory_job_matches
+        from services.job_list_filters import job_needs_attention, memory_job_matches
 
         scope = job_workspace_filter(workspace_id, workspace_filter)
         by_status: dict[str, int] = {}
+        attention = 0
         for job in self._jobs.values():
             if not scope.matches(job.get("workspace_id")) or not memory_job_matches(
-                job, status=status, search=search, date_from=date_from, date_to=date_to
+                job, status=status, search=search, date_from=date_from, date_to=date_to,
+                    source_type=source_type, destination_type=destination_type,
+                    sync_mode=sync_mode, verification=verification,
             ):
                 continue
             key = str(job.get("status") or "unknown")
             by_status[key] = by_status.get(key, 0) + 1
-        return {"total": sum(by_status.values()), "by_status": by_status}
+            attention += int(job_needs_attention(job))
+        return {"total": sum(by_status.values()), "by_status": by_status, "attention": attention}
 
     def count_job_matches(
         self,
@@ -2046,6 +2084,10 @@ class MemoryMongoDBService:
         search: str = "",
         date_from: date | None = None,
         date_to: date | None = None,
+        source_type: str = "",
+        destination_type: str = "",
+        sync_mode: str = "",
+        verification: str = "",
     ) -> int:
         from services.job_list_filters import memory_job_matches
 
@@ -2054,7 +2096,9 @@ class MemoryMongoDBService:
             1 for job in self._jobs.values()
             if scope.matches(job.get("workspace_id"))
             and memory_job_matches(
-                job, status=status, search=search, date_from=date_from, date_to=date_to
+                job, status=status, search=search, date_from=date_from, date_to=date_to,
+                    source_type=source_type, destination_type=destination_type,
+                    sync_mode=sync_mode, verification=verification,
             )
         )
 
@@ -2069,6 +2113,10 @@ class MemoryMongoDBService:
         search: str = "",
         date_from: date | None = None,
         date_to: date | None = None,
+        source_type: str = "",
+        destination_type: str = "",
+        sync_mode: str = "",
+        verification: str = "",
     ) -> list[dict]:
         from services.connector_request_limits import bounded_job_list_limit
         from services.job_list_view import slim_job_for_list
@@ -2087,7 +2135,9 @@ class MemoryMongoDBService:
                 j for j in self._jobs.values()
                 if scope.matches(j.get("workspace_id"))
                 and memory_job_matches(
-                    j, status=status, search=search, date_from=date_from, date_to=date_to
+                    j, status=status, search=search, date_from=date_from, date_to=date_to,
+                    source_type=source_type, destination_type=destination_type,
+                    sync_mode=sync_mode, verification=verification,
                 )
             ),
             key=lambda j: (_created_sort_stamp(j.get("created_at")), str(j.get("_id") or "")),

@@ -648,10 +648,14 @@ async def list_transfer_jobs(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=1_000_000),
-    status: Literal["all", "running", "completed", "failed"] = Query(default="all"),
+    status: Literal["all", "running", "completed", "failed", "attention"] = Query(default="all"),
     search: str = Query(default="", max_length=120),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
+    source_type: str = Query(default="", max_length=120),
+    destination_type: str = Query(default="", max_length=120),
+    sync_mode: str = Query(default="", max_length=120),
+    verification: Literal["", "failed", "passed", "none"] = Query(default=""),
 ):
     """List recent transfer jobs scoped to a workspace, with whole-history counts.
 
@@ -676,6 +680,15 @@ async def list_transfer_jobs(
             "date_from": date_from,
             "date_to": date_to,
         }
+        # Engine / mode / verification facets ride along only when set, so a job
+        # store that predates them keeps answering the plain query.
+        facets = {
+            "source_type": source_type.strip(),
+            "destination_type": destination_type.strip(),
+            "sync_mode": sync_mode.strip(),
+            "verification": verification,
+        }
+        query.update({key: value for key, value in facets.items() if value})
         jobs = await asyncio.to_thread(
             mongo.list_jobs,
             limit=limit,
@@ -684,9 +697,13 @@ async def list_transfer_jobs(
             **query,
         )
         counts = await asyncio.to_thread(mongo.count_jobs, workspace_filter=scope)
+        unfiltered = (
+            status == "all" and not search.strip() and date_from is None and date_to is None
+            and not any(facets.values())
+        )
         filtered_total = (
             counts["total"]
-            if status == "all" and not search.strip() and date_from is None and date_to is None
+            if unfiltered
             else await asyncio.to_thread(mongo.count_job_matches, workspace_filter=scope, **query)
         )
         return {
@@ -697,6 +714,8 @@ async def list_transfer_jobs(
             "limit": limit,
             "offset": offset,
             "status_counts": counts.get("by_status") or {},
+            # Failed runs plus runs whose Gate-8 verification failed (whole history).
+            "attention_count": int(counts.get("attention") or 0),
             "degraded": False,
         }
     except (PyMongoError, ConnectionError) as e:
@@ -708,6 +727,7 @@ async def list_transfer_jobs(
             "limit": limit,
             "offset": offset,
             "status_counts": {},
+            "attention_count": 0,
             "degraded": True,
             "persistence": "unavailable",
             "detail": str(e),
