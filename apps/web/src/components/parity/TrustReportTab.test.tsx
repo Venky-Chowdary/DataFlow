@@ -270,12 +270,14 @@ describe("Trust Report polish: header actions follow the sign-off state", () => 
 
   it("downloads are labelled by what they download; the signed pack only once signed", () => {
     const blocked = buttons(toolbar(view(failedRunReport(), { onDownloadSigned: noop })));
-    assert.ok(blocked.some((b) => b.text === "Download report (.md)"), blocked.map((b) => b.text).join(" | "));
+    assert.ok(blocked.some((b) => b.text === "Report (.md)"), blocked.map((b) => b.text).join(" | "));
     assert.ok(!blocked.some((b) => /pack/i.test(b.text)), "no pack before signing: the API answers 409");
 
+    assert.match(toolbar(view(failedRunReport())), /title="Download the trust report as Markdown/);
+
     const signed = buttons(toolbar(view(signedReport(), { onDownloadSigned: noop })));
-    assert.ok(signed.some((b) => b.text === "Download report (.md)"));
-    const pack = signed.find((b) => b.text === "Download signed pack (.json)");
+    assert.ok(signed.some((b) => b.text === "Report (.md)"));
+    const pack = signed.find((b) => b.text === "Signed pack (.json)");
     assert.ok(pack, signed.map((b) => b.text).join(" | "));
     assert.match(pack.cls, /df2-btn-primary/);
     const viewSignoff = signed.find((b) => b.text === "View sign-off");
@@ -429,7 +431,7 @@ describe("Trust Report actions (jsdom)", () => {
     assert.equal(post.body, '{"note":"Widen per ticket 88","expected_version":3}');
     // While the request runs, every action is disabled.
     assert.equal(button("Explain again").disabled, true);
-    assert.equal(button("Download report (.md)").disabled, true);
+    assert.equal(button("Report (.md)").disabled, true);
     assert.equal(host!.querySelector(".df2-parity")!.getAttribute("aria-busy"), "true");
 
     const fixed = unexplainedReport({
@@ -514,7 +516,7 @@ describe("Trust Report actions (jsdom)", () => {
     // jsdom has no object URLs; the stubs stay so the delayed revoke still finds one.
     await mount();
     assert.equal(host!.querySelectorAll(".df2-parity-toolbar button").length, 3, "no signed-pack button before signing");
-    await click(button("Download report (.md)"));
+    await click(button("Report (.md)"));
     await React.act(async () => settle());
     assert.ok(calls.some((c) => /\/parity-report\/export\?format=markdown$/.test(c.url)));
     assert.equal(made.length, 1);
@@ -528,7 +530,7 @@ describe("Trust Report actions (jsdom)", () => {
     getReport = () => signedReport({ job_id: "job-31" });
     await mount();
     const packs = [...host!.querySelectorAll<HTMLButtonElement>(".df2-parity-toolbar button")].filter((b) =>
-      /signed pack/.test(b.textContent || ""),
+      /signed pack/i.test(b.textContent || ""),
     );
     assert.equal(packs.length, 1);
     await click(packs[0]);

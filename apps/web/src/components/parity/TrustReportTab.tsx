@@ -381,7 +381,8 @@ export function TrustReportView({
           >
             Refresh
           </Button>
-          {/* The Markdown report is always available; the signed pack exists only once signed (else 409). */}
+          {/* Compact labels keep the toolbar on one row; the sign-off panel spells them out.
+              The Markdown report is always available; the signed pack exists only once signed (else 409). */}
           <Button
             size="sm"
             onClick={onExport}
@@ -389,9 +390,9 @@ export function TrustReportView({
             loading={busy?.kind === "export"}
             loadingLabel="Downloading…"
             leadingIcon={<DtIcon name="download" size={14} />}
-            title="The trust report as Markdown, as it reads now."
+            title="Download the trust report as Markdown, as it reads now."
           >
-            Download report (.md)
+            Report (.md)
           </Button>
           {report.signoff.status === "signed" && onDownloadSigned && (
             <Button
@@ -402,9 +403,9 @@ export function TrustReportView({
               loading={busy?.kind === "pack"}
               loadingLabel="Downloading…"
               leadingIcon={<DtIcon name="download" size={14} />}
-              title="The signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature."
+              title="Download the signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature."
             >
-              Download signed pack (.json)
+              Signed pack (.json)
             </Button>
           )}
           {/* Not an anchor: the app routes on location.hash, so a #fragment would navigate away. */}
