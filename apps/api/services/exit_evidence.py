@@ -267,6 +267,13 @@ def verify_pack(pack: Any) -> dict[str, Any]:
             "anchor": anchor, "parts_reread": False, "note": PARTS_NOTE}
 
 
+def _pii_line(ack: Any) -> str:
+    if not isinstance(ack, dict) or not ack.get("actor"):
+        return "- PII acknowledgement: none (no extract needed one, or the PII gate held it)"
+    reason = str(ack.get("reason") or "").replace("\n", " ")
+    return f"- PII acknowledgement: {ack.get('actor')} at {ack.get('at')}: {reason}"
+
+
 def render_markdown(doc: dict[str, Any]) -> str:
     """A readable Exit Evidence report; it states evidence, never compliance."""
     from services.exit_rehearsal import public
@@ -284,6 +291,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
         f"{seal.get('total_bytes', 0)} byte(s)",
         f"- Sign-off: {sign['status']}" + (f", signature `{sign['signature']}`" if sign.get("signature") else ""),
         f"- Anchor: {((view.get('evidence') or {}).get('anchor') or {}).get('status') or 'not anchored'}",
+        _pii_line(view.get("pii_acknowledgement")),
         "",
         "| Table | Status | Source rows | Extracted rows | Value check | Why |",
         "| --- | --- | ---: | ---: | --- | --- |",

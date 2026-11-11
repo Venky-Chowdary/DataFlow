@@ -486,6 +486,9 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/exit/systems", Permission.JOB_MANAGE),
     ("PATCH", "/api/v1/exit/systems/{system_id}", Permission.JOB_MANAGE),
     ("DELETE", "/api/v1/exit/systems/{system_id}", Permission.JOB_MANAGE),
+    # Acknowledging PII for a system lets its recurring extracts pass the PII gate.
+    ("POST", "/api/v1/exit/systems/{system_id}/pii-acknowledgement", Permission.JOB_MANAGE),
+    ("DELETE", "/api/v1/exit/systems/{system_id}/pii-acknowledgement", Permission.JOB_MANAGE),
     ("POST", "/api/v1/exit/systems/{system_id}/rehearsals", Permission.JOB_RUN),
     ("POST", "/api/v1/exit/rehearsals/{rehearsal_id}/signoff", Permission.JOB_MANAGE),
     ("POST", "/api/v1/exit/evidence/verify", Permission.JOB_READ),

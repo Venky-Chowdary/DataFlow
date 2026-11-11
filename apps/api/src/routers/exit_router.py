@@ -150,6 +150,47 @@ async def delete_exit_system(system_id: str, request: Request):
     return Response(status_code=204)
 
 
+# ------------------------------------------------------------- PII review
+
+
+class PiiAcknowledgementBody(BaseModel):
+    """Why the system's extracts may carry the PII the gate found (the actor is the caller, never the body)."""
+
+    model_config = {"extra": "forbid"}
+
+    reason: str = Field(default="", max_length=500)
+    expected_version: int | None = Field(default=None, ge=0)
+
+
+@router.post("/exit/systems/{system_id}/pii-acknowledgement")
+async def acknowledge_exit_pii(system_id: str, body: PiiAcknowledgementBody, request: Request):
+    """Acknowledge PII for a system: its rehearsal extracts then pass the PII gate as an acknowledged transfer."""
+    from services.exit_inventory import public_system
+    from services.exit_pii import acknowledge
+
+    _visible_system(system_id, request, write=True)
+    try:
+        system = await asyncio.to_thread(acknowledge, system_id, actor=actor_from_request(request),
+                                         reason=body.reason, expected_version=body.expected_version)
+    except ExitError as exc:
+        raise _http(exc) from exc
+    return await asyncio.to_thread(public_system, system)
+
+
+@router.delete("/exit/systems/{system_id}/pii-acknowledgement")
+async def withdraw_exit_pii(system_id: str, request: Request):
+    """Withdraw the acknowledgement: the next rehearsal's extracts are held by the PII gate again."""
+    from services.exit_inventory import public_system
+    from services.exit_pii import withdraw
+
+    _visible_system(system_id, request, write=True)
+    try:
+        system = await asyncio.to_thread(withdraw, system_id, actor=actor_from_request(request))
+    except ExitError as exc:
+        raise _http(exc) from exc
+    return await asyncio.to_thread(public_system, system)
+
+
 # ------------------------------------------------------------------ rehearsals
 
 

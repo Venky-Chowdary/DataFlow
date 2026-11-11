@@ -101,9 +101,20 @@ def extract_request(rehearsal: dict[str, Any], index: int, table: dict[str, Any]
         sync_mode="full_refresh_overwrite", stream_contracts=contracts, validation_mode="strict",
         skip_preflight=False, workspace_id=rehearsal["workspace_id"],
         triggered_by=f"exit rehearsal {rehearsal['id']}", idempotency_key=f"exit-{rehearsal['id']}-{index}",
-        acknowledgment_actor=rehearsal["actor"],
-        acknowledgment_reason=f"Exit rehearsal {rehearsal['id']} of {rehearsal['system_name']}.",
+        # The system's PII acknowledgement (services.exit_pii), never an implicit pass of the PII gate.
+        **_acknowledgement(rehearsal),
     )
+
+
+def _acknowledgement(rehearsal: dict[str, Any]) -> dict[str, Any]:
+    """The extract's acknowledgement fields: the system's PII acknowledgement when it has a current one."""
+    ack = rehearsal.get("pii_acknowledgement") if isinstance(rehearsal.get("pii_acknowledgement"), dict) else None
+    if not ack:
+        return {"acknowledgment_actor": rehearsal["actor"],
+                "acknowledgment_reason": f"Exit rehearsal {rehearsal['id']} of {rehearsal['system_name']}."}
+    return {"compliance_acknowledged": True, "acknowledgment_actor": str(ack.get("actor") or ""),
+            "acknowledgment_reason": (f"{ack.get('reason')} (PII acknowledged {ack.get('at')}; exit rehearsal "
+                                      f"{rehearsal['id']} of {rehearsal['system_name']})")}
 
 
 def _claim_system(system_id: str, rehearsal_id: str) -> None:
@@ -139,6 +150,7 @@ def _release_system(system_id: str, rehearsal_id: str) -> None:
 def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dict[str, Any]:
     """Start a rehearsal of ``system``: one extract job per declared table (contract 4)."""
     from services.exit_inventory import default_roles
+    from services.exit_pii import snapshot as pii_snapshot
     from src.transfer.background import run_transfer_async
     from src.transfer.engine import get_transfer_engine
 
@@ -158,6 +170,7 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
         "source": dict(system.get("source") or {}), "extract_format": system.get("extract_format") or "jsonl",
         "window_seconds": int(system.get("exit_window_hours") or 0) * 3600,
         "definition_sha256": definition_sha256(system),
+        "pii_acknowledgement": pii_snapshot(system),
         "required_roles": list(system.get("required_roles") or default_roles()),
         "tables": tables, "approvals": [], "signed": None, "_verify": None,
     })
@@ -400,6 +413,16 @@ def _failed_reason(job: dict[str, Any], job_id: str) -> str:
     return failed_reason(job, job_id)
 
 
+def _not_extracted(job: dict[str, Any], job_id: str) -> dict[str, str]:
+    """{status, reason} of a table whose extract job did not complete: held by the PII gate, or failed."""
+    from services.exit_pii import NEEDS_PII_REVIEW, held_by_pii_gate, held_reason
+
+    found = held_by_pii_gate(job)
+    if found is not None:
+        return {"status": NEEDS_PII_REVIEW, "reason": held_reason(found, job_id)}
+    return {"status": "failed", "reason": _failed_reason(job, job_id)}
+
+
 def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> dict[str, str]:
     """The source table's declared column types (they steer the digest of both sides)."""
     from services.source_schema_authority import endpoint_source_column_types
@@ -430,7 +453,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
     ds = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     out["extract_seconds"] = ds.get("elapsed_seconds")
     if str(job.get("status") or "").lower() != "completed":
-        return {**out, "status": "failed", "reason": _failed_reason(job, job_id)}
+        return {**out, **_not_extracted(job, job_id)}
     part, local_path = _part(table["name"], ds)
     if part is None:
         return {**out, "status": "failed", "reason": "The extract job recorded no stored part."}
@@ -560,7 +583,7 @@ def _not_verified(table: dict[str, Any], job: dict[str, Any], timed_out_after: f
     if table["status"] == "failed":
         return out
     if str(job.get("status") or "").lower() != "completed":
-        return {**out, "status": "failed", "reason": _failed_reason(job, str(table.get("job_id") or ""))}
+        return {**out, **_not_extracted(job, str(table.get("job_id") or ""))}
     return {**out, "status": "not_proven", "reason": timed_out_reason(timed_out_after)}
 
 
@@ -595,7 +618,8 @@ def verify(doc: dict[str, Any], jobs: dict[str, dict[str, Any]], *,
     methods = {m: 0 for m in ("full_checksum", "key_diff", "population_digest", "sampled", "count_only", "none")}
     for t in tables:
         methods[t["value_parity"]["method"]] = methods.get(t["value_parity"]["method"], 0) + 1
-    count = {s: sum(1 for t in tables if t["status"] == s) for s in ("proven", "not_proven", "incomplete", "failed")}
+    count = {s: sum(1 for t in tables if t["status"] == s)
+             for s in ("proven", "not_proven", "incomplete", "failed", "needs_pii_review")}
     extracted = sum(1 for t in tables if t.get("part"))
     statement = (f"{extracted} of {len(tables)} declared table(s) extracted. {count['proven']} proven complete "
                  f"(rows, key sets, every value and control totals). Value check: "
@@ -605,6 +629,7 @@ def verify(doc: dict[str, Any], jobs: dict[str, dict[str, Any]], *,
         "completeness": {"tables_declared": len(tables), "tables_extracted": extracted,
                          "tables_proven": count["proven"], "tables_not_proven": count["not_proven"],
                          "tables_incomplete": count["incomplete"], "tables_failed": count["failed"],
+                         "tables_needs_pii_review": count["needs_pii_review"],
                          "value_methods": methods, "statement": statement},
         "seal": seal,
         "duration": duration_block(extract_seconds, verify_seconds, int(doc.get("window_seconds") or 0),
@@ -631,7 +656,8 @@ def timeline(doc: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         stage("inventory", doc.get("started_at"), doc.get("started_at"), "done"),
         stage("extract", marks.get("extract_started"), marks.get("extract_finished"),
-              "running" if extracting else ("failed" if doc.get("verdict") == "failed" else "done")),
+              "running" if extracting else ("failed" if doc.get("verdict") in {"failed", "needs_pii_review"}
+                                            else "done")),
         stage("verify", marks.get("verify_started"), marks.get("verify_finished"),
               "running" if running and (doc.get("_verify") or {}) else ("pending" if running else "done")),
         stage("seal", marks.get("verify_finished"), marks.get("verify_finished"),
@@ -688,6 +714,7 @@ def public(doc: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("completeness", {
         "tables_declared": n, "tables_extracted": 0, "tables_proven": 0, "tables_not_proven": 0,
         "tables_incomplete": 0, "tables_failed": sum(1 for t in doc.get("tables") or [] if t.get("status") == "failed"),
+        "tables_needs_pii_review": 0,
         "value_methods": {}, "statement": "The rehearsal is still extracting or verifying."})
     out.setdefault("seal", {"algorithm": "sha256-merkle-rfc6962", "merkle_root": None, "parts_count": 0,
                             "total_bytes": 0, "storage": None, "parts": []})

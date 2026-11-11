@@ -21,7 +21,7 @@ from services.exit_store import REHEARSALS, SYSTEMS
 
 CRITICALITY = ("critical", "important", "standard")
 FORMATS = ("jsonl", "csv")
-STATES = ("never_rehearsed", "running", "proven", "not_proven", "incomplete", "failed")
+STATES = ("never_rehearsed", "running", "proven", "not_proven", "incomplete", "failed", "needs_pii_review")
 DEFAULT_EVERY_DAYS = 90
 MAX_TABLES = 2000
 _TABLE_NAME = re.compile(r"^[^\x00-\x1f;'\"`]{1,256}$")
@@ -431,7 +431,10 @@ def readiness(system: dict[str, Any], rehearsals: list[dict[str, Any]] | None = 
 
 
 def public_system(system: dict[str, Any], rehearsals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    from services.exit_pii import view
+
     out = {k: v for k, v in system.items() if not str(k).startswith("_") and k != "schedule_last_fired_at"}
+    out["pii_acknowledgement"] = view(system)
     out["readiness"] = readiness(system, rehearsals)
     return out
 
@@ -446,6 +449,7 @@ def _label(state: str, tables: int, stale: bool = False) -> str:
         "not_proven": "Not proven",
         "incomplete": "Incomplete",
         "failed": "Rehearsal failed",
+        "needs_pii_review": "Needs PII review",
     }.get(state, "Not proven")
 
 

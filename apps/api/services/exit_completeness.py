@@ -509,10 +509,14 @@ def rehearsal_verdict(tables: list[dict[str, Any]]) -> tuple[str, str]:
     n = len(tables)
     if any(s in {"pending", "running"} for s in statuses):
         return "running", "The rehearsal is still extracting or verifying."
-    count = {s: statuses.count(s) for s in ("proven", "not_proven", "incomplete", "failed")}
+    count = {s: statuses.count(s) for s in ("proven", "not_proven", "incomplete", "failed", "needs_pii_review")}
     if count["failed"]:
         names = ", ".join(t["name"] for t in tables if t["status"] == "failed")[:300]
         return "failed", f"{count['failed']} of {n} table(s) could not be extracted: {names}."
+    if count["needs_pii_review"]:
+        names = ", ".join(t["name"] for t in tables if t["status"] == "needs_pii_review")[:300]
+        return "needs_pii_review", (f"The PII gate held {count['needs_pii_review']} of {n} table(s): {names}. "
+                                    "Acknowledge PII for this system, then rehearse it again.")
     if count["incomplete"]:
         names = ", ".join(t["name"] for t in tables if t["status"] == "incomplete")[:300]
         return "incomplete", f"{count['incomplete']} of {n} table(s) differ from the source: {names}."
