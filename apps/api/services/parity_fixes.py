@@ -211,8 +211,14 @@ def _live_types(job: dict[str, Any], ev: TableEvidence, columns: list[str]) -> d
     from src.transfer.adapters_introspect import _introspect_table_schema
     from src.transfer.connector_capabilities import resolve_driver_type
 
+    from services.parity_report import _reread_seconds
+    from src.ai.copilot.tool_deadline import run_with_deadline
+
     out: dict[str, Any] = {"source": {}, "dest": {}}
-    try:
+
+    def read() -> dict[str, Any]:
+        # Its own dict: a read abandoned at the deadline never writes into ``out``.
+        out: dict[str, Any] = {"source": {}, "dest": {}}
         _req, source, destination = _endpoints(job)
         t2s = target_to_source(job)
         types = _live_source_types(source, [t2s.get(c, c) for c in columns])
@@ -223,6 +229,14 @@ def _live_types(job: dict[str, Any], ev: TableEvidence, columns: list[str]) -> d
         out["dest"] = {c: types.get(c) for c in columns if types.get(c)}
         out["dialect"] = db_type
         out["schema"] = schema_from_cfg(db_type, cfg)
+        return out
+
+    def timed_out(message: str) -> None:
+        raise TimeoutError(message)
+
+    try:
+        # The same bound as the keyed re-read: a slow catalog never holds the report.
+        out = run_with_deadline("parity_live_types", read, timed_out, seconds=_reread_seconds())
     except Exception as exc:  # noqa: BLE001 - types are advisory; the fix says what is unknown
         logger.info("parity: live column types unavailable (%s)", type(exc).__name__)
     if not out.get("dialect"):

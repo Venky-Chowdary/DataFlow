@@ -109,3 +109,19 @@ def test_p5_count_only_streams_stay_unverifiable():
     ), reread=False)
     assert report["verdict"] == "unverifiable"
     assert "items" in report["verdict_reason"] and report["signoff"]["status"] == "blocked"
+
+
+def test_p4_slow_live_column_types_are_bounded(monkeypatch):
+    from types import SimpleNamespace
+
+    from services import parity_evidence, parity_fixes, value_readback
+    from services.parity_evidence import TableEvidence
+
+    monkeypatch.setenv("DATAFLOW_PARITY_REREAD_TIMEOUT", "1")
+    endpoint = SimpleNamespace(format="postgresql", table="t", collection="")
+    monkeypatch.setattr(parity_evidence, "_endpoints", lambda _job: (None, endpoint, endpoint))
+    monkeypatch.setattr(value_readback, "_live_source_types", lambda *_a: time.sleep(3) or {})
+    started = time.monotonic()
+    live = parity_fixes._live_types({"transfer_request": {}}, TableEvidence("t", "key_diff", 1, 1), ["amount"])
+    assert time.monotonic() - started < 2.5
+    assert live["source"] == {} and live["dialect"] == ""
