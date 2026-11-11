@@ -87,6 +87,7 @@ export function useJobRunActions({
   const syncable = isJobSuccess(status);
 
   const rerun: JobsToolbarAction = {
+    visible: Boolean(selected) && (retryable || syncable),
     disabled: !selected || busy || !writeGate.allowed || !(retryable || syncable),
     busy: busy && Boolean(selected),
     title: !selected
@@ -106,6 +107,7 @@ export function useJobRunActions({
   };
 
   const cancel: JobsToolbarAction = {
+    visible: Boolean(selected) && live,
     disabled: !selected || !live || !writeGate.allowed || cancelling === selected._id,
     busy: Boolean(selected && cancelling === selected._id),
     title: !selected

@@ -1,6 +1,7 @@
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Ellipsis } from "lucide-react";
 import { ConnectorIcon } from "../../app/brand-icons";
-import { destMetricCompact, destMetricToneClass, formatJobRowMetric } from "../../lib/conservationLedger";
+import { destMetricCompact, formatJobRowMetric } from "../../lib/conservationLedger";
 import {
   formatJobDuration,
   formatJobStarted,
@@ -12,7 +13,9 @@ import {
   jobModeLabel,
   jobRouteLabel,
   jobStartedAt,
+  jobStatusShortLabel,
   jobVerification,
+  jobVerificationDisplay,
   LIVE_JOB_STATUSES,
   nextJobsGridSort,
   verificationBadgeClass,
@@ -24,7 +27,6 @@ import { jobStatusBadgeClass, jobStatusLabel, presentedJobStatus, uniqueListKey 
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
-import { ProgressCell } from "../ui/ProgressCell";
 import { JobsMenu, type JobsMenuItem } from "./JobsMenu";
 
 /** Phone width: the grid becomes stacked rows (same breakpoint as the old list/detail swap). */
@@ -85,28 +87,42 @@ function ariaSort(sort: JobsGridSort, column: JobsGridColumnId): "ascending" | "
   return sort.dir === "asc" ? "ascending" : "descending";
 }
 
+/**
+ * Rows: the plain count, right-aligned. How it was measured (dest COUNT(*),
+ * writer ack, delta) is in the tooltip; a live run adds a thin progress bar.
+ * Counts stay neutral — the verdict lives in the Verification column.
+ */
 function RowsCell({ job, live }: { job: TransferJob; live: boolean }) {
   if (live && job.progress_pct != null && !job.progress_indeterminate) {
     const processed = Number(job.records_processed ?? 0);
     const total = Number(job.total_rows ?? 0);
+    const pct = Math.round(reconcileBarPercent(job.progress_pct, job.reconcile_pct, job.phase));
     const reconciling = String(job.phase || "").toLowerCase() === "reconcile" && job.reconcile_pct != null;
+    const title = reconciling
+      ? `Checksum ${Math.min(99, Number(job.reconcile_pct))}% · ${processed.toLocaleString()} rows written`
+      : total > 0
+        ? `${processed.toLocaleString()} of ${total.toLocaleString()} rows (${pct}%)`
+        : `${processed.toLocaleString()} rows so far`;
     return (
-      <div className="df2-jobs-grid-progress">
-        <span className="df2-jobs-grid-progress-text">
-          {reconciling
-            ? `Checksum ${Math.min(99, Number(job.reconcile_pct))}%`
-            : total > 0
-              ? `${processed.toLocaleString()} / ${total.toLocaleString()}`
-              : `${processed.toLocaleString()} rows`}
+      <span className="df2-jobs-grid-rows is-live" title={title}>
+        <span className="df2-jobs-grid-num">{processed.toLocaleString()}</span>
+        <span
+          className="df2-job-row-bar df2-jobs-grid-bar"
+          role="progressbar"
+          aria-label={title}
+          aria-valuenow={pct}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <i style={{ width: `${pct}%` }} />
         </span>
-        <ProgressCell value={reconcileBarPercent(job.progress_pct, job.reconcile_pct, job.phase)} />
-      </div>
+      </span>
     );
   }
   const metric = formatJobRowMetric(job);
   return (
-    <span className={`df2-job-row-rows ${destMetricToneClass(metric)}`} title={metric.title}>
-      {destMetricCompact(metric)}
+    <span className="df2-jobs-grid-rows" title={`${destMetricCompact(metric)}. ${metric.title}`}>
+      <span className="df2-jobs-grid-num">{metric.value}</span>
     </span>
   );
 }
@@ -239,15 +255,19 @@ export function JobsGrid({
             const live = LIVE_JOB_STATUSES.has(status);
             const name = displayName(job);
             const route = jobRouteLabel(job);
-            const verification = jobVerification(job);
+            const verification = jobVerificationDisplay(jobVerification(job));
             const selected = job._id === selectedId;
             const active = job._id === activeId;
             const started = jobStartedAt(job);
             const startedMs = parseServerTimestampMs(started);
             const cells: Record<JobsGridColumnId, ReactNode> = {
               status: (
-                <span className={`${jobStatusBadgeClass(status)} df2-jobs-grid-status`}>
-                  {jobStatusLabel(status)}
+                <span
+                  className={`${jobStatusBadgeClass(status)} df2-jobs-grid-status`}
+                  title={jobStatusLabel(status)}
+                  aria-label={jobStatusLabel(status)}
+                >
+                  {jobStatusShortLabel(status)}
                 </span>
               ),
               job: (
@@ -274,9 +294,6 @@ export function JobsGrid({
               verification: (
                 <span className="df2-jobs-grid-verify" title={verification.title}>
                   <span className={verificationBadgeClass(verification.tone)}>{verification.label}</span>
-                  {verification.quarantined > 0 && (
-                    <span className="df2-jobs-grid-muted">{verification.quarantined.toLocaleString()} quarantined</span>
-                  )}
                 </span>
               ),
               duration: (
@@ -324,9 +341,9 @@ export function JobsGrid({
                 ))}
                 <td className="df2-jobs-grid-col-actions">
                   <JobsMenu
-                    label={`Actions for ${name}`}
+                    label={`More actions for ${name}`}
                     iconOnly
-                    icon={<DtIcon name="menu" size={16} />}
+                    icon={<Ellipsis size={16} aria-hidden="true" />}
                     triggerClassName="df2-btn df2-btn-ghost df2-btn-sm df2-jobs-grid-row-menu"
                     triggerTabIndex={active ? 0 : -1}
                     items={rowActions.menuItems(job)}

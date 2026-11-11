@@ -11,6 +11,18 @@ export interface JobsMenuItem {
   checked?: boolean;
   /** `radio` for one-of-many (density), `checkbox` for independent toggles. */
   kind?: "checkbox" | "radio";
+  /** Consecutive items with the same section render as one labelled group. */
+  section?: string;
+}
+
+function groupItems(items: JobsMenuItem[]): { section?: string; items: JobsMenuItem[] }[] {
+  const groups: { section?: string; items: JobsMenuItem[] }[] = [];
+  for (const item of items) {
+    const last = groups.at(-1);
+    if (last && last.section === item.section) last.items.push(item);
+    else groups.push({ section: item.section, items: [item] });
+  }
+  return groups;
 }
 
 interface JobsMenuProps {
@@ -25,6 +37,8 @@ interface JobsMenuProps {
   title?: string;
   /** Visible text when it differs from the accessible label (e.g. "Density: Compact"). */
   text?: string;
+  /** After the text, e.g. a chevron on a filter chip. */
+  trailingIcon?: ReactNode;
 }
 
 const MENU_GAP = 4;
@@ -34,7 +48,7 @@ const MENU_GAP = 4;
  * (`df2-canvas-menu`). The popup is fixed-positioned from the trigger so a
  * scrolling grid never clips it. Arrow keys move, Escape returns focus.
  */
-export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, triggerTabIndex, title, text }: JobsMenuProps) {
+export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, triggerTabIndex, title, text, trailingIcon }: JobsMenuProps) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -132,6 +146,7 @@ export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, trigg
       >
         {icon}
         {iconOnly ? null : text ?? label}
+        {trailingIcon}
       </button>
       {open && (
         <div
@@ -144,26 +159,36 @@ export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, trigg
           onKeyDown={onMenuKeyDown}
           onClick={(event) => event.stopPropagation()}
         >
-          {items.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role={item.kind === "radio" ? "menuitemradio" : item.kind === "checkbox" ? "menuitemcheckbox" : "menuitem"}
-              aria-checked={item.kind ? Boolean(item.checked) : undefined}
-              disabled={item.disabled}
-              title={item.title}
-              tabIndex={-1}
-              onClick={() => {
-                item.onSelect();
-                if (item.kind !== "checkbox") close(true);
-              }}
-            >
-              {item.kind ? (
-                <span className="df2-jobs-menu-check" aria-hidden="true">{item.checked ? "✓" : ""}</span>
-              ) : null}
-              {item.label}
-            </button>
-          ))}
+          {groupItems(items).map((group, index) => {
+            const buttons = group.items.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role={item.kind === "radio" ? "menuitemradio" : item.kind === "checkbox" ? "menuitemcheckbox" : "menuitem"}
+                aria-checked={item.kind ? Boolean(item.checked) : undefined}
+                disabled={item.disabled}
+                title={item.title}
+                tabIndex={-1}
+                onClick={() => {
+                  item.onSelect();
+                  if (item.kind !== "checkbox") close(true);
+                }}
+              >
+                {item.kind ? (
+                  <span className="df2-jobs-menu-check" aria-hidden="true">{item.checked ? "✓" : ""}</span>
+                ) : null}
+                {item.label}
+              </button>
+            ));
+            return group.section ? (
+              <div key={group.section} role="group" aria-label={group.section} className="df2-jobs-menu-group">
+                <div className="df2-jobs-menu-heading" aria-hidden="true">{group.section}</div>
+                {buttons}
+              </div>
+            ) : (
+              <div key={`group-${index}`} role="none" className="df2-jobs-menu-group">{buttons}</div>
+            );
+          })}
         </div>
       )}
     </span>

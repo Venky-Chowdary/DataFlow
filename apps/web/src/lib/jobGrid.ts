@@ -137,6 +137,61 @@ export function jobVerification(job: TransferJob): JobVerificationView {
   };
 }
 
+/** Plain grid label over a classifier verdict; the Gate-8 basis stays in the tooltip. */
+export interface JobVerificationDisplay {
+  label: string;
+  tone: JobVerificationTone;
+  title: string;
+}
+
+/** Classifier labels that verified only part of the data (a sample, a batch, one table). */
+const PARTIAL_VERDICTS = new Set([
+  "Batch verified",
+  "Last stream checksum",
+  "Append delta",
+  "Write-pass + dest read-back",
+]);
+
+/**
+ * Words an operator reads in the grid: Verified, Verified (sample), Verified
+ * (partial), Unverified, Failed, Pending, Not run, Quarantined N. Only the
+ * presentation of `jobVerification`; the verdict itself is not re-derived.
+ */
+export function jobVerificationDisplay(view: JobVerificationView): JobVerificationDisplay {
+  const held = view.quarantined > 0
+    ? ` ${view.quarantined.toLocaleString()} rows held out in quarantine.`
+    : "";
+  if (view.label === "Pending" && view.tone === "muted") {
+    return { label: "Pending", tone: "muted", title: view.title };
+  }
+  if (view.label === "Not run" || view.label === "Not captured") {
+    return {
+      label: "Not run",
+      tone: "muted",
+      title: view.label === "Not run" ? view.title : "This run recorded no Gate-8 verdict.",
+    };
+  }
+  if (view.tone === "danger") return { label: "Failed", tone: "danger", title: view.title + held };
+  const verdict: JobVerificationDisplay = view.tone === "ok"
+    ? { label: "Verified", tone: "ok", title: view.title }
+    : view.label === "Sample verified"
+      ? { label: "Verified (sample)", tone: "warn", title: view.title }
+      : PARTIAL_VERDICTS.has(view.label)
+        ? { label: "Verified (partial)", tone: "warn", title: view.title }
+        : { label: "Unverified", tone: "warn", title: view.title };
+  if (view.quarantined > 0) {
+    return { label: `Quarantined ${view.quarantined.toLocaleString()}`, tone: "warn", title: verdict.title + held };
+  }
+  return verdict;
+}
+
+/** Grid status: one short word; the full label goes in its title / aria-label. */
+export function jobStatusShortLabel(status: string): string {
+  if (status === "completed_with_quarantine") return "Quarantined";
+  if (status === "completed_with_warnings") return "Warnings";
+  return jobStatusLabel(status);
+}
+
 /** "Needs attention": a failed run, or a run whose Gate-8 verification failed. */
 export function jobNeedsAttention(job: TransferJob): boolean {
   return presentedJobStatus(job) === "failed" || job.verification_summary?.passed === false;
@@ -354,6 +409,7 @@ export const JOBS_CSV_HEADER = [
   "Rows processed",
   "Rows (dest proof)",
   "Verification",
+  "Verification basis",
   "Quarantined rows",
   "Duration",
   "Started (UTC)",
@@ -371,6 +427,7 @@ export function jobsCsv(jobs: TransferJob[], text: JobsGridRowText): string {
   const rows = jobs.map((job) => {
     const status = presentedJobStatus(job);
     const verification = jobVerification(job);
+    const shown = jobVerificationDisplay(verification);
     return [
       job._id,
       text.name(job),
@@ -382,6 +439,7 @@ export function jobsCsv(jobs: TransferJob[], text: JobsGridRowText): string {
       job.sync_mode ? jobModeLabel(job) : "",
       (job as { records_processed_unknown?: boolean }).records_processed_unknown ? "" : job.records_processed ?? "",
       destMetricCompact(formatJobRowMetric(job)),
+      shown.label,
       verification.label,
       verification.quarantined || "",
       formatJobDuration(job.started_at, job.completed_at) || "",

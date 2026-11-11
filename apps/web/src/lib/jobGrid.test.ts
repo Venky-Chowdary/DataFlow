@@ -10,6 +10,8 @@ import {
   DEFAULT_JOBS_GRID_SORT,
   jobDetailSubtitle,
   jobNeedsAttention,
+  jobStatusShortLabel,
+  jobVerificationDisplay,
   jobsCsv,
   JOBS_CSV_HEADER,
   jobVerification,
@@ -95,6 +97,52 @@ describe("jobVerification", () => {
   });
 });
 
+describe("jobVerificationDisplay (plain labels over the unchanged classifier)", () => {
+  const show = (patch: Partial<TransferJob>) => jobVerificationDisplay(jobVerification(job("v", patch)));
+
+  it("says Verified / Verified (sample) / Failed / Pending / Not run", () => {
+    const verified = show({ verification_summary: independent });
+    assert.equal(verified.label, "Verified");
+    assert.equal(verified.tone, "ok");
+    assert.match(verified.title, /Independent re-read/, "the technical basis stays in the tooltip");
+    const sample = show({ verification_summary: { passed: true, coverage: "sample", sample_compare: { passed: true, compared: 5 } } });
+    assert.equal(sample.label, "Verified (sample)");
+    assert.equal(sample.tone, "warn");
+    assert.equal(show({ verification_summary: { passed: false } }).label, "Failed");
+    assert.equal(show({ status: "running" }).label, "Pending");
+    assert.equal(show({ status: "failed" }).label, "Not run");
+    assert.equal(show({}).label, "Not run", "no recorded verdict is not a verification");
+    assert.match(show({}).title, /no Gate-8 verdict/i);
+  });
+
+  it("never upgrades a partial or unproven verdict to Verified", () => {
+    const writerAck = show({ verification_summary: { passed: true, phase: "writer_ack", message: "Verified by writer" } });
+    assert.equal(writerAck.label, "Unverified");
+    assert.match(writerAck.title, /Writer ack/);
+    const batch = show({ verification_summary: { passed: true, checksum_scope: "written_batch_keys" } });
+    assert.equal(batch.label, "Verified (partial)");
+    assert.equal(batch.tone, "warn");
+  });
+
+  it("shows held-out rows as Quarantined N unless the verification failed", () => {
+    const held = show({ verification_summary: independent, rejected_rows: 37 });
+    assert.equal(held.label, "Quarantined 37");
+    assert.equal(held.tone, "warn");
+    assert.match(held.title, /Independent re-read.*37 rows held out/s);
+    assert.equal(show({ verification_summary: { passed: false }, rejected_rows: 3 }).label, "Failed");
+  });
+});
+
+describe("jobStatusShortLabel", () => {
+  it("keeps grid status to one short word, the full label stays available", () => {
+    assert.equal(jobStatusShortLabel("completed_with_quarantine"), "Quarantined");
+    assert.equal(jobStatusShortLabel("completed_with_warnings"), "Warnings");
+    assert.equal(jobStatusShortLabel("completed"), "Completed");
+    assert.equal(jobStatusShortLabel("failed"), "Failed");
+    assert.equal(jobStatusShortLabel("needs_approval"), "Needs approval");
+  });
+});
+
 describe("jobNeedsAttention", () => {
   it("is a failed run or a failed Gate-8 verification", () => {
     assert.equal(jobNeedsAttention(job("a", { status: "failed" })), true);
@@ -164,7 +212,7 @@ describe("jobsCsv", () => {
     assert.ok(lines[1].startsWith('6731abcd,"orders, ""east""",Failed,postgresql,src,snowflake,'));
     assert.match(csv, /Incremental append/);
     assert.match(csv, /,38s,2026-11-10T10:00:00\.000Z,2026-11-10T10:00:38\.000Z,"line one\nline two"/);
-    assert.match(lines.at(-2) || "", /Independent re-read,3,/);
+    assert.match(lines.at(-2) || "", /,Quarantined 3,Independent re-read,3,/);
     assert.equal(lines.at(-1), "", "the file ends with a line break");
   });
 

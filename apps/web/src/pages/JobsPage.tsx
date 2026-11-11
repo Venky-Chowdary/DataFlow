@@ -1252,9 +1252,10 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
               onFacets={changeFacets}
               sourceTypes={engineOptions.sources}
               destinationTypes={engineOptions.destinations}
-              dateActive={Boolean(createdFrom || createdTo)}
-              dateOpen={dateFilterOpen}
-              onToggleDate={() => setDateFilterOpen((value) => !value)}
+              dateFrom={createdFrom}
+              dateTo={createdTo}
+              onDates={(from, to) => { setPageIndex(0); setCreatedFrom(from); setCreatedTo(to); }}
+              onCustomDates={() => setDateFilterOpen(true)}
             />
 
             {dateFilterOpen && (
@@ -1336,8 +1337,13 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
             <JobDetailPanel
               open={panelOpen}
               onClose={() => setMobileListOpen(true)}
-              title="Job detail"
+              title={selected ? jobDisplayName({ ...selected, name: liveJob?.name || selected.name }, nameOverrides[selected._id]) : "Job"}
               subtitle={selected ? jobDetailSubtitle(selected) : undefined}
+              headerExtra={selected ? (
+                <span className={jobStatusBadgeClass(presentedJobStatus(selected))}>
+                  {jobStatusLabel(presentedJobStatus(selected))}
+                </span>
+              ) : undefined}
             >
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
                 {selectedId && (

@@ -169,27 +169,55 @@ describe("Jobs grid page", () => {
     assert.match(kpis, /5 failed · 2 failed verification/);
   });
 
-  it("sends engine, mode and verification facets to the server and clears them", async () => {
+  function menuItem(label: string) {
+    const item = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menu"] [role^="menuitem"]'))
+      .find((entry) => entry.textContent?.replace("✓", "").trim() === label);
+    assert.ok(item, `menu item ${label}`);
+    return item;
+  }
+
+  it("filters with compact chips: value on the chip, × clears one, Clear filters clears all", async () => {
     await render();
-    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Source engine"]');
-    assert.ok(select);
-    assert.deepEqual(Array.from(select.options).map((o) => o.value), ["", "mysql", "postgresql"]);
-    await act(async () => {
-      select.value = "mysql";
-      select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-    });
-    const verification = host.querySelector<HTMLSelectElement>('select[aria-label="Verification"]')!;
-    await act(async () => {
-      verification.value = "failed";
-      verification.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-    });
+    const chips = () => Array.from(host.querySelectorAll(".df2-jobs-filter-chips .df2-chip")).map((c) => c.textContent?.trim());
+    assert.deepEqual(chips(), ["Date: Any", "Source: Any", "Destination: Any", "Mode: Any", "Verification: Any"]);
+    assert.equal(host.querySelector(".df2-jobs-filter-chips select"), null, "no wide label + select pairs");
+    await click(button("Source: Any"));
+    assert.deepEqual(
+      Array.from(document.querySelectorAll('[role="menu"] [role="menuitemradio"]')).map((i) => i.textContent?.replace("✓", "").trim()),
+      ["Any", "MySQL", "PostgreSQL"],
+    );
+    await click(menuItem("MySQL"));
+    await click(button("Verification: Any"));
+    await click(menuItem("Failed"));
     await settle();
     assert.equal(queries.at(-1)?.sourceType, "mysql");
     assert.equal(queries.at(-1)?.verification, "failed");
-    await click(button("Clear filters"));
+    assert.ok(button("Source: MySQL").classList.contains("active"));
+    assert.equal(host.querySelector('[aria-label="Clear Destination filter"]'), null, "only active chips offer ×");
+    await click(button(/×/, host.querySelector('[aria-label="Clear Source filter"]')!.parentElement!));
     await settle();
     assert.equal(queries.at(-1)?.sourceType, undefined);
+    assert.equal(queries.at(-1)?.verification, "failed");
+    await click(button("Clear filters"));
+    await settle();
     assert.equal(queries.at(-1)?.verification, undefined);
+    assert.equal(host.querySelector(".df2-jobs-filter-chips .df2-chip.active"), null);
+  });
+
+  it("sets a date range from the Date chip, with custom dates behind Custom range", async () => {
+    await render();
+    await click(button("Date: Any"));
+    await click(menuItem("Last 7 days"));
+    await settle();
+    assert.equal(queries.at(-1)?.dateFrom, sevenDayWindowStart());
+    assert.equal(queries.at(-1)?.dateTo, undefined);
+    assert.ok(button("Date: Last 7 days").classList.contains("active"));
+    await click(button("Date: Last 7 days"));
+    await click(menuItem("Custom range…"));
+    assert.equal(host.querySelectorAll('input[type="date"]').length, 2);
+    await click(host.querySelector<HTMLButtonElement>('[aria-label="Clear Date filter"]')!);
+    await settle();
+    assert.equal(queries.at(-1)?.dateFrom, undefined);
   });
 
   it("opens the detail drawer from the keyboard, closes it with Escape and returns focus", async () => {
@@ -203,8 +231,10 @@ describe("Jobs grid page", () => {
     await key(row("grid-beta"), "Enter");
     const open = drawer();
     assert.ok(open);
-    assert.match(open.textContent || "", /Job detail/);
-    assert.match(open.textContent || "", /MySQL → MySQL/);
+    assert.equal(open.querySelector(".df2-drawer-title")?.textContent, "Synthetic beta", "the drawer is titled by the job");
+    assert.equal(open.querySelector(".df2-drawer-title-row .df2-badge")?.textContent, "Failed");
+    assert.equal(open.querySelector(".df2-drawer-subtitle")?.textContent, "MySQL → MySQL");
+    assert.doesNotMatch(open.querySelector(".df2-drawer-header")?.textContent || "", /Job detail/);
     await act(async () => {
       document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
@@ -243,17 +273,17 @@ describe("Jobs grid page", () => {
     localStorage.setItem("df2.session", JSON.stringify({ email: "Operator@Example.com", name: "Op", role: "admin", token: "t", expires_at: Date.now() / 1000 + 3600, signed_in_at: Date.now() }));
     await render();
     assert.ok(headers().includes("Mode"));
-    await click(button("Columns"));
-    const mode = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitemcheckbox"]'))
-      .find((item) => item.textContent?.includes("Mode"));
-    assert.ok(mode);
+    await click(button("View"));
+    const groups = Array.from(document.querySelectorAll('[role="menu"] [role="group"]')).map((g) => g.getAttribute("aria-label"));
+    assert.deepEqual(groups, ["Columns", "Density", "More"]);
+    const mode = menuItem("Mode");
+    assert.equal(mode.getAttribute("role"), "menuitemcheckbox");
     assert.equal(mode.getAttribute("aria-checked"), "true");
     await click(mode);
     assert.equal(headers().includes("Mode"), false);
-    await click(button(/^Density: Compact$/));
-    const comfortable = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'))
-      .find((item) => item.textContent?.includes("Comfortable"));
-    assert.ok(comfortable);
+    assert.ok(document.querySelector('[role="menu"]'), "toggling a column keeps the menu open");
+    const comfortable = menuItem("Comfortable");
+    assert.equal(comfortable.getAttribute("role"), "menuitemradio");
     await click(comfortable);
     assert.ok(host.querySelector(".df2-jobs-grid--comfortable"));
 
@@ -294,15 +324,28 @@ describe("Jobs grid page", () => {
     assert.equal(queries.every((q) => q.offset === 0), true, "a local sort never re-pages the server");
   });
 
-  it("disables Cancel unless the selected run is live, and Re-run for live runs", async () => {
-    await render();
-    assert.equal(button("Cancel", host).disabled, true);
-    assert.match(button("Cancel", host).title, /Only a running or queued job/);
-    assert.equal(button("Re-run", host).disabled, false);
-    assert.match(button("Re-run", host).title, /Sync now/);
-    row("grid-beta").focus();
-    await settle();
-    assert.match(button("Re-run", host).title, /Retry from start/);
+  it("shows Re-run or Cancel only when the selected run can take it", async () => {
+    const live = { ...jobs[0], _id: "grid-live", name: "Synthetic live", status: "running" } as TransferJob;
+    jobs.push(live);
+    try {
+      await render();
+      const toolbarButtons = () => Array.from(host.querySelectorAll<HTMLButtonElement>(".df2-jobs-toolbar button"))
+        .map((b) => b.textContent?.trim());
+      assert.ok(toolbarButtons().includes("Re-run"));
+      assert.equal(toolbarButtons().includes("Cancel"), false, "no permanently disabled Cancel");
+      assert.match(button("Re-run", host).title, /Sync now/);
+      row("grid-beta").focus();
+      await settle();
+      assert.match(button("Re-run", host).title, /Retry from start/);
+      row("grid-live").focus();
+      await settle();
+      assert.ok(toolbarButtons().includes("Cancel"));
+      assert.equal(toolbarButtons().includes("Re-run"), false, "a live run cannot be re-run");
+      for (const label of ["Refresh", "Export CSV", "View"]) assert.ok(toolbarButtons().includes(label), label);
+      for (const label of ["Columns", "Journals"]) assert.equal(toolbarButtons().includes(label), false, label);
+    } finally {
+      jobs.pop();
+    }
   });
 });
 

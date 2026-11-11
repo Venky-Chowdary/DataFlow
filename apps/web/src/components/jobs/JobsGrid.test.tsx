@@ -125,9 +125,37 @@ describe("JobsGrid", () => {
     assert.equal(rowEl("job-live").tabIndex, -1);
     const status = rowEl("job-bad").querySelector(".df2-jobs-grid-status");
     assert.equal(status?.textContent, "Failed", "status is text, not colour alone");
-    assert.match(rowEl("job-ok").textContent || "", /Failed/, "failed verification shows its label");
-    assert.equal(rowEl("job-live").querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"), "40");
-    assert.match(rowEl("job-live").textContent || "", /400 \/ 1,000/);
+    const verify = rowEl("job-ok").querySelector(".df2-jobs-grid-col-verification .df2-badge");
+    assert.equal(verify?.textContent, "Failed", "failed verification shows its plain label");
+    assert.match(rowEl("job-ok").querySelector(".df2-jobs-grid-verify")?.getAttribute("title") || "", /2 rows differ/);
+    const bar = rowEl("job-live").querySelector('[role="progressbar"]');
+    assert.equal(bar?.getAttribute("aria-valuenow"), "40");
+    assert.equal(rowEl("job-live").querySelector(".df2-jobs-grid-col-rows .df2-jobs-grid-num")?.textContent, "400");
+    assert.match(rowEl("job-live").querySelector(".df2-jobs-grid-col-rows [title]")?.getAttribute("title") || "", /400 of 1,000 rows/);
+  });
+
+  it("keeps cells plain: short status, neutral counts, one verification badge", async () => {
+    await render({
+      jobs: [{
+        ...jobs[1],
+        _id: "job-q",
+        status: "completed_with_quarantine",
+        rejected_rows: 37,
+        records_processed: 48210,
+        verification_summary: { passed: false, message: "2 rows differ" },
+        row_accounting: { dest_count: 48173, writer_ack: 48210, balanced: false, conservation_kind: "overwrite", rows_written_source: "gate8_dest_readback" },
+      } as TransferJob],
+      selectedId: "job-q",
+    });
+    const status = rowEl("job-q").querySelector(".df2-jobs-grid-status")!;
+    assert.equal(status.textContent, "Quarantined");
+    assert.equal(status.getAttribute("title"), "Completed with quarantine");
+    assert.equal(status.getAttribute("aria-label"), "Completed with quarantine");
+    const rows = rowEl("job-q").querySelector(".df2-jobs-grid-col-rows")!;
+    assert.equal(rows.querySelector(".df2-jobs-grid-num")?.textContent, "48,173");
+    assert.equal(rows.querySelector(".is-danger, .is-warn"), null, "row counts carry no verdict colour");
+    assert.match(rows.querySelector("[title]")?.getAttribute("title") || "", /at dest/);
+    assert.equal(rowEl("job-q").querySelectorAll(".df2-jobs-grid-col-verification .df2-badge").length, 1);
   });
 
   it("moves the cursor with arrows / Home / End and opens with Enter or Space", async () => {
@@ -179,7 +207,8 @@ describe("JobsGrid", () => {
   it("opens the row menu without opening the row", async () => {
     await render();
     const trigger = rowEl("job-bad").querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
-    assert.equal(trigger.getAttribute("aria-label"), "Actions for events_stream");
+    assert.equal(trigger.getAttribute("aria-label"), "More actions for events_stream");
+    assert.ok(trigger.querySelector("svg.lucide-ellipsis"), "the row action is the horizontal ellipsis");
     await act(async () => trigger.click());
     assert.deepEqual(calls.open, [], "the menu button is not a row click");
     const menu = document.querySelector('[role="menu"]');

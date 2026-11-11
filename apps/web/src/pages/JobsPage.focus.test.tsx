@@ -413,10 +413,14 @@ describe("Jobs server-backed list queries", () => {
     await settle();
     assert.equal(queries.at(-1)?.offset, 50);
 
-    const dateToggle = Array.from(host.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent?.trim() === "Date range");
-    assert.ok(dateToggle);
-    await click(dateToggle);
+    const dateChip = Array.from(host.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "Date: Any");
+    assert.ok(dateChip);
+    await click(dateChip);
+    const custom = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menu"] [role^="menuitem"]'))
+      .find((item) => item.textContent?.includes("Custom range"));
+    assert.ok(custom);
+    await click(custom);
     const dateInputs = Array.from(host.querySelectorAll<HTMLInputElement>('input[type="date"]'));
     assert.equal(dateInputs.length, 2);
     const setInput = async (input: HTMLInputElement, value: string) => {

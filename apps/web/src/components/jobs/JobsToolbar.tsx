@@ -17,6 +17,8 @@ export interface JobsPivotCounts {
 }
 
 export interface JobsToolbarAction {
+  /** Contextual actions render only when the selected run can take them. */
+  visible?: boolean;
   disabled: boolean;
   /** Tooltip — what the action will do, or why it is unavailable. */
   title: string;
@@ -44,7 +46,8 @@ interface JobsToolbarProps {
 /**
  * The Jobs command bar, composed from the shared PageToolbar the way
  * Connectors, Schedules and Contracts compose theirs: search · status tabs ·
- * actions. Re-run and Cancel act on the selected row.
+ * actions. Re-run and Cancel appear for the selected row when it can take
+ * them; layout and journals sit in one View menu.
  */
 export function JobsToolbar({
   search,
@@ -91,28 +94,32 @@ export function JobsToolbar({
               Refresh
             </Button>
           )}
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={rerun.disabled}
-            loading={rerun.busy}
-            title={rerun.title}
-            onClick={rerun.onClick}
-            leadingIcon={<DtIcon name="play" size={14} />}
-          >
-            Re-run
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={cancel.disabled}
-            loading={cancel.busy}
-            title={cancel.title}
-            onClick={cancel.onClick}
-            leadingIcon={<DtIcon name="x" size={14} />}
-          >
-            Cancel
-          </Button>
+          {rerun.visible !== false && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={rerun.disabled}
+              loading={rerun.busy}
+              title={rerun.title}
+              onClick={rerun.onClick}
+              leadingIcon={<DtIcon name="play" size={14} />}
+            >
+              Re-run
+            </Button>
+          )}
+          {cancel.visible !== false && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={cancel.disabled}
+              loading={cancel.busy}
+              title={cancel.title}
+              onClick={cancel.onClick}
+              leadingIcon={<DtIcon name="x" size={14} />}
+            >
+              Cancel
+            </Button>
+          )}
           <Button
             size="sm"
             variant="ghost"
@@ -124,32 +131,29 @@ export function JobsToolbar({
             Export CSV
           </Button>
           <JobsMenu
-            label="Columns"
+            label="View"
             icon={<DtIcon name="table" size={14} />}
-            title="Choose the columns the grid shows"
-            items={JOBS_GRID_COLUMNS.filter((column) => !column.required).map((column) => ({
-              id: column.id,
-              label: column.label,
-              kind: "checkbox" as const,
-              checked: columns.includes(column.id),
-              onSelect: () => onToggleColumn(column.id),
-            }))}
+            title="Columns, row density and journals"
+            items={[
+              ...JOBS_GRID_COLUMNS.filter((column) => !column.required).map((column) => ({
+                id: `column-${column.id}`,
+                section: "Columns",
+                label: column.label,
+                kind: "checkbox" as const,
+                checked: columns.includes(column.id),
+                onSelect: () => onToggleColumn(column.id),
+              })),
+              ...(["compact", "comfortable"] as const).map((value) => ({
+                id: `density-${value}`,
+                section: "Density",
+                label: value === "compact" ? "Compact" : "Comfortable",
+                kind: "radio" as const,
+                checked: density === value,
+                onSelect: () => onDensity(value),
+              })),
+              { id: "journals", section: "More", label: "Journals…", onSelect: onJournals },
+            ]}
           />
-          <JobsMenu
-            label="Row density"
-            text={`Density: ${density === "compact" ? "Compact" : "Comfortable"}`}
-            title="Row density"
-            items={(["compact", "comfortable"] as const).map((value) => ({
-              id: value,
-              label: value === "compact" ? "Compact" : "Comfortable",
-              kind: "radio" as const,
-              checked: density === value,
-              onSelect: () => onDensity(value),
-            }))}
-          />
-          <Button size="sm" variant="ghost" onClick={onJournals} leadingIcon={<DtIcon name="database" size={14} />}>
-            Journals
-          </Button>
         </div>
       }
     />
