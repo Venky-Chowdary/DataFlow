@@ -170,7 +170,7 @@ export function summaryFixture(over: Partial<ParitySummary> = {}): ParitySummary
   }));
   return {
     generated_at: "2026-11-11T15:00:00Z",
-    kpis: { runs: 12, fully_proven_pct: 96.4, runs_with_unexplained: 2, signoffs: 11, most_drifting_table: "payments" },
+    kpis: { runs: 12, fully_proven_pct: 96.4, runs_with_unexplained: 2, runs_failed_verification: 1, signoffs: 11, most_drifting_table: "payments" },
     runs,
     heatmap: {
       tables: ["orders", "payments"],

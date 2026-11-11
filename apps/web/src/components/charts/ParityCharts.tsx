@@ -349,7 +349,15 @@ export function ParityTrendChart({ runs, height = 180 }: { runs: ParitySummaryRu
 
 /* ── Tables × runs heatmap ───────────────────────────────────── */
 
-const HEAT_ORDER: ParityHeatCell[] = ["proven", "sampled", "explained", "unexplained_small", "unexplained_large", "none"];
+const HEAT_ORDER: ParityHeatCell[] = [
+  "proven",
+  "sampled",
+  "explained",
+  "unexplained_small",
+  "unexplained_large",
+  "failed",
+  "none",
+];
 const HEAT_KNOWN = new Set<string>(HEAT_ORDER);
 
 function heatClass(cell: string): string {
@@ -359,7 +367,7 @@ function heatClass(cell: string): string {
 /**
  * Every state carries its own shape, so no two states differ by colour alone:
  * proven a check, sampled a ring, explained a dash, unexplained a dot (larger
- * when large), not checked a slash.
+ * when large), failed verification a cross, not checked a slash.
  */
 function HeatGlyph({ cell, cx, cy }: { cell: string; cx: number; cy: number }) {
   const state = HEAT_KNOWN.has(cell) ? cell : "none";
@@ -374,6 +382,14 @@ function HeatGlyph({ cell, cx, cy }: { cell: string; cx: number; cy: number }) {
     case "unexplained_small":
     case "unexplained_large":
       return <circle className="df2-parity-heat-mark" cx={cx} cy={cy} r={state === "unexplained_large" ? 3.5 : 2} aria-hidden />;
+    case "failed":
+      return (
+        <path
+          className={cls}
+          d={`M${cx - 3} ${cy - 3} L${cx + 3} ${cy + 3} M${cx + 3} ${cy - 3} L${cx - 3} ${cy + 3}`}
+          aria-hidden
+        />
+      );
     default:
       return <line className={cls} x1={cx - 3} y1={cy + 3} x2={cx + 3} y2={cy - 3} aria-hidden />;
   }
@@ -391,14 +407,23 @@ export function heatmapSummary(heatmap: ParitySummary["heatmap"]): string {
     }))
     .filter((t) => t.count > 0)
     .sort((a, b) => b.count - a.count);
+  const failed = heatmap.tables
+    .map((name, i) => ({ name, count: (heatmap.cells[i] ?? []).filter((c) => c === "failed").length }))
+    .filter((t) => t.count > 0)
+    .sort((a, b) => b.count - a.count);
   const head = `${tables} ${tables === 1 ? "table" : "tables"} over ${runs} ${runs === 1 ? "run" : "runs"}.`;
-  if (!drifting.length) return `${head} No table had unexplained differences.`;
-  const parts = drifting
+  const failedPart = failed.length ? ` Failed verification: ${tableCounts(failed)}.` : "";
+  if (!drifting.length) return `${head} No table had unexplained differences.${failedPart}`;
+  return `${head} Unexplained differences: ${tableCounts(drifting)}.${failedPart}`;
+}
+
+/** "payments in 2 runs; orders in 1 run" for the first three tables, then how many more. */
+function tableCounts(items: { name: string; count: number }[]): string {
+  const parts = items
     .slice(0, 3)
     .map((t) => `${t.name} in ${t.count} ${t.count === 1 ? "run" : "runs"}`)
     .join("; ");
-  const more = drifting.length > 3 ? `; ${drifting.length - 3} more` : "";
-  return `${head} Unexplained differences: ${parts}${more}.`;
+  return parts + (items.length > 3 ? `; ${items.length - 3} more` : "");
 }
 
 export interface TableRunHeatmapProps {

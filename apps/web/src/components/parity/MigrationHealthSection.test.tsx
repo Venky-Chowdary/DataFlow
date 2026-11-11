@@ -27,6 +27,7 @@ describe("Migration health section", () => {
     assert.match(t, /Last 30 runs/);
     assert.match(t, /runs fully proven 96\.4%/);
     assert.match(t, /runs with unexplained differences 2/);
+    assert.match(t, /runs that failed verification 1/);
     assert.match(t, /sign-offs 11/);
     assert.match(t, /most-drifting table payments/);
     assert.match(t, /Parity trend/);

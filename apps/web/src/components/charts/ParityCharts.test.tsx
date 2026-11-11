@@ -210,3 +210,24 @@ describe("a sample that bounds nothing (re-review 3, H4)", () => {
     assert.match(trendSummary(runs), /1 of \d+ runs were only sampled and have no figure/);
   });
 });
+
+describe("a run Gate-8 failed (re-review 4, finding 3)", () => {
+  const base = summaryFixture();
+  const cells = [base.heatmap.cells[0].map((c, i) => (i === 4 ? ("failed" as const) : c)), base.heatmap.cells[1]];
+  const heatmap = { ...base.heatmap, cells };
+  const html = renderToStaticMarkup(<TableRunHeatmap heatmap={heatmap} runs={base.runs} />);
+
+  it("draws a failed-verification cell with its own shape and legend, not as not checked", () => {
+    assert.match(html, /<title>orders · orders_daily · run 24: Failed verification<\/title>/);
+    assert.equal((html.match(/df2-parity-heat-glyph is-failed"/g) || []).length, 1 + 1);
+    assert.match(html, /<\/svg>Failed verification<\/li>/);
+    noLiteralColours(html);
+  });
+
+  it("names the failed runs in the summary", () => {
+    assert.equal(
+      heatmapSummary(heatmap),
+      "2 tables over 12 runs. Unexplained differences: payments in 2 runs. Failed verification: orders in 1 run.",
+    );
+  });
+});

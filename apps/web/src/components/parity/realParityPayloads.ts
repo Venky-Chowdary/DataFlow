@@ -654,6 +654,7 @@ export const summary: ParitySummary = {
     "fully_proven_pct": 66.67,
     "most_drifting_table": "pay",
     "runs": 3,
+    "runs_failed_verification": 0,
     "runs_with_unexplained": 1,
     "signoffs": 1
   },

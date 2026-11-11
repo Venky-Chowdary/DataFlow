@@ -930,7 +930,9 @@ def compact_summary(report: dict[str, Any], job: dict[str, Any] | None = None) -
         "unexplained": report["parity"]["unexplained"],
         "rows_source": report["parity"]["rows_source"],
         "tables": [
-            {k: t.get(k) for k in ("name", "status", "check", "unexplained", "rows_source", "proven_equal_pct")}
+            {**{k: t.get(k) for k in ("name", "status", "check", "unexplained", "rows_source", "proven_equal_pct")},
+             # Gate-8 failed on rows its evidence does not name: a failed run, not one left unchecked.
+             "failed_verification": bool(t.get("_unaccounted"))}
             for t in report["tables"]
         ],
         "signed": report["signoff"]["status"] == "signed",

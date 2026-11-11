@@ -84,6 +84,10 @@ export function MigrationHealthView({ state, summary, error, limit, onRetry, onO
                 <dd>{summary.kpis.runs_with_unexplained.toLocaleString("en-US")}</dd>
               </div>
               <div className="df2-parity-kpi">
+                <dt>runs that failed verification</dt>
+                <dd>{summary.kpis.runs_failed_verification.toLocaleString("en-US")}</dd>
+              </div>
+              <div className="df2-parity-kpi">
                 <dt>sign-offs</dt>
                 <dd>{summary.kpis.signoffs.toLocaleString("en-US")}</dd>
               </div>

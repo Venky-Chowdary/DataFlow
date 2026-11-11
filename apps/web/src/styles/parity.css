@@ -699,6 +699,15 @@
   background: color-mix(in srgb, var(--df-danger) 72%, var(--df-surface));
 }
 
+/* Gate-8 failed on rows it did not name: a failed run, never drawn as "not checked". */
+.df2-parity-heat-cell.is-failed,
+.df2-parity-legend-swatch.is-failed {
+  fill: color-mix(in srgb, var(--df-danger) 22%, var(--df-surface));
+  background: color-mix(in srgb, var(--df-danger) 22%, var(--df-surface));
+  stroke: var(--df-danger);
+  stroke-width: 1;
+}
+
 .df2-parity-heat-cell.is-none,
 .df2-parity-legend-swatch.is-none {
   fill: var(--df-surface-muted);
@@ -711,7 +720,7 @@
   fill: var(--df-surface);
 }
 
-/* Shapes per heatmap state (review U3): check, ring, dash, slash. */
+/* Shapes per heatmap state (review U3): check, ring, dash, cross, slash. */
 .df2-parity-heat-glyph {
   fill: none;
   stroke: var(--df-surface);
@@ -727,6 +736,10 @@
 
 .df2-parity-heat-glyph.is-none {
   stroke: var(--df-text-tertiary);
+}
+
+.df2-parity-heat-glyph.is-failed {
+  stroke: var(--df-danger);
 }
 
 .df2-parity-legend svg.df2-parity-legend-swatch {

@@ -69,6 +69,8 @@ def remember_report(job_id: str, job: dict[str, Any], report: dict[str, Any]) ->
 
 def _cell(table: dict[str, Any]) -> str:
     status = table.get("status")
+    if table.get("failed_verification"):
+        return "failed"  # Gate-8 failed on rows it did not name: not "not checked"
     if status in {"match", "explained"} and table.get("check") == "sampled":
         # A sample bounds the rate of unexplained differences; only a full compare is proof.
         return "sampled"
@@ -93,9 +95,10 @@ def _job_summary(job: dict[str, Any], job_id: str) -> dict[str, Any]:
     if isinstance(stored, dict) and any(stored.get(k) != v for k, v in summary_stamp(job).items()):
         stored = None
     # A summary stored before it carried the check method (tables' check, the run's
-    # method) cannot tell a sample from a full compare: recompute it from the evidence.
+    # method) cannot tell a sample from a full compare, nor (without
+    # ``failed_verification``) a failed Gate-8 from an unchecked run: recompute it.
     if isinstance(stored, dict) and stored.get("verdict") and "method" in stored and all(
-        "check" in t for t in stored.get("tables") or []
+        "check" in t and "failed_verification" in t for t in stored.get("tables") or []
     ):
         return stored
     from services.parity_report import build_parity_report, compact_summary
@@ -166,7 +169,9 @@ def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
     drifting = Counter(
         name for name, row in zip(tables, cells) for c in row if c.startswith("unexplained")
     )
-    decided = [r for r in runs if r["verdict"] != "unverifiable"]
+    # A run Gate-8 failed without naming the rows is decided as far as the KPI goes: it is not proven.
+    failed = {job_id for job_id, tables in by_job.items() if any(t.get("failed_verification") for t in tables.values())}
+    decided = [r for r in runs if r["verdict"] != "unverifiable" or r["job_id"] in failed]
     return {
         "generated_at": now_iso(),
         "kpis": {
@@ -176,6 +181,7 @@ def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
                 if decided else None
             ),
             "runs_with_unexplained": sum(1 for r in runs if r["unexplained"] > 0),
+            "runs_failed_verification": len(failed),
             "signoffs": sum(1 for _b, _j, s in rows if s.get("signed")),
             "most_drifting_table": drifting.most_common(1)[0][0] if drifting else None,
         },

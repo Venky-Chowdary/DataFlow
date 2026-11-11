@@ -20,7 +20,15 @@ export type ParityFixAction = "widen_column" | "resync_keys" | "accept" | "rerun
 /** applying: a person approved a write fix and it is being applied now. */
 export type ParityFixStatus = "proposed" | "applying" | "applied" | "failed" | "dismissed";
 export type ParitySignoffStatus = "blocked" | "open" | "signed";
-export type ParityHeatCell = "proven" | "sampled" | "explained" | "unexplained_small" | "unexplained_large" | "none";
+/** `failed`: Gate-8 failed on rows its evidence does not name (a failed run, not an unchecked one). */
+export type ParityHeatCell =
+  | "proven"
+  | "sampled"
+  | "explained"
+  | "unexplained_small"
+  | "unexplained_large"
+  | "failed"
+  | "none";
 
 export interface ParityCounts {
   rows_source: number | null;
@@ -231,6 +239,8 @@ export interface ParitySummary {
     runs: number;
     fully_proven_pct: number | null;
     runs_with_unexplained: number;
+    /** Runs Gate-8 failed without naming the rows that differ: counted as not proven. */
+    runs_failed_verification: number;
     signoffs: number;
     most_drifting_table: string | null;
   };
@@ -622,6 +632,7 @@ export const HEAT_CELL_LABELS: Record<ParityHeatCell, string> = {
   explained: "All explained",
   unexplained_small: "Unexplained, small",
   unexplained_large: "Unexplained, large",
+  failed: "Failed verification",
   none: "Not checked",
 };
 
