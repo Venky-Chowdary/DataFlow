@@ -472,10 +472,25 @@ def _protected_triples(job: dict[str, Any]) -> list[tuple[str, str, str]]:
     return protected_columns(mappings_of(job), _dict(request_of(job).get("shape_recipe")))
 
 
-def _count_observations(job: dict[str, Any], ev: TableEvidence, drift_rows: int) -> list[Observation]:
-    """Rows the counts say are missing or extra beyond the keyed evidence."""
+#: Origins that name a missing or extra row by key inside this run's count gap.
+_COUNTED_ORIGINS = frozenset({"sample_compare", "ladder_l5", "key_census"})
+_KEYED_MODES = frozenset({"upsert", "incremental_deduped", "cdc", "scd2"})
+
+
+def _count_observations(job: dict[str, Any], ev: TableEvidence) -> list[Observation]:
+    """Rows the counts say are missing or extra beyond the keyed evidence.
+
+    Gate-8's ``source_rows`` is the run's reader count and the destination
+    count holds what the run wrote, so a source row the write witness saw
+    updated, deleted or moved out of the window *after* the write changes
+    neither count: no witness category moves this gap (subtracting them hid
+    real losses). Named keys count once (L5 and the census may both name one),
+    and a key already counted as quarantined or witnessed is not subtracted
+    again. Witnessed losses are left out: the source no longer holds them, so
+    they are not in the reader-count gap either.
+    """
     from services.parity_classifier import (
-        OUT_OF_SCOPE_POPULATION, QUARANTINED, TRANSFORM_APPLIED, cause,
+        OUT_OF_SCOPE_POPULATION, QUARANTINED, TRANSFORM_APPLIED, UNEXPLAINED, cause,
     )
 
     recon = _dict(job.get("reconciliation"))
@@ -505,36 +520,43 @@ def _count_observations(job: dict[str, Any], ev: TableEvidence, drift_rows: int)
             cause=cause(TRANSFORM_APPLIED, "Rows the run's duplicate policy skipped, as configured.",
                         explained=True),
         ))
-    keyed_missing = sum(1 for o in ev.observations if o.kind == "missing_in_destination" and o.key)
-    keyed_extra = sum(1 for o in ev.observations if o.kind == "extra_in_destination" and o.key)
+    counted = [o for o in ev.observations if o.key and o.origin in _COUNTED_ORIGINS]
+    already = ev.quarantined_keys | ev.drifted_keys
+    keyed_missing = len({o.key for o in counted if o.kind == "missing_in_destination" and o.key not in already})
+    keyed_extra = len({o.key for o in counted if o.kind == "extra_in_destination" and o.key not in already})
     before = max(_int(recon.get("target_rows_before")) or _int(dest.get("target_rows_before")) or 0, 0)
     mode = sync_mode_of(job)
     landed_expected = src_n - quarantined - filtered - skipped
-    gap: int | None
-    if mode in _OVERWRITE_MODES or before == 0:
-        gap = landed_expected - dst_n
-        outside = 0
-    elif mode in {"upsert", "incremental_deduped", "cdc", "scd2"}:
-        # A keyed write may update rows that were already there: only the keyed
-        # evidence can name a missing row, and whatever else the table holds was
-        # outside this run.
-        gap = None
-        outside = max(0, dst_n - (landed_expected - keyed_missing - drift_rows))
-    else:
-        gap = landed_expected - (dst_n - before)
-        outside = before
-    missing = 0 if gap is None else gap - keyed_missing - drift_rows
-    if missing > 0:
-        out.append(Observation(table=ev.name, kind="missing_in_destination", rows=missing, origin="row_count"))
-    elif missing < 0 and -missing - keyed_extra > 0:
-        out.append(Observation(
-            table=ev.name, kind="extra_in_destination", rows=-missing - keyed_extra, origin="row_count",
-        ))
-    # An append or upsert writes only source rows: a destination-only key it names
-    # was there before (or removed from the source since) — outside this run.
+    # An append or upsert into an occupied table writes only source rows: a
+    # destination-only key it names was there before — outside this run.
     ev.outside_run = mode not in _OVERWRITE_MODES and before > 0
-    if ev.outside_run:
-        outside -= keyed_extra
+    shortfall = False
+    if not ev.outside_run:
+        # Overwrite or a first load: the destination is exactly this run's rows.
+        unnamed = landed_expected - dst_n - keyed_missing + keyed_extra
+        outside = 0
+    elif mode in _KEYED_MODES:
+        # A keyed write may update rows that were already there, so the overlap
+        # is unknown — but every row this run wrote must be there now: holding
+        # fewer than that is a certain shortfall.
+        unnamed = max(0, landed_expected - dst_n - keyed_missing)
+        shortfall = unnamed > 0
+        outside = max(0, dst_n - (landed_expected - keyed_missing)) - keyed_extra
+    else:
+        unnamed = landed_expected - (dst_n - before) - keyed_missing
+        outside = before - keyed_extra
+    if unnamed > 0:
+        out.append(Observation(
+            table=ev.name, kind="missing_in_destination", rows=unnamed, origin="row_count",
+            cause=cause(
+                UNEXPLAINED,
+                f"The destination holds {dst_n:,} row(s), fewer than the {landed_expected:,} this run "
+                "wrote: at least this many never landed.",
+                explained=False,
+            ) if shortfall else None,
+        ))
+    elif unnamed < 0:
+        out.append(Observation(table=ev.name, kind="extra_in_destination", rows=-unnamed, origin="row_count"))
     if outside > 0:
         out.append(Observation(
             table=ev.name, kind="extra_in_destination", rows=outside, origin="row_count",
@@ -611,7 +633,9 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
         )
     ev.drifted_keys, drift_rows, drift_sample = _drift(recon, key_cols)
     ev.observations = _value_observations(recon, name)
-    if drift_rows:
+    # Drifted keys the sample, L5 or the census already name are counted there.
+    drift_rows -= len({o.key for o in ev.observations if o.key in ev.drifted_keys})
+    if drift_rows > 0:
         ev.observations.append(Observation(
             table=name, kind="value", rows=drift_rows, origin="write_witness",
             keys_sample=drift_sample[:MAX_KEYS_SAMPLE],
@@ -622,7 +646,7 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
             ),
         ))
     ev.observations += _failure_observations(recon, name, key_cols, ev.observations)
-    ev.observations += _count_observations(job, ev, drift_rows)
+    ev.observations += _count_observations(job, ev)
     ev.observations += _effect_observations(job, name)
     ev.observations += _duplicate_observations(recon, name)
     if dest.get("partial_batch_removed") or str(dest.get("partial_batch_undo") or "") == "restored":
