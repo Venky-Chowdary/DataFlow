@@ -216,6 +216,8 @@ async def lifespan(app: FastAPI):
 
     # Accept traffic immediately — do not block on HuggingFace / RAG init.
     app.state.ready = False
+    # Loop tasks started below are kept so shutdown can cancel them (M-9).
+    app.state.background_tasks = []
     print("[+] HTTP listener ready (background warm-up starting)")
 
     async def _warm_up():
@@ -244,7 +246,7 @@ async def lifespan(app: FastAPI):
 
             if training_enabled:
                 app.state.training_task = asyncio.create_task(_background_training())
-                asyncio.create_task(run_training_loop())
+                app.state.background_tasks.append(asyncio.create_task(run_training_loop()))
                 print("[+] Training Agent enabled")
             else:
                 print("[*] Training Agent disabled (DATAFLOW_TRAINING=off)")
@@ -286,7 +288,7 @@ async def lifespan(app: FastAPI):
             if schedule_loop_enabled():
                 from .services.schedule_runner import run_schedule_loop
 
-                asyncio.create_task(run_schedule_loop())
+                app.state.background_tasks.append(asyncio.create_task(run_schedule_loop()))
                 print("[+] Pipeline scheduler started")
             else:
                 print("[+] Pipeline scheduler not started in this process (SCHEDULE_LOOP off)")
@@ -377,6 +379,16 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+    # M-9: nothing this app started may outlive it. The schedule and training
+    # loops are cancelled; the four threads are stopped and joined off the
+    # event loop (the claim loop drains in-flight transfers first, bounded by
+    # WORKER_DRAIN_SECONDS, and releases their leases).
+    from services.background_lifecycle import cancel_background_tasks, stop_background_threads
+
+    await cancel_background_tasks(getattr(app.state, "background_tasks", []))
+    app.state.background_tasks = []
+    await asyncio.to_thread(stop_background_threads)
+    app.state.ready = False
     try:
         from services.otel_logging import shutdown_otel_logging
 

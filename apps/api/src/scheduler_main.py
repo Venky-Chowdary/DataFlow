@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import sys
 
 from services.brand_env import getenv_brand
@@ -60,10 +61,22 @@ def main() -> int:
         log.exception("Schedule file import failed; the loop will retry")
 
     log.info("Datawrap scheduler starting (cadence only, no transfer execution)")
+    async def _run_until_signalled() -> None:
+        # SIGTERM (Kubernetes) and SIGINT cancel the beat between ticks, so the
+        # process exits through asyncio's teardown instead of being killed.
+        loop = asyncio.get_running_loop()
+        beat = asyncio.current_task()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, beat.cancel)
+            except (NotImplementedError, RuntimeError, ValueError):  # pragma: no cover - non-POSIX loop
+                log.debug("signal %s handler not installed", sig)
+        await run_schedule_loop()
+
     try:
-        asyncio.run(run_schedule_loop())
-    except KeyboardInterrupt:
-        log.info("Scheduler interrupted — shutting down")
+        asyncio.run(_run_until_signalled())
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        log.info("Scheduler stopping — shutting down")
     return 0
 
 
