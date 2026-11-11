@@ -1557,12 +1557,17 @@ export async function fetchJobs(query: Partial<JobHistoryQuery> = {}): Promise<J
   if (query.search?.trim()) params.set("search", query.search.trim());
   if (query.dateFrom) params.set("date_from", query.dateFrom);
   if (query.dateTo) params.set("date_to", query.dateTo);
+  if (query.sourceType) params.set("source_type", query.sourceType);
+  if (query.destinationType) params.set("destination_type", query.destinationType);
+  if (query.syncMode) params.set("sync_mode", query.syncMode);
+  if (query.verification) params.set("verification", query.verification);
   const suffix = params.size ? `?${params.toString()}` : "";
   const data = await requestJson<{
     jobs?: TransferJob[];
     total?: number;
     filtered_total?: number;
     status_counts?: Record<string, number>;
+    attention_count?: number;
   }>(
     [`${API_BASE}/connectors/jobs${suffix}`],
     "Failed to load jobs",

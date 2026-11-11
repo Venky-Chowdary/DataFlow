@@ -1,0 +1,283 @@
+"""Jobs grid: the list carries what its Verification column and filters need.
+
+The redesigned Jobs page shows a Verification column, a "Needs attention"
+pivot (failed runs plus runs whose Gate-8 verification failed) and engine /
+sync-mode / verification filters. All of it reads the job documents the list
+query already returns — no per-row lookup — and the filters run server-side
+so paging over a long history stays honest.
+"""
+
+from __future__ import annotations
+
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
+import pytest
+from fastapi.testclient import TestClient
+
+from services import mongodb_service as mongodb_service_mod
+from services.job_list_filters import (
+    attention_expr,
+    job_needs_attention,
+    memory_job_matches,
+    mongo_job_list_query,
+    verdict_expr,
+)
+from services.job_list_view import slim_job_for_list, verification_summary_for_list
+from services.mongodb_service import get_mongodb_service
+from services.orphan_jobs import stop_orphan_sweeper
+from src.main import app
+
+
+def test_verification_summary_keeps_verdict_scalars_and_drops_heavy_rows():
+    job = {
+        "_id": "j1",
+        "status": "completed",
+        "reconciliation": {
+            "passed": True,
+            "coverage": "full_checksum",
+            "checksum_scope": "whole_table",
+            "source_checksum": "abc",
+            "target_checksum": "abc",
+            "source_checksum_provenance": "independent_source_reread",
+            "source_rows": 10,
+            "target_rows": 10,
+            "message": "m" * 5000,
+            "identity": {"column": "id", "proven": True, "reason": "pk"},
+            "sample_compare": {"passed": True, "compared": 5, "mismatches": [{"row": 1}] * 50},
+            "mismatches": [{"row": 1}] * 500,
+            "dest_readback": {"dest_count": 10},
+            "streams": [{"name": "a"}],
+        },
+        "destination_summary": {"multi_stream": True, "streams": [{"name": "a"}, {"name": "b"}]},
+    }
+    slim = slim_job_for_list(job)
+    summary = slim["verification_summary"]
+    assert summary["passed"] is True
+    assert summary["coverage"] == "full_checksum"
+    assert summary["source_checksum_provenance"] == "independent_source_reread"
+    assert summary["identity"] == {"proven": True}
+    assert summary["sample_compare"] == {"passed": True, "compared": 5}
+    assert len(summary["message"]) == 5000, "never cut: the classifier reads the whole message"
+    for heavy in ("mismatches", "dest_readback", "streams"):
+        assert heavy not in summary
+    assert slim["multi_stream"] is True
+    # The full report stays on the detail endpoint only; the optimistic detail
+    # hydrate from a list row must never mistake the summary for it.
+    assert "reconciliation" not in slim
+    assert "destination_summary" not in slim
+
+
+def test_no_recorded_verdict_ships_no_summary():
+    assert verification_summary_for_list({"status": "failed"}) is None
+    assert verification_summary_for_list({"reconciliation": {}}) is None
+    assert verification_summary_for_list({"reconciliation": "passed"}) is None
+    assert "verification_summary" not in slim_job_for_list({"_id": "x", "status": "running"})
+    assert "multi_stream" not in slim_job_for_list({"_id": "x", "destination_summary": {"multi_stream": False}})
+
+
+def test_needs_attention_is_failed_or_failed_verification():
+    assert job_needs_attention({"status": "failed"})
+    assert job_needs_attention({"status": "completed", "reconciliation": {"passed": False}})
+    assert not job_needs_attention({"status": "completed", "reconciliation": {"passed": True}})
+    assert not job_needs_attention({"status": "completed"})
+    assert not job_needs_attention({"status": "running", "reconciliation": None})
+
+
+def test_mongo_query_for_attention_and_facets():
+    query = mongo_job_list_query(
+        {"workspace_id": "w"},
+        status="attention",
+        source_type="postgresql",
+        destination_type="snowflake",
+        sync_mode="upsert",
+        verification="failed",
+    )
+    clauses = query["$and"]
+    assert {"$expr": attention_expr()} in clauses
+    assert {"source_type": "postgresql"} in clauses
+    assert {"destination_type": "snowflake"} in clauses
+    assert {"sync_mode": "upsert"} in clauses
+    assert {"$expr": verdict_expr("failed")} in clauses
+    assert mongo_job_list_query(verification="passed") == {"$expr": verdict_expr("passed")}
+    assert mongo_job_list_query(verification="none") == {"$expr": verdict_expr("none")}
+    # Unknown or empty facets never narrow the query.
+    assert mongo_job_list_query(verification="bogus", source_type="  ") == {}
+
+
+def test_memory_matches_apply_the_same_facets():
+    job = {
+        "status": "completed",
+        "source_type": "postgresql",
+        "destination_type": "snowflake",
+        "sync_mode": "upsert",
+        "reconciliation": {"passed": False},
+    }
+    assert memory_job_matches(job, status="attention")
+    assert memory_job_matches(job, source_type="postgresql", destination_type="snowflake", sync_mode="upsert")
+    assert not memory_job_matches(job, source_type="mysql")
+    assert memory_job_matches(job, verification="failed")
+    assert not memory_job_matches(job, verification="passed")
+    assert not memory_job_matches(job, verification="none")
+    assert memory_job_matches({"status": "completed"}, verification="none")
+    assert not memory_job_matches({"status": "completed"}, status="attention")
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_TEAM_STORE", str(tmp_path / "teams.json"))
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
+    monkeypatch.setenv("DATAFLOW_JOB_STORE", "memory")
+    monkeypatch.setattr(mongodb_service_mod, "_mongodb_service", None)
+    # _seed back-dates a job that has no owner. The orphan sweep is right to
+    # fail such a job, so it must not run while these tests seed: neither the
+    # start-up pass (warm-up runs in the background, after seeding may begin)
+    # nor a sweeper thread an earlier test's app left running.
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+    stop_orphan_sweeper()
+    with TestClient(app) as c:
+        yield c
+
+
+def _seed(name: str, status: str, *, day: int, source: str = "postgresql", dest: str = "mysql",
+          mode: str = "full_refresh", passed: bool | None = None) -> str:
+    mongo = get_mongodb_service()
+    job_id = mongo.create_transfer_job({
+        "name": name,
+        "source_name": name,
+        "source_type": source,
+        "destination_type": dest,
+        "destination_database": "warehouse",
+        "destination_collection": name,
+        "sync_mode": mode,
+    })
+    record = mongo._jobs[job_id]
+    record["created_at"] = datetime(2026, 11, day, tzinfo=timezone.utc)
+    if passed is not None:
+        record["reconciliation"] = {"passed": passed, "source_rows": 3, "target_rows": 3 if passed else 2,
+                                    "mismatches": [{"row": 1}]}
+    mongo.update_job_status(job_id, status)
+    return job_id
+
+
+@pytest.mark.parametrize("path", ["/api/v1/connectors/jobs", "/api/v1/jobs"])
+def test_list_counts_attention_and_filters_server_side(client, path):
+    _seed("ok_proven", "completed", day=1, passed=True)
+    _seed("ok_differs", "completed", day=2, source="mysql", dest="snowflake", mode="upsert", passed=False)
+    _seed("broken", "failed", day=3)
+    _seed("broken_after_verify", "failed", day=4, passed=False)
+    _seed("live", "running", day=5)
+
+    body = client.get(path).json()
+    assert body["total"] == 5
+    # Two failed runs plus one completed run whose verification failed — the
+    # failed run that also failed verification is counted once.
+    assert body["attention_count"] == 3
+    rows = {job["name"]: job for job in body["jobs"]}
+    assert rows["ok_differs"]["verification_summary"]["passed"] is False
+    assert "mismatches" not in rows["ok_differs"]["verification_summary"]
+    assert "verification_summary" not in rows["live"]
+
+    attention = client.get(f"{path}?status=attention").json()
+    assert sorted(job["name"] for job in attention["jobs"]) == ["broken", "broken_after_verify", "ok_differs"]
+    assert attention["filtered_total"] == 3
+    assert attention["total"] == 5
+
+    faceted = client.get(f"{path}?source_type=mysql&destination_type=snowflake&sync_mode=upsert").json()
+    assert [job["name"] for job in faceted["jobs"]] == ["ok_differs"]
+    assert faceted["filtered_total"] == 1
+
+    unverified = client.get(f"{path}?verification=none").json()
+    assert sorted(job["name"] for job in unverified["jobs"]) == ["broken", "live"]
+    assert client.get(f"{path}?verification=passed").json()["filtered_total"] == 1
+    assert client.get(f"{path}?verification=bogus").status_code == 422
+
+
+# ── Review follow-ups: one match semantics for list, counts and both stores ──
+
+_EDGE_DOCS = [
+    {"_id": "a", "status": "failed", "workspace_id": "w1", "reconciliation": {"passed": False}},
+    {"_id": "b", "status": "completed", "workspace_id": "w1", "reconciliation": {"passed": False, "mismatches": [1, 2]}},
+    {"_id": "c", "status": "completed", "workspace_id": "w1", "reconciliation": {"passed": True}},
+    {"_id": "d", "status": "completed", "workspace_id": "w1", "reconciliation": None},
+    {"_id": "e", "status": "completed", "workspace_id": "w1"},
+    # Malformed shapes: a list is not a Gate-8 report, and a non-bool verdict is no verdict.
+    {"_id": "f", "status": "completed", "workspace_id": "w1", "reconciliation": [{"passed": False}]},
+    {"_id": "g", "status": "FAILED", "workspace_id": "w1"},
+    {"_id": "h", "status": "failed", "workspace_id": "w2"},
+    {"_id": "i", "status": "completed", "workspace_id": "w1", "reconciliation": {"passed": "no"}},
+]
+_EXPECTED = {
+    "attention": ["a", "b"],
+    "failed": ["a", "b"],
+    "passed": ["c"],
+    "none": ["d", "e", "f", "g", "i"],
+}
+
+
+def _ids(rows):
+    return sorted(row["_id"] for row in rows)
+
+
+def _check_store(store):
+    counts = store.count_jobs(workspace_id="w1")
+    attention = _ids(store.list_jobs(workspace_id="w1", status="attention"))
+    assert attention == _EXPECTED["attention"]
+    assert counts["attention"] == len(attention), "the pivot count is the list it opens"
+    assert store.count_job_matches(workspace_id="w1", status="attention") == len(attention)
+    for verdict in ("failed", "passed", "none"):
+        assert _ids(store.list_jobs(workspace_id="w1", verification=verdict)) == _EXPECTED[verdict], verdict
+    # Status matches exactly, as Mongo does: "FAILED" is not the failed status.
+    assert _ids(store.list_jobs(workspace_id="w1", status="failed")) == ["a"]
+    # A facet is a literal value, never an operator.
+    assert store.list_jobs(workspace_id="w1", source_type='{"$gt": ""}') == []
+
+
+def test_memory_store_attention_and_verification_edge_shapes():
+    from services.mongodb_service import MemoryMongoDBService
+
+    store = MemoryMongoDBService()
+    for doc in _EDGE_DOCS:
+        store._jobs[doc["_id"]] = dict(doc)
+    _check_store(store)
+
+
+def test_live_mongo_matches_the_memory_store():
+    """Mongo and the memory store answer the attention / verification facets alike."""
+    import uuid
+
+    from services.mongodb_service import MongoDBService
+
+    store = MongoDBService()
+    store.db_name = f"jobs_grid_parity_{uuid.uuid4().hex[:8]}"
+    try:
+        db = store.get_database()
+    except ConnectionError:
+        pytest.skip("no local MongoDB")
+    try:
+        db["transfer_jobs"].insert_many([
+            {**doc, "created_at": datetime(2026, 11, index + 1, tzinfo=timezone.utc)}
+            for index, doc in enumerate(_EDGE_DOCS)
+        ])
+        _check_store(store)
+    finally:
+        store.client.drop_database(store.db_name)
+
+
+def test_list_ships_the_classifier_inputs_the_detail_card_uses():
+    long_tail = "x" * 3000 + " Verified by writer; read-back verifier not available."
+    slim = slim_job_for_list({
+        "_id": "m",
+        "status": "completed",
+        "reconciliation": {"passed": True, "message": long_tail},
+        "destination_summary": {"multi_stream": True, "streams": [{"name": "a"}, {"name": "b"}, {"name": "c"}]},
+    })
+    # The classifier reads phrases anywhere in the message: never cut it.
+    assert slim["verification_summary"]["message"] == long_tail
+    assert slim["multi_stream"] is True
+    assert slim["stream_count"] == 3

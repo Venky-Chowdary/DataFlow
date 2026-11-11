@@ -987,7 +987,8 @@ describe("Overview parked-decision attention", () => {
     assert.match(page, /studioSourceLabel/);
     assert.match(page, /sourceLabel=\{sourceLabel\}/);
     assert.doesNotMatch(page, /sourceLabel=\{file\?\.name \|\| sourceConnector\?\.name\}/);
-    const jobs = readFileSync(join(webRoot, "pages/JobsPage.tsx"), "utf8");
+    // The job list is the Jobs operations grid now; its rows keep the unique key.
+    const jobs = readFileSync(join(webRoot, "components/jobs/JobsGrid.tsx"), "utf8");
     assert.match(jobs, /uniqueListKey\(job\._id, index, "job"\)/);
   });
 });
