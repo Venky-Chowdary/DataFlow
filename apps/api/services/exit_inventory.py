@@ -372,13 +372,16 @@ def rehearsal_summary(rehearsal: dict[str, Any] | None, system: dict[str, Any] |
     comp = rehearsal.get("completeness") or {}
     duration = rehearsal.get("duration") or {}
     seal = rehearsal.get("seal") or {}
+    # A running rehearsal has no duration / completeness yet: read its stored definition.
+    window = duration.get("window_seconds")
+    window = int(rehearsal.get("window_seconds") or 0) if window is None else window
     return {
         "id": rehearsal["id"], "n": rehearsal.get("n"), "started_at": rehearsal.get("started_at"),
         "finished_at": rehearsal.get("finished_at"), "verdict": rehearsal.get("verdict"),
-        "measured_seconds": duration.get("measured_seconds"), "window_seconds": duration.get("window_seconds"),
+        "measured_seconds": duration.get("measured_seconds"), "window_seconds": window,
         # Only a proven run is compared with the window (contract 4.2).
         "fits_window": duration.get("fits_window") if rehearsal.get("verdict") == "proven" else None,
-        "tables_declared": comp.get("tables_declared", 0),
+        "tables_declared": comp.get("tables_declared", len(rehearsal.get("tables") or [])),
         "tables_proven": comp.get("tables_proven", 0), "total_bytes": seal.get("total_bytes"),
         # The stored signature (``signoff`` is a computed view, never stored).
         "signed": isinstance(rehearsal.get("signed"), dict) and bool(rehearsal["signed"].get("signature")),
@@ -386,6 +389,15 @@ def rehearsal_summary(rehearsal: dict[str, Any] | None, system: dict[str, Any] |
                     bool(rehearsal.get("definition_sha256")) and rehearsal.get("definition_sha256")
                     == definition_sha256(system)),
     }
+
+
+def rehearsal_history(system: dict[str, Any], *, limit: int = 20) -> dict[str, Any]:
+    """``GET /exit/systems/{id}/rehearsals``: summaries (``current`` against ``system``) and the trend."""
+    from services.exit_rehearsal import trend
+
+    rows = rehearsals_of(system["id"], limit=limit)
+    return {"rehearsals": [rehearsal_summary(r, system) for r in rows],
+            "trend": trend(rows[0]) if rows else {"points": [], "growth_pct_rows": None, "projection": None}}
 
 
 def readiness(system: dict[str, Any], rehearsals: list[dict[str, Any]] | None = None,

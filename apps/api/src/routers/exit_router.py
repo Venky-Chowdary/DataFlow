@@ -179,18 +179,11 @@ async def start_exit_rehearsal(system_id: str, request: Request):
 
 @router.get("/exit/systems/{system_id}/rehearsals")
 async def list_exit_rehearsals(system_id: str, request: Request, limit: int = Query(default=20, ge=1, le=100)):
-    from services.exit_inventory import rehearsal_summary, rehearsals_of
-    from services.exit_rehearsal import trend
+    from services.exit_inventory import rehearsal_history
 
-    _visible_system(system_id, request)
-
-    def build() -> dict[str, Any]:
-        rows = rehearsals_of(system_id, limit=limit)
-        latest = rows[0] if rows else None
-        return {"rehearsals": [rehearsal_summary(r) for r in rows],
-                "trend": trend(latest) if latest else {"points": [], "growth_pct_rows": None, "projection": None}}
-
-    return await asyncio.to_thread(build)
+    system = _visible_system(system_id, request)
+    # The system is passed so each summary says whether it still proves the current definition.
+    return await asyncio.to_thread(rehearsal_history, system, limit=limit)
 
 
 @router.get("/exit/rehearsals/{rehearsal_id}")
