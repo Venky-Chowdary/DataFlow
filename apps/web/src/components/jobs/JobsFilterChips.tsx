@@ -82,7 +82,7 @@ export function JobsFilterChips({
           value={facets.sourceType}
           onChange={(event) => set({ sourceType: event.target.value })}
         >
-          <option value="">Any engine</option>
+          <option value="">Any source</option>
           {sources.map((id) => <option key={id} value={id}>{jobEngineLabel(id)}</option>)}
         </select>
       </label>
@@ -94,7 +94,7 @@ export function JobsFilterChips({
           value={facets.destinationType}
           onChange={(event) => set({ destinationType: event.target.value })}
         >
-          <option value="">Any engine</option>
+          <option value="">Any destination</option>
           {destinations.map((id) => <option key={id} value={id}>{jobEngineLabel(id)}</option>)}
         </select>
       </label>
@@ -118,7 +118,7 @@ export function JobsFilterChips({
           value={facets.verification}
           onChange={(event) => set({ verification: event.target.value as JobsFacets["verification"] })}
         >
-          <option value="">Any result</option>
+          <option value="">Any verification</option>
           {VERIFICATION_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
         </select>
       </label>

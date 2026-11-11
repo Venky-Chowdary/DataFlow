@@ -38,6 +38,7 @@ import {
 import {
   formatJobDuration,
   isDefaultJobsGridSort,
+  jobDetailSubtitle,
   jobDisplayName,
   jobNeedsAttention,
   jobRouteLabel,
@@ -1188,11 +1189,6 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
       title="Jobs"
       kicker="Operations"
       description="Live progress, phases, quarantine, and Gate-8 proof for every transfer."
-      actions={onStartTransfer && !noJobsYet ? (
-        <Button size="sm" variant="primary" onClick={() => openStudio()} leadingIcon={<DtIcon name="plus" size={14} />}>
-          New transfer
-        </Button>
-      ) : undefined}
     >
       <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3 df2-jobs-workspace-grid">
         {noJobsYet ? (
@@ -1327,13 +1323,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
             <JobDetailPanel
               open={panelOpen}
               onClose={() => setMobileListOpen(true)}
-              title={selected ? jobDisplayName(selected, nameOverrides[selected._id]) : "Job detail"}
-              subtitle={selected ? jobRouteLabel(selected) : undefined}
-              headerExtra={selected ? (
-                <span className={jobStatusBadgeClass(presentedJobStatus(selected))}>
-                  {jobStatusLabel(presentedJobStatus(selected))}
-                </span>
-              ) : undefined}
+              title="Job detail"
+              subtitle={selected ? jobDetailSubtitle(selected) : undefined}
             >
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
                 {selectedId && (

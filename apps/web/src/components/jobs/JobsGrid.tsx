@@ -162,9 +162,11 @@ export function JobsGrid({
     if (changed.length) setAnnouncement(changed.slice(0, 3).join(". ") + (changed.length > 3 ? `. ${changed.length - 3} more changed.` : "."));
   }, [jobs, displayName]);
 
+  // Focusing a row selects it (onFocus below), so arrows only move focus.
   const focusRow = (jobId: string) => {
-    onSelect(jobId);
-    document.getElementById(`job-item-${jobId}`)?.focus();
+    const row = document.getElementById(`job-item-${jobId}`);
+    if (row) row.focus();
+    else onSelect(jobId);
   };
 
   const onRowKeyDown = (event: KeyboardEvent<HTMLTableRowElement>, index: number, jobId: string) => {

@@ -317,6 +317,12 @@ export function jobModeLabel(job: Pick<TransferJob, "sync_mode">): string {
   return formatSyncModeLabel(job.sync_mode);
 }
 
+/** Drawer subtitle: the engines and mode, which the detail header below does not repeat. */
+export function jobDetailSubtitle(job: Pick<TransferJob, "source_type" | "destination_type" | "sync_mode">): string {
+  const route = `${jobEngineLabel(job.source_type)} → ${jobEngineLabel(job.destination_type)}`;
+  return job.sync_mode ? `${route} · ${jobModeLabel(job)}` : route;
+}
+
 export function formatJobStarted(iso: string | undefined, now = new Date()): string {
   if (!iso) return "—";
   const ms = parseServerTimestampMs(iso);
