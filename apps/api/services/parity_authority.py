@@ -77,8 +77,18 @@ def signoff_authority() -> dict[str, dict[str, list[str]]]:
         raise AuthorityConfigError(f"DATAFLOW_{ENV} is invalid: {exc}") from exc
 
 
+#: The actor a request without an authenticated user carries (``audit_log.actor_from_request``).
+_ANONYMOUS = frozenset({"", "anonymous"})
+
+
 def signing_refusal(signoff_role: str, *, signer_role: str, signer: str) -> str | None:
     """Why ``signer`` (gate role ``signer_role`` in the job's workspace) may not sign, or None."""
+    if str(signer or "").strip().lower() in _ANONYMOUS:
+        # Authentication off: every caller is the same anonymous operator, so "one person signs one
+        # role" could never be met past the first role. Say so before any role is recorded.
+        return ("Sign-off needs authentication: without it every request comes from the same anonymous "
+                "operator, so the rule that one person signs one role cannot be met. Turn authentication "
+                "on and sign as a named approver.")
     try:
         mapping = signoff_authority()
     except AuthorityConfigError as exc:
