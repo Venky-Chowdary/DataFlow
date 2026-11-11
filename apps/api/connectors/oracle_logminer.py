@@ -4011,6 +4011,19 @@ class OracleLogMinerCdc:
                 if op == "delete":
                     if key:
                         buf.delete(table_name, key, lsn=str(scn))
+                    else:
+                        # Quarantined with a reason, never dropped (the other
+                        # LogMiner path does the same).
+                        shared_rejected.append(
+                            {
+                                "table": table_name,
+                                "reason": (
+                                    "Oracle LogMiner DELETE lacks the configured "
+                                    f"primary key {pk!r}."
+                                ),
+                                "row": row,
+                            }
+                        )
                 elif op == "insert":
                     buf.insert(table_name, row, pk=key or None, lsn=str(scn))
                 else:
