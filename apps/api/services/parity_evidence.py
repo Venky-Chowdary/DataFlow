@@ -628,7 +628,17 @@ def _count_observations(job: dict[str, Any], ev: TableEvidence) -> list[Observat
             ) if shortfall else None,
         ))
     elif unnamed < 0:
-        out.append(Observation(table=ev.name, kind="extra_in_destination", rows=-unnamed, origin="row_count"))
+        out.append(Observation(
+            table=ev.name, kind="extra_in_destination", rows=-unnamed, origin="row_count",
+            # Into an occupied table only ``before`` rows were there already (``outside`` below):
+            # these are beyond them — rows written twice, or by something else (re-review 4, finding 8).
+            cause=cause(
+                UNEXPLAINED,
+                f"The destination holds {-unnamed:,} row(s) more than the {before:,} it held before plus the "
+                f"{landed_expected:,} this run wrote: rows written twice, or by something else.",
+                explained=False,
+            ) if ev.outside_run else None,
+        ))
     if outside > 0:
         out.append(Observation(
             table=ev.name, kind="extra_in_destination", rows=outside, origin="row_count",
