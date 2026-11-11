@@ -202,11 +202,28 @@ def round_trips(value: Any, transform: str) -> bool:
     return error is None and strict_text(out) == text
 
 
+def _null_changes(transform: str) -> bool:
+    """A NULL-aware transform (``default:``) that writes something in place of SQL NULL."""
+    from services.transform_engine import apply_transform
+
+    out, error = apply_transform(None, transform)
+    return error is not None or out is not None
+
+
 def check_values(values: Iterable[Any], transform: str) -> dict[str, Any]:
-    """{status, rows_checked, rows_not_fitting} for one conditional column."""
+    """{status, rows_checked, rows_not_fitting} for one conditional column.
+
+    NULL is fed through the transform too: one that keeps it NULL skips it,
+    one that fills it (``default:X``) counts it as a value that does not fit.
+    """
     checked = failing = 0
+    null_changes: bool | None = None
     for value in values:
         if value is None:
+            null_changes = _null_changes(transform) if null_changes is None else null_changes
+            if null_changes:
+                checked += 1
+                failing += 1
             continue
         checked += 1
         if not round_trips(value, transform):

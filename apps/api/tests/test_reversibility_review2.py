@@ -322,3 +322,34 @@ def test_n3_lossless_type_mappings_stay_invertible(stype, ttype, source, dest):
     from services.reversibility import INVERTIBLE
 
     assert _pair(stype, ttype, source, dest)[0] == INVERTIBLE
+
+
+# ------------------------------------------------- N7: NULL-aware transforms
+
+
+def test_n7_default_on_a_column_whose_sample_holds_nulls_does_not_fit():
+    from services.reversibility import classify_mapping
+
+    mapping = _m("note", transform="default:N/A", stype="TEXT", ttype="TEXT")
+    nulls = classify_mapping(mapping, observed=[None, "a", "b"])
+    assert nulls["check"] == {"status": "does_not_fit", "rows_checked": 3, "rows_not_fitting": 1}
+    assert classify_mapping(mapping, observed=["a", "b"])["check"]["status"] == "fits"
+    # A transform that keeps NULL as NULL still skips it.
+    trim = classify_mapping(_m("note", transform="trim", stype="TEXT", ttype="TEXT"), observed=[None, "a"])
+    assert trim["check"] == {"status": "fits", "rows_checked": 1, "rows_not_fitting": 0}
+
+
+def test_n7_validate_blocks_default_on_a_sampled_null_like_execute():
+    from services.reversibility_sources import plan_report
+
+    rev = SimpleNamespace(mappings=[_m("id"), _m("note", transform="default:N/A")])
+    plan = SimpleNamespace(
+        id="p", source={"format": "sqlite", "table": "t"}, destination={"format": "sqlite", "table": "t"},
+        source_columns=["id", "note"], source_schema={"id": "INTEGER", "note": "TEXT"},
+        target_schema={"id": "INTEGER", "note": "TEXT"},
+        sample_rows=[{"id": 1, "note": None}, {"id": 2, "note": "a"}], row_count_estimate=2,
+        policies={"require_reversibility": True}, active_revision=lambda: rev)
+    report = plan_report(plan)
+    note = report["tables"][0]["columns"][1]
+    assert note["check"]["status"] == "does_not_fit"
+    assert report["gate"]["status"] == "block"
