@@ -82,7 +82,7 @@ describe("Trust Report states (static)", () => {
     assert.match(t, /Approve and re-check/);
     assert.match(t, /Can't be applied: The destination table has no primary key\./);
     assert.equal((t.match(/Approve and re-check/g) || []).length, 1, "a fix that cannot apply has no approve button");
-    assert.match(t, /0 of 3 fix rounds used/);
+    assert.match(t, /0 of 3 write fixes used/);
     assert.match(t, /4 differences are unexplained\. Sign-off opens at zero\./);
     assert.match(html, /<button[^>]*disabled=""[^>]*>Sign as Engineering/);
     assert.doesNotMatch(html, /window\.confirm/);
@@ -126,6 +126,19 @@ describe("Trust Report states (static)", () => {
     const t = text(view(provenReport({ verdict: "unverifiable", verdict_reason: "Only row counts were captured for this run." })));
     assert.match(t, /Can't be verified/);
     assert.match(t, /Only row counts were captured for this run\./);
+  });
+
+  it("blocks sign-off while the verdict is unverifiable and says why", () => {
+    const report = provenReport({
+      verdict: "unverifiable",
+      verdict_reason: "Values were not compared for orders (only row counts or nothing was recorded), so the evidence cannot decide.",
+      signoff: { ...provenReport().signoff, status: "blocked", blocked_reason: "The evidence cannot decide parity, so there is nothing to sign." },
+    });
+    const html = view(report);
+    const t = text(html);
+    assert.match(t, /Blocked/);
+    assert.match(t, /The evidence cannot decide parity, so there is nothing to sign\./);
+    assert.match(html, /<button[^>]*disabled=""[^>]*>Sign as Engineering/);
   });
 
   it("links to the existing Gate-8 and trust-score cards rather than redrawing them", () => {

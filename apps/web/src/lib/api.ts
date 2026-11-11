@@ -6054,9 +6054,20 @@ export async function downloadParityReportMarkdown(jobId: string): Promise<Blob>
   return res.blob();
 }
 
+/**
+ * The signed pack (409 until every required role has signed): the proof-pack
+ * envelope that POST /transfer/proof-pack/verify checks, as JSON for a download.
+ */
+export async function downloadParitySignedPack(jobId: string): Promise<Blob> {
+  const res = await apiFetch(parityReportUrl(jobId, "/export?format=json"));
+  if (!res.ok) throw await apiErrorFrom(res, "Could not download the signed pack.");
+  return res.blob();
+}
+
 /** Workspace-wide parity over the most recent runs (Dashboard, Migration health). */
 export async function fetchParitySummary(limit = 30, init: { signal?: AbortSignal } = {}): Promise<ParitySummary> {
-  const safe = Math.max(1, Math.min(200, Math.floor(limit) || 30));
+  // The route accepts 1..100 (422 outside it).
+  const safe = Math.max(1, Math.min(100, Math.floor(limit) || 30));
   const res = await apiFetch(`${API_BASE}/parity/summary?limit=${safe}`, { signal: init.signal });
   if (!res.ok) throw await apiErrorFrom(res, "Could not load migration health.");
   return (await res.json()) as ParitySummary;

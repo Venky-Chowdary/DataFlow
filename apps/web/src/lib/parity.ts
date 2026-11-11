@@ -90,6 +90,10 @@ export interface ParityFix {
   approved_by: string | null;
   applied_at: string | null;
   result: string | null;
+  /** When a person approved or dismissed it; only on decided fixes. */
+  decided_at?: string | null;
+  /** The approver's note; only on decided fixes. */
+  note?: string | null;
 }
 
 export interface ParityRound {
@@ -116,12 +120,21 @@ export interface ParitySignoff {
   signed_at: string | null;
 }
 
+/** What re-reading the named keys on both sides found, per table. */
+export interface ParityReread {
+  status: "ok" | "failed" | "not_needed";
+  keys: number;
+  reason?: string;
+}
+
 export interface ParityEvidence {
   reconciliation_passed: boolean | null;
   assurance_level: string | null;
   trust_score: number | null;
   protection_proof: string | null;
   transform_proof: string | null;
+  /** Keyed by table name. */
+  reread: Record<string, ParityReread>;
 }
 
 export interface ParityReport {
@@ -149,6 +162,8 @@ export interface ParitySummaryRun {
   proven_equal_pct: number | null;
   unexplained: number;
   verdict: ParityVerdict;
+  /** This run's parity is an outlier against the route's earlier runs; null when history is too short. */
+  drift: boolean | null;
 }
 
 export interface ParitySummary {
@@ -165,8 +180,19 @@ export interface ParitySummary {
   heatmap: { tables: string[]; job_ids: string[]; cells: ParityHeatCell[][] };
 }
 
-/** The applied-fix rounds a job may use before fixes are switched off. */
+/** Write fixes (widen, re-sync, re-run) a job may apply or fail before they are switched off. */
 export const PARITY_MAX_ROUNDS = 3;
+
+const WRITE_FIX_ACTIONS = new Set<string>(["widen_column", "resync_keys", "rerun"]);
+
+/**
+ * Write fixes counted against {@link PARITY_MAX_ROUNDS}: every widen, re-sync
+ * or re-run that was applied or failed. A re-run records no round, so this is
+ * not the number of rounds.
+ */
+export function fixAttemptsUsed(report: Pick<ParityReport, "fixes">): number {
+  return report.fixes.filter((f) => WRITE_FIX_ACTIONS.has(f.action) && (f.status === "applied" || f.status === "failed")).length;
+}
 
 export type ParityTone = "ok" | "warn" | "danger" | "muted";
 
@@ -372,14 +398,15 @@ export function unsignedRoles(signoff: ParitySignoff): string[] {
 }
 
 /** Why sign-off is not possible right now, or "" when it is. */
-export function signoffBlockedReason(report: Pick<ParityReport, "signoff" | "parity">): string {
+export function signoffBlockedReason(report: Pick<ParityReport, "signoff" | "parity" | "verdict">): string {
   if (report.signoff.status === "signed") return "";
-  if (report.signoff.status === "blocked" || report.parity.unexplained > 0) {
+  if (report.signoff.status === "blocked" || report.parity.unexplained > 0 || report.verdict === "unverifiable") {
     const reason = (report.signoff.blocked_reason || "").trim();
     if (reason) return reason;
     const n = Math.max(0, report.parity.unexplained);
-    return n > 0
-      ? `Sign-off opens when nothing is unexplained. ${plural(n, "difference")} still need a cause or a fix.`
+    if (n > 0) return `Sign-off opens when nothing is unexplained. ${plural(n, "difference")} still need a cause or a fix.`;
+    return report.verdict === "unverifiable"
+      ? "The evidence cannot decide parity, so there is nothing to sign yet."
       : "Sign-off is not open for this report yet.";
   }
   return "";
@@ -450,16 +477,6 @@ export function heatCellLabel(cell: string): string {
 }
 
 /**
- * A re-run fix was applied but no round records its result yet: the report
- * recomputes when that run finishes, so the page keeps checking.
- */
-export function awaitingRerun(report: Pick<ParityReport, "fixes" | "rounds"> | null): boolean {
-  if (!report) return false;
-  const rounded = new Set(report.rounds.map((r) => r.fix_id));
-  return report.fixes.some((f) => f.action === "rerun" && f.status === "applied" && !rounded.has(f.id));
-}
-
-/**
  * What went wrong and what to do, for any failed Parity Studio request. The
  * API's own reason is kept; the status decides the advice around it.
  */
@@ -470,7 +487,12 @@ export function parityErrorMessage(err: unknown, fallback: string): string {
   if (status === 404) {
     return "This job was not found in this workspace. It may have been deleted, or it belongs to another workspace.";
   }
-  if (status === 403) return reason;
+  if (status === 403) {
+    // The workspace check (approve/dismiss) says only what is missing; say who can do it.
+    return /workspace write access/i.test(raw)
+      ? `${reason} Approving or dismissing a fix needs editor or admin access to this job's workspace. Ask a workspace admin, or an editor to act on it.`
+      : reason;
+  }
   if (status === 409) return `${reason} The report has been refreshed so you can see its current state.`;
   if (status === 422) return `The request was refused: ${reason}`;
   if (status >= 500) return `${fallback} The server reported an error (HTTP ${status}). Try again in a moment.`;
@@ -478,4 +500,35 @@ export function parityErrorMessage(err: unknown, fallback: string): string {
     return `${fallback} The request did not reach the server. Check your connection and try again.`;
   }
   return reason;
+}
+
+/** "4 keys re-read on both sides", or why the re-read did not run, per table. */
+export function rereadLabel(reread: ParityEvidence["reread"] | null | undefined): { value: string; tone: "ok" | "warn" | "muted"; detail: string } {
+  const entries = Object.entries(reread ?? {});
+  if (entries.length === 0) return { value: "Not needed", tone: "muted", detail: "" };
+  const failed = entries.filter(([, r]) => r.status === "failed");
+  const keys = entries.reduce((n, [, r]) => n + (r.status === "ok" ? Math.max(0, r.keys || 0) : 0), 0);
+  const detail = entries
+    .map(([table, r]) => `${table}: ${r.status === "ok" ? plural(r.keys, "key") + " re-read" : r.status === "failed" ? `failed${r.reason ? ` (${r.reason})` : ""}` : "not needed"}`)
+    .join("; ");
+  if (failed.length) return { value: `Failed for ${failed.map(([t]) => t).join(", ")}`, tone: "warn", detail };
+  if (keys > 0) return { value: `${plural(keys, "key")} re-read`, tone: "ok", detail };
+  return { value: "Not needed", tone: "muted", detail };
+}
+
+/**
+ * The explanation was written before the latest decision (a fix applied,
+ * failed or dismissed, or a re-check round), so it may describe differences
+ * that are gone. The verdict above it is always current; the words may not be.
+ */
+export function explanationIsStale(report: Pick<ParityReport, "explanation" | "fixes" | "rounds">): boolean {
+  const written = Date.parse(report.explanation?.generated_at ?? "");
+  if (!Number.isFinite(written)) return false;
+  const times = [
+    ...report.rounds.map((r) => r.at),
+    ...report.fixes.flatMap((f) => [f.applied_at, f.decided_at]),
+  ]
+    .map((t) => Date.parse(t ?? ""))
+    .filter((t) => Number.isFinite(t));
+  return times.some((t) => t > written);
 }

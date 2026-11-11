@@ -641,6 +641,14 @@
   stroke-width: 2.5;
 }
 
+.df2-parity-drift {
+  fill: var(--df-warning-text);
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-xs);
+  font-weight: var(--df-fw-semibold);
+  pointer-events: none;
+}
+
 /* Heatmap */
 .df2-parity-heat {
   display: grid;

@@ -8,6 +8,7 @@ import {
   approveParityFix,
   dismissParityFix,
   downloadParityReportMarkdown,
+  downloadParitySignedPack,
   explainParityReport,
   fetchParityReport,
   fetchParitySummary,
@@ -15,15 +16,17 @@ import {
   ApiError,
 } from "./api.js";
 import {
-  awaitingRerun,
   causeChip,
   causeLabel,
   checkLabel,
   differenceTitle,
   differencesByTable,
+  explanationIsStale,
+  fixAttemptsUsed,
   formatParityPct,
   newerReport,
   parityErrorMessage,
+  rereadLabel,
   roleLabel,
   shortSignature,
   signoffBlockedReason,
@@ -110,13 +113,16 @@ describe("version-aware merge", () => {
     assert.equal(newerReport(unexplainedReport({ version: 9 }), other), other);
   });
 
-  it("knows when a re-run fix is still finishing", () => {
-    const fix = { ...unexplainedReport().fixes[0], id: "fix-rerun", action: "rerun" as const, status: "applied" as const };
-    assert.equal(awaitingRerun(unexplainedReport({ fixes: [fix] })), true);
-    assert.equal(
-      awaitingRerun(unexplainedReport({ fixes: [fix], rounds: [{ n: 1, at: "", unexplained_before: 4, unexplained_after: 0, fix_id: "fix-rerun" }] })),
-      false,
-    );
+  it("counts applied and failed write fixes against the limit, re-runs included (they record no round)", () => {
+    const base = unexplainedReport().fixes[0];
+    const fixes = [
+      { ...base, id: "f-rerun", action: "rerun" as const, status: "applied" as const },
+      { ...base, id: "f-sync", action: "resync_keys" as const, status: "failed" as const },
+      { ...base, id: "f-sync-2", action: "resync_keys" as const, status: "proposed" as const },
+      { ...base, id: "f-acc", action: "accept" as const, status: "applied" as const },
+      { ...base, id: "f-wid", action: "widen_column" as const, status: "dismissed" as const },
+    ];
+    assert.equal(fixAttemptsUsed(unexplainedReport({ fixes, rounds: [] })), 2);
   });
 });
 
@@ -141,6 +147,16 @@ describe("sign-off", () => {
     assert.equal(signoffBlockedReason(signedReport()), "");
   });
 
+  it("is blocked while the verdict is unverifiable, with the API's reason or its own", () => {
+    const unverifiable = provenReport({
+      verdict: "unverifiable",
+      signoff: { ...provenReport().signoff, status: "blocked", blocked_reason: "The evidence cannot decide parity, so there is nothing to sign." },
+    });
+    assert.equal(signoffBlockedReason(unverifiable), "The evidence cannot decide parity, so there is nothing to sign.");
+    unverifiable.signoff = { ...unverifiable.signoff, status: "open", blocked_reason: null };
+    assert.match(signoffBlockedReason(unverifiable), /nothing to sign yet/);
+  });
+
   it("shortens a signature for display and keeps its scheme", () => {
     assert.equal(shortSignature(signedReport().signoff.signature!), "hmac-sha256:9f3c…a71e");
   });
@@ -152,6 +168,42 @@ describe("error copy", () => {
     assert.match(parityErrorMessage(new ApiError("Fix already applied", 409), "x"), /^Fix already applied\. The report has been refreshed/);
     assert.match(parityErrorMessage(new Error("Request timed out"), "Could not load."), /Check your connection/);
     assert.match(parityErrorMessage(new ApiError("boom", 503), "Could not load."), /HTTP 503\)\. Try again/);
+  });
+
+  it("keeps the workspace refusal's words and says who can approve", () => {
+    const msg = parityErrorMessage(new ApiError("Workspace write access required", 403), "Could not complete this fix.");
+    assert.match(msg, /^Workspace write access required\. /);
+    assert.match(msg, /editor or admin access to this job's workspace/);
+    assert.equal(parityErrorMessage(new ApiError("You need job.run.", 403), "x"), "You need job.run.");
+    assert.match(
+      parityErrorMessage(new ApiError("One person signs one role; ask another approver.", 409), "x"),
+      /^One person signs one role; ask another approver\. The report has been refreshed/,
+    );
+  });
+});
+
+describe("explanation freshness", () => {
+  it("is stale once a fix was decided or a round landed after it was written", () => {
+    const base = unexplainedReport();
+    const written = { ...base.explanation!, generated_at: "2026-11-11T14:00:00Z" };
+    assert.equal(explanationIsStale({ ...base, explanation: written, rounds: [] }), false);
+    const round = { n: 1, at: "2026-11-11T14:05:00Z", unexplained_before: 4, unexplained_after: 0, fix_id: "fix-widen" };
+    assert.equal(explanationIsStale({ ...base, explanation: written, rounds: [round] }), true);
+    const dismissed = { ...base.fixes[0], status: "dismissed" as const, decided_at: "2026-11-11T14:01:00Z" };
+    assert.equal(explanationIsStale({ ...base, explanation: written, fixes: [dismissed], rounds: [] }), true);
+    assert.equal(explanationIsStale({ ...base, explanation: null }), false);
+  });
+});
+
+describe("re-read evidence", () => {
+  it("sums the keys re-read, names a table whose re-read failed, and reads empty as not needed", () => {
+    assert.deepEqual(rereadLabel({ pay: { status: "ok", keys: 4 } }), { value: "4 keys re-read", tone: "ok", detail: "pay: 4 keys re-read" });
+    const failed = rereadLabel({ pay: { status: "failed", keys: 0, reason: "the source could not be re-read (OperationalError)" } });
+    assert.equal(failed.value, "Failed for pay");
+    assert.equal(failed.tone, "warn");
+    assert.match(failed.detail, /OperationalError/);
+    assert.equal(rereadLabel({}).value, "Not needed");
+    assert.equal(rereadLabel({ a: { status: "not_needed", keys: 0 } }).value, "Not needed");
   });
 });
 
@@ -229,13 +281,22 @@ describe("parity API client", () => {
     assert.equal(await blob.text(), "# Trust report\n");
   });
 
+  it("downloads the signed JSON pack, and keeps the 409 until it is signed", async () => {
+    const calls = mockFetch(() => json({ content_sha256: "ab", signature: { alg: "HS256", key_id: "k", value: "cd" } }));
+    const blob = await downloadParitySignedPack("job-31");
+    assert.match(calls[0].url, /\/jobs\/job-31\/parity-report\/export\?format=json$/);
+    assert.match(await blob.text(), /content_sha256/);
+    mockFetch(() => json({ detail: "The report is not signed yet." }, 409));
+    await assert.rejects(downloadParitySignedPack("job-31"), (err: unknown) => err instanceof ApiError && err.status === 409);
+  });
+
   it("reads the workspace summary with a bounded limit", async () => {
     const calls = mockFetch(() => json(summaryFixture()));
     const summary = await fetchParitySummary(30);
     assert.equal(summary.runs.length, 12);
     assert.match(calls[0].url, /\/parity\/summary\?limit=30$/);
     await fetchParitySummary(10_000);
-    assert.match(calls[1].url, /limit=200$/);
+    assert.match(calls[1].url, /limit=100$/, "the route refuses more than 100 with a 422");
   });
 
   it("reports a missing job as a 404 ApiError", async () => {

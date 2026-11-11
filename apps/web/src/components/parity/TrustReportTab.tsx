@@ -24,6 +24,7 @@ import {
   approveParityFix,
   dismissParityFix,
   downloadParityReportMarkdown,
+  downloadParitySignedPack,
   explainParityReport,
   fetchParityReport,
   signParityReport,
@@ -32,13 +33,14 @@ import { downloadBlob } from "../../lib/downloadBlob";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import {
   PARITY_MAX_ROUNDS,
-  awaitingRerun,
   badgeClass,
   causeChip,
   causeLabel,
   differenceTitle,
   differencesByTable,
+  explanationIsStale,
   fixApproveLabel,
+  fixAttemptsUsed,
   fixConsequence,
   fixStatusPresentation,
   formatClock,
@@ -47,6 +49,7 @@ import {
   isFixActionable,
   newerReport,
   parityErrorMessage,
+  rereadLabel,
   roleLabel,
   verdictPresentation,
   type ParityDifference,
@@ -99,6 +102,25 @@ function DifferenceRow({ diff }: { diff: ParityDifference }) {
   );
 }
 
+/**
+ * Who decided, when, what happened, and their note. A dismissal's result is its
+ * note, so the note is shown once.
+ */
+function decisionLines(fix: ParityFix): { summary: string; note: string } {
+  if (fix.status === "proposed") return { summary: "", note: "" };
+  const note = (fix.note || "").trim();
+  const result = (fix.result || "").trim();
+  const when = fix.applied_at || fix.decided_at;
+  const head = [
+    fix.approved_by ? `${fix.status === "dismissed" ? "Dismissed" : "Approved"} by ${fix.approved_by}` : "",
+    when ? formatDateTime(when) : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const shownResult = result && result !== note ? result : "";
+  return { summary: [head, shownResult].filter(Boolean).join(". "), note };
+}
+
 export interface FixCardProps {
   fix: ParityFix;
   busy: ParityBusy;
@@ -114,6 +136,7 @@ export function FixCard({ fix, busy, canAct, onApprove, onDismiss }: FixCardProp
   const noteId = useId();
   const status = fixStatusPresentation(fix.status);
   const actionable = isFixActionable(fix);
+  const decision = decisionLines(fix);
   const anyBusy = busy != null;
   const mine = busy != null && "id" in busy && busy.id === fix.id;
 
@@ -136,13 +159,10 @@ export function FixCard({ fix, busy, canAct, onApprove, onDismiss }: FixCardProp
           <DtIcon name="alert" size={12} /> Can't be applied: {fix.not_applicable_reason || "the destination does not support it."}
         </p>
       )}
-      {fix.status !== "proposed" && (fix.approved_by || fix.applied_at || fix.result) && (
-        <p className={fix.status === "failed" ? "df2-parity-notice is-danger" : "df2-parity-muted"}>
-          {fix.approved_by ? `${fix.status === "dismissed" ? "Dismissed" : "Approved"} by ${fix.approved_by}` : ""}
-          {fix.applied_at ? ` · ${formatDateTime(fix.applied_at)}` : ""}
-          {fix.result ? `${fix.approved_by || fix.applied_at ? ". " : ""}${fix.result}` : ""}
-        </p>
+      {decision.summary && (
+        <p className={fix.status === "failed" ? "df2-parity-notice is-danger" : "df2-parity-muted"}>{decision.summary}</p>
       )}
+      {decision.note && <p className="df2-parity-muted">Note: “{decision.note}”</p>}
 
       {actionable && canAct && confirming === null && (
         <div className="df2-parity-actions">
@@ -231,12 +251,14 @@ export interface TrustReportViewProps {
   onDismiss: (fixId: string, note: string) => void;
   onSign: (role: string, note: string) => void;
   onExport: () => void;
+  /** Download the signed pack (JSON); offered only once the report is signed. */
+  onDownloadSigned?: () => void;
   /** Links to the existing evidence cards for this job. */
   onOpenGate8?: () => void;
   onOpenDetail?: () => void;
 }
 
-function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: "ok" | "warn" | "muted" }> {
+function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: "ok" | "warn" | "muted"; detail?: string }> {
   const e = report.evidence;
   return [
     {
@@ -252,6 +274,7 @@ function evidenceItems(report: ParityReport): Array<{ label: string; value: stri
     },
     { label: "Protection proof", value: e.protection_proof || "None for this run", tone: e.protection_proof ? "ok" : "muted" },
     { label: "Transform proof", value: e.transform_proof || "None for this run", tone: e.transform_proof ? "ok" : "muted" },
+    { label: "Re-read now", ...rereadLabel(e.reread) },
   ];
 }
 
@@ -269,6 +292,7 @@ export function TrustReportView({
   onDismiss,
   onSign,
   onExport,
+  onDownloadSigned,
   onOpenGate8,
   onOpenDetail,
 }: TrustReportViewProps) {
@@ -277,6 +301,7 @@ export function TrustReportView({
   const groups = differencesByTable(report);
   const anyBusy = busy != null;
   const openFixes = report.fixes.filter((f) => f.status === "proposed");
+  const attemptsUsed = fixAttemptsUsed(report);
   const doneFixes = report.fixes.filter((f) => f.status !== "proposed");
   const ringTone = report.verdict === "unexplained" ? "warn" : report.verdict === "unverifiable" ? "idle" : "ok";
   const signoffAnchor = `parity-signoff-${report.job_id}`;
@@ -433,6 +458,12 @@ export function TrustReportView({
                     <p key={i} className="df2-parity-ai-text">{p}</p>
                   ))}
                 <span className="df2-parity-muted">Written {formatDateTime(report.explanation.generated_at)}</span>
+                {explanationIsStale(report) && (
+                  <p className="df2-parity-notice is-warn" role="status">
+                    <DtIcon name="alert" size={14} />
+                    <span>Written before the latest fix. The figures above are current; explain again to update these words.</span>
+                  </p>
+                )}
               </>
             ) : (
               <p className="df2-parity-ai-text">
@@ -465,8 +496,11 @@ export function TrustReportView({
             <section className="df2-parity-card" aria-label="Proposed fixes">
               <header className="df2-parity-section-head">
                 <h3 className="df2-parity-h3">Proposed fixes</h3>
-                <span className="df2-parity-muted df2-parity-num">
-                  {report.rounds.length} of {PARITY_MAX_ROUNDS} fix rounds used
+                <span
+                  className="df2-parity-muted df2-parity-num"
+                  title="Every widen, re-sync or re-run that was applied or failed counts. After the limit, write fixes are switched off."
+                >
+                  {Math.min(attemptsUsed, PARITY_MAX_ROUNDS)} of {PARITY_MAX_ROUNDS} write fixes used
                 </span>
               </header>
               {!canFix && openFixes.length > 0 && (
@@ -535,7 +569,7 @@ export function TrustReportView({
             <div key={item.label}>
               <dt>{item.label}</dt>
               <dd>
-                <span className={badgeClass(item.tone)}>{item.value}</span>
+                <span className={badgeClass(item.tone)} title={item.detail || undefined}>{item.value}</span>
               </dd>
             </div>
           ))}
@@ -549,6 +583,7 @@ export function TrustReportView({
         signDeniedReason={signDeniedReason}
         onSign={onSign}
         onExport={onExport}
+        onDownloadSigned={onDownloadSigned}
         error={errors.signoff}
       />
     </div>
@@ -563,13 +598,11 @@ export interface TrustReportTabProps {
   jobStatus?: string;
   onOpenGate8?: () => void;
   onOpenDetail?: () => void;
-  /** How often to re-read while a re-run fix is finishing (ms). */
-  rerunPollMs?: number;
 }
 
 const IN_FLIGHT = new Set(["running", "pending", "queued"]);
 
-export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail, rerunPollMs = 15_000 }: TrustReportTabProps) {
+export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: TrustReportTabProps) {
   const { toast } = useToast();
   const fixGate = useWriteGate(PERMISSIONS.jobRun, "approve or dismiss a fix");
   const signGate = useWriteGate(PERMISSIONS.jobRead, "explain or sign off a trust report");
@@ -621,16 +654,6 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail, re
     return () => controller.abort();
   }, [jobId, inFlight, load]);
 
-  // A re-run fix finishes on its own schedule; keep reading until its round lands.
-  const waiting = awaitingRerun(report);
-  useEffect(() => {
-    if (!waiting || rerunPollMs <= 0) return;
-    const timer = window.setInterval(() => {
-      if (!busyRef.current) void load();
-    }, rerunPollMs);
-    return () => window.clearInterval(timer);
-  }, [waiting, rerunPollMs, load]);
-
   /**
    * Run one action at a time. Every control is disabled while it runs; the
    * response replaces the report only if it is newer, and a response that is
@@ -667,6 +690,8 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail, re
                 ? "Could not record your sign-off."
                 : next.kind === "export"
                   ? "Could not export the evidence pack."
+                  : next.kind === "pack"
+                    ? "Could not download the signed pack."
                   : "Could not refresh the trust report.";
         const message = parityErrorMessage(err, fallback);
         if (area) setErrors((e) => ({ ...e, [area]: message }));
@@ -754,6 +779,12 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail, re
         void run({ kind: "export" }, null, async () => {
           const blob = await downloadParityReportMarkdown(jobId);
           downloadBlob(`datawrap-trust-report-${jobId}.md`, blob);
+        })
+      }
+      onDownloadSigned={() =>
+        void run({ kind: "pack" }, null, async () => {
+          const blob = await downloadParitySignedPack(jobId);
+          downloadBlob(`datawrap-parity-signed-pack-${jobId}.json`, blob);
         })
       }
       onOpenGate8={onOpenGate8}

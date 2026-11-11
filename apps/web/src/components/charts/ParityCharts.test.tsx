@@ -84,7 +84,8 @@ describe("ParityTrendChart", () => {
   it("summarises the trend in words", () => {
     assert.equal(
       trendSummary(summary.runs),
-      "Parity over the last 12 runs: between 99.5% and 100%; latest 99.94%. 2 of 12 runs had unexplained differences.",
+      "Parity over the last 12 runs: between 99.5% and 100%; latest 99.94%. 2 of 12 runs had unexplained differences. " +
+        "1 of 12 runs drifted from their route's earlier runs.",
     );
     assert.match(html, /role="img"/);
     assert.match(html, /aria-label="Parity over the last 12 runs/);
@@ -102,8 +103,17 @@ describe("ParityTrendChart", () => {
     assert.equal(d.split("M").length - 1, 2, "an unknown run must split the line in two");
     assert.equal((html.match(/df2-parity-point is-flagged/g) || []).length, 2);
     assert.match(html, /df2-parity-point is-flagged is-last/);
-    assert.match(html, /<title>orders_daily · run 25: 99\.5% · 6 unexplained<\/title>/);
+    assert.match(html, /<title>orders_daily · run 25: 99\.5% · 6 unexplained · drift: an outlier against this route&#x27;s earlier runs<\/title>/);
     noLiteralColours(html);
+  });
+
+  it("marks a drifting run with a word on its point, and only that run", () => {
+    assert.equal((html.match(/class="df2-parity-drift"[^>]*>drift</g) || []).length, 1);
+    // Run 25 sits at x=186 on the 360px default width.
+    assert.match(html, /<text class="df2-parity-drift" x="186" /);
+    const calm = renderToStaticMarkup(<ParityTrendChart runs={summary.runs.map((r) => ({ ...r, drift: null }))} />);
+    assert.doesNotMatch(calm, /df2-parity-drift/);
+    assert.doesNotMatch(trendSummary(summary.runs.map((r) => ({ ...r, drift: false }))), /drifted/);
   });
 
   it("says so when no run has a figure", () => {

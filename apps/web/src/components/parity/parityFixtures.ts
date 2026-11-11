@@ -45,6 +45,7 @@ export function provenReport(over: Partial<ParityReport> = {}): ParityReport {
       trust_score: 96,
       protection_proof: null,
       transform_proof: null,
+      reread: { orders: { status: "not_needed", keys: 0 } },
     },
     ...over,
   };
@@ -164,6 +165,8 @@ export function summaryFixture(over: Partial<ParitySummary> = {}): ParitySummary
     proven_equal_pct: pct,
     unexplained: i === 5 ? 6 : i === 11 ? 1 : 0,
     verdict: (i === 5 || i === 11 ? "unexplained" : pct === null ? "unverifiable" : "proven") as ParitySummary["runs"][number]["verdict"],
+    // Too little history for the first runs; run 25 is an outlier for its route.
+    drift: i < 3 ? null : i === 5,
   }));
   return {
     generated_at: "2026-11-11T15:00:00Z",

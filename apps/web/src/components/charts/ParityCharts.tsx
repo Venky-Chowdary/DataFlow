@@ -180,7 +180,9 @@ export function trendSummary(runs: ParitySummaryRun[]): string {
       : `between ${formatParityPct(Math.min(...values))} and ${formatParityPct(Math.max(...values))}`;
   const flaggedText =
     flagged === 0 ? "No run had unexplained differences." : `${flagged} of ${runs.length} runs had unexplained differences.`;
-  return `Parity over the last ${runs.length} runs: ${range}; latest ${formatParityPct(latest.proven_equal_pct)}. ${flaggedText}`;
+  const drifted = runs.filter((r) => r.drift === true).length;
+  const driftText = drifted ? ` ${drifted} of ${runs.length} runs drifted from their route's earlier runs.` : "";
+  return `Parity over the last ${runs.length} runs: ${range}; latest ${formatParityPct(latest.proven_equal_pct)}. ${flaggedText}${driftText}`;
 }
 
 /** Line + area of rows proven equal per run, oldest to newest, on a labelled min/max scale. */
@@ -238,9 +240,10 @@ export function ParityTrendChart({ runs, height = 180 }: { runs: ParitySummaryRu
           if (py == null) return null;
           const isLast = i === lastIndex;
           const flagged = run.unexplained > 0;
+          const drift = run.drift === true;
           const tip = `${run.name || run.job_id}: ${formatParityPct(run.proven_equal_pct)}${
             flagged ? ` · ${run.unexplained.toLocaleString("en-US")} unexplained` : ""
-          }`;
+          }${drift ? " · drift: an outlier against this route's earlier runs" : ""}`;
           return (
             <g key={`${run.job_id}-${i}`}>
               {/* A wider invisible target so the tooltip is reachable. */}
@@ -255,6 +258,12 @@ export function ParityTrendChart({ runs, height = 180 }: { runs: ParitySummaryRu
               >
                 <title>{tip}</title>
               </circle>
+              {/* Robust z against the route's earlier runs (API); a word, not only a colour. */}
+              {drift && (
+                <text className="df2-parity-drift" x={points[i].x} y={py > TREND_PAD.t + 14 ? py - 9 : py + 16} textAnchor="middle">
+                  drift
+                </text>
+              )}
             </g>
           );
         })}

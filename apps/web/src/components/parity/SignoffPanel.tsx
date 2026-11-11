@@ -16,7 +16,7 @@ import {
 } from "../../lib/parity";
 
 export type ParityBusy =
-  | { kind: "refresh" | "explain" | "sign" | "export" }
+  | { kind: "refresh" | "explain" | "sign" | "export" | "pack" }
   | { kind: "approve" | "dismiss"; id: string }
   | null;
 
@@ -28,6 +28,8 @@ export interface SignoffPanelProps {
   signDeniedReason?: string;
   onSign: (role: string, note: string) => void;
   onExport: () => void;
+  /** Download the signed pack (JSON); the button shows only once the report is signed. */
+  onDownloadSigned?: () => void;
   /** Last sign-off or export failure, already phrased for the reader. */
   error?: string;
 }
@@ -40,10 +42,12 @@ const STATUS: Record<string, { label: string; tone: ParityTone }> = {
 
 /**
  * Page C: who must sign, who has, why it is blocked, and the evidence pack.
- * Sign-off opens only at zero unexplained differences; the API enforces that
+ * Sign-off opens only at zero unexplained differences and a decided verdict
+ * (not "unverifiable"); a role signs once and one person signs one role. The API
+ * enforces all of it
  * with a 409, and this panel says so before anyone tries.
  */
-export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, onExport, error }: SignoffPanelProps) {
+export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, onExport, onDownloadSigned, error }: SignoffPanelProps) {
   const { signoff } = report;
   const rows = signoffRows(signoff);
   const waiting = unsignedRoles(signoff);
@@ -61,6 +65,7 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
   const anyBusy = busy != null;
   const signing = busy?.kind === "sign";
   const exporting = busy?.kind === "export";
+  const signed = signoff.status === "signed";
   const blocked = Boolean(blockedReason);
 
   return (
@@ -208,6 +213,20 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
             >
               Export Markdown
             </Button>
+            {signed && onDownloadSigned && (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={onDownloadSigned}
+                disabled={anyBusy}
+                loading={busy?.kind === "pack"}
+                loadingLabel="Downloading…"
+                leadingIcon={<DtIcon name="download" size={14} />}
+                title="The signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature."
+              >
+                Download signed pack
+              </Button>
+            )}
           </div>
         </div>
       </div>
