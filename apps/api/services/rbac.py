@@ -487,6 +487,8 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("PATCH", "/api/v1/exit/systems/{system_id}", Permission.JOB_MANAGE),
     ("DELETE", "/api/v1/exit/systems/{system_id}", Permission.JOB_MANAGE),
     ("POST", "/api/v1/exit/systems/{system_id}/rehearsals", Permission.JOB_RUN),
+    ("POST", "/api/v1/exit/rehearsals/{rehearsal_id}/signoff", Permission.JOB_MANAGE),
+    ("POST", "/api/v1/exit/evidence/verify", Permission.JOB_READ),
     ("POST", "/api/v1/transfer/analyze", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/analyze-file", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/introspect", Permission.JOB_PLAN),

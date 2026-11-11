@@ -138,7 +138,8 @@ def test_store_update_is_compare_and_swap(file_store):
 
 @pytest.fixture()
 def world(ent, tmp_path):
-    db = tmp_path / "ledger.sqlite"
+    (tmp_path / "sqlite").mkdir()
+    db = tmp_path / "sqlite" / "ledger.sqlite"
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, amount NUMERIC)")
     conn.commit()
@@ -214,3 +215,61 @@ def test_rehearsal_due_dates_track_the_period(file_store):
     started = (NOW - timedelta(days=10)).isoformat()
     out = readiness(_system(rehearsal_every_days=7), [_rehearsal(1, "proven", started, 5)], now=NOW)
     assert out["overdue"] is True
+
+
+def test_rehearsal_signoff_and_evidence_over_rest(ent, world, monkeypatch, tmp_path):
+    import time
+
+    monkeypatch.setenv("DATAWRAP_EXPORTS_DIR", str(tmp_path / "exports"))
+    monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_STORE", str(tmp_path / "anchors.jsonl"))
+    conn = sqlite3.connect(str(tmp_path / "sqlite" / "ledger.sqlite"))
+    with conn:
+        conn.executemany("INSERT INTO orders VALUES (?, ?)", [(i, i * 2) for i in range(1, 26)])
+    conn.close()
+    editor, viewer, stranger = world["editor"], world["viewer"], world["stranger"]
+    sid = _declare(editor, world["connector"]).json()["id"]
+    assert viewer.post(f"/api/v1/exit/systems/{sid}/rehearsals").status_code == 403
+    assert stranger.post(f"/api/v1/exit/systems/{sid}/rehearsals").status_code == 404
+    started = editor.post(f"/api/v1/exit/systems/{sid}/rehearsals")
+    assert started.status_code == 202, started.text
+    rid = started.json()["id"]
+    assert editor.post(f"/api/v1/exit/systems/{sid}/rehearsals").status_code in {202, 409}
+    deadline = time.monotonic() + 120
+    body = started.json()
+    while body["verdict"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.5)
+        body = viewer.get(f"/api/v1/exit/rehearsals/{rid}").json()
+    assert body["verdict"] == "proven", (body["verdict_reason"], [t["reason"] for t in body["tables"]])
+    assert stranger.get(f"/api/v1/exit/rehearsals/{rid}").status_code == 404
+    listed = viewer.get(f"/api/v1/exit/systems/{sid}/rehearsals").json()
+    assert listed["rehearsals"][0]["id"] == rid and listed["trend"]["points"][-1]["rehearsal_id"] == rid
+    assert viewer.get(f"/api/v1/exit/rehearsals/{rid}/evidence").status_code == 409
+
+    ws = world["ws"]
+    signers = [
+        ("engineering", ent.member(email="exit-eng@example.com", workspace_id=ws, role="editor")),
+        ("data_owner", editor),
+        ("compliance", ent.member(email="exit-admin@example.com", workspace_id=ws, role="admin")),
+    ]
+    assert viewer.post(f"/api/v1/exit/rehearsals/{rid}/signoff", json={"role": "engineering"}).status_code == 403
+    assert editor.post(f"/api/v1/exit/rehearsals/{rid}/signoff", json={"role": "nobody"}).status_code == 422
+    assert signers[0][1].post(f"/api/v1/exit/rehearsals/{rid}/signoff",
+                              json={"role": "compliance"}).status_code == 403
+    for role, client in signers:
+        res = client.post(f"/api/v1/exit/rehearsals/{rid}/signoff", json={"role": role, "note": "ok"})
+        assert res.status_code == 200, (role, res.text)
+    signed = res.json()
+    assert signed["signoff"]["status"] == "signed" and signed["evidence"]["signed"] is True
+    assert editor.post(f"/api/v1/exit/rehearsals/{rid}/signoff", json={"role": "data_owner"}).status_code == 409
+
+    pack = viewer.get(f"/api/v1/exit/rehearsals/{rid}/evidence").json()
+    assert pack["kind"] == "exit_evidence" and pack["rehearsal_id"] == rid
+    checked = viewer.post("/api/v1/exit/evidence/verify", json={"pack": pack}).json()
+    assert checked["ok"] is True and checked["anchor"]["status"] == "not_anchored"
+    shared = editor.post("/api/v1/transfer/proof-pack/verify", json={"pack": pack}).json()
+    assert shared["ok"] is True and shared["kind"] == "exit_evidence"
+    markdown = viewer.get(f"/api/v1/exit/rehearsals/{rid}/evidence?format=markdown")
+    assert markdown.status_code == 200 and "Verdict: **proven**" in markdown.text
+    actions = {e["action"] for e in ent.audit(ws)}
+    assert {"exit.rehearsal.started", "exit.rehearsal.completed", "exit.rehearsal.signed_off",
+            "exit.rehearsal.signoff_refused", "exit.rehearsal.signed", "exit.evidence.exported"} <= actions

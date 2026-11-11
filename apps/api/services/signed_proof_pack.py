@@ -992,7 +992,7 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
                 "chain_anchor digest does not match this pack's content — the pack "
                 "was altered after it was sealed, or the anchor belongs to another pack"
             )
-    kind = PARITY_PACK_KIND if pack.get("kind") == PARITY_PACK_KIND else "proof_pack"
+    kind = str(pack.get("kind")) if pack.get("kind") in {PARITY_PACK_KIND, EXIT_PACK_KIND} else "proof_pack"
     return {"ok": not errors, "errors": errors, "content_sha256": actual_hash, "kind": kind}
 
 
@@ -1181,17 +1181,26 @@ def parity_section_for_pack(job: dict[str, Any]) -> dict[str, Any] | None:
 
 
 PARITY_PACK_KIND = "parity_report"
+EXIT_PACK_KIND = "exit_evidence"
 
 
 def pack_subject(pack: dict[str, Any]) -> str:
     """The HMAC subject of a signed pack: domain-separated by its ``kind``.
 
-    A Parity Studio pack is signed for ``parity_report:<job id>``, a proof pack
-    for ``<job id>``, so neither signature verifies as the other kind (``kind``
-    is inside the hashed body, so relabelling a pack breaks its hash too).
+    A Parity Studio pack is signed for ``parity_report:<job id>``, an Exit
+    Evidence Pack for ``exit_evidence:<system id>:<rehearsal id>``, a proof pack
+    for ``<job id>``, so no signature verifies as another kind (``kind`` is
+    inside the hashed body, so relabelling a pack breaks its hash too).
     """
+    if pack.get("kind") == EXIT_PACK_KIND:
+        return f"{EXIT_PACK_KIND}:{pack.get('system_id') or ''}:{pack.get('rehearsal_id') or ''}"
     job_id = str(pack.get("job_id") or "")
     return f"{PARITY_PACK_KIND}:{job_id}" if pack.get("kind") == PARITY_PACK_KIND else job_id
+
+
+def build_signed_exit_pack(body: dict[str, Any]) -> dict[str, Any]:
+    """Sign an Exit Evidence Pack body (``kind`` exit_evidence) in its own signature domain."""
+    return sign_body({**body, "kind": EXIT_PACK_KIND}, subject=pack_subject({**body, "kind": EXIT_PACK_KIND}))
 
 
 def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str) -> dict[str, Any]:

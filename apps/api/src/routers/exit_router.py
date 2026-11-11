@@ -11,9 +11,10 @@ a system of another workspace is a 404, exactly like a job.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, Response
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from services.audit_log import actor_from_request
@@ -202,3 +203,67 @@ async def get_exit_rehearsal(rehearsal_id: str, request: Request):
         return public(settle(rehearsal_id) or doc)
 
     return await asyncio.to_thread(build)
+
+
+# ----------------------------------------------------- sign-off and evidence
+
+
+class SignoffBody(BaseModel):
+    role: str = Field(default="", max_length=64)
+    note: str = Field(default="", max_length=500)
+    expected_version: int | None = Field(default=None, ge=0)
+
+
+@router.post("/exit/rehearsals/{rehearsal_id}/signoff")
+async def sign_off_exit_rehearsal(rehearsal_id: str, request: Request, body: SignoffBody | None = None):
+    from services.exit_evidence import sign_off
+    from services.exit_rehearsal import public
+
+    from .parity_router import _signer_role
+
+    doc = _visible_rehearsal(rehearsal_id, request)
+    body = body or SignoffBody()
+    if not body.role.strip():
+        raise HTTPException(status_code=422, detail="role is required")
+    try:
+        after = await asyncio.to_thread(
+            sign_off, rehearsal_id, role=body.role, actor=actor_from_request(request), note=body.note,
+            # The signer's authority in the system's workspace, from the principal, never the body.
+            signer_role=_signer_role(request, {"workspace_id": doc.get("workspace_id")}),
+            expected_version=body.expected_version,
+        )
+    except ExitError as exc:
+        raise _http(exc) from exc
+    return await asyncio.to_thread(public, after)
+
+
+@router.get("/exit/rehearsals/{rehearsal_id}/evidence")
+async def export_exit_evidence(
+    rehearsal_id: str, request: Request, format: Literal["json", "markdown"] = Query(default="json"),
+):
+    """The signed Exit Evidence Pack (json, 409 until signed) or a readable Markdown report."""
+    from services.exit_evidence import render_markdown, signed_pack
+    from services.exit_inventory import audit
+
+    doc = _visible_rehearsal(rehearsal_id, request)
+    pack = signed_pack(doc)
+    if format == "json" and not pack:
+        raise HTTPException(status_code=409, detail="The rehearsal is not signed yet.")
+    audit("exit.evidence.exported", system={"id": doc.get("system_id"), "workspace_id": doc.get("workspace_id")},
+          actor=actor_from_request(request),
+          details={"rehearsal_id": rehearsal_id, "format": format, "signed": bool(pack)})
+    if format == "json":
+        return pack
+    return PlainTextResponse(await asyncio.to_thread(render_markdown, doc), media_type="text/markdown")
+
+
+@router.post("/exit/evidence/verify")
+async def verify_exit_evidence(body: Any = Body(...)):
+    """Verify an Exit Evidence Pack (``{"pack": ...}`` or the pack itself): signature, Merkle root, anchor.
+
+    A body that is not a signed pack is a 422 naming what is missing, like the proof-pack verify route.
+    """
+    from services.exit_evidence import verify_pack
+    from services.proof_pack_request import pack_from_body
+
+    return await asyncio.to_thread(verify_pack, pack_from_body(body))
