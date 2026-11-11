@@ -340,7 +340,23 @@ def source_columns_and_rows(endpoint: Any, *, itersize: int = 5000) -> tuple[lis
 # ------------------------------------------------------------------ verdicts
 
 
+def _sensitive(column: str, totals: dict[str, Decimal]) -> bool:
+    """A PII column by name, or a total that is itself a PII value (a card number, an SSN)."""
+    from services.pii_guard import detect_pii, is_sensitive_name
+
+    return is_sensitive_name(column) or any(
+        detect_pii(format(totals[k], "f")).get("has_pii") for k in ("min", "max") if k in totals)
+
+
+def _shown(totals: dict[str, Decimal] | None, masked: bool) -> dict[str, str | None] | None:
+    if totals is None:
+        return None
+    return {k: (None if masked else format(v, "f")) for k, v in totals.items()}
+
+
 def _totals_rows(src: Profile, ext: Profile | None) -> list[dict[str, Any]]:
+    """Control totals per numeric column. Sum, min and max are compared on the real values,
+    but a PII column's are withheld (``masked``): min / max of an identifier are real values."""
     out = []
     for col in sorted(src.totals):
         s = src.totals[col]
@@ -349,11 +365,13 @@ def _totals_rows(src: Profile, ext: Profile | None) -> list[dict[str, Any]]:
             e and all(s[k] == e[k] for k in ("sum", "min", "max")))
         if ext is not None and e is None and src.rows:
             match = False
+        masked = _sensitive(col, s) or bool(e and _sensitive(col, e))
         out.append({
             "column": col,
-            "source": {k: format(v, "f") for k, v in s.items()},
-            "extract": {k: format(v, "f") for k, v in e.items()} if e else None,
+            "source": _shown(s, masked),
+            "extract": _shown(e, masked) if e else None,
             "match": match,
+            "masked": masked,
         })
     return out
 

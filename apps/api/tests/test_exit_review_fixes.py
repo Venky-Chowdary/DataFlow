@@ -493,3 +493,28 @@ def test_m3_pack_verify_says_the_parts_are_not_re_read(world):  # noqa: F811
     _out, pack = _signed_rehearsal(world)
     result = verify_pack(pack)
     assert result["parts_reread"] is False and "not re-read" in result["note"]
+
+
+# ------------------------------------------- M5: control totals never show a PII value
+
+
+def test_m5_control_totals_of_a_pii_column_are_compared_but_not_shown():
+    types = {"id": "BIGINT", "ssn": "BIGINT", "ref": "BIGINT", "amount": "DECIMAL(12,2)"}
+    rows = [{"id": 1, "ssn": 123456789, "ref": 4111111111111111, "amount": Decimal("2.50")},
+            {"id": 2, "ssn": 987654321, "ref": 7, "amount": Decimal("1.25")}]
+    src = profile_rows(rows, list(types), ["id"], None, types=types, engine="postgresql")
+    ext = profile_rows([{k: str(v) for k, v in r.items()} for r in rows], list(types), ["id"], sorted(src.totals),
+                       types=types, engine="postgresql")
+    out = judge_table(name="t", source=src, extract=ext, key_columns=["id"], seal_ok=True, parity=PARITY,
+                      not_measured=[])
+    totals = {c["column"]: c for c in out["control_totals"]}
+    for col in ("ssn", "ref"):  # a sensitive name, and a card number found in the values
+        assert totals[col]["masked"] is True and totals[col]["match"] is True
+        assert totals[col]["source"] == totals[col]["extract"] == {"sum": None, "min": None, "max": None}
+    assert totals["amount"]["masked"] is False and totals["amount"]["source"]["max"] == "2.50"
+    assert "123456789" not in json.dumps(out) and "4111111111111111" not in json.dumps(out)
+    changed = profile_rows([dict(r, ssn=r["ssn"] + 1) for r in rows], list(types), ["id"], sorted(src.totals),
+                           types=types, engine="postgresql")
+    differs = judge_table(name="t", source=src, extract=changed, key_columns=["id"], seal_ok=True, parity=PARITY,
+                          not_measured=[])
+    assert {c["column"]: c for c in differs["control_totals"]}["ssn"]["match"] is False
