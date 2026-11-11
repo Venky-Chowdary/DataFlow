@@ -704,6 +704,30 @@
   fill: var(--df-surface);
 }
 
+/* Shapes per heatmap state (review U3): check, ring, dash, slash. */
+.df2-parity-heat-glyph {
+  fill: none;
+  stroke: var(--df-surface);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.df2-parity-heat-glyph.is-sampled {
+  stroke: var(--df-text-tertiary);
+}
+
+.df2-parity-heat-glyph.is-none {
+  stroke: var(--df-text-tertiary);
+}
+
+.df2-parity-legend svg.df2-parity-legend-swatch {
+  background: none;
+  border: 0;
+  overflow: visible;
+}
+
 .df2-parity-legend {
   display: flex;
   flex-wrap: wrap;

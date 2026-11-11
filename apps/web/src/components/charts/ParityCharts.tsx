@@ -7,6 +7,7 @@
  * Scale maths lives in lib/chartScale.ts, where it is unit-tested.
  */
 
+import { useId } from "react";
 import { ProgressRing } from "../ui/ProgressRing";
 import { useElementWidth } from "./useElementWidth";
 import {
@@ -310,6 +311,29 @@ function heatClass(cell: string): string {
   return HEAT_KNOWN.has(cell) ? cell.replace("_", "-") : "none";
 }
 
+/**
+ * Every state carries its own shape, so no two states differ by colour alone:
+ * proven a check, sampled a ring, explained a dash, unexplained a dot (larger
+ * when large), not checked a slash.
+ */
+function HeatGlyph({ cell, cx, cy }: { cell: string; cx: number; cy: number }) {
+  const state = HEAT_KNOWN.has(cell) ? cell : "none";
+  const cls = `df2-parity-heat-glyph is-${heatClass(state)}`;
+  switch (state) {
+    case "proven":
+      return <polyline className={cls} points={`${cx - 3.5},${cy} ${cx - 1},${cy + 2.5} ${cx + 3.5},${cy - 2.5}`} aria-hidden />;
+    case "sampled":
+      return <circle className={cls} cx={cx} cy={cy} r={2.8} aria-hidden />;
+    case "explained":
+      return <line className={cls} x1={cx - 3.5} y1={cy} x2={cx + 3.5} y2={cy} aria-hidden />;
+    case "unexplained_small":
+    case "unexplained_large":
+      return <circle className="df2-parity-heat-mark" cx={cx} cy={cy} r={state === "unexplained_large" ? 3.5 : 2} aria-hidden />;
+    default:
+      return <line className={cls} x1={cx - 3} y1={cy + 3} x2={cx + 3} y2={cy - 3} aria-hidden />;
+  }
+}
+
 /** Which table keeps drifting, in words. */
 export function heatmapSummary(heatmap: ParitySummary["heatmap"]): string {
   const runs = heatmap.job_ids.length;
@@ -353,11 +377,19 @@ export function TableRunHeatmap({ heatmap, runs = [] }: TableRunHeatmapProps) {
   const cellW = cols ? Math.max(14, (width - HEAT_LABEL_W - HEAT_GAP * cols) / cols) : 14;
   const svgW = HEAT_LABEL_W + cols * (cellW + HEAT_GAP);
   const svgH = rows * (HEAT_ROW_H + HEAT_GAP);
+  const tableId = useId();
 
   return (
     <div className="df2-parity-heat">
       <div ref={ref} className="df2-parity-scroll">
-        <svg width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`} role="img" aria-label={summary}>
+        <svg
+          width={svgW}
+          height={svgH}
+          viewBox={`0 0 ${svgW} ${svgH}`}
+          role="img"
+          aria-label={summary}
+          aria-describedby={tableId}
+        >
           <title>{summary}</title>
           {heatmap.tables.map((table, r) => {
             const top = r * (HEAT_ROW_H + HEAT_GAP);
@@ -372,22 +404,13 @@ export function TableRunHeatmap({ heatmap, runs = [] }: TableRunHeatmapProps) {
                   const cell = heatmap.cells[r]?.[c] ?? "none";
                   const x = HEAT_LABEL_W + c * (cellW + HEAT_GAP);
                   const tip = `${table} · ${names.get(jobId) ?? jobId}: ${heatCellLabel(cell)}`;
-                  const unexplained = cell === "unexplained_small" || cell === "unexplained_large";
                   return (
                     <g key={`${jobId}-${c}`}>
                       <rect className={`df2-parity-heat-cell is-${heatClass(cell)}`} x={x} y={top} width={cellW} height={HEAT_ROW_H} rx="3">
                         <title>{tip}</title>
                       </rect>
-                      {/* A mark inside unexplained cells, so the state never rests on colour alone. */}
-                      {unexplained && (
-                        <circle
-                          className="df2-parity-heat-mark"
-                          cx={x + cellW / 2}
-                          cy={top + HEAT_ROW_H / 2}
-                          r={cell === "unexplained_large" ? 3.5 : 2}
-                          aria-hidden
-                        />
-                      )}
+                      {/* A shape per state, so the state never rests on colour alone. */}
+                      <HeatGlyph cell={cell} cx={x + cellW / 2} cy={top + HEAT_ROW_H / 2} />
                     </g>
                   );
                 })}
@@ -396,10 +419,36 @@ export function TableRunHeatmap({ heatmap, runs = [] }: TableRunHeatmapProps) {
           })}
         </svg>
       </div>
+      {/* The cells as a table for screen readers: titles inside role="img" are not reachable. */}
+      <table id={tableId} className="df2-sr-only">
+        <caption>Parity per table and run</caption>
+        <thead>
+          <tr>
+            <th scope="col">Table</th>
+            {heatmap.job_ids.map((jobId, c) => (
+              <th scope="col" key={`${jobId}-${c}`}>{names.get(jobId) ?? jobId}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {heatmap.tables.map((table, r) => (
+            <tr key={table}>
+              <th scope="row">{table}</th>
+              {heatmap.job_ids.map((jobId, c) => (
+                <td key={`${jobId}-${c}`}>{heatCellLabel(heatmap.cells[r]?.[c] ?? "none")}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
       <ul className="df2-parity-legend" aria-label="Legend">
         {HEAT_ORDER.map((cell) => (
           <li key={cell}>
-            <span className={`df2-parity-legend-swatch is-${heatClass(cell)}`} aria-hidden />
+            <svg className={`df2-parity-legend-swatch is-${heatClass(cell)}`} width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+              {/* Fill inherits the swatch's state colour. */}
+              <rect x="0" y="0" width="12" height="12" rx="2" />
+              <HeatGlyph cell={cell} cx={6} cy={6} />
+            </svg>
             {HEAT_CELL_LABELS[cell]}
           </li>
         ))}

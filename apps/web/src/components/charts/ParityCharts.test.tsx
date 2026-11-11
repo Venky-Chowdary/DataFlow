@@ -152,12 +152,32 @@ describe("TableRunHeatmap", () => {
   it("draws one cell per table and run, with a legend and a non-colour mark", () => {
     assert.equal((html.match(/class="df2-parity-heat-cell /g) || []).length, 24);
     assert.equal((html.match(/is-unexplained-large/g) || []).length, 2); // cell + legend swatch
-    assert.equal((html.match(/df2-parity-heat-mark/g) || []).length, 2);
+    // Unexplained cells carry a dot; the legend repeats each state's shape.
+    assert.equal((html.match(/df2-parity-heat-mark/g) || []).length, 2 + 2);
     for (const label of ["Proven", "All explained", "Unexplained, small", "Unexplained, large", "Not checked"]) {
-      assert.match(html, new RegExp(`</span>${label}</li>`));
+      assert.match(html, new RegExp(`</svg>${label}</li>`));
     }
     assert.match(html, /<title>payments · orders_daily · run 25: Unexplained, large<\/title>/);
     noLiteralColours(html);
+  });
+
+  it("gives every state its own shape, never colour alone (review U3)", () => {
+    const cells = summary.heatmap.cells.flat();
+    const glyphs = (cls: string) => (html.match(new RegExp(`df2-parity-heat-glyph is-${cls}"`, "g")) || []).length;
+    // One shape per cell of that state, plus one in the legend.
+    assert.equal(glyphs("proven"), cells.filter((c) => c === "proven").length + 1);
+    assert.equal(glyphs("explained"), cells.filter((c) => c === "explained").length + 1);
+    assert.equal(glyphs("none"), cells.filter((c) => c === "none").length + 1);
+    assert.equal(glyphs("sampled"), 1);
+  });
+
+  it("offers the cells as a table a screen reader can walk (review U3)", () => {
+    assert.match(html, /aria-describedby="([^"]+)"/);
+    const id = /aria-describedby="([^"]+)"/.exec(html)![1];
+    assert.match(html, new RegExp(`<table id="${id.replace(/[:]/g, "\\:")}" class="df2-sr-only">`));
+    assert.match(html, /<caption>Parity per table and run<\/caption>/);
+    assert.match(html, /<th scope="row">payments<\/th>/);
+    assert.match(html, /<td>Unexplained, large<\/td>/);
   });
 
   it("renders an unknown cell state as not checked instead of failing", () => {
