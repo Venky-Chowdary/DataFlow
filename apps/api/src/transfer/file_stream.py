@@ -1452,6 +1452,7 @@ def _kept_table_carriers(
     }
 
 
+@date_locale_scoped  # the order this file's dates settle is this load's, never the caller's next read
 def stream_file_to_database(
     content: bytes | str | os.PathLike,
     filename: str,
