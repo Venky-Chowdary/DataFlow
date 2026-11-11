@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+from services.brand_env import getenv_brand
+
 logger = logging.getLogger(__name__)
 
 #: Under the MCP client's own request timeout, so the caller gets our answer.
@@ -66,7 +68,8 @@ QUERY_DEADLINE_TOOLS = frozenset(
 
 
 def _seconds_from_env(name: str, default: float) -> float:
-    raw = os.environ.get(name, "")
+    """A positive number of seconds from ``DATAWRAP_<name>``, else ``DATAFLOW_<name>``."""
+    raw = getenv_brand(name, "") or ""
     try:
         value = float(raw) if raw.strip() else default
     except ValueError:
@@ -76,10 +79,8 @@ def _seconds_from_env(name: str, default: float) -> float:
 
 def deadline_seconds(tool: str = "") -> float:
     if tool in QUERY_DEADLINE_TOOLS:
-        return _seconds_from_env(
-            "DATAFLOW_QUERY_TOOL_DEADLINE_SECONDS", DEFAULT_QUERY_DEADLINE_SECONDS
-        )
-    return _seconds_from_env("DATAFLOW_TOOL_DEADLINE_SECONDS", DEFAULT_DEADLINE_SECONDS)
+        return _seconds_from_env("QUERY_TOOL_DEADLINE_SECONDS", DEFAULT_QUERY_DEADLINE_SECONDS)
+    return _seconds_from_env("TOOL_DEADLINE_SECONDS", DEFAULT_DEADLINE_SECONDS)
 
 
 @dataclass
