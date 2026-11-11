@@ -102,6 +102,11 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
             fields.setdefault("cursor_value", report["after"])
     else:
         _stamp_read_scope(mongo, job_id, fields)
+    # The next append compares against this run's baseline: record it before
+    # "completed" is visible, never after (it reads the whole destination).
+    from services.append_continuity import record_before_success_status
+
+    record_before_success_status()
     written = mongo.update_job_status(job_id, status, **fields)
     if written is not False:
         return written
