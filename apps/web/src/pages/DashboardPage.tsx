@@ -17,6 +17,7 @@ import { formatJobRoute, formatStreamNames, readJobStreamNames } from "../lib/jo
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { DtIcon } from "../components/DtIcon";
 import { DataPlaneFlow } from "../components/overview/DataPlaneFlow";
+import { MigrationHealthSection } from "../components/parity/MigrationHealthSection";
 import {
   StatusDonut,
   ThroughputChart,
@@ -49,7 +50,8 @@ interface DashboardPageProps {
   schedules?: PipelineSchedule[];
   onOpenConnectors?: () => void;
   onOpenJobs?: () => void;
-  onOpenJob?: (jobId: string) => void;
+  /** ``panel`` deep-links a job detail section (e.g. "trust-report"). */
+  onOpenJob?: (jobId: string, panel?: string) => void;
   onOpenPipeline?: (scheduleId: string) => void;
   onOpenSchedules?: () => void;
   onStartTransfer?: () => void;
@@ -352,6 +354,11 @@ export function DashboardPage({
             </div>
           </article>
         </section>
+
+        <MigrationHealthSection
+          onOpenJob={onOpenJob ? (jobId) => onOpenJob(jobId, "trust-report") : undefined}
+          onStartTransfer={onStartTransfer}
+        />
 
         <div className="df2-overview-v3-workspace">
           <div className="df2-overview-v3-main">

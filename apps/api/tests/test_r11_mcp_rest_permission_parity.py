@@ -38,6 +38,7 @@ REST_TWIN: dict[str, tuple[str, str]] = {
     "run_query": ("POST", "/api/v1/query/execute"),
     "list_jobs": ("GET", "/api/v1/jobs"),
     "get_job": ("GET", "/api/v1/jobs/job-1"),
+    "explain_parity": ("GET", "/api/v1/jobs/job-1/parity-report"),
     "open_job": ("GET", "/api/v1/jobs/job-1"),
     "get_preflight_run": ("GET", "/api/v1/preflight/runs/run-1"),
     "list_contracts": ("GET", "/api/v1/contracts"),

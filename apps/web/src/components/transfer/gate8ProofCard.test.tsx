@@ -184,7 +184,12 @@ describe("Gate8ProofCard signature isolation", () => {
     Object.defineProperty(input, "files", { configurable: true, value: [{ text: async () => '{"job_id":"job-a"}' }] });
     await React.act(async () => {
       input.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Verification reads the file and lazy-loads the API module before it
+      // posts; one macrotask is not always enough under load. Wait (bounded)
+      // for the request instead of for a fixed tick.
+      for (let i = 0; i < 50 && pending.length === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     });
     assert.equal(pending.length, 1, host?.textContent || "No mounted card");
   }

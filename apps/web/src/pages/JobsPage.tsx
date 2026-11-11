@@ -59,6 +59,7 @@ import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
+import { TrustReportTab } from "../components/parity/TrustReportTab";
 import { destHeadline, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
 import { readCoercedNullRows, formatStreamNames, jobEndpointLabels, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
@@ -276,7 +277,7 @@ interface JobsPageProps {
 }
 
 type JobFilter = "all" | "running" | "completed" | "failed";
-type JobDetailTab = "detail" | "mapping" | "quarantine" | "log";
+type JobDetailTab = "detail" | "mapping" | "quarantine" | "trust" | "log";
 
 function defaultDetailTab(status: string, rejectedRows: number): JobDetailTab {
   if (status === "completed_with_quarantine" || rejectedRows > 0) return "quarantine";
@@ -592,6 +593,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     } else if (focusPanel === "quarantine") {
       setDetailTab("quarantine");
       setEvidenceDrawer("quarantine");
+    } else if (focusPanel === "trust-report") {
+      setDetailTab("trust");
     }
     window.requestAnimationFrame(() => {
       document.getElementById(`job-item-${focusJobId}`)?.scrollIntoView({
@@ -1527,6 +1530,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                             { id: "detail" as const, label: "Detail", icon: "activity" },
                             { id: "mapping" as const, label: "Mapping", icon: "connectors", count: mappingCount || undefined },
                             { id: "quarantine" as const, label: "Quarantine", icon: "alert", count: rejectedCount || undefined, hidden: !showQuarantineTab },
+                            { id: "trust" as const, label: "Trust Report", icon: "shield" },
                             { id: "log" as const, label: "Log", icon: "jobs", count: logLineCount || undefined },
                           ] as const
                         ).filter((t) => !("hidden" in t && t.hidden)).map((tab) => (
@@ -1968,6 +1972,17 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                                 void onRefresh?.();
                                 if (childJobId) setSelectedId(childJobId);
                               }}
+                            />
+                          </div>
+                        )}
+
+                        {detailTab === "trust" && (
+                          <div className="df2-jobs-detail-pane">
+                            <TrustReportTab
+                              jobId={selected._id}
+                              jobStatus={presentedJobStatus(liveJob)}
+                              onOpenGate8={recon ? () => setEvidenceDrawer("gate8") : undefined}
+                              onOpenDetail={() => setDetailTab("detail")}
                             />
                           </div>
                         )}

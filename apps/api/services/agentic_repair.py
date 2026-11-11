@@ -391,6 +391,63 @@ def decide_proposal(
         return decided
 
 
+# ── Parity Studio fixes: the same proposal / decision record ─────────────────
+
+#: Proposals Parity Studio registers for the fixes a person decides on a job's
+#: Trust Report. They are decided there — where the fix is applied through the
+#: transfer path and re-checked — never through ``/repair/proposals/{id}/decide``.
+PARITY_SOURCE = "parity"
+
+
+def parity_proposal_id(job_id: str, fix_id: str) -> str:
+    import hashlib
+
+    return "repair_parity_" + hashlib.sha256(f"{job_id}|{fix_id}".encode("utf-8")).hexdigest()[:16]
+
+
+def propose_from_parity(*, job_id: str, fix: dict[str, Any]) -> RepairProposal:
+    """Register a Parity Studio fix as a repair proposal (idempotent per job and fix)."""
+    pid = parity_proposal_id(job_id, str(fix.get("id") or ""))
+    existing = get_proposal(pid)
+    if existing is not None:
+        return existing
+    proposal = RepairProposal(
+        id=pid,
+        job_id=job_id,
+        source=PARITY_SOURCE,
+        confidence="high",  # chosen by deterministic rules from the parity evidence
+        auto_applicable=False,  # Parity Studio applies nothing without a person's approval
+        summary=str(fix.get("title") or "Parity Studio fix"),
+        actions=[{
+            "kind": str(fix.get("action") or ""),
+            "fix_id": str(fix.get("id") or ""),
+            "label": str(fix.get("title") or ""),
+            "difference_ids": list(fix.get("difference_ids") or []),
+            "preview": fix.get("preview"),
+        }],
+        diagnosis={"detail": str(fix.get("detail") or "")},
+    )
+    with _LOCK:
+        _upsert_proposal(proposal)
+    _audit("propose_parity", {"proposal_id": pid, "job_id": job_id, "fix_id": fix.get("id")})
+    return proposal
+
+
+def record_outcome(proposal_id: str, *, applied: bool, result: str, actor: str = "") -> RepairProposal | None:
+    """Close an approved proposal whose apply finished later (a background re-sync)."""
+    with _LOCK:
+        existing = get_proposal(proposal_id)
+        if existing is None or existing.status not in ("approved",):
+            return existing
+        row = existing.to_dict()
+        row["status"] = "applied" if applied else "failed"
+        row["apply_result"] = {**dict(row.get("apply_result") or {}), "applied": applied, "result": result[:500]}
+        decided = _proposal_from_row(row)
+        _upsert_proposal(decided)
+    _audit("outcome", {"proposal_id": proposal_id, "actor": actor, "status": row["status"]})
+    return decided
+
+
 MUTATIVE_ACTION_KINDS = frozenset({"change_target_type", "add_transform", "map_column"})
 
 

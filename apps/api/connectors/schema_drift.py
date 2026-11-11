@@ -1171,10 +1171,14 @@ def widen_existing_columns_native(
     suppressed_out: dict[str, str] | None = None,
     temporal_fsp_without_backfill: bool = False,
     key_columns: list[str] | None = None,
+    dry_run: bool = False,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen columns that are now too narrow.
 
-    Returns the list of DDL statements executed.  ``backfill`` must be True for
+    Returns the list of DDL statements executed. With ``dry_run`` the catalog
+    is read and every check runs exactly as for a real widen, but no DDL is
+    executed: the statements it would execute are returned (a preview that
+    cannot drift from what runs).  ``backfill`` must be True for
     a general widen. A MySQL fractional-second widen still runs when
     ``temporal_fsp_without_backfill`` is set, because leaving TIMESTAMP(0)
     under a millisecond source drops digits the map already refused.
@@ -1297,7 +1301,10 @@ def widen_existing_columns_native(
                 if "TIMESTAMP" in old_family and "DATETIME" in new_family:
                     from services.timezone_policy import MYSQL_UTC_PIN_SQL
 
-                    cursor.execute(MYSQL_UTC_PIN_SQL)
+                    if dry_run:
+                        log.append(MYSQL_UTC_PIN_SQL)
+                    else:
+                        cursor.execute(MYSQL_UTC_PIN_SQL)
             # Session-level lock timeouts are now configured by each driver's
             # connection guard (e.g. apply_postgres_session_guards / apply_mysql_session_guards)
             # so ALTER COLUMN cannot hang forever on a contended table lock.
@@ -1307,7 +1314,8 @@ def widen_existing_columns_native(
                 )
                 mysql_modifies.append((ddl, col, existing_type, new_type))
                 continue
-            cursor.execute(ddl)
+            if not dry_run:
+                cursor.execute(ddl)
             log.append(ddl)
             logger.debug(
                 "Widened %s.%s from %s to %s", table_name, col, existing_type, new_type
@@ -1335,7 +1343,10 @@ def widen_existing_columns_native(
             raise_widen_refusal(col, existing_type, new_type, exc)
             raise
     if mysql_modifies:
-        log.extend(_execute_mysql_modifies(cursor, table_name, mysql_modifies))
+        if dry_run:
+            log.append(_combined_mysql_modify(mysql_modifies))
+        else:
+            log.extend(_execute_mysql_modifies(cursor, table_name, mysql_modifies))
     return log
 
 
@@ -1403,6 +1414,13 @@ def _key_widen_dependents(
         return []
 
 
+def _combined_mysql_modify(modifies: list[tuple[str, str, str, str]]) -> str:
+    """The one ``ALTER TABLE ... MODIFY a ..., MODIFY b ...`` for a table's MySQL widens."""
+    first = modifies[0][0]
+    head = first[: first.index(" MODIFY COLUMN ")]
+    return head + " " + ", ".join(m[0][m[0].index(" MODIFY COLUMN ") + 1:] for m in modifies)
+
+
 def _execute_mysql_modifies(
     cursor: Any, table_name: str, modifies: list[tuple[str, str, str, str]]
 ) -> list[str]:
@@ -1412,9 +1430,7 @@ def _execute_mysql_modifies(
     that would be too long, a lock timeout) leaves the table exactly as it was
     instead of half-migrated.
     """
-    first = modifies[0][0]
-    head = first[: first.index(" MODIFY COLUMN ")]
-    ddl = head + " " + ", ".join(m[0][m[0].index(" MODIFY COLUMN ") + 1:] for m in modifies)
+    ddl = _combined_mysql_modify(modifies)
     cols = ", ".join(m[1] for m in modifies)
     for attempt in range(1, WIDEN_LOCK_ATTEMPTS + 1):
         try:

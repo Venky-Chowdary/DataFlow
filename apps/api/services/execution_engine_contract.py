@@ -365,6 +365,49 @@ def append_rerun_refusal_error(reason: str) -> str:
     )
 
 
+def job_contract_flags(xfer_req: Any) -> tuple[bool, bool]:
+    """Whether the saved transfer request declares a merge key or a cursor.
+
+    The rerun/retry duplicate gate must check the *contract*, not the mode
+    family (C20): a declared primary/merge key collapses a second copy, and a
+    declared cursor means an incremental rerun continues from the persisted
+    watermark instead of re-reading committed rows.
+    """
+    try:
+        from services.sync_cursor import resolve_sync_contract
+
+        contract = resolve_sync_contract(
+            list(getattr(xfer_req, "stream_contracts", None) or [])
+        )
+    except Exception:  # noqa: BLE001 - a malformed contract must not 500 the route
+        contract = None
+    read_options = getattr(xfer_req, "read_options", None) or {}
+    source_filter = getattr(xfer_req, "source_filter", None) or {}
+
+    def _field(*names: str) -> str:
+        for holder in (contract, read_options, source_filter):
+            if holder is None:
+                continue
+            for name in names:
+                try:
+                    if isinstance(holder, dict):
+                        val = holder.get(name)
+                    else:
+                        val = getattr(holder, name, None)
+                except Exception:  # noqa: BLE001
+                    val = None
+                if val:
+                    return str(val)
+        return ""
+
+    has_key = bool(
+        _field("primary_key", "dedupe_key", "upsert_key", "merge_key")
+        or (contract and getattr(contract, "primary_key", None))
+    )
+    has_cursor = bool(_field("cursor_field", "cursor", "cursor_column"))
+    return has_key, has_cursor
+
+
 def decide_job_rerun(
     *,
     status: str | None = None,
@@ -404,6 +447,25 @@ def decide_job_rerun(
         operator_requested=True,
         has_key_contract=has_key_contract,
         has_cursor_contract=has_cursor_contract,
+    )
+
+
+def decide_saved_job_rerun(job: dict | None, xfer_req: Any) -> dict[str, Any]:
+    """The re-run decision for a stored job and its saved request (``force`` aside).
+
+    One decision for every caller: ``POST /connectors/jobs/{id}/rerun`` and
+    Parity Studio's ``rerun`` fix, which offers a re-run only where this
+    route would start one.
+    """
+    rows_committed, rows_known = committed_rows_of(job)
+    has_key, has_cursor = job_contract_flags(xfer_req)
+    return decide_job_rerun(
+        status=(job or {}).get("status"),
+        sync_mode=getattr(xfer_req, "sync_mode", ""),
+        rows_committed=rows_committed,
+        rows_committed_known=rows_known,
+        has_key_contract=has_key,
+        has_cursor_contract=has_cursor,
     )
 
 

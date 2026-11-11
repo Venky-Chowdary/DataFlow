@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useToast } from "../Toast";
 import { HiddenFileInput } from "../ui/HiddenFileInput";
+import { downloadBlob } from "../../lib/downloadBlob";
 import {
   controlTotalEvidenceLabel,
   controlTotalEvidenceTitle,
@@ -27,7 +28,6 @@ import type {
   Gate8Reconciliation,
   Gate8SampleMismatch,
 } from "./gate8Status";
-import { downloadBlob } from "../../lib/downloadBlob";
 
 /**
  * The card renders the engine payload verbatim — one shape, defined in

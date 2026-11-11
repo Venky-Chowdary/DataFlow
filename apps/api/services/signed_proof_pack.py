@@ -803,6 +803,7 @@ def build_signed_proof_pack(
     anchor_in_chain: bool = False,
     governance_operations: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
+    parity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -917,6 +918,9 @@ def build_signed_proof_pack(
         or (preflight_summary or {}).get("control_totals")
         or {},
     }
+    if parity:
+        # Parity Studio sign-off: the verdict people signed and its own signature.
+        body["parity"] = parity
     from services.ai_egress import proof_pack_ai_egress
 
     body["ai_egress"] = proof_pack_ai_egress(job_id)
@@ -961,7 +965,7 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     if not isinstance(pack, dict):
         return {"ok": False, "errors": ["pack must be an object"]}
-    actual_hash, sig_errors = verify_body(pack, subject=str(pack.get("job_id") or ""))
+    actual_hash, sig_errors = verify_body(pack, subject=pack_subject(pack))
     errors.extend(sig_errors)
     assurance = pack.get("assurance") if isinstance(pack.get("assurance"), dict) else {}
     if assurance.get("migration_proven") and assurance.get("claim_level") != "full_checksum":
@@ -988,7 +992,8 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
                 "chain_anchor digest does not match this pack's content — the pack "
                 "was altered after it was sealed, or the anchor belongs to another pack"
             )
-    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
+    kind = PARITY_PACK_KIND if pack.get("kind") == PARITY_PACK_KIND else "proof_pack"
+    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash, "kind": kind}
 
 
 def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
@@ -1154,4 +1159,55 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         anchor_in_chain=True,
         governance_operations=_collect_governance_for_pack(job),
         timing=_timing_for_pack(dest),
+        parity=parity_section_for_pack(job),
     )
+
+
+def parity_section_for_pack(job: dict[str, Any]) -> dict[str, Any] | None:
+    """The signed Parity Studio verdict on a job, as the proof pack carries it."""
+    state = job.get("parity") if isinstance(job.get("parity"), dict) else {}
+    signed = state.get("signed") if isinstance(state.get("signed"), dict) else None
+    if not signed:
+        return None
+    report = (signed.get("pack") or {}).get("parity") or {}
+    return {
+        "verdict": report.get("verdict"),
+        "unexplained": (report.get("parity") or {}).get("unexplained"),
+        "approvals": (report.get("signoff") or {}).get("approvals") or [],
+        "signed_at": signed.get("signed_at"),
+        "content_sha256": signed.get("content_sha256"),
+        "signature": signed.get("signature"),
+    }
+
+
+PARITY_PACK_KIND = "parity_report"
+
+
+def pack_subject(pack: dict[str, Any]) -> str:
+    """The HMAC subject of a signed pack: domain-separated by its ``kind``.
+
+    A Parity Studio pack is signed for ``parity_report:<job id>``, a proof pack
+    for ``<job id>``, so neither signature verifies as the other kind (``kind``
+    is inside the hashed body, so relabelling a pack breaks its hash too).
+    """
+    job_id = str(pack.get("job_id") or "")
+    return f"{PARITY_PACK_KIND}:{job_id}" if pack.get("kind") == PARITY_PACK_KIND else job_id
+
+
+def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str) -> dict[str, Any]:
+    """Sign a final parity report with the proof-pack key, in its own signature domain.
+
+    Same envelope as the proof pack (``content_sha256`` + HMAC), so
+    ``POST /transfer/proof-pack/verify`` verifies it — but over the subject
+    ``parity_report:<job id>`` (:func:`pack_subject`), and the verify answer
+    names the ``kind`` it verified.
+    """
+    body = {
+        "version": PROOF_PACK_VERSION,
+        "kind": PARITY_PACK_KIND,
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+        "job_id": job_id,
+        "actor": actor,
+        "parity": report,
+    }
+    return sign_body(body, subject=pack_subject(body))

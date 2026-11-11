@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from services.ops_events import emit_event
+from services.remediation_actions import STUDIO, kinds_for
+from services.remediation_actions import action as remediation_action
 from services.value_serializer import json_default
 from services.workspace_filter import bound_allows, current_workspace_filter
 
@@ -30,6 +32,7 @@ from ..rag.query_analysis import (
 )
 from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
+from .parity_tools import PARITY_TOOL_DEFINITIONS
 from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
@@ -479,16 +482,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": [
-                        "normalize_control_chars",
-                        "open_bad_data_fix",
-                        "quarantine_and_rerun",
-                        "review_mappings",
-                        "rerun_preflight",
-                    ],
-                },
+                "kind": {"type": "string", "enum": list(kinds_for(STUDIO))},
                 "run_id": {"type": "string"},
                 **_WORKSPACE_PROP,
             },
@@ -1663,6 +1657,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {"type": "object", "properties": {**_WORKSPACE_PROP}, "required": []},
     },
     *LIFECYCLE_TOOL_DEFINITIONS,
+    *PARITY_TOOL_DEFINITIONS,
 ]
 
 TOOL_FAMILIES: list[dict] = [
@@ -1722,6 +1717,7 @@ TOOL_FAMILIES: list[dict] = [
         "tools": [
             "list_jobs",
             "get_job",
+            "explain_parity",
             "navigate",
             "get_preflight_run",
             "remediate_validation",
@@ -1928,6 +1924,7 @@ class DataPilotTools:
             "navigate": self._navigate,
             "get_preflight_run": self._get_preflight_run,
             "remediate_validation": self._remediate_validation,
+            "explain_parity": self._explain_parity,
             "compare_datasets": self._compare_datasets,
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
@@ -2904,20 +2901,20 @@ class DataPilotTools:
             )
         return ToolResult(name="get_preflight_run", success=True, output=record)
 
+    def _explain_parity(self, job_id: str = "", selector: str = "") -> ToolResult:
+        from .parity_tools import explain_parity
+
+        return explain_parity(job_id=job_id, selector=selector)
+
     def _remediate_validation(
         self,
         kind: str = "",
         run_id: str = "",
         workspace_id: str = "",
     ) -> ToolResult:
-        allowed = {
-            "normalize_control_chars",
-            "open_bad_data_fix",
-            "quarantine_and_rerun",
-            "review_mappings",
-            "rerun_preflight",
-        }
-        if kind not in allowed:
+        allowed = kinds_for(STUDIO)
+        chosen = remediation_action(kind, STUDIO)
+        if chosen is None:
             return ToolResult(
                 name="remediate_validation",
                 success=False,
@@ -2938,19 +2935,12 @@ class DataPilotTools:
                         "Ask the user for the pf_… ID shown on Validate."
                     ),
                 )
-        labels = {
-            "normalize_control_chars": "Normalize control characters…",
-            "open_bad_data_fix": "Fix bad data…",
-            "quarantine_and_rerun": "Quarantine bad rows and re-run…",
-            "review_mappings": "Open Map step to review mappings",
-            "rerun_preflight": "Re-run Validate",
-        }
-        requires_confirm = kind in {"open_bad_data_fix", "quarantine_and_rerun"}
+        requires_confirm = chosen.requires_confirm
         ack_id = ""
         if requires_confirm:
             from .ack_ledger import get_ack_ledger
 
-            destructive = kind == "quarantine_and_rerun"
+            destructive = chosen.destructive
             payload = {
                 "remediation_kind": kind,
                 "run_id": cited or None,
@@ -2963,7 +2953,7 @@ class DataPilotTools:
                 preview={
                     "remediation_kind": kind,
                     "run_id": cited or None,
-                    "label": labels[kind],
+                    "label": chosen.label,
                     "destructive": destructive,
                 },
             )
@@ -2973,11 +2963,11 @@ class DataPilotTools:
             output={
                 "action": "studio",
                 "kind": kind,
-                "label": labels[kind],
+                "label": chosen.label,
                 "run_id": cited or None,
                 "risk": "mutate" if requires_confirm else "safe",
                 "requires_confirm": requires_confirm,
-                "destructive": kind == "quarantine_and_rerun",
+                "destructive": chosen.destructive,
                 "ui_only": not requires_confirm,
                 **({"ack_id": ack_id} if ack_id else {}),
                 "note": (

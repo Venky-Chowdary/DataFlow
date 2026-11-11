@@ -390,6 +390,8 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/mcp/", Permission.AI_USE),
     # Job history under its own name (QA enterprise #50): a read every role holds.
     ("GET", "/api/v1/jobs/", Permission.JOB_READ),
+    # Parity Studio's workspace summary reads stored job evidence only.
+    ("GET", "/api/v1/parity/", Permission.JOB_READ),
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/query/", Permission.QUERY_USE),
@@ -463,6 +465,16 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ),
     ("POST", "/api/v1/transfer/{job_id}/rollback/execute", Permission.JOB_MANAGE),
     ("POST", "/api/v1/repair/proposals/{proposal_id}/decide", Permission.JOB_MANAGE),
+    # Parity Studio. Explaining stores the explanation and the fix order on the
+    # job (audited), so it is job.run; signing attests the report, so it needs
+    # job.manage (and services.parity_authority binds each sign-off role to the
+    # signer's workspace role). Deciding a fix is a repair decision recorded in
+    # services.agentic_repair (ALTER TABLE, a re-sync, a re-run), so it is the
+    # same permission as /repair/proposals/{id}/decide: job.manage.
+    ("POST", "/api/v1/jobs/{job_id}/parity-report/explain", Permission.JOB_RUN),
+    ("POST", "/api/v1/jobs/{job_id}/parity-report/signoff", Permission.JOB_MANAGE),
+    ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/approve", Permission.JOB_MANAGE),
+    ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/dismiss", Permission.JOB_MANAGE),
     ("POST", "/api/v1/transfer/analyze", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/analyze-file", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/introspect", Permission.JOB_PLAN),

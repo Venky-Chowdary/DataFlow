@@ -104,6 +104,8 @@ _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _NULL_SENTINEL = "\x00NULL\x00"
+#: Characters of a sample mismatch value Gate-8 stores (``sample_compare.mismatches``).
+STORED_MISMATCH_VALUE_CHARS = 120
 
 _INTERVAL_DDL_RE = re.compile(r"interval", re.I)
 
@@ -4812,11 +4814,11 @@ def sample_compare_rows(
                         "source_value": operator_binary_cell_text(
                             operator_cell_text(src_val),
                             str((dest_types or {}).get(tgt_col) or ""),
-                        )[:120],
+                        )[:STORED_MISMATCH_VALUE_CHARS],
                         "target_value": operator_binary_cell_text(
                             operator_cell_text(tgt_val),
                             str((dest_types or {}).get(tgt_col) or ""),
-                        )[:120],
+                        )[:STORED_MISMATCH_VALUE_CHARS],
                     }
                 )
                 if len(mismatches) >= 10:

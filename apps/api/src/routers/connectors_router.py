@@ -41,6 +41,7 @@ from ..transfer.connector_registry import run_probe
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 from services.ops_events import emit_event
+from services.execution_engine_contract import job_contract_flags
 
 logger = logging.getLogger(__name__)
 
@@ -55,47 +56,8 @@ def _refresh_saved_connectors(xfer_req: Any) -> None:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-def _job_contract_flags(xfer_req: Any) -> tuple[bool, bool]:
-    """Whether the saved transfer request declares a merge key or a cursor.
-
-    The rerun/retry duplicate gate must check the *contract*, not the mode
-    family (C20): a declared primary/merge key collapses a second copy, and a
-    declared cursor means an incremental rerun continues from the persisted
-    watermark instead of re-reading committed rows.
-    """
-    try:
-        from services.sync_cursor import resolve_sync_contract
-
-        contract = resolve_sync_contract(
-            list(getattr(xfer_req, "stream_contracts", None) or [])
-        )
-    except Exception:  # noqa: BLE001 - a malformed contract must not 500 the route
-        contract = None
-    read_options = getattr(xfer_req, "read_options", None) or {}
-    source_filter = getattr(xfer_req, "source_filter", None) or {}
-
-    def _field(*names: str) -> str:
-        for holder in (contract, read_options, source_filter):
-            if holder is None:
-                continue
-            for name in names:
-                try:
-                    if isinstance(holder, dict):
-                        val = holder.get(name)
-                    else:
-                        val = getattr(holder, name, None)
-                except Exception:  # noqa: BLE001
-                    val = None
-                if val:
-                    return str(val)
-        return ""
-
-    has_key = bool(
-        _field("primary_key", "dedupe_key", "upsert_key", "merge_key")
-        or (contract and getattr(contract, "primary_key", None))
-    )
-    has_cursor = bool(_field("cursor_field", "cursor", "cursor_column"))
-    return has_key, has_cursor
+# The rerun/retry duplicate gate's contract flags live with the decision itself.
+_job_contract_flags = job_contract_flags
 
 
 def _actor_email(request: Request) -> str:
@@ -1183,20 +1145,12 @@ async def rerun_transfer_job(
 
         from services.execution_engine_contract import (
             committed_rows_of,
-            decide_job_rerun,
+            decide_saved_job_rerun,
             rerun_refusal_detail,
         )
 
         rows_committed, rows_known = committed_rows_of(job)
-        _has_key, _has_cursor = _job_contract_flags(xfer_req)
-        decision = decide_job_rerun(
-            status=job.get("status"),
-            sync_mode=getattr(xfer_req, "sync_mode", ""),
-            rows_committed=rows_committed,
-            rows_committed_known=rows_known,
-            has_key_contract=_has_key,
-            has_cursor_contract=_has_cursor,
-        )
+        decision = decide_saved_job_rerun(job, xfer_req)
         if not decision["allowed"] and not force:
             detail = rerun_refusal_detail(decision["reason"])
             detail["rows_committed"] = rows_committed if rows_known else None
