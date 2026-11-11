@@ -35,6 +35,7 @@ def sign_off(
     given against, so a concurrent change is a 409, never a signature on a
     report nobody saw.
     """
+    from services.parity_fixes import summarized
     from services.parity_report import build_parity_report, public_report
     from services.signed_proof_pack import build_signed_parity_pack
 
@@ -52,7 +53,11 @@ def sign_off(
     if signoff["status"] == "blocked":
         raise ParityConflict(str(signoff["blocked_reason"] or "Sign-off is blocked."))
 
-    def approve(_job: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
+    def approve(job_now: dict[str, Any], state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        pack = _approve(state)
+        return summarized(job_now, state, job_id), pack
+
+    def _approve(state: dict[str, Any]) -> dict[str, Any] | None:
         approvals = list(state["approvals"])
         if state.get("signed"):
             raise ParityConflict("This report is already signed.")
@@ -80,13 +85,14 @@ def sign_off(
         }
         return pack
 
-    updated, state, pack = update_state(job_id, approve, expected_version=int(report["version"]))
+    _updated, state, (after, pack) = update_state(job_id, approve, expected_version=int(report["version"]))
     audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
           details={"role": role, "note": note, "verdict": report["verdict"]})
     if pack:
         audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
               details={"signed": True, "content_sha256": pack["content_sha256"], "roles": sorted(roles)})
-    return build_parity_report(updated, reread=True, job_id=job_id)
+    after["version"] = int(state["version"])
+    return after
 
 
 def signed_pack(job: dict[str, Any]) -> dict[str, Any] | None:

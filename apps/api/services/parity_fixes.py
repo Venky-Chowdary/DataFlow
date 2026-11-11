@@ -394,7 +394,6 @@ def approve_fix(
     *claimed* (status ``applying``) by that compare-and-swap — the round limit
     is checked inside it — then applied, then settled.
     """
-    from services.parity_report import build_parity_report
 
     job, report, fix = _decision_report(job_id, fix_id, expected_version)
     if not fix["applicable"]:
@@ -406,7 +405,7 @@ def approve_fix(
     before = report["parity"]["unexplained"]
 
     if fix["action"] == "accept":
-        def accept(_job: dict[str, Any], state: dict[str, Any]) -> None:
+        def accept(job_now: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
             _still_proposed(state, fix_id)
             for did in fix["difference_ids"]:
                 state["acceptances"][did] = {"by": actor, "at": now_iso(), "note": note, "fix_id": fix_id}
@@ -414,10 +413,11 @@ def approve_fix(
                 **record, "status": "applied", "applied_at": now_iso(),
                 "result": f"Accepted {len(fix['difference_ids'])} difference(s).",
             }
+            return summarized(job_now, state, job_id)
 
-        updated, state, _ = update_state(job_id, accept, expected_version=version)
+        _updated, state, after = update_state(job_id, accept, expected_version=version)
+        _with_state(after, state)
         audit("job.parity.fix_approved", job=job, job_id=job_id, actor=actor, details=details)
-        after = build_parity_report(updated, reread=True, job_id=job_id)
         audit("job.parity.fix_applied", job=job, job_id=job_id, actor=actor,
               details={**details, "result": state["fixes"][fix_id]["result"],
                        "unexplained_after": after["parity"]["unexplained"]})
@@ -478,7 +478,7 @@ def settle_fix(
             raise ParityConflict(f"Fix {fix_id} is not being applied.")
         record.update(status="applied" if ok else "failed", applied_at=now_iso(), result=result)
         if not ok:
-            return build_parity_report({**job, "parity": state}, reread=True, job_id=job_id)
+            return summarized(job, state, job_id)
         after = build_parity_report({**job, "parity": state}, reread=True, job_id=job_id)
         if record["action"] in {"resync_keys", "widen_column"}:
             still = {k for d in after["differences"] if not d["cause"]["explained"] for k in d["_keys"]}
@@ -491,7 +491,7 @@ def settle_fix(
                 "n": len(state["rounds"]) + 1, "at": now_iso(), "unexplained_before": before,
                 "unexplained_after": after["parity"]["unexplained"], "fix_id": fix_id,
             })
-        return after
+        return summarized(job, state, job_id)
 
     job, state, after = update_state(job_id, settle)
     record = state["fixes"][fix_id]
@@ -506,6 +506,19 @@ def settle_fix(
     return _with_state(after, state)
 
 
+def summarized(job: dict[str, Any], state: dict[str, Any], job_id: str) -> dict[str, Any]:
+    """The report of ``state`` (re-read), with its compact summary set on ``state``.
+
+    Called inside a compare-and-swap change, so the dashboard summary is
+    written in the same write as the decision that changed it.
+    """
+    from services.parity_report import build_parity_report, compact_summary
+
+    report = build_parity_report({**job, "parity": state}, reread=True, job_id=job_id)
+    state["summary"] = compact_summary(report)
+    return report
+
+
 def _with_state(report: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     report["version"] = int(state.get("version") or 0)
     report["rounds"] = list(state.get("rounds") or [])
@@ -515,17 +528,17 @@ def _with_state(report: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]
 def dismiss_fix(
     job_id: str, fix_id: str, *, actor: str, note: str = "", expected_version: int | None = None,
 ) -> dict[str, Any]:
-    from services.parity_report import build_parity_report
 
     job, report, fix = _decision_report(job_id, fix_id, expected_version)
     note = note[:500]
 
-    def dismiss(_job: dict[str, Any], state: dict[str, Any]) -> None:
+    def dismiss(job_now: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         _still_proposed(state, fix_id)
         state["fixes"][fix_id] = {**public_fix(fix), "status": "dismissed", "approved_by": actor,
                                   "decided_at": now_iso(), "note": note, "result": note or None}
+        return summarized(job_now, state, job_id)
 
-    updated, _state, _ = update_state(job_id, dismiss, expected_version=int(report["version"]))
+    _updated, state, after = update_state(job_id, dismiss, expected_version=int(report["version"]))
     audit("job.parity.fix_dismissed", job=job, job_id=job_id, actor=actor,
           details={"fix_id": fix_id, "action": fix["action"], "note": note})
-    return build_parity_report(updated, reread=True, job_id=job_id)
+    return _with_state(after, state)
