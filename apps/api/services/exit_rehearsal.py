@@ -313,6 +313,13 @@ def _failed_reason(job: dict[str, Any]) -> str:
     return f"The extract job ended {job.get('status') or 'without a status'}: {error}"
 
 
+def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> dict[str, str]:
+    """The source table's declared column types (they steer the digest of both sides)."""
+    from services.source_schema_authority import endpoint_source_column_types
+
+    return endpoint_source_column_types(_source_endpoint(doc["source"], table, doc["workspace_id"]))
+
+
 def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     """One table's RehearsalTable (contract 4) from its finished job."""
     from services.exit_completeness import judge_table, profile_extract, profile_rows, source_columns_and_rows
@@ -342,11 +349,15 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         gaps.append(f"Parity Studio could not read the extract job's evidence ({type(exc).__name__})")
     keys = list(table.get("key_columns") or [])
     source = extract = None
+    types: dict[str, str] = {}
+    engine = ""
     try:
         endpoint = _source_endpoint(doc["source"], table, doc["workspace_id"])
+        engine = str(getattr(endpoint, "format", "") or "").lower()
+        types = _declared_types(doc, table)
         columns, rows, close = source_columns_and_rows(endpoint)
         try:
-            source = profile_rows(rows, columns, keys, None)
+            source = profile_rows(rows, columns, keys, None, types=types, engine=engine)
         finally:
             close()
     except Exception as exc:  # noqa: BLE001 - not measured is a named gap, never a pass
@@ -357,7 +368,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         extract, digest, size = profile_extract(
             part, local_path=local_path, fmt=doc["extract_format"],
             columns=source.columns if source else [], key_columns=keys,
-            numeric=sorted(source.totals) if source else [],
+            numeric=sorted(source.totals) if source else [], types=types, engine=engine,
         )
         if part["storage"] == "object_store":
             seal_ok = digest == part["sha256"] and size == part["size_bytes"]

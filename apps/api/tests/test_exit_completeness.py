@@ -24,11 +24,14 @@ from services.exit_completeness import (
 from services.exit_rehearsal import duration_block
 
 
+TYPES = {"id": "BIGINT", "amount": "DECIMAL(12,2)"}
+
+
 def _profiles(**ext_over):
     rows = [{"id": i, "amount": Decimal(i) / 4} for i in range(1, 11)]
-    src = profile_rows(rows, ["id", "amount"], ["id"], None)
+    src = profile_rows(rows, ["id", "amount"], ["id"], None, types=TYPES, engine="postgresql")
     ext = profile_rows([{k: str(v) for k, v in r.items()} for r in rows], ["id", "amount"], ["id"],
-                       sorted(src.totals))
+                       sorted(src.totals), types=TYPES, engine="postgresql")
     for k, v in ext_over.items():
         setattr(ext, k, v)
     return src, ext

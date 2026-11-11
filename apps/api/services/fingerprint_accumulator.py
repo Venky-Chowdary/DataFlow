@@ -47,8 +47,11 @@ class FingerprintAccumulator:
     without holding every row's fingerprint in RAM.
     """
 
-    def __init__(self, threshold: int | None = None) -> None:
+    def __init__(self, threshold: int | None = None, *, keep_fingerprints: bool = True) -> None:
+        """``keep_fingerprints=False`` keeps only the additive digest and the per-column
+        digests (no buffer, no spill to disk); :meth:`digest` is then not available."""
         self.threshold = threshold or SPILL_THRESHOLD
+        self.keep_fingerprints = keep_fingerprints
         self.buffer: list[tuple[str, str]] = []
         self.chunk_files: list[str] = []
         self.total = 0
@@ -67,7 +70,8 @@ class FingerprintAccumulator:
         self._progress_noted = self.total
 
     def add(self, key: str, fingerprint: str) -> None:
-        self.buffer.append((key, fingerprint))
+        if self.keep_fingerprints:
+            self.buffer.append((key, fingerprint))
         self.total += 1
         self.columns.add(fingerprint)
         # Order-independent additive digest: sum of per-row fingerprint
@@ -169,6 +173,8 @@ class FingerprintAccumulator:
 
     def digest(self) -> str:
         """Full SHA-256 hex digest (audit §2.8 — never truncate to 64 bits)."""
+        if not self.keep_fingerprints:
+            raise ValueError("this accumulator keeps only the additive digest")
         self._flush_progress()
         h = hashlib.sha256()
         for _, fp in self._sorted_stream():
