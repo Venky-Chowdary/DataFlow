@@ -261,26 +261,56 @@ _SIDE_EFFECT_FUNCTIONS = frozenset({
     # side-channel drivers (pg dblink, mysql locks/files, mssql xp_)
     "get_lock", "release_lock", "load_file",
     "xp_cmdshell", "xp_dirtree", "xp_fileexist", "xp_regread", "xp_regwrite",
-    "openrowset", "opendatasource", "bulk",
+    "openrowset", "opendatasource", "openquery", "bulk",
+    # mssql server-file readers
+    "fn_xe_file_target_read_file", "fn_trace_gettable", "fn_get_audit_file",
+    "fn_dblog", "fn_dump_dblog",
+    # pg: run a statement passed as a string, so the scan never sees it
+    "query_to_xml", "query_to_xmlschema", "query_to_xml_and_xmlschema",
+    "cursor_to_xml", "cursor_to_xmlschema", "xpath_table", "ts_stat", "ts_rewrite",
+    "connectby",
+    # oracle URI / file object constructors (HTTP and file reads from a SELECT)
+    "httpuritype", "dburitype", "xdburitype", "uritype", "bfilename",
+    # bigquery federated pass-through
+    "external_query",
     # oracle administrative packages are prefixed dbms_/utl_ below
 })
 _SIDE_EFFECT_PREFIXES = (
     "dblink", "lo_", "dbms_", "utl_", "sys_exec", "sys_eval", "sp_",
+    # mssql extended procedures, pg tablefunc crosstabN, snowflake account control
+    "xp_", "crosstab", "system$",
 )
 
-_FUNC_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+# A call's whole dotted name: ``utl_http.request(``, ``sys.dbms_xmlgen.getxml(``,
+# ``master..xp_cmdshell(``, and Oracle's remote form ``pkg.fn@dblink(``.
+# Capturing only the identifier before ``(`` read ``request`` / ``getxml`` and
+# never met the package prefix (audit M-5).
+_FUNC_CALL_RE = re.compile(
+    r"(?<![A-Za-z0-9_$#.@])"
+    r"((?:[A-Za-z_][A-Za-z0-9_$#]*\s*\.\s*(?:\.\s*)?)*[A-Za-z_][A-Za-z0-9_$#]*)"
+    r"(?:\s*@\s*[A-Za-z0-9_$#.]+)?\s*\("
+)
+
+
+def _is_side_effect_name(name: str) -> bool:
+    return name in _SIDE_EFFECT_FUNCTIONS or name.startswith(_SIDE_EFFECT_PREFIXES)
 
 
 def _has_side_effect_functions(sql: str) -> bool:
-    """True when a read query invokes a function with session/server side effects."""
+    """True when a read query invokes a function with session/server side effects.
+
+    Every part of a qualified name is judged: the function itself against the
+    names and prefixes, and each qualifier (schema, package, type) against the
+    prefixes, so a package is refused whatever member is called on it.
+    """
     from services.sql_literals import sql_call_views
 
     for scrubbed in sql_call_views(sql or ""):
         for match in _FUNC_CALL_RE.finditer(scrubbed):
-            name = match.group(1).lower()
-            if name in _SIDE_EFFECT_FUNCTIONS:
+            *qualifiers, name = (part.strip().lower() for part in match.group(1).split(".") if part.strip())
+            if _is_side_effect_name(name):
                 return True
-            if any(name.startswith(prefix) for prefix in _SIDE_EFFECT_PREFIXES):
+            if any(q.startswith(_SIDE_EFFECT_PREFIXES) for q in qualifiers):
                 return True
     return False
 
@@ -1436,6 +1466,15 @@ def _apply_read_only_session(conn: Any, db_type: str) -> None:
             # transaction. Its guard is the connect-time config in
             # _duckdb_playground_engine.
             conn.execute(text("PRAGMA query_only = ON"))
+        elif _is_oracle_connector(db):
+            # Must be the transaction's first statement, which it is: this
+            # runs first on a fresh connection checkout. DML and SELECT ... FOR
+            # UPDATE then fail with ORA-01456 (audit M-5).
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+        # SQL Server / Azure SQL / Synapse: T-SQL has no read-only transaction,
+        # and a session-level SET would follow the pooled connection to the
+        # next writer. The guard there is the statement filter, and that this
+        # connection is closed without a commit.
     except Exception as exc:
         logging.getLogger(__name__).debug(
             "read-only session option not applied on %s: %s", db, exc
