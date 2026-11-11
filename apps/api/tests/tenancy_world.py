@@ -139,6 +139,13 @@ def tenancy_world(tmp_path, monkeypatch) -> Iterator[TenancyWorld]:
     monkeypatch.setattr(resource_acl, "STORE_PATH", tmp_path / "resource-acls.jsonl")
     monkeypatch.setattr(transfer_plan_store, "STORE_PATH", tmp_path / "transfer_plans.json")
     monkeypatch.setattr(tenant_store, "STORE_PATH", tmp_path / "tenants.json")
+    # Jobs seeded here have no owner process. The app's orphan sweep is right
+    # to reclaim such a job, so it must not run under these tests: neither one
+    # started by this app's warm-up nor a sweeper an earlier test left running.
+    from services.orphan_jobs import stop_orphan_sweeper
+
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+    stop_orphan_sweeper()
     # One in-memory job store per test: jobs seeded here are the jobs the
     # routes (and every store that follows a job to its workspace) read.
     jobs = mongodb_service.MemoryMongoDBService()

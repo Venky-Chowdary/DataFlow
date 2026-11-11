@@ -195,7 +195,7 @@ def test_mongo_backed_proposals_are_scoped_and_legacy_rows_adopted(tenancy_world
     )
     try:
         client.admin.command("ping")
-    except Exception:
+    except pymongo.errors.PyMongoError:
         pytest.skip("MongoDB is not running")
     from services import agentic_repair as ar
 

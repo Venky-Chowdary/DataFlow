@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from services.brand_env import getenv_brand
 from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
 from services.safe_errors import safe_http_exception
