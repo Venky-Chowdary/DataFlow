@@ -64,19 +64,10 @@ def merkle_leaf(part: dict[str, Any]) -> bytes:
 
 def merkle_root(parts: Iterable[dict[str, Any]]) -> str:
     """RFC 6962 Merkle tree hash over the parts, sorted by table name."""
+    from services.ledger_merkle import root_of
+
     leaves = [merkle_leaf(p) for p in sorted(parts, key=lambda p: (str(p["table"]), str(p.get("name") or "")))]
-
-    def mth(items: list[bytes]) -> bytes:
-        if not items:
-            return hashlib.sha256(b"").digest()
-        if len(items) == 1:
-            return hashlib.sha256(b"\x00" + items[0]).digest()
-        k = 1
-        while k * 2 < len(items):
-            k *= 2
-        return hashlib.sha256(b"\x01" + mth(items[:k]) + mth(items[k:])).digest()
-
-    return "sha256:" + mth(leaves).hex()
+    return "sha256:" + root_of(leaves).hex()
 
 
 # -------------------------------------------------------------- measurement
