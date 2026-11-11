@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -434,7 +435,7 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
 
     # Which side requires TLS (QA r12 bug 8): the generic "SSL/TLS error" below
     # did not say whether to turn SSL on or off.
-    from .network_error_copy import network_failure_copy, tls_requirement_copy
+    from .network_error_copy import is_login_timeout, network_failure_copy, tls_requirement_copy
 
     tls_required = tls_requirement_copy(text, raw_s)
     if tls_required:
@@ -511,6 +512,11 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
             "SFTP path not found. The login succeeded; the remote folder or "
             "file does not exist. Check the remote directory."
         )
+
+    # SQL Server's "Login timeout expired" (HYT00) is the connect timeout; the
+    # auth rule below read its "login" as a refused password (D353).
+    if is_login_timeout(text):
+        return _with_cause(network_failure_copy(text, raw_s), raw_s)
 
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
@@ -786,9 +792,12 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
                 if early:
                     result = (False, early)
                 else:
+                    started = time.monotonic()
                     result = _run_probe_impl(db_type, cfg)
                     if not result[0]:
+                        waited = time.monotonic() - started
                         result = _name_protocol_mismatch(db_type, cfg, result)
+                        result = _name_silent_endpoint(db_type, cfg, result, waited)
         except EgressRefused as exc:
             op.failed(category="probe_failed")
             return False, str(exc)
@@ -843,6 +852,39 @@ def _name_protocol_mismatch(
     # resolved driver as ``db_type``.
     message = protocol_mismatch_message(str(cfg.get("type") or db_type), host, port)
     return (False, message) if message else result
+
+
+def _name_silent_endpoint(
+    db_type: str, cfg: dict[str, Any], result: tuple[bool, str], waited: float
+) -> tuple[bool, str]:
+    """A SQL handshake that timed out says whether the port accepted TCP (D353).
+
+    libpq's "timeout expired" and ODBC's "Login timeout expired" read the same
+    for a dropped SYN and for a proxy or tunnel that accepted the connection
+    and never forwarded it, and a dual-stack host added its unroutable
+    address's "Network is unreachable". One bare TCP connection, only after
+    such a failure, settles which it was.
+    """
+    from services.wire_protocol_sniff import tcp_answer
+
+    from .engine_family import SQL_DUPLEX_FAMILIES, engine_family
+    from .network_error_copy import observed_endpoint_copy, recheckable
+
+    kind = str(cfg.get("type") or db_type)
+    if cfg.get("connection_string") or not recheckable(result[1]):
+        return result
+    if engine_family(kind) not in SQL_DUPLEX_FAMILIES and resolve_driver_type(kind) != "generic_sql":
+        return result
+    host = str(cfg.get("host") or "")
+    try:
+        port = int(cfg.get("port") or default_port(resolve_driver_type(kind)) or 0)
+    except (TypeError, ValueError):
+        return result
+    copy = observed_endpoint_copy(tcp_answer(host, port), host, port, waited)
+    if not copy:
+        return result
+    _, _, cause = result[1].partition(" Driver: ")
+    return False, (f"{copy} Driver: {cause}" if cause else copy)
 
 
 _MONGO_UNREACHABLE = re.compile(
