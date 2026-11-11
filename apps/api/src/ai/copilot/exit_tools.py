@@ -116,7 +116,7 @@ def explain_exit_rehearsal(rehearsal_id: str = "", system_id: str = "") -> "Tool
         return _result(name, error="That rehearsal or system was not found in this workspace.")
     from services.exit_rehearsal import settle
 
-    rehearsal = settle(rehearsal["id"]) or rehearsal
+    rehearsal = settle(rehearsal["id"], inline=False) or rehearsal
     duration = rehearsal.get("duration") or {}
     seal = rehearsal.get("seal") or {}
     return _result(name, output={

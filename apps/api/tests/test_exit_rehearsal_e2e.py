@@ -270,3 +270,26 @@ def test_a_part_altered_in_the_bucket_breaks_the_seal(world, bucket):
     assert out["verdict"] == "incomplete"
     assert "seal" in {d["kind"] for d in table["differences"]}
     assert table["part"]["verified_on_read"] is False
+
+
+def test_a_read_never_verifies_on_the_request_thread(world, monkeypatch):
+    import threading
+
+    from services import exit_rehearsal
+    from services.exit_rehearsal import settle, start
+
+    first = start(_system(tables=[{"name": "events"}]), actor="a@example.com")
+    _wait(first)
+    called: list[str] = []
+    monkeypatch.setattr(exit_rehearsal, "verify", lambda *_a: called.append(threading.current_thread().name) or {})
+    doc = settle(first["id"], inline=False)
+    assert doc["verdict"] == "running" and {t["reason"] for t in doc["tables"]} == {"Verifying."}
+    assert threading.main_thread().name not in called
+
+
+def test_parity_summary_leaves_rehearsal_extracts_out():
+    from services.parity_summary import _is_repair_job
+
+    assert _is_repair_job({"exit_rehearsal_id": "exr_1"})
+    assert _is_repair_job({"transfer_request": {"triggered_by": "exit rehearsal exr_1"}})
+    assert not _is_repair_job({"transfer_request": {"triggered_by": "ops@example.com"}})

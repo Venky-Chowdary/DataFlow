@@ -200,7 +200,8 @@ async def get_exit_rehearsal(rehearsal_id: str, request: Request):
     doc = _visible_rehearsal(rehearsal_id, request)
 
     def build() -> dict[str, Any]:
-        return public(settle(rehearsal_id) or doc)
+        # Never verifies on the request thread: a finished rehearsal is verified in the background.
+        return public(settle(rehearsal_id, inline=False) or doc)
 
     return await asyncio.to_thread(build)
 

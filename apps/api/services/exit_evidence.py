@@ -119,7 +119,7 @@ def sign_off(rehearsal_id: str, *, role: str, actor: str, signer_role: str, note
     role = str(role or "").strip().lower()
     signer_role = str(signer_role or "viewer").strip().lower()
     note = str(note or "")[:500]
-    doc = settle(rehearsal_id) or exit_store.get(exit_store.REHEARSALS, rehearsal_id)
+    doc = settle(rehearsal_id, inline=False) or exit_store.get(exit_store.REHEARSALS, rehearsal_id)
     if not doc:
         raise ExitNotFound("Rehearsal not found")
     system = {"id": doc.get("system_id"), "workspace_id": doc.get("workspace_id")}

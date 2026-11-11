@@ -190,7 +190,7 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
             continue
         if future is not None and hasattr(future, "add_done_callback"):
             future.add_done_callback(lambda _f: settle_quietly(rid))
-    return settle(rid) or rehearsal
+    return settle(rid, inline=False) or rehearsal
 
 
 # ------------------------------------------------------------------- settle
@@ -216,12 +216,15 @@ def _live_tables(doc: dict[str, Any], jobs: dict[str, dict[str, Any]]) -> list[d
     return out
 
 
-def settle(rehearsal_id: str) -> dict[str, Any] | None:
+def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
     """Verify, seal and close a rehearsal whose extract jobs have all finished.
 
     Returns the stored document (unchanged while jobs still run). Exactly one
     caller verifies: the verification is claimed by compare-and-swap, and a
-    claim older than an hour is taken over.
+    claim older than an hour is taken over. ``inline=False`` (a page read, the
+    scheduler beat, a sign-off attempt) never runs the verification on the
+    caller's thread — it re-reads both whole populations — but starts it in
+    the background and answers with the tables "Verifying.".
     """
     doc = exit_store.get(REHEARSALS, rehearsal_id)
     if not doc or doc.get("verdict") != "running":
@@ -229,6 +232,15 @@ def settle(rehearsal_id: str) -> dict[str, Any] | None:
     store = _job_store()
     jobs = {str(t["job_id"]): (store.get_job(str(t["job_id"])) or {}) for t in doc["tables"] if t.get("job_id")}
     if any(str(j.get("status") or "").lower() not in TERMINAL for j in jobs.values()):
+        doc["tables"] = _live_tables(doc, jobs)
+        return doc
+    if not inline:
+        import threading
+
+        held = parse_ts((doc.get("_verify") or {}).get("at"))
+        if not held or datetime.now(timezone.utc) - held >= VERIFY_STALE:
+            threading.Thread(target=settle_quietly, args=(rehearsal_id,), daemon=True,
+                             name=f"exit-verify-{rehearsal_id}").start()
         doc["tables"] = _live_tables(doc, jobs)
         return doc
     claim_id = uuid.uuid4().hex
@@ -554,7 +566,7 @@ def run_due_rehearsals(*, now: datetime | None = None) -> dict[str, int]:
         return {"settled": 0, "started": 0}
     settled = started = 0
     for doc in exit_store.list_docs(REHEARSALS, query={"verdict": "running"}):
-        closed = settle(doc["id"])
+        closed = settle(doc["id"], inline=False)  # verification runs off the beat
         settled += int(bool(closed and closed.get("verdict") != "running"))
     for system in exit_store.list_docs(SYSTEMS, where=lambda d: bool(d.get("rehearsal_schedule"))):
         schedule = system["rehearsal_schedule"]
