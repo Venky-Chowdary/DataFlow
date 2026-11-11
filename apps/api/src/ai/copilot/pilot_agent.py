@@ -23,7 +23,7 @@ from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_fill
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
-from .job_narration import narrate_jobs
+from .job_narration import job_duration_line, narrate_jobs
 from .tool_permissions import (
     MUTATE,
     bind_current_context,
@@ -2233,12 +2233,13 @@ Draft answer:
         data_context: dict | None,
         history: list[dict] | None = None,
     ) -> list[tuple[str, dict]]:
-        """Plan this turn, then reroute status asks the router misread as data reads."""
+        """Plan this turn, reroute status asks the router misread as data reads,
+        then make every ledger read filter by the status and window asked for."""
+        from .job_questions import ground_job_plan
         from .workspace_intents import ground_plan
 
-        return ground_plan(
-            message, self._plan_from_memory(message, data_context, history), history
-        )
+        planned = ground_plan(message, self._plan_from_memory(message, data_context, history), history)
+        return ground_job_plan(message, planned)
 
     def _plan_from_memory(
         self,

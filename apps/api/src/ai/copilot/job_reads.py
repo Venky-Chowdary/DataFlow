@@ -36,6 +36,7 @@ def summarize_listed_job(doc: dict[str, Any]) -> dict[str, Any]:
     message = str(doc.get("message") or "").strip()
     if not error and message and status in {"failed", "error", "cancelled"}:
         error = message
+    from services.job_list_filters import job_verdict
     from services.job_status import job_stall_seconds, job_timestamp_iso
 
     stall = job_stall_seconds(doc)
@@ -61,7 +62,12 @@ def summarize_listed_job(doc: dict[str, Any]) -> dict[str, Any]:
         "stalled": stall > 0,
         "stall_seconds": int(stall),
         "created_at": job_timestamp_iso(doc.get("created_at")),
+        "started_at": job_timestamp_iso(doc.get("started_at")),
         "completed_at": job_timestamp_iso(doc.get("completed_at")),
+        # The recorded Gate-8 verdict (True / False / None), by the Jobs page rule.
+        "verification_passed": job_verdict(
+            {"reconciliation": doc.get("reconciliation") or doc.get("verification_summary")}
+        ),
         "source_table": (
             doc.get("source_table")
             or doc.get("table_name")
@@ -180,28 +186,39 @@ def _mongo_already_unreachable(mongo: Any) -> bool:
 
 
 def _from_engine_store(
-    limit: int, workspace_filter: Any = None
+    limit: int, workspace_filter: Any = None, filters: dict[str, Any] | None = None
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """The process-local engine store: what is left to read when the ledger is not.
+
+    Always ``degraded``: the durable history is not in it, so nothing counted
+    here may be presented as the workspace's totals (audit C3).
+    """
+    degraded = {"degraded": True, "degraded_reason": "job_store_unreachable"}
     # Engine job records carry no workspace, so only a caller who may see every
     # workspace may read them (D154).
     if workspace_filter is not None and not workspace_filter.is_everything:
-        return [], {"total": 0, "by_status": {}}
-    raw = list(job_store.list_recent(limit=limit) or [])
-    summaries = [summarize_listed_job(_record_as_job_doc(row)) for row in raw]
+        return [], {"total": 0, "by_status": {}, **degraded}
+    docs = [_record_as_job_doc(row) for row in (job_store.list_recent(limit=limit) or [])]
     by_status: dict[str, int] = {}
     try:
         stats = job_store.stats() or {}
-        total = int(stats.get("total_jobs") or len(summaries))
+        total = int(stats.get("total_jobs") or len(docs))
     except Exception:
-        total = len(summaries)
+        total = len(docs)
         stats = {}
-    for job in summaries:
-        key = str(job.get("status") or "unknown")
+    for doc in docs:
+        key = str(doc.get("status") or "unknown")
         by_status[key] = by_status.get(key, 0) + 1
     if total and not by_status:
         # stats() counts without returning the breakdown; keep what we showed.
         by_status = {"unknown": total}
-    return summaries, {"total": total, "by_status": by_status}
+    counts: dict[str, Any] = {"total": total, "by_status": by_status, **degraded}
+    if filters:
+        from services.job_list_filters import memory_job_matches
+
+        docs = [d for d in docs if memory_job_matches(d, **filters)]
+        counts["filtered_total"] = len(docs)
+    return [summarize_listed_job(d) for d in docs], counts
 
 
 def workspace_scope_unresolved() -> bool:
@@ -216,14 +233,34 @@ def workspace_scope_unresolved() -> bool:
 def list_transfer_jobs(
     limit: int = 10,
     workspace_id: str | None = None,
+    *,
+    status: str | None = None,
+    date_from: Any = None,
+    date_to: Any = None,
+    verification: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
-    """Recent jobs plus a whole-history count.
+    """One page of jobs plus counts over the whole scoped history.
+
+    ``status`` / ``date_from`` / ``date_to`` / ``verification`` are the Jobs
+    grid's own server-side filters (``services.job_list_filters``). With any of
+    them set, the page holds only matching rows and ``counts`` also carries
+    ``filtered_total`` (rows matching the filter) and, for a created window,
+    ``window`` (the per-status census inside it).
 
     Mongo is preferred when it answers. A connection failure falls through to
-    the engine job_store — the same store a transfer writes when Mongo is down.
+    the engine job_store — the same store a transfer writes when Mongo is down —
+    and that read is marked ``degraded`` so no caller states it as the history.
     An empty successful Mongo read is left empty so a process-global leftover
     in the file store cannot invent jobs the operator's workspace does not have.
     """
+    filters = {
+        key: value
+        for key, value in (
+            ("status", status), ("date_from", date_from),
+            ("date_to", date_to), ("verification", verification),
+        )
+        if value
+    }
     # A Pilot/MCP turn reads only what its caller may see (D154); ``workspace_id``
     # narrows further only for system-scope callers.
     workspace_filter = current_workspace_filter()
@@ -247,19 +284,24 @@ def list_transfer_jobs(
 
         mongo = get_mongodb_service()
         if _mongo_already_unreachable(mongo):
-            summaries, counts = _from_engine_store(limit, workspace_filter)
+            summaries, counts = _from_engine_store(limit, workspace_filter, filters)
             return summaries, counts, "job_store"
-        raw = mongo.list_jobs(limit=limit, workspace_id=workspace_id, workspace_filter=workspace_filter)
-        counts = mongo.count_jobs(workspace_id=workspace_id, workspace_filter=workspace_filter)
+        scope = {"workspace_id": workspace_id, "workspace_filter": workspace_filter}
+        raw = mongo.list_jobs(limit=limit, **scope, **filters)
+        counts = dict(mongo.count_jobs(**scope) or {"total": 0, "by_status": {}})
+        if filters:
+            counts["filtered_total"] = int(mongo.count_job_matches(**scope, **filters) or 0)
+            window = {k: v for k, v in filters.items() if k in ("date_from", "date_to")}
+            if window:
+                counts["window"] = dict(mongo.count_jobs(**scope, **window) or {})
         summaries = [summarize_listed_job(j) for j in (raw or []) if isinstance(j, dict)]
-        return summaries, counts or {"total": 0, "by_status": {}}, "mongo"
+        return summaries, counts, "mongo"
     except Exception as exc:
-        # D104-minor: a transient Mongo read failure silently swaps list_jobs
-        # to the local job store, which cannot contain the durable jobs —
-        # the QA saw a just-completed schedule run missing for ~1 min, then
-        # appear. The fallback stays (it is the honest answer when Mongo is
-        # down), but the swap is logged so the "missing" window is explainable
-        # from ops logs, and callers already see store="job_store".
+        # D104-minor: a transient Mongo read failure swaps list_jobs to the
+        # local job store, which cannot contain the durable jobs. The fallback
+        # stays (a run started while Mongo is down is in it), the swap is
+        # logged, and the read is marked degraded so the answer says the
+        # ledger could not be read instead of "no jobs yet" (audit C3).
         import logging
 
         logging.getLogger(__name__).warning(
@@ -267,7 +309,7 @@ def list_transfer_jobs(
             "local job store — durable jobs may be temporarily absent",
             type(exc).__name__,
         )
-        summaries, counts = _from_engine_store(limit, workspace_filter)
+        summaries, counts = _from_engine_store(limit, workspace_filter, filters)
         return summaries, counts, "job_store"
 
 

@@ -30,6 +30,7 @@ from ..rag.query_analysis import (
     classify_ask,
     is_cdc_delivery_question,
 )
+from .job_ledger import LIST_JOBS_TOOL
 from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
 from .parity_tools import PARITY_TOOL_DEFINITIONS
@@ -365,37 +366,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": ["template_key"],
         },
     },
-    {
-        "name": "list_jobs",
-        "description": (
-            "List recent transfer jobs with status, IDs, and record counts. "
-            "``total`` is the whole history for ``scope`` (default ``workspace``, "
-            "the same population as brief_workspace). Pass ``scope=all`` only when "
-            "you explicitly need every workspace."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "Max jobs to return. Integer from 1 to 100. Negative and unbounded limits are refused.",
-                    "default": 10,
-                    "minimum": 1,
-                    "maximum": 100,
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["workspace", "all", "unassigned"],
-                    "default": "workspace",
-                    "description": (
-                        "workspace = this workspace; all = every workspace; "
-                        "unassigned = legacy jobs with no workspace (platform admins)"
-                    ),
-                },
-            },
-            "required": [],
-        },
-    },
+    LIST_JOBS_TOOL,
     {
         "name": "get_job",
         "description": (
@@ -2619,56 +2590,25 @@ class DataPilotTools:
             )
         return ToolResult(name="confirm_action", success=True, output=body)
 
-    def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
-        from services.workspace_filter import UNASSIGNED_WORKSPACE
+    def _list_jobs(
+        self,
+        limit: int = 10,
+        scope: str = "workspace",
+        status: str = "",
+        window: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        verification: str = "",
+    ) -> ToolResult:
+        from .job_ledger import read_job_ledger
 
-        from .job_reads import (
-            job_list_workspace_scope,
-            list_transfer_jobs,
-            workspace_scope_unresolved,
+        output, refusal = read_job_ledger(
+            limit=limit, scope=scope, status=status, window=window,
+            date_from=date_from, date_to=date_to, verification=verification,
         )
-
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 100:
-            return ToolResult(
-                name="list_jobs",
-                success=False,
-                output=None,
-                error="limit must be an integer from 1 to 100.",
-            )
-        try:
-            workspace_id = job_list_workspace_scope(scope)
-        except ValueError as exc:
-            return ToolResult(name="list_jobs", success=False, output=None, error=str(exc))
-        if workspace_id == "" and workspace_scope_unresolved():
-            return ToolResult(
-                name="list_jobs",
-                success=False,
-                output=None,
-                error=(
-                    "This key can read every workspace and is not acting in one. "
-                    "Send X-Workspace-Id to list one workspace's jobs, or pass "
-                    "scope=all for every workspace."
-                ),
-            )
-        summary, counts, source = list_transfer_jobs(limit=limit, workspace_id=workspace_id)
-        # "How many jobs?" must be answered from the whole history for this scope.
-        # The page we read here is only the window we can show.
-        return ToolResult(
-            name="list_jobs",
-            success=True,
-            output={
-                "jobs": summary,
-                "count": len(summary),
-                "total": int(counts.get("total") or 0),
-                "status_counts": counts.get("by_status") or {},
-                "store": source,
-                "scope": (
-                    "all" if workspace_id is None
-                    else "unassigned" if workspace_id == UNASSIGNED_WORKSPACE
-                    else "workspace"
-                ),
-            },
-        )
+        if refusal:
+            return ToolResult(name="list_jobs", success=False, output=None, error=refusal)
+        return ToolResult(name="list_jobs", success=True, output=output)
 
     @staticmethod
     def _offers_bad_data_fix(job: dict, quarantine: list, stored_rejected: int) -> bool:
