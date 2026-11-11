@@ -96,6 +96,8 @@ class Profile:
     uncompared: dict[str, str] = field(default_factory=dict)
     #: Gate-8 per-column multiset digests of the row digest (names a differing column).
     column_digests: dict[str, str] = field(default_factory=dict)
+    #: column -> counts of NaN / Infinity / -Infinity (kept out of sum / min / max, compared as counts).
+    nonfinite: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 _UNTYPED = "has no declared type, so its values could not be compared exactly"
@@ -189,6 +191,11 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
                     continue
                 value = _decimal(raw)
                 if value is None:
+                    continue
+                if not value.is_finite():
+                    # NaN never orders (min / max raise): counted per kind, compared as counts.
+                    kinds = prof.nonfinite.setdefault(col, {})
+                    kinds[str(value).lstrip("+")] = kinds.get(str(value).lstrip("+"), 0) + 1
                     continue
                 t = totals.setdefault(col, {"sum": Decimal(0), "min": value, "max": value})
                 t["sum"] += value
@@ -362,7 +369,8 @@ def _totals_rows(src: Profile, ext: Profile | None) -> list[dict[str, Any]]:
         s = src.totals[col]
         e = (ext.totals.get(col) if ext else None)
         match = None if e is None and ext is None else bool(
-            e and all(s[k] == e[k] for k in ("sum", "min", "max")))
+            e and all(s[k] == e[k] for k in ("sum", "min", "max"))
+            and src.nonfinite.get(col, {}) == ext.nonfinite.get(col, {}))
         if ext is not None and e is None and src.rows:
             match = False
         masked = _sensitive(col, s) or bool(e and _sensitive(col, e))

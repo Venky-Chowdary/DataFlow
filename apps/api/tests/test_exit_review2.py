@@ -163,3 +163,34 @@ def test_n10_a_measure_the_classifier_clears_shows_its_totals():
     # A measure whose values the classifier reads as PII stays masked.
     card, _ = _totals({"amount": "NUMERIC(20,0)"}, [{"amount": Decimal("4111111111111111")}])
     assert card["amount"]["masked"] is True
+
+
+# ------------------------------------------------------------- Low: NaN in a numeric column
+
+
+def test_low_a_nan_in_a_numeric_column_is_profiled_not_reported_as_unreadable():
+    from decimal import Decimal
+
+    from services.exit_completeness import profile_rows
+
+    types = {"id": "BIGINT", "ratio": "DOUBLE PRECISION", "amount": "NUMERIC(12,2)"}
+    rows = [{"id": 1, "ratio": float("nan"), "amount": Decimal("NaN")},
+            {"id": 2, "ratio": 0.5, "amount": Decimal("2.50")}]
+    src = profile_rows(rows, list(types), ["id"], None, types=types, engine="postgresql")
+    assert src.rows == 2 and src.totals["ratio"]["max"] == Decimal("0.5")
+    same = profile_rows([{"id": 1, "ratio": "NaN", "amount": "NaN"}, {"id": 2, "ratio": "0.5", "amount": "2.50"}],
+                        list(types), ["id"], sorted(src.totals), types=types, engine="postgresql")
+    other = profile_rows([{"id": 1, "ratio": "0", "amount": "0"}, {"id": 2, "ratio": "0.5", "amount": "2.50"}],
+                         list(types), ["id"], sorted(src.totals), types=types, engine="postgresql")
+    totals, _ = _totals_of(src, same)
+    assert totals["ratio"]["match"] is True and totals["amount"]["match"] is True
+    totals, _ = _totals_of(src, other)
+    assert totals["ratio"]["match"] is False and totals["amount"]["match"] is False
+
+
+def _totals_of(src, ext):
+    from services.exit_completeness import judge_table
+
+    out = judge_table(name="t", source=src, extract=ext, key_columns=["id"], seal_ok=True,
+                      parity={"check": "count_only", "verdict": "unverifiable", "unexplained": 0}, not_measured=[])
+    return {c["column"]: c for c in out["control_totals"]}, out
