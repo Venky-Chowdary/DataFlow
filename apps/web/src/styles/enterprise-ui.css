@@ -16075,3 +16075,467 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
   gap: 8px;
   align-items: center;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Jobs — operations grid (components/jobs/JobsGrid, JobsToolbar,
+   JobsFilterChips, JobDetailPanel). Extends the shared table, badge,
+   toolbar and drawer primitives; tokens only.
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-page-fit.df2-page-jobs .df2-jobs-workspace-grid {
+  gap: 0;
+}
+
+.df2-jobs-kpis.df2-stats {
+  flex-shrink: 0;
+  margin: 0 0 12px;
+}
+
+.df2-jobs-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin: 0 0 12px;
+}
+
+.df2-jobs-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--df-fs-label);
+  font-weight: 600;
+  color: var(--df-text-secondary);
+}
+
+.df2-jobs-filter-chip select.df2-input {
+  width: auto;
+  max-width: 220px;
+  height: var(--df-control-height-sm, 32px);
+  min-height: var(--df-control-height-sm, 32px);
+  font-size: var(--df-fs-field-sm);
+}
+
+.df2-jobs-filter-chip.is-active select.df2-input {
+  border-color: var(--df-brand);
+  background-color: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-page-fit.df2-page-jobs .df2-jobs-date-filter {
+  flex-shrink: 0;
+  margin: 0 0 12px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md, 8px);
+}
+
+/* The grid owns the rest of the viewport: rows scroll, the header sticks. */
+.df2-jobs-grid {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-panel, 12px);
+  background: var(--df-surface);
+  overflow: hidden;
+}
+
+.df2-jobs-grid > .df2-empty {
+  margin: 16px;
+}
+
+.df2-jobs-grid .df2-jobs-page-loading,
+.df2-jobs-grid .df2-jobs-page-error,
+.df2-jobs-grid-note {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--df-border);
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-secondary);
+}
+
+.df2-jobs-grid .df2-jobs-page-error {
+  color: var(--df-danger);
+}
+
+.df2-jobs-grid-scroll.df2-table-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+table.df2-table.df2-jobs-grid-table {
+  width: 100%;
+  min-width: 1040px;
+  border: 0;
+  border-radius: initial;
+  overflow: visible;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--df-fs-sm);
+}
+
+.df2-jobs-grid-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: var(--df-z-sticky);
+  padding: 0;
+  background: var(--df-table-head-bg);
+  border-bottom: 1px solid var(--df-border-strong);
+  white-space: nowrap;
+}
+
+.df2-jobs-grid-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 var(--df-table-cell-pad-x, 14px);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.df2-jobs-grid-sort:hover {
+  color: var(--df-text-primary);
+}
+
+.df2-jobs-grid-sort:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: -2px;
+}
+
+.df2-jobs-grid-sort-icon {
+  display: inline-flex;
+  opacity: 0;
+  color: var(--df-text-muted);
+}
+
+.df2-jobs-grid-sort:hover .df2-jobs-grid-sort-icon,
+.df2-jobs-grid-sort-icon.is-active {
+  opacity: 1;
+}
+
+.df2-jobs-grid-sort-icon.is-active {
+  color: var(--df-brand-strong);
+}
+
+.df2-jobs-grid-table th.is-num .df2-jobs-grid-sort {
+  justify-content: flex-end;
+}
+
+.df2-jobs-grid-table td {
+  height: var(--df-list-row-min-h);
+  padding: var(--df-list-row-pad-y) var(--df-table-cell-pad-x, 14px);
+  border-bottom: 1px solid var(--df-border);
+  vertical-align: middle;
+  white-space: nowrap;
+  color: var(--df-text-primary);
+}
+
+.df2-jobs-grid--comfortable .df2-jobs-grid-table td {
+  height: var(--df-list-row-min-h-dual);
+  padding-top: calc(var(--df-list-row-pad-y) + 4px);
+  padding-bottom: calc(var(--df-list-row-pad-y) + 4px);
+}
+
+.df2-jobs-grid-table td.is-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-jobs-grid-table tbody tr.df2-jobs-grid-row {
+  cursor: pointer;
+}
+
+.df2-jobs-grid-table tbody tr.df2-jobs-grid-row:nth-child(even) td {
+  background: transparent;
+}
+
+.df2-jobs-grid-table tbody tr.df2-jobs-grid-row:hover td {
+  background: var(--df-table-row-hover);
+}
+
+.df2-jobs-grid-table tbody tr.df2-jobs-grid-row.is-selected td {
+  background: var(--df-brand-soft);
+}
+
+.df2-jobs-grid-table tbody tr.df2-jobs-grid-row.is-selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--df-brand);
+}
+
+.df2-jobs-grid-table tbody tr.df2-jobs-grid-row:focus {
+  outline: none;
+}
+
+.df2-jobs-grid-table tbody tr.df2-jobs-grid-row:focus-visible td {
+  box-shadow: inset 0 2px 0 var(--df-focus-ring), inset 0 -2px 0 var(--df-focus-ring);
+}
+
+.df2-jobs-grid-table tbody tr.df2-jobs-grid-row:focus-visible td:first-child {
+  box-shadow: inset 2px 2px 0 var(--df-focus-ring), inset 0 -2px 0 var(--df-focus-ring);
+}
+
+.df2-jobs-grid-table tbody tr.df2-jobs-grid-row:focus-visible td:last-child {
+  box-shadow: inset -2px 2px 0 var(--df-focus-ring), inset 0 -2px 0 var(--df-focus-ring);
+}
+
+.df2-jobs-grid-table td.df2-jobs-grid-col-job {
+  max-width: 280px;
+}
+
+.df2-jobs-grid-job {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.df2-jobs-grid-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--df-text-primary);
+}
+
+.df2-jobs-grid-job .df2-job-row-id {
+  justify-self: start;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+}
+
+.df2-jobs-grid-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--df-text-tertiary);
+}
+
+.df2-jobs-grid-engine {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px 1px 5px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-sm, 6px);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+  font-size: var(--df-fs-xs);
+  font-weight: 500;
+}
+
+.df2-jobs-grid-muted {
+  color: var(--df-text-secondary);
+}
+
+.df2-jobs-grid-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-jobs-grid-verify {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.df2-jobs-grid-verify .df2-badge,
+.df2-jobs-grid-status.df2-badge {
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.df2-jobs-grid-verify .df2-jobs-grid-muted {
+  font-size: var(--df-fs-xs);
+}
+
+.df2-jobs-grid-progress {
+  display: grid;
+  gap: 2px;
+  min-width: 140px;
+}
+
+.df2-jobs-grid-progress-text {
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-jobs-grid-table th.df2-jobs-grid-col-actions,
+.df2-jobs-grid-table td.df2-jobs-grid-col-actions {
+  width: 44px;
+  padding-left: 4px;
+  padding-right: 8px;
+  text-align: right;
+}
+
+.df2-jobs-menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.df2-btn.df2-jobs-grid-row-menu {
+  width: var(--df-list-row-action);
+  min-width: var(--df-list-row-action);
+  height: var(--df-list-row-action);
+  min-height: var(--df-list-row-action);
+  padding: 0;
+  justify-content: center;
+}
+
+.df2-canvas-menu.df2-jobs-menu {
+  z-index: var(--df-z-dropdown);
+  min-width: 200px;
+}
+
+.df2-canvas-menu.df2-jobs-menu button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--df-fs-sm);
+}
+
+.df2-canvas-menu.df2-jobs-menu button:disabled {
+  color: var(--df-text-muted);
+  cursor: not-allowed;
+}
+
+.df2-canvas-menu.df2-jobs-menu button:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: -2px;
+}
+
+.df2-jobs-menu-check {
+  display: inline-block;
+  width: 14px;
+  color: var(--df-brand-strong);
+  text-align: center;
+}
+
+.df2-jobs-grid .df2-jobs-grid-footer {
+  position: static;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 8px 12px;
+}
+
+.df2-jobs-grid .df2-jobs-v3-window-note {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--df-border);
+}
+
+/* Detail drawer: today's job detail, as a scrolling column inside the drawer. */
+.df2-drawer.df2-jobs-detail-drawer .df2-drawer-body {
+  padding: 0;
+  gap: 0;
+}
+
+.df2-app .df2-jobs-detail-drawer .df2-jobs-v3-detail {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+  border: 0;
+  border-radius: initial;
+}
+
+/* Phones: stacked rows (label · value), full-screen drawer. */
+.df2-jobs-grid.is-stacked table.df2-table.df2-jobs-grid-table {
+  min-width: 0;
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table,
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table tbody,
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table tr,
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table td {
+  display: block;
+  width: 100%;
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table tr.df2-jobs-grid-row {
+  position: relative;
+  padding: 10px 48px 10px 12px;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table td {
+  height: auto;
+  max-width: none;
+  padding: 2px 0;
+  border: 0;
+  white-space: normal;
+  text-align: left;
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table td[data-label]::before {
+  content: attr(data-label) " · ";
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-muted);
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table td.df2-jobs-grid-col-job::before,
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table td.df2-jobs-grid-col-status::before {
+  content: none;
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table td.df2-jobs-grid-col-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: auto;
+  padding: 0;
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table tr.df2-jobs-grid-row.is-selected td:first-child {
+  box-shadow: none;
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table tr.df2-jobs-grid-row.is-selected {
+  box-shadow: inset 3px 0 0 var(--df-brand);
+  background: var(--df-brand-soft);
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-table tr.df2-jobs-grid-row.is-selected td {
+  background: transparent;
+}
+
+.df2-jobs-grid.is-stacked .df2-jobs-grid-progress {
+  display: inline-grid;
+  vertical-align: middle;
+}
+
+@media (max-width: 720px) {
+  .df2-jobs-filter-chip {
+    flex: 1 1 calc(50% - 8px);
+  }
+
+  .df2-jobs-filter-chip select.df2-input {
+    flex: 1 1 auto;
+    max-width: none;
+  }
+
+  .df2-jobs-detail-drawer.df2-drawer {
+    max-width: none;
+  }
+}

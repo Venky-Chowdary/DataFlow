@@ -8,15 +8,21 @@ import { JobTheater } from "../components/JobTheater";
 import { JobNameEditor } from "../components/jobs/JobNameEditor";
 import { JournalsDrawer } from "../components/jobs/JournalsDrawer";
 import { JobJournalNote } from "../components/jobs/JobJournalNote";
+import { JobDetailPanel } from "../components/jobs/JobDetailPanel";
+import { JobsFilterChips } from "../components/jobs/JobsFilterChips";
+import { JobsGrid } from "../components/jobs/JobsGrid";
+import { JobsGridFooter } from "../components/jobs/JobsGridFooter";
+import { JobsToolbar } from "../components/jobs/JobsToolbar";
+import { useJobRunActions } from "../components/jobs/useJobRunActions";
+import { applyJobsFacets, useJobsGridState } from "../components/jobs/useJobsGridState";
+import { useJobsKpis } from "../components/jobs/useJobsKpis";
+import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
-import { FilterBar } from "../components/ui/FilterBar";
-import { FilterTabs } from "../components/ui/FilterTabs";
-import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
 import { useActiveData } from "../lib/DataContext";
@@ -27,9 +33,19 @@ import {
   jobWindowNote,
   type JobHistory,
   type JobHistoryQuery,
+  type JobListStatus,
 } from "../lib/jobHistory";
-import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, presentedJobStatus, uniqueListKey } from "../lib/uiUtils";
-import { parseServerTimestampMs } from "../lib/jobTheaterProgress";
+import {
+  formatJobDuration,
+  isDefaultJobsGridSort,
+  jobDisplayName,
+  jobNeedsAttention,
+  jobRouteLabel,
+  LIVE_JOB_STATUSES,
+  shortJobId,
+  sortJobsForGrid,
+} from "../lib/jobGrid";
+import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, presentedJobStatus } from "../lib/uiUtils";
 import { jobDetailNeedsRefetch } from "../lib/theaterMount";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -41,8 +57,8 @@ import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
-import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
-import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, jobEndpointLabels, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { destHeadline, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
+import { readCoercedNullRows, formatStreamNames, jobEndpointLabels, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
 import { IdentityAlignmentNote } from "../components/jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
@@ -58,7 +74,6 @@ import { getActiveWorkspaceId } from "../lib/workspace";
 import { readSession } from "../lib/session";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { blockerTitle } from "../lib/preflightGates";
-import { reconcileBarPercent } from "../lib/progressRing";
 import {
   absentEvidenceLabel,
   deepLinkPending,
@@ -244,21 +259,6 @@ interface JobDetailRecord extends JobProgress {
   completed_at?: string;
 }
 
-function formatJobDuration(startedAt?: string, completedAt?: string): string | null {
-  if (!startedAt) return null;
-  // Job-store timestamps are UTC without an offset; Date.parse reads them as local.
-  const start = parseServerTimestampMs(startedAt);
-  if (start == null) return null;
-  const end = completedAt ? parseServerTimestampMs(completedAt) : Date.now();
-  if (end == null || end < start) return null;
-  const s = Math.floor((end - start) / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
-
 interface JobsPageProps {
   jobs: TransferJob[];
   /** Whole-history counts; the table still shows the recent page in `jobs`. */
@@ -276,14 +276,6 @@ interface JobsPageProps {
 type JobFilter = "all" | "running" | "completed" | "failed";
 type JobDetailTab = "detail" | "mapping" | "quarantine" | "log";
 
-function statusIcon(status: string) {
-  if (status === "completed") return "check";
-  if (status === "completed_with_quarantine") return "alert";
-  if (status === "failed" || status === "cancelled") return "x";
-  if (status === "running" || status === "pending") return "activity";
-  return "jobs";
-}
-
 function defaultDetailTab(status: string, rejectedRows: number): JobDetailTab {
   if (status === "completed_with_quarantine" || rejectedRows > 0) return "quarantine";
   if (status === "failed") return "detail";
@@ -293,33 +285,6 @@ function defaultDetailTab(status: string, rejectedRows: number): JobDetailTab {
 /** Source side of a route label. Never renders a missing name as "undefined". */
 function jobSourceLabel(job: Pick<TransferJob, "source_name" | "source_type">) {
   return (job.source_name || "").trim() || (job.source_type || "").trim() || "source";
-}
-
-function jobRouteLabel(
-  job: Pick<
-    TransferJob,
-    "source_name" | "source_type" | "destination_database" | "destination_collection" | "destination_type" | "stream_names"
-  >,
-) {
-  return formatJobRoute(job);
-}
-
-function jobDisplayName(
-  job: Pick<
-    TransferJob,
-    | "name"
-    | "source_name"
-    | "source_type"
-    | "destination_database"
-    | "destination_collection"
-    | "destination_type"
-    | "stream_names"
-  >,
-  override?: string | null,
-) {
-  const named = (override ?? job.name)?.trim();
-  if (named && !isRestoredEndpointTitle(named, job)) return named;
-  return formatJobRoute(job);
 }
 
 function checkpointCommittedPhrase(checkpoint: TransferJob["checkpoint"] | null | undefined): string {
@@ -350,12 +315,6 @@ function duplicateJobNameError(
     }
   }
   return null;
-}
-
-const LIVE_JOB_STATUSES = new Set(["running", "pending", "queued", "retrying"]);
-
-function shortJobId(id: string): string {
-  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
 
 function JobLineageLinks({
@@ -401,7 +360,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   const [retrying, setRetrying] = useState(false);
   const [blockingJob, setBlockingJob] = useState<{ id: string; status: string; createdAt: string } | null>(null);
   const [resuming, setResuming] = useState(false);
-  const [filter, setFilter] = useState<JobFilter>("all");
+  const [filter, setFilter] = useState<JobFilter | "attention">("all");
   const [jobSearch, setJobSearch] = useState("");
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdTo, setCreatedTo] = useState("");
@@ -422,6 +381,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   const [mappingProof, setMappingProof] = useState<MappingProof | null>(null);
   const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
   const [journalsOpen, setJournalsOpen] = useState(false);
+  const grid = useJobsGridState();
   const appliedFocusRef = useRef<string | null>(null);
   const deepLinkRef = useRef(latchDeepLink({}, initialJobId, initialPanel));
   deepLinkRef.current = latchDeepLink(deepLinkRef.current, initialJobId, initialPanel);
@@ -438,7 +398,11 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     search: jobSearch.trim() || undefined,
     dateFrom: createdFrom || undefined,
     dateTo: createdTo || undefined,
-  }), [pageIndex, pageSize, filter, jobSearch, createdFrom, createdTo]);
+    sourceType: grid.facets.sourceType || undefined,
+    destinationType: grid.facets.destinationType || undefined,
+    syncMode: grid.facets.syncMode || undefined,
+    verification: grid.facets.verification || undefined,
+  }), [pageIndex, pageSize, filter, jobSearch, createdFrom, createdTo, grid.facets]);
 
   useEffect(() => {
     if (!onLoadPage) return;
@@ -470,9 +434,14 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     };
   }, [onLoadPage, jobPageQuery, pageRefresh, createdFrom, createdTo, jobSearch]);
 
-  const changeFilter = (value: JobFilter) => {
+  const changeFilter = (value: JobListStatus) => {
     setPageIndex(0);
     setFilter(value);
+  };
+
+  const changeFacets = (value: typeof grid.facets) => {
+    setPageIndex(0);
+    grid.setFacets(value);
   };
 
   const changeSearch = (value: string) => {
@@ -486,9 +455,13 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     const detailOpen = Boolean(selectedId && !mobileListOpen);
     const wasDetailOpen = mobileDetailOpenRef.current;
     mobileDetailOpenRef.current = detailOpen;
-    if (detailOpen === wasDetailOpen || !window.matchMedia("(max-width: 720px)").matches) return;
+    if (detailOpen === wasDetailOpen) return;
     if (detailOpen) {
-      mobileBackRef.current?.focus();
+      // The detail drawer takes focus itself; on a phone the visible back
+      // control is the first thing to reach, after the drawer has mounted.
+      if (window.matchMedia("(max-width: 720px)").matches) {
+        window.requestAnimationFrame(() => mobileBackRef.current?.focus());
+      }
     } else if (selectedId) {
       document.getElementById(`job-item-${selectedId}`)?.focus();
     }
@@ -519,7 +492,9 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     let list = jobs;
     if (filter === "running") list = jobs.filter((j) => LIVE_JOB_STATUSES.has(j.status));
     else if (filter === "completed") list = jobs.filter((j) => isJobSuccess(presentedJobStatus(j)));
+    else if (filter === "attention") list = jobs.filter(jobNeedsAttention);
     else if (filter !== "all") list = jobs.filter((j) => j.status === filter);
+    list = applyJobsFacets(list, grid.facets);
 
     const q = jobSearch.trim().toLowerCase();
     if (!q) return list;
@@ -539,13 +514,10 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q)),
     );
-  }, [jobs, filter, jobSearch, nameOverrides]);
+  }, [jobs, filter, jobSearch, nameOverrides, grid.facets]);
 
   const filteredTotal = pageHistory?.filteredTotal ?? filtered.length;
-  const pageCount = Math.max(1, Math.ceil(filteredTotal / pageSize));
-  const pageStart = filtered.length ? pageIndex * pageSize + 1 : 0;
-  const pageEnd = pageIndex * pageSize + filtered.length;
-  const windowNote = onLoadPage
+  const windowNote = onLoadPage || filter === "attention"
     ? undefined
     : jobWindowNote({
         counts,
@@ -746,11 +718,11 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     onRefresh?.();
   }, [onRefresh]);
 
-  const handleRetry = useCallback(async () => {
-    if (!selectedId) return;
+  const handleRetry = useCallback(async (jobId: string | null = selectedId) => {
+    if (!jobId) return;
     setRetrying(true);
     try {
-      const result = await retryJob(selectedId);
+      const result = await retryJob(jobId);
       toast({ title: "Retry started", message: "Watching new job in Job Theater.", tone: "success" });
       setSelectedId(result.job_id);
       onRefresh?.();
@@ -786,6 +758,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
     setJobSearch("");
     setCreatedFrom("");
     setCreatedTo("");
+    grid.resetFacets();
     setPageIndex(0);
     setSelectedId(id);
     onRefresh?.();
@@ -796,7 +769,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
         block: "nearest",
       });
     });
-  }, [onRefresh]);
+  }, [onRefresh, grid.resetFacets]);
 
   const handleSync = useCallback(async (mode: "sync" | "full") => {
     if (!selectedId) return;
@@ -862,6 +835,45 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
       setRetrying(false);
     }
   }, [selectedId, toast, confirm, liveJob, focusJob]);
+
+  // ── Operations grid: display order, KPIs, command-bar actions ──
+  const noJobsYet = jobs.length === 0 && (history?.total ?? 0) === 0 && !pageLoading;
+  const gridName = useCallback(
+    (job: TransferJob) => jobDisplayName(job, nameOverrides[job._id]),
+    [nameOverrides],
+  );
+  const gridJobs = useMemo(
+    () => sortJobsForGrid(filtered, grid.sort, { name: gridName }),
+    [filtered, grid.sort, gridName],
+  );
+  const panelOpen = Boolean(selectedId) && !mobileListOpen;
+  const openJob = useCallback((jobId: string) => {
+    setSelectedId(jobId);
+    setMobileListOpen(false);
+  }, []);
+  const kpis = useJobsKpis({
+    running: counts.running,
+    failed: counts.failed,
+    attention: history?.attentionCount,
+    refreshKey: pageRefresh,
+  });
+  const runActions = useJobRunActions({
+    selected: jobs.find((j) => j._id === selectedId),
+    rows: gridJobs,
+    displayName: gridName,
+    retry: (jobId) => handleRetry(jobId),
+    syncNow: () => handleSync("sync"),
+    busy: retrying,
+    open: openJob,
+    onRefresh: refreshJobsAndDetail,
+  });
+  const engineOptions = useMemo(() => {
+    const seen = [...recentJobs, ...(pageHistory?.jobs ?? [])];
+    return {
+      sources: Array.from(new Set(seen.map((j) => j.source_type).filter(Boolean))),
+      destinations: Array.from(new Set(seen.map((j) => j.destination_type).filter(Boolean))),
+    };
+  }, [recentJobs, pageHistory]);
 
   const handleResume = useCallback(async () => {
     if (!selectedId) return;
@@ -1176,9 +1188,14 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
       title="Jobs"
       kicker="Operations"
       description="Live progress, phases, quarantine, and Gate-8 proof for every transfer."
+      actions={onStartTransfer && !noJobsYet ? (
+        <Button size="sm" variant="primary" onClick={() => openStudio()} leadingIcon={<DtIcon name="plus" size={14} />}>
+          New transfer
+        </Button>
+      ) : undefined}
     >
-      <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3">
-        {jobs.length === 0 && (history?.total ?? 0) === 0 && !pageLoading ? (
+      <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3 df2-jobs-workspace-grid">
+        {noJobsYet ? (
           <EmptyState
             page
             icon="jobs"
@@ -1198,45 +1215,37 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
           />
         ) : (
           <>
-            <PageToolbar
-              searchValue={jobSearch}
-              onSearchChange={changeSearch}
-              searchPlaceholder="Search all jobs by route, type, status, or ID…"
-              filters={
-                <FilterBar variant="inline" ariaLabel="Filter jobs by status">
-                  <FilterTabs
-                    ariaLabel="Filter jobs by status"
-                    value={filter}
-                    onChange={changeFilter}
-                    items={([
-                      { id: "all", label: "All", count: counts.all },
-                      { id: "running", label: "Running", count: counts.running },
-                      { id: "completed", label: "Completed", count: counts.completed },
-                      { id: "failed", label: "Failed", count: counts.failed },
-                    ] as const)}
-                  />
-                </FilterBar>
-              }
-              actions={
-                <>
-                  <Button
-                    size="sm"
-                    variant={dateFilterOpen || createdFrom || createdTo ? "secondary" : "ghost"}
-                    aria-expanded={dateFilterOpen}
-                    onClick={() => setDateFilterOpen((value) => !value)}
-                  >
-                    {createdFrom || createdTo ? "Date range active" : "Date range"}
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setJournalsOpen(true)} leadingIcon={<DtIcon name="database" size={14} />}>
-                    Journals
-                  </Button>
-                  {onRefresh && (
-                    <Button size="sm" onClick={refreshJobsAndDetail} leadingIcon={<DtIcon name="activity" size={14} />}>
-                      Refresh
-                    </Button>
-                  )}
-                </>
-              }
+            <PageMetricsRow className="df2-jobs-kpis" metrics={kpis} columns={4} compact />
+            <JobsToolbar
+              search={jobSearch}
+              onSearch={changeSearch}
+              pivot={filter}
+              onPivot={changeFilter}
+              counts={{
+                all: counts.all,
+                running: counts.running,
+                completed: counts.completed,
+                failed: counts.failed,
+                attention: history?.attentionCount,
+              }}
+              onRefresh={onRefresh ? refreshJobsAndDetail : undefined}
+              rerun={runActions.rerun}
+              cancel={runActions.cancel}
+              exportCsv={runActions.exportCsv}
+              columns={grid.columns}
+              onToggleColumn={grid.toggleColumn}
+              density={grid.density}
+              onDensity={grid.setDensity}
+              onJournals={() => setJournalsOpen(true)}
+            />
+            <JobsFilterChips
+              facets={grid.facets}
+              onFacets={changeFacets}
+              sourceTypes={engineOptions.sources}
+              destinationTypes={engineOptions.destinations}
+              dateActive={Boolean(createdFrom || createdTo)}
+              dateOpen={dateFilterOpen}
+              onToggleDate={() => setDateFilterOpen((value) => !value)}
             />
 
             {dateFilterOpen && (
@@ -1273,132 +1282,59 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
               </section>
             )}
 
-            <div className={`df2-jobs-v3-layout${selectedId && !mobileListOpen ? " has-selection" : ""}${mobileListOpen ? " is-mobile-list-open" : ""}`}>
-              <aside className="df2-jobs-v3-list" role="list" aria-label="Transfer jobs" aria-busy={pageLoading || undefined}>
-                {pageLoading && <p className="df2-jobs-page-loading" role="status">Updating job results…</p>}
-                {pageError && (
-                  <p className="df2-jobs-page-error" role="alert">
-                    Could not load this job query: {pageError}{" "}
-                    <Button size="sm" variant="ghost" onClick={() => setPageRefresh((value) => value + 1)}>Retry</Button>
-                  </p>
-                )}
-                {pageError ? (
-                  <EmptyState compact icon="alert" title="Job results unavailable" description="The last query did not complete. Retry to load this page." />
-                ) : filtered.length === 0 ? (
-                  <EmptyState
-                    compact
-                    icon="search"
-                    title={jobSearch || createdFrom || createdTo ? "No matches" : "No jobs in this view"}
-                    description={
-                      jobSearch
-                        ? `No jobs match "${jobSearch}".`
-                        : createdFrom || createdTo
-                          ? "No jobs were created in this date range."
-                          : `No ${filter === "all" ? "" : filter} jobs in this filter.`
-                    }
-                  />
-                ) : (
-                  filtered.map((job, index) => {
-                    const fullRoute = jobRouteLabel(job);
-                    const displayName = jobDisplayName(job, nameOverrides[job._id]);
-                    const route = displayName === fullRoute
-                      ? `${job.source_type || "source"} → ${job.destination_type || "destination"}`
-                      : fullRoute;
-                    const shownStatus = presentedJobStatus(job);
-                    const isLiveRow = LIVE_JOB_STATUSES.has(shownStatus);
-                    return (
-                      <button
-                        key={uniqueListKey(job._id, index, "job")}
-                        id={`job-item-${job._id}`}
-                        type="button"
-                        role="listitem"
-                        className={[
-                          "df2-job-row",
-                          selectedId === job._id ? "is-active" : "",
-                          shownStatus === "failed" || shownStatus === "cancelled" ? "is-failed" : "",
-                          isLiveRow ? "is-live" : "",
-                        ].filter(Boolean).join(" ")}
-                        aria-current={selectedId === job._id ? "true" : undefined}
-                        onClick={() => {
-                          setSelectedId(job._id);
-                          setMobileListOpen(false);
-                        }}
-                      >
-                        <span className={`df2-job-row-status is-${shownStatus}`} aria-hidden>
-                          <DtIcon name={statusIcon(shownStatus)} size={14} />
-                        </span>
-                        <div className="df2-job-row-main">
-                          <div className="df2-job-row-title">
-                            <span className="df2-job-row-name" title={displayName}>{displayName}</span>
-                            <span className={`${jobStatusBadgeClass(shownStatus)} df2-job-row-badge`}>
-                              {jobStatusLabel(shownStatus)}
-                            </span>
-                          </div>
-                          <div className="df2-job-row-meta">
-                            <span className="df2-job-row-route-meta" title={fullRoute}>{route}</span>
-                            {(() => {
-                              const rows = formatJobRowMetric(job);
-                              return (
-                                <span
-                                  className={`df2-job-row-rows ${destMetricToneClass(rows)}`}
-                                  title={rows.title}
-                                >
-                                  {destMetricCompact(rows)}
-                                </span>
-                              );
-                            })()}
-                            <span>
-                              {new Date(job.created_at).toLocaleString(undefined, {
-                                month: "short",
-                                day: "numeric",
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })}
-                            </span>
-                            <code className="df2-job-row-id" title={job._id}>{job._id.slice(0, 8)}…</code>
-                          </div>
-                          {isLiveRow && job.progress_pct != null && (
-                            <div className="df2-job-row-bar" aria-hidden>
-                              <i style={{ width: `${reconcileBarPercent(job.progress_pct, job.reconcile_pct, job.phase)}%` }} />
-                            </div>
-                          )}
-                          {isLiveRow && String(job.phase || "").toLowerCase() === "reconcile" && job.reconcile_pct != null && (
-                            <span className="df2-job-row-rows">Checksum {Math.min(99, Number(job.reconcile_pct))}%</span>
-                          )}
-                        </div>
-                      </button>
-                    );
-                  })
-                )}
-                {windowNote && <p className="df2-jobs-v3-window-note">{windowNote}</p>}
-                {onLoadPage && pageHistory && !pageError && (
-                  <nav className="df2-jobs-pagination" aria-label="Job list pages">
-                    <span className="df2-jobs-pagination-range">
-                      {filteredTotal === 0
-                        ? "No matching jobs"
-                        : `Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filteredTotal.toLocaleString()}`}
-                    </span>
-                    <label className="df2-jobs-page-size">
-                      <span>Rows</span>
-                      <select
-                        className="df2-input df2-select"
-                        value={pageSize}
-                        onChange={(event) => { setPageIndex(0); setPageSize(Number(event.target.value)); }}
-                      >
-                        {[25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
-                      </select>
-                    </label>
-                    <Button size="sm" variant="ghost" disabled={pageIndex === 0 || pageLoading} onClick={() => setPageIndex((value) => Math.max(0, value - 1))}>
-                      Previous
-                    </Button>
-                    <span className="df2-jobs-pagination-page">Page {pageIndex + 1} of {pageCount}</span>
-                    <Button size="sm" variant="ghost" disabled={pageIndex + 1 >= pageCount || pageLoading} onClick={() => setPageIndex((value) => value + 1)}>
-                      Next
-                    </Button>
-                  </nav>
-                )}
-              </aside>
-
+            <JobsGrid
+              jobs={gridJobs}
+              displayName={gridName}
+              selectedId={selectedId}
+              columns={grid.columns}
+              density={grid.density}
+              sort={grid.sort}
+              onSortChange={grid.setSort}
+              onSelect={setSelectedId}
+              onOpen={openJob}
+              rowActions={{ menuItems: runActions.rowMenuItems }}
+              loading={pageLoading}
+              error={pageError}
+              onRetry={() => setPageRefresh((value) => value + 1)}
+              emptyTitle={jobSearch || createdFrom || createdTo ? "No matches" : "No jobs in this view"}
+              emptyDescription={
+                jobSearch
+                  ? `No jobs match "${jobSearch}".`
+                  : createdFrom || createdTo
+                    ? "No jobs were created in this date range."
+                    : filter === "attention"
+                      ? "Nothing needs attention: no failed runs and no failed verification in this filter."
+                      : `No ${filter === "all" ? "" : filter} jobs in this filter.`
+              }
+              sortNote={isDefaultJobsGridSort(grid.sort) ? undefined : "Sorted within this page. Paging stays newest first."}
+              footer={
+                <>
+                  {windowNote && <p className="df2-jobs-v3-window-note">{windowNote}</p>}
+                  {onLoadPage && pageHistory && !pageError && (
+                    <JobsGridFooter
+                      filteredTotal={filteredTotal}
+                      pageIndex={pageIndex}
+                      pageSize={pageSize}
+                      shown={filtered.length}
+                      loading={pageLoading}
+                      onPageSize={(size) => { setPageIndex(0); setPageSize(size); }}
+                      onPage={setPageIndex}
+                    />
+                  )}
+                </>
+              }
+            />
+            <JobDetailPanel
+              open={panelOpen}
+              onClose={() => setMobileListOpen(true)}
+              title={selected ? jobDisplayName(selected, nameOverrides[selected._id]) : "Job detail"}
+              subtitle={selected ? jobRouteLabel(selected) : undefined}
+              headerExtra={selected ? (
+                <span className={jobStatusBadgeClass(presentedJobStatus(selected))}>
+                  {jobStatusLabel(presentedJobStatus(selected))}
+                </span>
+              ) : undefined}
+            >
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
                 {selectedId && (
                   <button
@@ -2172,7 +2108,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                   />
                 )}
               </section>
-            </div>
+            </JobDetailPanel>
           </>
         )}
       </PageFrame>

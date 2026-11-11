@@ -101,19 +101,30 @@ async function render(
 
 function row(index = 0) {
   const element = document.getElementById(`job-item-${jobs[index]._id}`);
-  assert.ok(element instanceof dom.window.HTMLButtonElement);
+  assert.ok(element instanceof dom.window.HTMLTableRowElement, "each job is a grid row");
   return element;
 }
 
+/** The job detail drawer (portaled out of the page host), or null when closed. */
+function detailDrawer() {
+  return document.querySelector<HTMLElement>('[role="dialog"][aria-label="Job detail"]');
+}
+
 function back() {
-  const element = host.querySelector<HTMLButtonElement>(".df2-jobs-v3-back");
+  const element = document.querySelector<HTMLButtonElement>(".df2-jobs-v3-back");
   assert.ok(element);
   return element;
 }
 
-async function click(element: HTMLButtonElement) {
+async function click(element: HTMLElement) {
   element.focus();
   await act(async () => element.click());
+}
+
+/** Select a row and open its detail drawer, as a pointer click does. */
+async function openDetail(index = 0) {
+  await click(row(index));
+  assert.ok(detailDrawer(), "a row click opens the job detail drawer");
 }
 
 afterEach(async () => {
@@ -129,12 +140,12 @@ describe("Jobs focus: isolated real components with synthetic jobs (not authenti
   it("moves mobile row focus into detail and restores the selected row on All jobs", async () => {
     await render();
     await click(row(1));
-    assert.ok(host.querySelector(".df2-jobs-v3-layout.has-selection"));
+    assert.ok(detailDrawer());
     assert.ok(document.activeElement === back(), "mobile entry must focus the visible back control");
     await click(back());
-    assert.ok(host.querySelector(".df2-jobs-v3-layout.is-mobile-list-open"));
+    assert.equal(detailDrawer(), null);
     assert.ok(document.activeElement === row(1), "list return must focus the selected row");
-    assert.equal(row(1).getAttribute("aria-current"), "true");
+    assert.equal(row(1).getAttribute("aria-selected"), "true");
     await click(row(1));
     assert.ok(document.activeElement === back(), "reopening the same selection must move focus too");
   });
@@ -145,8 +156,8 @@ describe("Jobs focus: isolated real components with synthetic jobs (not authenti
     document.body.appendChild(outside);
     outside.focus();
     await render();
-    assert.equal(row().getAttribute("aria-current"), "true");
-    assert.ok(host.querySelector(".df2-jobs-v3-layout.is-mobile-list-open"));
+    assert.equal(row().getAttribute("aria-selected"), "true");
+    assert.equal(detailDrawer(), null);
     assert.ok(document.activeElement === outside, "automatic selection must not steal list focus");
   });
 
@@ -158,13 +169,13 @@ describe("Jobs focus: isolated real components with synthetic jobs (not authenti
     assert.ok(document.activeElement === row(1), "deep-linked selection must be restored");
     await render([...jobs], jobs[1]._id);
     assert.ok(document.activeElement === row(1), "polling must not reopen the deep link");
-    assert.ok(host.querySelector(".df2-jobs-v3-layout.is-mobile-list-open"));
+    assert.equal(detailDrawer(), null);
   });
 
   it("does not steal detail focus on polling and restores the current selection", async () => {
     await render();
     await click(row(1));
-    const detailControl = host.querySelector<HTMLButtonElement>(".df2-jobs-v3-detail button:not(.df2-jobs-v3-back)");
+    const detailControl = document.querySelector<HTMLButtonElement>(".df2-jobs-v3-detail button:not(.df2-jobs-v3-back)");
     assert.ok(detailControl);
     detailControl.focus();
     await render([...jobs]);
@@ -173,20 +184,28 @@ describe("Jobs focus: isolated real components with synthetic jobs (not authenti
     assert.ok(document.activeElement === row(1), "list return must restore the current selection");
   });
 
-  it("preserves desktop row focus on selection and deferred deep links", async () => {
+  it("moves desktop focus into the detail drawer and returns it to the row on close", async () => {
     mobile = false;
     await render();
     await click(row(1));
-    assert.ok(document.activeElement === row(1), "desktop selection must preserve row focus");
+    const drawer = detailDrawer();
+    assert.ok(drawer);
+    assert.ok(drawer.contains(document.activeElement), "the modal detail drawer takes focus");
+    const close = drawer.querySelector<HTMLButtonElement>('button[aria-label="Close"]');
+    assert.ok(close);
+    await click(close);
+    assert.equal(detailDrawer(), null);
+    assert.ok(document.activeElement === row(1), "closing the drawer returns focus to the selected row");
     await render(jobs, jobs[0]._id);
-    assert.ok(document.activeElement === row(1), "desktop deep link must preserve focus");
+    assert.ok(detailDrawer(), "a deep link opens its job's detail");
+    assert.equal(row(0).getAttribute("aria-selected"), "true");
   });
 
   it("restores the current row after asynchronous list replacement changes the selection", async () => {
     await render();
     await click(row(1));
     await render([jobs[0]]);
-    assert.equal(row().getAttribute("aria-current"), "true");
+    assert.equal(row().getAttribute("aria-selected"), "true");
     assert.ok(document.activeElement === back(), "automatic detail selection must preserve visible focus");
     await click(back());
     assert.ok(document.activeElement === row(), "return must restore the current row, not the removed entry row");
@@ -195,7 +214,7 @@ describe("Jobs focus: isolated real components with synthetic jobs (not authenti
 
 describe("Jobs evidence: isolated real components with synthetic jobs", () => {
   function evidenceSection(label = "Evidence panels") {
-    const section = host.querySelector<HTMLElement>(`.df2-jobs-evidence-list[aria-label="${label}"]`);
+    const section = document.querySelector<HTMLElement>(`.df2-jobs-evidence-list[aria-label="${label}"]`);
     assert.ok(section);
     assert.ok(section.querySelector("ul"), "evidence must retain native list semantics");
     assert.equal(section.querySelector('[role="listitem"]'), null, "buttons must retain button semantics");
@@ -209,17 +228,25 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
     return button;
   }
 
+  /** The evidence drawer opened over the job detail drawer. */
+  function topDialog() {
+    const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"]');
+    return dialogs.length > 1 ? dialogs.item(dialogs.length - 1) : null;
+  }
+
   async function closeDrawer() {
-    const button = document.querySelector<HTMLButtonElement>('[role="dialog"] button[aria-label="Close"]');
+    const button = topDialog()?.querySelector<HTMLButtonElement>('button[aria-label="Close"]');
     assert.ok(button);
     await click(button);
-    assert.equal(document.querySelector('[role="dialog"]'), null);
+    assert.equal(topDialog(), null);
+    assert.ok(detailDrawer(), "closing evidence leaves the job detail open");
   }
 
   it("shows absent evidence as unavailable rather than hiding it or implying a valid proof", async () => {
     mobile = false;
     detailRecords.set(jobs[0]._id, jobs[0]);
     await render([jobs[0]]);
+    await openDetail(0);
     await settle();
     assert.equal(evidenceSection().querySelectorAll("li").length, 9);
     for (const label of ["Gate-8 reconcile", "Validate / preflight", "Writer & throughput", "Mapping proof", "DDL & stream log", "Pipeline explanation"]) {
@@ -229,10 +256,10 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
       assert.equal(item.querySelector(".df2-jobs-evidence-list-status")?.textContent, "Not captured");
       assert.equal(item.querySelector(".tone-ok"), null);
       await click(button);
-      assert.equal(document.querySelector('[role="dialog"]'), null);
+      assert.equal(topDialog(), null);
     }
     await click(evidenceAction("Run metadata"));
-    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Run metadata/);
+    assert.match(topDialog()?.textContent || "", /Run metadata/);
     await closeDrawer();
   });
 
@@ -251,6 +278,7 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
         gates: [{ id: "synthetic_gate", status: "warn", message: "Synthetic gate warned" }] },
     });
     await render([jobs[0]]);
+    await openDetail(0);
     assert.equal(evidenceStatus("Gate-8 reconcile"), "Loading…");
     assert.equal(evidenceStatus("Validate / preflight"), "Loading…");
     release();
@@ -263,6 +291,7 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
   it("reports an unreadable job record as unavailable, not as proof that was never captured", async () => {
     mobile = false;
     await render([jobs[1]]);
+    await openDetail(1);
     await settle(1700);
     assert.equal(evidenceStatus("Gate-8 reconcile"), "Detail unavailable — Refresh");
     assert.equal(evidenceAction("Gate-8 reconcile").disabled, true);
@@ -271,15 +300,16 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
   it("labels the existing mapping-table fallback honestly and keeps proof unavailable in Mapping", async () => {
     mobile = false;
     await render([{ ...jobs[0], transfer_request: { mappings: [{ source: "customer_id", target: "account_id" }] } } as TransferJob]);
+    await openDetail(0);
     assert.equal(evidenceSection().querySelector('button[aria-label="Open Mapping proof"]'), null);
     await click(evidenceAction("Column mappings"));
-    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Column map.*customer_id.*account_id/s);
+    assert.match(topDialog()?.textContent || "", /Column map.*customer_id.*account_id/s);
     await closeDrawer();
     const mapping = evidenceSection("Mapping evidence");
     assert.equal(evidenceAction("Mapping proof", mapping).disabled, true);
-    assert.match(host.querySelector(".df2-jobs-map-overview")?.textContent || "", /Risks \/ reviewNot captured/);
+    assert.match(document.querySelector(".df2-jobs-map-overview")?.textContent || "", /Risks \/ reviewNot captured/);
     await click(evidenceAction("Column map table", mapping));
-    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Column map.*customer_id.*account_id/s);
+    assert.match(topDialog()?.textContent || "", /Column map.*customer_id.*account_id/s);
     await closeDrawer();
   });
 
@@ -298,6 +328,7 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
           transform: "none", transform_fidelity: "preserve", confidence: 0.8 }] },
     } as TransferJob;
     await render([job]);
+    await openDetail(0);
     for (const label of ["Gate-8 reconcile", "Validate / preflight"]) {
       assert.equal(evidenceAction(label).disabled, false);
       assert.equal(evidenceAction(label).closest("li")!.querySelector(".tone-ok"), null);
@@ -311,34 +342,35 @@ describe("Jobs evidence: isolated real components with synthetic jobs", () => {
       ["Mapping proof", /customer_id.*account_id/s],
     ] as const) {
       await click(evidenceAction(label));
-      assert.match(document.querySelector('[role="dialog"]')?.textContent || "", content, label);
+      assert.match(topDialog()?.textContent || "", content, label);
       await closeDrawer();
     }
-    const logsTab = host.querySelector<HTMLButtonElement>('#job-tab-log');
+    const logsTab = document.querySelector<HTMLButtonElement>('#job-tab-log');
     assert.ok(logsTab);
     await click(logsTab);
     await click(evidenceAction("Streams", evidenceSection("Logs")));
-    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Stream conservation.*synthetic_accounts/s);
+    assert.match(topDialog()?.textContent || "", /Stream conservation.*synthetic_accounts/s);
     await closeDrawer();
   });
 
   it("preserves log and explanation drawer callbacks with separately labeled evidence actions", async () => {
     mobile = false;
     await render([{ ...jobs[0], ddl_log: ["CREATE TABLE synthetic_accounts"], explanation: "Synthetic pipeline summary." } as TransferJob]);
+    await openDetail(0);
     await click(evidenceAction("DDL & stream log"));
-    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /CREATE TABLE synthetic_accounts/);
+    assert.match(topDialog()?.textContent || "", /CREATE TABLE synthetic_accounts/);
     await closeDrawer();
     await click(evidenceAction("Pipeline explanation"));
-    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Synthetic pipeline summary/);
+    assert.match(topDialog()?.textContent || "", /Synthetic pipeline summary/);
     await closeDrawer();
-    const logsTab = host.querySelector<HTMLButtonElement>('#job-tab-log');
+    const logsTab = document.querySelector<HTMLButtonElement>('#job-tab-log');
     assert.ok(logsTab);
     await click(logsTab);
     const logs = evidenceSection("Logs");
     assert.equal(logs.querySelectorAll("li").length, 4);
     assert.equal(evidenceAction("Streams", logs).disabled, true);
     await click(evidenceAction("DDL & stream", logs));
-    assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /CREATE TABLE synthetic_accounts/);
+    assert.match(topDialog()?.textContent || "", /CREATE TABLE synthetic_accounts/);
     await closeDrawer();
   });
 });
