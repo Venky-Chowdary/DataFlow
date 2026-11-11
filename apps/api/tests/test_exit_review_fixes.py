@@ -544,3 +544,64 @@ def test_m6_judge_does_not_claim_a_key_set_it_did_not_measure():
     out = judge_table(name="t", source=src, extract=ext, key_columns=["ID"], seal_ok=True, parity=PARITY,
                       not_measured=[])
     assert out["status"] == "proven" and "key set" not in out["reason"]
+
+
+# --------------------------------------------- API gaps found by the web build (W1-W4)
+
+_TABLE_KEYS = {"name", "schema", "job_id", "status", "reason", "key_columns", "rows_source", "rows_extracted",
+               "key_set", "row_set", "control_totals", "value_parity", "differences", "extract_seconds", "part"}
+
+
+def test_w1_a_running_rehearsal_has_the_full_table_shape(world):  # noqa: F811
+    from services.exit_rehearsal import public, start
+    from tests.test_exit_rehearsal_e2e import _wait
+
+    started = start(_system(tables=[{"name": "events"}]), actor="a@example.com")
+    view = public(started)
+    for table in view["tables"]:
+        assert _TABLE_KEYS <= set(table), sorted(_TABLE_KEYS - set(table))
+        if table["status"] in {"pending", "running"}:
+            assert table["rows_source"] is None and table["part"] is None and table["differences"] == []
+            assert table["key_set"] == {"source_sha256": None, "extract_sha256": None, "match": None}
+            assert table["value_parity"]["method"] is None and table["control_totals"] == []
+    _wait(started)
+
+
+def test_w2_the_board_names_the_running_rehearsal(world):  # noqa: F811
+    from services.exit_inventory import board, get_system, readiness
+    from services.exit_rehearsal import settle, start
+    from tests.test_exit_rehearsal_e2e import _wait
+
+    system = _system(tables=[{"name": "events"}])
+    first = _run(system)
+    second = start(get_system(system["id"]), actor="a@example.com")
+    row = board([get_system(system["id"])])["systems"][0]
+    assert row["running_rehearsal_id"] == second["id"] and row["last_rehearsal_id"] == first["id"]
+    assert readiness(get_system(system["id"]))["running_rehearsal_id"] == second["id"]
+    _wait(second)
+    settle(second["id"])
+    after = board([get_system(system["id"])])["systems"][0]
+    assert after["running_rehearsal_id"] is None and after["last_rehearsal_id"] == second["id"]
+
+
+def test_w3_reasons_join_sentences_cleanly():
+    types = {"id": "BIGINT", "amount": "DECIMAL(12,2)"}
+    rows = [{"id": 1, "amount": Decimal("1.00")}, {"id": 2, "amount": Decimal("2.00")}]
+    src = profile_rows(rows, list(types), ["id"], None, types=types, engine="sqlite")
+    ext = profile_rows([rows[0], dict(rows[1], amount=Decimal("3.00"))], list(types), ["id"], ["id", "amount"],
+                       types=types, engine="sqlite")
+    out = judge_table(name="t", source=src, extract=ext, key_columns=["id"], seal_ok=False, parity=PARITY,
+                      not_measured=[])
+    assert ".;" not in out["reason"] and ".." not in out["reason"] and out["reason"].endswith(".")
+    gapped = judge_table(name="t", source=src, extract=src, key_columns=["id"], seal_ok=True, parity=PARITY,
+                         not_measured=["the source could not be re-read (The read failed: see the server log.)",
+                                       "doc is json."])
+    assert ".;" not in gapped["reason"] and ".," not in gapped["reason"] and ".." not in gapped["reason"]
+
+
+def test_w4_a_failed_extract_reason_has_no_driver_text_e2e(world):  # noqa: F811
+    out = _run(_system(tables=[{"name": "orders"}, {"name": "no_such_table"}]))
+    failed = next(t for t in out["tables"] if t["name"] == "no_such_table")
+    assert failed["status"] == "failed"
+    assert "no such table" not in failed["reason"].lower() and "driver" not in failed["reason"].lower()
+    assert failed["reason"].startswith("The extract job failed")

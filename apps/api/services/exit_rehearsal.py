@@ -371,7 +371,8 @@ def _failed_reason(job: dict[str, Any]) -> str:
     error = job.get("error") or job.get("message")
     if not error:
         return f"The extract job ended {status}; no error was recorded."
-    return safe_error(error, what=f"The extract job ({status})", event=ERROR_EVENT)
+    what = "The extract job" if status.lower() == "failed" else f"The extract job ({status})"
+    return safe_error(error, what=what, event=ERROR_EVENT)
 
 
 def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> dict[str, str]:
@@ -621,6 +622,16 @@ def trend(doc: dict[str, Any]) -> dict[str, Any]:
     return {"points": points, "growth_pct_rows": growth, "projection": projection}
 
 
+#: RehearsalTable fields not measured yet (a pending / running / failed-to-start table).
+_UNMEASURED_TABLE: dict[str, Any] = {
+    "rows_source": None, "rows_extracted": None,
+    "key_set": {"source_sha256": None, "extract_sha256": None, "match": None},
+    "row_set": {"source_sha256": None, "extract_sha256": None, "match": None},
+    "control_totals": [], "differences": [], "extract_seconds": None, "part": None,
+    "value_parity": {"method": None, "parity_verdict": None, "unexplained": None, "report": None},
+}
+
+
 def public(doc: dict[str, Any]) -> dict[str, Any]:
     """ExitRehearsal (contract 4): stored state plus the computed timeline, trend and sign-off."""
     from services.exit_evidence import evidence_block, signoff_block
@@ -628,6 +639,8 @@ def public(doc: dict[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in doc.items() if not str(k).startswith("_")
            and k not in {"approvals", "signed", "source", "extract_format", "required_roles", "window_seconds"}}
     # A running rehearsal carries the full shape, with nothing measured yet.
+    out["tables"] = [{**_UNMEASURED_TABLE, **{k: v for k, v in t.items() if not str(k).startswith("_")}}
+                     for t in doc.get("tables") or []]
     n = len(doc.get("tables") or [])
     out.setdefault("completeness", {
         "tables_declared": n, "tables_extracted": 0, "tables_proven": 0, "tables_not_proven": 0,

@@ -376,6 +376,24 @@ def _totals_rows(src: Profile, ext: Profile | None) -> list[dict[str, Any]]:
     return out
 
 
+def _clause(text: str) -> str:
+    """A part as a clause: no final full stop (one inside a closing bracket included)."""
+    text = str(text).strip()
+    while text.endswith((".", ".)")):
+        text = text[:-1] if text.endswith(".") else text[:-2] + ")"
+    return text
+
+
+def _clauses(parts: Iterable[str]) -> str:
+    return "; ".join(_clause(p) for p in parts if str(p).strip())
+
+
+def _sentences(parts: Iterable[str]) -> str:
+    """Parts joined as one sentence: ``a; b; c.`` (never ``a.; b.``)."""
+    joined = _clauses(parts)
+    return joined + "." if joined else ""
+
+
 def resolve_keys(key_columns: list[str], columns: list[str]) -> tuple[list[str], list[str]]:
     """(declared key columns as the table spells them, declared keys that are not columns)."""
     by_lower = {c.lower(): c for c in columns}
@@ -431,11 +449,11 @@ def judge_table(
     not_measured = list(not_measured) + [f"{col} {why}" for col, why in (source.uncompared if source else {}).items()]
     if diffs:
         status = "incomplete"
-        reason = "; ".join(d["detail"] for d in diffs[:4])
+        reason = _sentences(d["detail"] for d in diffs[:4])
     elif not_measured or method not in FULL_VALUE_CHECKS | {"population_digest"}:
         status = "not_proven"
         gaps = list(not_measured) or [f"values were compared only by {method.replace('_', ' ')}"]
-        reason = "Nothing differs where measured, but " + "; ".join(gaps) + ", so this table is not proven."
+        reason = "Nothing differs where measured, but " + _clauses(gaps) + ", so this table is not proven."
     else:
         status = "proven"
         keyed = "key set, " if source is not None and source.key_set_sha256 else ""

@@ -375,6 +375,7 @@ def readiness(system: dict[str, Any], rehearsals: list[dict[str, Any]] | None = 
         "state": state if state in STATES else "failed",
         "overdue": current > due,
         "next_due_at": _iso(due),
+        "running_rehearsal_id": (running or {}).get("id"),
         "stale": stale,
         "stale_reason": (f"The system's source, tables, keys or window changed since rehearsal {latest.get('n')}; "
                          "rehearse it again to prove the current definition.") if stale and latest else None,
@@ -417,6 +418,7 @@ def board(systems: list[dict[str, Any]], *, now: datetime | None = None) -> dict
             "engine": (system.get("source") or {}).get("engine"), "tables": tables, "state": ready["state"],
             "overdue": ready["overdue"], "next_due_at": ready["next_due_at"],
             "last_rehearsal_at": last.get("started_at"), "last_rehearsal_id": last.get("id"),
+            "running_rehearsal_id": ready["running_rehearsal_id"],
             "measured_seconds": last.get("measured_seconds"),
             "window_seconds": int(system.get("exit_window_hours") or 0) * 3600,
             # Measured against the window the rehearsal ran under: shown only while that is still the window.

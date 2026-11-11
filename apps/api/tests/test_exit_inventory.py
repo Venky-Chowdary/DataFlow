@@ -61,7 +61,8 @@ def test_a_never_rehearsed_system_is_overdue_after_its_period():
 
     fresh = readiness(_system(created_at="2026-11-01T00:00:00Z"), [], now=NOW)
     assert fresh == {"state": "never_rehearsed", "overdue": False, "next_due_at": "2027-01-30T00:00:00Z",
-                     "stale": False, "stale_reason": None, "last_rehearsal": None, "last_proven_rehearsal": None}
+                     "running_rehearsal_id": None, "stale": False, "stale_reason": None, "last_rehearsal": None,
+                     "last_proven_rehearsal": None}
     stale = readiness(_system(created_at="2026-01-01T00:00:00Z"), [], now=NOW)
     assert stale["overdue"] is True
 
