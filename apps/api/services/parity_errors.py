@@ -6,7 +6,11 @@ errors quote row values (``Incorrect integer value: 'alice@example.com'``,
 ``Key (email)=(…)``, ``Failing row contains (…)``), and no pattern list can
 find them all. So this is an allowlist: an error becomes its exception class,
 the engine's error code (SQLSTATE, MySQL errno, ORA-/Msg number) and a fixed
-sentence for that code. The full text goes to the server log only.
+sentence for that code. The server-side record is the platform's canonical error
+event (:func:`services.safe_errors.public_error`, with its correlation id); the
+full text goes to the server log only, under that correlation id. Its public
+``detail`` is not used: with ``DATAFLOW_EXPOSE_ERROR_DETAIL`` it would carry the
+raw text, and a fix result is sealed in signed packs.
 """
 
 from __future__ import annotations
@@ -107,12 +111,19 @@ def safe_error(error: Any, *, what: str = "the fix", limit: int = 300) -> str:
     Only the exception class, the engine's error code and a fixed sentence for
     that code survive; the full text is logged on the server.
     """
+    from services.safe_errors import public_error
+
     text = str(error or "")
     cls = type(error).__name__ if isinstance(error, BaseException) else ""
     if not cls and (found := _CLASS.search(text)):
         cls = found.group(2)
     code = error_code(text)
-    logger.warning("parity: %s failed (%s%s): %s", what, cls or "error", f" {code}" if code else "", text[:2000])
+    _detail, cid = public_error(
+        error if isinstance(error, BaseException) else RuntimeError(cls or "error"),
+        event="parity.fix.failed", public_message=what, logger=logger, error_code=code or None,
+    )
+    logger.warning("parity: %s failed (%s%s) [reference %s]: %s", what, cls or "error", f" {code}" if code else "",
+                   cid, text[:2000])
     sentence = _MESSAGES.get(code) or (
         "the Oracle database refused the statement" if code.startswith("ORA-") else
         "see the server log for the details")
