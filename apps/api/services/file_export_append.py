@@ -68,7 +68,11 @@ def land_export_bytes(
     (``services.export_object_store``): one object per job, so an append run
     stores this run's rows as its own object and never rewrites another's.
     """
-    from services.export_object_store import exports_use_object_store, store_job_export
+    from services.export_object_store import (
+        exports_use_object_store,
+        job_export_workspace,
+        store_job_export,
+    )
     from services.export_paths import generated_export_path, resolve_export_path
     from services.local_file_policy import local_destination_refusal
     from services.sync_cursor import is_append_sync, resolve_effective_sync_mode
@@ -83,8 +87,11 @@ def land_export_bytes(
     fmt = str(getattr(destination, "format", "") or "")
     ext = os.path.splitext(export_name)[1].lstrip(".") or fmt or "json"
     configured = str(getattr(destination, "output_path", "") or "").strip()
+    # The export lands in the folder of the job's workspace (audit H-2): two
+    # workspaces naming the same ``output_path`` never share a file.
+    workspace_id = job_export_workspace(job_id)
     if configured:
-        target = resolve_export_path(configured, default_ext=ext)
+        target = resolve_export_path(configured, default_ext=ext, workspace_id=workspace_id)
         export_path = str(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         appending = is_append_sync(
@@ -100,7 +107,7 @@ def land_export_bytes(
         name = target.name
     else:
         name = f"export_{job_id}.{ext}"
-        export_path = str(generated_export_path(name))
+        export_path = str(generated_export_path(name, workspace_id=workspace_id))
         with open(export_path, "wb") as fh:
             fh.write(export_bytes)
     return {

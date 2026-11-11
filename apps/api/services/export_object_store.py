@@ -284,6 +284,17 @@ def export_job_scope(job_id: str, workspace_id: str) -> Iterator[None]:
         discard_staged_export(job_id)
 
 
+def bound_job_workspace() -> str:
+    """The workspace of the tracked job running in this context, or ``""``."""
+    bound = _bound_job.get()
+    return bound[1] if bound is not None else ""
+
+
+def job_export_workspace(job_id: str) -> str:
+    """The workspace a job's export belongs to: the bound job's, else the stored job's."""
+    return _job_workspace(job_id)
+
+
 def _job_workspace(job_id: str) -> str:
     bound = _bound_job.get()
     if bound is not None and bound[0] == str(job_id) and bound[1]:

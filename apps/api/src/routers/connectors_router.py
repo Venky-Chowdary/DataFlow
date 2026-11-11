@@ -1805,7 +1805,8 @@ async def export_job_quarantine(job_id: str, request: Request):
 
     # The folder GET /transfer/download serves (DATAFLOW_EXPORTS_DIR aware).
     filename = f"quarantine_{job_id}_{uuid.uuid4().hex[:8]}.csv"
-    export_path = generated_export_path(filename)
+    # In the job's own workspace folder, so only that workspace downloads it.
+    export_path = generated_export_path(filename, workspace_id=str(job.get("workspace_id") or ""))
     export_path.write_bytes(content)
 
     return {

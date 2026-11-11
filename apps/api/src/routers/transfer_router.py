@@ -2405,20 +2405,20 @@ async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request)
 
 
 @router.get("/download/{filename}")
-async def download_export(filename: str):
-    """Serve an exported file from the exports directory.
+async def download_export(filename: str, request: Request):
+    """Serve an export of the caller's own workspace.
 
-    The folder the writers use (``export_paths.exports_dir()``, which honours
-    ``DATAFLOW_EXPORTS_DIR``), not a second hard-coded copy of the default.
+    Looked up in the caller's workspace folder(s) under the exports folder
+    (``export_paths``, which honours ``DATAFLOW_EXPORTS_DIR``); a file left in
+    the flat folder by an earlier release is served only to its job's
+    workspace. Another workspace's export, a name that leaves the folder and a
+    name that does not exist all answer the same 404 (audit H-2).
     """
-    from services.export_paths import exports_dir
+    from services.export_paths import downloadable_export
+    from services.workspace_access import tenant_scope
 
-    export_dir = exports_dir()
-    file_path = export_dir / filename
-    # Security: refuse to serve files outside the exports directory
-    if not file_path.resolve().is_relative_to(export_dir.resolve()):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    if not file_path.exists():
+    file_path = downloadable_export(filename, tenant_scope(request))
+    if file_path is None:
         raise HTTPException(status_code=404, detail="Export not found")
     return FileResponse(file_path, filename=filename)
 

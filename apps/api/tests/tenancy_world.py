@@ -104,6 +104,9 @@ def tenancy_world(tmp_path, monkeypatch) -> Iterator[TenancyWorld]:
     monkeypatch.delenv("DATAWRAP_DATA_DIR", raising=False)
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("DATAFLOW_CONTRACTS_PATH", str(tmp_path / "contracts.json"))
+    # Exports land in the test's own folder, never in apps/api/exports.
+    monkeypatch.delenv("DATAWRAP_EXPORTS_DIR", raising=False)
+    monkeypatch.setenv("DATAFLOW_EXPORTS_DIR", str(tmp_path / "exports"))
     monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "1")
     monkeypatch.setenv("DATAFLOW_REQUIRE_WORKSPACE", "1")
     monkeypatch.setenv("DATAFLOW_ADMIN_EMAIL", ADMIN_EMAIL)
