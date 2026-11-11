@@ -47,6 +47,7 @@ import {
   sortJobsForGrid,
 } from "../lib/jobGrid";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, presentedJobStatus } from "../lib/uiUtils";
+import { parseServerTimestampMs } from "../lib/jobTheaterProgress";
 import { jobDetailNeedsRefetch } from "../lib/theaterMount";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -390,7 +391,19 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   const focusPanel = deepLinkRef.current.panel;
   const pinnedJobRef = useRef<string | null>(null);
   const pageRequestRef = useRef(0);
-  const jobs = pageHistory?.jobs ?? recentJobs;
+  // The server page is the row set; the polled recent feed refreshes a row
+  // only when its copy was written later (live progress between page reads).
+  const jobs = useMemo(() => {
+    if (!pageHistory) return recentJobs;
+    const fresh = new Map(recentJobs.map((j) => [j._id, j]));
+    return pageHistory.jobs.map((row) => {
+      const live = fresh.get(row._id);
+      if (!live) return row;
+      const liveAt = parseServerTimestampMs(live.updated_at || "") ?? 0;
+      const rowAt = parseServerTimestampMs(row.updated_at || "") ?? 0;
+      return liveAt > rowAt ? live : row;
+    });
+  }, [pageHistory, recentJobs]);
   const history = pageHistory ?? recentHistory;
   const jobPageQuery = useMemo<JobHistoryQuery>(() => ({
     limit: pageSize,

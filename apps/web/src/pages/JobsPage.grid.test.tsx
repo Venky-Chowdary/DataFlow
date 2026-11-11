@@ -86,7 +86,7 @@ const loadPage = async (query: JobHistoryQuery): Promise<JobHistory> => {
   };
 };
 
-async function render(withPaging = true) {
+async function render(withPaging = true, recent: TransferJob[] = jobs) {
   if (!root) {
     host = document.createElement("div");
     document.body.appendChild(host);
@@ -95,7 +95,7 @@ async function render(withPaging = true) {
   await act(async () => {
     root!.render(createElement(ToastProvider, null,
       createElement(ConfirmProvider, null,
-        createElement(JobsPage, { jobs, onLoadPage: withPaging ? loadPage : undefined, onRefresh: () => {} })),
+        createElement(JobsPage, { jobs: recent, onLoadPage: withPaging ? loadPage : undefined, onRefresh: () => {} })),
     ));
   });
   await settle();
@@ -266,6 +266,18 @@ describe("Jobs grid page", () => {
     await render();
     assert.equal(headers().includes("Mode"), false, "the layout survives a remount");
     assert.ok(host.querySelector(".df2-jobs-grid--comfortable"));
+  });
+
+  it("keeps server-page rows live from the polled recent feed without re-paging", async () => {
+    await render();
+    const requests = queries.length;
+    const status = () => row("grid-alpha").querySelector(".df2-jobs-grid-status")?.textContent;
+    assert.equal(status(), "Completed");
+    await render(true, [{ ...jobs[0], status: "failed", updated_at: "2026-11-07T00:10:00" } as TransferJob]);
+    assert.equal(status(), "Failed", "the newer recent row replaces the page row");
+    await render(true, [{ ...jobs[0], status: "running" } as TransferJob]);
+    assert.equal(status(), "Completed", "a recent row with no later write never overrides the page");
+    assert.equal(queries.length, requests, "no extra server page read");
   });
 
   it("sorts the loaded page locally and says so", async () => {
