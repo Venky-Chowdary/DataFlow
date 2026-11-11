@@ -37,9 +37,19 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from services.reversibility_types import (
+    CONDITIONAL,
+    INVERTIBLE,
+    LOSSY,
+    TEXT,
+    TYPE_CHECKED,
+    check_type_values,
+    logical,
+    type_pair,
+)
+
 GATE_ID = "g24_reversibility"
 
-INVERTIBLE, LOSSY, CONDITIONAL = "invertible", "lossy", "conditional"
 REVERSIBLE, PARTLY, NOT_REVERSIBLE = "reversible", "partly_reversible", "not_reversible"
 
 #: Map transforms that never change a value the engine binds.
@@ -72,15 +82,20 @@ _CAST_FOR: dict[str, str] = {
     "integer": "integer", "decimal": "decimal", "float": "decimal", "boolean": "boolean",
     "date": "date", "datetime": "datetime", "time": "time", "json": "json",
 }
-_TEXT = frozenset({"string", "text"})
-_SAFE_WIDEN = frozenset({("integer", "decimal"), ("date", "datetime"), ("boolean", "integer")})
-_TRUNCATE = frozenset({("datetime", "date"), ("datetime", "time")})
-_ROUND = frozenset({("decimal", "integer"), ("float", "integer"), ("decimal", "float"), ("float", "decimal")})
+
 
 _REASON = {
     "identity": "is copied unchanged",
     "rename": "is renamed to {target}; the values are copied unchanged",
     "widen": "widens {stype} to {ttype}; every value fits",
+    "timezone": "drops the time zone ({stype} to {ttype}); the original offset cannot be recovered",
+    "json_normalize": ("is stored as {ttype}, which keeps one value per key in its own key order and spacing; "
+                       "the original {stype} text cannot be rebuilt"),
+    "charset": ("narrows the character set ({stype} to {ttype}); reversible only if every character survives "
+                "the code page (checked as plain ASCII)"),
+    "enum": "is cast {stype} to {ttype}; reversible only if every value is one of its labels",
+    "blank_pad": "is padded to the fixed width of {ttype}; reversible only if no value ends in a space",
+    "text_width": "is cast {stype} to {ttype}; reversible only if every value's text fits the width",
     "lossless_cast": "is cast {stype} to {ttype} without losing information",
     "type_preserving_bind": "is bound as its own type ({ttype})",
     "omit": "is not written to the destination (omitted)",
@@ -104,38 +119,6 @@ _REASON = {
 
 def _norm(value: Any) -> str:
     return str(value or "").strip()
-
-
-def _logical(type_str: str) -> str:
-    """The logical family, or "" when no type is declared (the type system reads "" as string)."""
-    if not _norm(type_str):
-        return ""
-    from services.type_system import normalize_logical_type
-
-    return normalize_logical_type(type_str)
-
-
-def _narrows(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
-    """Any narrowing the type system already names (one rule set with preflight)."""
-    from services import type_system as ts
-
-    checks = (
-        lambda: ts.string_width_would_narrow(stype, ttype, dest_db=dest_db),
-        lambda: ts.decimal_params_would_narrow(stype, ttype, dest_db=dest_db),
-        lambda: ts.integer_width_would_narrow(stype, ttype, dest_db=dest_db),
-        lambda: ts.float_mantissa_would_narrow(stype, ttype, dest_db=dest_db, source_db=source_db),
-        lambda: ts.temporal_precision_would_narrow(stype, ttype, dest_db=dest_db),
-        lambda: ts.binary_width_would_narrow(stype, ttype),
-        lambda: ts.interval_precision_would_narrow(stype, ttype),
-        lambda: ts.bitstring_width_would_narrow(stype, ttype),
-    )
-    for check in checks:
-        try:
-            if check():
-                return True
-        except Exception:  # noqa: BLE001 - a helper that cannot read a spelling decides nothing
-            continue
-    return False
 
 
 def _transform_of(mapping: Mapping[str, Any]) -> str:
@@ -210,7 +193,7 @@ def _overflow(values: Sequence[Any], ttype: str, tlogical: str) -> dict[str, Any
         if text is None:
             continue
         checked += 1
-        if tlogical in _TEXT and len(text) > width:
+        if tlogical in TEXT and len(text) > width:
             failing += 1
         elif tlogical == "decimal" and scale is not None:
             try:
@@ -255,24 +238,6 @@ def _entry(source: str | None, target: str | None, stype: str | None, ttype: str
     }
 
 
-def _type_pair(stype: str, ttype: str, *, dest_db: str, source_db: str) -> tuple[str, str]:
-    """(invertibility, reason code) of a type mapping alone."""
-    slog, tlog = _logical(stype), _logical(ttype)
-    if not slog or not tlog:
-        return CONDITIONAL, "type_unknown"
-    if _narrows(stype, ttype, dest_db=dest_db, source_db=source_db):
-        return LOSSY, "narrowing"
-    if (slog, tlog) in _TRUNCATE:
-        return LOSSY, "truncation"
-    if (slog, tlog) in _ROUND:
-        return LOSSY, "rounding"
-    if slog == tlog or {slog, tlog} <= _TEXT:
-        return INVERTIBLE, ("identity" if _norm(stype).upper() == _norm(ttype).upper() else "widen")
-    if (slog, tlog) in _SAFE_WIDEN or (tlog in _TEXT and slog != "binary"):
-        return INVERTIBLE, "lossless_cast"
-    return CONDITIONAL, "cast"
-
-
 def classify_mapping(
     mapping: Mapping[str, Any],
     *,
@@ -299,11 +264,11 @@ def classify_mapping(
         return out
     if transform.startswith("concat:"):
         return _entry(source, target, stype, ttype, transforms, LOSSY, "concat")
-    kind, code = _type_pair(stype, ttype, dest_db=dest_db, source_db=source_db)
+    kind, code = type_pair(stype, ttype, dest_db=dest_db, source_db=source_db)
     if kind == LOSSY:
-        check = _overflow(values, ttype, _logical(ttype)) if code == "narrowing" else None
+        check = _overflow(values, ttype, logical(ttype)) if code == "narrowing" else None
         return _entry(source, target, stype, ttype, transforms, LOSSY, code, check)
-    slog, tlog = _logical(stype), _logical(ttype)
+    slog, tlog = logical(stype), logical(ttype)
     if transform and transform not in _IDENTITY:
         from services.mapping_quality import _is_passthrough_transform
 
@@ -317,6 +282,8 @@ def classify_mapping(
         side = "source" if not slog else "destination"
         cast = _CAST_FOR.get(tlog)
         check = check_values(values, cast) if (code == "cast" and cast) else None
+        if code in TYPE_CHECKED:
+            check = check_type_values(code, values, ttype, strict_text)
         if check is None:
             check = {"status": "not_checked", "rows_checked": 0, "rows_not_fitting": 0}
         return _entry(source, target, stype, ttype, transforms, CONDITIONAL, code, check, side=side)

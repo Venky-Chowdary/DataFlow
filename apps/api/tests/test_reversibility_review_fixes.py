@@ -267,3 +267,78 @@ def test_c2_engine_lets_a_recipe_that_adds_a_column_pass_g24(people, fake_store)
     result = _execute(fake_store, src, dst, shape_recipe=recipe, mappings=mappings)
     assert result.success, result.error
     assert _dest_rows(dst) == 10
+
+
+# ------------------------------------------------ C3: lossy type mappings
+
+
+def _col(stype, ttype, dest="postgresql", source="postgresql", observed=None):
+    return classify_mapping(_m("c", stype=stype, ttype=ttype), dest_db=dest, source_db=source, observed=observed)
+
+
+@pytest.mark.parametrize("stype,ttype,dest,source,code", [
+    ("bigint", "integer", "postgresql", "postgresql", "narrowing"),
+    ("bigint", "int", "mysql", "mysql", "narrowing"),
+    ("bigint", "int", "mssql", "mssql", "narrowing"),
+    ("BIGINT", "INTEGER", "postgresql", "postgresql", "narrowing"),
+    ("integer", "smallint", "postgresql", "postgresql", "narrowing"),
+    ("timestamp with time zone", "timestamp without time zone", "postgresql", "postgresql", "timezone"),
+    ("timestamptz", "datetime(6)", "mysql", "postgresql", "timezone"),
+    ("time with time zone", "time", "postgresql", "postgresql", "timezone"),
+    ("timestamp", "datetime", "mysql", "postgresql", "narrowing"),
+    ("double", "float", "mysql", "mysql", "narrowing"),
+    ("json", "jsonb", "postgresql", "postgresql", "json_normalize"),
+    ("timestamp", "varchar(10)", "postgresql", "postgresql", "narrowing"),
+    ("double precision", "varchar(5)", "postgresql", "postgresql", "narrowing"),
+    ("bigint", "varchar(3)", "postgresql", "postgresql", "narrowing"),
+    ("numeric(12,2)", "varchar(8)", "postgresql", "postgresql", "narrowing"),
+])
+def test_c3_lossy_type_mappings_are_named_lossy(stype, ttype, dest, source, code):
+    col = _col(stype, ttype, dest, source)
+    assert (col["invertibility"], col["reason_code"]) == (LOSSY, code), col
+    assert "every value fits" not in col["reason"]
+
+
+@pytest.mark.parametrize("stype,ttype,dest,code,fits,does_not_fit", [
+    ("nvarchar(50)", "varchar(50)", "mssql", "charset", ["plain"], ["café"]),
+    ("varchar(10)", "enum('a','b')", "mysql", "enum", ["a", "b"], ["c"]),
+    ("varchar(10)", "char(10)", "postgresql", "blank_pad", ["abc"], ["abc "]),
+])
+def test_c3_conditional_type_mappings_are_checked_against_the_data(stype, ttype, dest, code, fits, does_not_fit):
+    unchecked = _col(stype, ttype, dest, dest)
+    assert (unchecked["invertibility"], unchecked["reason_code"]) == (CONDITIONAL, code), unchecked
+    assert unchecked["check"]["status"] == "not_checked"
+    assert _col(stype, ttype, dest, dest, observed=fits)["check"]["status"] == "fits"
+    bad = _col(stype, ttype, dest, dest, observed=fits + does_not_fit)
+    assert bad["check"] == {"status": "does_not_fit", "rows_checked": len(fits) + 1, "rows_not_fitting": 1}
+
+
+@pytest.mark.parametrize("stype,ttype,dest,source,code", [
+    ("integer", "bigint", "postgresql", "postgresql", "widen"),
+    ("bigint", "bigint", "postgresql", "postgresql", "identity"),
+    ("int", "integer", "mysql", "mysql", "widen"),
+    ("timestamp(3)", "timestamp(6)", "postgresql", "postgresql", "widen"),
+    ("timestamp", "datetime(6)", "mysql", "postgresql", "widen"),
+    ("real", "double precision", "postgresql", "postgresql", "widen"),
+    ("float", "double", "mysql", "mysql", "widen"),
+    ("jsonb", "json", "postgresql", "postgresql", "widen"),
+    ("enum('a','b')", "varchar(10)", "mysql", "mysql", "widen"),
+    ("nvarchar(50)", "varchar(50)", "postgresql", "mssql", "widen"),
+    ("char(10)", "char(10)", "postgresql", "postgresql", "identity"),
+    ("bigint", "varchar(20)", "postgresql", "postgresql", "lossless_cast"),
+    ("integer", "varchar(11)", "postgresql", "postgresql", "lossless_cast"),
+    ("timestamp", "varchar(40)", "postgresql", "postgresql", "lossless_cast"),
+    ("uuid", "varchar(36)", "postgresql", "postgresql", "lossless_cast"),
+    ("numeric(12,2)", "varchar(14)", "postgresql", "postgresql", "lossless_cast"),
+    ("date", "text", "postgresql", "postgresql", "lossless_cast"),
+])
+def test_c3_lossless_type_mappings_stay_invertible(stype, ttype, dest, source, code):
+    col = _col(stype, ttype, dest, source)
+    assert (col["invertibility"], col["reason_code"]) == (INVERTIBLE, code), col
+
+
+def test_c3_a_cast_into_text_of_unknown_rendered_width_is_checked_by_width():
+    col = _col("interval", "varchar(8)")
+    assert (col["invertibility"], col["reason_code"]) == (CONDITIONAL, "text_width"), col
+    assert _col("interval", "varchar(8)", observed=["1 day"])["check"]["status"] == "fits"
+    assert _col("interval", "varchar(8)", observed=["1 day 02:00:00"])["check"]["status"] == "does_not_fit"
