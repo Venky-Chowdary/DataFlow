@@ -57,6 +57,8 @@ import {
   parityRowsChecked,
   parityUnknownCaption,
   rowsDifferLabel,
+  unverifiableNotice,
+  verdictReasonDetail,
   shouldPollApplying,
   approveOutcome,
   assuranceTone,
@@ -284,6 +286,8 @@ export interface TrustReportViewProps {
   onOpenDetail?: () => void;
   /** The automatic re-read while a fix is applying stopped at its limit; say so. */
   pollStopped?: boolean;
+  /** The job's status: a failed run that never reached verification is said plainly. */
+  jobStatus?: string;
 }
 
 function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: ParityTone; detail?: string }> {
@@ -326,6 +330,7 @@ export function TrustReportView({
   onOpenGate8,
   onOpenDetail,
   pollStopped = false,
+  jobStatus,
 }: TrustReportViewProps) {
   const verdict = verdictPresentation(report);
   const { parity, confidence } = report;
@@ -337,6 +342,9 @@ export function TrustReportView({
   const ringTone = report.verdict === "unexplained" ? "warn" : report.verdict === "unverifiable" ? "idle" : "ok";
   const signoffAnchor = `parity-signoff-${report.job_id}`;
   const shortcut = signoffShortcut(report);
+  // The verdict pill is in the header; the notice says why it cannot be verified.
+  const notice = unverifiableNotice(report, jobStatus);
+  const reasonDetail = verdictReasonDetail(report);
   const differLabel = rowsDifferLabel(report);
   const kpis: Array<{ label: string; value: string; figure: boolean }> = [
     { label: "rows in source", value: formatCount(parity.rows_source), figure: parity.rows_source != null },
@@ -415,10 +423,10 @@ export function TrustReportView({
         </div>
       </header>
 
-      {report.verdict === "unverifiable" && report.verdict_reason && (
+      {notice && (
         <p className="df2-parity-notice is-warn" role="status">
           <DtIcon name="alert" size={14} />
-          <span>{report.verdict_reason}</span>
+          <span>{notice}</span>
         </p>
       )}
 
@@ -431,7 +439,6 @@ export function TrustReportView({
             checked={parityRowsChecked(report)}
             caption={parity.proven_equal_pct == null ? parityUnknownCaption(report) : undefined}
           />
-          <span className={badgeClass(verdict.tone)}>{verdict.label}</span>
         </div>
         <div className="df2-parity-card df2-parity-kpi-card">
           {/* "explained n / m" means something only when rows differ; 3 or 4 tiles, never an orphan. */}
@@ -446,9 +453,7 @@ export function TrustReportView({
           <p className="df2-parity-confidence">
             <b>How sure is this?</b> {confidence.statement}
           </p>
-          {report.verdict !== "unverifiable" && report.verdict_reason && (
-            <p className="df2-parity-muted">{report.verdict_reason}</p>
-          )}
+          {reasonDetail && <p className="df2-parity-muted">{reasonDetail}</p>}
         </div>
       </div>
 
@@ -892,6 +897,7 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
       }
       onOpenGate8={onOpenGate8}
       onOpenDetail={onOpenDetail}
+      jobStatus={jobStatus}
     />
   );
 }

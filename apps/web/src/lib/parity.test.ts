@@ -445,4 +445,10 @@ describe("a report where nothing was compared (trust-report polish)", () => {
     );
     assert.equal(parityIsLowerBound(unexplainedReport()), true);
   });
+
+  it("never says a difference was looked for when nothing was compared", () => {
+    const text = noDifferencesText(failedRunReport());
+    assert.doesNotMatch(text, /were found|could not cover/);
+    assert.match(text, /Nothing was compared/);
+  });
 });
