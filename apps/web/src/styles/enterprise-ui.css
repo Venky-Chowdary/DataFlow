@@ -16566,9 +16566,9 @@ table.df2-table.df2-jobs-grid-table {
   flex: 1 1 100%;
 }
 
+/* The metric and the ID chip join Rename's row and wrap only when narrow. */
 .df2-app .df2-jobs-detail-drawer .df2-jobs-v3-summary-title-line .df2-jobs-v3-summary-ids {
-  flex: 1 1 auto;
-  justify-content: flex-start;
+  display: contents;
 }
 
 .df2-app .df2-jobs-detail-drawer .df2-job-name-editor-title {
