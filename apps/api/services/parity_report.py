@@ -440,12 +440,21 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _public(item: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in item.items() if not str(k).startswith("_")}
+
+
 def public_report(report: dict[str, Any]) -> dict[str, Any]:
-    """The report without its internal bookkeeping (``_``-prefixed keys)."""
+    """The report without its internal bookkeeping (``_``-prefixed keys).
+
+    Everything that leaves the API — the response, the signed pack, the
+    exports — goes through here, so the fixes' key lists and DDL inputs
+    (``_keys``, ``_key_column``, ``_new_type`` …) never do.
+    """
     out = dict(report)
-    out["tables"] = [{k: v for k, v in t.items() if not k.startswith("_")} for t in report["tables"]]
-    out["differences"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in report["differences"]]
-    return {k: v for k, v in out.items() if not k.startswith("_")}
+    for name in ("tables", "differences", "fixes"):
+        out[name] = [_public(item) for item in report.get(name) or []]
+    return _public(out)
 
 
 def build_parity_report(job: dict[str, Any], *, reread: bool = True, job_id: str = "") -> dict[str, Any]:

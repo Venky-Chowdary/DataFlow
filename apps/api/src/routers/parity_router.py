@@ -57,12 +57,9 @@ def _visible_job(job_id: str, request: Request, *, write: bool = False) -> dict[
 
 
 def _public(report: dict[str, Any]) -> dict[str, Any]:
-    from services.parity_fixes import public_fix
     from services.parity_report import public_report
 
-    out = public_report(report)
-    out["fixes"] = [public_fix(f) for f in report["fixes"]]
-    return out
+    return public_report(report)
 
 
 def _report(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
