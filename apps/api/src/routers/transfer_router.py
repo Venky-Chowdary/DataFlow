@@ -340,6 +340,8 @@ class ExecuteTransferRequest(PolicyFieldsModel):
     contract_id: str = ""
     enforce_contract: bool = True
     require_signed_contract: bool = False
+    # Reversibility gate (g24): block unless every table can be turned back into the source.
+    require_reversibility: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
     source_timezone: str = ""
@@ -1129,6 +1131,7 @@ async def execute_transfer_json(
         contract_id=body.contract_id or "",
         enforce_contract=bool(body.enforce_contract),
         require_signed_contract=bool(body.require_signed_contract),
+        require_reversibility=bool(body.require_reversibility),
         date_locale=body.date_locale,
         number_locale=body.number_locale,
         triggered_by=_actor_email(request),
@@ -1206,6 +1209,9 @@ async def execute_transfer_json(
             explicit_require=bool(body.require_signed_contract),
             policies=plan_policies if isinstance(plan_policies, dict) else {},
         )
+        from services.reversibility_sources import stamp_plan_requirement
+
+        stamp_plan_requirement(request_obj, plan_policies if isinstance(plan_policies, dict) else {})
     except ValueError as exc:
         raise safe_http_exception(
             exc,
@@ -1400,6 +1406,7 @@ async def run_universal_transfer(
     decision_artifact_json: str = Form(""),
     contract_id: str = Form(""),
     require_signed_contract: str = Form("false"),
+    require_reversibility: str = Form("false"),
     risk_acceptance: str = Form(""),
     risk_acceptance_json: str = Form(""),
     request: Request = None,
@@ -1800,6 +1807,11 @@ async def run_universal_transfer(
             explicit_require=require_signed_contract.lower() in ("true", "1", "yes"),
             policies=plan_policies,
         )
+        from services.reversibility_sources import stamp_plan_requirement
+
+        if require_reversibility.strip().lower() in ("true", "1", "yes", "on"):
+            request_obj.require_reversibility = True
+        stamp_plan_requirement(request_obj, plan_policies if isinstance(plan_policies, dict) else {})
     except ValueError as exc:
         raise safe_http_exception(
             exc,

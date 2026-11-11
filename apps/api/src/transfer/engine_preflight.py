@@ -326,4 +326,9 @@ def _execute_policy_gates_for_request(
         ms_gate = millisecond_fit_gate(request, *planned)
         if ms_gate is not None:
             gates = [*gates, ms_gate]
+    from services.reversibility_sources import execute_gate
+
+    reversibility = execute_gate(request, planned)
+    if reversibility is not None:
+        gates = [*gates, reversibility]
     return gates
