@@ -315,6 +315,8 @@ _OPERATOR_COPY_PREFIXES = (
     "network unreachable:",
     "handshake timed out",
     "connection failed:",
+    # connectors.mongodb_common.replica_set_members_unreachable (D358).
+    "mongodb replica set",
     "connection failed on railway",
     "tls certificate",
     "the server refused the tls",
