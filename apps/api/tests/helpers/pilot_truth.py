@@ -49,6 +49,15 @@ def reset_workspace(monkeypatch=None) -> None:
         case_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(case_dir / "connectors.json"))
         monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+        # Cases seed back-dated in-flight jobs that nothing owns. An orphan
+        # sweeper or stall watchdog left running by an earlier test's app is
+        # right to fail such a job, and would change the ledger mid-case.
+        monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+    from services.job_watchdog import stop_stall_watchdog
+    from services.orphan_jobs import stop_orphan_sweeper
+
+    stop_orphan_sweeper()
+    stop_stall_watchdog()
     import services.schedule_store as schedule_store
 
     schedule_store._save_all([])
@@ -205,3 +214,9 @@ def listed_job_ids(answer: str) -> list[str]:
 def says_unreadable(answer: str) -> bool:
     """The outage sentence: the store could not be read (never "you have none")."""
     return bool(re.search(r"could(?: not|n't) (?:read|load|reach)", answer or "", re.I))
+
+
+def assert_only_these_numbers(answer: str, allowed: set[int]) -> None:
+    """Every number Pilot states as a fact must be one the store counted."""
+    stated = set(bold_ints(answer))
+    assert stated <= allowed, f"numbers with no store fact behind them: {sorted(stated - allowed)} in {answer!r}"
