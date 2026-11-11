@@ -280,11 +280,20 @@ function plural(n: number, one: string, many = `${one}s`): string {
 }
 
 /** Verdict pill: what the report concluded, in one short phrase. */
-export function verdictPresentation(report: Pick<ParityReport, "verdict" | "parity">): { label: string; tone: ParityTone } {
+export function verdictPresentation(
+  report: Pick<ParityReport, "verdict" | "parity"> & { confidence?: Pick<ParityReport["confidence"], "bound_valid"> },
+): { label: string; tone: ParityTone } {
   switch (report.verdict) {
     case "proven":
       return { label: "Proven equal", tone: "ok" };
     case "no_difference_found":
+      if (report.confidence?.bound_valid === false) {
+        // Not a random sample: it says nothing about the rows it did not check, and sign-off waits.
+        return {
+          label: report.parity.explained > 0 ? "No unexplained difference in the rows checked" : "No difference in the rows checked",
+          tone: "muted",
+        };
+      }
       // A sample bounds the rate; it is not proof of every row (explained differences included).
       return {
         label: report.parity.explained > 0 ? "No unexplained difference in sample" : "No difference in sample",
@@ -299,6 +308,26 @@ export function verdictPresentation(report: Pick<ParityReport, "verdict" | "pari
     default:
       return { label: "Can't be verified", tone: "muted" };
   }
+}
+
+/** What the Differences card says when the report lists none: never "none found" for a failed Gate-8. */
+export function noDifferencesText(
+  report: Pick<ParityReport, "verdict"> & {
+    confidence: Pick<ParityReport["confidence"], "bound_valid">;
+    evidence: Pick<ParityReport["evidence"], "reconciliation_passed">;
+  },
+): string {
+  if (report.verdict === "unverifiable") {
+    return report.evidence.reconciliation_passed === false
+      ? "Gate-8 failed this run, but its evidence names no row that differs, so parity cannot be shown. Re-run the job to localize the difference."
+      : "No differences were found, but the check could not cover enough rows to prove a match.";
+  }
+  if (report.verdict === "no_difference_found") {
+    return report.confidence.bound_valid === false
+      ? "No difference in the rows checked. The other rows were not compared, so nothing bounds them; run full verification before signing."
+      : "No difference in the sampled rows. Rows outside the sample were not compared; the bound above says how many could still differ.";
+  }
+  return "No differences. Every checked row matches.";
 }
 
 /**

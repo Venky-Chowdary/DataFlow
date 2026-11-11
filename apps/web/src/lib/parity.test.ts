@@ -47,6 +47,7 @@ import {
   fixStatusPresentation,
   approveOutcome,
   signedDriftNote,
+  noDifferencesText,
 } from "./parity.js";
 import { provenReport, signedReport, summaryFixture, unexplainedReport } from "../components/parity/parityFixtures.js";
 
@@ -405,5 +406,31 @@ describe("signed report drift (re-review finding 13a)", () => {
     assert.match(note, /still says proven/);
     assert.match(note, /now reads unexplained/);
     assert.equal(signedDriftNote({ ...moved, signoff: { ...moved.signoff, status: "open" as const } }), null);
+  });
+});
+
+describe("honest empty and sampled states (re-review 4, 9e)", () => {
+  const unbounded = provenReport({
+    verdict: "no_difference_found",
+    confidence: { ...provenReport().confidence, method: "sampled", bound_valid: false, rows_checked: 2000, rows_total: 1_000_000 },
+  });
+
+  it("does not show a green pill when a sample that bounds nothing found no difference", () => {
+    assert.deepEqual(verdictPresentation(unbounded), { label: "No difference in the rows checked", tone: "muted" });
+    // A sample that does bound the rate keeps its label.
+    assert.equal(verdictPresentation(provenReport({ verdict: "no_difference_found" })).tone, "ok");
+  });
+
+  it("says Gate-8 failed when nothing localizes the failure, not that no difference was found", () => {
+    const failed = provenReport({
+      verdict: "unverifiable",
+      evidence: { ...provenReport().evidence, reconciliation_passed: false },
+    });
+    const text = noDifferencesText(failed);
+    assert.match(text, /Gate-8 failed/);
+    assert.doesNotMatch(text, /No differences were found/);
+    assert.match(noDifferencesText(provenReport({ verdict: "unverifiable" })), /could not cover enough rows/);
+    assert.match(noDifferencesText(unbounded), /run full verification/);
+    assert.equal(noDifferencesText(provenReport()), "No differences. Every checked row matches.");
   });
 });

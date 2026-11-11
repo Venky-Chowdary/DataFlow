@@ -182,10 +182,17 @@ def _resolution(diff: dict[str, Any], fixes: list[dict[str, Any]]) -> str:
     ]
     if diff["cause"]["code"] == "accepted_by_operator":
         return "Accepted"
+    if not diff["cause"]["explained"]:
+        # Still unexplained after the fix: it is open, whatever ran (re-review 4, 9e).
+        if not done:
+            return "Open"
+        f = done[-1]
+        tail = "; it still differs" if f["status"] == "applied" else ""
+        return f"Open ({f['action'].replace('_', ' ')} {f['status']}{tail})"
     if done:
         f = done[-1]
         return f"{f['action'].replace('_', ' ')} {f['status']}"
-    return "Expected" if diff["cause"]["explained"] else "Open"
+    return "Expected"
 
 
 def render_markdown(report: dict[str, Any], pack: dict[str, Any] | None) -> str:
