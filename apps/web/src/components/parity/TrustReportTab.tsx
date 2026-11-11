@@ -52,6 +52,7 @@ import {
   parityErrorMessage,
   rereadLabel,
   roleLabel,
+  signoffShortcut,
   parityIsLowerBound,
   parityRowsChecked,
   parityUnknownCaption,
@@ -335,6 +336,7 @@ export function TrustReportView({
   const doneFixes = report.fixes.filter((f) => f.status !== "proposed");
   const ringTone = report.verdict === "unexplained" ? "warn" : report.verdict === "unverifiable" ? "idle" : "ok";
   const signoffAnchor = `parity-signoff-${report.job_id}`;
+  const shortcut = signoffShortcut(report);
   const differLabel = rowsDifferLabel(report);
   const kpis: Array<{ label: string; value: string; figure: boolean }> = [
     { label: "rows in source", value: formatCount(parity.rows_source), figure: parity.rows_source != null },
@@ -371,27 +373,44 @@ export function TrustReportView({
           >
             Refresh
           </Button>
+          {/* The Markdown report is always available; the signed pack exists only once signed (else 409). */}
           <Button
             size="sm"
             onClick={onExport}
             disabled={anyBusy}
             loading={busy?.kind === "export"}
-            loadingLabel="Exporting…"
+            loadingLabel="Downloading…"
             leadingIcon={<DtIcon name="download" size={14} />}
+            title="The trust report as Markdown, as it reads now."
           >
-            Export pack
+            Download report (.md)
           </Button>
+          {report.signoff.status === "signed" && onDownloadSigned && (
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={onDownloadSigned}
+              disabled={anyBusy}
+              loading={busy?.kind === "pack"}
+              loadingLabel="Downloading…"
+              leadingIcon={<DtIcon name="download" size={14} />}
+              title="The signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature."
+            >
+              Download signed pack (.json)
+            </Button>
+          )}
           {/* Not an anchor: the app routes on location.hash, so a #fragment would navigate away. */}
           <Button
             size="sm"
-            variant="primary"
+            variant={shortcut.primary ? "primary" : "ghost"}
+            title={shortcut.title}
             onClick={() => {
               const target = typeof document !== "undefined" ? document.getElementById(signoffAnchor) : null;
               target?.scrollIntoView?.({ behavior: "smooth", block: "start" });
               target?.focus({ preventScroll: true });
             }}
           >
-            Go to sign-off
+            {shortcut.label}
           </Button>
         </div>
       </header>
@@ -764,7 +783,7 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
               : area === "signoff"
                 ? "Could not record your sign-off."
                 : next.kind === "export"
-                  ? "Could not export the evidence pack."
+                  ? "Could not download the Markdown report."
                   : next.kind === "pack"
                     ? "Could not download the signed pack."
                   : "Could not refresh the trust report.";

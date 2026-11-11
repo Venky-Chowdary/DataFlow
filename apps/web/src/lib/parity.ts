@@ -631,6 +631,23 @@ export function signoffBlockedReason(report: Pick<ParityReport, "signoff" | "par
   return "";
 }
 
+/**
+ * The header's sign-off shortcut. Primary only while sign-off is open; a
+ * blocked report gets a secondary link to the panel that says why, and a
+ * signed one a link to the record.
+ */
+export function signoffShortcut(report: Pick<ParityReport, "signoff" | "parity" | "verdict">): {
+  state: "open" | "blocked" | "signed";
+  label: string;
+  primary: boolean;
+  title?: string;
+} {
+  if (report.signoff.status === "signed") return { state: "signed", label: "View sign-off", primary: false };
+  const blocked = signoffBlockedReason(report);
+  if (blocked) return { state: "blocked", label: "Why sign-off is blocked", primary: false, title: blocked };
+  return { state: "open", label: "Go to sign-off", primary: true };
+}
+
 /** "hmac-sha256:9f3c…a71e": enough to compare by eye; the full value is in the title. */
 export function shortSignature(signature: string): string {
   const s = signature.trim();
