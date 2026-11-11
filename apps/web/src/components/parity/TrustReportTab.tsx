@@ -244,6 +244,8 @@ export interface TrustReportViewProps {
   /** job.read: explain and sign. */
   canSign: boolean;
   signDeniedReason?: string;
+  /** Asking for an explanation writes to the report; defaults to the sign-off gate. */
+  canExplain?: boolean;
   /** Failures, keyed by area so each shows beside the control that failed. */
   errors?: { explain?: string; fix?: string; signoff?: string };
   onRefresh: () => void;
@@ -286,6 +288,7 @@ export function TrustReportView({
   fixDeniedReason,
   canSign,
   signDeniedReason,
+  canExplain = canSign,
   errors = {},
   onRefresh,
   onExplain,
@@ -473,7 +476,7 @@ export function TrustReportView({
                 No explanation yet. Ask for one to get the likely cause of each difference in plain language.
               </p>
             )}
-            {canSign && (
+            {canExplain && (
               <div className="df2-parity-actions">
                 <Button
                   size="sm"
@@ -608,7 +611,10 @@ const IN_FLIGHT = new Set(["running", "pending", "queued"]);
 export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: TrustReportTabProps) {
   const { toast } = useToast();
   const fixGate = useWriteGate(PERMISSIONS.jobRun, "approve or dismiss a fix");
-  const signGate = useWriteGate(PERMISSIONS.jobRead, "explain or sign off a trust report");
+  const explainGate = useWriteGate(PERMISSIONS.jobRead, "ask for an explanation of a trust report");
+  // Signing attests the report: job.manage, and the API binds each sign-off role
+  // to your role in the job's workspace (review finding 5).
+  const signGate = useWriteGate(PERMISSIONS.jobManage, "sign off a trust report");
   const [report, setReport] = useState<ParityReport | null>(null);
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -758,6 +764,7 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
       fixDeniedReason={fixGate.reason}
       canSign={signGate.allowed}
       signDeniedReason={signGate.reason}
+      canExplain={explainGate.allowed}
       errors={errors}
       onRefresh={() => void run({ kind: "refresh" }, null, () => fetchParityReport(jobId))}
       onExplain={() =>

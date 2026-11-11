@@ -185,6 +185,7 @@ export const reportInitial: ParityReport = {
   "signoff": {
     "approvals": [],
     "blocked_reason": "4 row(s) still hold an unexplained difference.",
+    "invalidated_approvals": [],
     "required_roles": [
       "engineering",
       "data_owner",
@@ -354,6 +355,7 @@ export const reportResynced: ParityReport = {
   "signoff": {
     "approvals": [],
     "blocked_reason": null,
+    "invalidated_approvals": [],
     "required_roles": [
       "engineering",
       "data_owner",
@@ -524,24 +526,37 @@ export const reportSigned: ParityReport = {
     "approvals": [
       {
         "at": "2026-11-11T14:00:00+00:00",
+        "authority": "workspace editor",
+        "content_sha256": "8626fd86e8279cc70f6bded14ff18f8c04f9a2c0805c75f582172ad4b8b754d0",
         "note": "checked",
         "role": "engineering",
-        "user": "eng@example.com"
+        "signer_role": "editor",
+        "user": "eng@example.com",
+        "version": 6
       },
       {
         "at": "2026-11-11T14:00:00+00:00",
+        "authority": "workspace editor",
+        "content_sha256": "8626fd86e8279cc70f6bded14ff18f8c04f9a2c0805c75f582172ad4b8b754d0",
         "note": "",
         "role": "data_owner",
-        "user": "owner@example.com"
+        "signer_role": "editor",
+        "user": "owner@example.com",
+        "version": 7
       },
       {
         "at": "2026-11-11T14:00:00+00:00",
+        "authority": "workspace admin",
+        "content_sha256": "8626fd86e8279cc70f6bded14ff18f8c04f9a2c0805c75f582172ad4b8b754d0",
         "note": "ok",
         "role": "compliance",
-        "user": "comp@example.com"
+        "signer_role": "admin",
+        "user": "comp@example.com",
+        "version": 8
       }
     ],
     "blocked_reason": null,
+    "invalidated_approvals": [],
     "required_roles": [
       "engineering",
       "data_owner",

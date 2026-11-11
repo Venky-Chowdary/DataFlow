@@ -71,14 +71,6 @@ def test_accepting_and_signing_refresh_the_dashboard(store):
     assert _dashboard_verdict(store, job_id) == ("explained", False)
 
     for role, who in (("engineering", "e@x.io"), ("data_owner", "d@x.io"), ("compliance", "c@x.io")):
-        sign_off(job_id, role=role, actor=who, **_signer(role))
+        sign_off(job_id, role=role, actor=who, signer_role="admin")
     assert _dashboard_verdict(store, job_id) == ("explained", True)
 
-
-def _signer(role: str) -> dict:
-    import inspect
-
-    from services.parity_signoff import sign_off
-
-    # Sign-off binds roles to authority (review finding 5): sign as a workspace admin.
-    return {"signer_role": "admin"} if "signer_role" in inspect.signature(sign_off).parameters else {}

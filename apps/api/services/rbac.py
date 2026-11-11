@@ -465,11 +465,12 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ),
     ("POST", "/api/v1/transfer/{job_id}/rollback/execute", Permission.JOB_MANAGE),
     ("POST", "/api/v1/repair/proposals/{proposal_id}/decide", Permission.JOB_MANAGE),
-    # Parity Studio. Explaining and signing are reads of the report (a compliance
-    # approver may hold only job.read); applying a fix writes through the
+    # Parity Studio. Explaining is a read of the report; signing attests it, so
+    # it needs job.manage (and services.parity_authority binds each sign-off
+    # role to the signer's workspace role); applying a fix writes through the
     # transfer path, so it is the permission that runs transfers.
     ("POST", "/api/v1/jobs/{job_id}/parity-report/explain", Permission.JOB_READ),
-    ("POST", "/api/v1/jobs/{job_id}/parity-report/signoff", Permission.JOB_READ),
+    ("POST", "/api/v1/jobs/{job_id}/parity-report/signoff", Permission.JOB_MANAGE),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/approve", Permission.JOB_RUN),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/dismiss", Permission.JOB_RUN),
     ("POST", "/api/v1/transfer/analyze", Permission.JOB_PLAN),

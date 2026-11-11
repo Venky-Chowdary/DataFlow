@@ -195,11 +195,11 @@ def test_parity_loop_on_a_real_engine_run(store, tmp_path):
         approve_fix(job_id, resync["id"], actor="ops@example.com")  # idempotent: second approve
 
     # Sign-off: three roles, three people; the third signature seals the report.
-    sign_off(job_id, role="engineering", actor="eng@example.com", note="checked")
+    sign_off(job_id, role="engineering", signer_role="editor", actor="eng@example.com", note="checked")
     with pytest.raises(ParityConflict):
-        sign_off(job_id, role="data_owner", actor="eng@example.com")  # one person, one role
-    sign_off(job_id, role="data_owner", actor="owner@example.com")
-    signed = sign_off(job_id, role="compliance", actor="comp@example.com")
+        sign_off(job_id, role="data_owner", signer_role="editor", actor="eng@example.com")  # one person, one role
+    sign_off(job_id, role="data_owner", signer_role="editor", actor="owner@example.com")
+    signed = sign_off(job_id, role="compliance", signer_role="admin", actor="comp@example.com")
     assert signed["signoff"]["status"] == "signed"
     assert signed["signoff"]["signature"].startswith("hmac-sha256:")
     pack = signed_pack(store.get_job(job_id))

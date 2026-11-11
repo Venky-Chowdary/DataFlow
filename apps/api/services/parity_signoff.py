@@ -1,19 +1,29 @@
 """Parity Studio: sign-off by named roles, the signed report and its export.
 
-Sign-off opens only when no unexplained difference is left. Each approval names
-a role, the person and a note, and writes an audit-chain event. When every
-required role has signed, the final report is serialized canonically and signed
-with the proof-pack key (:func:`services.signed_proof_pack.build_signed_parity_pack`)
-— the same envelope ``POST /api/v1/transfer/proof-pack/verify`` checks — and the
-signed pack is stored on the job. The Markdown export renders from that pack.
+Sign-off opens only when no unexplained difference is left. A role is signed
+only by someone whose real authority in the job's workspace the configured
+mapping binds to it (:mod:`services.parity_authority`); the approval records
+that authority (``signer_role``), the report ``version`` and the
+``content_sha256`` of what was signed. An approval counts only while the report
+still has that content: any change to the verdict, the differences or a fix
+invalidates it (shown under ``invalidated_approvals``) and the role signs again.
+When every required role has signed the same content, the final report is
+serialized canonically and signed with the proof-pack key
+(:func:`services.signed_proof_pack.build_signed_parity_pack`) — the same
+envelope ``POST /api/v1/transfer/proof-pack/verify`` checks — and the signed
+pack is stored on the job; a signed report is final (no decision changes it).
+The Markdown export renders from that pack.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from services.parity_state import (
     ParityConflict,
+    ParityForbidden,
     ParityInvalid,
     audit,
     check_version,
@@ -26,47 +36,97 @@ from services.parity_state import (
 VERIFY_ROUTE = "POST /api/v1/transfer/proof-pack/verify"
 
 
+def content_sha256(report: dict[str, Any]) -> str:
+    """The digest of what a signer attests: verdict, counts, tables, differences, fix outcomes.
+
+    Volatile presentation (timestamps, version, wording, the explanation, sign-off
+    itself) is left out, so re-reading an unchanged report keeps approvals valid.
+    """
+    body = {
+        "job_id": report.get("job_id"),
+        "verdict": report.get("verdict"),
+        "parity": report.get("parity"),
+        "tables": [
+            {k: t.get(k) for k in ("name", "check", "rows_source", "rows_destination", "proven_equal_pct",
+                                   "differences", "explained", "unexplained", "status")}
+            for t in report.get("tables") or []
+        ],
+        "differences": sorted(
+            ([d.get("id"), d.get("kind"), d.get("column"), d.get("rows"), (d.get("cause") or {}).get("code"),
+              bool((d.get("cause") or {}).get("explained"))] for d in report.get("differences") or []),
+            key=lambda row: str(row[0]),
+        ),
+        "fixes": sorted([str(f.get("id")), str(f.get("status"))] for f in report.get("fixes") or []),
+    }
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def valid_approvals(state: dict[str, Any], digest: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(approvals of this exact content, approvals of content that changed since)."""
+    approvals = [a for a in state.get("approvals") or [] if isinstance(a, dict)]
+    valid = [a for a in approvals if a.get("content_sha256") == digest]
+    return valid, [a for a in approvals if a not in valid]
+
+
 def sign_off(
-    job_id: str, *, role: str, actor: str, note: str = "", expected_version: int | None = None,
+    job_id: str, *, role: str, actor: str, signer_role: str, note: str = "",
+    expected_version: int | None = None,
 ) -> dict[str, Any]:
     """Record one role's approval; sign the report when the last role signs.
 
-    The approval is written by compare-and-swap on the report version it was
-    given against, so a concurrent change is a 409, never a signature on a
+    ``signer_role`` is the signer's gate role in the job's workspace, resolved
+    by the caller from the authenticated principal — never from the request
+    body. The approval is written by compare-and-swap on the report version it
+    was given against, so a concurrent change is a 409, never a signature on a
     report nobody saw.
     """
+    from services.parity_authority import authority_note, signing_refusal
     from services.parity_fixes import summarized
     from services.parity_report import build_parity_report, public_report
     from services.signed_proof_pack import build_signed_parity_pack
 
     role = str(role or "").strip().lower()
+    signer_role = str(signer_role or "viewer").strip().lower()
     note = note[:500]
     job = load_job(job_id)
     check_version(job, expected_version)
     roles = [str(r).lower() for r in state_of(job)["required_roles"]]
     if role not in roles:
         raise ParityInvalid(f"Role must be one of: {', '.join(roles)}.")
+    refusal = signing_refusal(role, signer_role=signer_role, signer=actor)
+    if refusal:
+        audit("job.parity.signoff_refused", job=job, job_id=job_id, actor=actor, outcome="denied",
+              details={"role": role, "signer_role": signer_role, "reason": refusal})
+        raise ParityForbidden(refusal)
     report = build_parity_report(job, reread=True, job_id=job_id)
     signoff = report["signoff"]
     if signoff["status"] == "signed":
         raise ParityConflict("This report is already signed.")
     if signoff["status"] == "blocked":
         raise ParityConflict(str(signoff["blocked_reason"] or "Sign-off is blocked."))
+    digest = content_sha256(report)
+    authority = authority_note(role, signer_role)
 
     def approve(job_now: dict[str, Any], state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
         pack = _approve(state)
         return summarized(job_now, state, job_id), pack
 
     def _approve(state: dict[str, Any]) -> dict[str, Any] | None:
-        approvals = list(state["approvals"])
         if state.get("signed"):
             raise ParityConflict("This report is already signed.")
+        approvals, invalidated = valid_approvals(state, digest)
         if any(a.get("role") == role for a in approvals):
             raise ParityConflict(f"The {role} role has already signed.")
         if actor and any(a.get("user") == actor for a in approvals):
             raise ParityConflict("One person signs one role; ask another approver.")
-        approvals.append({"role": role, "user": actor or "anonymous", "at": now_iso(), "note": note})
-        state["approvals"] = approvals
+        approvals.append({
+            "role": role, "user": actor or "anonymous", "at": now_iso(), "note": note,
+            "signer_role": signer_role, "authority": authority,
+            "version": int(report["version"]), "content_sha256": digest,
+        })
+        # Approvals of earlier content stay on the record; they no longer count.
+        state["approvals"] = invalidated + approvals
         if not {a["role"] for a in approvals} >= set(roles):
             return None
         signed_at = now_iso()
@@ -87,7 +147,8 @@ def sign_off(
 
     _updated, state, (after, pack) = update_state(job_id, approve, expected_version=int(report["version"]))
     audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
-          details={"role": role, "note": note, "verdict": report["verdict"]})
+          details={"role": role, "note": note, "verdict": report["verdict"], "signer_role": signer_role,
+                   "version": int(report["version"]), "content_sha256": digest})
     if pack:
         audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
               details={"signed": True, "content_sha256": pack["content_sha256"], "roles": sorted(roles)})

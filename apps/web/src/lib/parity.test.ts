@@ -37,6 +37,8 @@ import {
   verdictPresentation,
   parityIsLowerBound,
   heatCellLabel,
+  approvalAuthority,
+  invalidatedApprovalsNote,
   fixStatusPresentation,
 } from "./parity.js";
 import { provenReport, signedReport, summaryFixture, unexplainedReport } from "../components/parity/parityFixtures.js";
@@ -170,6 +172,18 @@ describe("sign-off", () => {
     assert.equal(signoffBlockedReason(unverifiable), "The evidence cannot decide parity, so there is nothing to sign.");
     unverifiable.signoff = { ...unverifiable.signoff, status: "open", blocked_reason: null };
     assert.match(signoffBlockedReason(unverifiable), /nothing to sign yet/);
+  });
+
+  it("names the authority each approval was signed with, and approvals that no longer count (review finding 5)", () => {
+    assert.equal(approvalAuthority({ signer_role: "admin", authority: "workspace admin" }), "workspace admin");
+    assert.equal(approvalAuthority({ signer_role: "editor" }), "workspace editor");
+    assert.equal(approvalAuthority({}), "");
+    const stale = { role: "engineering", user: "e@x.io", at: "2026-11-11T10:00:00Z", note: "", signer_role: "editor" };
+    assert.equal(invalidatedApprovalsNote({ invalidated_approvals: [] }), "");
+    assert.match(
+      invalidatedApprovalsNote({ invalidated_approvals: [stale] }),
+      /^1 approval \(Engineering\) attested an earlier version of this report and no longer counts; that role signs again\.$/,
+    );
   });
 
   it("shortens a signature for display and keeps its scheme", () => {

@@ -3,8 +3,10 @@
 ``GET /jobs/{id}/parity-report`` answers "does the destination match the source,
 and is every difference explained?" from the run's own evidence. Fixes are
 applied only when a person approves one (``job.run``, the permission that runs
-transfers, plus write access to the job's workspace); sign-off needs ``job.read``
-and is refused while an unexplained difference is left. A job of another
+transfers, plus write access to the job's workspace); sign-off needs
+``job.manage`` and the authority the configured mapping binds to the role
+(:mod:`services.parity_authority`), and is refused while an unexplained
+difference is left. A job of another
 workspace is a 404, exactly as ``GET /jobs/{id}``.
 """
 
@@ -139,18 +141,33 @@ async def dismiss_parity_fix(job_id: str, fix_id: str, request: Request, body: N
     return _public(report)
 
 
+def _signer_role(request: Request, job: dict[str, Any]) -> str:
+    """The signer's real authority: their gate role in the *job's* workspace.
+
+    Resolved from the authenticated principal (membership, or a platform
+    admin), never from anything the request body says. With authentication
+    off the single local operator administers everything.
+    """
+    from services.effective_role import resolve_effective_role
+    from src.services import auth_service
+
+    if not auth_service.auth_required():
+        return "admin"
+    return resolve_effective_role(getattr(request.state, "user", None), str(job.get("workspace_id") or ""))
+
+
 @router.post("/jobs/{job_id}/parity-report/signoff")
 async def sign_off_parity_report(job_id: str, request: Request, body: SignoffBody | None = None):
     from services.parity_signoff import sign_off
 
-    _visible_job(job_id, request)
+    job = _visible_job(job_id, request)
     body = body or SignoffBody()
     if not body.role.strip():
         raise HTTPException(status_code=422, detail="role is required")
     try:
         report = await asyncio.to_thread(
             sign_off, job_id, role=body.role, actor=actor_from_request(request), note=body.note,
-            expected_version=body.expected_version,
+            signer_role=_signer_role(request, job), expected_version=body.expected_version,
         )
     except ParityError as exc:
         raise _http(exc) from exc

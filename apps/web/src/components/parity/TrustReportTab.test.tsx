@@ -141,6 +141,21 @@ describe("Trust Report states (static)", () => {
     assert.match(html, /<button[^>]*disabled=""[^>]*>Sign as Engineering/);
   });
 
+  it("shows each signer's workspace authority and approvals that no longer count (review finding 5)", () => {
+    const base = provenReport();
+    const report = provenReport({
+      signoff: {
+        ...base.signoff,
+        approvals: [{ role: "engineering", user: "e@x.io", at: "2026-11-11T10:00:00Z", note: "", signer_role: "editor", authority: "workspace editor" }],
+        invalidated_approvals: [{ role: "data_owner", user: "d@x.io", at: "2026-11-11T09:00:00Z", note: "", signer_role: "editor" }],
+      },
+    });
+    const t = text(view(report));
+    assert.match(t, /e@x\.io \(workspace editor\)/);
+    assert.match(t, /1 approval \(Data owner\) attested an earlier version of this report and no longer counts/);
+    assert.match(t, /your role in this job's workspace/);
+  });
+
   it("links to the existing Gate-8 and trust-score cards rather than redrawing them", () => {
     const t = text(view(provenReport(), { onOpenGate8: noop, onOpenDetail: noop }));
     assert.match(t, /Open Gate-8 proof/);

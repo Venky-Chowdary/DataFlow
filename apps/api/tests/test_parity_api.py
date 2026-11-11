@@ -61,7 +61,8 @@ def world(ent, monkeypatch):
         "foreign": _job(other, "theirs"),
         "editor": ent.member(email="parity-editor@example.com", workspace_id=ws, role="editor"),
         "viewer": ent.member(email="parity-viewer@example.com", workspace_id=ws, role="viewer"),
-        "owner": ent.member(email="parity-owner@example.com", workspace_id=ws, role="viewer"),
+        "data": ent.member(email="parity-data@example.com", workspace_id=ws, role="editor"),
+        "owner": ent.member(email="parity-owner@example.com", workspace_id=ws, role="admin"),
     }
 
 
@@ -112,10 +113,12 @@ def test_rbac_conflicts_audit_signature_and_export(ent, world):
     assert res.status_code == 409, res.text
     assert editor.post(f"/api/v1/jobs/{job}/parity-report/fixes/f_unknown/approve", json={}).status_code == 404
 
-    res = viewer.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "engineering"})
+    # Signing attests the report: a reader cannot sign any role (job.manage, review finding 5).
+    assert viewer.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "engineering"}).status_code == 403
+    res = editor.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "engineering"})
     assert res.status_code == 409 and "unexplained" in res.text
-    assert viewer.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "cfo"}).status_code == 422
-    assert viewer.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={}).status_code == 422
+    assert editor.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "cfo"}).status_code == 422
+    assert editor.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={}).status_code == 422
 
     version = report["version"]
     for fix in [f for f in report["fixes"] if f["action"] == "accept"]:
@@ -132,16 +135,21 @@ def test_rbac_conflicts_audit_signature_and_export(ent, world):
     assert report["signoff"]["status"] == "open"
 
     assert editor.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "engineering"}).status_code == 200
-    dup = viewer.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "engineering"})
+    data = world["data"]
+    dup = data.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "engineering"})
     assert dup.status_code == 409
-    assert viewer.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "data_owner"}).status_code == 200
+    # An editor holds no compliance authority by default: the role is bound to workspace admin.
+    denied = data.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "compliance"})
+    assert denied.status_code == 403 and "workspace admin" in denied.text
+    assert data.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "data_owner"}).status_code == 200
     last = owner.post(f"/api/v1/jobs/{job}/parity-report/signoff", json={"role": "compliance", "note": "ok"})
     assert last.status_code == 200, last.text
     signed = last.json()
     assert signed["signoff"]["status"] == "signed"
     assert signed["signoff"]["signature"].startswith("hmac-sha256:")
-    assert [a["user"] for a in signed["signoff"]["approvals"]] == [
-        "parity-editor@example.com", "parity-viewer@example.com", "parity-owner@example.com",
+    assert [(a["user"], a["signer_role"]) for a in signed["signoff"]["approvals"]] == [
+        ("parity-editor@example.com", "editor"), ("parity-data@example.com", "editor"),
+        ("parity-owner@example.com", "admin"),
     ]
 
     pack = viewer.get(f"/api/v1/jobs/{job}/parity-report/export", params={"format": "json"})

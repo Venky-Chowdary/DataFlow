@@ -379,10 +379,17 @@ def _evidence_block(job: dict[str, Any], tables_ev: list[TableEvidence]) -> dict
     }
 
 
-def _signoff(state: dict[str, Any], verdict: str, unexplained: int) -> dict[str, Any]:
+def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    from services.parity_signoff import content_sha256, valid_approvals
+
+    verdict, unexplained = report["verdict"], report["parity"]["unexplained"]
     roles = list(state.get("required_roles") or [])
-    approvals = list(state.get("approvals") or [])
     signed = state.get("signed") if isinstance(state.get("signed"), dict) else None
+    if signed:
+        sealed = ((signed.get("pack") or {}).get("parity") or {}).get("signoff") or {}
+        approvals, invalidated = list(sealed.get("approvals") or []), []
+    else:
+        approvals, invalidated = valid_approvals(state, content_sha256(report))
     blocked_reason = None
     if signed:
         status = "signed"
@@ -392,11 +399,14 @@ def _signoff(state: dict[str, Any], verdict: str, unexplained: int) -> dict[str,
     elif verdict == "unverifiable":
         status = "blocked"
         blocked_reason = "The evidence cannot decide parity, so there is nothing to sign."
+    elif any(f.get("status") == "applying" for f in report.get("fixes") or []):
+        status = "blocked"
+        blocked_reason = "A fix is being applied; sign once its re-check is recorded."
     else:
         status = "open"
     return {
-        "required_roles": roles, "approvals": approvals, "status": status,
-        "blocked_reason": blocked_reason,
+        "required_roles": roles, "approvals": approvals, "invalidated_approvals": invalidated,
+        "status": status, "blocked_reason": blocked_reason,
         "signature": (signed or {}).get("signature"), "signed_at": (signed or {}).get("signed_at"),
     }
 
@@ -455,7 +465,7 @@ def build_parity_report(job: dict[str, Any], *, reread: bool = True, job_id: str
         "_sync_mode": sync_mode_of(job),
     }
     report["fixes"] = propose_fixes(job, report, state, reread=reread)
-    report["signoff"] = _signoff(state, verdict, parity["unexplained"])
+    report["signoff"] = _signoff(state, report)
     return report
 
 

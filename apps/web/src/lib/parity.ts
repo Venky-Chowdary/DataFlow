@@ -114,11 +114,21 @@ export interface ParityApproval {
   user: string;
   at: string;
   note: string;
+  /** The signer's role in the job's workspace when they signed: the authority that made it count. */
+  signer_role?: string;
+  /** How that authority reads, e.g. "workspace admin" or "workspace editor (named approver)". */
+  authority?: string;
+  /** The report version and content digest this approval attests. */
+  version?: number;
+  content_sha256?: string;
 }
 
 export interface ParitySignoff {
   required_roles: string[];
+  /** Approvals of the report's current content; only these count. */
   approvals: ParityApproval[];
+  /** Approvals given before the report changed; kept on the record, they no longer count. */
+  invalidated_approvals?: ParityApproval[];
   status: ParitySignoffStatus;
   blocked_reason: string | null;
   signature: string | null;
@@ -410,6 +420,19 @@ export function signoffRows(signoff: ParitySignoff): SignoffRow[] {
     if (!roles.includes(approval.role)) rows.push({ role: approval.role, label: roleLabel(approval.role), approval });
   }
   return rows;
+}
+
+/** "workspace admin", from the approval's recorded authority; "" for an approval that recorded none. */
+export function approvalAuthority(approval: Pick<ParityApproval, "authority" | "signer_role">): string {
+  return (approval.authority || (approval.signer_role ? `workspace ${approval.signer_role}` : "")).trim();
+}
+
+/** Why approvals stopped counting, or "" when none did. */
+export function invalidatedApprovalsNote(signoff: Pick<ParitySignoff, "invalidated_approvals">): string {
+  const stale = signoff.invalidated_approvals ?? [];
+  if (!stale.length) return "";
+  const roles = [...new Set(stale.map((a) => roleLabel(a.role)))].join(", ");
+  return `${plural(stale.length, "approval")} (${roles}) attested an earlier version of this report and no longer ${stale.length === 1 ? "counts" : "count"}; ${stale.length === 1 ? "that role signs" : "those roles sign"} again.`;
 }
 
 /** Roles still waiting for a signature. */

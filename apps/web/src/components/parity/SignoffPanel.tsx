@@ -7,6 +7,8 @@ import {
   formatClock,
   formatDateTime,
   roleLabel,
+  approvalAuthority,
+  invalidatedApprovalsNote,
   shortSignature,
   signoffBlockedReason,
   signoffRows,
@@ -79,8 +81,9 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
         <div>
           <h3 id={`${formId}-title`} className="df2-parity-h3">Sign-off and evidence pack</h3>
           <p className="df2-parity-muted">
-            Each approval is written to the audit log. When every required role has signed, the pack is signed with
-            the workspace proof key.
+            Each approval is written to the audit log with your role in this job's workspace, which must hold the
+            authority the role needs. When every required role has signed the same report, the pack is signed with
+            the workspace proof key and the report is final.
           </p>
         </div>
         <span className={badgeClass(status.tone)}>{status.label}</span>
@@ -95,12 +98,21 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
               <span>{blockedReason}</span>
             </p>
           )}
+          {invalidatedApprovalsNote(signoff) && (
+            <p className="df2-parity-notice is-warn" role="status">
+              <DtIcon name="alert" size={14} />
+              <span>{invalidatedApprovalsNote(signoff)}</span>
+            </p>
+          )}
           <ul className="df2-parity-sigs">
             {rows.map((row) => (
               <li key={row.role} className="df2-parity-sig">
                 <span>
                   <b>{row.label}</b>
                   {row.approval ? <> · {row.approval.user}</> : null}
+                  {row.approval && approvalAuthority(row.approval) ? (
+                    <span className="df2-parity-muted"> ({approvalAuthority(row.approval)})</span>
+                  ) : null}
                   {row.approval?.note ? <span className="df2-parity-sig-note">{row.approval.note}</span> : null}
                 </span>
                 {row.approval ? (

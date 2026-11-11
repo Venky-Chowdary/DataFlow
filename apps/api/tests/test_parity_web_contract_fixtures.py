@@ -125,9 +125,9 @@ def _payloads(fake: _Store, tmp_path: Path, monkeypatch) -> dict[str, object]:
                  if f["action"] == "resync_keys" and f["status"] == "proposed")
     resynced = approve_fix(first, retry["id"], actor="ops@example.com", note="triggers removed")
     remember_report(first, fake.get_job(first), resynced)
-    sign_off(first, role="engineering", actor="eng@example.com", note="checked")
-    sign_off(first, role="data_owner", actor="owner@example.com")
-    signed = sign_off(first, role="compliance", actor="comp@example.com", note="ok")
+    sign_off(first, role="engineering", signer_role="editor", actor="eng@example.com", note="checked")
+    sign_off(first, role="data_owner", signer_role="editor", actor="owner@example.com")
+    signed = sign_off(first, role="compliance", signer_role="admin", actor="comp@example.com", note="ok")
     remember_report(first, fake.get_job(first), signed)
 
     # Run 2: the same route, now clean except the row the run never wrote.

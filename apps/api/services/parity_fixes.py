@@ -36,6 +36,7 @@ from services.parity_state import (  # noqa: F401 - the error types are re-expor
     check_version,
     load_job,
     now_iso,
+    state_of,
     update_state,
 )
 from services.remediation_actions import PARITY, action as remediation_action
@@ -363,8 +364,18 @@ def _widen_apply(job: dict[str, Any], fix: dict[str, Any]) -> str:
     return "Ran: " + "; ".join(ran)
 
 
+SIGNED_IS_FINAL = "This report is signed, and a signed report is final; re-run the job for a new report."
+
+
+def not_signed(state: dict[str, Any]) -> None:
+    """A signed report is final: no decision may change what was signed."""
+    if state.get("signed"):
+        raise ParityConflict(SIGNED_IS_FINAL)
+
+
 def _still_proposed(state: dict[str, Any], fix_id: str) -> None:
-    """Inside the compare-and-swap: nobody decided this fix since it was read."""
+    """Inside the compare-and-swap: nobody decided this fix since it was read, nor signed the report."""
+    not_signed(state)
     stored = (state.get("fixes") or {}).get(fix_id)
     if stored:
         raise ParityConflict(f"Fix {fix_id} is already {stored.get('status')}.")
@@ -375,6 +386,7 @@ def _decision_report(job_id: str, fix_id: str, expected_version: int | None) -> 
 
     job = load_job(job_id)
     check_version(job, expected_version)
+    not_signed(state_of(job))
     report = build_parity_report(job, reread=True, job_id=job_id)
     fix = _find(report, fix_id)
     if fix["status"] != "proposed":
