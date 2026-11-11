@@ -16543,13 +16543,31 @@ table.df2-table.df2-jobs-grid-table {
   overflow: visible;
 }
 
-/* In the drawer the name gets its own line and wraps; IDs and badges follow. */
+/* In the drawer the header already names the job and shows its status, so
+   the card drops its own copy of both. Rename, the row metric and the Job ID
+   chip stay, on one line. The rename input (is-edit) is never hidden. */
+.df2-app .df2-jobs-detail-drawer .df2-job-name-editor.is-view .df2-job-name-editor-title,
+.df2-app .df2-jobs-detail-drawer .df2-jobs-v3-summary-ids > .df2-badge {
+  display: none;
+}
+
 .df2-app .df2-jobs-detail-drawer .df2-jobs-v3-summary-title-line {
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 
+.df2-app .df2-jobs-detail-drawer .df2-jobs-v3-summary-title-line .df2-job-name-editor.is-view {
+  width: auto;
+}
+
+.df2-app .df2-jobs-detail-drawer .df2-jobs-v3-summary-title-line .df2-job-name-editor.is-edit {
+  flex: 1 1 100%;
+}
+
 .df2-app .df2-jobs-detail-drawer .df2-jobs-v3-summary-title-line .df2-jobs-v3-summary-ids {
+  flex: 1 1 auto;
   justify-content: flex-start;
 }
 

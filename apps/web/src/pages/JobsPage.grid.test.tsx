@@ -237,6 +237,9 @@ describe("Jobs grid page", () => {
     assert.equal(open.querySelector(".df2-drawer-title-row .df2-badge")?.textContent, "Failed");
     assert.equal(open.querySelector(".df2-drawer-subtitle")?.textContent, "MySQL → MySQL");
     assert.doesNotMatch(open.querySelector(".df2-drawer-header")?.textContent || "", /Job detail/);
+    assert.ok(open.classList.contains("df2-jobs-detail-drawer"), "the class the de-duplication rules scope to");
+    assert.ok(open.querySelector(".df2-job-name-rename-btn"), "Rename stays in the card");
+    assert.ok(open.querySelector(".df2-jobs-v3-summary-ids .df2-copy-id"), "the Job ID chip stays in the card");
     await act(async () => {
       document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
