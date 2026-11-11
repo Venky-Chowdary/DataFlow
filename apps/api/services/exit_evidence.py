@@ -19,6 +19,9 @@ import json
 from typing import Any
 
 PACK_KIND = "exit_evidence"
+PARTS_NOTE = ("The stored extract parts are not re-read here: the Merkle root is recomputed from the part "
+              "hashes the pack lists. Comparing a stored part with its listed SHA-256 needs the part itself "
+              "(it may have expired from the export bucket).")
 
 
 def content_sha256(doc: dict[str, Any]) -> str:
@@ -243,7 +246,7 @@ def verify_pack(pack: Any) -> dict[str, Any]:
         return {"ok": False, "errors": ["this is not an Exit Evidence Pack (kind exit_evidence)"],
                 "kind": str((pack or {}).get("kind") or "") if isinstance(pack, dict) else "",
                 "content_sha256": None, "signature_ok": False, "merkle_ok": False, "merkle_root": None,
-                "anchor": verify_receipt(None)}
+                "anchor": verify_receipt(None), "parts_reread": False, "note": PARTS_NOTE}
     checked = verify_signed_proof_pack(pack)
     errors = list(checked["errors"])
     claimed = pack.get("merkle_root")
@@ -261,7 +264,7 @@ def verify_pack(pack: Any) -> dict[str, Any]:
         errors.append(f"the anchor could not be confirmed: {anchor.get('reason')}")
     return {"ok": not errors, "errors": errors, "kind": PACK_KIND, "content_sha256": checked["content_sha256"],
             "signature_ok": not checked["errors"], "merkle_ok": merkle_ok, "merkle_root": claimed,
-            "anchor": anchor}
+            "anchor": anchor, "parts_reread": False, "note": PARTS_NOTE}
 
 
 def render_markdown(doc: dict[str, Any]) -> str:

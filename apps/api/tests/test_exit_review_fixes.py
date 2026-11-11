@@ -458,3 +458,38 @@ def test_m2_another_replica_without_the_local_index_still_finds_the_anchor(world
     monkeypatch.setattr(exit_store, "get", lambda *_a, **_k: None)
     found = verify_pack(pack)
     assert found["anchor"]["status"] == "anchored" and found["ok"] is True
+
+
+# ---------------------------------- M3: a stored extract changed after it was written
+
+
+def test_m3_a_local_part_rewritten_after_the_extract_breaks_the_seal(world):  # noqa: F811
+    def rewrite(rehearsal):
+        path = _part_path(world, rehearsal, "events")
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        # Same rows, different bytes: only the SHA-256 recorded at write time can tell.
+        path.write_text("\n".join(json.dumps(r, separators=(",", ":")) for r in rows) + "\n")
+
+    out = _run(_system(tables=[{"name": "events"}]), tamper=rewrite)
+    t = out["tables"][0]
+    assert t["status"] == "incomplete" and t["part"]["verified_on_read"] is False
+    assert any(d["kind"] == "seal" for d in t["differences"])
+
+
+def test_m3_a_clean_local_part_is_verified_against_the_sha_recorded_at_write(world):  # noqa: F811
+    from services.parity_state import job_store
+
+    out = _run(_system(tables=[{"name": "events"}]))
+    t = out["tables"][0]
+    ds = job_store().get_job(t["job_id"])["destination_summary"]
+    assert ds["sha256"] and ds["size_bytes"] > 0
+    assert t["part"]["sha256"] == ds["sha256"] and t["part"]["verified_on_read"] is True
+    assert out["verdict"] == "proven"
+
+
+def test_m3_pack_verify_says_the_parts_are_not_re_read(world):  # noqa: F811
+    from services.exit_evidence import verify_pack
+
+    _out, pack = _signed_rehearsal(world)
+    result = verify_pack(pack)
+    assert result["parts_reread"] is False and "not re-read" in result["note"]

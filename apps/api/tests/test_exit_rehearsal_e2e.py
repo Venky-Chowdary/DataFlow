@@ -175,7 +175,8 @@ def test_missing_and_changed_rows_block_proven(world):
     changed = _run(_system(name="Copy", tables=[{"name": "orders"}]), tamper=change_a_value)
     diffs = changed["tables"][0]["differences"]
     assert changed["verdict"] == "incomplete"
-    assert [d["kind"] for d in diffs] == ["changed_rows"] and diffs[0]["rows_at_least"] is True
+    # The file no longer matches the SHA-256 recorded when it was written, and the values differ.
+    assert [d["kind"] for d in diffs] == ["seal", "changed_rows"] and diffs[1]["rows_at_least"] is True
 
 
 def test_a_source_that_cannot_be_reread_is_not_proven(world, monkeypatch):

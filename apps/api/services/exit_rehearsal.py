@@ -348,8 +348,10 @@ def _part(table: str, ds: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     path = str(ds.get("path") or "")
     if not path:
         return None, ""
+    # The SHA-256 and size the export recorded when it wrote the file (empty on an older job).
     return {"table": table, "name": str(ds.get("filename") or ""), "storage": "local_file", "object_key": None,
-            "size_bytes": 0, "sha256": "", "verified_on_read": False, "upload_parts": None}, path
+            "size_bytes": int(ds.get("size_bytes") or 0), "sha256": str(ds.get("sha256") or ""),
+            "verified_on_read": False, "upload_parts": None}, path
 
 
 def _parity(job: dict[str, Any], job_id: str) -> dict[str, Any]:
@@ -429,16 +431,18 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
             columns=source.columns if source else [], key_columns=keys,
             numeric=sorted(source.totals) if source else [], types=types, engine=engine,
         )
-        if part["storage"] == "object_store":
+        if part["sha256"]:
             seal_ok = digest == part["sha256"] and size == part["size_bytes"]
         else:
+            # Nothing was recorded at write time: the bytes read are sealed, but not verified.
             part.update(sha256=digest, size_bytes=size)
-            seal_ok = True
+            gaps.append("the stored part has no SHA-256 recorded when it was written, so it could not be "
+                        "verified on read")
         part["verified_on_read"] = bool(seal_ok)
     except Exception as exc:  # noqa: BLE001 - an unreadable or expired part cannot be proven
         logger.info("exit rehearsal extract read-back failed for %s", table["name"], exc_info=True)
         gaps.append(f"the stored part could not be read back ({safe_error(exc, what='the read', event=ERROR_EVENT)})")
-    if part["storage"] == "local_file" and not part["sha256"]:
+    if not part["sha256"]:
         part = None
     judged = judge_table(name=table["name"], source=source, extract=extract, key_columns=keys,
                          seal_ok=seal_ok, parity=parity, not_measured=gaps)
