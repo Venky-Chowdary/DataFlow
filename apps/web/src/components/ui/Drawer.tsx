@@ -40,6 +40,12 @@ interface DrawerProps {
   side?: "right" | "left";
   ariaLabel?: string;
   className?: string;
+  /**
+   * Where the drawer mounts. Defaults to `document.body`. A page whose content
+   * is styled under the app shell (`.df2-app`) passes that element so the
+   * drawer body keeps the page's own rules.
+   */
+  container?: Element | null;
   children: ReactNode;
 }
 
@@ -64,16 +70,28 @@ export function Drawer({
   side = "right",
   ariaLabel,
   className = "",
+  container,
   children,
 }: DrawerProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  // Callers pass an inline onClose; reading it through a ref keeps a parent
+  // re-render (list polling) from re-running the open effect, which would
+  // pull focus back to the panel from whatever the operator focused inside.
+  const closeRef = useRef(onClose);
+  useEffect(() => { closeRef.current = onClose; }, [onClose]);
   const resolvedSize = resolveSize(size);
   const resolvedWidth = DRAWER_WIDTH[resolvedSize];
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      // Only the topmost dialog answers Escape: an evidence drawer or confirm
+      // opened over this one closes alone, as Dialog already does.
+      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+      const panel = panelRef.current;
+      if (panel && dialogs.length && dialogs.item(dialogs.length - 1) !== panel) return;
+      closeRef.current();
     };
     document.addEventListener("keydown", onKey);
     const unlock = lockBodyScroll();
@@ -83,7 +101,7 @@ export function Drawer({
       unlock();
       window.cancelAnimationFrame(t);
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
@@ -125,6 +143,6 @@ export function Drawer({
         {footer && <div className="df2-drawer-footer">{footer}</div>}
       </div>
     </div>,
-    document.body,
+    container ?? document.body,
   );
 }
