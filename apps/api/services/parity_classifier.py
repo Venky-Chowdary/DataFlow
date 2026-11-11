@@ -76,7 +76,6 @@ _FLOAT_FAMILY = re.compile(
 )
 _FLOAT32 = re.compile(r"\b(real|float4|binary_float)\b|^\s*float\s*\(\s*([1-9]|1\d|2[0-4])\s*\)", re.I)
 _DATETIME = re.compile(r"^\s*\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
-_ORACLE = frozenset({"oracle", "oracle_db"})
 _REPLACEMENT_CHARS = frozenset({"?", "�"})
 
 
@@ -171,7 +170,9 @@ def null_vs_empty(source: str | None, dest: str | None, ctx: CellContext) -> dic
     Explained only where the destination engine stores ``''`` as NULL (Oracle).
     """
     if source == "" and dest is None:
-        oracle = ctx.dest_engine.lower() in _ORACLE
+        from services.oracle_empty_string import empty_is_null_destination
+
+        oracle = empty_is_null_destination(ctx.dest_engine)
         return cause(
             NULL_VS_EMPTY,
             "The source holds an empty string; the destination holds NULL"
