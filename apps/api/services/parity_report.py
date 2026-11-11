@@ -536,6 +536,8 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
         } if ev.check == "sampled" else None,
         "_accepted": min(sum(len(d["_keys"]) + d["_keyless"] for d in accepted), differ - bad),
         "_at_least": at_least,
+        "_unaccounted": ev.gate8_unaccounted,
+        "_capped": ev.capped,
         "_note": ev.note,
     }
 
@@ -582,6 +584,23 @@ def _checked_sentence(table: dict[str, Any]) -> str:
     return f"{found} ({x['how']}); {other}"
 
 
+def _full_caveat(full_tables: list[dict[str, Any]]) -> str:
+    """What a full compare cannot claim: Gate-8 failed on rows it did not name, or named only the first."""
+    unaccounted = [t["name"] for t in full_tables if t["_unaccounted"]]
+    if unaccounted:
+        return (f"Every row was compared, but Gate-8 failed on rows its evidence does not name in "
+                f"{', '.join(unaccounted[:5])}, so whether any row differs cannot be shown.")
+    capped = [t for t in full_tables if t["_capped"]]
+    if not capped:
+        return ""
+    bad = sum(t["unexplained"] for t in full_tables)
+    differ = sum(t["differences"] for t in full_tables)
+    found = (f"at least {bad:,} row(s) hold a difference no rule explains" if bad
+             else f"at least {differ:,} row(s) differ")
+    return (f"Every row was compared, but Gate-8 named only the first differing keys of "
+            f"{', '.join(t['name'] for t in capped[:5])}: {found}, and more may differ.")
+
+
 def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
     kinds = {
         "full" if t["check"] in _FULL_CHECKS else "sampled" if t["check"] == "sampled" else "none"
@@ -606,6 +625,7 @@ def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
         )
         if not any(t["differences"] for t in full_tables):
             statement = "Every row was compared and no row differs."
+        statement = _full_caveat(full_tables) or statement
     elif method == "sampled":
         statement = (
             " ".join(f"{_checked_sentence(t)}." for t in unbounded) if unbounded
@@ -614,7 +634,9 @@ def _confidence(tables: list[dict[str, Any]]) -> dict[str, Any]:
     elif method == "mixed":
         parts = []
         if full_tables:
-            parts.append(f"{len(full_tables)} table(s) were compared in full")
+            caveat = _full_caveat(full_tables)
+            parts.append(f"{len(full_tables)} table(s) were compared in full"
+                         + (f" ({caveat[:1].lower()}{caveat[1:-1]})" if caveat else ""))
         if unbounded:
             parts += [f"{t['name']}: {_checked_sentence(t)}" for t in unbounded]
         elif n:
