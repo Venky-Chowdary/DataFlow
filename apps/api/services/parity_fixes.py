@@ -60,30 +60,41 @@ def _fix_id(action: str, diff_ids: list[str]) -> str:
 
 
 def _fix(action: str, diffs: list[dict[str, Any]], *, title: str, detail: str,
-         preview: str | None = None, reason: str | None = None, **internal: Any) -> dict[str, Any]:
+         preview: str | None = None, reason: str | None = None, bound: list[str] | None = None,
+         **internal: Any) -> dict[str, Any]:
     chosen = remediation_action(action, PARITY)
     if chosen is None:  # pragma: no cover - the menu is fixed in this module
         raise ValueError(f"{action} is not a Parity Studio action")
     ids = [d["id"] for d in diffs]
     return {
         "id": _fix_id(action, ids), "difference_ids": ids, "action": action,
-        "title": title, "detail": detail, "preview": preview, "preview_sha256": preview_digest(preview),
+        "title": title, "detail": detail, "preview": preview, "preview_sha256": preview_digest(preview, bound),
         "applicable": reason is None, "not_applicable_reason": reason,
         "status": "proposed", "approved_by": None, "applied_at": None, "result": None,
         **{f"_{k}": v for k, v in internal.items()},
     }
 
 
-def preview_digest(preview: str | None) -> str | None:
-    """SHA-256 of what a person reviewed (the DDL, the key list): an approve may name it."""
-    return hashlib.sha256(preview.encode("utf-8")).hexdigest() if preview else None
+def preview_digest(preview: str | None, bound: list[str] | None = None) -> str | None:
+    """SHA-256 of what a person reviewed (the DDL, the key list): an approve may name it.
+
+    A preview shows at most 20 keys; ``bound`` (every key the fix writes or accepts)
+    is hashed with it, so another key beyond the first 20 is another digest.
+    """
+    if not preview:
+        return None
+    text = preview if bound is None else preview + "\n" + "\x1f".join(sorted(map(str, bound)))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _shown_keys(keys: list[str], *, protected: bool) -> str:
+    if protected:
+        return f"{len(keys)} protected key(s)"
+    return ", ".join(keys[:20]) + (f" … (+{len(keys) - 20})" if len(keys) > 20 else "")
 
 
 def _keys_preview(table: str, key_col: str, keys: list[str], *, protected: bool = False) -> str:
-    if protected:
-        return f"upsert {table} for {key_col} IN ({len(keys)} protected key(s)) — {len(keys)} key(s)"
-    shown = ", ".join(keys[:20]) + (f" … (+{len(keys) - 20})" if len(keys) > 20 else "")
-    return f"upsert {table} for {key_col} IN ({shown}) — {len(keys)} key(s)"
+    return f"upsert {table} for {key_col} IN ({_shown_keys(keys, protected=protected)}) — {len(keys)} key(s)"
 
 
 def _route_reason(job: dict[str, Any]) -> str | None:
@@ -117,6 +128,7 @@ def _resync(job: dict[str, Any], ev: TableEvidence, diffs: list[dict[str, Any]],
         detail=detail, reason=reason,
         preview=_keys_preview(ev.name, key_col or "key", keys,
                               protected=any(c in ev.protected for c in ev.key_columns)),
+        bound=keys,
         keys=keys, table=ev.name, key_column=key_col,
     )
 
@@ -322,12 +334,19 @@ def _full_verification(job: dict[str, Any], ev: TableEvidence, job_id: str) -> d
     )
 
 
-def _accept(diff: dict[str, Any]) -> dict:
+def _accept(diff: dict[str, Any], *, protected: bool) -> dict:
+    """Accept exactly the rows shown: the preview names them and its digest binds every key
+    and the keyless count, so rows a later re-read adds are another preview (409 on approve)."""
     where = f"{diff['table']}.{diff['column']}" if diff.get("column") else diff["table"]
+    keys, keyless = list(diff["_keys"]), int(diff["_keyless"])
+    rows = ([f"key{'s' if len(keys) != 1 else ''} {_shown_keys(keys, protected=protected)}"] if keys else []) + (
+        [f"{keyless:,} row(s) without a key"] if keyless else [])
     return _fix(
         "accept", [diff],
         title=f"Accept {diff['rows']:,} row(s) in {where} ({diff['cause']['label'].lower()})",
         detail="Marks this difference as accepted by you, with your note. No data is changed.",
+        preview=f"accept {where} ({diff['cause']['code']}): {diff['rows']:,} row(s) — {'; '.join(rows)}",
+        bound=[*keys, f"keyless={keyless}"],
     )
 
 
@@ -414,7 +433,8 @@ def propose_fixes(job: dict[str, Any], report: dict[str, Any], state: dict[str, 
         if rest or (resync is not None and not resync["applicable"]):
             proposals.append(_rerun(job, rest or keyed, job_id))
         # Rows nobody counted cannot be accepted: only a re-run can count them.
-        proposals += [_accept(d) for d in bad if not d.get("rows_at_least")]
+        key_protected = any(c in ev.protected for c in ev.key_columns)
+        proposals += [_accept(d, protected=key_protected) for d in bad if not d.get("rows_at_least")]
     return _merge(proposals, state)
 
 
