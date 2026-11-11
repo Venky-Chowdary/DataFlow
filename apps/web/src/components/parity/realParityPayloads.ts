@@ -446,6 +446,7 @@ export const reportSigned: ParityReport = {
     "reconciliation_passed": false,
     "reread": {
       "pay": {
+        "cached_at": "2026-11-11T14:00:00+00:00",
         "keys": 4,
         "status": "ok"
       }
