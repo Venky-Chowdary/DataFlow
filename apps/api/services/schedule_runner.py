@@ -2512,17 +2512,20 @@ def _clear_stale_running_schedules() -> None:
 
 
 async def _run_maintenance() -> None:
-    """Housekeeping on the beat: scheduled job retention, expired sandboxes.
+    """Housekeeping on the beat: scheduled job retention, expired sandboxes,
+    expired file exports in the export bucket.
 
     The beat can tick every second on every replica; each step first claims
     its period in Mongo (``services.maintenance_claim``: retention once a day,
-    the sandbox sweep every 15 minutes, one replica per period) and returns at
-    once when off or not due. A failure is logged, never raised into the beat.
+    the sandbox and export sweeps every 15 minutes, one replica per period) and
+    returns at once when off or not due. A failure is logged, never raised into
+    the beat.
     """
+    from services.export_object_store import sweep_expired_exports
     from services.job_retention_schedule import run_due_retention
     from services.sandbox_workspaces import sweep_expired_sandboxes
 
-    for step in (run_due_retention, sweep_expired_sandboxes):
+    for step in (run_due_retention, sweep_expired_sandboxes, sweep_expired_exports):
         try:
             await asyncio.get_running_loop().run_in_executor(
                 _executor, functools.partial(contextvars.copy_context().run, step)

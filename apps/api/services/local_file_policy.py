@@ -170,7 +170,10 @@ def sqlite_destination_refusal(dest_type: str, connection_string: str = "") -> s
 #   (REST, Glue, Hive, SQL database) is local only with a local warehouse path.
 # * ``file_export``: ``file_export_append.land_export_bytes`` writes under
 #   ``export_paths.exports_dir()`` on the writing server. File delivery to
-#   S3/MinIO/GCS/ADLS/SFTP is a ``database``-kind destination and stays.
+#   S3/MinIO/GCS/ADLS/SFTP is a ``database``-kind destination and stays. With
+#   an export bucket configured (``DATAWRAP_EXPORT_BUCKET``) the export goes to
+#   that private bucket instead (``services.export_object_store``) and is not
+#   refused: it no longer lands on the writing server's disk.
 #
 # ``DATAWRAP_LOCAL_FILE_DESTINATIONS=on|off`` (or ``DATAFLOW_…``) decides
 # explicitly; ``DATAWRAP_SQLITE_DESTINATION`` still decides SQLite on its own.
@@ -326,6 +329,11 @@ def local_destination_refusal(endpoint_or_type: Any, cfg: Any = None) -> str | N
     kind = local_disk_destination(endpoint_or_type, cfg)
     if kind is None or (sqlite_ok if kind == "sqlite" else files_ok):
         return None
+    if kind == "file_export":
+        from services.export_object_store import export_bucket_configured
+
+        if export_bucket_configured():  # the export goes to the private export bucket
+            return None
     return local_destination_message(kind)
 
 

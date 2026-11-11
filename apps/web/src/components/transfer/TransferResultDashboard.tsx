@@ -10,7 +10,8 @@ import { LiveEventLog } from "../ui/LiveEventLog";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
-import type { RepairMapping } from "../../lib/api";
+import { downloadJobExport, type RepairMapping } from "../../lib/api";
+import { exportDownloadTarget, exportRetentionNote } from "../../lib/jobExportDownload";
 import { Gate8ProofCard } from "./Gate8ProofCard";
 import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8, type Gate8Reconciliation } from "./gate8Status";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
@@ -113,6 +114,21 @@ export function TransferResultDashboard({
 }: TransferResultDashboardProps) {
   const { setActiveData } = useActiveData();
   const [proofOpen, setProofOpen] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const exportTarget = exportDownloadTarget(result);
+  const exportNote = exportRetentionNote(result.destination_summary as { storage?: unknown; expires_at?: unknown } | undefined);
+  const startJobExportDownload = async (jobId: string) => {
+    setExportBusy(true);
+    setExportError("");
+    try {
+      await downloadJobExport(jobId);
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExportBusy(false);
+    }
+  };
   const resolvedProof = asMappingProof(mappingProofProp) || asMappingProof(result.mapping_proof);
   const ds = result.destination_summary;
   const streamHealth = readJobStreams(result);
@@ -756,16 +772,31 @@ export function TransferResultDashboard({
             <header className="df2-result-proof-head">
               <DtIcon name="check" size={14} />
               <strong>Proof</strong>
-              {result.destination?.download_url && (
+              {exportTarget?.kind === "browser" && (
                 <a
-                  href={result.destination.download_url}
+                  href={exportTarget.href}
                   className="df2-btn df2-btn-sm df2-btn-primary"
-                  download={result.destination.filename || `export.${result.destination?.format || "json"}`}
+                  download={exportTarget.filename}
                 >
                   <DtIcon name="download" size={14} /> Download export
                 </a>
               )}
+              {exportTarget?.kind === "job" && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm df2-btn-primary"
+                  disabled={exportBusy}
+                  onClick={() => void startJobExportDownload(exportTarget.jobId)}
+                >
+                  <DtIcon name="download" size={14} /> {exportBusy ? "Preparing download…" : "Download export"}
+                </button>
+              )}
             </header>
+            {(exportError || exportNote) && (
+              <p className={exportError ? "df2-result-export-note is-error" : "df2-result-export-note"} role={exportError ? "alert" : undefined}>
+                {exportError || exportNote}
+              </p>
+            )}
             <dl className="df2-result-proof-dl">
               <div>
                 <dt>Route</dt>

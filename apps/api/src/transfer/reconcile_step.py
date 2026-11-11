@@ -6735,6 +6735,13 @@ def _run_reconciliation_impl(
                     f"{os.path.basename(str(dest_summary.get('path') or ''))!r}: "
                     + _cell_mismatch_text(cell_compare)
                 )
+        from services.export_object_store import export_object_proof
+
+        # A bucket export: bind the checked bytes to the stored object (key,
+        # size, rows, SHA-256) so the signed download is provably this data.
+        stored_object = export_object_proof(dest_summary, payload)
+        if stored_object is not None:
+            payload["export_object"] = stored_object
         return _finalize(payload)
 
     from .connector_capabilities import resolve_driver_type
