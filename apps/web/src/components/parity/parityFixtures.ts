@@ -157,6 +157,78 @@ export function signedReport(over: Partial<ParityReport> = {}): ParityReport {
   });
 }
 
+/**
+ * A failed run with no Gate-8 reconciliation: what build_parity_report returns
+ * for it (services/parity_report.py), clock time fixed. Nothing was compared.
+ */
+export function failedRunReport(over: Partial<ParityReport> = {}): ParityReport {
+  return {
+    job_id: "job-failed-7",
+    generated_at: "2026-11-11T14:45:00Z",
+    version: 0,
+    verdict: "unverifiable",
+    verdict_reason: "Gate-8 recorded no reconciliation for this job, so nothing was compared.",
+    parity: { rows_source: null, rows_destination: null, rows_differ: 0, explained: 0, unexplained: 0, proven_equal_pct: null },
+    confidence: {
+      bound_valid: true,
+      differences_in_sample: 0,
+      level: 0.95,
+      method: "none",
+      rows_checked: 0,
+      rows_total: null,
+      sample_description: null,
+      sampled_rows: 0,
+      statement: "No value comparison ran for this job, so nothing bounds the difference rate.",
+      upper_bound_rate: null,
+    },
+    tables: [],
+    differences: [],
+    explanation: null,
+    fixes: [],
+    rounds: [],
+    signoff: {
+      required_roles: ["engineering", "data_owner", "compliance"],
+      approvals: [],
+      invalidated_approvals: [],
+      status: "blocked",
+      blocked_reason: "The evidence cannot decide parity, so there is nothing to sign.",
+      signature: null,
+      signed_at: null,
+    },
+    evidence: {
+      reconciliation_passed: null,
+      assurance_level: null,
+      trust_score: 58,
+      protection_proof: null,
+      transform_proof: null,
+      reread: {},
+    },
+    ...over,
+  };
+}
+
+/** A fully compared run with nothing different, in the API's own words. */
+export function provenApiWordingReport(over: Partial<ParityReport> = {}): ParityReport {
+  return provenReport({
+    job_id: "job-proven-6",
+    version: 0,
+    verdict_reason: "No differences: the destination matches the source.",
+    parity: { rows_source: 6, rows_destination: 6, rows_differ: 0, explained: 0, unexplained: 0, proven_equal_pct: 100 },
+    confidence: {
+      bound_valid: true,
+      method: "full",
+      sampled_rows: 0,
+      differences_in_sample: 0,
+      level: 0.95,
+      upper_bound_rate: null,
+      rows_checked: 6,
+      rows_total: 6,
+      statement: "Every row was compared and no row differs.",
+    },
+    ...over,
+  });
+}
+
 export function summaryFixture(over: Partial<ParitySummary> = {}): ParitySummary {
   const runs = [100, 100, 99.8, 100, 100, 99.5, 100, null, 99.9, 100, 100, 99.94].map((pct, i) => ({
     job_id: `job-${20 + i}`,
