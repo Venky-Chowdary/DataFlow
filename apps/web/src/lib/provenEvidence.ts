@@ -2,7 +2,8 @@
  * Measured evidence for public-facing pages.
  *
  * Every row here comes from a live matrix run recorded in
- * `docs/CLIENT_READINESS_REPORT.md` — a real transfer through the product path
+ * the client readiness report (removed from the repository with the old docs
+ * tree, so that record is no longer here) — a real transfer through the product path
  * against a real engine, with the destination re-read afterwards. Marketing
  * copy renders these rows instead of writing its own numbers, so a claim on the
  * site cannot outrun the artifact that backs it.
@@ -225,7 +226,7 @@ export const NOT_PROVEN: UnprovenRow[] = [
  * `transfer_live_driver_types()` on the current base (46 drivers). Catalog
  * entries whose status is `planned` (Redshift, Databricks, ClickHouse,
  * MariaDB, CockroachDB, Shopify) are not named — see
- * docs/MARKETING_AUDIT_2026-10.md, "Not claimed on purpose".
+ * docs/reference/connectors.md for each driver's declared status.
  */
 export const MARKETING_STACK: ReadonlyArray<{
   family: string;

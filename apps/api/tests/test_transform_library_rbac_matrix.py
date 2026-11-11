@@ -1,5 +1,5 @@
 """Transform-library RBAC: every route has an explicit rule, and the role matrix
-documented in docs/DEPLOYMENT.md follows from services/rbac.py's own tables."""
+documented in docs/operate/security.md follows from services/rbac.py's own tables."""
 
 from __future__ import annotations
 

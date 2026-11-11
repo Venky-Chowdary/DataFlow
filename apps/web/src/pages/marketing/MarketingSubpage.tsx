@@ -63,7 +63,7 @@ function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
 
 /**
  * Control posture badges. Each label names a shipped control
- * (docs/MARKETING_AUDIT_2026-10.md §2); certifications are not listed.
+ * (see docs/operate/security.md); certifications are not listed.
  */
 function ComplianceBadges({ items }: { items: string[] }) {
   return (

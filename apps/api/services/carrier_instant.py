@@ -16,7 +16,7 @@ carrier's granularity is not knowable (unknown engine, non-temporal DDL), the
 value passes through unrounded and any difference still fails Gate-8.
 
 Rounding, not truncation, is the measured behaviour of MySQL and PostgreSQL
-(see ``docs/CARRIER_PRECISION_EVIDENCE.md``); SQL Server ``datetime`` rounds to
+(the measurement record was removed with the old docs); SQL Server ``datetime`` rounds to
 1/300 s and ``smalldatetime`` to the minute, both modelled here. An engine that
 truncated instead would fail Gate-8 rather than pass it — the honest direction.
 """

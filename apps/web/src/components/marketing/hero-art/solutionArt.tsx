@@ -1,6 +1,6 @@
 /**
  * Home + solution hero drawings. Each argues the outcome of that page —
- * see docs/MARKETING_HERO_DESIGN_SYSTEM.md.
+ * (the hero design notes were removed with the old docs).
  */
 
 import {

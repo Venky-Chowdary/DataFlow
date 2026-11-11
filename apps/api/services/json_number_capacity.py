@@ -1,6 +1,6 @@
 """Which JSON numbers a destination's native JSON type stores exactly (D206).
 
-docs/ZERO_LOSS_PROPERTIES.md, Property 8 ("JSON number spelling"): a JSON
+docs/use/verification.md ("Numbers inside JSON"): a JSON
 document written to a *text* carrier keeps every token, but a native JSON type
 re-encodes numbers:
 

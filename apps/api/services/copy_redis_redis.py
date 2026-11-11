@@ -14,7 +14,7 @@ column renames, occupied dest with dest COUNT ≠ source, cross-endpoint,
 copy onto the same prefix, public proxy, missing COPY command, non-native
 Redis TYPE. TTL is carried by Redis 7 ``COPY`` when the source key has
 one; the row path still does not productize TTL (see
-``docs/REDIS_TTL_SEMANTICS.md``).
+``docs/reference/connectors.md``).
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 /**
  * Enterprise / catalog / knowledge hero drawings —
- * see docs/MARKETING_HERO_DESIGN_SYSTEM.md.
+ * (the hero design notes were removed with the old docs).
  */
 
 import {

@@ -4,7 +4,7 @@ Studio's Mirror option promises "Soft-delete dest keys missing from the source
 (_deleted). Physical COUNT(*) stays; active population is COUNT(*) WHERE NOT
 _deleted." (apps/web/src/lib/transferConstants.ts, DestinationAdvancedDrawer,
 ScheduleForm, helpDocs; services/mirror_engine.py's own contract;
-docs/ZERO_LOSS_PROPERTIES.md). QA ran a mirror on production: rows were
+docs/use/sync-modes.md). QA ran a mirror on production: rows were
 physically deleted (552 -> 540) and no ``_deleted`` column was created. The
 engine defaulted an undeclared stream contract to a hard DELETE.
 

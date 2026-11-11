@@ -424,8 +424,8 @@ async def login_mfa(body: ChallengeBody, request: Request):
 async def mfa_admin_reset(body: ResetBody, request: Request):
     """Platform admin removes another account's second factor (lost device and
     lost recovery codes). Needs a written reason; audited; the account's
-    sessions are revoked so the next sign-in starts clean. See
-    docs/MFA_ENFORCEMENT_DESIGN.md → Break-glass for the CLI equivalent."""
+    sessions are revoked so the next sign-in starts clean. The command-line
+    equivalent is ``scripts/mfa_reset.py``."""
     from services.tenant_scope import actor_is_unrestricted
     from services.user_store import normalize_email
     from src.services.auth_service import revoke_sessions_for_email

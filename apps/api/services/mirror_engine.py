@@ -49,7 +49,7 @@ COUNT_ONLY = "count"
 def resolve_mirror_delete_mode(contract: Any = None, options: Any = None) -> str:
     """The mirror delete behaviour a run applies: ``soft`` unless declared.
 
-    Studio, the schedule form, help docs and docs/ZERO_LOSS_PROPERTIES.md all
+    Studio, the schedule form, help docs and docs/use/sync-modes.md all
     promise a soft delete (``_deleted``; physical COUNT(*) stays). An
     undeclared contract defaulted to a hard DELETE, so QA's mirror dropped
     552 -> 540 rows with no ``_deleted`` column (QA demo 1030). ``hard`` is an

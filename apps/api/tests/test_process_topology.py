@@ -1,6 +1,6 @@
 """Process split: API enqueues, scheduler owns cadence, workers claim by workload.
 
-Proof for docs/ENTERPRISE_SERVICE_TOPOLOGY.md steps 1–4. No cluster, no 1M harness.
+Proof for the process split in docs/operate/deploy.md. No cluster, no 1M harness.
 """
 
 from __future__ import annotations

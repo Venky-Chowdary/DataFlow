@@ -11,4 +11,4 @@ apps/api/data/vector_store
 apps/api/data/training
 .cursor
 *.md
-!docs/DEPLOYMENT.md
+!docs/operate/deploy.md

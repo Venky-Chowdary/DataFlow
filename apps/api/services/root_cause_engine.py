@@ -107,7 +107,7 @@ class MigrationRootCause:
     expected_runtime_impact: str = ""
     quarantine_policy: str = "holdout_rejected_rows"
     rollback_policy: str = "DOCUMENT_ONLY"
-    documentation: str = "docs/MIGRATION_RISK_CONTRACT.md"
+    documentation: str = "docs/use/verification.md"
     impacted_gates: list[str] = field(default_factory=list)
     absorbed_blocker_ids: list[str] = field(default_factory=list)
     severity: str = "block"
@@ -1119,7 +1119,7 @@ def _type_widening_root(
         recovery_strategy="Re-plan with the approval; the same decision runs at Execute.",
         expected_runtime_impact="One ALTER COLUMN per widened column before the write.",
         quarantine_policy="none",
-        documentation="docs/MIGRATION_RISK_CONTRACT.md",
+        documentation="docs/use/verification.md",
         impacted_gates=list(gate_ids),
         absorbed_blocker_ids=absorbed_ids,
         severity="block",
@@ -1309,10 +1309,10 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         ),
                         quarantine_policy=(
                             "holdout_rejected_rows under CAST_AND_CONTINUE "
-                            "(see docs/MIGRATION_RISK_CONTRACT.md)"
+                            "(see docs/use/verification.md)"
                         ),
                         rollback_policy="DOCUMENT_ONLY",
-                        documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                        documentation="docs/use/verification.md",
                         impacted_gates=gate_ids or absorbed,
                         absorbed_blocker_ids=absorbed,
                         severity="block",
@@ -1437,10 +1437,10 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     ),
                     quarantine_policy=(
                         "per signed execution_policy "
-                        "(see docs/MIGRATION_RISK_CONTRACT.md)"
+                        "(see docs/use/verification.md)"
                     ),
                     rollback_policy="DOCUMENT_ONLY",
-                    documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                    documentation="docs/use/verification.md",
                     impacted_gates=risk_absorbed or ["g4_mapping_confidence"],
                     absorbed_blocker_ids=risk_absorbed,
                     severity="block",
@@ -1498,7 +1498,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 expected_runtime_impact="Re-Validate only",
                 quarantine_policy="n/a — no rows moved",
                 rollback_policy="DOCUMENT_ONLY",
-                documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                documentation="docs/use/verification.md",
                 impacted_gates=["schema_drift"],
                 absorbed_blocker_ids=["schema_drift"],
                 severity="block",
@@ -1577,7 +1577,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 expected_runtime_impact="Re-Validate only — no dest rewrite until Execute",
                 quarantine_policy="n/a — confidence is a Map decision, not a row quarantine",
                 rollback_policy="DOCUMENT_ONLY",
-                documentation="docs/MAPPING_CONFIDENCE_AUTHORITY.md",
+                documentation="docs/use/verification.md",
                 impacted_gates=absorbed or ["g4_mapping_confidence"],
                 absorbed_blocker_ids=absorbed,
                 severity="block",
@@ -1784,10 +1784,10 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 expected_runtime_impact="Re-Validate is sample-scoped",
                 quarantine_policy=(
                     "holdout_rejected_rows under CAST_AND_CONTINUE / QUARANTINE_ROW "
-                    "(see docs/MIGRATION_RISK_CONTRACT.md)"
+                    "(see docs/use/verification.md)"
                 ),
                 rollback_policy="DOCUMENT_ONLY",
-                documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                documentation="docs/use/verification.md",
                 impacted_gates=absorbed,
                 absorbed_blocker_ids=absorbed,
                 severity="block",
@@ -1883,7 +1883,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     "holdout_rejected_rows under QUARANTINE_ROW when normalization is refused"
                 ),
                 rollback_policy="DOCUMENT_ONLY",
-                documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                documentation="docs/use/verification.md",
                 impacted_gates=absorbed,
                 absorbed_blocker_ids=absorbed,
                 severity="block",
@@ -1970,7 +1970,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 ),
                 quarantine_policy="n/a — the batch is refused before any write",
                 rollback_policy="DOCUMENT_ONLY",
-                documentation="docs/MIGRATION_ROLLBACK.md",
+                documentation="docs/operate/runbooks.md",
                 impacted_gates=absorbed,
                 absorbed_blocker_ids=absorbed,
                 severity="block",
@@ -2073,7 +2073,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 ),
                 quarantine_policy="n/a — the batch is refused before any write",
                 rollback_policy="DOCUMENT_ONLY",
-                documentation="docs/MIGRATION_ROLLBACK.md",
+                documentation="docs/operate/runbooks.md",
                 impacted_gates=absorbed,
                 absorbed_blocker_ids=absorbed,
                 severity="block",
@@ -2160,7 +2160,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     expected_runtime_impact="Re-Validate only — no destination rewrite",
                     quarantine_policy="n/a — the probe must run, rows are not quarantined",
                     rollback_policy="DOCUMENT_ONLY",
-                    documentation="docs/MIGRATION_ROLLBACK.md",
+                    documentation="docs/operate/runbooks.md",
                     impacted_gates=absorbed,
                     absorbed_blocker_ids=absorbed,
                     severity="block",
@@ -2259,7 +2259,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     expected_runtime_impact="Re-Validate sample; full table rewrite if sync mode changes",
                     quarantine_policy="n/a — identity must be fixed, not quarantined away",
                     rollback_policy="DOCUMENT_ONLY",
-                    documentation="docs/MIGRATION_ROLLBACK.md",
+                    documentation="docs/operate/runbooks.md",
                     impacted_gates=absorbed,
                     absorbed_blocker_ids=absorbed,
                     severity="block",
@@ -2361,7 +2361,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 expected_runtime_impact="Re-Validate only — no destination rewrite",
                 quarantine_policy="n/a — no rows moved",
                 rollback_policy="DOCUMENT_ONLY",
-                documentation="docs/MIGRATION_ROLLBACK.md",
+                documentation="docs/operate/runbooks.md",
                 impacted_gates=absorbed,
                 absorbed_blocker_ids=absorbed,
                 severity="block",
