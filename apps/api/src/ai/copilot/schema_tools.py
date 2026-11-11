@@ -718,6 +718,17 @@ def list_connector_objects(
                 objects.append(name)
                 if kind:
                     kinds[name] = kind
+        if not info.get("connected") and not objects and endpoint.kind != "file":
+            # Unreachable is not "no tables": an empty success let the
+            # assistant report an empty connector (D314's race: the driver's
+            # own timeout answered just before the tool deadline did).
+            reason = str(info.get("message") or "the connection was not established")
+            return _tool_result(
+                "list_connector_objects",
+                success=False,
+                output={"connector_name": conn.get("name"), "connected": False},
+                error=f"Could not list objects on {conn.get('name') or 'this connector'}: {reason}",
+            )
         total = len(objects)
         objects = objects[: max(1, int(limit or 100))]
         return _tool_result(
