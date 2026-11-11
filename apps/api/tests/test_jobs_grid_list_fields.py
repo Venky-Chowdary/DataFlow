@@ -30,6 +30,7 @@ from services.job_list_filters import (
 )
 from services.job_list_view import slim_job_for_list, verification_summary_for_list
 from services.mongodb_service import get_mongodb_service
+from services.orphan_jobs import stop_orphan_sweeper
 from src.main import app
 
 
@@ -133,6 +134,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
     monkeypatch.setenv("DATAFLOW_JOB_STORE", "memory")
     monkeypatch.setattr(mongodb_service_mod, "_mongodb_service", None)
+    # _seed back-dates a job that has no owner. The orphan sweep is right to
+    # fail such a job, so it must not run while these tests seed: neither the
+    # start-up pass (warm-up runs in the background, after seeding may begin)
+    # nor a sweeper thread an earlier test's app left running.
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+    stop_orphan_sweeper()
     with TestClient(app) as c:
         yield c
 
