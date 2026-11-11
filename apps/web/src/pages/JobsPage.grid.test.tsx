@@ -194,7 +194,9 @@ describe("Jobs grid page", () => {
     assert.equal(queries.at(-1)?.verification, "failed");
     assert.ok(button("Source: MySQL").classList.contains("active"));
     assert.equal(host.querySelector('[aria-label="Clear Destination filter"]'), null, "only active chips offer ×");
-    await click(button(/×/, host.querySelector('[aria-label="Clear Source filter"]')!.parentElement!));
+    const clear = host.querySelector<HTMLButtonElement>('button[aria-label="Clear Source filter"]')!;
+    assert.ok(clear.classList.contains("df2-close-btn"), "the shared close control, not a typed ×");
+    await click(clear);
     await settle();
     assert.equal(queries.at(-1)?.sourceType, undefined);
     assert.equal(queries.at(-1)?.verification, "failed");

@@ -383,9 +383,9 @@ export function formatJobStarted(iso: string | undefined, now = new Date()): str
   const ms = parseServerTimestampMs(iso);
   if (ms == null) return "—";
   const date = new Date(ms);
-  const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
   if (date.toDateString() === now.toDateString()) return `Today ${time}`;
-  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 // ── CSV export of the current page ────────────────────────────────────────

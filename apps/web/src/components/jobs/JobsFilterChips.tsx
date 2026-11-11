@@ -90,8 +90,14 @@ function Chip({
         items={items}
       />
       {active && (
-        <button type="button" className="df2-jobs-chip-clear" aria-label={`Clear ${name} filter`} title={`Clear ${name} filter`} onClick={onClear}>
-          ×
+        <button
+          type="button"
+          className="df2-close-btn df2-close-btn-sm"
+          aria-label={`Clear ${name} filter`}
+          title={`Clear ${name} filter`}
+          onClick={onClear}
+        >
+          <DtIcon name="x" size={13} />
         </button>
       )}
     </span>
