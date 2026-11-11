@@ -1,0 +1,738 @@
+/* Parity Studio — Trust Report tab (Page A), sign-off (Page C), Migration health (Page B).
+   Namespace: .df2-parity*. Tokens only: every colour is a --df-* variable (or a
+   color-mix of two), so html[data-theme="dark"] remaps it with the rest of the app. */
+
+.df2-parity {
+  display: grid;
+  gap: var(--df-space-4);
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-parity .df2-badge,
+.df2-parity-health .df2-badge {
+  /* Labels such as "4 to resolve" are sentences, not titles. */
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.df2-parity-muted {
+  margin: 0;
+  color: var(--df-text-tertiary);
+  font-size: var(--df-fs-sm);
+}
+
+.df2-parity-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-parity-h3 {
+  margin: 0;
+  font-family: var(--df-font-display);
+  font-size: var(--df-fs-card-title);
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+}
+
+.df2-parity-h4 {
+  margin: 0;
+  font-size: var(--df-fs-md);
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+}
+
+.df2-parity-card {
+  display: grid;
+  gap: var(--df-space-3);
+  align-content: start;
+  min-width: 0;
+  padding: var(--df-space-4);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-surface);
+}
+
+.df2-parity-stack {
+  display: grid;
+  gap: var(--df-space-4);
+  align-content: start;
+  min-width: 0;
+}
+
+.df2-parity-grid2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--df-space-4);
+  min-width: 0;
+}
+
+.df2-parity-toolbar,
+.df2-parity-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--df-space-3);
+}
+
+.df2-parity-section-head > div:first-child {
+  display: grid;
+  gap: var(--df-space-1);
+  min-width: 0;
+}
+
+.df2-parity-toolbar-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-2);
+}
+
+.df2-parity-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-2);
+}
+
+.df2-parity-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--df-space-2);
+  margin: 0;
+  padding: var(--df-space-2) var(--df-space-3);
+  border-left: 3px solid var(--df-warning);
+  border-radius: var(--df-radius-md);
+  background: var(--df-warning-bg);
+  color: var(--df-text-primary);
+  font-size: var(--df-fs-md);
+}
+
+.df2-parity-notice > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--df-warning);
+}
+
+.df2-parity-notice.is-danger {
+  border-left-color: var(--df-danger);
+  background: var(--df-danger-bg);
+}
+
+.df2-parity-notice.is-danger > svg {
+  color: var(--df-danger);
+}
+
+/* Hero: ring + KPIs */
+.df2-parity-hero {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  gap: var(--df-space-4);
+}
+
+@media (max-width: 720px) {
+  .df2-parity-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.df2-parity-ring-card {
+  justify-items: center;
+  text-align: center;
+}
+
+.df2-parity-ring .df2-progress-ring .track {
+  stroke: var(--df-border);
+  stroke-width: 12;
+}
+
+.df2-parity-ring .df2-progress-ring .fill {
+  stroke: var(--df-brand);
+  stroke-width: 12;
+  /* A butt cap keeps 99.9% visibly short of a closed ring. */
+  stroke-linecap: butt;
+}
+
+.df2-parity-ring .df2-progress-ring.tone-warn .fill {
+  stroke: var(--df-warning);
+}
+
+.df2-parity-ring .df2-progress-ring.tone-danger .fill {
+  stroke: var(--df-danger);
+}
+
+.df2-parity-ring .df2-progress-ring.tone-idle .fill {
+  stroke: var(--df-border-strong);
+}
+
+.df2-parity-ring .df2-progress-ring-label {
+  gap: 2px;
+}
+
+.df2-parity-ring .df2-progress-ring-label .df2-parity-ring-value {
+  font-family: var(--df-font-display);
+  font-size: 26px;
+  font-weight: var(--df-fw-bold);
+  color: var(--df-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-parity-ring .df2-progress-ring-label .df2-parity-ring-caption {
+  font-size: var(--df-fs-xs);
+  font-weight: var(--df-fw-medium);
+  color: var(--df-text-tertiary);
+}
+
+.df2-parity-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: var(--df-space-2);
+  margin: 0;
+}
+
+.df2-parity-kpi {
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-end;
+  gap: 2px;
+  padding: var(--df-space-2) var(--df-space-3);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+  min-width: 0;
+}
+
+.df2-parity-kpi dt {
+  font-size: var(--df-fs-body);
+  color: var(--df-text-tertiary);
+}
+
+.df2-parity-kpi dd {
+  margin: 0;
+  font-family: var(--df-font-display);
+  font-size: var(--df-fs-xl);
+  font-weight: var(--df-fw-bold);
+  color: var(--df-text-primary);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.df2-parity-kpi dd.df2-mono {
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-lg);
+}
+
+.df2-parity-confidence {
+  margin: 0;
+  font-size: var(--df-fs-md);
+  color: var(--df-text-secondary);
+  line-height: 1.5;
+}
+
+.df2-parity-confidence b {
+  color: var(--df-text-primary);
+}
+
+/* Tables card */
+.df2-parity-scroll {
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.df2-parity-tables {
+  min-width: 520px;
+  width: 100%;
+}
+
+.df2-parity-col-bar {
+  width: 40%;
+}
+
+.df2-parity-bar-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-2);
+}
+
+.df2-parity-bar-cell .df2-parity-num {
+  white-space: nowrap;
+  min-width: 64px;
+  text-align: right;
+}
+
+.df2-parity-bar {
+  display: block;
+  flex: 1;
+  min-width: 80px;
+}
+
+.df2-parity-bar-track {
+  fill: var(--df-border);
+}
+
+.df2-parity-bar .df2-parity-bar-fill {
+  fill: var(--df-brand);
+}
+
+.df2-parity-bar.is-warn .df2-parity-bar-fill {
+  fill: var(--df-warning);
+}
+
+.df2-parity-bar.is-muted .df2-parity-bar-fill {
+  fill: var(--df-border-strong);
+}
+
+/* Differences */
+.df2-parity-diff-group {
+  display: grid;
+  gap: var(--df-space-2);
+}
+
+.df2-parity-diffs {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-parity-diff {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--df-space-3);
+  align-items: start;
+  padding: var(--df-space-3) 0;
+  border-top: 1px solid var(--df-border);
+}
+
+.df2-parity-diff:first-child {
+  border-top: 0;
+}
+
+.df2-parity-diff-chips {
+  display: grid;
+  gap: var(--df-space-1);
+  justify-items: start;
+}
+
+.df2-parity-diff-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: var(--df-fs-md);
+}
+
+.df2-parity-diff-body b {
+  color: var(--df-text-primary);
+}
+
+.df2-parity-diff-cause,
+.df2-parity-example {
+  color: var(--df-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.df2-parity-cause-label {
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+}
+
+.df2-parity-keys summary {
+  cursor: pointer;
+  color: var(--df-text-tertiary);
+  font-size: var(--df-fs-sm);
+}
+
+.df2-parity-keys code {
+  display: block;
+  margin-top: var(--df-space-1);
+  font-size: var(--df-fs-body);
+  overflow-wrap: anywhere;
+}
+
+.df2-parity-split svg {
+  display: block;
+}
+
+.df2-parity-split-ok {
+  fill: var(--df-success);
+}
+
+.df2-parity-split-bad {
+  fill: var(--df-danger);
+}
+
+.df2-parity-split-empty {
+  fill: var(--df-border);
+}
+
+/* Explanation */
+.df2-parity-ai {
+  display: grid;
+  gap: var(--df-space-2);
+  padding: var(--df-space-4);
+  border: 1px solid var(--df-brand-soft);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-surface-tint);
+  min-width: 0;
+}
+
+.df2-parity-ai-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--df-space-2);
+}
+
+.df2-parity-who {
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--df-brand-strong);
+}
+
+.df2-parity-source {
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-tertiary);
+}
+
+.df2-parity-ai-text {
+  margin: 0;
+  font-size: var(--df-fs-md);
+  line-height: 1.55;
+  color: var(--df-text-primary);
+}
+
+/* Fixes */
+.df2-parity-fix {
+  display: grid;
+  gap: var(--df-space-2);
+  padding: var(--df-space-3);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+  min-width: 0;
+}
+
+.df2-parity-fix.is-dismissed {
+  background: var(--df-surface-muted);
+}
+
+.df2-parity-fix-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--df-space-2);
+  font-size: var(--df-fs-md);
+  color: var(--df-text-primary);
+}
+
+.df2-parity-fix-detail {
+  margin: 0;
+  font-size: var(--df-fs-md);
+  color: var(--df-text-secondary);
+}
+
+.df2-parity-code {
+  margin: 0;
+  padding: var(--df-space-2) var(--df-space-3);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-sm);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-body);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.df2-parity-confirm {
+  display: grid;
+  gap: var(--df-space-2);
+  padding: var(--df-space-3);
+  border: 1px solid var(--df-border-brand);
+  border-radius: var(--df-radius-md);
+  background: var(--df-brand-muted);
+}
+
+.df2-parity-confirm-text {
+  margin: 0;
+  font-size: var(--df-fs-md);
+  color: var(--df-text-primary);
+}
+
+.df2-parity-note-input {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+}
+
+/* Rounds */
+.df2-parity-rounds {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-parity-round {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  gap: var(--df-space-3);
+  align-items: baseline;
+  padding: var(--df-space-2) 0;
+  border-top: 1px solid var(--df-border);
+  font-size: var(--df-fs-md);
+  color: var(--df-text-primary);
+}
+
+.df2-parity-round:first-child {
+  border-top: 0;
+}
+
+.df2-parity-round-n {
+  font-weight: var(--df-fw-semibold);
+}
+
+/* Evidence */
+.df2-parity-evidence {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--df-space-3);
+  margin: 0;
+}
+
+.df2-parity-evidence dt {
+  font-size: var(--df-fs-body);
+  color: var(--df-text-tertiary);
+}
+
+.df2-parity-evidence dd {
+  margin: var(--df-space-1) 0 0;
+}
+
+/* Sign-off (Page C) */
+.df2-parity-signoff {
+  display: grid;
+  gap: var(--df-space-3);
+}
+
+.df2-parity-sigs {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-parity-sig {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--df-space-2);
+  padding: var(--df-space-2) 0;
+  border-top: 1px solid var(--df-border);
+  font-size: var(--df-fs-md);
+  color: var(--df-text-primary);
+}
+
+.df2-parity-sig:first-child {
+  border-top: 0;
+}
+
+.df2-parity-sig-note {
+  display: block;
+  color: var(--df-text-tertiary);
+  font-size: var(--df-fs-sm);
+}
+
+.df2-parity-sign-form {
+  display: grid;
+  gap: var(--df-space-2);
+}
+
+.df2-parity-signed {
+  display: grid;
+  gap: var(--df-space-2);
+  font-size: var(--df-fs-md);
+  color: var(--df-text-secondary);
+}
+
+.df2-parity-signed p {
+  margin: 0;
+}
+
+.df2-parity-signature .df2-copy-id-value {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.df2-parity-list {
+  display: grid;
+  gap: var(--df-space-1);
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--df-fs-md);
+  color: var(--df-text-secondary);
+}
+
+/* Charts: shared text and marks */
+.df2-parity-chart-label,
+.df2-parity-heat-label {
+  fill: var(--df-text-tertiary);
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-xs);
+}
+
+.df2-parity-heat-label {
+  font-family: var(--df-font-mono);
+}
+
+.df2-parity-chart-value {
+  fill: var(--df-text-primary);
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-body);
+  font-weight: var(--df-fw-semibold);
+}
+
+.df2-parity-grid {
+  stroke: var(--df-border);
+  stroke-width: 1;
+}
+
+.df2-parity-trend svg {
+  display: block;
+}
+
+.df2-parity-trend.is-empty {
+  padding: var(--df-space-6) 0;
+}
+
+.df2-parity-trend-area {
+  fill: var(--df-brand-muted);
+  stroke: none;
+}
+
+.df2-parity-trend-line {
+  fill: none;
+  stroke: var(--df-brand);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.df2-parity-hit {
+  fill: transparent;
+}
+
+.df2-parity-point {
+  fill: var(--df-brand);
+  stroke: var(--df-surface);
+  stroke-width: 2;
+}
+
+.df2-parity-point.is-flagged {
+  fill: var(--df-danger);
+}
+
+.df2-parity-point.is-last {
+  stroke-width: 2.5;
+}
+
+/* Heatmap */
+.df2-parity-heat {
+  display: grid;
+  gap: var(--df-space-3);
+  min-width: 0;
+}
+
+.df2-parity-heat svg {
+  display: block;
+}
+
+.df2-parity-heat-cell.is-proven,
+.df2-parity-legend-swatch.is-proven {
+  fill: color-mix(in srgb, var(--df-brand) 24%, var(--df-surface));
+  background: color-mix(in srgb, var(--df-brand) 24%, var(--df-surface));
+}
+
+.df2-parity-heat-cell.is-explained,
+.df2-parity-legend-swatch.is-explained {
+  fill: color-mix(in srgb, var(--df-brand) 55%, var(--df-surface));
+  background: color-mix(in srgb, var(--df-brand) 55%, var(--df-surface));
+}
+
+.df2-parity-heat-cell.is-unexplained-small,
+.df2-parity-legend-swatch.is-unexplained-small {
+  fill: color-mix(in srgb, var(--df-warning) 62%, var(--df-surface));
+  background: color-mix(in srgb, var(--df-warning) 62%, var(--df-surface));
+}
+
+.df2-parity-heat-cell.is-unexplained-large,
+.df2-parity-legend-swatch.is-unexplained-large {
+  fill: color-mix(in srgb, var(--df-danger) 72%, var(--df-surface));
+  background: color-mix(in srgb, var(--df-danger) 72%, var(--df-surface));
+}
+
+.df2-parity-heat-cell.is-none,
+.df2-parity-legend-swatch.is-none {
+  fill: var(--df-surface-muted);
+  background: var(--df-surface-muted);
+  stroke: var(--df-border);
+  stroke-width: 1;
+}
+
+.df2-parity-heat-mark {
+  fill: var(--df-surface);
+}
+
+.df2-parity-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--df-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--df-fs-body);
+  color: var(--df-text-tertiary);
+}
+
+.df2-parity-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-space-1);
+}
+
+.df2-parity-legend-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  /* Square swatches, matching the cells (a full radius would read as dots). */
+  border-radius: calc(var(--df-radius-sm) / 2);
+}
+
+.df2-parity-legend-swatch.is-none {
+  border: 1px solid var(--df-border);
+}
+
+/* Dashboard section (Page B) */
+.df2-parity-health .df2-overview-v3-card-body {
+  display: grid;
+  gap: var(--df-space-4);
+}
+
+.df2-parity-health .df2-parity-notice .df2-btn {
+  margin-left: auto;
+}
+
+.df2-parity-health-empty {
+  display: grid;
+  gap: var(--df-space-3);
+  justify-items: start;
+}
+
+.df2-parity-health-empty p {
+  margin: 0;
+}

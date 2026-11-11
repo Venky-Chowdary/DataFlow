@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useElementWidth } from "../charts/useElementWidth";
 import { DtIcon } from "../DtIcon";
 import type { DayThroughput, JobStatusSlice } from "../../lib/overviewAnalytics";
 
@@ -27,21 +27,7 @@ function formatAxisValue(n: number): string {
 
 /** Responsive SVG throughput — fills card width */
 export function ThroughputChart({ series }: ThroughputChartProps) {
-  const wrapRef = useRef<HTMLElement>(null);
-  const [width, setWidth] = useState(360);
-
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const measure = () => {
-      const w = el.getBoundingClientRect().width;
-      if (w > 0) setWidth(Math.round(w));
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+  const [wrapRef, width] = useElementWidth<HTMLElement>(360);
 
   const h = CHART_HEIGHT;
   const pad = { t: 16, r: 12, b: 32, l: 44 };
