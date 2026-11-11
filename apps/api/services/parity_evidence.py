@@ -140,10 +140,13 @@ def key_columns_of(job: dict[str, Any]) -> list[str]:
         cols = [str(c) for c in dest.get(name) or [] if str(c or "").strip()]
         if cols:
             return cols
+    # A stream contract names its key in source columns: read it in destination naming, as
+    # every other key source is (a renamed protected key is matched by its target name).
+    s2t = {s: t for t, s in target_to_source(job).items()}
     for contract in request_of(job).get("stream_contracts") or []:
         pk = _dict(contract).get("primary_key")
         cols = [pk] if isinstance(pk, str) else list(pk or [])
-        cols = [str(c) for c in cols if str(c or "").strip()]
+        cols = [s2t.get(str(c), str(c)) for c in cols if str(c or "").strip()]
         if cols:
             return cols
     recon = _dict(job.get("reconciliation"))
