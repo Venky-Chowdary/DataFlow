@@ -62,6 +62,10 @@ _APPLYING_HERE: set[tuple[str, str]] = set()
 _APPLYING_LOCK = threading.Lock()
 
 
+class _SignedMeanwhile(ParityConflict):
+    """The report was signed before this fix's outcome arrived."""
+
+
 class RerunRefused(ParityConflict):
     """The re-run route refused (or never started) the re-run: nothing was written."""
 
@@ -495,6 +499,8 @@ def settle_fix(job_id: str, fix_id: str, *, ok: bool, result: str, stale: bool =
     from services.parity_report import build_parity_report
 
     def settle(job: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        if state.get("signed"):
+            raise _SignedMeanwhile()
         record = state["fixes"].get(fix_id)
         late = bool(record and record.get("_stale") and record.get("status") == "failed" and not stale)
         if not record or (record.get("status") != APPLYING and not late):
@@ -522,7 +528,19 @@ def settle_fix(job_id: str, fix_id: str, *, ok: bool, result: str, stale: bool =
             })
         return summarized(job, state, job_id)
 
-    job, state, after = update_state(job_id, settle)
+    try:
+        job, state, after = update_state(job_id, settle)
+    except _SignedMeanwhile:
+        # The report was signed while this fix's outcome was pending (it had been settled
+        # as stale): a signed report is final, so the outcome is recorded as an event after
+        # signing and the sealed state is left exactly as it was signed.
+        from services.parity_report import build_parity_report
+
+        job = load_job(job_id)
+        audit("job.parity.fix_settled_after_signing", job=job, job_id=job_id, actor="",
+              details={"fix_id": fix_id, "ok": ok, "result": result[:500]},
+              outcome="succeeded" if ok else "failed")
+        return build_parity_report(job, reread=True, job_id=job_id, cache="use")
     record = state["fixes"][fix_id]
     actor = str(record.get("approved_by") or "")
     details = {"fix_id": fix_id, "action": record["action"], "difference_ids": record.get("difference_ids"),
