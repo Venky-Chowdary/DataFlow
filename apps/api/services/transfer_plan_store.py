@@ -175,6 +175,16 @@ def get_plan(plan_id: str) -> TransferPlanRecord | None:
     return None
 
 
+def _in_scope(plan: TransferPlanRecord, plan_id: str) -> bool:
+    """The plan a mutator may change: this id, inside the caller's tenant scope.
+
+    The same rule as :func:`get_plan`, so another workspace's plan is "not
+    found" to every write as well as every read (audit H-1). Nothing bound
+    (workers, schedulers) is system scope and reaches every plan.
+    """
+    return plan.id == plan_id and bound_allows(plan.workspace_id)
+
+
 def assign_unscoped_workspaces(workspace_for, *, apply: bool) -> dict[str, int]:
     """Stamp legacy unscoped plans with ``workspace_for(plan.to_dict())`` (D154 backfill)."""
     unscoped = WorkspaceFilter.only("")
@@ -227,7 +237,7 @@ def add_mapping_revision(
 ) -> TransferPlanRecord | None:
     plans = _load_all()
     for i, plan in enumerate(plans):
-        if plan.id != plan_id:
+        if not _in_scope(plan, plan_id):
             continue
         src_cols = source_columns or plan.source_columns
         src_schema = source_schema or plan.source_schema
@@ -284,7 +294,7 @@ def add_mapping_revision(
 def add_preflight_run(plan_id: str, preflight_result: dict[str, Any]) -> TransferPlanRecord | None:
     plans = _load_all()
     for i, plan in enumerate(plans):
-        if plan.id != plan_id:
+        if not _in_scope(plan, plan_id):
             continue
         run = {
             # Reuse the caller's run id when it carries one, so the id the
@@ -314,7 +324,7 @@ def update_plan(plan_id: str, data: dict[str, Any]) -> TransferPlanRecord | None
     """Merge destination, policies, and schema snapshots onto an existing plan."""
     plans = _load_all()
     for i, plan in enumerate(plans):
-        if plan.id != plan_id:
+        if not _in_scope(plan, plan_id):
             continue
         if "name" in data and data["name"]:
             plan.name = str(data["name"])
@@ -352,7 +362,7 @@ def sync_ui_mappings(
     """Persist user-approved mapping edits as a new revision."""
     plans = _load_all()
     for i, plan in enumerate(plans):
-        if plan.id != plan_id:
+        if not _in_scope(plan, plan_id):
             continue
         version = (plan.revisions[-1].version + 1) if plan.revisions else 1
         from services.mapping_proof import mapping_proof_or_build
@@ -397,7 +407,7 @@ def sync_ui_mappings(
 def approve_plan_version(plan_id: str, version: int | None = None) -> TransferPlanRecord | None:
     plans = _load_all()
     for i, plan in enumerate(plans):
-        if plan.id != plan_id:
+        if not _in_scope(plan, plan_id):
             continue
         target_version = version or plan.active_version
         for rev in plan.revisions:
@@ -414,7 +424,7 @@ def approve_plan_version(plan_id: str, version: int | None = None) -> TransferPl
 def attach_job(plan_id: str, job_id: str, *, status: str = "running") -> TransferPlanRecord | None:
     plans = _load_all()
     for i, plan in enumerate(plans):
-        if plan.id != plan_id:
+        if not _in_scope(plan, plan_id):
             continue
         if job_id not in plan.job_ids:
             plan.job_ids.append(job_id)
