@@ -62,6 +62,25 @@ describe("Drawer", () => {
     assert.deepEqual(closed, ["evidence"], "the drawer underneath stays open");
   });
 
+  it("closes the most recently opened overlay first, whatever the DOM order", async () => {
+    // The Jobs detail drawer mounts inside the app shell, which sits before
+    // <body>-portaled drawers in the DOM; open order, not DOM order, decides.
+    const shell = document.createElement("div");
+    shell.className = "df2-app";
+    document.body.prepend(shell);
+    const closed: string[] = [];
+    const view = (withShell: boolean) => createElement(Fragment, null,
+      createElement(Drawer, { open: true, onClose: () => closed.push("journals"), ariaLabel: "Journals" }, "j"),
+      withShell
+        ? createElement(Drawer, { open: true, onClose: () => closed.push("detail"), ariaLabel: "Detail", container: shell }, "d")
+        : null,
+    );
+    await render(view(false));
+    await render(view(true));
+    await escape();
+    assert.deepEqual(closed, ["detail"], "the in-shell drawer opened last, so it closes first");
+  });
+
   it("keeps focus where the operator put it when the parent re-renders", async () => {
     const view = (tick: number) => createElement(Drawer, { open: true, onClose: () => tick, ariaLabel: "Detail" },
       createElement("button", { type: "button", id: "inside" }, `tick ${tick}`));

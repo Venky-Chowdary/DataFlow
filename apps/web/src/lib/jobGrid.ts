@@ -12,6 +12,7 @@ import { formatJobRowMetric, destMetricCompact } from "./conservationLedger";
 import { connectorDisplayName } from "./connectorTypes";
 import { formatJobRoute, isRestoredEndpointTitle } from "./jobEvidence";
 import { parseServerTimestampMs } from "./jobTheaterProgress";
+import { reconcileBarPercent } from "./progressRing";
 import { readSession } from "./session";
 import { formatSyncModeLabel } from "./transferConstants";
 import type { TransferJob } from "./types";
@@ -108,10 +109,11 @@ export function jobVerification(job: TransferJob): JobVerificationView {
   }
   const summary = job.verification_summary;
   if (summary && typeof summary === "object" && Object.keys(summary).length) {
-    const report = presentMultiStreamGate8(summary, {
-      multi_stream: job.multi_stream,
-      streams: job.stream_names,
-    }) ?? summary;
+    // Same inputs as the detail card: its relabel counts destination_summary
+    // .streams, which the list ships as stream_count (stream names are sourced
+    // differently and can disagree).
+    const streams = Array.from({ length: Math.max(0, Number(job.stream_count) || 0) }, () => ({}));
+    const report = presentMultiStreamGate8(summary, { multi_stream: job.multi_stream, streams }) ?? summary;
     const view = classifyGate8Status(report);
     const message = String(report.message || "").trim();
     return {
@@ -192,9 +194,64 @@ export function jobStatusShortLabel(status: string): string {
   return jobStatusLabel(status);
 }
 
-/** "Needs attention": a failed run, or a run whose Gate-8 verification failed. */
+/**
+ * "Needs attention": a failed run, or a run whose Gate-8 verification failed.
+ * Reads the stored status, as the server's attention filter does — a late
+ * cancel flag changes the label shown, not whether the run failed.
+ */
 export function jobNeedsAttention(job: TransferJob): boolean {
-  return presentedJobStatus(job) === "failed" || job.verification_summary?.passed === false;
+  return job.status === "failed" || job.verification_summary?.passed === false;
+}
+
+/**
+ * Which run actions the API accepts for a job, from its stored status (the
+ * presented label folds a pending cancel into "Cancelled", but a running job
+ * with a cancel requested is still running and cannot be retried).
+ */
+export function jobRunEligibility(job: Pick<TransferJob, "status">): { retry: boolean; sync: boolean; cancel: boolean } {
+  const status = String(job.status || "");
+  return {
+    retry: status === "failed" || status === "cancelled" || status === "canceled",
+    sync: isJobSuccess(status),
+    cancel: LIVE_JOB_STATUSES.has(status),
+  };
+}
+
+/** What the Rows cell shows, and the number it sorts by. */
+export interface JobRowsDisplay {
+  text: string;
+  /** The shown count as a number; null when the cell shows no count. */
+  value: number | null;
+  title: string;
+  live: boolean;
+  /** Progress bar percentage for a live run. */
+  pct: number;
+}
+
+export function jobRowsDisplay(job: TransferJob): JobRowsDisplay {
+  const live = LIVE_JOB_STATUSES.has(presentedJobStatus(job)) && job.progress_pct != null && !job.progress_indeterminate;
+  if (live) {
+    const processed = Number(job.records_processed ?? 0);
+    const total = Number(job.total_rows ?? 0);
+    const pct = Math.round(reconcileBarPercent(job.progress_pct, job.reconcile_pct, job.phase));
+    const reconciling = String(job.phase || "").toLowerCase() === "reconcile" && job.reconcile_pct != null;
+    const title = reconciling
+      ? `Checksum ${Math.min(99, Number(job.reconcile_pct))}% · ${processed.toLocaleString()} rows written`
+      : total > 0
+        ? `${processed.toLocaleString()} of ${total.toLocaleString()} rows (${pct}%)`
+        : `${processed.toLocaleString()} rows so far`;
+    return { text: processed.toLocaleString(), value: processed, title, live: true, pct };
+  }
+  const metric = formatJobRowMetric(job);
+  const digits = metric.value.replace(/[^\d]/g, "");
+  const negative = /^\s*[-−]/.test(metric.value);
+  return {
+    text: metric.value,
+    value: digits ? (negative ? -Number(digits) : Number(digits)) : null,
+    title: `${destMetricCompact(metric)}. ${metric.title}`,
+    live: false,
+    pct: 0,
+  };
 }
 
 // ── Columns, sort, density ────────────────────────────────────────────────
@@ -280,7 +337,7 @@ function sortKey(job: TransferJob, column: JobsGridColumnId, text: JobsGridRowTe
     case "mode":
       return job.sync_mode ? formatSyncModeLabel(job.sync_mode).toLowerCase() : null;
     case "rows":
-      return job.records_processed ?? null;
+      return jobRowsDisplay(job).value;
     case "verification":
       return VERIFICATION_RANK[jobVerification(job).tone];
     case "duration":
@@ -449,6 +506,11 @@ export function jobsCsv(jobs: TransferJob[], text: JobsGridRowText): string {
     ];
   });
   return [JOBS_CSV_HEADER as readonly unknown[], ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
+}
+
+/** Blob parts for the CSV download: a UTF-8 BOM first, so Excel reads → and … correctly. */
+export function jobsCsvBlobParts(csv: string): BlobPart[] {
+  return ["\uFEFF", csv];
 }
 
 export function jobsCsvFilename(now = new Date()): string {

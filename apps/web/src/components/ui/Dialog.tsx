@@ -1,5 +1,6 @@
 import { ReactNode, useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
+import { isTopOverlay, pushOverlay } from "../../lib/overlayStack";
 import { DtIcon } from "../DtIcon";
 import { lockBodyScroll } from "../../lib/bodyScrollLock";
 
@@ -45,8 +46,9 @@ export function Dialog({
       ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     const onKey = (e: KeyboardEvent) => {
       const panel = panelRef.current;
-      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
-      if (!panel || dialogs.item(dialogs.length - 1) !== panel) return;
+      // The most recently opened overlay owns Escape and Tab (open order, not
+      // DOM order: a drawer in the app shell precedes <body> portals).
+      if (!panel || !isTopOverlay(panel)) return;
       if (e.key === "Escape") {
         e.preventDefault();
         closeRef.current();
@@ -89,7 +91,9 @@ export function Dialog({
     const t = window.requestAnimationFrame(() => {
       if (!panelRef.current?.contains(document.activeElement)) panelRef.current?.focus();
     });
+    const popOverlay = panelRef.current ? pushOverlay(panelRef.current) : () => {};
     return () => {
+      popOverlay();
       document.removeEventListener("keydown", onKey);
       unlock();
       window.cancelAnimationFrame(t);

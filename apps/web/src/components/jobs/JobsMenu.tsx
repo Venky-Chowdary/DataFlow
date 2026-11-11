@@ -126,7 +126,9 @@ export function JobsMenu({ label, icon, iconOnly, items, triggerClassName, trigg
       event.preventDefault();
       (event.key === "Home" ? entries[0] : entries.at(-1))?.focus();
     } else if (event.key === "Tab") {
-      close(false);
+      // The popup sits at the end of <body>: hand focus back to the trigger
+      // and let this Tab carry on from there (no preventDefault).
+      close(true);
     }
   };
 

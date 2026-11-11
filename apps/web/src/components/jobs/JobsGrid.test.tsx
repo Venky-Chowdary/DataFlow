@@ -239,6 +239,26 @@ describe("JobsGrid", () => {
     assert.equal(rowEl("job-ok").querySelector("td[data-label='Verification']")?.getAttribute("data-label"), "Verification");
   });
 
+  it("reports the server's row count and each row's position in it", async () => {
+    await render({ totalRows: 60, rowOffset: 50 });
+    const grid = host.querySelector('[role="grid"]')!;
+    assert.equal(grid.getAttribute("aria-rowcount"), "61", "60 jobs plus the header row");
+    assert.equal(rowEl("job-live").getAttribute("aria-rowindex"), "52", "page 2 starts at job 51 (row 52)");
+    assert.equal(rowEl("job-bad").getAttribute("aria-rowindex"), "54");
+  });
+
+  it("Tab out of a row menu closes it and continues from its trigger", async () => {
+    await render();
+    const trigger = rowEl("job-bad").querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
+    await act(async () => trigger.click());
+    const menu = document.querySelector('[role="menu"]')!;
+    const tab = new dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    await act(async () => { menu.dispatchEvent(tab); });
+    assert.equal(document.querySelector('[role="menu"]'), null);
+    assert.equal(document.activeElement, trigger, "focus is back in the row, not lost at the end of <body>");
+    assert.equal(tab.defaultPrevented, false, "the browser's Tab then moves on from the trigger");
+  });
+
   it("announces a status change on refresh in a polite live region", async () => {
     await render();
     const live = host.querySelector('[aria-live="polite"][role="status"]');

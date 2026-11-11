@@ -1,10 +1,9 @@
 import { useCallback, useState } from "react";
 import { cancelJob } from "../../lib/api";
 import { downloadBlob } from "../../lib/downloadBlob";
-import { jobsCsv, jobsCsvFilename, LIVE_JOB_STATUSES, shortJobId } from "../../lib/jobGrid";
+import { jobRunEligibility, jobsCsv, jobsCsvBlobParts, jobsCsvFilename, shortJobId } from "../../lib/jobGrid";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import type { TransferJob } from "../../lib/types";
-import { isJobSuccess, presentedJobStatus } from "../../lib/uiUtils";
 import { useToast } from "../Toast";
 import { useConfirm } from "../ui/ConfirmDialog";
 import type { JobsMenuItem } from "./JobsMenu";
@@ -81,10 +80,11 @@ export function useJobRunActions({
     }
   }, [confirm, displayName, onRefresh, toast]);
 
-  const status = selected ? presentedJobStatus(selected) : "";
-  const live = LIVE_JOB_STATUSES.has(status);
-  const retryable = status === "failed" || status === "cancelled";
-  const syncable = isJobSuccess(status);
+  // Eligibility reads the stored status, which is what the API checks.
+  const eligible = selected ? jobRunEligibility(selected) : { retry: false, sync: false, cancel: false };
+  const live = eligible.cancel;
+  const retryable = eligible.retry;
+  const syncable = eligible.sync;
 
   const rerun: JobsToolbarAction = {
     visible: Boolean(selected) && (retryable || syncable),
@@ -129,14 +129,14 @@ export function useJobRunActions({
       : "No jobs on this page to export",
     onClick: () => {
       if (!rows.length) return;
-      downloadBlob(jobsCsvFilename(), new Blob([jobsCsv(rows, { name: displayName })], { type: "text/csv;charset=utf-8" }));
+      downloadBlob(jobsCsvFilename(), new Blob(jobsCsvBlobParts(jobsCsv(rows, { name: displayName })), { type: "text/csv;charset=utf-8" }));
     },
   };
 
   const rowMenuItems = (job: TransferJob): JobsMenuItem[] => {
-    const rowStatus = presentedJobStatus(job);
+    const rowEligible = jobRunEligibility(job);
     const items: JobsMenuItem[] = [{ id: "open", label: "Open details", onSelect: () => open(job._id) }];
-    if (rowStatus === "failed" || rowStatus === "cancelled") {
+    if (rowEligible.retry) {
       items.push({
         id: "retry",
         label: "Retry from start",
@@ -145,7 +145,7 @@ export function useJobRunActions({
         onSelect: () => void retry(job._id),
       });
     }
-    if (LIVE_JOB_STATUSES.has(rowStatus)) {
+    if (rowEligible.cancel) {
       items.push({
         id: "cancel",
         label: "Cancel job",

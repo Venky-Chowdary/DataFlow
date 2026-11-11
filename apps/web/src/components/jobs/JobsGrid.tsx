@@ -1,7 +1,6 @@
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Ellipsis } from "lucide-react";
 import { ConnectorIcon } from "../../app/brand-icons";
-import { destMetricCompact, formatJobRowMetric } from "../../lib/conservationLedger";
 import {
   formatJobDuration,
   formatJobStarted,
@@ -12,6 +11,7 @@ import {
   jobEngineLabel,
   jobModeLabel,
   jobRouteLabel,
+  jobRowsDisplay,
   jobStartedAt,
   jobStatusShortLabel,
   jobVerification,
@@ -21,7 +21,6 @@ import {
   verificationBadgeClass,
 } from "../../lib/jobGrid";
 import { parseServerTimestampMs } from "../../lib/jobTheaterProgress";
-import { reconcileBarPercent } from "../../lib/progressRing";
 import type { TransferJob } from "../../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel, presentedJobStatus, uniqueListKey } from "../../lib/uiUtils";
 import { DtIcon } from "../DtIcon";
@@ -80,6 +79,10 @@ interface JobsGridProps {
   footer?: ReactNode;
   /** Shown above the rows when the loaded page is sorted locally. */
   sortNote?: string;
+  /** Jobs matching the server query (all pages); defaults to the rows shown. */
+  totalRows?: number;
+  /** Position of this page's first row in that set (server offset). */
+  rowOffset?: number;
 }
 
 function ariaSort(sort: JobsGridSort, column: JobsGridColumnId): "ascending" | "descending" | "none" {
@@ -88,41 +91,28 @@ function ariaSort(sort: JobsGridSort, column: JobsGridColumnId): "ascending" | "
 }
 
 /**
- * Rows: the plain count, right-aligned. How it was measured (dest COUNT(*),
- * writer ack, delta) is in the tooltip; a live run adds a thin progress bar.
- * Counts stay neutral — the verdict lives in the Verification column.
+ * Rows: the plain count, right-aligned (the same number the column sorts by).
+ * How it was measured (dest COUNT(*), writer ack, delta) is in the tooltip; a
+ * live run adds a thin progress bar. Counts stay neutral — the verdict lives
+ * in the Verification column.
  */
-function RowsCell({ job, live }: { job: TransferJob; live: boolean }) {
-  if (live && job.progress_pct != null && !job.progress_indeterminate) {
-    const processed = Number(job.records_processed ?? 0);
-    const total = Number(job.total_rows ?? 0);
-    const pct = Math.round(reconcileBarPercent(job.progress_pct, job.reconcile_pct, job.phase));
-    const reconciling = String(job.phase || "").toLowerCase() === "reconcile" && job.reconcile_pct != null;
-    const title = reconciling
-      ? `Checksum ${Math.min(99, Number(job.reconcile_pct))}% · ${processed.toLocaleString()} rows written`
-      : total > 0
-        ? `${processed.toLocaleString()} of ${total.toLocaleString()} rows (${pct}%)`
-        : `${processed.toLocaleString()} rows so far`;
-    return (
-      <span className="df2-jobs-grid-rows is-live" title={title}>
-        <span className="df2-jobs-grid-num">{processed.toLocaleString()}</span>
+function RowsCell({ job }: { job: TransferJob }) {
+  const rows = jobRowsDisplay(job);
+  return (
+    <span className={`df2-jobs-grid-rows${rows.live ? " is-live" : ""}`} title={rows.title}>
+      <span className="df2-jobs-grid-num">{rows.text}</span>
+      {rows.live && (
         <span
           className="df2-job-row-bar df2-jobs-grid-bar"
           role="progressbar"
-          aria-label={title}
-          aria-valuenow={pct}
+          aria-label={rows.title}
+          aria-valuenow={rows.pct}
           aria-valuemin={0}
           aria-valuemax={100}
         >
-          <i style={{ width: `${pct}%` }} />
+          <i style={{ width: `${rows.pct}%` }} />
         </span>
-      </span>
-    );
-  }
-  const metric = formatJobRowMetric(job);
-  return (
-    <span className="df2-jobs-grid-rows" title={`${destMetricCompact(metric)}. ${metric.title}`}>
-      <span className="df2-jobs-grid-num">{metric.value}</span>
+      )}
     </span>
   );
 }
@@ -153,6 +143,8 @@ export function JobsGrid({
   emptyDescription,
   footer,
   sortNote,
+  totalRows,
+  rowOffset = 0,
 }: JobsGridProps) {
   const stacked = useMediaQuery(JOBS_GRID_STACK_QUERY);
   const hintId = useId();
@@ -218,7 +210,7 @@ export function JobsGrid({
         className="df2-table df2-jobs-grid-table"
         role="grid"
         aria-label="Transfer jobs"
-        aria-rowcount={jobs.length + 1}
+        aria-rowcount={Math.max(totalRows ?? jobs.length, jobs.length) + 1}
         aria-busy={loading || undefined}
         aria-describedby={hintId}
       >
@@ -290,7 +282,7 @@ export function JobsGrid({
                 </span>
               ),
               mode: <span className="df2-jobs-grid-muted">{job.sync_mode ? jobModeLabel(job) : "—"}</span>,
-              rows: <RowsCell job={job} live={live} />,
+              rows: <RowsCell job={job} />,
               verification: (
                 <span className="df2-jobs-grid-verify" title={verification.title}>
                   <span className={verificationBadgeClass(verification.tone)}>{verification.label}</span>
@@ -315,7 +307,7 @@ export function JobsGrid({
               <tr
                 key={uniqueListKey(job._id, index, "job")}
                 id={`job-item-${job._id}`}
-                aria-rowindex={index + 2}
+                aria-rowindex={rowOffset + index + 2}
                 aria-selected={selected}
                 tabIndex={active ? 0 : -1}
                 className={[

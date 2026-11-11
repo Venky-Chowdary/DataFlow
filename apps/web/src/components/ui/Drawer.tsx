@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { DtIcon } from "../DtIcon";
 import { lockBodyScroll } from "../../lib/bodyScrollLock";
+import { isTopOverlay, pushOverlay } from "../../lib/overlayStack";
 
 /**
  * Canonical right-rail width for every app slide-over (Transfer Studio, Jobs,
@@ -86,17 +87,17 @@ export function Drawer({
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
-      // Only the topmost dialog answers Escape: an evidence drawer or confirm
-      // opened over this one closes alone, as Dialog already does.
-      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
-      const panel = panelRef.current;
-      if (panel && dialogs.length && dialogs.item(dialogs.length - 1) !== panel) return;
+      // Only the most recently opened overlay answers Escape: an evidence
+      // drawer or confirm opened over this one closes alone.
+      if (!isTopOverlay(panelRef.current)) return;
       closeRef.current();
     };
+    const popOverlay = panelRef.current ? pushOverlay(panelRef.current) : () => {};
     document.addEventListener("keydown", onKey);
     const unlock = lockBodyScroll();
     const t = window.requestAnimationFrame(() => panelRef.current?.focus());
     return () => {
+      popOverlay();
       document.removeEventListener("keydown", onKey);
       unlock();
       window.cancelAnimationFrame(t);

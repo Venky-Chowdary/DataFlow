@@ -1317,6 +1317,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
                       : `No ${filter === "all" ? "" : filter} jobs in this filter.`
               }
               sortNote={isDefaultJobsGridSort(grid.sort) ? undefined : "Sorted within this page. Paging stays newest first."}
+              totalRows={onLoadPage && pageHistory ? filteredTotal : undefined}
+              rowOffset={onLoadPage && pageHistory ? pageIndex * pageSize : 0}
               footer={
                 <>
                   {windowNote && <p className="df2-jobs-v3-window-note">{windowNote}</p>}

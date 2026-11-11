@@ -201,6 +201,8 @@ export interface TransferJob {
   verification_summary?: Gate8ReconciliationPayload;
   /** List rows only: destination_summary.multi_stream of a multi-table run. */
   multi_stream?: boolean;
+  /** List rows only: len(destination_summary.streams), which the Gate-8 relabel counts. */
+  stream_count?: number;
   source_connector_id?: string;
   dest_connector_id?: string;
   destination_type: string;
