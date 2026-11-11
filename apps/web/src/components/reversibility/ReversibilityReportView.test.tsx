@@ -37,9 +37,16 @@ describe("Reversibility tab (static)", () => {
   it("names every lossy column with its reason code and reason", () => {
     const t = text(view(planReversibilityFixture()));
     assert.match(t, /Lossy mappings \(4\)/);
-    assert.match(t, /customers\.email Hashed \(hash_pii\) email is hashed \(hash_pii\); the original value cannot be recovered from the destination\./);
-    assert.match(t, /customers\.phone Masked \(mask_pii\)/);
-    assert.match(t, /payments\.amount Narrowed/);
+    assert.match(t, /Hashed \(hash_pii\) customers\.email email is hashed \(hash_pii\); the original value cannot be recovered from the destination\./);
+    assert.match(t, /Masked \(mask_pii\) customers\.phone/);
+    assert.match(t, /Narrowed payments\.amount/);
+  });
+
+  it("lists each lossy column as a badge at its own width, then the full name (never clipped)", () => {
+    const html = view(planReversibilityFixture());
+    const items = html.match(/<li><span class="df2-rev-lossy-head"><span class="df2-badge df2-badge-error">[^<]+<\/span><span class="df2-mono df2-rev-lossy-name">[^<]+<\/span><\/span>/g) ?? [];
+    assert.equal(items.length, 4);
+    assert.match(html, /df2-rev-lossy-name">customers\.customer_id</);
   });
 
   it("opens the tables that are not reversible, lossy columns first, with the data check in words", () => {
@@ -106,7 +113,7 @@ describe("Reversibility tab (static)", () => {
   it("renders the report the API really returns", () => {
     const t = text(view(realPlanReversibility));
     assert.match(t, /Partly reversible/);
-    assert.match(t, /payments\.note Dropped note is not mapped, so the destination does not hold it\./);
+    assert.match(t, /Dropped payments\.note note is not mapped, so the destination does not hold it\./);
     assert.match(t, /email → email_hash/);
     assert.match(t, /Blocks Execute/);
   });

@@ -647,6 +647,13 @@
   stroke-dasharray: 6 4;
 }
 
+.df2-exit-trend-gap {
+  stroke: var(--df-text-tertiary);
+  stroke-width: 1.5;
+  stroke-dasharray: 1 4;
+  stroke-linecap: round;
+}
+
 .df2-exit-trend-projection {
   stroke: var(--df-text-tertiary);
   stroke-width: 1.5;
@@ -1298,14 +1305,30 @@ table.df2-table.df2-rev-columns {
 
 .df2-rev-lossy li {
   display: grid;
-  grid-template-columns: minmax(0, auto) auto;
-  justify-content: start;
-  align-items: baseline;
-  gap: 4px var(--df-space-2);
+  gap: 4px;
   padding: 8px 0;
   border-top: 1px solid var(--df-border);
   font-size: var(--df-fs-md);
   color: var(--df-text-primary);
+}
+
+/* Badge first at its own width (as in the Trust Report), then the full name, which wraps. */
+.df2-rev-lossy-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px var(--df-space-2);
+  min-width: 0;
+}
+
+.df2-rev-lossy-head > .df2-badge {
+  flex: none;
+}
+
+.df2-rev-lossy-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .df2-rev-lossy li:first-child {
@@ -1313,7 +1336,6 @@ table.df2-table.df2-rev-columns {
 }
 
 .df2-rev-lossy-reason {
-  grid-column: 1 / -1;
   color: var(--df-text-secondary);
 }
 

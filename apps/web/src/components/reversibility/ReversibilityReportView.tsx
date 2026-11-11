@@ -301,8 +301,10 @@ export function ReversibilityReportView({
             <ul className="df2-rev-lossy">
               {report.lossy_columns.map((c, i) => (
                 <li key={`${c.table}.${c.column}:${i}`}>
-                  <span className="df2-mono">{c.table}.{c.column}</span>
-                  <span className={badgeClass("danger")}>{reasonCodeLabel(c.reason_code)}</span>
+                  <span className="df2-rev-lossy-head">
+                    <span className={badgeClass("danger")}>{reasonCodeLabel(c.reason_code)}</span>
+                    <span className="df2-mono df2-rev-lossy-name">{c.table}.{c.column}</span>
+                  </span>
                   <span className="df2-rev-lossy-reason">{c.reason}</span>
                 </li>
               ))}

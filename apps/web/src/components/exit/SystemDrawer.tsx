@@ -229,7 +229,7 @@ export function SystemDrawer({
           <section className="df2-parity-card" aria-label="Rehearsals">
             <h3 className="df2-parity-h3">Rehearsals</h3>
             {history && history.trend.points.length > 0 && (
-              <DurationTrendChart trend={history.trend} windowSeconds={windowSeconds} height={150} />
+              <DurationTrendChart trend={history.trend} windowSeconds={windowSeconds} />
             )}
             {!history || history.rehearsals.length === 0 ? (
               <p className="df2-parity-muted">

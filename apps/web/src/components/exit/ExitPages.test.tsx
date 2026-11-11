@@ -15,10 +15,11 @@ import { ExitBoardView, boardMetrics, type ExitBoardViewProps } from "./ExitBoar
 import { RehearsalView, type RehearsalViewProps } from "./RehearsalView.js";
 import { RehearsalPanel } from "./RehearsalPanel.js";
 import { SystemFormDrawer } from "./SystemFormDrawer.js";
-import { WindowBar } from "../charts/ExitCharts.js";
+import { DurationTrendChart, WindowBar, durationTrendSummary } from "../charts/ExitCharts.js";
 import {
   ANCHORED,
   ANCHOR_FAILED,
+  trendFixture,
   FIXTURE_NOW,
   NOT_ANCHORED,
   boardFixture,
@@ -261,6 +262,31 @@ describe("Page B: a rehearsal run", () => {
     assert.match(notProven, /Not proof/);
     const signed = text(run(realSigned));
     assert.match(signed, /Not anchored the local stub is not a write-once store/);
+  });
+});
+
+describe("duration trend", () => {
+  it("draws no point for a rehearsal that was not measured, and says which", () => {
+    const trend = trendFixture(); // rehearsal 3 failed: measured_seconds null
+    const html = renderToStaticMarkup(<DurationTrendChart trend={trend} windowSeconds={30 * 86400} />);
+    // Five measured points (each with a hit target), none for rehearsal 3, and no hollow mark on an axis.
+    assert.equal((html.match(/<circle class="df2-parity-point/g) ?? []).length, 5);
+    assert.doesNotMatch(html, /Rehearsal 3:/);
+    assert.doesNotMatch(html, /is-sampled/);
+    assert.match(html, /class="df2-exit-trend-gap"/, "a dotted bridge marks the gap");
+    assert.match(text(html), /Not measured, so not drawn: rehearsal 3 \(failed\)/);
+    assert.match(durationTrendSummary(trend, 30 * 86400), /Not measured, so not drawn: rehearsal 3 \(failed\)\./);
+  });
+
+  it("uses a min/max scale, not a zero baseline", () => {
+    const html = renderToStaticMarkup(<DurationTrendChart trend={trendFixture()} windowSeconds={30 * 86400} />);
+    const labels = [...html.matchAll(/class="df2-parity-chart-label"[^>]*>([^<]+)</g)].map((m) => m[1]);
+    assert.ok(labels.includes("63 h"), labels.join("|"));
+    assert.ok(labels.includes("52 h"), labels.join("|"));
+    assert.ok(!labels.includes("0"), "no zero baseline label");
+    // The lowest point sits near the bottom of the plot, the highest near the top.
+    const ys = [...html.matchAll(/<circle class="df2-parity-point[^"]*" cx="[^"]+" cy="([^"]+)"/g)].map((m) => Number(m[1]));
+    assert.ok(Math.max(...ys) - Math.min(...ys) > 60, `spread ${Math.max(...ys) - Math.min(...ys)}`);
   });
 });
 
