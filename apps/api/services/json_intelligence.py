@@ -438,12 +438,17 @@ def flatten_document(
     sep: str = "_",
     max_depth: int = DEFAULT_FLATTEN_DEPTH,
     keep_parent: bool = True,
+    lineage: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Expand nested dicts into ``parent_child`` columns for SQL / warehouse maps.
 
     Parent objects are kept (serialized later to VARIANT/JSON) so nothing is
     lost; leaf scalars are promoted so Map can bind ``address_city`` etc.
     Arrays stay on the parent key as JSON — no row explosion.
+
+    ``lineage`` (when given) records ``{column: the column it was derived
+    from}`` for every column this walk names under a parent, a name it shares
+    with a literal field included: protecting a parent protects them (D349).
     """
     if not isinstance(doc, dict):
         return {}
@@ -456,6 +461,10 @@ def flatten_document(
             if added >= MAX_FLATTENED_KEYS:
                 return
             name = f"{prefix}{sep}{key}" if prefix else str(key)
+            if lineage is not None and (
+                not isinstance(value, dict) or depth < max_depth
+            ):
+                lineage.setdefault(name, prefix)
             if isinstance(value, dict):
                 if depth < max_depth:
                     if keep_parent and name not in out:
@@ -499,8 +508,12 @@ def expand_mongo_documents(
     docs: list[dict[str, Any]],
     *,
     cfg: dict[str, Any] | None = None,
+    lineage: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Apply nested expansion when enabled; otherwise return docs unchanged."""
+    """Apply nested expansion when enabled; otherwise return docs unchanged.
+
+    ``lineage`` collects which column each expanded column came from.
+    """
     if not docs or not mongo_flatten_enabled(cfg):
         return docs
-    return [flatten_document(doc) for doc in docs]
+    return [flatten_document(doc, lineage=lineage) for doc in docs]

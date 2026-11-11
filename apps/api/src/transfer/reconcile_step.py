@@ -868,6 +868,18 @@ def _recipe_step_sql(
             return f"TRIM({expr})"
         return f"BTRIM({expr})"
 
+    def _py_strip(expr: str) -> str:
+        # The engine's trim is str.strip(): every Unicode whitespace character,
+        # not only the space SQL TRIM removes — a '\tbob' cell read as a broken
+        # step and failed the run.
+        if tsql:
+            return f"TRIM({_lit(_PY_WHITESPACE)} FROM {expr})"
+        if mysql:
+            # Whitespace has no meaning inside an ICU class: no escaping.
+            ws = _PY_WHITESPACE
+            return f"REGEXP_REPLACE({expr}, {_lit(f'^[{ws}]+|[{ws}]+$')}, '')"
+        return f"BTRIM({expr}, {_lit(_PY_WHITESPACE)})"
+
     if op == "case":
         mode = str(opts.get("mode") or "").casefold()
         if mode in unfaithful_case_modes:
@@ -878,16 +890,7 @@ def _recipe_step_sql(
             return f"LOWER({col_expr})"
         return None
     if op == "trim":
-        # The engine's trim is str.strip(): every Unicode whitespace character,
-        # not only the space SQL TRIM removes — a '\tbob' cell read as a broken
-        # step and failed the run.
-        if tsql:
-            return f"TRIM({_lit(_PY_WHITESPACE)} FROM {col_expr})"
-        if mysql:
-            # Whitespace has no meaning inside an ICU class: no escaping.
-            ws = _PY_WHITESPACE
-            return f"REGEXP_REPLACE({col_expr}, {_lit(f'^[{ws}]+|[{ws}]+$')}, '')"
-        return f"BTRIM({col_expr}, {_lit(_PY_WHITESPACE)})"
+        return _py_strip(col_expr)
     if op == "collapse_whitespace":
         # _fn_collapse_whitespace = re.sub(r"\s+", " ", t).strip()
         if tsql:
@@ -931,11 +934,15 @@ def _recipe_step_sql(
         # Typed is_blank: NULL or a NULL wire sentinel. '' and '   ' are values
         # on a database source — defaulting them here failed every run whose
         # trim step produced '' (trim -> default_if_null -> upper).
+        # include_empty (the Map transform default:, D350) adds '' and
+        # whitespace-only text, judged by the engine's str.strip().
         txt = _text_cast(col_expr)
         nan = f"OR {txt} = 'NaN' " if nan_is_null else ""
+        empty = f"OR {_py_strip(txt)} = '' " if opts.get("include_empty") else ""
         return (
             f"CASE WHEN {col_expr} IS NULL "
             f"{nan}"
+            f"{empty}"
             f"OR {_btrim(txt)} IN ({_lit('__df_sql_null__')}, "
             f"{_lit('__df_missing__')}, {_lit('__df_ddb_null__')}) "
             f"THEN {_lit(opts.get('value'))} "
@@ -1699,7 +1706,8 @@ def _transform_applied_proof_impl(
         try:
             sel = ", ".join(
                 f"{quote_sql_identifier(c, qs)} AS "
-                f'{qs}__raw_{c}{qs}, {e} AS {qs}__o_{c}{qs}'
+                f"{quote_sql_identifier(f'__raw_{c}', qs)}, "
+                f"{e} AS {quote_sql_identifier(f'__o_{c}', qs)}"
                 for c, e in oracle_exprs.items()
             )
             stmt = sa.text(

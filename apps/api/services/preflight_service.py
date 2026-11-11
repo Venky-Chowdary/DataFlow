@@ -2847,16 +2847,16 @@ def run_file_preflight(
     }
     # D94: PII the content scan found is said out loud even when it does not
     # force a review hold (email / phone / IP are medium-risk).
-    from services.preflight_proof_bundle import pii_detection_warning
+    from services.preflight_proof_bundle import pii_detection_warnings
 
-    _pii_warning = pii_detection_warning(
+    _pii_warnings = pii_detection_warnings(  # + D349 inherited protection
         (out.get("proof_bundle") or {}).get("compliance")
         if isinstance(out.get("proof_bundle"), dict)
         else None,
-        list(mappings or []),
+        list(mappings or []), sample_rows,
     )
-    if _pii_warning:
-        out.setdefault("warnings", []).append(_pii_warning)
+    if _pii_warnings:
+        out.setdefault("warnings", []).extend(_pii_warnings)
     if number_locale_assumed:
         cols = ", ".join(f["column"] for f in number_locale_assumed[:6])
         out.setdefault("warnings", []).append(

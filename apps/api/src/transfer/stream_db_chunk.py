@@ -72,6 +72,10 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
                     f"(discovered mid-transfer from {cfg.src_type} — no silent drop)"
                 )
         if new_headers:
+            from services.flatten_protection import protect_discovered_children
+
+            # D349: a field flattened out of a protected parent inherits it.
+            protect_discovered_children(cfg, batch, new_headers)
             cfg.backfill_new_fields = True
             cfg.target_cols, _ = resolve_target_columns(cfg.mappings, cfg.column_types, preserve_case=True)
 

@@ -2041,7 +2041,7 @@ TRANSFORM_SEMANTICS: dict[str, dict[str, Any]] = {
     "percentage": {"semantics": "parse percentage to number", "deterministic": True, "lossy": True},
     "postal": {"semantics": "normalize postal code", "deterministic": True, "lossy": True},
     "base64": {"semantics": "normalize base64 payload", "deterministic": True, "lossy": True},
-    "strip_controls": {"semantics": "remove control characters", "deterministic": True, "lossy": True},
+    "strip_controls": {"semantics": "remove control characters: every control character (tab, newline and carriage return included, as well as NUL, ESC, DEL) and invisible format character (zero-width space, BOM) is deleted with nothing in its place ('a<TAB>b' -> 'ab'); no other character or whitespace changes (normalize_unicode turns tabs and newlines into one space)", "deterministic": True, "lossy": True},
     "normalize_unicode": {"semantics": "NFKC normalize + collapse whitespace", "deterministic": True, "lossy": True},
     "replace:": {"semantics": "replace OLD with NEW (replace:OLD:NEW)", "deterministic": True, "lossy": True},
     "concat:": {"semantics": "append literal suffix (concat:TEXT)", "deterministic": True, "lossy": True},
@@ -2094,6 +2094,16 @@ def sql_upper(text: str) -> str:
 def sql_lower(text: str) -> str:
     """LOWER as SQL engines apply it: İ -> i, never i + U+0307 (D13)."""
     return _one_to_one_case(text, str.lower, lambda ch: ch.lower()[:1])
+
+
+def strip_control_characters(text: str) -> str:
+    """``strip_controls``: delete every control (Cc — tab, newline and CR
+    included) and format (Cf) character; nothing else changes (D351).
+
+    The one implementation for the Map transform, a column_transforms
+    pipeline step (shape class ``all_controls``) and the proof's recompute.
+    """
+    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf"))
 
 
 def _strip_format_controls(text: str) -> str:
@@ -2711,7 +2721,8 @@ def apply_transform(
     # encoding (D113/D109 sentinel layer).
     from services.value_serializer import unescape_wire_text
 
-    text = unescape_wire_text(raw_s).strip()
+    unescaped = unescape_wire_text(raw_s)
+    text = unescaped.strip()
     if transform_l in {"omit", "intentional_omit", "drop", "exclude"}:
         return None, "intentional omit — mapping should not project"
 
@@ -2721,6 +2732,10 @@ def apply_transform(
         # still a cell the operator asked to redact, not a SQL NULL.
         return REDACTED_PLACEHOLDER, None
 
+    if transform_l == "strip_controls":
+        # Only control/format characters go: no trim, no whitespace collapse,
+        # so the single step and a pipeline step write the same value (D351).
+        return strip_control_characters(unescaped), None
     if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
         return "", None
     if text == "" and transform_l == "binary":
@@ -2893,11 +2908,6 @@ def apply_transform(
         # into ' pad ' on a normal load (QA R2-019). collapse_whitespace is
         # the explicit shape operation for that.
         return text.strip(), None
-
-    if transform == "strip_controls":
-        cleaned = _strip_format_controls(text)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        return cleaned, None
 
     if transform == "normalize_unicode":
         cleaned = unicodedata.normalize("NFKC", _strip_format_controls(text))

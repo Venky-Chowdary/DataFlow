@@ -84,6 +84,10 @@ UI_TO_ENGINE: dict[str, str] = {
     "omit": "omit",
 }
 
+#: Write-path governance ids (``governance_ops.WRITE_PATH_IDS``): one-way, so
+#: the resolver keeps them whatever the carrier.
+_ONE_WAY_TRANSFORMS: frozenset[str] = frozenset({"redact", "hash_pii", "mask_pii"})
+
 # Transforms that naturally produce string output and are safe for string targets.
 _STRING_TRANSFORMS: frozenset[str] = {
     "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "mask_pii", "redact",
@@ -208,6 +212,12 @@ def resolve_transform(
     # guessed carrier could not parse the token.
     if mapping.get("transform_override") and raw not in {None, "", "none", "null"}:
         return str(raw)
+    # A one-way protection is never "incompatible" with a carrier: replacing
+    # redact / hash_pii / mask_pii on a JSON or numeric column with the
+    # inferred cast wrote the clear value (D349, Studio / REST mappings). A
+    # carrier that cannot hold the token fails the write; it never leaks.
+    if str(raw or "").lower() in _ONE_WAY_TRANSFORMS:
+        return str(raw).lower()
     # Intentional omit never participates in row projection / type coercion.
     if str(raw or "").lower() in {"omit", "intentional_omit", "drop", "exclude"}:
         return "omit"
