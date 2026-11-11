@@ -765,16 +765,16 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
       }
       onApprove={(fixId, note) => {
         const fix = report.fixes.find((f) => f.id === fixId);
-        void run({ kind: "approve", id: fixId }, "fix", () => approveParityFix(jobId, fixId, note), {
+        void run({ kind: "approve", id: fixId }, "fix", () => approveParityFix(jobId, fixId, note, report.version), {
           title: fix?.action === "accept" ? "Differences accepted" : "Fix applied and re-checked",
           message: fix?.title,
         });
       }}
       onDismiss={(fixId, note) =>
-        void run({ kind: "dismiss", id: fixId }, "fix", () => dismissParityFix(jobId, fixId, note), { title: "Fix dismissed" })
+        void run({ kind: "dismiss", id: fixId }, "fix", () => dismissParityFix(jobId, fixId, note, report.version), { title: "Fix dismissed" })
       }
       onSign={(role, note) =>
-        void run({ kind: "sign" }, "signoff", () => signParityReport(jobId, role, note), {
+        void run({ kind: "sign" }, "signoff", () => signParityReport(jobId, role, note, report.version), {
           title: `Signed as ${roleLabel(role)}`,
         })
       }

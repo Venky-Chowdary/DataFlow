@@ -37,6 +37,7 @@ import {
   verdictPresentation,
   parityIsLowerBound,
   heatCellLabel,
+  fixStatusPresentation,
 } from "./parity.js";
 import { provenReport, signedReport, summaryFixture, unexplainedReport } from "../components/parity/parityFixtures.js";
 
@@ -81,6 +82,12 @@ describe("verdicts, statuses and causes", () => {
     assert.equal(tableStatusPresentation({ status: "match", unexplained: 0, check: "sampled" }).label, "No difference in sample");
     assert.equal(verdictPresentation(provenReport({ verdict: "no_difference_found" })).label, "No difference in sample");
     assert.equal(heatCellLabel("sampled"), "No difference in sample");
+    // A claimed write fix (review finding 4) reads as in progress and counts against the limit.
+    assert.equal(fixStatusPresentation("applying").label, "Applying…");
+    assert.equal(
+      fixAttemptsUsed({ fixes: [{ ...unexplainedReport().fixes[0], action: "resync_keys", status: "applying" }] }),
+      1,
+    );
     assert.equal(parityIsLowerBound(provenReport()), false);
     assert.equal(parityIsLowerBound(unexplainedReport()), true);
     assert.equal(checkLabel("sampled"), "Count + sampled values");
@@ -260,6 +267,10 @@ describe("parity API client", () => {
     await approveParityFix("job-31", "fix-widen", "  widen it  ");
     await dismissParityFix("job-31", "fix-resync");
     await signParityReport("job-31", "data_owner", "Checked totals.");
+    // The version the person decided on travels with the decision (409 when it moved on).
+    await approveParityFix("job-31", "fix-widen", "go", 7);
+    await dismissParityFix("job-31", "fix-resync", undefined, 7);
+    await signParityReport("job-31", "compliance", undefined, 7);
     assert.deepEqual(
       calls.map((c) => [c.method, c.url.replace(/^.*\/jobs\//, "/jobs/"), c.body]),
       [
@@ -267,6 +278,9 @@ describe("parity API client", () => {
         ["POST", "/jobs/job-31/parity-report/fixes/fix-widen/approve", '{"note":"widen it"}'],
         ["POST", "/jobs/job-31/parity-report/fixes/fix-resync/dismiss", "{}"],
         ["POST", "/jobs/job-31/parity-report/signoff", '{"role":"data_owner","note":"Checked totals."}'],
+        ["POST", "/jobs/job-31/parity-report/fixes/fix-widen/approve", '{"note":"go","expected_version":7}'],
+        ["POST", "/jobs/job-31/parity-report/fixes/fix-resync/dismiss", '{"expected_version":7}'],
+        ["POST", "/jobs/job-31/parity-report/signoff", '{"role":"compliance","expected_version":7}'],
       ],
     );
     for (const c of calls) assert.equal(c.headers.get("Content-Type"), "application/json");

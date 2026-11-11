@@ -27,6 +27,8 @@ router = APIRouter(tags=["Parity Studio"])
 
 class NoteBody(BaseModel):
     note: str = Field(default="", max_length=500)
+    # The report version the person decided on; another version is a 409.
+    expected_version: int | None = Field(default=None, ge=0)
 
 
 class SignoffBody(BaseModel):
@@ -34,6 +36,7 @@ class SignoffBody(BaseModel):
     # a 404 whatever the body holds.
     role: str = Field(default="", max_length=64)
     note: str = Field(default="", max_length=500)
+    expected_version: int | None = Field(default=None, ge=0)
 
 
 def _http(exc: ParityError) -> HTTPException:
@@ -114,6 +117,7 @@ async def approve_parity_fix(
         report = await asyncio.to_thread(
             approve_fix, job_id, fix_id, actor=actor_from_request(request),
             note=(body.note if body else ""), start_rerun=start_rerun,
+            expected_version=(body.expected_version if body else None),
         )
     except ParityError as exc:
         raise _http(exc) from exc
@@ -128,7 +132,7 @@ async def dismiss_parity_fix(job_id: str, fix_id: str, request: Request, body: N
     try:
         report = await asyncio.to_thread(
             dismiss_fix, job_id, fix_id, actor=actor_from_request(request),
-            note=(body.note if body else ""),
+            note=(body.note if body else ""), expected_version=(body.expected_version if body else None),
         )
     except ParityError as exc:
         raise _http(exc) from exc
@@ -146,6 +150,7 @@ async def sign_off_parity_report(job_id: str, request: Request, body: SignoffBod
     try:
         report = await asyncio.to_thread(
             sign_off, job_id, role=body.role, actor=actor_from_request(request), note=body.note,
+            expected_version=body.expected_version,
         )
     except ParityError as exc:
         raise _http(exc) from exc

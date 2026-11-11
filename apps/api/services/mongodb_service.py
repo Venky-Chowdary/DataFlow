@@ -195,6 +195,53 @@ def _as_object_id(job_id: str):
         return None
 
 
+_MISSING = object()
+
+
+def expected_fields_filter(expected: dict[str, Any]) -> dict[str, Any]:
+    """Mongo filter for a compare-and-swap ``expected`` spec.
+
+    ``{path: value}`` requires that value; a tuple or list means "any of"
+    (``{"parity.version": (0, None)}``), and ``None`` matches a missing field
+    as well as a null one — Mongo's own equality, mirrored by
+    :func:`expected_fields_hold` for the memory store.
+    """
+    clauses: dict[str, Any] = {}
+    for path, want in expected.items():
+        clauses[path] = {"$in": list(want)} if isinstance(want, (list, tuple)) else want
+    return clauses
+
+
+def _get_dotted(doc: Any, path: str) -> Any:
+    for part in path.split("."):
+        if not isinstance(doc, dict) or part not in doc:
+            return _MISSING
+        doc = doc[part]
+    return doc
+
+
+def _set_dotted(doc: dict, path: str, value: Any) -> None:
+    parts = path.split(".")
+    for part in parts[:-1]:
+        nxt = doc.get(part)
+        if not isinstance(nxt, dict):
+            nxt = doc[part] = {}
+        doc = nxt
+    doc[parts[-1]] = value
+
+
+def expected_fields_hold(doc: dict, expected: dict[str, Any]) -> bool:
+    """True when every ``expected`` path holds on ``doc`` (see expected_fields_filter)."""
+    for path, want in expected.items():
+        have = _get_dotted(doc, path)
+        options = list(want) if isinstance(want, (list, tuple)) else [want]
+        if have is _MISSING:
+            have = None
+        if not any(have == option and (option is not None or have is None) for option in options):
+            return False
+    return True
+
+
 def job_key_filter(job_id: str) -> dict | None:
     """Mongo filter matching a job by ObjectId **or** by its string id.
 
@@ -1203,13 +1250,24 @@ class MongoDBService:
         return str(doc.get("status") or "")
 
     def update_job_fields(
-        self, job_id: str, fields: dict, *, touch_updated_at: bool = True
+        self,
+        job_id: str,
+        fields: dict,
+        *,
+        touch_updated_at: bool = True,
+        expected: dict[str, Any] | None = None,
     ) -> bool:
         """Patch job metadata without changing status (e.g. rename).
 
         ``touch_updated_at=False`` is for bookkeeping writes that are not job
         progress (e.g. the stall watchdog's flag) — bumping ``updated_at``
         would reset the quiet clock the watchdog measures.
+
+        ``expected`` makes the write a compare-and-swap: ``{dotted path:
+        value}`` must all hold on the stored document at the moment of the
+        write (one atomic ``update_one``), else nothing is written and the
+        answer is False. See :func:`expected_fields_filter` for the values.
+        Field names may be dotted paths (``{"parity.summary": ...}``).
         """
         if not fields:
             return False
@@ -1224,7 +1282,8 @@ class MongoDBService:
         updates = dict(fields)
         if touch_updated_at:
             updates["updated_at"] = datetime.now(timezone.utc)
-        result = collection.update_one(key, {"$set": updates})
+        query = {"$and": [key, expected_fields_filter(expected)]} if expected else key
+        result = collection.update_one(query, {"$set": updates})
         return result.matched_count > 0
 
     def list_unscoped_jobs(self) -> list[dict]:
@@ -1526,6 +1585,8 @@ class MemoryMongoDBService:
         self._jobs: dict[str, dict] = {}
         self._claims: dict[str, dict] = {}
         self._claim_lock = threading.Lock()
+        # Compare-and-swap field writes check and write under this lock.
+        self._fields_lock = threading.Lock()
         self.client: Any = None
         self.connection_string = "memory://"
         self.db_name = "datatransfer"
@@ -1952,21 +2013,32 @@ class MemoryMongoDBService:
         return bool(rec.get("cancel_requested")) or rec.get("status") == "cancelled"
 
     def update_job_fields(
-        self, job_id: str, fields: dict, *, touch_updated_at: bool = True
+        self,
+        job_id: str,
+        fields: dict,
+        *,
+        touch_updated_at: bool = True,
+        expected: dict[str, Any] | None = None,
     ) -> bool:
         """Patch job metadata without changing status (e.g. rename).
 
         See ``MongoDBService.update_job_fields`` — ``touch_updated_at=False``
-        keeps bookkeeping writes from reading as job progress.
+        keeps bookkeeping writes from reading as job progress, ``expected``
+        is the same compare-and-swap (checked and written under one lock) and
+        dotted field names set nested values, as ``$set`` does.
         """
         if not fields:
             return False
-        rec = self._jobs.get(job_id)
-        if not rec:
-            return False
-        rec.update(fields)
-        if touch_updated_at:
-            rec["updated_at"] = datetime.now(timezone.utc)
+        with self._fields_lock:
+            rec = self._jobs.get(job_id)
+            if not rec:
+                return False
+            if expected and not expected_fields_hold(rec, expected):
+                return False
+            for name, value in fields.items():
+                _set_dotted(rec, name, value)
+            if touch_updated_at:
+                rec["updated_at"] = datetime.now(timezone.utc)
         return True
 
     def list_unscoped_jobs(self) -> list[dict]:

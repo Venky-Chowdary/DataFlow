@@ -379,7 +379,7 @@ export const reportResynced: ParityReport = {
   ],
   "verdict": "explained",
   "verdict_reason": "9 row(s) differ and every difference is explained.",
-  "version": 4
+  "version": 6
 };
 
 export const reportSigned: ParityReport = {
@@ -567,7 +567,7 @@ export const reportSigned: ParityReport = {
   ],
   "verdict": "explained",
   "verdict_reason": "9 row(s) differ and every difference is explained.",
-  "version": 7
+  "version": 9
 };
 
 export const summary: ParitySummary = {

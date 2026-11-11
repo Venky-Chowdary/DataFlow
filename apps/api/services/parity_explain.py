@@ -156,18 +156,18 @@ def explain_report(report: dict[str, Any]) -> dict[str, Any]:
 
 def explain_job(job_id: str, *, actor: str) -> dict[str, Any]:
     """Explain the current report, store the explanation, return the updated report."""
-    from services.parity_fixes import load_job
     from services.parity_report import build_parity_report
-    from services.parity_state import job_lock, save_state, state_of
+    from services.parity_state import load_job, update_state
 
-    with job_lock(job_id):
-        job = load_job(job_id)
-        report = build_parity_report(job, reread=True, job_id=job_id)
-        explanation = explain_report(report)
-        state = state_of(job)
+    job = load_job(job_id)
+    report = build_parity_report(job, reread=True, job_id=job_id)
+    explanation = explain_report(report)
+
+    def store(_job: dict[str, Any], state: dict[str, Any]) -> None:
         state["explanation"] = {k: explanation[k] for k in ("text", "source", "generated_at")}
         state["fix_order"] = explanation.get("fix_order") or []
-        save_state(job_id, job, state)
+
+    _job, state, _ = update_state(job_id, store)
     report["explanation"] = state["explanation"]
     report["version"] = state["version"]
     order = {fid: i for i, fid in enumerate(state["fix_order"])}

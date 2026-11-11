@@ -12,59 +12,81 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.parity_fixes import ParityConflict, ParityInvalid, load_job
-from services.parity_state import audit, job_lock, now_iso, save_state, state_of
+from services.parity_state import (
+    ParityConflict,
+    ParityInvalid,
+    audit,
+    check_version,
+    load_job,
+    now_iso,
+    state_of,
+    update_state,
+)
 
 VERIFY_ROUTE = "POST /api/v1/transfer/proof-pack/verify"
 
 
-def sign_off(job_id: str, *, role: str, actor: str, note: str = "") -> dict[str, Any]:
-    """Record one role's approval; sign the report when the last role signs."""
+def sign_off(
+    job_id: str, *, role: str, actor: str, note: str = "", expected_version: int | None = None,
+) -> dict[str, Any]:
+    """Record one role's approval; sign the report when the last role signs.
+
+    The approval is written by compare-and-swap on the report version it was
+    given against, so a concurrent change is a 409, never a signature on a
+    report nobody saw.
+    """
     from services.parity_report import build_parity_report, public_report
     from services.signed_proof_pack import build_signed_parity_pack
 
     role = str(role or "").strip().lower()
-    with job_lock(job_id):
-        job = load_job(job_id)
-        state = state_of(job)
-        roles = [str(r).lower() for r in state["required_roles"]]
-        if role not in roles:
-            raise ParityInvalid(f"Role must be one of: {', '.join(roles)}.")
-        report = build_parity_report(job, reread=True, job_id=job_id)
-        signoff = report["signoff"]
-        if signoff["status"] == "signed":
-            raise ParityConflict("This report is already signed.")
-        if signoff["status"] == "blocked":
-            raise ParityConflict(str(signoff["blocked_reason"] or "Sign-off is blocked."))
+    note = note[:500]
+    job = load_job(job_id)
+    check_version(job, expected_version)
+    roles = [str(r).lower() for r in state_of(job)["required_roles"]]
+    if role not in roles:
+        raise ParityInvalid(f"Role must be one of: {', '.join(roles)}.")
+    report = build_parity_report(job, reread=True, job_id=job_id)
+    signoff = report["signoff"]
+    if signoff["status"] == "signed":
+        raise ParityConflict("This report is already signed.")
+    if signoff["status"] == "blocked":
+        raise ParityConflict(str(signoff["blocked_reason"] or "Sign-off is blocked."))
+
+    def approve(_job: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
         approvals = list(state["approvals"])
+        if state.get("signed"):
+            raise ParityConflict("This report is already signed.")
         if any(a.get("role") == role for a in approvals):
             raise ParityConflict(f"The {role} role has already signed.")
         if actor and any(a.get("user") == actor for a in approvals):
             raise ParityConflict("One person signs one role; ask another approver.")
-        approvals.append({"role": role, "user": actor or "anonymous", "at": now_iso(), "note": note[:500]})
+        approvals.append({"role": role, "user": actor or "anonymous", "at": now_iso(), "note": note})
         state["approvals"] = approvals
+        if not {a["role"] for a in approvals} >= set(roles):
+            return None
+        signed_at = now_iso()
+        final = public_report(report)
+        final["signoff"] = {
+            **final["signoff"], "approvals": approvals, "status": "signed",
+            "blocked_reason": None, "signature": None, "signed_at": signed_at,
+        }
+        final["version"] = int(state.get("version") or 0) + 1
+        pack = build_signed_parity_pack(job_id=job_id, report=final, actor=actor)
+        state["signed"] = {
+            "signature": "hmac-sha256:" + str(pack["signature"]["value"]),
+            "signed_at": signed_at,
+            "content_sha256": pack["content_sha256"],
+            "pack": pack,
+        }
+        return pack
+
+    updated, state, pack = update_state(job_id, approve, expected_version=int(report["version"]))
+    audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
+          details={"role": role, "note": note, "verdict": report["verdict"]})
+    if pack:
         audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
-              details={"role": role, "note": note[:500], "verdict": report["verdict"]})
-        if {a["role"] for a in approvals} >= set(roles):
-            signed_at = now_iso()
-            final = public_report(report)
-            final["signoff"] = {
-                **final["signoff"], "approvals": approvals, "status": "signed",
-                "blocked_reason": None, "signature": None, "signed_at": signed_at,
-            }
-            final["version"] = int(state.get("version") or 0) + 1
-            pack = build_signed_parity_pack(job_id=job_id, report=final, actor=actor)
-            state["signed"] = {
-                "signature": "hmac-sha256:" + str(pack["signature"]["value"]),
-                "signed_at": signed_at,
-                "content_sha256": pack["content_sha256"],
-                "pack": pack,
-            }
-            audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
-                  details={"signed": True, "content_sha256": pack["content_sha256"],
-                           "roles": sorted(roles)})
-        save_state(job_id, job, state)
-    return build_parity_report({**job, "parity": state}, reread=True, job_id=job_id)
+              details={"signed": True, "content_sha256": pack["content_sha256"], "roles": sorted(roles)})
+    return build_parity_report(updated, reread=True, job_id=job_id)
 
 
 def signed_pack(job: dict[str, Any]) -> dict[str, Any] | None:

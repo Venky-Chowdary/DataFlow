@@ -246,7 +246,8 @@ describe("Trust Report actions (jsdom)", () => {
     await click(button("Confirm and apply"));
     const post = calls.find((c) => c.method === "POST")!;
     assert.match(post.url, /\/parity-report\/fixes\/fix-widen\/approve$/);
-    assert.equal(post.body, '{"note":"Widen per ticket 88"}');
+    // The decision carries the version it was taken on (review finding 4: 409 when it moved on).
+    assert.equal(post.body, '{"note":"Widen per ticket 88","expected_version":3}');
     // While the request runs, every action is disabled.
     assert.equal(button("Explain again").disabled, true);
     assert.equal(button(/Export pack/).disabled, true);

@@ -6019,30 +6019,42 @@ export async function explainParityReport(jobId: string): Promise<ParityReport> 
   return parityReportFrom(res, "Could not write an explanation for this report.");
 }
 
+/**
+ * A decision's body: the note, and the report version the person decided on.
+ * The API answers 409 when the report changed since (another person or tab).
+ */
+function decisionBody(note: string | undefined, expectedVersion: number | undefined, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    ...extra,
+    ...(note?.trim() ? { note: note.trim() } : {}),
+    ...(typeof expectedVersion === "number" ? { expected_version: expectedVersion } : {}),
+  });
+}
+
 /** Approve a proposed fix: the API applies it, re-checks and returns the new report. */
-export async function approveParityFix(jobId: string, fixId: string, note?: string): Promise<ParityReport> {
+export async function approveParityFix(jobId: string, fixId: string, note?: string, expectedVersion?: number): Promise<ParityReport> {
   const res = await apiFetch(parityReportUrl(jobId, `/fixes/${encodeURIComponent(fixId)}/approve`), {
     method: "POST",
-    body: JSON.stringify(note?.trim() ? { note: note.trim() } : {}),
+    body: decisionBody(note, expectedVersion),
     timeoutMs: 300_000,
   });
   return parityReportFrom(res, "Could not apply this fix.");
 }
 
 /** Dismiss a proposed fix without applying it. */
-export async function dismissParityFix(jobId: string, fixId: string, note?: string): Promise<ParityReport> {
+export async function dismissParityFix(jobId: string, fixId: string, note?: string, expectedVersion?: number): Promise<ParityReport> {
   const res = await apiFetch(parityReportUrl(jobId, `/fixes/${encodeURIComponent(fixId)}/dismiss`), {
     method: "POST",
-    body: JSON.stringify(note?.trim() ? { note: note.trim() } : {}),
+    body: decisionBody(note, expectedVersion),
   });
   return parityReportFrom(res, "Could not dismiss this fix.");
 }
 
 /** Sign the report as one of its required roles. 409 while anything is unexplained. */
-export async function signParityReport(jobId: string, role: string, note?: string): Promise<ParityReport> {
+export async function signParityReport(jobId: string, role: string, note?: string, expectedVersion?: number): Promise<ParityReport> {
   const res = await apiFetch(parityReportUrl(jobId, "/signoff"), {
     method: "POST",
-    body: JSON.stringify(note?.trim() ? { role, note: note.trim() } : { role }),
+    body: decisionBody(note, expectedVersion, { role }),
   });
   return parityReportFrom(res, "Could not record your sign-off.");
 }

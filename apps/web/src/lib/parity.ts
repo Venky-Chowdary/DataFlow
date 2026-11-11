@@ -17,7 +17,8 @@ export type ParityCheck = "full_checksum" | "key_diff" | "sampled" | "count_only
 export type ParityTableStatus = "match" | "explained" | "unexplained" | "unverifiable";
 export type ParityDifferenceKind = "missing_in_destination" | "extra_in_destination" | "value" | "duplicate_key";
 export type ParityFixAction = "widen_column" | "resync_keys" | "accept" | "rerun";
-export type ParityFixStatus = "proposed" | "applied" | "failed" | "dismissed";
+/** applying: a person approved a write fix and it is being applied now. */
+export type ParityFixStatus = "proposed" | "applying" | "applied" | "failed" | "dismissed";
 export type ParitySignoffStatus = "blocked" | "open" | "signed";
 export type ParityHeatCell = "proven" | "sampled" | "explained" | "unexplained_small" | "unexplained_large" | "none";
 
@@ -191,11 +192,13 @@ const WRITE_FIX_ACTIONS = new Set<string>(["widen_column", "resync_keys", "rerun
 
 /**
  * Write fixes counted against {@link PARITY_MAX_ROUNDS}: every widen, re-sync
- * or re-run that was applied or failed. A re-run records no round, so this is
+ * or re-run being applied, applied or failed. A re-run records no round, so this is
  * not the number of rounds.
  */
 export function fixAttemptsUsed(report: Pick<ParityReport, "fixes">): number {
-  return report.fixes.filter((f) => WRITE_FIX_ACTIONS.has(f.action) && (f.status === "applied" || f.status === "failed")).length;
+  return report.fixes.filter(
+    (f) => WRITE_FIX_ACTIONS.has(f.action) && (f.status === "applying" || f.status === "applied" || f.status === "failed"),
+  ).length;
 }
 
 export type ParityTone = "ok" | "warn" | "danger" | "muted";
@@ -340,6 +343,7 @@ export function humanize(code: string): string {
 
 const FIX_STATUS: Record<ParityFixStatus, { label: string; tone: ParityTone }> = {
   proposed: { label: "Proposed", tone: "muted" },
+  applying: { label: "Applying…", tone: "warn" },
   applied: { label: "Applied", tone: "ok" },
   failed: { label: "Failed", tone: "danger" },
   dismissed: { label: "Dismissed", tone: "muted" },

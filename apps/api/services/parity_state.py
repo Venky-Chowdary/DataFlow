@@ -2,28 +2,58 @@
 
 Everything a person decides — approving, dismissing or accepting a fix, the
 re-check rounds, the explanation they asked for, sign-off approvals and the
-signature — lives under the job's ``parity`` field, written through the job
-store's ``update_job_fields``. ``version`` goes up by one on every change, so a
-client can tell a stale report from the current one. Writes for one job are
-serialized in-process; every change also writes an audit-chain event.
+signature — lives under the job's ``parity`` field. ``version`` goes up by one
+on every change, so a client can tell a stale report from the current one.
+
+Every write is a compare-and-swap on ``parity.version`` through the job
+store's ``update_job_fields(..., expected=...)`` — one atomic ``update_one``
+on MongoDB, the same check under the store's lock in memory — because the API
+runs as several replicas and a process lock serializes nothing across them.
+:func:`update_state` re-reads and re-applies a change when another writer got
+there first, or answers 409 when the caller pinned the version it decided on.
+Every change also writes an audit-chain event.
 """
 
 from __future__ import annotations
 
 import copy
 import logging
-import threading
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_REQUIRED_ROLES: tuple[str, ...] = ("engineering", "data_owner", "compliance")
 #: Applied write-path rounds per job; after this, write fixes are disabled.
 MAX_APPLIED_ROUNDS = 3
+#: Read-modify-write attempts before a contended change gives up with 409.
+CAS_ATTEMPTS = 4
 
-_LOCKS: dict[str, threading.Lock] = {}
-_LOCKS_GUARD = threading.Lock()
+T = TypeVar("T")
+
+
+class ParityError(Exception):
+    status_code = 400
+
+
+class ParityNotFound(ParityError):
+    status_code = 404
+
+
+class ParityConflict(ParityError):
+    status_code = 409
+
+
+class ParityStale(ParityConflict):
+    """The parity state changed since the caller read it (another replica or person)."""
+
+
+class ParityInvalid(ParityError):
+    status_code = 422
+
+
+class ParityForbidden(ParityError):
+    status_code = 403
 
 
 def now_iso() -> str:
@@ -37,12 +67,11 @@ def job_store() -> Any:
     return get_mongodb_service()
 
 
-def job_lock(job_id: str) -> threading.Lock:
-    with _LOCKS_GUARD:
-        lock = _LOCKS.get(job_id)
-        if lock is None:
-            lock = _LOCKS[job_id] = threading.Lock()
-        return lock
+def load_job(job_id: str) -> dict[str, Any]:
+    job = job_store().get_job(job_id)
+    if not job:
+        raise ParityNotFound("Job not found")
+    return job
 
 
 def empty_state() -> dict[str, Any]:
@@ -76,15 +105,98 @@ def state_of(job: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
-def save_state(job_id: str, job: dict[str, Any], state: dict[str, Any], *, bump: bool = True) -> dict[str, Any]:
-    """Persist ``state`` on the job (bumping ``version``) and return the updated job."""
-    if bump:
-        state["version"] = int(state.get("version") or 0) + 1
-    if not job_store().update_job_fields(job_id, {"parity": state}, touch_updated_at=False):
-        raise RuntimeError("the job store did not accept the parity state")
-    updated = dict(job)
-    updated["parity"] = state
-    return updated
+def version_of(job: dict[str, Any]) -> int:
+    stored = job.get("parity") if isinstance(job.get("parity"), dict) else {}
+    try:
+        return int(stored.get("version") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def version_guard(version: int) -> dict[str, Any]:
+    """The ``expected`` spec for "the state is still at ``version``".
+
+    A job nobody decided anything on has no ``parity.version`` yet (or 0).
+    """
+    return {"parity.version": int(version)} if version else {"parity.version": (0, None)}
+
+
+def stale(current: int, expected: int) -> ParityStale:
+    return ParityStale(
+        f"The parity report changed since it was read (version {expected}, now {current}). "
+        "Reload it and decide again."
+    )
+
+
+def check_version(job: dict[str, Any], expected_version: int | None) -> None:
+    """409 when the caller decided on another version than the stored one."""
+    if expected_version is not None and version_of(job) != int(expected_version):
+        raise stale(version_of(job), int(expected_version))
+
+
+def write_state(job_id: str, state: dict[str, Any], *, expected_version: int) -> None:
+    """Compare-and-swap ``state`` onto the job: written only while still at ``expected_version``.
+
+    Bumps ``state["version"]``. Raises :class:`ParityStale` when another writer
+    changed the state first (nothing is written), :class:`ParityNotFound` when
+    the job is gone.
+    """
+    state["version"] = int(expected_version) + 1
+    ok = job_store().update_job_fields(
+        job_id, {"parity": state}, touch_updated_at=False, expected=version_guard(expected_version)
+    )
+    if not ok:
+        job = job_store().get_job(job_id)
+        if not job:
+            raise ParityNotFound("Job not found")
+        raise stale(version_of(job), int(expected_version))
+
+
+def update_state(
+    job_id: str,
+    change: Callable[[dict[str, Any], dict[str, Any]], T],
+    *,
+    expected_version: int | None = None,
+    attempts: int = CAS_ATTEMPTS,
+) -> tuple[dict[str, Any], dict[str, Any], T]:
+    """Read the job, apply ``change(job, state)``, compare-and-swap it back.
+
+    ``change`` mutates the state in place and runs on the freshest state of
+    each attempt, so every check it makes (a fix is still proposed, the round
+    limit, a role signs once) holds at the moment of the write. With
+    ``expected_version`` the caller decided on that version: any other one is
+    a 409 and nothing is retried. Without it a lost race is retried on the
+    re-read state. Returns ``(job with the new state, state, change's value)``.
+    """
+    last: ParityStale | None = None
+    for _attempt in range(max(1, attempts)):
+        job = load_job(job_id)
+        check_version(job, expected_version)
+        state = state_of(job)
+        current = int(state.get("version") or 0)
+        result = change(job, state)
+        try:
+            write_state(job_id, state, expected_version=current)
+        except ParityStale as exc:
+            if expected_version is not None:
+                raise
+            last = exc
+            continue
+        return {**job, "parity": state}, state, result
+    raise last or ParityStale("The parity report kept changing; reload it and try again.")
+
+
+def store_cache(job_id: str, fields: dict[str, Any], *, version: int) -> bool:
+    """Write derived ``parity.*`` cache fields (no version bump) only while the
+    state is still at ``version``: a reader computing from an older snapshot
+    never overwrites what a decision wrote since. Returns whether it was written.
+    """
+    if not fields:
+        return False
+    return bool(job_store().update_job_fields(
+        job_id, {f"parity.{k}": v for k, v in fields.items()}, touch_updated_at=False,
+        expected=version_guard(version),
+    ))
 
 
 def audit(

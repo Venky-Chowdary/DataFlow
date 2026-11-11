@@ -14,7 +14,7 @@ import logging
 from collections import Counter
 from typing import Any
 
-from services.parity_state import job_store, now_iso, state_of
+from services.parity_state import job_store, now_iso, state_of, store_cache
 
 logger = logging.getLogger(__name__)
 
@@ -29,31 +29,28 @@ def _route(job: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
 
 
 def remember_report(job_id: str, job: dict[str, Any], report: dict[str, Any]) -> None:
-    """Store the compact summary and keys a re-read proved equal; no version bump.
+    """Cache the compact summary the dashboard reads; no version bump, no decision.
 
-    These are caches of what the evidence showed, not decisions, so they do not
-    change the report version. Written only when something changed.
+    Written as ``parity.summary`` alone and only while the state is still at
+    the version this report was built from, so a read computed from an older
+    snapshot can never overwrite a decision written since (compare-and-swap).
+    A read persists nothing else: keys a re-read proved equal are recomputed
+    by the next re-read, and only a fix's re-check round records them.
     """
     from services.parity_report import compact_summary
 
     state = state_of(job)
     summary = compact_summary(report)
-    changed = {k: v for k, v in (state.get("summary") or {}).items() if k != "at"} != {
+    if {k: v for k, v in (state.get("summary") or {}).items() if k != "at"} == {
         k: v for k, v in summary.items() if k != "at"
-    }
-    for ev in report.get("_tables_ev") or []:
-        if ev.resolved_now:
-            merged = sorted(set(state["resolved"].get(ev.name) or []) | set(ev.resolved_now))
-            if merged != sorted(state["resolved"].get(ev.name) or []):
-                state["resolved"][ev.name] = merged
-                changed = True
-    if not changed:
+    }:
         return
-    state["summary"] = summary
     try:
-        job_store().update_job_fields(job_id, {"parity": state}, touch_updated_at=False)
+        if not store_cache(job_id, {"summary": summary}, version=int(report.get("version") or 0)):
+            return  # a decision landed since this report was built; it wrote its own summary
     except Exception as exc:  # noqa: BLE001 - a cache write must not fail the read
         logger.info("parity summary not stored (%s)", type(exc).__name__)
+        return
     route = _route(job)
     if route:
         try:
