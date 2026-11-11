@@ -385,7 +385,8 @@ def _group(ev: TableEvidence, engine: str, acceptances: dict[str, Any]) -> list[
     key_protected = any(c in ev.protected for c in ev.key_columns)
     out = []
     for diff in groups.values():
-        accepted = acceptances.get(diff["id"])
+        # Rows accepted under this id and under its "beyond acceptance" part count together.
+        accepted = merge_acceptances(acceptances.get(diff["id"]), acceptances.get(_beyond_id(diff)))
         parts = [diff]
         # Nobody can accept rows nobody counted: a lower-bound difference stays open.
         if accepted and not diff["cause"]["explained"] and not diff["rows_at_least"]:
@@ -400,6 +401,27 @@ def _group(ev: TableEvidence, engine: str, acceptances: dict[str, Any]) -> list[
     order = {"value": 0, "missing_in_destination": 1, "extra_in_destination": 2, "duplicate_key": 3}
     out.sort(key=lambda d: (d["cause"]["explained"], order.get(d["kind"], 9), d["column"] or "", d["id"]))
     return out
+
+
+def _beyond_id(diff: dict[str, Any]) -> str:
+    """The id of the rows of a difference beyond what was accepted (built before any split)."""
+    code = str(diff["cause"]["code"]).removesuffix("|beyond_acceptance")
+    return difference_id(diff["table"], diff["column"], diff["kind"], code + "|beyond_acceptance")
+
+
+def merge_acceptances(*records: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Several acceptances of one difference as one: every key, the keyless rows, each approver and note."""
+    found = [r for r in records if r]
+    if len(found) <= 1:
+        return found[0] if found else None
+
+    def joined(name: str, sep: str) -> str:
+        return sep.join(dict.fromkeys(str(r.get(name) or "").strip() for r in found if str(r.get(name) or "").strip()))
+
+    keys = list(dict.fromkeys(str(k) for r in found for k in r.get("keys") or []))
+    keyless = sum(max(int(r.get("keyless_rows") or 0), 0) for r in found)
+    return {**found[-1], "by": joined("by", " and "), "note": joined("note", "; "), "keys": keys,
+            "keyless_rows": keyless, "rows": len(keys) + keyless}
 
 
 def _split_accepted(diff: dict[str, Any], accepted: dict[str, Any]) -> list[dict[str, Any]]:
@@ -424,7 +446,7 @@ def _split_accepted(diff: dict[str, Any], accepted: dict[str, Any]) -> list[dict
     }
     covered["cause"]["detail"] += f" Diagnosed as: {was['label'].lower()} — {was['detail']}"
     rest = {
-        **diff, "id": difference_id(diff["table"], diff["column"], diff["kind"], was["code"] + "|beyond_acceptance"),
+        **diff, "id": _beyond_id(diff),
         "_keys": beyond, "_keyless": diff["_keyless"] - keyless,
         "_sampled_keys": [k for k in diff["_sampled_keys"] if k not in keys],
         "_sampled_keyless": diff["_sampled_keyless"] - sampled_keyless,

@@ -262,6 +262,8 @@ def _release(job: dict[str, Any], job_id: str, fix_id: str, *, actor: str, reaso
 
 def _accept(job: dict[str, Any], job_id: str, report: dict[str, Any], fix: dict[str, Any],
             record: dict[str, Any], *, actor: str, note: str, details: dict[str, Any]) -> dict[str, Any]:
+    from services.parity_report import merge_acceptances
+
     if not note.strip():
         raise ParityInvalid("Accepting a difference needs a note: say why it is acceptable.")
     fix_id = fix["id"]
@@ -274,9 +276,11 @@ def _accept(job: dict[str, Any], job_id: str, report: dict[str, Any], fix: dict[
     def accept(job_now: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         _still_proposed(state, fix_id)
         for did in fix["difference_ids"]:
-            # Exactly the rows the person saw: later rows with the same cause are not covered.
-            state["acceptances"][did] = {"by": actor, "at": now_iso(), "note": note, "fix_id": fix_id,
-                                         **scope.get(did, {"keys": [], "keyless_rows": 0, "rows": 0})}
+            # Exactly the rows the person saw: later rows with the same cause are not covered. A
+            # second acceptance of rows beyond the first adds to it (the same id): never replaces it.
+            state["acceptances"][did] = merge_acceptances(state["acceptances"].get(did), {
+                "by": actor, "at": now_iso(), "note": note, "fix_id": fix_id,
+                **scope.get(did, {"keys": [], "keyless_rows": 0, "rows": 0})})
         state["fixes"][fix_id] = {**record, "status": "applied", "applied_at": now_iso(), "result": result}
         return summarized(job_now, state, job_id)
 
