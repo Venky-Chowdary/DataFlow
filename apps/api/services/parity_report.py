@@ -498,12 +498,12 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
     upper = None
     pct: float | None = None
     if ev.check in _FULL_CHECKS and ev.rows_source:
-        pct = round(100.0 * max(ev.rows_source - bad, 0) / ev.rows_source, 4)
+        pct = share_pct(ev.rows_source - bad, ev.rows_source)
     elif ev.check == "sampled" and ev.sampled_rows and bound_ok:
         upper = _sample_bound(ev, k, bad - k_open)
-        pct = round(100.0 * (1.0 - upper), 4) if upper is not None else None
+        pct = floor_pct(100.0 * (1.0 - upper), short=upper > 0) if upper is not None else None
         if pct is not None and ev.rows_source:
-            pct = min(pct, round(100.0 * max(ev.rows_source - bad, 0) / ev.rows_source, 4))
+            pct = min(pct, share_pct(ev.rows_source - bad, ev.rows_source))
     # A sample that is not a uniform random draw over the population bounds nothing:
     # no share and no rate, only the rows it checked (re-review 3, H4).
     if at_least:
@@ -680,6 +680,32 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
     return "proven", "No differences: the destination matches the source."
 
 
+#: Shares are stated to this many decimals, always rounded down.
+_PCT_DECIMALS = 4
+
+
+def floor_pct(value: float, *, short: bool, decimals: int = _PCT_DECIMALS) -> float:
+    """A share rounded **down**; never 100 while anything is short of it.
+
+    ``round()`` turned 1 bad row in 25,000 into 100.0: a share that claims
+    more than the data shows. ``short`` says something is unexplained (or the
+    share is below 100), so the result stays below 100.
+    """
+    import math
+
+    step = 10 ** decimals
+    out = math.floor(max(0.0, min(100.0, value)) * step + 1e-9) / step
+    if short and out >= 100.0:
+        out = (100 * step - 1) / step
+    return out
+
+
+def share_pct(good: int, total: int) -> float:
+    """``good`` of ``total`` rows as a floored percentage, below 100 whenever ``good < total``."""
+    good = max(int(good), 0)
+    return floor_pct(100.0 * good / total, short=good < total)
+
+
 def _sum(values: list[int | None]) -> int | None:
     known = [v for v in values if v is not None]
     return sum(known) if known else None
@@ -691,9 +717,9 @@ def _parity_block(tables: list[dict[str, Any]]) -> dict[str, Any]:
     pct = None
     # One table whose share is unknown (unchecked rows, uncounted differences) makes the whole unknown.
     if weighted and len(weighted) == len(tables):
-        pct = round(sum(p * w for p, w in weighted) / total, 4) if total else round(
-            sum(p for p, _w in weighted) / len(weighted), 4
-        )
+        short = any(t["unexplained"] for t in tables) or any(p < 100 for p, _w in weighted)
+        mean = sum(p * w for p, w in weighted) / total if total else sum(p for p, _w in weighted) / len(weighted)
+        pct = floor_pct(mean, short=short)
     return {
         "rows_source": _sum([t["rows_source"] for t in tables]),
         "rows_destination": _sum([t["rows_destination"] for t in tables]),

@@ -167,7 +167,12 @@ def signed_pack(job: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _pct(value: Any) -> str:
-    return "unknown" if value is None else f"{float(value):.2f}%"
+    """Two decimals, rounded **down**, and never "100.00%" for a share below 100."""
+    from services.parity_report import floor_pct
+
+    if value is None:
+        return "unknown"
+    return f"{floor_pct(float(value), short=float(value) < 100, decimals=2):.2f}%"
 
 
 def _resolution(diff: dict[str, Any], fixes: list[dict[str, Any]]) -> str:
