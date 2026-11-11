@@ -10,7 +10,7 @@ import type { Root } from "react-dom/client";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TrustReportTab, TrustReportView, type TrustReportViewProps } from "./TrustReportTab.js";
-import { provenReport, signedReport, unexplainedReport } from "./parityFixtures.js";
+import { failedRunReport, provenApiWordingReport, provenReport, signedReport, unexplainedReport } from "./parityFixtures.js";
 import type { ParityReport } from "../../lib/parity.js";
 
 const noop = () => {};
@@ -175,6 +175,63 @@ describe("Trust Report states (static)", () => {
     const t = text(view(provenReport(), { onOpenGate8: noop, onOpenDetail: noop }));
     assert.match(t, /Open Gate-8 proof/);
     assert.match(t, /Open trust score and ledger/);
+  });
+});
+
+/* ── Polish: defects found on the merged tab ─────────────────── */
+
+/** The KPI tiles, in order, as "label: value". */
+function kpis(html: string): string[] {
+  return [...html.matchAll(/<div class="df2-parity-kpi"><dt>([^<]*)<\/dt><dd[^>]*>([\s\S]*?)<\/dd><\/div>/g)].map(
+    (m) => `${m[1]}: ${text(m[2]).trim()}`,
+  );
+}
+
+describe("Trust Report polish: nothing compared reads as nothing compared", () => {
+  it("the ring of a failed run shows a dash and \"not compared\", never a sampled bound", () => {
+    const html = view(failedRunReport());
+    assert.match(html, /class="df2-parity-ring-value">—</);
+    assert.match(html, /class="df2-parity-ring-caption">not compared</);
+    assert.doesNotMatch(html, /sampled bound/);
+  });
+
+  it("a ring without a figure after a comparison that could not decide says so, not \"not compared\"", () => {
+    const failedGate8 = provenReport({
+      verdict: "unverifiable",
+      verdict_reason: "Gate-8 failed on rows its evidence does not name.",
+      parity: { ...provenReport().parity, proven_equal_pct: null },
+      evidence: { ...provenReport().evidence, reconciliation_passed: false },
+    });
+    const html = view(failedGate8);
+    assert.match(html, /class="df2-parity-ring-caption">not determined</);
+  });
+
+  it("rows differ is \"Not compared\" when no comparison ran, and there is no explained tile", () => {
+    const html = view(failedRunReport());
+    assert.deepEqual(kpis(html), [
+      "rows in source: Unknown",
+      "rows in destination: Unknown",
+      "rows differ: Not compared",
+    ]);
+    assert.match(html, /<dl class="df2-parity-kpis is-3">/);
+  });
+
+  it("an undecided comparison does not claim zero rows differ", () => {
+    const failedGate8 = provenReport({
+      verdict: "unverifiable",
+      parity: { ...provenReport().parity, proven_equal_pct: null },
+      evidence: { ...provenReport().evidence, reconciliation_passed: false },
+    });
+    assert.ok(kpis(view(failedGate8)).includes("rows differ: Unknown"));
+  });
+
+  it("the explained tile shows only when rows differ, so the grid holds 3 or 4 tiles", () => {
+    const proven = view(provenApiWordingReport());
+    assert.deepEqual(kpis(proven), ["rows in source: 6", "rows in destination: 6", "rows differ: 0"]);
+    assert.match(proven, /<dl class="df2-parity-kpis is-3">/);
+    const differing = view(unexplainedReport());
+    assert.ok(kpis(differing).includes("explained: 8 / 12"));
+    assert.match(differing, /<dl class="df2-parity-kpis is-4">/);
   });
 });
 

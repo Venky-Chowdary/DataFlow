@@ -349,8 +349,36 @@ export function formatParityPct(pct: number | null | undefined): string {
  * The headline figure is a lower bound unless every table was compared in
  * full: a sampled table contributes its Clopper-Pearson bound, not a count.
  */
-export function parityIsLowerBound(report: Pick<ParityReport, "confidence">): boolean {
-  return report.confidence.method !== "full" && report.confidence.bound_valid !== false;
+export function parityIsLowerBound(
+  report: Pick<ParityReport, "confidence"> & { parity?: Pick<ParityCounts, "proven_equal_pct"> },
+): boolean {
+  const c = report.confidence;
+  // Only a sample bounds anything: "none" compared nothing, and with no figure there is no bound to state.
+  if (c.method !== "sampled" && c.method !== "mixed") return false;
+  if (report.parity && report.parity.proven_equal_pct == null) return false;
+  return c.bound_valid !== false;
+}
+
+/** True when no value comparison ran at all (a run that never reached verification, counts only). */
+export function nothingCompared(report: Pick<ParityReport, "confidence">): boolean {
+  return report.confidence.method === "none";
+}
+
+/** The ring's caption when there is no figure: honest about whether anything was compared. */
+export function parityUnknownCaption(report: Pick<ParityReport, "confidence">): string {
+  return nothingCompared(report) ? "not compared" : "not determined";
+}
+
+/**
+ * The "rows differ" tile. Zero reads as a clean result, so it shows only when a
+ * comparison decided it; otherwise the tile says nothing was compared, or that
+ * the count is unknown.
+ */
+export function rowsDifferLabel(report: Pick<ParityReport, "verdict" | "parity" | "confidence">): string {
+  if (report.parity.rows_differ > 0) return formatCount(report.parity.rows_differ);
+  if (nothingCompared(report)) return "Not compared";
+  if (report.verdict === "unverifiable") return "Unknown";
+  return formatCount(report.parity.rows_differ);
 }
 
 /**

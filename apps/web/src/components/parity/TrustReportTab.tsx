@@ -54,6 +54,8 @@ import {
   roleLabel,
   parityIsLowerBound,
   parityRowsChecked,
+  parityUnknownCaption,
+  rowsDifferLabel,
   shouldPollApplying,
   approveOutcome,
   assuranceTone,
@@ -333,6 +335,19 @@ export function TrustReportView({
   const doneFixes = report.fixes.filter((f) => f.status !== "proposed");
   const ringTone = report.verdict === "unexplained" ? "warn" : report.verdict === "unverifiable" ? "idle" : "ok";
   const signoffAnchor = `parity-signoff-${report.job_id}`;
+  const differLabel = rowsDifferLabel(report);
+  const kpis: Array<{ label: string; value: string; figure: boolean }> = [
+    { label: "rows in source", value: formatCount(parity.rows_source), figure: parity.rows_source != null },
+    { label: "rows in destination", value: formatCount(parity.rows_destination), figure: parity.rows_destination != null },
+    { label: "rows differ", value: differLabel, figure: /^[\d,]+$/.test(differLabel) },
+  ];
+  if (parity.rows_differ > 0) {
+    kpis.push({
+      label: "explained",
+      value: `${parity.explained.toLocaleString("en-US")} / ${parity.rows_differ.toLocaleString("en-US")}`,
+      figure: true,
+    });
+  }
   const tablesTitleId = useId();
 
   return (
@@ -395,29 +410,19 @@ export function TrustReportView({
             tone={ringTone}
             lowerBound={parityIsLowerBound(report)}
             checked={parityRowsChecked(report)}
+            caption={parity.proven_equal_pct == null ? parityUnknownCaption(report) : undefined}
           />
           <span className={badgeClass(verdict.tone)}>{verdict.label}</span>
         </div>
-        <div className="df2-parity-card">
-          <dl className="df2-parity-kpis">
-            <div className="df2-parity-kpi">
-              <dt>rows in source</dt>
-              <dd>{formatCount(parity.rows_source)}</dd>
-            </div>
-            <div className="df2-parity-kpi">
-              <dt>rows in destination</dt>
-              <dd>{formatCount(parity.rows_destination)}</dd>
-            </div>
-            <div className="df2-parity-kpi">
-              <dt>rows differ</dt>
-              <dd>{formatCount(parity.rows_differ)}</dd>
-            </div>
-            <div className="df2-parity-kpi">
-              <dt>explained</dt>
-              <dd>
-                {parity.explained.toLocaleString("en-US")} / {parity.rows_differ.toLocaleString("en-US")}
-              </dd>
-            </div>
+        <div className="df2-parity-card df2-parity-kpi-card">
+          {/* "explained n / m" means something only when rows differ; 3 or 4 tiles, never an orphan. */}
+          <dl className={`df2-parity-kpis is-${kpis.length}`}>
+            {kpis.map((kpi) => (
+              <div key={kpi.label} className="df2-parity-kpi">
+                <dt>{kpi.label}</dt>
+                <dd className={kpi.figure ? undefined : "is-unknown"}>{kpi.value}</dd>
+              </div>
+            ))}
           </dl>
           <p className="df2-parity-confidence">
             <b>How sure is this?</b> {confidence.statement}

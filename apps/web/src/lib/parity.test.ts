@@ -49,7 +49,7 @@ import {
   signedDriftNote,
   noDifferencesText,
 } from "./parity.js";
-import { provenReport, signedReport, summaryFixture, unexplainedReport } from "../components/parity/parityFixtures.js";
+import { failedRunReport, provenReport, signedReport, summaryFixture, unexplainedReport } from "../components/parity/parityFixtures.js";
 
 describe("parity figures", () => {
   it("never rounds a percentage up to 100%", () => {
@@ -432,5 +432,17 @@ describe("honest empty and sampled states (re-review 4, 9e)", () => {
     assert.match(noDifferencesText(provenReport({ verdict: "unverifiable" })), /could not cover enough rows/);
     assert.match(noDifferencesText(unbounded), /run full verification/);
     assert.equal(noDifferencesText(provenReport()), "No differences. Every checked row matches.");
+  });
+});
+
+describe("a report where nothing was compared (trust-report polish)", () => {
+  it("is not a sampled bound: no comparison ran, so there is no bound to state", () => {
+    assert.equal(parityIsLowerBound(failedRunReport()), false);
+    // A sampled report with no figure has no bound to draw either.
+    assert.equal(
+      parityIsLowerBound(unexplainedReport({ parity: { ...unexplainedReport().parity, proven_equal_pct: null } })),
+      false,
+    );
+    assert.equal(parityIsLowerBound(unexplainedReport()), true);
   });
 });
