@@ -22,6 +22,10 @@ SEARCH_FIELDS = (
     "job_id",
 )
 SEARCH_MAX = 120
+# "Needs attention" on the Jobs page: a failed run, or a run whose Gate-8
+# verification recorded ``passed: false`` (its differences were not explained).
+ATTENTION_STATUS = "attention"
+VERIFICATION_FILTERS = ("failed", "passed", "none")
 
 
 def status_values(status: str | None) -> tuple[str, ...] | None:
@@ -32,6 +36,55 @@ def status_values(status: str | None) -> tuple[str, ...] | None:
         return tuple(sorted(COMPLETED_STATUSES | {"success", "succeeded"}))
     if value == "failed":
         return ("failed",)
+    return None
+
+
+# One definition of a recorded Gate-8 verdict for the list, the counts and both
+# job stores: ``reconciliation`` is an object whose ``passed`` is a boolean.
+# Anything else (missing, null, a list, a non-bool flag) is "no verdict". The
+# Mongo forms are aggregation expressions, so an array-shaped field is never
+# matched element-wise the way a plain ``{"reconciliation.passed": ...}``
+# query would.
+_RECON_IS_OBJECT = {"$eq": [{"$type": "$reconciliation"}, "object"]}
+_VERDICT_IS_BOOL = {"$eq": [{"$type": "$reconciliation.passed"}, "bool"]}
+
+
+def verdict_expr(verdict: str) -> dict[str, Any]:
+    """Mongo ``$expr`` for a verification facet: failed, passed or none."""
+    if verdict == "failed":
+        return {"$and": [_RECON_IS_OBJECT, {"$eq": ["$reconciliation.passed", False]}]}
+    if verdict == "passed":
+        return {"$and": [_RECON_IS_OBJECT, {"$eq": ["$reconciliation.passed", True]}]}
+    return {"$not": [{"$and": [_RECON_IS_OBJECT, _VERDICT_IS_BOOL]}]}
+
+
+def attention_expr() -> dict[str, Any]:
+    """Mongo ``$expr`` for "Needs attention": status exactly ``failed``, or a failed verdict."""
+    return {"$or": [{"$eq": ["$status", "failed"]}, verdict_expr("failed")]}
+
+
+def job_verdict(job: dict[str, Any]) -> bool | None:
+    """The recorded Gate-8 verdict, or None when the run recorded none (same rule as ``verdict_expr``)."""
+    recon = job.get("reconciliation")
+    if not isinstance(recon, dict):
+        return None
+    passed = recon.get("passed")
+    return passed if isinstance(passed, bool) else None
+
+
+def job_needs_attention(job: dict[str, Any]) -> bool:
+    """Failed, or its Gate-8 verification failed — the Jobs page "Needs attention" pivot."""
+    return job.get("status") == "failed" or job_verdict(job) is False
+
+
+def _exact(value: str | None) -> str:
+    return str(value or "").strip()[:SEARCH_MAX]
+
+
+def _verification_clause(value: str | None) -> dict[str, Any] | None:
+    verdict = _exact(value).lower()
+    if verdict in VERIFICATION_FILTERS:
+        return {"$expr": verdict_expr(verdict)}
     return None
 
 
@@ -48,6 +101,10 @@ def mongo_job_list_query(
     search: str = "",
     date_from: date | None = None,
     date_to: date | None = None,
+    source_type: str | None = None,
+    destination_type: str | None = None,
+    sync_mode: str | None = None,
+    verification: str | None = None,
 ) -> dict[str, Any]:
     clauses: list[dict[str, Any]] = []
     if base:
@@ -56,6 +113,19 @@ def mongo_job_list_query(
     statuses = status_values(status)
     if statuses:
         clauses.append({"status": {"$in": list(statuses)}})
+    elif str(status or "").strip().lower() == ATTENTION_STATUS:
+        clauses.append({"$expr": attention_expr()})
+
+    for field, value in (
+        ("source_type", source_type),
+        ("destination_type", destination_type),
+        ("sync_mode", sync_mode),
+    ):
+        if _exact(value):
+            clauses.append({field: _exact(value)})
+    verdict = _verification_clause(verification)
+    if verdict:
+        clauses.append(verdict)
 
     needle = str(search or "").strip()[:SEARCH_MAX]
     if needle:
@@ -117,11 +187,30 @@ def memory_job_matches(
     search: str = "",
     date_from: date | None = None,
     date_to: date | None = None,
+    source_type: str | None = None,
+    destination_type: str | None = None,
+    sync_mode: str | None = None,
+    verification: str | None = None,
 ) -> bool:
     statuses = status_values(status)
-    job_status = str(job.get("status") or "unknown").strip().lower()
+    # Exact, as the Mongo ``$in`` is: a stored "FAILED" is not the failed status.
+    job_status = str(job.get("status") or "unknown")
     if statuses and job_status not in statuses:
         return False
+    if str(status or "").strip().lower() == ATTENTION_STATUS and not job_needs_attention(job):
+        return False
+    for field, value in (
+        ("source_type", source_type),
+        ("destination_type", destination_type),
+        ("sync_mode", sync_mode),
+    ):
+        if _exact(value) and job.get(field) != _exact(value):
+            return False
+    verdict = _exact(verification).lower()
+    if verdict in VERIFICATION_FILTERS:
+        expected = {"failed": False, "passed": True, "none": None}[verdict]
+        if job_verdict(job) is not expected:
+            return False
 
     needle = str(search or "").strip()[:SEARCH_MAX].casefold()
     if needle:
