@@ -316,12 +316,39 @@ def running_rehearsal(system_id: str) -> dict[str, Any] | None:
 # ------------------------------------------------------------------ readiness
 
 
+def connector_fingerprint(source: dict[str, Any], workspace_id: str) -> dict[str, Any]:
+    """What the saved connection behind ``source.connector_id`` points at now (never a secret).
+
+    The endpoint identity fields the job idempotency key reads (engine, host,
+    port, database, schema, warehouse, path, ...) without the credential
+    digest, so an edit to the connection behind the same id (another host or
+    database) changes a system's definition and a password rotation does not.
+    A connection that cannot be resolved reads ``{"resolved": False}``.
+    """
+    from types import SimpleNamespace
+
+    from services.job_idempotency import _endpoint_identity
+    from services.schedule_runner import _endpoint_from_connector, _resolve_connector_for_schedule
+
+    connector_id = str((source or {}).get("connector_id") or "")
+    try:
+        conn = _resolve_connector_for_schedule(connector_id, SimpleNamespace(workspace_id=workspace_id))
+        if not conn:
+            return {"resolved": False}
+        identity = _endpoint_identity(_endpoint_from_connector(conn, ""))
+    except Exception:  # noqa: BLE001 - an unreadable connection is a changed definition, not a crash
+        return {"resolved": False}
+    return {k: v for k, v in identity.items() if k not in {"credential_digest", "table", "collection"}}
+
+
 def definition_sha256(system: dict[str, Any]) -> str:
-    """What a rehearsal proves about a system: its source, its tables and keys, its window.
+    """What a rehearsal proves about a system: its source, its tables and keys, its window and format.
 
     Stored on every rehearsal at start; readiness counts a proof only while the
     system still has this definition (a name, a criticality or a schedule may
-    change without touching the proof).
+    change without touching the proof). The source is the connector id *and*
+    what that connection points at now (:func:`connector_fingerprint`), and the
+    extract format is part of it (review 2, N9).
     """
     import hashlib
     import json
@@ -329,9 +356,13 @@ def definition_sha256(system: dict[str, Any]) -> str:
     tables = sorted(({"name": str(t.get("name") or ""), "schema": t.get("schema") or None,
                       "key_columns": [str(k) for k in t.get("key_columns") or []]}
                      for t in system.get("tables") or []), key=lambda t: (t["name"], str(t["schema"] or "")))
-    body = {"connector_id": str((system.get("source") or {}).get("connector_id") or ""), "tables": tables,
-            "exit_window_hours": int(system.get("exit_window_hours") or 0)}
-    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    source = system.get("source") or {}
+    body = {"connector_id": str(source.get("connector_id") or ""), "tables": tables,
+            "exit_window_hours": int(system.get("exit_window_hours") or 0),
+            "extract_format": str(system.get("extract_format") or "jsonl"),
+            "connector": connector_fingerprint(source, str(system.get("workspace_id") or ""))}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+                          .encode()).hexdigest()
 
 
 def rehearsal_summary(rehearsal: dict[str, Any] | None, system: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -378,8 +409,9 @@ def readiness(system: dict[str, Any], rehearsals: list[dict[str, Any]] | None = 
         "next_due_at": _iso(due),
         "running_rehearsal_id": (running or {}).get("id"),
         "stale": stale,
-        "stale_reason": (f"The system's source, tables, keys or window changed since rehearsal {latest.get('n')}; "
-                         "rehearse it again to prove the current definition.") if stale and latest else None,
+        "stale_reason": (f"The system's source connection, tables, keys, window or extract format changed since "
+                         f"rehearsal {latest.get('n')}; rehearse it again to prove the current definition.")
+        if stale and latest else None,
         "last_rehearsal": rehearsal_summary(latest or running, system),
         "last_proven_rehearsal": rehearsal_summary(next((r for r in finished if r.get("verdict") == "proven"), None),
                                                    system),
