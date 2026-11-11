@@ -233,11 +233,11 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
     elif ev.check == "sampled" and ev.sampled_rows:
         upper = clopper_pearson_upper(min(k, ev.sampled_rows), ev.sampled_rows)
         pct = round(100.0 * (1.0 - upper), 4) if upper is not None else None
-    if ev.capped:
-        pct = None  # the census stopped naming keys: the rest is not proven
+    if ev.capped or ev.gate8_unaccounted:
+        pct = None  # the census stopped naming keys, or Gate-8 failed on rows it did not name
     if bad:
         status = "unexplained"
-    elif ev.check in {"none", "count_only"} or ev.capped:
+    elif ev.check in {"none", "count_only"} or ev.capped or ev.gate8_unaccounted:
         status = "unverifiable"
     elif differ:
         status = "explained"

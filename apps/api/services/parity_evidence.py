@@ -74,6 +74,8 @@ class TableEvidence:
     capped: bool = False
     outside_run: bool = False  # a destination-only key cannot have been written by this run
     note: str = ""
+    #: Gate-8 failed this run and the stored evidence names nothing that accounts for it.
+    gate8_unaccounted: bool = False
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -325,6 +327,88 @@ def _value_observations(recon: dict[str, Any], table: str) -> list[Observation]:
     return out
 
 
+#: Observations that localize a Gate-8 failure (rows, keys or columns that differ).
+#: Recipe effects, protected columns and out-of-scope rows exist by design and
+#: account for no failure.
+_LOCALIZING = frozenset({
+    "sample_compare", "ladder_l5", "key_census", "write_witness", "write_witness_loss",
+    "ladder_aggregate", "unattributed", "row_count", "quarantine", "rule_checks",
+    "dedupe_checks", "batch_undo", "protection_proof",
+})
+
+
+def _failure_observations(recon: dict[str, Any], table: str, key_cols: list[str],
+                          named: list[Observation]) -> list[Observation]:
+    """What Gate-8 proved differs without naming every row: witnessed losses,
+    column aggregates (L2/L4, the engine-profile ladder) and an unattributed
+    discrepancy. Each is unexplained: no rule can explain a value it never saw.
+    """
+    from services.keyed_write_witness import DRIFT_KEY, UNATTRIBUTED_KEY
+    from services.parity_classifier import UNEXPLAINED, cause
+
+    out: list[Observation] = []
+    drift = _dict(recon.get(DRIFT_KEY))
+    loss_count = max(_int(drift.get("loss_count")) or 0, 0)
+    if loss_count:
+        lost = cause(
+            UNEXPLAINED,
+            "The write witness found this key missing from the destination or different from what "
+            "this run wrote, and the source no longer holds it: a destination loss.",
+            explained=False,
+        )
+        keys = [k for k in (_render_key(x, key_cols) for x in drift.get("losses") or []) if k]
+        keys = list(dict.fromkeys(keys))[:loss_count]
+        out += [Observation(table=table, kind="missing_in_destination", key=k,
+                            origin="write_witness_loss", cause=lost) for k in keys]
+        if loss_count > len(keys):
+            out.append(Observation(table=table, kind="missing_in_destination", rows=loss_count - len(keys),
+                                   origin="write_witness_loss", cause=lost))
+    columns: dict[str, str] = {}
+    ladder = _dict(recon.get("verification_ladder"))
+    layers = _dict(ladder.get("layers"))
+    for layer in ("L2", "L4"):
+        info = _dict(layers.get(layer))
+        if info.get("passed") is False:
+            for col in _dict(info.get("details")).get("mismatched_columns") or []:
+                columns.setdefault(str(col), f"Gate-8's column check ({layer})")
+    if any(_dict(layers.get(x)).get("passed") is False for x in ("L2", "L4")):
+        for col in _dict(ladder.get("localization")).get("columns") or []:
+            columns.setdefault(str(col), "Gate-8's column localization")
+    unattributed = _dict(recon.get(UNATTRIBUTED_KEY))
+    if unattributed.get("l2") == "failed":
+        for col in unattributed.get("columns") or [None]:
+            columns.setdefault(str(col) if col else "", "The re-read of the keys this run wrote (L2)")
+    if any(o.key and o.origin in {"ladder_l5", "key_census"} for o in named):
+        # The whole population was compared key by key (L5 or the key census):
+        # its named rows localize the aggregate failure, including rows that
+        # move a column's min/max/sum without a value of their own changing.
+        columns = {}
+    by_row = {o.column for o in named if o.kind == "value" and o.column}
+    for col, where in columns.items():
+        if col and col in by_row:
+            continue  # the rows that differ in this column are already named
+        out.append(Observation(
+            table=table, kind="value", column=col or None, rows=1,
+            origin="unattributed" if where.startswith("The re-read") else "ladder_aggregate",
+            cause=cause(
+                UNEXPLAINED,
+                f"{where} found that {('column ' + col) if col else 'one or more columns'} differs between "
+                "the source and the destination; the rows were not named, so at least one row differs.",
+                explained=False,
+            ),
+        ))
+    return out
+
+
+def gate8_failed(recon: dict[str, Any]) -> bool:
+    return recon.get("passed") is False
+
+
+def failed_layers(recon: dict[str, Any]) -> list[str]:
+    layers = _dict(_dict(recon.get("verification_ladder")).get("layers"))
+    return sorted(name for name, info in layers.items() if _dict(info).get("passed") is False)
+
+
 def _effect_observations(job: dict[str, Any], table: str) -> list[Observation]:
     """Cells the run's own recipe changed, and protected columns: explained by design."""
     from services.parity_classifier import TRANSFORM_APPLIED, UNEXPLAINED, cause
@@ -537,11 +621,22 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
                 explained=True,
             ),
         ))
+    ev.observations += _failure_observations(recon, name, key_cols, ev.observations)
     ev.observations += _count_observations(job, ev, drift_rows)
     ev.observations += _effect_observations(job, name)
     ev.observations += _duplicate_observations(recon, name)
     if dest.get("partial_batch_removed") or str(dest.get("partial_batch_undo") or "") == "restored":
         _batch_undone(ev, recon, dest)
+    if gate8_failed(recon) and not any(
+        o.origin in _LOCALIZING and not _out_of_scope(o) for o in ev.observations
+    ):
+        ev.gate8_unaccounted = True
+        layers = failed_layers(recon)
+        ev.note = (
+            f"Gate-8 failed this run{' (' + ', '.join(layers) + ')' if layers else ''}, but its "
+            f"evidence names no row or column of {name} that accounts for the failure, so parity "
+            "cannot be shown. Re-run the job to localize the difference."
+        )
     tables = [ev]
     streams = dest.get("streams") if dest.get("multi_stream") else None
     for row in streams if isinstance(streams, list) else []:
@@ -567,6 +662,10 @@ def extract_evidence(job: dict[str, Any]) -> list[TableEvidence]:
                     rows=abs(gap), origin="row_count",
                 ))
     return tables
+
+
+def _out_of_scope(ob: Observation) -> bool:
+    return bool(ob.cause) and ob.cause.get("code") == "out_of_scope_population"
 
 
 def job_is_terminal(job: dict[str, Any]) -> bool:

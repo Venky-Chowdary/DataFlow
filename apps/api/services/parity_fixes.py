@@ -246,7 +246,7 @@ def propose_fixes(job: dict[str, Any], report: dict[str, Any], state: dict[str, 
     for ev in report.get("_tables_ev") or []:
         bad = [d for d in report["differences"] if d["table"] == ev.name and not d["cause"]["explained"]]
         if not bad:
-            if ev.capped:
+            if ev.capped or ev.gate8_unaccounted:
                 proposals.append(_rerun(job, [], job_id))
             continue
         narrow = [d for d in bad if d["cause"]["code"] in NARROW_COLUMN_CAUSES and d["column"] and d["kind"] == "value"]
