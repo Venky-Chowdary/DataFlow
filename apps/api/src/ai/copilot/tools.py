@@ -32,6 +32,7 @@ from ..rag.query_analysis import (
 )
 from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
+from .parity_tools import PARITY_TOOL_DEFINITIONS
 from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
@@ -1656,6 +1657,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {"type": "object", "properties": {**_WORKSPACE_PROP}, "required": []},
     },
     *LIFECYCLE_TOOL_DEFINITIONS,
+    *PARITY_TOOL_DEFINITIONS,
 ]
 
 TOOL_FAMILIES: list[dict] = [
@@ -1715,6 +1717,7 @@ TOOL_FAMILIES: list[dict] = [
         "tools": [
             "list_jobs",
             "get_job",
+            "explain_parity",
             "navigate",
             "get_preflight_run",
             "remediate_validation",
@@ -1921,6 +1924,7 @@ class DataPilotTools:
             "navigate": self._navigate,
             "get_preflight_run": self._get_preflight_run,
             "remediate_validation": self._remediate_validation,
+            "explain_parity": self._explain_parity,
             "compare_datasets": self._compare_datasets,
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
@@ -2896,6 +2900,11 @@ class DataPilotTools:
                 error=f"Preflight run '{run_id}' not found. Ask the user for the pf_… ID shown on Validate.",
             )
         return ToolResult(name="get_preflight_run", success=True, output=record)
+
+    def _explain_parity(self, job_id: str = "", selector: str = "") -> ToolResult:
+        from .parity_tools import explain_parity
+
+        return explain_parity(job_id=job_id, selector=selector)
 
     def _remediate_validation(
         self,
