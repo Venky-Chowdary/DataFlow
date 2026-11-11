@@ -32,6 +32,8 @@ interface JobsToolbarProps {
   pivot: JobListStatus;
   onPivot: (value: JobListStatus) => void;
   counts: JobsPivotCounts;
+  /** False when the API cannot filter Needs attention (older servers). */
+  showAttention?: boolean;
   onRefresh?: () => void;
   rerun: JobsToolbarAction;
   cancel: JobsToolbarAction;
@@ -55,6 +57,7 @@ export function JobsToolbar({
   pivot,
   onPivot,
   counts,
+  showAttention = true,
   onRefresh,
   rerun,
   cancel,
@@ -80,7 +83,7 @@ export function JobsToolbar({
             items={[
               { id: "all", label: "All", count: counts.all },
               { id: "running", label: "Running", count: counts.running },
-              { id: "attention", label: "Needs attention", count: counts.attention },
+              ...(showAttention ? [{ id: "attention" as const, label: "Needs attention", count: counts.attention }] : []),
               { id: "completed", label: "Completed", count: counts.completed },
               { id: "failed", label: "Failed", count: counts.failed },
             ]}

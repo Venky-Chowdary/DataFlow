@@ -83,6 +83,8 @@ interface JobsGridProps {
   totalRows?: number;
   /** Position of this page's first row in that set (server offset). */
   rowOffset?: number;
+  /** A one-line status above the rows (e.g. a filter the server refused). */
+  notice?: string;
 }
 
 function ariaSort(sort: JobsGridSort, column: JobsGridColumnId): "ascending" | "descending" | "none" {
@@ -145,6 +147,7 @@ export function JobsGrid({
   sortNote,
   totalRows,
   rowOffset = 0,
+  notice,
 }: JobsGridProps) {
   const stacked = useMediaQuery(JOBS_GRID_STACK_QUERY);
   const hintId = useId();
@@ -369,6 +372,7 @@ export function JobsGrid({
           {onRetry && <Button size="sm" variant="ghost" onClick={onRetry}>Retry</Button>}
         </p>
       )}
+      {notice && <p className="df2-jobs-grid-note" role="status">{notice}</p>}
       {sortNote && jobs.length > 0 && !error && <p className="df2-jobs-grid-note">{sortNote}</p>}
       {body}
       {footer}

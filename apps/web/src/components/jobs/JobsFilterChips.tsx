@@ -58,6 +58,8 @@ interface JobsFilterChipsProps {
   onDates: (from: string, to: string) => void;
   /** Open the custom from/to panel. */
   onCustomDates: () => void;
+  /** False when the API ignores engine / mode / verification facets (older servers). */
+  showFacets?: boolean;
 }
 
 function withSelected(options: string[], selected: string): string[] {
@@ -119,6 +121,7 @@ export function JobsFilterChips({
   dateTo,
   onDates,
   onCustomDates,
+  showFacets = true,
 }: JobsFilterChipsProps) {
   const sources = useMemo(() => withSelected(sourceTypes, facets.sourceType), [sourceTypes, facets.sourceType]);
   const destinations = useMemo(
@@ -130,9 +133,11 @@ export function JobsFilterChips({
   const radio = (id: string, label: string, checked: boolean, onSelect: () => void, title?: string): JobsMenuItem => ({
     id, label, checked, onSelect, title, kind: "radio",
   });
+  // Engines come from the jobs loaded in this session (no API lists the
+  // engines a workspace has run), and the menu says so.
   const engineItems = (options: string[], selected: string, apply: (value: string) => void) => [
     radio("any", "Any", !selected, () => apply("")),
-    ...options.map((id) => radio(id, jobEngineLabel(id), selected === id, () => apply(id))),
+    ...options.map((id) => ({ ...radio(id, jobEngineLabel(id), selected === id, () => apply(id)), section: "From loaded jobs" })),
   ];
 
   return (
@@ -149,41 +154,45 @@ export function JobsFilterChips({
           { id: "custom", label: "Custom range…", onSelect: onCustomDates, title: "Pick from and to dates (UTC days)" },
         ]}
       />
-      <Chip
-        name="Source"
-        value={facets.sourceType ? jobEngineLabel(facets.sourceType) : "Any"}
-        active={Boolean(facets.sourceType)}
-        onClear={() => set({ sourceType: "" })}
-        items={engineItems(sources, facets.sourceType, (sourceType) => set({ sourceType }))}
-      />
-      <Chip
-        name="Destination"
-        value={facets.destinationType ? jobEngineLabel(facets.destinationType) : "Any"}
-        active={Boolean(facets.destinationType)}
-        onClear={() => set({ destinationType: "" })}
-        items={engineItems(destinations, facets.destinationType, (destinationType) => set({ destinationType }))}
-      />
-      <Chip
-        name="Mode"
-        value={facets.syncMode ? formatSyncModeLabel(facets.syncMode) : "Any"}
-        active={Boolean(facets.syncMode)}
-        onClear={() => set({ syncMode: "" })}
-        items={[
-          radio("any", "Any", !facets.syncMode, () => set({ syncMode: "" })),
-          ...SYNC_MODES.map((mode) => radio(mode.id, mode.label, facets.syncMode === mode.id, () => set({ syncMode: mode.id }), mode.detail)),
-        ]}
-      />
-      <Chip
-        name="Verification"
-        value={VERIFICATION_OPTIONS.find((o) => o.id === facets.verification)?.label ?? "Any"}
-        active={Boolean(facets.verification)}
-        onClear={() => set({ verification: "" })}
-        items={[
-          radio("any", "Any", !facets.verification, () => set({ verification: "" })),
-          ...VERIFICATION_OPTIONS.map((option) =>
-            radio(option.id, option.label, facets.verification === option.id, () => set({ verification: option.id }), option.title)),
-        ]}
-      />
+      {showFacets && (
+        <>
+          <Chip
+            name="Source"
+            value={facets.sourceType ? jobEngineLabel(facets.sourceType) : "Any"}
+            active={Boolean(facets.sourceType)}
+            onClear={() => set({ sourceType: "" })}
+            items={engineItems(sources, facets.sourceType, (sourceType) => set({ sourceType }))}
+          />
+          <Chip
+            name="Destination"
+            value={facets.destinationType ? jobEngineLabel(facets.destinationType) : "Any"}
+            active={Boolean(facets.destinationType)}
+            onClear={() => set({ destinationType: "" })}
+            items={engineItems(destinations, facets.destinationType, (destinationType) => set({ destinationType }))}
+          />
+          <Chip
+            name="Mode"
+            value={facets.syncMode ? formatSyncModeLabel(facets.syncMode) : "Any"}
+            active={Boolean(facets.syncMode)}
+            onClear={() => set({ syncMode: "" })}
+            items={[
+              radio("any", "Any", !facets.syncMode, () => set({ syncMode: "" })),
+              ...SYNC_MODES.map((mode) => radio(mode.id, mode.label, facets.syncMode === mode.id, () => set({ syncMode: mode.id }), mode.detail)),
+            ]}
+          />
+          <Chip
+            name="Verification"
+            value={VERIFICATION_OPTIONS.find((o) => o.id === facets.verification)?.label ?? "Any"}
+            active={Boolean(facets.verification)}
+            onClear={() => set({ verification: "" })}
+            items={[
+              radio("any", "Any", !facets.verification, () => set({ verification: "" })),
+              ...VERIFICATION_OPTIONS.map((option) =>
+                radio(option.id, option.label, facets.verification === option.id, () => set({ verification: option.id }), option.title)),
+            ]}
+          />
+        </>
+      )}
       {(hasJobsFacets(facets) || dateActive) && (
         <Button
           size="sm"

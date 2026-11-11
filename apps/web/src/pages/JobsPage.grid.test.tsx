@@ -303,16 +303,18 @@ describe("Jobs grid page", () => {
     assert.ok(host.querySelector(".df2-jobs-grid--comfortable"));
   });
 
-  it("keeps server-page rows live from the polled recent feed without re-paging", async () => {
+  it("keeps server-page rows live from the polled recent feed and re-reads the page on a status change", async () => {
     await render();
     const requests = queries.length;
     const status = () => row("grid-alpha").querySelector(".df2-jobs-grid-status")?.textContent;
     assert.equal(status(), "Completed");
+    await render(true, [{ ...jobs[0], records_processed: 99, updated_at: "2026-11-07T00:09:00" } as TransferJob]);
+    assert.equal(queries.length, requests, "progress alone never re-reads the server page");
     await render(true, [{ ...jobs[0], status: "failed", updated_at: "2026-11-07T00:10:00" } as TransferJob]);
     assert.equal(status(), "Failed", "the newer recent row replaces the page row");
+    assert.equal(queries.length, requests + 1, "one fresh page read for the status change");
     await render(true, [{ ...jobs[0], status: "running" } as TransferJob]);
     assert.equal(status(), "Completed", "a recent row with no later write never overrides the page");
-    assert.equal(queries.length, requests, "no extra server page read");
   });
 
   it("sorts the loaded page locally and says so", async () => {
@@ -336,8 +338,10 @@ describe("Jobs grid page", () => {
       await render();
       const toolbarButtons = () => Array.from(host.querySelectorAll<HTMLButtonElement>(".df2-jobs-toolbar button"))
         .map((b) => b.textContent?.trim());
-      assert.ok(toolbarButtons().includes("Re-run"));
+      assert.equal(toolbarButtons().includes("Re-run"), false, "nothing picked yet");
       assert.equal(toolbarButtons().includes("Cancel"), false, "no permanently disabled Cancel");
+      row("grid-alpha").focus();
+      await settle();
       assert.match(button("Re-run", host).title, /Sync now/);
       row("grid-beta").focus();
       await settle();

@@ -156,7 +156,7 @@ describe("Jobs focus: isolated real components with synthetic jobs (not authenti
     document.body.appendChild(outside);
     outside.focus();
     await render();
-    assert.equal(row().getAttribute("aria-selected"), "true");
+    assert.equal(row().getAttribute("aria-selected"), "false", "arrival selects nothing the operator can act on");
     assert.equal(detailDrawer(), null);
     assert.ok(document.activeElement === outside, "automatic selection must not steal list focus");
   });
@@ -201,14 +201,16 @@ describe("Jobs focus: isolated real components with synthetic jobs (not authenti
     assert.equal(row(0).getAttribute("aria-selected"), "true");
   });
 
-  it("restores the current row after asynchronous list replacement changes the selection", async () => {
+  it("keeps the open run when the list replaces it, then lands on the first row", async () => {
     await render();
     await click(row(1));
     await render([jobs[0]]);
-    assert.equal(row().getAttribute("aria-selected"), "true");
-    assert.ok(document.activeElement === back(), "automatic detail selection must preserve visible focus");
+    assert.ok(detailDrawer(), "the drawer stays open on the run the operator opened");
+    assert.match(detailDrawer()?.querySelector(".df2-drawer-title")?.textContent || "", /Synthetic beta/);
+    assert.equal(row().getAttribute("aria-selected"), "false", "no silent switch to another run");
+    assert.ok(document.activeElement === back(), "the open drawer keeps visible focus");
     await click(back());
-    assert.ok(document.activeElement === row(), "return must restore the current row, not the removed entry row");
+    assert.ok(document.activeElement === row(), "return lands on the first row, not the removed entry");
   });
 });
 
