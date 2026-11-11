@@ -200,12 +200,12 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
     for _index, req, job_id in launches:
         try:
             future = run_transfer_async(job_id, req, resume=False)
-        except Exception as exc:  # noqa: BLE001 - the scheduler refused: that table failed
+        except Exception as exc:  # noqa: BLE001 - the scheduler refused: that table reads failed, by name
             logger.warning("exit rehearsal %s: scheduling %s failed (%s)", rid, job_id, type(exc).__name__)
             _job_store().update_job_status(job_id, "failed", error="The scheduler did not accept the extract job.")
-            continue
-        if future is not None and hasattr(future, "add_done_callback"):
-            future.add_done_callback(lambda _f: settle_quietly(rid))
+        else:
+            if future is not None and hasattr(future, "add_done_callback"):
+                future.add_done_callback(lambda _f: settle_quietly(rid))
     return settle(rid, inline=False) or rehearsal
 
 
@@ -752,7 +752,10 @@ def run_due_rehearsals(*, now: datetime | None = None) -> dict[str, int]:
         after = parse_ts(system.get("schedule_last_fired_at")) or parse_ts(system.get("created_at")) or current
         try:
             due = next_run(schedule["cron"], after, schedule.get("timezone") or "UTC")
-        except Exception:  # noqa: BLE001 - a schedule that cannot fire is skipped, not fatal
+        except (ValueError, KeyError, TypeError) as exc:
+            # A stored cron / zone that no longer parses (CronError is a ValueError, an unknown zone a
+            # KeyError): this system's schedule cannot fire, the other systems still do. Named in the log.
+            logger.warning("exit rehearsal schedule of %s cannot fire (%s)", system.get("id"), type(exc).__name__)
             continue
         if due > current:
             continue

@@ -199,7 +199,9 @@ def narrows(stype: str, ttype: str, *, dest_db: str, source_db: str) -> bool:
         try:
             if check():
                 return True
-        except Exception:  # noqa: BLE001 - a helper that cannot read a spelling decides nothing
+        except (ValueError, TypeError, ArithmeticError):
+            # A width / precision the helper cannot parse out of the spelling: that helper decides
+            # nothing (the others still do, and an undeclared type is ``type_unknown``, never a pass).
             continue
     return False
 

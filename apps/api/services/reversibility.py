@@ -252,7 +252,7 @@ def _overflow(values: Sequence[Any], ttype: str, tlogical: str) -> dict[str, Any
         elif tlogical == "decimal" and scale is not None:
             try:
                 exp = Decimal(text).normalize().as_tuple().exponent
-            except Exception:  # noqa: BLE001 - not a number: the cast refuses it anyway
+            except (ArithmeticError, ValueError):  # not a number (InvalidOperation): the cast refuses it anyway
                 continue
             if isinstance(exp, int) and -exp > int(scale):
                 failing += 1
