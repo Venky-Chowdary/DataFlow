@@ -221,5 +221,7 @@ def put_anchor(digest: str, *, kind: str, subject: str, event_time: str = "", s3
 def _md5_b64(body: bytes) -> str:
     import base64
 
-    # Object Lock PUTs must carry an integrity header; MD5 is what S3 requires for it here.
-    return base64.b64encode(hashlib.md5(body).digest()).decode("ascii")  # noqa: S324
+    # Object Lock PUTs must carry a transport-integrity header, and Content-MD5 is the
+    # one S3 takes here. It protects the upload in transit, nothing else: the anchor's
+    # evidence is the SHA-256 digest read back from the stored object.
+    return base64.b64encode(hashlib.md5(body, usedforsecurity=False).digest()).decode("ascii")
