@@ -261,16 +261,18 @@ def _execute_policy_gates_for_request(
     *,
     source_columns: list[str] | None = None,
     resume: bool = False,
-    planned: tuple[Any, Any, Any] | None = None,
+    planned: tuple[Any, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate≡Execute policy gates — never default source_kind to file.
 
     Studio Validate passes dest_type / source_type / source_kind / write_via_staging.
     Execute must match or CDC/SCD2/staging falsely block (or skip) after Approve.
 
-    ``planned`` is the run's ``(mappings, source types, destination types)``:
-    with it, a datetime narrowed onto a millisecond carrier gets its value-level
-    answer (D148, ``services.millisecond_fit``).
+    ``planned`` is the run's ``(mappings, source types, destination types[,
+    design sample rows])``: with it, a datetime narrowed onto a millisecond
+    carrier gets its value-level answer (D148, ``services.millisecond_fit``) and
+    the reversibility gate checks conditional columns against the rows Execute
+    read, as Validate does against the plan sample.
     """
     from services.preflight_cursor_gate import read_scope_for_transfer_request
     from services.preflight_service import run_transfer_policy_gates
@@ -323,7 +325,7 @@ def _execute_policy_gates_for_request(
     if planned is not None:
         from services.millisecond_fit import millisecond_fit_gate
 
-        ms_gate = millisecond_fit_gate(request, *planned)
+        ms_gate = millisecond_fit_gate(request, *planned[:3])
         if ms_gate is not None:
             gates = [*gates, ms_gate]
     from services.reversibility_sources import execute_gate

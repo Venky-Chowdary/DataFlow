@@ -151,7 +151,7 @@ def request_report(
     column_types: Mapping[str, str] | None,
     dest_types: Mapping[str, str] | None,
     *,
-    sample_rows: list[dict[str, Any]] | None = None,
+    sample_rows: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Execute's view: the run's planned mappings and types (Validate == Execute)."""
     src, dst = getattr(request, "source", None), getattr(request, "destination", None)
@@ -186,14 +186,18 @@ def preflight_gate(report: Mapping[str, Any]) -> dict[str, Any]:
     return gate
 
 
-def execute_gate(request: Any, planned: tuple[Any, Any, Any] | None) -> dict[str, Any] | None:
+def execute_gate(request: Any, planned: tuple[Any, ...] | None) -> dict[str, Any] | None:
     """``g24_reversibility`` for Execute when the request requires reversibility, else ``None``."""
     if not _truthy(getattr(request, POLICY, False)):
         return None
-    mappings, column_types, dest_types = planned or (None, None, None)
+    mappings, column_types, dest_types = tuple(planned or (None, None, None))[:3]
+    # The design sample Execute read (when the caller has one): conditional columns are
+    # checked against it, as Validate checks them against the plan sample.
+    sample = [r for r in (tuple(planned)[3] if planned and len(planned) > 3 else None) or []
+              if isinstance(r, Mapping)]
     if column_types is None:
         column_types = dict(getattr(request, "column_types", None) or {})
-    return preflight_gate(request_report(request, mappings, column_types, dest_types))
+    return preflight_gate(request_report(request, mappings, column_types, dest_types, sample_rows=sample))
 
 
 def stamp_plan_requirement(request: Any, policies: Mapping[str, Any] | None) -> None:

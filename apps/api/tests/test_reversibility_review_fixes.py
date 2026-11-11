@@ -440,3 +440,34 @@ def test_h6_a_lossless_run_passes_g24_at_execute_and_lands_every_row(people, fak
     assert result.success, result.error
     assert _dest_rows(dst) == 10
     assert seen and all(g["status"] == "pass" for g in seen), seen
+
+
+# --------------------- M4: Execute checks conditional columns against the rows it read (Validate == Execute)
+
+
+@pytest.fixture()
+def names(tmp_path):
+    def make(values):
+        src, dst = tmp_path / f"src_{uuid.uuid4().hex[:6]}.sqlite", tmp_path / f"dst_{uuid.uuid4().hex[:6]}.sqlite"
+        _exec(src, "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT)")
+        _exec(src, "INSERT INTO people VALUES (?, ?)", list(enumerate(values, start=1)))
+        return src, dst
+    return make
+
+
+_TRIM_MAPS = [dict(_m("id", stype="INTEGER", ttype="INTEGER"), confidence=0.99),
+              dict(_m("email", transform="trim", stype="TEXT", ttype="TEXT"), confidence=0.99)]
+
+
+def test_m4_execute_passes_a_normalising_transform_whose_read_rows_round_trip(names, fake_store):
+    src, dst = names(["a@example.com", "b@example.com", "c@example.com"])
+    result = _execute(fake_store, src, dst, mappings=_TRIM_MAPS)
+    assert result.success, result.error
+    assert _dest_rows(dst) == 3
+
+
+def test_m4_execute_blocks_a_normalising_transform_whose_read_rows_change(names, fake_store):
+    src, dst = names(["a@example.com", " b@example.com", "c@example.com"])
+    result = _execute(fake_store, src, dst, mappings=_TRIM_MAPS)
+    assert not result.success and _blocked_by_g24(result), result.error
+    assert "people.email" in str(result.error)
