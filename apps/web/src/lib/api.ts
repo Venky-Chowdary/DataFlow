@@ -20,6 +20,7 @@ import type {
   ShapeStepWire,
 } from "./shape";
 import { slimPreflightForExplain } from "./slimPreflightForExplain";
+import type { ParityReport, ParitySummary } from "./parity";
 
 export { refusalSentence };
 
@@ -5990,4 +5991,103 @@ export async function exportTransformProjectDbt(projectId: string): Promise<{
   );
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export dbt pack"));
   return res.json();
+}
+
+/* ── Parity Studio ───────────────────────────────────────────────
+   Trust report per job, the fix loop, sign-off and the workspace summary.
+   Every refusal keeps its HTTP status (ApiError) so the page can tell a 409
+   ("already applied", "sign-off blocked") from a transport failure. */
+
+function parityReportUrl(jobId: string, suffix = ""): string {
+  return `${API_BASE}/jobs/${encodeURIComponent(jobId)}/parity-report${suffix}`;
+}
+
+async function parityReportFrom(res: Response, fallback: string): Promise<ParityReport> {
+  if (!res.ok) throw await apiErrorFrom(res, fallback);
+  return (await res.json()) as ParityReport;
+}
+
+/** GET the trust report for one job. */
+export async function fetchParityReport(jobId: string, init: { signal?: AbortSignal } = {}): Promise<ParityReport> {
+  const res = await apiFetch(parityReportUrl(jobId), { signal: init.signal });
+  return parityReportFrom(res, "Could not load the trust report for this job.");
+}
+
+/** Ask for a fresh explanation (LLM where the egress policy allows it, else templates). */
+export async function explainParityReport(jobId: string): Promise<ParityReport> {
+  const res = await apiFetch(parityReportUrl(jobId, "/explain"), { method: "POST", body: "{}", timeoutMs: 120_000 });
+  return parityReportFrom(res, "Could not write an explanation for this report.");
+}
+
+/**
+ * A decision's body: the note, and the report version the person decided on.
+ * The API answers 409 when the report changed since (another person or tab).
+ */
+function decisionBody(note: string | undefined, expectedVersion: number | undefined, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    ...extra,
+    ...(note?.trim() ? { note: note.trim() } : {}),
+    ...(typeof expectedVersion === "number" ? { expected_version: expectedVersion } : {}),
+  });
+}
+
+/** Approve a proposed fix: the API applies it, re-checks and returns the new report. */
+export async function approveParityFix(
+  jobId: string,
+  fixId: string,
+  note?: string,
+  expectedVersion?: number,
+  /** The preview_sha256 of the fix the person reviewed: the API refuses (409) to run anything else. */
+  previewSha256?: string | null,
+): Promise<ParityReport> {
+  const res = await apiFetch(parityReportUrl(jobId, `/fixes/${encodeURIComponent(fixId)}/approve`), {
+    method: "POST",
+    body: decisionBody(note, expectedVersion, previewSha256 ? { preview_sha256: previewSha256 } : {}),
+    timeoutMs: 300_000,
+  });
+  return parityReportFrom(res, "Could not apply this fix.");
+}
+
+/** Dismiss a proposed fix without applying it. */
+export async function dismissParityFix(jobId: string, fixId: string, note?: string, expectedVersion?: number): Promise<ParityReport> {
+  const res = await apiFetch(parityReportUrl(jobId, `/fixes/${encodeURIComponent(fixId)}/dismiss`), {
+    method: "POST",
+    body: decisionBody(note, expectedVersion),
+  });
+  return parityReportFrom(res, "Could not dismiss this fix.");
+}
+
+/** Sign the report as one of its required roles. 409 while anything is unexplained. */
+export async function signParityReport(jobId: string, role: string, note?: string, expectedVersion?: number): Promise<ParityReport> {
+  const res = await apiFetch(parityReportUrl(jobId, "/signoff"), {
+    method: "POST",
+    body: decisionBody(note, expectedVersion, { role }),
+  });
+  return parityReportFrom(res, "Could not record your sign-off.");
+}
+
+/** The evidence pack as Markdown, signature included, for a download. */
+export async function downloadParityReportMarkdown(jobId: string): Promise<Blob> {
+  const res = await apiFetch(parityReportUrl(jobId, "/export?format=markdown"));
+  if (!res.ok) throw await apiErrorFrom(res, "Could not export the evidence pack.");
+  return res.blob();
+}
+
+/**
+ * The signed pack (409 until every required role has signed): the proof-pack
+ * envelope that POST /transfer/proof-pack/verify checks, as JSON for a download.
+ */
+export async function downloadParitySignedPack(jobId: string): Promise<Blob> {
+  const res = await apiFetch(parityReportUrl(jobId, "/export?format=json"));
+  if (!res.ok) throw await apiErrorFrom(res, "Could not download the signed pack.");
+  return res.blob();
+}
+
+/** Workspace-wide parity over the most recent runs (Dashboard, Migration health). */
+export async function fetchParitySummary(limit = 30, init: { signal?: AbortSignal } = {}): Promise<ParitySummary> {
+  // The route accepts 1..100 (422 outside it).
+  const safe = Math.max(1, Math.min(100, Math.floor(limit) || 30));
+  const res = await apiFetch(`${API_BASE}/parity/summary?limit=${safe}`, { signal: init.signal });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not load migration health.");
+  return (await res.json()) as ParitySummary;
 }

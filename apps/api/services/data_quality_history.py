@@ -585,6 +585,60 @@ def save_profile(
     _save_store(source, destination, {"runs": runs})
 
 
+def record_run_parity(
+    source: dict[str, Any],
+    destination: dict[str, Any],
+    *,
+    job_id: str,
+    parity: dict[str, Any],
+) -> bool:
+    """Attach a Parity Studio outcome to this job's load in the route ring buffer.
+
+    The slot is the run the engine already recorded for ``job_id``; no run is
+    invented. Returns whether that run was found and updated.
+    """
+    store = _load_store(source, destination)
+    runs = list(store.get("runs") or [])
+    jid = str(job_id or "").strip()
+    for run in runs:
+        if jid and str((run or {}).get("job_id") or "") == jid:
+            if run.get("parity") == parity:
+                return True
+            run["parity"] = dict(parity)
+            _save_store(source, destination, {"runs": runs})
+            return True
+    return False
+
+
+def parity_is_drifting(
+    source: dict[str, Any],
+    destination: dict[str, Any],
+    *,
+    job_id: str,
+    threshold: float = 3.5,
+) -> bool | None:
+    """Robust z (median + MAD) of this run's proven-equal % against the route's earlier runs.
+
+    ``None`` when the route holds too little parity history to judge.
+    """
+    series: list[Decimal] = []
+    current: Decimal | None = None
+    for run in load_run_history(source, destination):
+        pct = ((run or {}).get("parity") or {}).get("proven_equal_pct")
+        if pct is None:
+            continue
+        value = _rehydrate_stat(pct)
+        if str(run.get("job_id") or "") == str(job_id):
+            current = value
+            break
+        if value is not None:
+            series.append(value)
+    if current is None:
+        return None
+    z = _robust_z(current, series)
+    return None if z is None else abs(z) > Decimal(str(threshold))
+
+
 def last_pii_hash_key_version(source: dict[str, Any], destination: dict[str, Any]) -> str:
     """The hash_pii key version of this route's most recent load that recorded one."""
     for run in reversed(load_run_history(source, destination)):

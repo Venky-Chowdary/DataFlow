@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useToast } from "../Toast";
 import { HiddenFileInput } from "../ui/HiddenFileInput";
+import { downloadBlob } from "../../lib/downloadBlob";
 import {
   controlTotalEvidenceLabel,
   controlTotalEvidenceTitle,
@@ -70,18 +71,6 @@ function mismatchLabel(m: Gate8SampleMismatch): string {
   const col = m.column || m.source || m.target || "value";
   const row = m.row != null ? `row ${m.row}` : "row ?";
   return `${row} · ${col}: ${String(m.source_value ?? "—")} → ${String(m.target_value ?? "—")}`;
-}
-
-function downloadBlob(filename: string, blob: Blob) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.rel = "noopener";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
 function downloadJson(filename: string, payload: unknown) {

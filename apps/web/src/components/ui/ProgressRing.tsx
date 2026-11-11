@@ -9,6 +9,12 @@ interface ProgressRingProps {
   tone?: "ok" | "warn" | "danger" | "live" | "idle";
   children?: ReactNode;
   className?: string;
+  /**
+   * Draw the value unrounded. The default rounds to whole percent, which is
+   * right for progress but would close the ring at 99.6% — wrong for a parity
+   * figure, where only 100% may look complete.
+   */
+  exact?: boolean;
 }
 
 /** One SVG ring — 100% is a closed circle. Live mode spins; it does not invent %. */
@@ -20,10 +26,11 @@ export function ProgressRing({
   tone = "ok",
   children,
   className = "",
+  exact = false,
 }: ProgressRingProps) {
   const r = radius ?? Math.max(8, size / 2 - 4);
   const c = size / 2;
-  const pct = clampPercent(value);
+  const pct = exact ? Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0)) : clampPercent(value);
   const complete = !indeterminate && pct >= 100;
   return (
     <div
@@ -39,7 +46,7 @@ export function ProgressRing({
           r={r}
           className="fill"
           pathLength={100}
-          strokeDasharray={ringDasharray(pct, { indeterminate })}
+          strokeDasharray={ringDasharray(pct, { indeterminate, exact })}
           transform={`rotate(-90 ${c} ${c})`}
         />
       </svg>
