@@ -55,7 +55,24 @@ def require_sso_authorization(email: str) -> None:
         raise HTTPException(status_code=403, detail="account_disabled")
     if _sso_auto_provision():
         allowed_domains = _sso_allowed_domains()
-        if allowed_domains and email.split("@")[-1].lower() not in allowed_domains:
+        if not allowed_domains:
+            # Fail closed (audit M-11): an empty list is "no domain may be
+            # provisioned", not "every identity the provider returns". People
+            # who already have an account still sign in.
+            if lookup_user(email.strip().lower()):
+                return
+            logger.warning(
+                "SSO request failed (sso_type=sso issuer= reason=auto_provision_without_allowed_domains)"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "SSO auto-provisioning is on but no email domain is allowed: an administrator "
+                    "must set SSO_ALLOWED_DOMAINS (DATAWRAP_SSO_ALLOWED_DOMAINS) to the domains "
+                    "that may be provisioned."
+                ),
+            )
+        if email.split("@")[-1].lower() not in allowed_domains:
             raise HTTPException(
                 status_code=403,
                 detail="SSO email domain is not on this deployment's allowed SSO domain list",

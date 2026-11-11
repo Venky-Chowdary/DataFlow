@@ -53,5 +53,6 @@ def can_sign_in(email: str) -> bool:
         return False
     if not _sso_auto_provision():
         return False
-    domains = _sso_allowed_domains()
-    return not domains or normalized.rsplit("@", 1)[-1] in domains
+    # An empty list provisions nobody (audit M-11), exactly as
+    # sso_authorization.require_sso_authorization decides.
+    return normalized.rsplit("@", 1)[-1] in _sso_allowed_domains()
