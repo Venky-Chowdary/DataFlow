@@ -376,6 +376,13 @@ def _totals_rows(src: Profile, ext: Profile | None) -> list[dict[str, Any]]:
     return out
 
 
+def resolve_keys(key_columns: list[str], columns: list[str]) -> tuple[list[str], list[str]]:
+    """(declared key columns as the table spells them, declared keys that are not columns)."""
+    by_lower = {c.lower(): c for c in columns}
+    resolved = [by_lower[k.lower()] for k in key_columns if k.lower() in by_lower]
+    return resolved, [k for k in key_columns if k.lower() not in by_lower]
+
+
 def judge_table(
     *,
     name: str,
@@ -431,7 +438,7 @@ def judge_table(
         reason = "Nothing differs where measured, but " + "; ".join(gaps) + ", so this table is not proven."
     else:
         status = "proven"
-        keyed = "key set, " if key_columns else ""
+        keyed = "key set, " if source is not None and source.key_set_sha256 else ""
         reason = (f"Rows, {keyed}every value (by {method.replace('_', ' ')}) and control totals match over "
                   f"all {source.rows if source else 0} row(s); the part verified on read.")
     return {"status": status, "reason": reason, "differences": diffs, "value_method": method,

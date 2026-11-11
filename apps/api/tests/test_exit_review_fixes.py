@@ -518,3 +518,29 @@ def test_m5_control_totals_of_a_pii_column_are_compared_but_not_shown():
     differs = judge_table(name="t", source=src, extract=changed, key_columns=["id"], seal_ok=True, parity=PARITY,
                           not_measured=[])
     assert {c["column"]: c for c in differs["control_totals"]}["ssn"]["match"] is False
+
+
+# ------------------------------- M6: the reason claims a key-set check only when one ran
+
+
+def test_m6_a_declared_key_resolves_case_insensitively_e2e(world):  # noqa: F811
+    out = _run(_system(tables=[{"name": "orders", "key_columns": ["ID"]}]))
+    t = out["tables"][0]
+    assert t["key_set"]["source_sha256"] and t["key_set"]["match"] is True
+    assert out["verdict"] == "proven" and "key set" in t["reason"]
+
+
+def test_m6_declared_keys_resolve_to_the_table_columns_and_a_missing_one_is_named():
+    from services.exit_completeness import resolve_keys
+
+    assert resolve_keys(["ID"], ["id", "note"]) == (["id"], [])
+    assert resolve_keys(["id", "order_ref"], ["id", "note"]) == (["id"], ["order_ref"])
+
+
+def test_m6_judge_does_not_claim_a_key_set_it_did_not_measure():
+    types = {"id": "BIGINT"}
+    src = profile_rows([{"id": 1}], ["id"], [], None, types=types, engine="sqlite")
+    ext = profile_rows([{"id": 1}], ["id"], [], ["id"], types=types, engine="sqlite")
+    out = judge_table(name="t", source=src, extract=ext, key_columns=["ID"], seal_ok=True, parity=PARITY,
+                      not_measured=[])
+    assert out["status"] == "proven" and "key set" not in out["reason"]

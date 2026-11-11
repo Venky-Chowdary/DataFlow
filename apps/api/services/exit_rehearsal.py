@@ -383,7 +383,13 @@ def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> dict[str, str
 
 def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     """One table's RehearsalTable (contract 4) from its finished job."""
-    from services.exit_completeness import judge_table, profile_extract, profile_rows, source_columns_and_rows
+    from services.exit_completeness import (
+        judge_table,
+        profile_extract,
+        profile_rows,
+        resolve_keys,
+        source_columns_and_rows,
+    )
     from services.parity_errors import safe_error
 
     out = {**table, "rows_source": None, "rows_extracted": None,
@@ -417,6 +423,10 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         engine = str(getattr(endpoint, "format", "") or "").lower()
         types = _declared_types(doc, table)
         columns, rows, close = source_columns_and_rows(endpoint)
+        keys, missing = resolve_keys(keys, columns)
+        if missing:
+            gaps.append(f"the declared key column(s) {', '.join(missing)} are not columns of the table, so the "
+                        "key set was not measured")
         try:
             source = profile_rows(rows, columns, keys, None, types=types, engine=engine)
         finally:
