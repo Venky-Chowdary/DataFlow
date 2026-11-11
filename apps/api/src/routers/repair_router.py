@@ -77,7 +77,17 @@ async def get_repair_proposal(proposal_id: str) -> dict[str, Any]:
 
 @router.post("/repair/proposals/{proposal_id}/decide")
 async def decide_repair(proposal_id: str, body: DecideBody, request: Request) -> dict[str, Any]:
-    from services.agentic_repair import apply_actions_with_report, decide_proposal
+    from services.agentic_repair import PARITY_SOURCE, apply_actions_with_report, decide_proposal, get_proposal
+
+    found = get_proposal(proposal_id)
+    if found is not None and found.source == PARITY_SOURCE:
+        # One workflow, one entry point per kind: a parity fix is applied through
+        # the transfer path and re-checked on the job's Trust Report.
+        fix_id = next((str(a.get("fix_id") or "") for a in found.actions), "")
+        raise HTTPException(status_code=409, detail=(
+            "This is a Parity Studio fix; decide it on the job's Trust Report "
+            f"(POST /api/v1/jobs/{found.job_id}/parity-report/fixes/{fix_id}/approve or /dismiss)."
+        ))
 
     def _apply(actions: list[dict[str, Any]]) -> dict[str, Any]:
         return apply_actions_with_report(body.mappings, actions)

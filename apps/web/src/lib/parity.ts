@@ -376,7 +376,7 @@ export function fixConsequence(fix: Pick<ParityFix, "action" | "difference_ids">
     case "widen_column":
       return "Datawrap changes the destination column, then checks the affected rows again.";
     case "resync_keys":
-      return "Datawrap re-writes the affected keys with an upsert, then checks them again.";
+      return "Datawrap starts a job that re-writes the affected keys with an upsert; the report checks them again when it finishes.";
     case "accept":
       return "The differences are recorded as accepted by you, with your note, and count as explained.";
     case "rerun":
@@ -384,6 +384,20 @@ export function fixConsequence(fix: Pick<ParityFix, "action" | "difference_ids">
     default:
       return "Datawrap applies this fix, then checks the affected rows again.";
   }
+}
+
+/** How often the page re-reads a report while a fix is being applied, and for how long at most. */
+export const PARITY_APPLYING_POLL_MS = 5_000;
+export const PARITY_APPLYING_POLL_LIMIT = 120;
+
+/**
+ * Re-read while a fix is being applied (a key re-sync runs as its own job and is
+ * re-checked when it finishes), and stop: once nothing is applying, or after a
+ * bounded number of reads so a stuck job never polls forever.
+ */
+export function shouldPollApplying(report: Pick<ParityReport, "fixes"> | null, reads: number): boolean {
+  if (!report || reads >= PARITY_APPLYING_POLL_LIMIT) return false;
+  return report.fixes.some((f) => f.status === "applying");
 }
 
 /** Which fixes a person can still act on. */

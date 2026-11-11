@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_parity_e2e_engine import _corrupting_route, _exec, _request, _Store, store  # noqa: F401
+from tests.test_parity_e2e_engine import _corrupting_route, _exec, _request, _Store, run_inline, store  # noqa: F401
 
 WEB_FIXTURE = Path(__file__).resolve().parents[2] / "web" / "src" / "components" / "parity" / "realParityPayloads.ts"
 _ISO = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?")
@@ -76,7 +76,7 @@ def _run(fake: _Store, req, job_id: str, name: str) -> str:
 
 
 def _payloads(fake: _Store, tmp_path: Path, monkeypatch) -> dict[str, object]:
-    from services import parity_fixes
+    from services import parity_apply
     from services.parity_explain import explain_job
     from services.parity_fixes import approve_fix, dismiss_fix
     from services.parity_report import build_parity_report
@@ -109,14 +109,13 @@ def _payloads(fake: _Store, tmp_path: Path, monkeypatch) -> dict[str, object]:
     first = _run(fake, _request(src, dst), "parity-run-1", "pay nightly")
     initial = _report(first)
     resync = next(f for f in initial["fixes"] if f["action"] == "resync_keys")
-    original = parity_fixes._resync_apply
 
-    def _locked(*_a, **_k):
-        raise RuntimeError("re-sync job x failed: destination locked")
+    def _locked(child_id, _req):
+        fake.update_job_status(child_id, "failed", error="destination locked")
 
-    monkeypatch.setattr(parity_fixes, "_resync_apply", _locked)
+    monkeypatch.setattr(parity_apply, "_launch", _locked)
     approve_fix(first, resync["id"], actor="ops@example.com", note="first try")
-    monkeypatch.setattr(parity_fixes, "_resync_apply", original)
+    monkeypatch.setattr(parity_apply, "_launch", run_inline)
     explain_job(first, actor="eng@example.com")  # template words (no LLM in tests)
     _exec(dst, "DROP TRIGGER cut", "DROP TRIGGER drop13")
     accept = next(f for f in _report(first)["fixes"] if f["action"] == "accept")

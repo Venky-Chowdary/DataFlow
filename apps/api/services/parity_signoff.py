@@ -82,7 +82,7 @@ def sign_off(
     report nobody saw.
     """
     from services.parity_authority import authority_note, signing_refusal
-    from services.parity_fixes import summarized
+    from services.parity_apply import summarized
     from services.parity_report import build_parity_report, public_report
     from services.signed_proof_pack import build_signed_parity_pack
 

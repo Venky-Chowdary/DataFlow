@@ -21,23 +21,18 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Callable
+from typing import Any
 
 from services.parity_classifier import NARROW_COLUMN_CAUSES
 from services.parity_evidence import TableEvidence, job_is_terminal, request_of, target_to_source
-from services.parity_state import (  # noqa: F401 - the error types are re-exported
+from services.parity_state import (  # noqa: F401 - the error types and load_job are re-exported
     MAX_APPLIED_ROUNDS,
     ParityConflict,
     ParityError,
     ParityInvalid,
     ParityNotFound,
     ParityStale,
-    audit,
-    check_version,
     load_job,
-    now_iso,
-    state_of,
-    update_state,
 )
 from services.remediation_actions import PARITY, action as remediation_action
 
@@ -303,263 +298,16 @@ def _find(report: dict[str, Any], fix_id: str) -> dict[str, Any]:
     raise ParityNotFound(f"Fix {fix_id} is not on this job's parity report")
 
 
-def _resync_apply(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: str) -> str:
-    from src.transfer.engine import get_transfer_engine
-    from src.transfer.models import transfer_request_from_dict
-
-    keys = list(fix.get("_keys") or [])
-    key_tgt = str(fix.get("_key_column") or "")
-    key_src = target_to_source(job).get(key_tgt, key_tgt)
-    req = transfer_request_from_dict(request_of(job))
-    req.sync_mode = "upsert"
-    req.source_filter = {"column": key_src, "op": "in", "value": keys}
-    contracts = [dict(c) for c in req.stream_contracts or [] if isinstance(c, dict)] or [
-        {"name": str(req.source.table or req.source.collection or ""), "selected": True}
-    ]
-    for c in contracts:
-        c.pop("cursor_field", None)
-        c.update({"sync_mode": "upsert", "primary_key": [key_src]})
-    req.stream_contracts = contracts
-    req.skip_preflight = True
-    req.limit = 0
-    req.parent_job_id = job_id
-    req.workspace_id = str(job.get("workspace_id") or req.workspace_id or "")
-    req.triggered_by = actor or "parity studio"
-    req.acknowledgment_actor = actor
-    req.acknowledgment_reason = (
-        f"Parity Studio fix {fix['id']}: re-sync {len(keys)} key(s) approved by {actor or 'operator'}."
-    )
-    req.idempotency_key = f"parity-{job_id}-{fix['id']}"
-    engine = get_transfer_engine()
-    child_id = engine._create_pending_job(req)
-    result = engine.execute_tracked(req, child_id)
-    if not getattr(result, "success", False):
-        raise RuntimeError(f"re-sync job {child_id} failed: {str(getattr(result, 'error', '') or '')[:300]}")
-    return f"Re-synced {len(keys)} key(s) through job {child_id} (upsert on {key_tgt})."
+# The decision workflow (approve, apply, settle, dismiss) lives in
+# services.parity_apply; these names stay importable from here.
+_APPLY_NAMES = frozenset({
+    "approve_fix", "dismiss_fix", "settle_fix", "settle_pending", "summarized", "not_signed", "SIGNED_IS_FINAL",
+})
 
 
-def _widen_apply(job: dict[str, Any], fix: dict[str, Any]) -> str:
-    from connectors.schema_drift import widen_existing_columns_native
-    from services.dest_precount import warehouse_sql_engine
-    from services.dialect_profiles import schema_from_cfg
-    from services.parity_evidence import _endpoints
-    from src.transfer.adapters import resolve_connector_config
-    from src.transfer.connector_capabilities import resolve_driver_type
+def __getattr__(name: str) -> Any:
+    if name in _APPLY_NAMES:
+        from services import parity_apply
 
-    _req, _source, destination = _endpoints(job)
-    cfg = resolve_connector_config(destination)
-    dialect = resolve_driver_type(str(cfg.get("type") or destination.format or "")).lower()
-    with warehouse_sql_engine(dialect, cfg) as eng:
-        raw = eng.raw_connection()
-        try:
-            ran = widen_existing_columns_native(
-                raw.cursor(), dialect, schema_from_cfg(dialect, cfg) or None, str(fix["_table"]),
-                [str(fix["_column"])], [str(fix["_new_type"])], backfill=True,
-            )
-            raw.commit()
-        finally:
-            raw.close()
-    if not ran:
-        raise RuntimeError("the destination column was not changed: it is already at least as wide")
-    return "Ran: " + "; ".join(ran)
-
-
-SIGNED_IS_FINAL = "This report is signed, and a signed report is final; re-run the job for a new report."
-
-
-def not_signed(state: dict[str, Any]) -> None:
-    """A signed report is final: no decision may change what was signed."""
-    if state.get("signed"):
-        raise ParityConflict(SIGNED_IS_FINAL)
-
-
-def _still_proposed(state: dict[str, Any], fix_id: str) -> None:
-    """Inside the compare-and-swap: nobody decided this fix since it was read, nor signed the report."""
-    not_signed(state)
-    stored = (state.get("fixes") or {}).get(fix_id)
-    if stored:
-        raise ParityConflict(f"Fix {fix_id} is already {stored.get('status')}.")
-
-
-def _decision_report(job_id: str, fix_id: str, expected_version: int | None) -> tuple[dict, dict, dict]:
-    from services.parity_report import build_parity_report
-
-    job = load_job(job_id)
-    check_version(job, expected_version)
-    not_signed(state_of(job))
-    report = build_parity_report(job, reread=True, job_id=job_id)
-    fix = _find(report, fix_id)
-    if fix["status"] != "proposed":
-        raise ParityConflict(f"Fix {fix_id} is already {fix['status']}.")
-    return job, report, fix
-
-
-def approve_fix(
-    job_id: str, fix_id: str, *, actor: str, note: str = "", expected_version: int | None = None,
-    start_rerun: Callable[[], str] | None = None,
-) -> dict[str, Any]:
-    """Approve and apply one fix, re-check, record the round; returns the new report.
-
-    The decision is taken against the report of one state version and written
-    by compare-and-swap on it, so a concurrent decision (another replica,
-    another person) is a 409, never a lost update. A write fix is first
-    *claimed* (status ``applying``) by that compare-and-swap — the round limit
-    is checked inside it — then applied, then settled.
-    """
-
-    job, report, fix = _decision_report(job_id, fix_id, expected_version)
-    if not fix["applicable"]:
-        raise ParityConflict(str(fix.get("not_applicable_reason") or "This fix cannot be applied."))
-    version = int(report["version"])
-    note = note[:500]
-    details = {"fix_id": fix_id, "action": fix["action"], "difference_ids": fix["difference_ids"], "note": note}
-    record = {**public_fix(fix), "approved_by": actor, "decided_at": now_iso(), "note": note}
-    before = report["parity"]["unexplained"]
-
-    if fix["action"] == "accept":
-        if not note.strip():
-            raise ParityInvalid("Accepting a difference needs a note: say why it is acceptable.")
-        scope = {
-            d["id"]: {"keys": list(d["_keys"]), "keyless_rows": int(d["_keyless"]), "rows": int(d["rows"])}
-            for d in report["differences"] if d["id"] in fix["difference_ids"]
-        }
-
-        def accept(job_now: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-            _still_proposed(state, fix_id)
-            for did in fix["difference_ids"]:
-                # Exactly the rows the person saw: later rows with the same cause are not covered.
-                state["acceptances"][did] = {"by": actor, "at": now_iso(), "note": note, "fix_id": fix_id,
-                                             **scope.get(did, {"keys": [], "keyless_rows": 0, "rows": 0})}
-            state["fixes"][fix_id] = {
-                **record, "status": "applied", "applied_at": now_iso(),
-                "result": f"Accepted {len(fix['difference_ids'])} difference(s).",
-            }
-            return summarized(job_now, state, job_id)
-
-        _updated, state, after = update_state(job_id, accept, expected_version=version)
-        _with_state(after, state)
-        audit("job.parity.fix_approved", job=job, job_id=job_id, actor=actor, details=details)
-        audit("job.parity.fix_applied", job=job, job_id=job_id, actor=actor,
-              details={**details, "result": state["fixes"][fix_id]["result"],
-                       "unexplained_after": after["parity"]["unexplained"]})
-        return after
-
-    def claim(_job: dict[str, Any], state: dict[str, Any]) -> None:
-        _still_proposed(state, fix_id)
-        if write_fixes_used(state) >= MAX_APPLIED_ROUNDS:
-            raise ParityConflict(
-                f"This job has used its {MAX_APPLIED_ROUNDS} applied fix rounds; re-run the job to start again."
-            )
-        # What the re-check needs once the write is done (internal: never exported).
-        target = {k: fix[k] for k in ("_table", "_keys") if fix.get(k)}
-        state["fixes"][fix_id] = {**record, **target, "status": APPLYING, "applied_at": None, "result": None}
-
-    update_state(job_id, claim, expected_version=version)
-    audit("job.parity.fix_approved", job=job, job_id=job_id, actor=actor, details=details)
-    try:
-        if fix["action"] == "resync_keys":
-            result = _resync_apply(job, job_id, fix, actor)
-        elif fix["action"] == "widen_column":
-            result = _widen_apply(job, fix)
-        else:
-            if start_rerun is None:
-                raise ParityConflict("A re-run can only be started from the API.")
-            result = f"Started re-run {start_rerun()}; it gets its own parity report when it completes."
-    except ParityError:
-        _release_claim(job_id, fix_id)
-        raise
-    except Exception as exc:  # noqa: BLE001 - a failed write is recorded on the fix, never hidden
-        return settle_fix(job_id, fix_id, actor=actor, ok=False, result=str(exc)[:500], before=before)
-    return settle_fix(job_id, fix_id, actor=actor, ok=True, result=result, before=before)
-
-
-def _release_claim(job_id: str, fix_id: str) -> None:
-    """A refusal before anything was written: the fix is proposed again."""
-    def release(_job: dict[str, Any], state: dict[str, Any]) -> None:
-        if (state["fixes"].get(fix_id) or {}).get("status") == APPLYING:
-            state["fixes"].pop(fix_id)
-
-    update_state(job_id, release)
-
-
-def settle_fix(
-    job_id: str, fix_id: str, *, actor: str, ok: bool, result: str, before: int,
-) -> dict[str, Any]:
-    """Record how a claimed write fix ended: re-check its keys, append the round.
-
-    Written by compare-and-swap on the freshest state (retried, never pinned:
-    the write already happened and its outcome must not be lost to a
-    concurrent unrelated change).
-    """
-    from services.parity_report import build_parity_report
-
-    def settle(job: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        record = state["fixes"].get(fix_id)
-        if not record or record.get("status") != APPLYING:
-            raise ParityConflict(f"Fix {fix_id} is not being applied.")
-        record.update(status="applied" if ok else "failed", applied_at=now_iso(), result=result)
-        if not ok:
-            return summarized(job, state, job_id)
-        after = build_parity_report({**job, "parity": state}, reread=True, job_id=job_id)
-        if record["action"] in {"resync_keys", "widen_column"}:
-            still = {k for d in after["differences"] if not d["cause"]["explained"] for k in d["_keys"]}
-            table = str(record.get("_table") or "")
-            keys = list(record.get("_keys") or [])
-            if table and keys:
-                resolved = set(state["resolved"].get(table) or []) | (set(keys) - still)
-                state["resolved"][table] = sorted(resolved)
-            state["rounds"].append({
-                "n": len(state["rounds"]) + 1, "at": now_iso(), "unexplained_before": before,
-                "unexplained_after": after["parity"]["unexplained"], "fix_id": fix_id,
-            })
-        return summarized(job, state, job_id)
-
-    job, state, after = update_state(job_id, settle)
-    record = state["fixes"][fix_id]
-    details = {"fix_id": fix_id, "action": record["action"], "difference_ids": record.get("difference_ids"),
-               "result": result[:500]}
-    if ok:
-        audit("job.parity.fix_applied", job=job, job_id=job_id, actor=actor,
-              details={**details, "unexplained_after": after["parity"]["unexplained"]})
-    else:
-        audit("job.parity.fix_failed", job=job, job_id=job_id, actor=actor,
-              details={**details, "error": result[:500]}, outcome="failed")
-    return _with_state(after, state)
-
-
-def summarized(job: dict[str, Any], state: dict[str, Any], job_id: str) -> dict[str, Any]:
-    """The report of ``state`` (re-read), with its compact summary set on ``state``.
-
-    Called inside a compare-and-swap change, so the dashboard summary is
-    written in the same write as the decision that changed it.
-    """
-    from services.parity_report import build_parity_report, compact_summary
-
-    report = build_parity_report({**job, "parity": state}, reread=True, job_id=job_id)
-    state["summary"] = compact_summary(report)
-    return report
-
-
-def _with_state(report: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-    report["version"] = int(state.get("version") or 0)
-    report["rounds"] = list(state.get("rounds") or [])
-    return report
-
-
-def dismiss_fix(
-    job_id: str, fix_id: str, *, actor: str, note: str = "", expected_version: int | None = None,
-) -> dict[str, Any]:
-
-    job, report, fix = _decision_report(job_id, fix_id, expected_version)
-    note = note[:500]
-
-    def dismiss(job_now: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        _still_proposed(state, fix_id)
-        state["fixes"][fix_id] = {**public_fix(fix), "status": "dismissed", "approved_by": actor,
-                                  "decided_at": now_iso(), "note": note, "result": note or None}
-        return summarized(job_now, state, job_id)
-
-    _updated, state, after = update_state(job_id, dismiss, expected_version=int(report["version"]))
-    audit("job.parity.fix_dismissed", job=job, job_id=job_id, actor=actor,
-          details={"fix_id": fix_id, "action": fix["action"], "note": note})
-    return _with_state(after, state)
+        return getattr(parity_apply, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

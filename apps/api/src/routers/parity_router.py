@@ -2,8 +2,9 @@
 
 ``GET /jobs/{id}/parity-report`` answers "does the destination match the source,
 and is every difference explained?" from the run's own evidence. Fixes are
-applied only when a person approves one (``job.run``, the permission that runs
-transfers, plus write access to the job's workspace); sign-off needs
+applied only when a person approves one (``job.manage``, the permission of the
+repair approval workflow's decide route, plus write access to the job's
+workspace); sign-off needs
 ``job.manage`` and the authority the configured mapping binds to the role
 (:mod:`services.parity_authority`), and is refused while an unexplained
 difference is left. A job of another
@@ -64,7 +65,16 @@ def _public(report: dict[str, Any]) -> dict[str, Any]:
 
 def _report(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     from services.parity_report import build_parity_report
+    from services.parity_state import state_of
     from services.parity_summary import remember_report
+
+    if any(f.get("status") == "applying" for f in state_of(job)["fixes"].values()):
+        # A re-sync job that finished (on any replica) is settled by the next read.
+        from services.parity_apply import settle_pending
+        from services.parity_state import job_store
+
+        settle_pending(job_id)
+        job = job_store().get_job(job_id) or job
 
     report = build_parity_report(job, reread=True, job_id=job_id)
     remember_report(job_id, job, report)

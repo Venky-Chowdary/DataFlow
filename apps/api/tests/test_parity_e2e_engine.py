@@ -35,14 +35,28 @@ class _Store:
     def __init__(self) -> None:
         from tests.test_property2_golden_path_never_blocked import _FakeMongo
 
+        import threading
+
         self._inner = _FakeMongo()
         self.jobs = self._inner.jobs
+        self._lock = threading.Lock()
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
-    def update_job_fields(self, job_id: str, fields: dict, **_kw) -> bool:
-        return self._inner.update_job_fields(job_id, fields)
+    def update_job_fields(self, job_id: str, fields: dict, *, expected: dict | None = None, **_kw) -> bool:
+        """The real stores' compare-and-swap and dotted paths (services.mongodb_service)."""
+        import copy
+
+        from services.mongodb_service import _set_dotted, expected_fields_hold
+
+        with self._lock:
+            rec = self.jobs.setdefault(job_id, {})
+            if expected and not expected_fields_hold(rec, expected):
+                return False
+            for name, value in fields.items():
+                _set_dotted(rec, name, copy.deepcopy(value))
+            return True
 
     def get_job(self, job_id: str):
         job = self._inner.get_job(job_id)
@@ -62,7 +76,22 @@ def store(monkeypatch, tmp_path):
     monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
     monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
     monkeypatch.setenv("DATAFLOW_LLM_ENABLED", "false")
+    from services import parity_apply
+
+    # The re-sync runs on the transfer scheduler; here it runs on this thread so
+    # the test can read its outcome (tests/test_parity_review_f10_* covers the
+    # real background launch).
+    monkeypatch.setattr(parity_apply, "_launch", run_inline)
     return fake
+
+
+def run_inline(child_id: str, req):
+    import concurrent.futures
+
+    UniversalTransferEngine().execute_tracked(req, child_id)
+    done: concurrent.futures.Future = concurrent.futures.Future()
+    done.set_result(None)
+    return done
 
 
 def _exec(path: Path, *sql: str) -> None:
@@ -226,7 +255,7 @@ def test_parity_loop_on_a_real_engine_run(store, tmp_path):
 
 
 def test_a_failed_write_is_recorded_and_not_counted_as_resolved(store, tmp_path, monkeypatch):
-    from services import parity_fixes
+    from services import parity_apply
     from services.audit_log import list_audit_events
     from services.parity_fixes import approve_fix
     from services.parity_report import build_parity_report
@@ -236,10 +265,10 @@ def test_a_failed_write_is_recorded_and_not_counted_as_resolved(store, tmp_path,
     report = build_parity_report(store.get_job(job_id), job_id=job_id)
     resync = next(f for f in report["fixes"] if f["action"] == "resync_keys")
 
-    def _refuse(*_a, **_k):
-        raise RuntimeError("re-sync job x failed: destination locked")
+    def _locked(child_id, _req):
+        store.update_job_status(child_id, "failed", error="destination locked")
 
-    monkeypatch.setattr(parity_fixes, "_resync_apply", _refuse)
+    monkeypatch.setattr(parity_apply, "_launch", _locked)
     after = approve_fix(job_id, resync["id"], actor="ops@example.com")
     failed = next(f for f in after["fixes"] if f["id"] == resync["id"])
     assert failed["status"] == "failed" and "destination locked" in failed["result"]

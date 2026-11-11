@@ -169,7 +169,7 @@ def explain_report(report: dict[str, Any]) -> dict[str, Any]:
 
 def explain_job(job_id: str, *, actor: str) -> dict[str, Any]:
     """Explain the current report, store the explanation, return the updated report."""
-    from services.parity_fixes import not_signed
+    from services.parity_apply import not_signed
     from services.parity_report import build_parity_report
     from services.parity_state import load_job, state_of, update_state
 

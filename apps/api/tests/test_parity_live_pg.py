@@ -24,7 +24,7 @@ os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
 psycopg2 = pytest.importorskip("psycopg2")
 
-from tests.test_parity_e2e_engine import _Store  # noqa: E402
+from tests.test_parity_e2e_engine import _Store, run_inline  # noqa: E402
 
 
 def _pg_cfg() -> dict:
@@ -58,6 +58,9 @@ def pg(monkeypatch, tmp_path):
     monkeypatch.setattr(mongodb_service, "get_mongodb_service", lambda: store)
     monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
     monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
+    from services import parity_apply
+
+    monkeypatch.setattr(parity_apply, "_launch", run_inline)  # the re-sync job, on this thread
     suffix = uuid.uuid4().hex[:10]
     tables = (f"parity_src_{suffix}", f"parity_dst_{suffix}")
     try:

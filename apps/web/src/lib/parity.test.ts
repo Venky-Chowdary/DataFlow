@@ -37,6 +37,8 @@ import {
   verdictPresentation,
   parityIsLowerBound,
   heatCellLabel,
+  shouldPollApplying,
+  PARITY_APPLYING_POLL_LIMIT,
   approvalAuthority,
   invalidatedApprovalsNote,
   fixStatusPresentation,
@@ -84,6 +86,12 @@ describe("verdicts, statuses and causes", () => {
     assert.equal(tableStatusPresentation({ status: "match", unexplained: 0, check: "sampled" }).label, "No difference in sample");
     assert.equal(verdictPresentation(provenReport({ verdict: "no_difference_found" })).label, "No difference in sample");
     assert.equal(heatCellLabel("sampled"), "No difference in sample");
+    // A re-sync runs as its own job (review finding 10): re-read while it applies, never forever.
+    const applyingReport = { fixes: [{ ...unexplainedReport().fixes[0], status: "applying" as const }] };
+    assert.equal(shouldPollApplying(applyingReport, 0), true);
+    assert.equal(shouldPollApplying(applyingReport, PARITY_APPLYING_POLL_LIMIT), false);
+    assert.equal(shouldPollApplying(unexplainedReport(), 0), false);
+    assert.equal(shouldPollApplying(null, 0), false);
     // A claimed write fix (review finding 4) reads as in progress and counts against the limit.
     assert.equal(fixStatusPresentation("applying").label, "Applying…");
     assert.equal(

@@ -32,6 +32,7 @@ import {
 import { downloadBlob } from "../../lib/downloadBlob";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import {
+  PARITY_APPLYING_POLL_MS,
   PARITY_MAX_ROUNDS,
   badgeClass,
   causeChip,
@@ -52,6 +53,7 @@ import {
   rereadLabel,
   roleLabel,
   parityIsLowerBound,
+  shouldPollApplying,
   verdictPresentation,
   type ParityDifference,
   type ParityFix,
@@ -616,7 +618,8 @@ const IN_FLIGHT = new Set(["running", "pending", "queued"]);
 
 export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: TrustReportTabProps) {
   const { toast } = useToast();
-  const fixGate = useWriteGate(PERMISSIONS.jobRun, "approve or dismiss a fix");
+  // Deciding a fix is a repair decision (the same as Repair proposals' decide): job.manage.
+  const fixGate = useWriteGate(PERMISSIONS.jobManage, "approve or dismiss a fix");
   // Explaining stores the explanation on the job (audited), so it is job.run (review finding 11).
   const explainGate = useWriteGate(PERMISSIONS.jobRun, "ask for an explanation of a trust report");
   // Signing attests the report: job.manage, and the API binds each sign-off role
@@ -669,6 +672,23 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
     });
     return () => controller.abort();
   }, [jobId, inFlight, load]);
+
+  // A fix being applied (a re-sync job) settles on the server: re-read until it has, bounded.
+  const applying = report?.fixes.some((f) => f.status === "applying") ?? false;
+  useEffect(() => {
+    if (!applying) return;
+    let reads = 0;
+    const timer = setInterval(() => {
+      if (busyRef.current) return;
+      reads += 1;
+      if (!shouldPollApplying(reportRef.current, reads)) {
+        clearInterval(timer);
+        return;
+      }
+      void load();
+    }, PARITY_APPLYING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [applying, load]);
 
   /**
    * Run one action at a time. Every control is disabled while it runs; the
@@ -780,7 +800,12 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
       onApprove={(fixId, note) => {
         const fix = report.fixes.find((f) => f.id === fixId);
         void run({ kind: "approve", id: fixId }, "fix", () => approveParityFix(jobId, fixId, note, report.version), {
-          title: fix?.action === "accept" ? "Differences accepted" : "Fix applied and re-checked",
+          title:
+            fix?.action === "accept"
+              ? "Differences accepted"
+              : fix?.action === "resync_keys"
+                ? "Re-sync started; the report re-checks the keys when it finishes"
+                : "Fix applied and re-checked",
           message: fix?.title,
         });
       }}

@@ -92,17 +92,26 @@ def _job_summary(job: dict[str, Any], job_id: str) -> dict[str, Any]:
     return compact_summary(build_parity_report(job, reread=False, job_id=job_id))
 
 
+def _is_repair_job(job: dict[str, Any]) -> bool:
+    req = job.get("transfer_request") if isinstance(job.get("transfer_request"), dict) else {}
+    return bool(str(job.get("parent_job_id") or req.get("parent_job_id") or "").strip())
+
+
 def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
     """KPIs, the per-run trend (newest last) and the table x run heatmap."""
     from services.job_status import job_timestamp_iso
 
     store = job_store()
-    listed = store.list_jobs(limit=limit, workspace_filter=workspace_filter)
+    # Repair jobs (a Parity Studio re-sync, a quarantine replay) are not runs of
+    # their own: their outcome is the parent's re-check round. Read past them.
+    listed = store.list_jobs(limit=min(2 * limit, 200), workspace_filter=workspace_filter)
     rows: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
     for brief in listed:
+        if len(rows) >= limit:
+            break
         job_id = str(brief.get("_id") or brief.get("id") or brief.get("job_id") or "")
         job = store.get_job(job_id) if job_id else None
-        if not job:
+        if not job or _is_repair_job(job):
             continue
         rows.append((brief, job, _job_summary(job, job_id)))
     rows.reverse()  # the store lists newest first; the trend reads oldest to newest

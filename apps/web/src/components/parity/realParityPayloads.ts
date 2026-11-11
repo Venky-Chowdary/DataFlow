@@ -281,6 +281,7 @@ export const reportResynced: ParityReport = {
       "applicable": true,
       "applied_at": "2026-11-11T14:00:00+00:00",
       "approved_by": "ops@example.com",
+      "child_job_id": "resync-child-1",
       "decided_at": "2026-11-11T14:00:00+00:00",
       "detail": "Reads these 4 key(s) from the source again and writes them with an upsert on id; no other row is touched.",
       "difference_ids": [
@@ -291,7 +292,8 @@ export const reportResynced: ParityReport = {
       "not_applicable_reason": null,
       "note": "first try",
       "preview": "upsert pay for id IN (7, 8, 9, 13) — 4 key(s)",
-      "result": "re-sync job x failed: destination locked",
+      "repair_proposal_id": "repair_parity_1aa5af88e1d2cfda",
+      "result": "re-sync job resync-child-1 failed: destination locked",
       "status": "failed",
       "title": "Re-sync 4 key(s) in pay by upsert"
     },
@@ -309,6 +311,7 @@ export const reportResynced: ParityReport = {
       "not_applicable_reason": null,
       "note": "repair it instead",
       "preview": null,
+      "repair_proposal_id": "repair_parity_7c6ac4ebd9c5461f",
       "result": "repair it instead",
       "status": "dismissed",
       "title": "Accept 3 row(s) in pay.amount (numeric scale)"
@@ -318,6 +321,7 @@ export const reportResynced: ParityReport = {
       "applicable": true,
       "applied_at": "2026-11-11T14:00:00+00:00",
       "approved_by": "ops@example.com",
+      "child_job_id": "resync-child-2",
       "decided_at": "2026-11-11T14:00:00+00:00",
       "detail": "Reads these 4 key(s) from the source again and writes them with an upsert on id; no other row is touched.",
       "difference_ids": [
@@ -328,7 +332,8 @@ export const reportResynced: ParityReport = {
       "not_applicable_reason": null,
       "note": "triggers removed",
       "preview": "upsert pay for id IN (7, 8, 9, 13) — 4 key(s)",
-      "result": "Re-synced 4 key(s) through job resync-child-1 (upsert on id).",
+      "repair_proposal_id": "repair_parity_b779d9b7835a7ec5",
+      "result": "Re-synced 4 key(s) through job resync-child-2 (upsert on id; 4 row(s) written).",
       "status": "applied",
       "title": "Re-sync 4 key(s) in pay by upsert"
     }
@@ -381,7 +386,7 @@ export const reportResynced: ParityReport = {
   ],
   "verdict": "explained",
   "verdict_reason": "9 row(s) differ and every difference is explained.",
-  "version": 6
+  "version": 8
 };
 
 export const reportSigned: ParityReport = {
@@ -451,6 +456,7 @@ export const reportSigned: ParityReport = {
       "applicable": true,
       "applied_at": "2026-11-11T14:00:00+00:00",
       "approved_by": "ops@example.com",
+      "child_job_id": "resync-child-1",
       "decided_at": "2026-11-11T14:00:00+00:00",
       "detail": "Reads these 4 key(s) from the source again and writes them with an upsert on id; no other row is touched.",
       "difference_ids": [
@@ -461,7 +467,8 @@ export const reportSigned: ParityReport = {
       "not_applicable_reason": null,
       "note": "first try",
       "preview": "upsert pay for id IN (7, 8, 9, 13) — 4 key(s)",
-      "result": "re-sync job x failed: destination locked",
+      "repair_proposal_id": "repair_parity_1aa5af88e1d2cfda",
+      "result": "re-sync job resync-child-1 failed: destination locked",
       "status": "failed",
       "title": "Re-sync 4 key(s) in pay by upsert"
     },
@@ -479,6 +486,7 @@ export const reportSigned: ParityReport = {
       "not_applicable_reason": null,
       "note": "repair it instead",
       "preview": null,
+      "repair_proposal_id": "repair_parity_7c6ac4ebd9c5461f",
       "result": "repair it instead",
       "status": "dismissed",
       "title": "Accept 3 row(s) in pay.amount (numeric scale)"
@@ -488,6 +496,7 @@ export const reportSigned: ParityReport = {
       "applicable": true,
       "applied_at": "2026-11-11T14:00:00+00:00",
       "approved_by": "ops@example.com",
+      "child_job_id": "resync-child-2",
       "decided_at": "2026-11-11T14:00:00+00:00",
       "detail": "Reads these 4 key(s) from the source again and writes them with an upsert on id; no other row is touched.",
       "difference_ids": [
@@ -498,7 +507,8 @@ export const reportSigned: ParityReport = {
       "not_applicable_reason": null,
       "note": "triggers removed",
       "preview": "upsert pay for id IN (7, 8, 9, 13) — 4 key(s)",
-      "result": "Re-synced 4 key(s) through job resync-child-1 (upsert on id).",
+      "repair_proposal_id": "repair_parity_b779d9b7835a7ec5",
+      "result": "Re-synced 4 key(s) through job resync-child-2 (upsert on id; 4 row(s) written).",
       "status": "applied",
       "title": "Re-sync 4 key(s) in pay by upsert"
     }
@@ -532,7 +542,7 @@ export const reportSigned: ParityReport = {
         "role": "engineering",
         "signer_role": "editor",
         "user": "eng@example.com",
-        "version": 6
+        "version": 8
       },
       {
         "at": "2026-11-11T14:00:00+00:00",
@@ -542,7 +552,7 @@ export const reportSigned: ParityReport = {
         "role": "data_owner",
         "signer_role": "editor",
         "user": "owner@example.com",
-        "version": 7
+        "version": 9
       },
       {
         "at": "2026-11-11T14:00:00+00:00",
@@ -552,7 +562,7 @@ export const reportSigned: ParityReport = {
         "role": "compliance",
         "signer_role": "admin",
         "user": "comp@example.com",
-        "version": 8
+        "version": 10
       }
     ],
     "blocked_reason": null,
@@ -582,7 +592,7 @@ export const reportSigned: ParityReport = {
   ],
   "verdict": "explained",
   "verdict_reason": "9 row(s) differ and every difference is explained.",
-  "version": 9
+  "version": 11
 };
 
 export const summary: ParitySummary = {
@@ -592,13 +602,11 @@ export const summary: ParitySummary = {
       [
         "explained",
         "explained",
-        "explained",
         "unexplained_large"
       ]
     ],
     "job_ids": [
       "parity-run-1",
-      "resync-child-1",
       "parity-run-2",
       "parity-run-3"
     ],
@@ -607,9 +615,9 @@ export const summary: ParitySummary = {
     ]
   },
   "kpis": {
-    "fully_proven_pct": 75.0,
+    "fully_proven_pct": 66.67,
     "most_drifting_table": "pay",
-    "runs": 4,
+    "runs": 3,
     "runs_with_unexplained": 1,
     "signoffs": 1
   },
@@ -619,15 +627,6 @@ export const summary: ParitySummary = {
       "drift": null,
       "job_id": "parity-run-1",
       "name": "pay nightly",
-      "proven_equal_pct": 100.0,
-      "unexplained": 0,
-      "verdict": "explained"
-    },
-    {
-      "at": "",
-      "drift": null,
-      "job_id": "resync-child-1",
-      "name": "pay → pay",
       "proven_equal_pct": 100.0,
       "unexplained": 0,
       "verdict": "explained"

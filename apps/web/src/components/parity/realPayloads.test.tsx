@@ -78,9 +78,10 @@ describe("real backend payloads (static)", () => {
     assert.match(t, /Unexplained 4 → 0/);
     assert.ok(reportResynced.fixes.some((f) => f.id.endsWith("-2") && f.status === "applied"));
     assert.match(t, /Failed/);
-    assert.match(t, /Approved by ops@example\.com · [^.]+\. re-sync job x failed: destination locked/);
+    // The re-sync runs as its own job (review finding 10); its failure is that job's.
+    assert.match(t, /Approved by ops@example\.com · [^.]+\. re-sync job resync-child-1 failed: destination locked/);
     assert.match(t, /Note: “first try”/);
-    assert.match(t, /Re-synced 4 key\(s\) through job resync-child-1 \(upsert on id\)\. Note: “triggers removed”/);
+    assert.match(t, /Re-synced 4 key\(s\) through job resync-child-2 \(upsert on id; 4 row\(s\) written\)\. Note: “triggers removed”/);
     assert.match(t, /Dismissed by owner@example\.com/);
     assert.equal((t.match(/repair it instead/g) || []).length, 1, "a dismissal's note is shown once");
     assert.match(t, /2 of 3 write fixes used/, "a failed write counts against the limit too");
@@ -94,9 +95,10 @@ describe("real backend payloads (static)", () => {
     );
     const t = text(html);
     assert.match(t, /Signed/);
-    assert.match(t, /Engineering · eng@example\.com checked/);
+    // Each approval names the workspace authority it was signed with (review finding 5).
+    assert.match(t, /Engineering · eng@example\.com \(workspace editor\) checked/);
     assert.match(t, /Data owner · owner@example\.com/);
-    assert.match(t, /Compliance · comp@example\.com ok/);
+    assert.match(t, /Compliance · comp@example\.com \(workspace admin\) ok/);
     assert.equal((t.match(/Signed \d/g) || []).length, 3);
     assert.doesNotMatch(t, /Sign as/);
     assert.match(t, /hmac-sha256:5e5e…5e5e/);
@@ -107,12 +109,13 @@ describe("real backend payloads (static)", () => {
   it("summary: KPIs, trend and heatmap from the workspace summary", () => {
     const html = renderToStaticMarkup(<MigrationHealthView state="ready" summary={summary} limit={30} onOpenJob={noop} />);
     const t = text(html);
-    assert.match(t, /runs fully proven 75%/);
+    // The re-sync job is a repair of run 1, not a run (review U4): three runs, two fully proven.
+    assert.match(t, /runs fully proven 66\.6%/);
     assert.match(t, /runs with unexplained differences 1/);
     assert.match(t, /sign-offs 1/);
     assert.match(t, /most-drifting table pay/);
-    assert.match(html, /aria-label="Parity over the last 4 runs/);
-    assert.match(html, /aria-label="1 table over 4 runs\. Unexplained differences: pay in 1 run\."/);
+    assert.match(html, /aria-label="Parity over the last 3 runs/);
+    assert.match(html, /aria-label="1 table over 3 runs\. Unexplained differences: pay in 1 run\."/);
     assert.doesNotMatch(t, /\bdrift\b/, "no run has drift: true (too little route history)");
   });
 });
@@ -228,7 +231,7 @@ describe("real backend payloads (jsdom)", () => {
     await click(button("Sign as Engineering"));
     const post = calls.find((c) => c.method === "POST")!;
     assert.match(post.url, /\/parity-report\/signoff$/);
-    assert.equal(post.body, '{"role":"engineering"}');
+    assert.equal(post.body, `{"role":"engineering","expected_version":${reportResynced.version}}`);
     assert.match(alerts(), /One person signs one role; ask another approver\. The report has been refreshed/);
     assert.equal(calls.filter((c) => c.method === "GET").length, gets + 1);
     assert.equal(button("Sign as Engineering").disabled, false);
@@ -249,7 +252,7 @@ describe("real backend payloads (jsdom)", () => {
     await mount(<MigrationHealthSection limit={30} />);
     const t = host!.textContent || "";
     assert.match(t, /runs fully proven/);
-    assert.match(t, /75%/);
+    assert.match(t, /66\.6%/);
     assert.match(t, /pay backfill|pay nightly/);
     assert.ok(calls.some((c) => /\/parity\/summary\?limit=30$/.test(c.url)));
   });
