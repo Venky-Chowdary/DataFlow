@@ -381,3 +381,19 @@ describe("Trust Report actions (jsdom)", () => {
     assert.match(host!.textContent || "", /4 differences unexplained/);
   });
 });
+
+describe("bounded re-reads while a fix applies (re-review finding 15)", () => {
+  it("says so when the automatic re-reads stop and the fix is still applying", () => {
+    const base = unexplainedReport();
+    const applying = { ...base, fixes: base.fixes.map((f, i) => (i === 0 ? { ...f, status: "applying" as const } : f)) };
+    assert.match(text(view(applying, { pollStopped: true })), /Stopped checking automatically/);
+    assert.doesNotMatch(text(view(applying, { pollStopped: false })), /Stopped checking automatically/);
+    assert.doesNotMatch(text(view(base, { pollStopped: true })), /Stopped checking automatically/);
+  });
+
+  it("shows a lower-bound row count as at least (re-review finding 4)", () => {
+    const base = unexplainedReport();
+    const lower = { ...base, differences: base.differences.map((d, i) => (i === 0 ? { ...d, rows_at_least: true } : d)) };
+    assert.match(view(lower), /aria-label="at least \d+ rows"/);
+  });
+});

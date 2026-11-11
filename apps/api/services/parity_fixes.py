@@ -110,9 +110,8 @@ def _resync(job: dict[str, Any], ev: TableEvidence, diffs: list[dict[str, Any]],
     )
 
 
-def _widen(job: dict[str, Any], ev: TableEvidence, diff: dict[str, Any], live: dict[str, Any]) -> dict:
-    from connectors.schema_drift import _build_widen_ddl, is_wider_type
-
+def _widen(job: dict[str, Any], ev: TableEvidence, diff: dict[str, Any], live: dict[str, Any],
+           report: dict[str, Any]) -> dict:
     col = str(diff["column"])
     dialect = str(live.get("dialect") or "")
     existing = str(live.get("dest", {}).get(col) or ev.dest_types.get(col) or "")
@@ -121,23 +120,13 @@ def _widen(job: dict[str, Any], ev: TableEvidence, diff: dict[str, Any], live: d
         new_type = _decimal_cover(new_type, existing, dialect, diff)
     reason = _route_reason(job)
     preview = None
-    if reason is None:
-        try:
-            preview = _build_widen_ddl(
-                dialect, live.get("schema") or None, ev.name, col, new_type or "TEXT", existing or None
-            )
-        except NotImplementedError:
-            reason = (
-                f"{dialect or 'This destination'} cannot change a column type in place; "
-                "recreate the table with the wider type or re-run with overwrite."
-            )
-            preview = None
     if reason is None and not new_type:
         reason = "The source column type is not known, so there is no type to widen to."
-        preview = None
-    if reason is None and existing and not is_wider_type(existing, new_type, dest_db=dialect):
-        reason = f"The source type {new_type} is not wider than the destination type {existing}."
-        preview = None
+    if reason is None:
+        # The helper itself decides whether the type is wider: no DDL means nothing to widen.
+        preview, reason = _widen_preview(job, ev.name, col, new_type, dialect, report)
+        if reason is None and not preview:
+            reason = f"The source type {new_type} is not wider than the destination type {existing or 'it has'}."
     return _fix(
         "widen_column", [diff], title=f"Widen {ev.name}.{col} to {new_type or 'the source type'}",
         detail=(
@@ -150,6 +139,81 @@ def _widen(job: dict[str, Any], ev: TableEvidence, diff: dict[str, Any], live: d
         preview=preview, reason=reason, table=ev.name, column=col, new_type=new_type,
         existing_type=existing,
     )
+
+
+def widen_statements(job: dict[str, Any], table: str, column: str, new_type: str, *, dry_run: bool) -> list[str]:
+    """The widen DDL for one column through the one in-place widen helper.
+
+    ``dry_run`` reads the destination catalog and runs every check of
+    :func:`connectors.schema_drift.widen_existing_columns_native` without
+    executing DDL, so the preview a person approves is the statement list the
+    apply executes (MySQL's preserved column clause, the keyed carrier, the
+    UTC pin included).
+    """
+    from connectors.schema_drift import widen_existing_columns_native
+    from services.dest_precount import warehouse_sql_engine
+    from services.dialect_profiles import schema_from_cfg
+    from services.parity_evidence import _endpoints
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    _req, _source, destination = _endpoints(job)
+    cfg = resolve_connector_config(destination)
+    dialect = resolve_driver_type(str(cfg.get("type") or destination.format or "")).lower()
+    if dialect == "sqlite":
+        raise NotImplementedError("SQLite cannot ALTER COLUMN TYPE")
+    with warehouse_sql_engine(dialect, cfg) as eng:
+        raw = eng.raw_connection()
+        try:
+            ran = widen_existing_columns_native(
+                raw.cursor(), dialect, schema_from_cfg(dialect, cfg) or None, table,
+                [column], [new_type], backfill=True, dry_run=dry_run,
+            )
+            if dry_run:
+                raw.rollback()
+            else:
+                raw.commit()
+        finally:
+            raw.close()
+    return ran
+
+
+def _widen_preview(job: dict[str, Any], table: str, column: str, new_type: str, dialect: str,
+                   report: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(preview, not-applicable reason): the dry run of the DDL the apply would execute."""
+    from connectors.schema_drift import WidenNotSupported
+
+    from services.parity_cache import NotCached, cached_read
+    from services.parity_report import _reread_seconds, read_key
+    from src.ai.copilot.tool_deadline import run_with_deadline
+
+    def timed_out(message: str) -> None:
+        raise TimeoutError(message)
+
+    mode = str(report.get("_cache") or "refresh")
+    try:
+        statements, _at = cached_read(
+            read_key(job, int(report.get("version") or 0), "widen", table, column, new_type),
+            lambda: run_with_deadline(
+                "parity_widen_preview",
+                lambda: widen_statements(job, table, column, new_type, dry_run=True),
+                timed_out, seconds=_reread_seconds(),
+            ),
+            mode=mode,
+        )
+    except NotCached:
+        return None, "The DDL is prepared from the live destination catalog; open the Trust Report to see it."
+    except NotImplementedError:
+        return None, (
+            f"{dialect or 'This destination'} cannot change a column type in place; "
+            "recreate the table with the wider type or re-run with overwrite."
+        )
+    except WidenNotSupported as exc:
+        return None, str(exc)[:500]
+    except Exception as exc:  # noqa: BLE001 - no preview, no apply: say why
+        logger.info("parity: widen preview unavailable (%s)", type(exc).__name__)
+        return None, f"The destination catalog could not be read to prepare the DDL ({type(exc).__name__})."
+    return ("; ".join(statements) or None), None
 
 
 def _decimal_cover(source_type: str, existing: str, dialect: str, diff: dict[str, Any]) -> str:
@@ -216,7 +280,8 @@ def _accept(diff: dict[str, Any]) -> dict:
     )
 
 
-def _live_types(job: dict[str, Any], ev: TableEvidence, columns: list[str]) -> dict[str, Any]:
+def _live_types(job: dict[str, Any], ev: TableEvidence, columns: list[str],
+                report: dict[str, Any] | None = None) -> dict[str, Any]:
     """Catalog types of the narrow columns on both sides (best effort, metadata only).
 
     The source side is :func:`services.value_readback._live_source_types` — the
@@ -253,9 +318,16 @@ def _live_types(job: dict[str, Any], ev: TableEvidence, columns: list[str]) -> d
     def timed_out(message: str) -> None:
         raise TimeoutError(message)
 
+    from services.parity_cache import cached_read
+    from services.parity_report import read_key
+
     try:
         # The same bound as the keyed re-read: a slow catalog never holds the report.
-        out = run_with_deadline("parity_live_types", read, timed_out, seconds=_reread_seconds())
+        out, _at = cached_read(
+            read_key(job, int((report or {}).get("version") or 0), "types", ev.name, tuple(columns)),
+            lambda: run_with_deadline("parity_live_types", read, timed_out, seconds=_reread_seconds()),
+            mode=str((report or {}).get("_cache") or "refresh"),
+        )
     except Exception as exc:  # noqa: BLE001 - types are advisory; the fix says what is unknown
         logger.info("parity: live column types unavailable (%s)", type(exc).__name__)
     if not out.get("dialect"):
@@ -276,8 +348,10 @@ def propose_fixes(job: dict[str, Any], report: dict[str, Any], state: dict[str, 
                 proposals.append(_rerun(job, [], job_id))
             continue
         narrow = [d for d in bad if d["cause"]["code"] in NARROW_COLUMN_CAUSES and d["column"] and d["kind"] == "value"]
-        live = _live_types(job, ev, [d["column"] for d in narrow]) if narrow and reread else {}
-        widens = [_widen(job, ev, d, live) for d in narrow]
+        live = _live_types(job, ev, [d["column"] for d in narrow], report) if narrow and reread else {}
+        if narrow and not reread:
+            report = {**report, "_cache": "only"}  # no live read: a preview only from a recent one
+        widens = [_widen(job, ev, d, live, report) for d in narrow]
         proposals += widens
         keyed = [d for d in bad if d["_keys"] and d["kind"] in {"value", "missing_in_destination"}]
         resync = _resync(job, ev, keyed, any(w["applicable"] for w in widens)) if keyed else None

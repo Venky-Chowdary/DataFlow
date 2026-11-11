@@ -87,7 +87,8 @@ def _report(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
         settle_pending(job_id)
         job = job_store().get_job(job_id) or job
 
-    report = build_parity_report(job, reread=True, job_id=job_id)
+    # The page polls: a re-read of this version within the cache window is reused (parity_cache).
+    report = build_parity_report(job, reread=True, job_id=job_id, cache="use")
     remember_report(job_id, job, report)
     return _public(report)
 

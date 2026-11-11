@@ -17,6 +17,9 @@ PLAIN = CellContext()
 CHAR10 = CellContext(dest_type="CHAR(10)")
 REAL = CellContext(dest_type="REAL")
 DOUBLE = CellContext(dest_type="DOUBLE PRECISION")
+# float_precision is explained only from a float source column (re-review 14).
+FLOAT_TO_DOUBLE = CellContext(source_type="DOUBLE PRECISION", dest_type="DOUBLE PRECISION")
+FLOAT_TO_REAL = CellContext(source_type="DOUBLE PRECISION", dest_type="REAL")
 NUMERIC = CellContext(dest_type="NUMERIC(12,2)")
 ORACLE = CellContext(dest_engine="oracle")
 
@@ -51,10 +54,12 @@ ORACLE = CellContext(dest_engine="oracle")
         (pc.numeric_scale, "10.19", "10.1", PLAIN, False),  # cut, not rounded
         (pc.numeric_scale, "10.10", "10.1", PLAIN, True),
         (pc.numeric_scale, "1.25", "1.2500", PLAIN, True),
-        (pc.float_precision, "0.1", "0.10000000000000001", DOUBLE, True),
+        (pc.float_precision, "0.1", "0.10000000000000001", FLOAT_TO_DOUBLE, True),
+        (pc.float_precision, "0.1", "0.10000000000000001", DOUBLE, False),
         # The same binary64 on a column that is not a float is still lost digits (review finding 2).
         (pc.float_precision, "0.1", "0.10000000000000001", PLAIN, False),
-        (pc.float_precision, "3.14159274101257", "3.1415927", REAL, True),
+        (pc.float_precision, "3.14159274101257", "3.1415927", FLOAT_TO_REAL, True),
+        (pc.float_precision, "3.14159274101257", "3.1415927", REAL, False),
         (pc.float_precision, "1.0000000001", "1.0000000002", DOUBLE, False),
         (pc.float_precision, "123456.789012", "123456.7890625", NUMERIC, False),
     ],

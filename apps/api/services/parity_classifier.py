@@ -129,6 +129,14 @@ def same_value(left: str | None, right: str | None, ctx: CellContext | None = No
         return False
     if text_column(ctx):
         return False
+    if ctx is not None and _FLOAT_FAMILY.search(ctx.dest_type or "") and ctx.source_type and not (
+        _FLOAT_FAMILY.search(ctx.source_type)
+    ):
+        # A float column holding an integer or DECIMAL source: the float fingerprint would
+        # round away exactly the digits the column lost, so numbers compare exactly.
+        a, b = _decimal(left), _decimal(right)
+        if a is not None and b is not None:
+            return a == b
     ddl = ctx.dest_type if ctx is not None else ""
     if ddl:
         from services.reconciliation import fingerprint_for_reconcile
@@ -372,12 +380,12 @@ def _float_column(ctx: CellContext) -> bool:
 def float_precision(source: str | None, dest: str | None, ctx: CellContext) -> dict | None:
     """The two numbers agree to binary floating-point precision.
 
-    Explained only where a float column on either side makes binary rounding
-    the expected representation: the same binary64, or binary32 rounding on a
-    single-precision destination column. On an integer or DECIMAL column (or an
-    unknown type) agreeing as binary64 is no excuse — 9007199254740993 and
-    9007199254740992 are the same double yet different BIGINTs — so the lost
-    digits are unexplained.
+    Explained only where the *source* column is a float, so binary rounding is
+    the value's own representation: the same binary64, or binary32 rounding on a
+    single-precision destination column. From an integer or DECIMAL source (or
+    an unknown one) agreeing as binary64 is no excuse — 9007199254740993 and
+    9007199254740992 are the same double yet different BIGINTs, also when the
+    destination column is a DOUBLE — so the lost digits are unexplained.
     """
     a, b = _decimal(source), _decimal(dest)
     if a is None or b is None or a == b:
@@ -387,9 +395,14 @@ def float_precision(source: str | None, dest: str | None, ctx: CellContext) -> d
     rel = abs(fa - fb) / scale if scale else 0.0
     if rel > 2.0 ** -23:
         return None
-    if not _float_column(ctx):
+    if not _FLOAT_FAMILY.search(ctx.source_type or ""):
+        # Only a float *source* makes binary rounding the value itself: a BIGINT or DECIMAL
+        # written into a DOUBLE lost digits it held (9007199254740993 -> ...992).
         return cause(
             FLOAT_PRECISION,
+            (f"Digits were lost to floating-point rounding: the destination column is a float but the source "
+             f"({ctx.source_type or 'type unknown'}) is not (numeric precision loss).")
+            if _float_column(ctx) else
             "Digits were lost to floating-point rounding on a column that is not a float "
             "(numeric precision loss).",
             explained=False,

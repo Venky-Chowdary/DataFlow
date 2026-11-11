@@ -124,10 +124,20 @@ def clopper_pearson_upper(k: int, n: int, confidence: float = CONFIDENCE_LEVEL) 
 
 
 def format_rate_pct(rate: float | None) -> str:
-    """``0.0014967`` -> ``"0.15%"``; two significant digits below 0.01%."""
+    """An upper bound as a percentage, rounded **up**: ``0.001444`` -> ``"0.15%"``.
+
+    The figure reads "at most x%", so rounding it down (half-up rounding gave
+    "0.14%" for 0.1444%) would state a bound the data does not support. Two
+    decimals, or two significant digits below 0.01%.
+    """
     if rate is None:
         return "unknown"
-    pct = rate * 100.0
-    if pct >= 0.01 or pct == 0:
-        return f"{pct:.2f}%"
-    return f"{pct:.2g}%"
+    from decimal import ROUND_CEILING, Decimal
+
+    pct = Decimal(repr(float(rate))) * 100
+    if pct <= 0:
+        return "0.00%"
+    if pct >= Decimal("0.01"):
+        return f"{pct.quantize(Decimal('0.01'), rounding=ROUND_CEILING)}%"
+    step = Decimal(1).scaleb(pct.adjusted() - 1)
+    return f"{float(pct.quantize(step, rounding=ROUND_CEILING)):.2g}%"

@@ -465,26 +465,10 @@ def _applying_here(job_id: str, fix_id: str) -> bool:
 
 
 def _widen_apply(job: dict[str, Any], fix: dict[str, Any]) -> str:
-    from connectors.schema_drift import widen_existing_columns_native
-    from services.dest_precount import warehouse_sql_engine
-    from services.dialect_profiles import schema_from_cfg
-    from services.parity_evidence import _endpoints
-    from src.transfer.adapters import resolve_connector_config
-    from src.transfer.connector_capabilities import resolve_driver_type
+    """Execute the widen the fix previewed: the same helper, the same inputs, no dry run."""
+    from services.parity_fixes import widen_statements
 
-    _req, _source, destination = _endpoints(job)
-    cfg = resolve_connector_config(destination)
-    dialect = resolve_driver_type(str(cfg.get("type") or destination.format or "")).lower()
-    with warehouse_sql_engine(dialect, cfg) as eng:
-        raw = eng.raw_connection()
-        try:
-            ran = widen_existing_columns_native(
-                raw.cursor(), dialect, schema_from_cfg(dialect, cfg) or None, str(fix["_table"]),
-                [str(fix["_column"])], [str(fix["_new_type"])], backfill=True,
-            )
-            raw.commit()
-        finally:
-            raw.close()
+    ran = widen_statements(job, str(fix["_table"]), str(fix["_column"]), str(fix["_new_type"]), dry_run=False)
     if not ran:
         raise RuntimeError("the destination column was not changed: it is already at least as wide")
     return "Ran: " + "; ".join(ran)

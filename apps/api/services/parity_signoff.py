@@ -253,5 +253,6 @@ def export_markdown(job: dict[str, Any], job_id: str) -> str:
     from services.parity_report import build_parity_report, public_report
 
     pack = signed_pack(job)
-    report = public_report(build_parity_report(job, reread=False, job_id=job_id)) if not pack else {}
+    # The same basis as the Trust Report page at this version (its re-read, reused while fresh).
+    report = public_report(build_parity_report(job, reread=True, job_id=job_id, cache="use")) if not pack else {}
     return render_markdown(report, pack)

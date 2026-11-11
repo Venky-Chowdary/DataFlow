@@ -99,6 +99,13 @@ def _is_repair_job(job: dict[str, Any]) -> bool:
     return bool(str(job.get("parent_job_id") or req.get("parent_job_id") or "").strip())
 
 
+def _jobs_by_id(store: Any, ids: list[str]) -> dict[str, dict[str, Any]]:
+    batch = getattr(store, "get_jobs", None)
+    if callable(batch):
+        return dict(batch(ids) or {})
+    return {i: j for i in ids if (j := store.get_job(i))}
+
+
 def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
     """KPIs, the per-run trend (newest last) and the table x run heatmap."""
     from services.job_status import job_timestamp_iso
@@ -107,12 +114,13 @@ def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
     # Repair jobs (a Parity Studio re-sync, a quarantine replay) are not runs of
     # their own: their outcome is the parent's re-check round. Read past them.
     listed = store.list_jobs(limit=min(2 * limit, 200), workspace_filter=workspace_filter)
+    ids = [str(b.get("_id") or b.get("id") or b.get("job_id") or "") for b in listed]
+    full = _jobs_by_id(store, [i for i in ids if i])  # one batch read, not one read per job
     rows: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
-    for brief in listed:
+    for brief, job_id in zip(listed, ids):
         if len(rows) >= limit:
             break
-        job_id = str(brief.get("_id") or brief.get("id") or brief.get("job_id") or "")
-        job = store.get_job(job_id) if job_id else None
+        job = full.get(job_id) if job_id else None
         if not job or _is_repair_job(job):
             continue
         rows.append((brief, job, _job_summary(job, job_id)))

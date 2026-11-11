@@ -1370,6 +1370,28 @@ class MongoDBService:
             result["_id"] = str(result["_id"])
         return result
 
+    def get_jobs(self, job_ids: list[str]) -> dict[str, dict]:
+        """Several jobs by id in one query (``{id: job}``; a missing id is absent).
+
+        The batch twin of :meth:`get_job` for dashboards that read a page of
+        jobs whole: one round trip instead of one per job.
+        """
+        ids = [str(j) for j in dict.fromkeys(job_ids or []) if j]
+        if not ids:
+            return {}
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return {}
+        keys: list[Any] = [oid for oid in (_as_object_id(j) for j in ids) if oid is not None] + ids
+        out: dict[str, dict] = {}
+        for doc in db["transfer_jobs"].find({"$or": [{"_id": {"$in": keys}}, {"job_id": {"$in": ids}}]}):
+            doc["_id"] = str(doc["_id"])
+            out[doc["_id"]] = doc
+            if doc.get("job_id") and str(doc["job_id"]) in ids:
+                out.setdefault(str(doc["job_id"]), doc)
+        return out
+
     @staticmethod
     def _job_scope_query(
         workspace_id: str | None, workspace_filter: WorkspaceFilter | None = None
@@ -2084,6 +2106,15 @@ class MemoryMongoDBService:
                     rec[key] = rec[key].isoformat()
             return rec
         return None
+
+    def get_jobs(self, job_ids: list[str]) -> dict[str, dict]:
+        """Several jobs by id (``{id: job}``), as :meth:`MongoDBService.get_jobs`."""
+        out: dict[str, dict] = {}
+        for job_id in dict.fromkeys(job_ids or []):
+            job = self.get_job(str(job_id)) if job_id else None
+            if job:
+                out[str(job_id)] = job
+        return out
 
     def count_jobs(
         self,

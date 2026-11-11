@@ -131,7 +131,13 @@ def _stored_cell_cause(ob: Observation, found: dict[str, Any] | None) -> dict[st
     return cause(UNEXPLAINED, detail, explained=False)
 
 
-def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str, resolved: set[str]) -> None:
+def read_key(job: dict[str, Any], version: int, *parts: Any) -> tuple[Any, ...]:
+    """The cache key of one live read for this job at this parity-state version."""
+    return (job_id_of(job), str(job.get("updated_at") or job.get("completed_at") or ""), int(version), *parts)
+
+
+def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str, resolved: set[str], *,
+                  version: int = 0, cache: str = "refresh") -> None:
     """Replace the evidence for re-read keys with what both sides hold now.
 
     A key the evidence named that now reads equal on both sides is *not*
@@ -145,8 +151,15 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str, resolved:
     if not keys:
         ev.reread = {"status": "not_needed", "keys": 0}
         return
+    from services.parity_cache import NotCached, cached_read
+
     try:
-        cells = _bounded_reread(job, ev, keys)
+        cells, cached_at = cached_read(
+            read_key(job, version, "reread", ev.name, tuple(keys)),
+            lambda: _bounded_reread(job, ev, keys), mode=cache,
+        )
+    except NotCached:
+        return  # no recent live read: the stored evidence is the basis (evidence.reread says so)
     except Exception as exc:  # noqa: BLE001 - an unreadable side keeps the stored evidence
         logger.info("parity re-read skipped for %s: %s", ev.name, type(exc).__name__)
         ev.reread = {"status": "failed", "keys": 0, "reason": _reread_reason(exc)}
@@ -201,7 +214,7 @@ def _apply_reread(job: dict[str, Any], ev: TableEvidence, engine: str, resolved:
             fresh.append(_cannot_recheck(ev, key, named, sampled))
     done = set(cells)
     ev.observations = [o for o in ev.observations if not (o.key in done and o.cause is None)] + fresh
-    ev.reread = {"status": "ok", "keys": len(done)}
+    ev.reread = {"status": "ok", "keys": len(done), **({"cached_at": cached_at} if cached_at else {})}
     still = {o.key for o in fresh}
     ev.resolved_now = sorted(done - still)
     if done & resolved - still:
@@ -629,13 +642,16 @@ def public_report(report: dict[str, Any]) -> dict[str, Any]:
 
 def build_parity_report(
     job: dict[str, Any], *, reread: bool = True, job_id: str = "",
-    recheck: dict[str, list[str]] | None = None,
+    recheck: dict[str, list[str]] | None = None, cache: str = "refresh",
 ) -> dict[str, Any]:
     """The full report for one job, with internal fields (see :func:`public_report`).
 
-    ``reread=False`` reads no database: the summary and the MCP tool use it.
+    ``reread=False`` reads no database: the dashboard summary uses it.
     ``recheck`` names, per table, the keys a fix just wrote: a re-read that
-    finds them equal resolves them (a fix's re-check round).
+    finds them equal resolves them (a fix's re-check round). ``cache`` is how
+    the live reads use :mod:`services.parity_cache`: ``refresh`` (decisions),
+    ``use`` (the page and the Markdown export), ``only`` (the Pilot tool:
+    the page's recent read, else the stored evidence).
     """
     from services.parity_fixes import propose_fixes
 
@@ -648,7 +664,8 @@ def build_parity_report(
         resolved = set((state.get("resolved") or {}).get(ev.name) or [])
         checking = set((recheck or {}).get(ev.name) or [])
         if reread and terminal and ev is tables_ev[0]:
-            _apply_reread(job, ev, engine, resolved | checking)
+            _apply_reread(job, ev, engine, resolved | checking,
+                          version=int(state.get("version") or 0), cache=cache)
             if ev.reread.get("status") != "ok":
                 _apply_resolved(ev, resolved)
         else:
@@ -681,6 +698,7 @@ def build_parity_report(
         "evidence": _evidence_block(job, tables_ev),
         "_tables_ev": tables_ev,
         "_sync_mode": sync_mode_of(job),
+        "_cache": cache,
     }
     report["fixes"] = propose_fixes(job, report, state, reread=reread)
     report["signoff"] = _signoff(state, report)

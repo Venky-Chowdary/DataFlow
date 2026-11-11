@@ -34,8 +34,10 @@ def test_digit_loss_on_a_non_float_column_is_unexplained(source, dest, dest_type
 @pytest.mark.parametrize(
     "source, dest, ctx",
     [
-        # The same binary64 written with more digits: a float column on either side.
-        ("0.1000000000000000055511151231257827", "0.1", CellContext(dest_type="double precision")),
+        # The same binary64 written with more digits: a float source column (re-review 14:
+        # a float destination alone is no excuse, see test_parity_review2_f14_*).
+        ("0.1000000000000000055511151231257827", "0.1",
+         CellContext(source_type="double precision", dest_type="double precision")),
         ("0.1000000000000000055511151231257827", "0.1", CellContext(source_type="float8", dest_type="numeric")),
     ],
 )

@@ -1,8 +1,10 @@
 """Pilot / MCP tool ``explain_parity``: the parity report of one job, in words.
 
-Read-only. It answers from what the job already holds — the stored Gate-8
-evidence and Parity Studio decisions — and re-reads no database, so it is as
-cheap as ``get_job`` and gated by the same ``job.read``. Approving a fix stays a
+Read-only, and it never reads a customer database itself: it answers from the
+Trust Report page's live re-read of the same report version when one is recent
+(:mod:`services.parity_cache`), and otherwise from the stored Gate-8 evidence
+and Parity Studio decisions — ``basis`` says which, so a verdict that differs
+from the page's is explained. Gated by ``job.read``. Approving a fix stays a
 REST action a person takes (``POST /api/v1/jobs/{id}/parity-report/fixes/...``).
 """
 
@@ -73,6 +75,22 @@ def _summary(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def trust_report_link(job_id: str) -> str:
+    """The web app's deep link to a job's Trust Report (Jobs, the job, the trust panel)."""
+    from urllib.parse import urlencode
+
+    return "/#/jobs?" + urlencode({"jobId": job_id, "panel": "trust-report"})
+
+
+def _basis(reread: dict[str, Any]) -> str:
+    done = [r for r in reread.values() if isinstance(r, dict) and r.get("status") == "ok"]
+    if done:
+        at = next((r.get("cached_at") for r in done if r.get("cached_at")), None)
+        return "the Trust Report's live re-read of this version" + (f" ({at})" if at else "")
+    return ("the stored evidence only: no recent live re-read of this version, so the Trust Report "
+            "page (which re-reads the keys the evidence names) can show a newer verdict")
+
+
 def explain_parity(job_id: str = "", selector: str = "") -> "ToolResult":
     from services.parity_explain import template_explanation
     from services.parity_report import build_parity_report, public_report
@@ -83,15 +101,17 @@ def explain_parity(job_id: str = "", selector: str = "") -> "ToolResult":
     job, error = resolve_job(job_id, selector)
     if job is None:
         return ToolResult(name="explain_parity", success=False, output=None, error=error)
-    report = public_report(build_parity_report(job, reread=False))
+    report = public_report(build_parity_report(job, reread=True, cache="only"))
     explanation = report.get("explanation") or template_explanation(report)
+    reread = report["evidence"].get("reread") or {}
     return ToolResult(
         name="explain_parity",
         success=True,
         output={
             "summary": _summary(report),
             "explanation": explanation,
-            "open": f"/jobs/{report['job_id']}?tab=trust",
+            "basis": _basis(reread),
+            "open": trust_report_link(report["job_id"]),
             "note": (
                 "Verdicts come from the deterministic check and classifier; fixes are applied "
                 "only after a person approves them on the Trust Report."
