@@ -113,8 +113,7 @@ async def explain_parity_report(job_id: str, request: Request):
 
 @router.post("/jobs/{job_id}/parity-report/fixes/{fix_id}/approve")
 async def approve_parity_fix(
-    job_id: str, fix_id: str, request: Request, background_tasks: BackgroundTasks,
-    body: NoteBody | None = None,
+    job_id: str, fix_id: str, request: Request, body: NoteBody | None = None,
 ):
     from services.parity_fixes import approve_fix
 
@@ -128,8 +127,12 @@ async def approve_parity_fix(
 
         from .connectors_router import rerun_transfer_job
 
+        # The route's own scheduling (BackgroundTasks) runs as soon as it answers, on the
+        # loop and independent of this request: a later failure here (recording the
+        # outcome) must not drop it and leave the new job pending forever.
+        started_tasks = BackgroundTasks()
         future = asyncio.run_coroutine_threadsafe(
-            rerun_transfer_job(job_id, background_tasks, request), loop
+            rerun_transfer_job(job_id, started_tasks, request), loop
         )
         try:
             started = future.result(timeout=_RERUN_START_SECONDS)
@@ -143,6 +146,7 @@ async def approve_parity_fix(
         except HTTPException as exc:
             # The route's own refusal, scrubbed like the audit copy before it is a 409 body.
             raise RerunRefused(scrub_text(f"the re-run was refused: {_detail_text(exc.detail)}")) from exc
+        asyncio.run_coroutine_threadsafe(started_tasks(), loop)
         return str((started or {}).get("job_id") or "")
 
     try:

@@ -105,3 +105,30 @@ def test_a_route_refusal_releases_the_claim(editor_ws):
     assert _rerun_fix(after)["id"] == rerun["id"]  # proposed again, not "failed"
     assert scheduled == []
     assert "job.parity.fix_refused" in [e.get("action") for e in ent_.audit(ws)]
+
+
+def test_a_started_rerun_is_scheduled_even_if_recording_the_outcome_fails(editor_ws, monkeypatch):
+    # Re-review 3 (low): a failure after the route started the re-run dropped the request's
+    # BackgroundTasks, leaving the new job pending forever. The start is scheduled on its own.
+    import time
+
+    from services import parity_apply
+
+    _ent, ws, editor, scheduled = editor_ws
+    job = _job(ws, "overwrite load", reconciliation=_SHORT, transfer_request={**_ROUTE, "sync_mode": "full_refresh_overwrite"})
+    rerun = _rerun_fix(editor.get(f"/api/v1/jobs/{job}/parity-report").json())
+
+    def broken(*_a, **_k):
+        raise RuntimeError("the job store went away")
+
+    monkeypatch.setattr(parity_apply, "settle_fix", broken)
+    try:
+        res = editor.post(f"/api/v1/jobs/{job}/parity-report/fixes/{rerun['id']}/approve", json={"note": "go"})
+        assert res.status_code >= 500
+    except RuntimeError as exc:  # the test client may re-raise the server's error instead
+        assert "the job store went away" in str(exc)
+    for _ in range(50):
+        if scheduled:
+            break
+        time.sleep(0.05)
+    assert len(scheduled) == 1, "the started re-run was never scheduled"
