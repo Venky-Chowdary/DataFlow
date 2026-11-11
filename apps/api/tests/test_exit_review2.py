@@ -284,3 +284,53 @@ def test_n5_a_clean_extract_of_exact_floats_is_still_proven_e2e(world, fmt):  # 
     conn.close()
     out = _run(_system(name=f"Ratios {fmt}", tables=[{"name": "ratios"}], extract_format=fmt))
     assert out["verdict"] == "proven", out["tables"][0]["reason"]
+
+
+# ------------------------- N8: a failed extract's reason names the job, a reference and the engine's finding
+
+
+_SECRET = "alice@example.com"
+
+
+def _reason(job):
+    from services.exit_job_reasons import failed_reason
+
+    return failed_reason(job, "job_abc123")
+
+
+def test_n8_a_writer_cell_finding_names_the_job_the_count_and_the_column_never_the_value():
+    job = {"status": "failed",
+           "error": (f"file_export rejected 1 cell finding(s) across 1 row(s); strict error policy blocks partial "
+                     f"write — v (row 1): value is not a valid interval wire payload: '{_SECRET}' — quarantined"),
+           "rejected_details": [{"column": "v", "row": 1, "reason": f"value is not valid: '{_SECRET}'"}]}
+    reason = _reason(job)
+    assert "job_abc123" in reason and "Reference " in reason
+    assert "rejected 1 cell finding(s) across 1 row(s)" in reason and "column(s) v" in reason
+    assert _SECRET not in reason and "see the server log" not in reason
+
+
+def test_n8_a_preflight_block_names_the_root_cause_and_gate_never_the_blocker_text():
+    job = {"status": "failed", "error": f"Blocking issues detected: value '{_SECRET}' does not fit",
+           "error_details": {"reason": "Preflight blocked transfer",
+                             "blockers": [f"value '{_SECRET}' does not fit"],
+                             "guidance": [{"gate": "rc-fidelity-collapse-5009bdaaed43",
+                                           "message": f"Lossy: '{_SECRET}'"}]}}
+    reason = _reason(job)
+    assert "job_abc123" in reason and "Reference " in reason
+    assert "preflight" in reason and "fidelity collapse" in reason and "rc-fidelity-collapse-5009bdaaed43" in reason
+    assert _SECRET not in reason
+
+
+def test_n8_an_unknown_error_still_names_the_job_and_a_reference():
+    reason = _reason({"status": "failed", "error": f"boom near '{_SECRET}'"})
+    assert "job_abc123" in reason and "Reference " in reason and _SECRET not in reason
+    assert "see the server log" in reason
+    assert "job_abc123" in _reason({"status": "cancelled"})
+
+
+def test_n8_a_failed_extract_s_rehearsal_reason_names_its_job_and_reference_e2e(world):  # noqa: F811
+    out = _run(_system(name="Missing", tables=[{"name": "no_such_table"}]))
+    table = out["tables"][0]
+    assert out["verdict"] == "failed" and table["status"] == "failed"
+    assert table["job_id"] and table["job_id"] in table["reason"], table["reason"]
+    assert "Reference " in table["reason"]

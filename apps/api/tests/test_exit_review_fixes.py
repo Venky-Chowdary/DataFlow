@@ -192,7 +192,7 @@ _LEAKY = ("Read-back verification failed: row 1 column email→email: source='al
 def test_h1_a_failed_extract_job_error_is_allowlisted():
     from services.exit_rehearsal import _failed_reason
 
-    reason = _failed_reason({"status": "failed", "error": _LEAKY})
+    reason = _failed_reason({"status": "failed", "error": _LEAKY}, "job_1")
     assert "alice" not in reason and "example.com" not in reason and "__DF_SQL_NULL__" not in reason
     assert "source=" not in reason and reason.startswith("The extract job")
     assert "see the server log" in reason
@@ -604,7 +604,8 @@ def test_w4_a_failed_extract_reason_has_no_driver_text_e2e(world):  # noqa: F811
     failed = next(t for t in out["tables"] if t["name"] == "no_such_table")
     assert failed["status"] == "failed"
     assert "no such table" not in failed["reason"].lower() and "driver" not in failed["reason"].lower()
-    assert failed["reason"].startswith("The extract job failed")
+    # Review 2 (N8): the reason names the job and the server log reference.
+    assert failed["reason"].startswith(f"The extract job {failed['job_id']} failed") and "Reference " in failed["reason"]
 
 
 # ------------------------------------------------------------------- Low items

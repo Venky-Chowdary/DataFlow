@@ -177,7 +177,8 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
         except Exception as exc:  # noqa: BLE001 - this table failed to start; the others still run
             from services.parity_errors import safe_error
 
-            table.update(status="failed", reason=safe_error(exc, what="Starting the extract job", event=ERROR_EVENT))
+            table.update(status="failed", reason=safe_error(exc, what="Starting the extract job", event=ERROR_EVENT,
+                                                                    reference=True))
 
     def record(doc: dict[str, Any]) -> None:
         doc["tables"] = tables
@@ -363,16 +364,11 @@ def _parity(job: dict[str, Any], job_id: str) -> dict[str, Any]:
             "unexplained": int((report.get("parity") or {}).get("unexplained") or 0)}
 
 
-def _failed_reason(job: dict[str, Any]) -> str:
+def _failed_reason(job: dict[str, Any], job_id: str) -> str:
     """Why the extract job failed, allowlisted: a child job's error quotes row values (contract 20)."""
-    from services.parity_errors import safe_error
+    from services.exit_job_reasons import failed_reason
 
-    status = str(job.get("status") or "without a status")
-    error = job.get("error") or job.get("message")
-    if not error:
-        return f"The extract job ended {status}; no error was recorded."
-    what = "The extract job" if status.lower() == "failed" else f"The extract job ({status})"
-    return safe_error(error, what=what, event=ERROR_EVENT)
+    return failed_reason(job, job_id)
 
 
 def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> dict[str, str]:
@@ -405,7 +401,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
     ds = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     out["extract_seconds"] = ds.get("elapsed_seconds")
     if str(job.get("status") or "").lower() != "completed":
-        return {**out, "status": "failed", "reason": _failed_reason(job)}
+        return {**out, "status": "failed", "reason": _failed_reason(job, job_id)}
     part, local_path = _part(table["name"], ds)
     if part is None:
         return {**out, "status": "failed", "reason": "The extract job recorded no stored part."}
@@ -434,7 +430,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
             close()
     except Exception as exc:  # noqa: BLE001 - not measured is a named gap, never a pass
         logger.info("exit rehearsal source read-back failed for %s", table["name"], exc_info=True)
-        gaps.append(f"the source could not be re-read for a population digest ({safe_error(exc, what='the read', event=ERROR_EVENT)})")
+        gaps.append(f"the source could not be re-read for a population digest ({safe_error(exc, what='the read', event=ERROR_EVENT, reference=True)})")
     seal_ok: bool | None = None
     try:
         extract, digest, size = profile_extract(
@@ -452,7 +448,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         part["verified_on_read"] = bool(seal_ok)
     except Exception as exc:  # noqa: BLE001 - an unreadable or expired part cannot be proven
         logger.info("exit rehearsal extract read-back failed for %s", table["name"], exc_info=True)
-        gaps.append(f"the stored part could not be read back ({safe_error(exc, what='the read', event=ERROR_EVENT)})")
+        gaps.append(f"the stored part could not be read back ({safe_error(exc, what='the read', event=ERROR_EVENT, reference=True)})")
     if not part["sha256"]:
         part = None
     judged = judge_table(name=table["name"], source=source, extract=extract, key_columns=keys,
