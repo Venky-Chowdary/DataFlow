@@ -778,12 +778,16 @@ def job_is_terminal(job: dict[str, Any]) -> bool:
 # ── bounded keyed re-read ────────────────────────────────────────────────────
 
 
+class RereadImpossible(LookupError):
+    """The evidence cannot be re-read by key at all; its message is fixed text, never a value."""
+
+
 def _endpoints(job: dict[str, Any]) -> tuple[Any, Any, Any]:
     from src.transfer.models import transfer_request_from_dict
 
     payload = request_of(job)
     if not payload.get("source") or not payload.get("destination"):
-        raise LookupError("the job has no saved route to re-read")
+        raise RereadImpossible("the job has no saved route to re-read")
     req = transfer_request_from_dict(payload)
     try:
         from src.transfer.engine import get_transfer_engine
@@ -825,7 +829,7 @@ def reread_cells(job: dict[str, Any], ev: TableEvidence, keys: list[str]) -> dic
     cannot be read; the caller keeps the stored evidence then.
     """
     if len(ev.key_columns) != 1:
-        raise LookupError("re-reading by key needs a single-column key")
+        raise RereadImpossible("re-reading by key needs a single-column key")
     keys = list(dict.fromkeys(k for k in keys if k is not None))[:MAX_REREAD_KEYS]
     if not keys:
         return {}

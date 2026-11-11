@@ -289,8 +289,13 @@ def _bounded_reread(job: dict[str, Any], ev: TableEvidence, keys: list[str]) -> 
 def _reread_reason(exc: Exception) -> str:
     if isinstance(exc, RereadTimeout):
         return f"the re-read did not finish within {_reread_seconds():g}s; the stored evidence stands"
+    from services.parity_evidence import RereadImpossible
+
+    if isinstance(exc, RereadImpossible):
+        return str(exc)  # our own fixed sentence
     if isinstance(exc, LookupError):
-        return str(exc)
+        # A KeyError deep in a driver can carry a row value: never its text.
+        return "a key or column the re-read needs was not found"
     return f"the source or destination could not be re-read ({type(exc).__name__})"
 
 
