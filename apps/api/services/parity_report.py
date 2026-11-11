@@ -597,9 +597,17 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
     verdict, unexplained = report["verdict"], report["parity"]["unexplained"]
     roles = list(state.get("required_roles") or [])
     signed = state.get("signed") if isinstance(state.get("signed"), dict) else None
+    drift: dict[str, Any] = {}
     if signed:
-        sealed = ((signed.get("pack") or {}).get("parity") or {}).get("signoff") or {}
+        sealed_report = (signed.get("pack") or {}).get("parity") or {}
+        sealed = sealed_report.get("signoff") or {}
         approvals, invalidated = list(sealed.get("approvals") or []), []
+        # The signed content is final; what the data shows now may have moved since.
+        attested = next((a.get("content_sha256") for a in approvals if a.get("content_sha256")), None)
+        drift = {
+            "signed_verdict": sealed_report.get("verdict"),
+            "drift_since_signing": (content_sha256(report) != attested) if attested else None,
+        }
     else:
         approvals, invalidated = valid_approvals(state, content_sha256(report))
     blocked_reason = None
@@ -620,6 +628,7 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
         "required_roles": roles, "approvals": approvals, "invalidated_approvals": invalidated,
         "status": status, "blocked_reason": blocked_reason,
         "signature": (signed or {}).get("signature"), "signed_at": (signed or {}).get("signed_at"),
+        **drift,
     }
 
 

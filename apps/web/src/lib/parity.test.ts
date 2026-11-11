@@ -46,6 +46,7 @@ import {
   invalidatedApprovalsNote,
   fixStatusPresentation,
   approveOutcome,
+  signedDriftNote,
 } from "./parity.js";
 import { provenReport, signedReport, summaryFixture, unexplainedReport } from "../components/parity/parityFixtures.js";
 
@@ -385,5 +386,22 @@ describe("approve outcome (re-review finding 7)", () => {
     assert.equal(approveOutcome(withStatus("applying"), fix.id).tone, "info");
     assert.equal(approveOutcome(withStatus("applied", "Ran: ALTER"), fix.id).tone, "success");
     assert.equal(approveOutcome(null, fix.id).tone, "info");
+  });
+});
+
+describe("signed report drift (re-review finding 13a)", () => {
+  it("says when the data moved since signing, and stays quiet otherwise", () => {
+    const signed = signedReport();
+    assert.equal(signedDriftNote(signed), null);
+    const moved = {
+      ...signed,
+      verdict: "unexplained" as const,
+      signoff: { ...signed.signoff, signed_verdict: "proven" as const, drift_since_signing: true },
+    };
+    const note = signedDriftNote(moved) ?? "";
+    assert.match(note, /changed since it was signed/);
+    assert.match(note, /still says proven/);
+    assert.match(note, /now reads unexplained/);
+    assert.equal(signedDriftNote({ ...moved, signoff: { ...moved.signoff, status: "open" as const } }), null);
   });
 });

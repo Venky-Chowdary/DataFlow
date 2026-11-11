@@ -143,6 +143,10 @@ export interface ParitySignoff {
   blocked_reason: string | null;
   signature: string | null;
   signed_at: string | null;
+  /** Once signed: the verdict the approvals attested (the sealed pack's). */
+  signed_verdict?: ParityVerdict | null;
+  /** Once signed: true when what the data shows now differs from what was signed. */
+  drift_since_signing?: boolean | null;
 }
 
 /** What re-reading the named keys on both sides found, per table. */
@@ -150,6 +154,17 @@ export interface ParityReread {
   status: "ok" | "failed" | "not_needed";
   keys: number;
   reason?: string;
+  /** Set when this read was reused from a recent read of the same report version. */
+  cached_at?: string;
+}
+
+/** The drift note under a signed report: the seal is final, the data may have moved. */
+export function signedDriftNote(report: Pick<ParityReport, "verdict" | "signoff">): string | null {
+  const { signoff } = report;
+  if (signoff.status !== "signed" || !signoff.drift_since_signing) return null;
+  const was = signoff.signed_verdict ? signoff.signed_verdict.replace(/_/g, " ") : "what was signed";
+  const now = report.verdict.replace(/_/g, " ");
+  return `The data changed since it was signed. The signed pack still says ${was}; the live re-read now reads ${now}. Re-run the job for a new report to sign.`;
 }
 
 export interface ParityEvidence {

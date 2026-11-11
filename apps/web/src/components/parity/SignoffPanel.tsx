@@ -10,6 +10,7 @@ import {
   approvalAuthority,
   invalidatedApprovalsNote,
   shortSignature,
+  signedDriftNote,
   signoffBlockedReason,
   signoffRows,
   unsignedRoles,
@@ -93,13 +94,13 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
         <div className="df2-parity-card">
           <h4 className="df2-parity-h4">Approvals</h4>
           {blocked && (
-            <p className="df2-parity-notice is-warn" role="status">
+            <p className="df2-parity-notice" role="status">
               <DtIcon name="alert" size={14} />
               <span>{blockedReason}</span>
             </p>
           )}
           {invalidatedApprovalsNote(signoff) && (
-            <p className="df2-parity-notice is-warn" role="status">
+            <p className="df2-parity-notice" role="status">
               <DtIcon name="alert" size={14} />
               <span>{invalidatedApprovalsNote(signoff)}</span>
             </p>
@@ -134,6 +135,11 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
                 check it was not changed.
               </p>
               <CopyIdChip id={signoff.signature} label="Signature" className="df2-parity-signature" />
+              {signedDriftNote(report) && (
+                <p className="df2-parity-notice" role="status">
+                  {signedDriftNote(report)}
+                </p>
+              )}
             </div>
           ) : canSign ? (
             waiting.length > 0 && (

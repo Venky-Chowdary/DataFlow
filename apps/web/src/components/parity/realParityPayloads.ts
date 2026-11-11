@@ -574,6 +574,7 @@ export const reportSigned: ParityReport = {
       }
     ],
     "blocked_reason": null,
+    "drift_since_signing": false,
     "invalidated_approvals": [],
     "required_roles": [
       "engineering",
@@ -582,6 +583,7 @@ export const reportSigned: ParityReport = {
     ],
     "signature": "hmac-sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
     "signed_at": "2026-11-11T14:00:00+00:00",
+    "signed_verdict": "explained",
     "status": "signed"
   },
   "tables": [

@@ -965,7 +965,7 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     if not isinstance(pack, dict):
         return {"ok": False, "errors": ["pack must be an object"]}
-    actual_hash, sig_errors = verify_body(pack, subject=str(pack.get("job_id") or ""))
+    actual_hash, sig_errors = verify_body(pack, subject=pack_subject(pack))
     errors.extend(sig_errors)
     assurance = pack.get("assurance") if isinstance(pack.get("assurance"), dict) else {}
     if assurance.get("migration_proven") and assurance.get("claim_level") != "full_checksum":
@@ -992,7 +992,8 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
                 "chain_anchor digest does not match this pack's content — the pack "
                 "was altered after it was sealed, or the anchor belongs to another pack"
             )
-    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
+    kind = PARITY_PACK_KIND if pack.get("kind") == PARITY_PACK_KIND else "proof_pack"
+    return {"ok": not errors, "errors": errors, "content_sha256": actual_hash, "kind": kind}
 
 
 def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
@@ -1179,18 +1180,34 @@ def parity_section_for_pack(job: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str) -> dict[str, Any]:
-    """Sign a final parity report with the proof-pack key and format.
+PARITY_PACK_KIND = "parity_report"
 
-    Same envelope as the proof pack (``content_sha256`` + HMAC bound to the job
-    id), so ``POST /transfer/proof-pack/verify`` verifies it unchanged.
+
+def pack_subject(pack: dict[str, Any]) -> str:
+    """The HMAC subject of a signed pack: domain-separated by its ``kind``.
+
+    A Parity Studio pack is signed for ``parity_report:<job id>``, a proof pack
+    for ``<job id>``, so neither signature verifies as the other kind (``kind``
+    is inside the hashed body, so relabelling a pack breaks its hash too).
+    """
+    job_id = str(pack.get("job_id") or "")
+    return f"{PARITY_PACK_KIND}:{job_id}" if pack.get("kind") == PARITY_PACK_KIND else job_id
+
+
+def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str) -> dict[str, Any]:
+    """Sign a final parity report with the proof-pack key, in its own signature domain.
+
+    Same envelope as the proof pack (``content_sha256`` + HMAC), so
+    ``POST /transfer/proof-pack/verify`` verifies it — but over the subject
+    ``parity_report:<job id>`` (:func:`pack_subject`), and the verify answer
+    names the ``kind`` it verified.
     """
     body = {
         "version": PROOF_PACK_VERSION,
-        "kind": "parity_report",
+        "kind": PARITY_PACK_KIND,
         "issued_at": datetime.now(timezone.utc).isoformat(),
         "job_id": job_id,
         "actor": actor,
         "parity": report,
     }
-    return sign_body(body, subject=job_id)
+    return sign_body(body, subject=pack_subject(body))

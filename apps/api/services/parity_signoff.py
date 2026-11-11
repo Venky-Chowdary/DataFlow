@@ -40,7 +40,8 @@ def content_sha256(report: dict[str, Any]) -> str:
     """The digest of what a signer attests: verdict, counts, tables, differences, fix outcomes.
 
     Volatile presentation (timestamps, version, wording, the explanation, sign-off
-    itself) is left out, so re-reading an unchanged report keeps approvals valid.
+    itself) is left out, so re-reading an unchanged report keeps approvals valid;
+    the explanation is therefore not sealed in the signed pack either.
     """
     body = {
         "job_id": report.get("job_id"),
@@ -131,6 +132,9 @@ def sign_off(
             return None
         signed_at = now_iso()
         final = public_report(report)
+        # The seal holds what the approvals attest (content_sha256): the explanation is
+        # wording a model or a template wrote, not attested, so it is not sealed.
+        final["explanation"] = None
         final["signoff"] = {
             **final["signoff"], "approvals": approvals, "status": "signed",
             "blocked_reason": None, "signature": None, "signed_at": signed_at,
