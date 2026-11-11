@@ -116,41 +116,31 @@ def _stamp_job_mapping_artifacts(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
-def _destination_data_region(endpoint) -> str | None:
-    """Infer the cloud region for S3-compatible destinations from host/endpoint."""
-    if endpoint.format not in ("s3", "dynamodb"):
-        return None
-    from connectors.aws_common import resolve_region
-
-    cfg = {
-        "host": endpoint.host or "",
-        "connection_string": endpoint.connection_string or "",
-        "endpoint_url": endpoint.endpoint_url or "",
-    }
-    region = resolve_region(cfg)
-    return region if region and region not in ("us-east-1", "") else None
+def _host_tenant_id(request) -> str:
+    """The tenant this request's custom domain resolved to (``TenantMiddleware``)."""
+    return str(getattr(request.state, "tenant_id", "") or "")
 
 
-def _residency_check(request, endpoint, allowed_region: str):
-    """Fail closed when the destination region conflicts with the workspace region.
+def _job_region(request, workspace_id: str, requested: str = "") -> str:
+    """The job's ``data_region`` tag: the workspace's own region wins over the
+    caller's (``services.data_residency``, audit H-4)."""
+    from services.data_residency import job_data_region
 
-    Only enforced when the tenant has a non-default region or when
-    DATAFLOW_RESIDENCY_STRICT is enabled.
+    return job_data_region(workspace_id, requested, host_tenant_id=_host_tenant_id(request))
+
+
+def _residency_check(request, endpoint, workspace_id: str):
+    """403 when the destination is outside the workspace's configured region.
+
+    The region is the workspace tenant's, never the request's; a destination
+    whose region cannot be established is refused too. The engine repeats the
+    check where every job is created (``services.data_residency``).
     """
-    if not allowed_region:
-        return
-    tenant_region = getattr(request.state, "data_region", "") or getenv_brand("DEFAULT_REGION", "us-east-1")
-    strict = getenv_brand("RESIDENCY_STRICT", "").lower() in ("1", "true", "yes")
-    if not strict and (not tenant_region or tenant_region == "us-east-1"):
-        return
-    dest_region = _destination_data_region(endpoint)
-    if not dest_region:
-        return
-    if dest_region != allowed_region:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Data residency violation: destination region '{dest_region}' does not match workspace region '{allowed_region}'.",
-        )
+    from services.data_residency import residency_refusal
+
+    refusal = residency_refusal(workspace_id, endpoint, host_tenant_id=_host_tenant_id(request))
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
 
 
 def _actor_email(request: Request) -> str:
@@ -1093,11 +1083,7 @@ async def execute_transfer_json(
     src = src_preview
     dst = dst_preview
     require_admin_for_endpoints(request, workspace_id, src, dst)
-    region = (
-        (body.data_region or "").strip()
-        or getattr(request.state, "data_region", "")
-        or "us-east-1"
-    )
+    region = _job_region(request, workspace_id, body.data_region or "")
     request_obj = TransferRequest(
         source=src,
         destination=dst,
@@ -1195,7 +1181,7 @@ async def execute_transfer_json(
     else:
         plan_payload = None
 
-    _residency_check(request, dst, region)
+    _residency_check(request, dst, workspace_id)
     from src.transfer.contract_engine import stamp_request_contract
 
     plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
@@ -1607,11 +1593,7 @@ async def run_universal_transfer(
         except Exception:
             source_filter = {}
 
-    region = (
-        data_region.strip()
-        or getattr(request.state, "data_region", "")
-        or "us-east-1"
-    )
+    region = _job_region(request, workspace_id, data_region)
     request_obj = TransferRequest(
         source=source,
         destination=destination,
@@ -1775,7 +1757,7 @@ async def run_universal_transfer(
     if form_contracts is not None:
         request_obj.stream_contracts = form_contracts
 
-    _residency_check(request, destination, region)
+    _residency_check(request, destination, workspace_id)
 
     if form_risk_acceptance:
         try:

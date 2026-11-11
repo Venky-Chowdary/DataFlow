@@ -121,6 +121,7 @@ def tenancy_world(tmp_path, monkeypatch) -> Iterator[TenancyWorld]:
         resource_acl,
         schedule_store,
         team_store,
+        tenant_store,
         transfer_plan_store,
         user_store,
     )
@@ -137,6 +138,7 @@ def tenancy_world(tmp_path, monkeypatch) -> Iterator[TenancyWorld]:
     monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
     monkeypatch.setattr(resource_acl, "STORE_PATH", tmp_path / "resource-acls.jsonl")
     monkeypatch.setattr(transfer_plan_store, "STORE_PATH", tmp_path / "transfer_plans.json")
+    monkeypatch.setattr(tenant_store, "STORE_PATH", tmp_path / "tenants.json")
     # One in-memory job store per test: jobs seeded here are the jobs the
     # routes (and every store that follows a job to its workspace) read.
     jobs = mongodb_service.MemoryMongoDBService()

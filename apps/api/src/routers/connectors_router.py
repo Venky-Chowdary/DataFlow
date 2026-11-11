@@ -24,6 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pymongo.errors import PyMongoError
 from services.runtime_estimate import estimate_for_job_doc
+from services.data_residency import ResidencyRefused
 from services.workspace_access import (
     assert_resource_workspace,
     resolve_write_workspace,
@@ -1086,7 +1087,7 @@ async def retry_transfer_job(
                 "(at-least-once)."
             ),
         }
-    except HTTPException:
+    except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1240,7 +1241,7 @@ async def rerun_transfer_job(
                 + (f" {read_scope['reason']}" if read_scope else "")
             ),
         }
-    except HTTPException:
+    except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -3226,10 +3227,11 @@ async def transfer_data(
             except Exception:
                 source_filter = {}
 
-        region = (
-            data_region.strip()
-            or getattr(request.state, "data_region", "")
-            or "us-east-1"
+        # The workspace's own region wins over the caller's tag (audit H-4).
+        from services.data_residency import job_data_region
+
+        region = job_data_region(
+            workspace_id, data_region, host_tenant_id=str(getattr(request.state, "tenant_id", "") or "")
         )
         request_obj = TransferRequest(
             source=EndpointConfig(kind="file", format=src_fmt),
@@ -3316,7 +3318,7 @@ async def transfer_data(
             "ddl_executed": result.ddl_executed,
             "operation": result.operation,
         }
-    except (HTTPException, PayloadTooLarge):
+    except (HTTPException, PayloadTooLarge, ResidencyRefused):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -21,6 +21,7 @@ from services.health_service import aggregate_health
 from services.safe_errors import public_error
 from services.upload_limits import PayloadTooLarge
 from services.procedure_source import ProcedureSourceError
+from services.data_residency import ResidencyRefused
 from services.audit_coverage import AuditAccessMiddleware, http_route_template
 
 # Tests and callers historically import the route-template helper from the
@@ -900,6 +901,18 @@ async def duplicate_transfer_handler(
             "job_id": exc.existing_job_id,
         },
     )
+
+
+@app.exception_handler(ResidencyRefused)
+async def residency_refused_handler(request: Request, exc: ResidencyRefused):
+    """A destination outside the workspace's data region is a 403 on every submit path.
+
+    Job creation raises it (``services.data_residency``); the two Studio run
+    routes answer it themselves first, and this covers every other route that
+    queues a job (retry, rerun, replay, upload-and-run).
+    """
+    logger.info("Residency refusal on %s", request.url.path)
+    return JSONResponse(status_code=403, content={"error": "data_residency", "detail": str(exc)})
 
 
 @app.exception_handler(ConnectorStoreError)
