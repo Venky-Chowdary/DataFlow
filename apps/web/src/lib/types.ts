@@ -37,7 +37,7 @@ export function describeApiBase(): string {
   return API_BASE;
 }
 
-export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "transforms" | "transform-library" | "jobs" | "contracts" | "mcp" | "settings" | "docs" | "benchmarks";
+export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "transforms" | "transform-library" | "jobs" | "contracts" | "exit" | "mcp" | "settings" | "docs" | "benchmarks";
 
 export interface DataContract {
   id: string;
