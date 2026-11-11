@@ -54,6 +54,7 @@ import {
   roleLabel,
   parityIsLowerBound,
   shouldPollApplying,
+  approveOutcome,
   assuranceTone,
   proofTone,
   trustScoreTone,
@@ -276,6 +277,8 @@ export interface TrustReportViewProps {
   /** Links to the existing evidence cards for this job. */
   onOpenGate8?: () => void;
   onOpenDetail?: () => void;
+  /** The automatic re-read while a fix is applying stopped at its limit; say so. */
+  pollStopped?: boolean;
 }
 
 function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: ParityTone; detail?: string }> {
@@ -317,6 +320,7 @@ export function TrustReportView({
   onDownloadSigned,
   onOpenGate8,
   onOpenDetail,
+  pollStopped = false,
 }: TrustReportViewProps) {
   const verdict = verdictPresentation(report);
   const { parity, confidence } = report;
@@ -540,6 +544,15 @@ export function TrustReportView({
                   onDismiss={onDismiss}
                 />
               ))}
+              {pollStopped && report.fixes.some((f) => f.status === "applying") && (
+                <p className="df2-parity-notice" role="status">
+                  <DtIcon name="clock" size={14} />
+                  <span>
+                    Stopped checking automatically: the fix is still being applied. Refresh the report to see whether
+                    it has finished.
+                  </span>
+                </p>
+              )}
               {errors.fix && (
                 <p className="df2-parity-notice is-danger" role="alert">
                   <DtIcon name="alert" size={14} />
@@ -685,7 +698,10 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
 
   // A fix being applied (a re-sync job) settles on the server: re-read until it has, bounded.
   const applying = report?.fixes.some((f) => f.status === "applying") ?? false;
+  const [pollStopped, setPollStopped] = useState(false);
+  const [pollEpoch, setPollEpoch] = useState(0);
   useEffect(() => {
+    setPollStopped(false);
     if (!applying) return;
     let reads = 0;
     const timer = setInterval(() => {
@@ -693,12 +709,14 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
       reads += 1;
       if (!shouldPollApplying(reportRef.current, reads)) {
         clearInterval(timer);
+        // Still applying after the last automatic read: tell the person, never stop silently.
+        if (reportRef.current?.fixes.some((f) => f.status === "applying")) setPollStopped(true);
         return;
       }
       void load();
     }, PARITY_APPLYING_POLL_MS);
     return () => clearInterval(timer);
-  }, [applying, load]);
+  }, [applying, load, pollEpoch]);
 
   /**
    * Run one action at a time. Every control is disabled while it runs; the
@@ -710,7 +728,9 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
       next: Exclude<ParityBusy, null>,
       area: "explain" | "fix" | "signoff" | null,
       call: () => Promise<ParityReport | void>,
-      success?: { title: string; message?: string },
+      success?:
+        | { title: string; message?: string }
+        | ((result: ParityReport | void) => { title: string; message?: string; tone: "success" | "error" | "info" }),
     ) => {
       if (busyRef.current) return;
       busyRef.current = true;
@@ -724,7 +744,9 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
           accept(forJob, result);
           if (result.version <= before) await load();
         }
-        if (success && jobRef.current === forJob) toast({ ...success, tone: "success" });
+        if (success && jobRef.current === forJob) {
+          toast(typeof success === "function" ? success(result) : { ...success, tone: "success" });
+        }
       } catch (err) {
         if (jobRef.current !== forJob) return;
         const fallback =
@@ -803,22 +825,20 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
       signDeniedReason={signGate.reason}
       canExplain={explainGate.allowed}
       errors={errors}
-      onRefresh={() => void run({ kind: "refresh" }, null, () => fetchParityReport(jobId))}
+      pollStopped={pollStopped}
+      onRefresh={() => {
+        if (pollStopped) setPollEpoch((n) => n + 1); // a manual refresh restarts the bounded re-reads
+        void run({ kind: "refresh" }, null, () => fetchParityReport(jobId));
+      }}
       onExplain={() =>
         void run({ kind: "explain" }, "explain", () => explainParityReport(jobId), { title: "Explanation updated" })
       }
-      onApprove={(fixId, note) => {
-        const fix = report.fixes.find((f) => f.id === fixId);
-        void run({ kind: "approve", id: fixId }, "fix", () => approveParityFix(jobId, fixId, note, report.version), {
-          title:
-            fix?.action === "accept"
-              ? "Differences accepted"
-              : fix?.action === "resync_keys"
-                ? "Re-sync started; the report re-checks the keys when it finishes"
-                : "Fix applied and re-checked",
-          message: fix?.title,
-        });
-      }}
+      onApprove={(fixId, note) =>
+        void run({ kind: "approve", id: fixId }, "fix", () => approveParityFix(jobId, fixId, note, report.version), (result) =>
+          // The toast follows what came back for the fix: a 200 can carry a failed fix.
+          approveOutcome(result || null, fixId),
+        )
+      }
       onDismiss={(fixId, note) =>
         void run({ kind: "dismiss", id: fixId }, "fix", () => dismissParityFix(jobId, fixId, note, report.version), { title: "Fix dismissed" })
       }

@@ -45,6 +45,7 @@ import {
   approvalAuthority,
   invalidatedApprovalsNote,
   fixStatusPresentation,
+  approveOutcome,
 } from "./parity.js";
 import { provenReport, signedReport, summaryFixture, unexplainedReport } from "../components/parity/parityFixtures.js";
 
@@ -366,5 +367,23 @@ describe("parity API client", () => {
   it("reports a missing job as a 404 ApiError", async () => {
     mockFetch(() => json({ detail: "Job not found" }, 404));
     await assert.rejects(fetchParityReport("nope"), (err: unknown) => err instanceof ApiError && err.status === 404);
+  });
+});
+
+describe("approve outcome (re-review finding 7)", () => {
+  it("toasts by the status the server returned for the fix, never success for a failed fix", () => {
+    const base = unexplainedReport();
+    const fix = base.fixes[0];
+    const withStatus = (status: typeof fix.status, result: string | null = null) => ({
+      ...base,
+      fixes: [{ ...fix, status, result }],
+    });
+    const failed = approveOutcome(withStatus("failed", "the destination refused the ALTER"), fix.id);
+    assert.equal(failed.tone, "error");
+    assert.equal(failed.title, "The fix failed");
+    assert.equal(failed.message, "the destination refused the ALTER");
+    assert.equal(approveOutcome(withStatus("applying"), fix.id).tone, "info");
+    assert.equal(approveOutcome(withStatus("applied", "Ran: ALTER"), fix.id).tone, "success");
+    assert.equal(approveOutcome(null, fix.id).tone, "info");
   });
 });

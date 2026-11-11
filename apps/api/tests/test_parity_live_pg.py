@@ -92,7 +92,8 @@ def test_scale_cut_is_widened_and_resynced_on_postgres(pg):
 
     req = TransferRequest(
         source=endpoint(src), destination=endpoint(dst),
-        mappings=[{"source": c, "target": c} for c in ("id", "amount", "note")],
+        # Approved mappings: the re-sync job keeps preflight (as the re-run route does).
+        mappings=[{"source": c, "target": c, "user_override": True} for c in ("id", "amount", "note")],
         stream_contracts=[{"name": src, "primary_key": ["id"], "sync_mode": "upsert", "selected": True}],
         sync_mode="upsert", skip_preflight=True, validation_mode="lenient",
     )

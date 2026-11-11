@@ -130,10 +130,12 @@ def _request(src: Path, dst: Path) -> TransferRequest:
     return TransferRequest(
         source=EndpointConfig(kind="database", format="sqlite", database=str(src), table="pay"),
         destination=EndpointConfig(kind="database", format="sqlite", database=str(dst), table="pay"),
+        # Mappings an operator approved: the re-sync job a fix starts keeps
+        # preflight (as the re-run route does), and preflight passes them.
         mappings=[
-            {"source": "id", "target": "id"},
-            {"source": "note", "target": "note"},
-            {"source": "amount", "target": "amount"},
+            {"source": "id", "target": "id", "user_override": True},
+            {"source": "note", "target": "note", "user_override": True},
+            {"source": "amount", "target": "amount", "user_override": True},
         ],
         shape_recipe={"steps": [{"op": "trim", "column": "note"}]},
         stream_contracts=[{"name": "pay", "primary_key": ["id"], "sync_mode": "upsert", "selected": True}],

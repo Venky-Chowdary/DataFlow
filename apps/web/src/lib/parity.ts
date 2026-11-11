@@ -635,3 +635,29 @@ export function explanationIsStale(report: Pick<ParityReport, "explanation" | "f
     .filter((t) => Number.isFinite(t));
   return times.some((t) => t > written);
 }
+
+/**
+ * The toast after an approve, from what the server returned for that fix — a
+ * 200 can carry a fix that failed (the DDL was refused, the re-sync could not
+ * start), and that must not read as success.
+ */
+export function approveOutcome(
+  report: Pick<ParityReport, "fixes"> | null | undefined,
+  fixId: string,
+): { title: string; message?: string; tone: "success" | "error" | "info" } {
+  const fix = report?.fixes.find((f) => f.id === fixId);
+  if (!fix) return { title: "Decision recorded", tone: "info" };
+  const message = fix.result || fix.title;
+  switch (fix.status) {
+    case "failed":
+      return { title: "The fix failed", message, tone: "error" };
+    case "applying":
+      return { title: "Re-sync started; the report re-checks the keys when it finishes", message: fix.title, tone: "info" };
+    case "applied":
+      if (fix.action === "accept") return { title: "Differences accepted", message: fix.title, tone: "success" };
+      if (fix.action === "rerun") return { title: "Re-run started", message, tone: "success" };
+      return { title: "Fix applied and re-checked", message, tone: "success" };
+    default:
+      return { title: "Decision recorded", message: fix.title, tone: "info" };
+  }
+}

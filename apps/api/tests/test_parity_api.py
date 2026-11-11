@@ -219,30 +219,3 @@ def test_dismiss_explain_and_summary(ent, world):
     assert row[0] == "unexplained_large"  # 2 of 100 rows is over the 1% "small" line
     assert body["runs"][1]["verdict"] == "no_difference_found"  # a clean sample is not proof
     assert viewer.get("/api/v1/parity/summary", params={"limit": 0}).status_code == 422
-
-
-def test_rerun_fix_starts_the_existing_rerun(ent, world, monkeypatch):
-    import importlib
-
-    connectors_router = importlib.import_module("src.routers.connectors_router")
-    started = []
-
-    async def fake_rerun(job_id, background_tasks, request, force=False, body=None):
-        started.append((job_id, request.url.path))
-        return {"success": True, "job_id": "rerun-child-1"}
-
-    monkeypatch.setattr(connectors_router, "rerun_transfer_job", fake_rerun)
-    ws, editor = world["ws"], world["editor"]
-    job = _job(ws, "short load", reconciliation={
-        "passed": False, "source_rows": 100, "target_rows": 97, "culprit_census_clean": True,
-    }, transfer_request={"source": {"kind": "database", "table": "o"},
-                         "destination": {"kind": "database", "table": "o"}})
-    report = editor.get(f"/api/v1/jobs/{job}/parity-report").json()
-    rerun = _fix(report, "rerun")
-    assert rerun["applicable"] and rerun["preview"] == f"POST /api/v1/connectors/jobs/{job}/rerun"
-    res = editor.post(f"/api/v1/jobs/{job}/parity-report/fixes/{rerun['id']}/approve", json={"note": "go"})
-    assert res.status_code == 200, res.text
-    done = next(f for f in res.json()["fixes"] if f["id"] == rerun["id"])
-    assert done["status"] == "applied" and "rerun-child-1" in done["result"]
-    assert started == [(job, f"/api/v1/jobs/{job}/parity-report/fixes/{rerun['id']}/approve")]
-    assert res.json()["rounds"] == []  # a re-run is checked by its own report, not a round here

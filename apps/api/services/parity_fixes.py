@@ -174,17 +174,36 @@ def _decimal_cover(source_type: str, existing: str, dialect: str, diff: dict[str
     return source_type
 
 
+def rerun_refusal(job: dict[str, Any]) -> str | None:
+    """Why ``POST /connectors/jobs/{id}/rerun`` would refuse this job, or None.
+
+    The same decision that route takes
+    (:func:`services.execution_engine_contract.decide_saved_job_rerun`), so a
+    ``rerun`` fix is offered only where the route would start one: a failed
+    job uses retry, and an append that committed rows would duplicate them.
+    """
+    payload = request_of(job)
+    if not payload.get("source"):
+        return "This job has no saved configuration to re-run; start it again from Transfer Studio."
+    if not job_is_terminal(job):
+        return "The job is still running."
+    from services.execution_engine_contract import decide_saved_job_rerun
+    from src.transfer.models import transfer_request_from_dict
+
+    try:
+        req = transfer_request_from_dict(payload)
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return "This job's saved configuration cannot be read; start it again from Transfer Studio."
+    decision = decide_saved_job_rerun(job, req)
+    return None if decision.get("allowed") else str(decision.get("reason") or "The re-run route refuses this job.")
+
+
 def _rerun(job: dict[str, Any], diffs: list[dict[str, Any]], job_id: str) -> dict:
-    reason = None
-    if not request_of(job).get("source"):
-        reason = "This job has no saved configuration to re-run; start it again from Transfer Studio."
-    elif not job_is_terminal(job):
-        reason = "The job is still running."
     return _fix(
         "rerun", diffs, title="Re-run the job",
         detail="Starts the job again as a new run (preflight kept); that run gets its own parity "
         "report when it completes.",
-        preview=f"POST /api/v1/connectors/jobs/{job_id}/rerun", reason=reason,
+        preview=f"POST /api/v1/connectors/jobs/{job_id}/rerun", reason=rerun_refusal(job),
     )
 
 

@@ -20,6 +20,8 @@ read of the report on any replica — so no request waits on a source scan.
 from __future__ import annotations
 
 import logging
+import re
+import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -47,10 +49,46 @@ from services.parity_state import (
 logger = logging.getLogger(__name__)
 
 SIGNED_IS_FINAL = "This report is signed, and a signed report is final; re-run the job for a new report."
-#: A claim with no running job behind it after this long is settled as failed.
+#: A claim with nothing applying it after this long is settled as failed (the API restarted mid-apply).
 STALE_CLAIM_SECONDS = 3600
 _CHILD_OK = frozenset({"completed", "completed_with_quarantine", "completed_with_warnings", "success"})
 _CHILD_FAILED = frozenset({"failed", "cancelled", "canceled", "error"})
+
+#: (job id, fix id) of the write fixes this process is applying right now.
+_APPLYING_HERE: set[tuple[str, str]] = set()
+_APPLYING_LOCK = threading.Lock()
+
+
+class RerunRefused(ParityConflict):
+    """The re-run route refused (or never started) the re-run: nothing was written."""
+
+
+# Row values a database error may quote: never into a fix result, the signed pack or the audit.
+_VALUE_BEARING = (
+    (re.compile(r"(Key \(([^)]*)\)=)\((?:[^()]|\([^()]*\))*\)"), r"\1(…)"),
+    (re.compile(r"(Failing row contains )\((?:[^()]|\([^()]*\))*\)"), r"\1(…)"),
+    (re.compile(r"(Duplicate entry )'(?:[^'\\]|\\.)*'"), r"\1'…'"),
+    (re.compile(r"(duplicate key value is )\((?:[^()]|\([^()]*\))*\)", re.I), r"\1(…)"),
+    (re.compile(r"(DETAIL:)[^\n]*"), r"\1 (row values withheld)"),
+    (re.compile(r"(:\s*)\"(?:[^\"\\]|\\.)*\""), r'\1"…"'),
+    (re.compile(r"(value )'(?:[^'\\]|\\.)*'", re.I), r"\1'…'"),
+)
+
+
+def safe_result(text: Any, limit: int = 500) -> str:
+    """A fix result or error as it may be stored, signed and audited.
+
+    Database and child-job errors quote row values (PostgreSQL's
+    ``Key (email)=(…)``, ``Failing row contains (…)``, MySQL's ``Duplicate
+    entry '…'``) and sometimes credentials; protected columns are never shown,
+    so no quoted value is kept at all, and secret shapes are redacted.
+    """
+    from services.log_redaction import redact_log_text
+
+    out = str(text or "")
+    for pattern, repl in _VALUE_BEARING:
+        out = pattern.sub(repl, out)
+    return redact_log_text(out)[:limit]
 
 
 def not_signed(state: dict[str, Any]) -> None:
@@ -119,7 +157,11 @@ def approve_fix(
 
     ``accept`` is recorded at once. ``widen_column`` and ``rerun`` are applied
     and settled before returning; ``resync_keys`` returns while its transfer
-    job runs (the fix reads ``applying`` until it is settled).
+    job runs (the fix reads ``applying`` until it is settled). The write runs
+    outside every lock (no repair-workflow lock is held while a DDL or the
+    re-run route runs); its decision and outcome are recorded in the repair
+    workflow once it is known. A re-run the route refuses wrote nothing: the
+    claim is released (no round is used) and the refusal is a 409.
     """
     from services.agentic_repair import parity_proposal_id
 
@@ -154,17 +196,47 @@ def approve_fix(
     if fix["action"] == "resync_keys":
         return _start_resync(job, job_id, fix, actor)
 
-    def apply(_actions: list[dict[str, Any]]) -> dict[str, Any]:
+    with _APPLYING_LOCK:
+        _APPLYING_HERE.add((job_id, fix_id))
+    try:
         if fix["action"] == "widen_column":
-            return {"applied": True, "result": _widen_apply(job, fix)}
-        started = start_rerun() if start_rerun is not None else ""
-        return {"applied": True, "result": f"Started re-run {started}; it gets its own parity report when it completes."}
+            ok, result = True, _widen_apply(job, fix)
+        else:
+            started = start_rerun() if start_rerun is not None else ""
+            ok, result = True, f"Started re-run {started}; it gets its own parity report when it completes."
+    except RerunRefused as exc:
+        _release(job, job_id, fix_id, actor=actor, reason=safe_result(exc))
+        raise
+    except Exception as exc:  # noqa: BLE001 - a failed write is recorded on the fix, never hidden
+        ok, result = False, safe_result(exc) or "the fix failed"
+    finally:
+        with _APPLYING_LOCK:
+            _APPLYING_HERE.discard((job_id, fix_id))
+    _record_repair(job_id, fix, actor=actor, ok=ok, result=result)
+    return settle_fix(job_id, fix_id, ok=ok, result=result)
 
-    decided = _repair_decision(job_id, fix, approve=True, actor=actor, apply_fn=apply)
-    outcome = dict(decided.apply_result or {})
-    ok = decided.status == "applied"
-    result = str(outcome.get("result") if ok else outcome.get("error") or outcome.get("reason") or "the fix failed")
-    return settle_fix(job_id, fix_id, ok=ok, result=result[:500])
+
+def _record_repair(job_id: str, fix: dict[str, Any], *, actor: str, ok: bool, result: str) -> None:
+    """The decision and its known outcome in the repair workflow (nothing slow runs under its lock)."""
+    from services.agentic_repair import record_outcome
+
+    outcome = {"applied": True, "result": result} if ok else {"applied": False, "error": result}
+    decided = _repair_decision(job_id, fix, approve=True, actor=actor, apply_fn=lambda _a: outcome)
+    if not ok:
+        record_outcome(decided.id, applied=False, result=result, actor=actor)
+
+
+def _release(job: dict[str, Any], job_id: str, fix_id: str, *, actor: str, reason: str) -> None:
+    """Drop a claim nothing was written for: the fix is proposed again and uses no round."""
+
+    def release(_job: dict[str, Any], state: dict[str, Any]) -> None:
+        record = state["fixes"].get(fix_id) or {}
+        if record.get("status") == APPLYING:
+            state["fixes"].pop(fix_id, None)
+
+    update_state(job_id, release)
+    audit("job.parity.fix_refused", job=job, job_id=job_id, actor=actor, outcome="denied",
+          details={"fix_id": fix_id, "reason": reason})
 
 
 def _accept(job: dict[str, Any], job_id: str, report: dict[str, Any], fix: dict[str, Any],
@@ -216,7 +288,8 @@ def _resync_request(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor
         c.pop("cursor_field", None)
         c.update({"sync_mode": "upsert", "primary_key": [key_src]})
     req.stream_contracts = contracts
-    req.skip_preflight = True
+    # Preflight is kept, exactly as the existing re-run route keeps it.
+    req.skip_preflight = False
     req.limit = 0
     req.parent_job_id = job_id
     req.workspace_id = str(job.get("workspace_id") or req.workspace_id or "")
@@ -246,7 +319,7 @@ def _start_resync(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: 
     except Exception as exc:  # noqa: BLE001 - a failed start is recorded on the fix, never hidden
         from services.agentic_repair import record_outcome
 
-        error = str(exc)[:400]
+        error = safe_result(exc, 400)
         decided = _repair_decision(job_id, fix, approve=True, actor=actor,
                                    apply_fn=lambda _a: {"applied": False, "error": error})
         record_outcome(decided.id, applied=False, result=error, actor=actor)
@@ -265,7 +338,7 @@ def _start_resync(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: 
         future = _launch(child_id, req)
     except Exception as exc:  # noqa: BLE001 - the scheduler refused: the fix failed
         return settle_fix(job_id, fix_id, ok=False, result=f"The re-sync job {child_id} could not be scheduled: "
-                          f"{str(exc)[:300]}")
+                          f"{safe_result(exc, 300)}")
     if future is not None and hasattr(future, "add_done_callback"):
         future.add_done_callback(lambda _f: _settle_quietly(job_id))
     settled = settle_pending(job_id)
@@ -295,7 +368,17 @@ def _rows_written(child: dict[str, Any]) -> int | None:
 
 
 def _resync_outcome(record: dict[str, Any], child: dict[str, Any] | None) -> tuple[bool, str] | None:
-    """(ok, result) once the re-sync job is finished, else None."""
+    """(ok, result) once the re-sync job is over, else None (still running).
+
+    A job that is not finished is judged by the per-step stall watchdog
+    (:func:`services.job_watchdog.job_step_stall`): past its step's hard limit
+    with no progress, the re-sync failed. A status that is neither running nor
+    finished (nothing will move it on) is failed once the job has been quiet
+    for :data:`STALE_CLAIM_SECONDS`.
+    """
+    from services.job_status import UNFINISHED_JOB_STATUSES
+    from services.job_watchdog import job_step_stall
+
     child_id = str(record.get("child_job_id") or "")
     keys = list(record.get("_keys") or [])
     key_col = str(record.get("_key_column") or "the key")
@@ -303,9 +386,18 @@ def _resync_outcome(record: dict[str, Any], child: dict[str, Any] | None) -> tup
         return False, f"The re-sync job {child_id} is gone, so the fix cannot be confirmed."
     status = str(child.get("status") or "").strip().lower()
     if status in _CHILD_FAILED:
-        error = str(child.get("error") or child.get("message") or status)[:300]
+        error = safe_result(child.get("error") or child.get("message") or status, 300)
         return False, f"re-sync job {child_id} {status}: {error}"
+    if status in UNFINISHED_JOB_STATUSES:
+        stall = job_step_stall(child)
+        if stall and stall["stall_seconds"] >= stall["fail_seconds"]:
+            return False, (f"re-sync job {child_id} made no progress on step {stall['step']} for "
+                           f"{int(stall['stall_seconds'])}s, past its {int(stall['fail_seconds'])}s limit.")
+        return None
     if status not in _CHILD_OK:
+        quiet = _age_seconds(child.get("updated_at") or child.get("created_at"))
+        if quiet > STALE_CLAIM_SECONDS:
+            return False, f"re-sync job {child_id} has been {status or 'in an unknown state'} for {int(quiet)}s."
         return None
     written = _rows_written(child)
     if keys and written == 0:
@@ -316,22 +408,22 @@ def _resync_outcome(record: dict[str, Any], child: dict[str, Any] | None) -> tup
     return True, f"Re-synced {len(keys)} key(s) through job {child_id} (upsert on {key_col}{tail})."
 
 
-def _age_seconds(iso: str | None) -> float:
-    try:
-        then = datetime.fromisoformat(str(iso))
-    except (TypeError, ValueError):
-        return 0.0
-    if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - then).total_seconds()
+def _age_seconds(value: Any) -> float:
+    from services.job_watchdog import _as_utc
+
+    then = _as_utc(value)
+    return 0.0 if then is None else (datetime.now(timezone.utc) - then).total_seconds()
 
 
 def settle_pending(job_id: str) -> dict[str, Any] | None:
     """Settle every claimed fix whose work is over; returns the last settled report, or None.
 
     Cheap when nothing is applying (one job read). A re-sync is settled when
-    its transfer job is finished; a claim with nothing running behind it for
-    :data:`STALE_CLAIM_SECONDS` (the API restarted mid-apply) settles as failed.
+    its transfer job is finished or stalled (see :func:`_resync_outcome`). A
+    widen or re-run is applied by the request that approved it; a claim this
+    process is not applying and that is older than :data:`STALE_CLAIM_SECONDS`
+    (the API restarted mid-apply) settles as failed — and if that apply does
+    finish after all, its real outcome replaces the stale one.
     """
     from services.agentic_repair import record_outcome
 
@@ -341,9 +433,13 @@ def settle_pending(job_id: str) -> dict[str, Any] | None:
         if record.get("status") != APPLYING:
             continue
         child_id = str(record.get("child_job_id") or "")
+        stale = False
         if child_id:
             outcome = _resync_outcome(record, job_store().get_job(child_id))
+        elif _applying_here(job_id, fix_id):
+            outcome = None
         elif _age_seconds(record.get("decided_at")) > STALE_CLAIM_SECONDS:
+            stale = True
             outcome = (False, "The fix was approved but never finished (the API restarted while applying it).")
         else:
             outcome = None
@@ -351,13 +447,18 @@ def settle_pending(job_id: str) -> dict[str, Any] | None:
             continue
         ok, result = outcome
         try:
-            settled = settle_fix(job_id, fix_id, ok=ok, result=result)
+            settled = settle_fix(job_id, fix_id, ok=ok, result=result, stale=stale)
         except ParityConflict:
             continue  # another replica settled it first
         if record.get("repair_proposal_id"):
             record_outcome(str(record["repair_proposal_id"]), applied=ok, result=result,
                            actor=str(record.get("approved_by") or ""))
     return settled
+
+
+def _applying_here(job_id: str, fix_id: str) -> bool:
+    with _APPLYING_LOCK:
+        return (job_id, fix_id) in _APPLYING_HERE
 
 
 # ── widen: an existing in-place DDL helper ───────────────────────────────────
@@ -392,20 +493,28 @@ def _widen_apply(job: dict[str, Any], fix: dict[str, Any]) -> str:
 # ── settle and dismiss ───────────────────────────────────────────────────────
 
 
-def settle_fix(job_id: str, fix_id: str, *, ok: bool, result: str) -> dict[str, Any]:
+def settle_fix(job_id: str, fix_id: str, *, ok: bool, result: str, stale: bool = False) -> dict[str, Any]:
     """Record how a claimed write fix ended: re-check its keys, append the round.
 
     Written by compare-and-swap on the freshest state (retried, never pinned:
     the write already happened and its outcome must not be lost to a
-    concurrent unrelated change).
+    concurrent unrelated change). ``stale`` marks a claim settled as failed
+    only because nothing finished it in time; when the apply does finish
+    later, its real outcome replaces that one.
     """
     from services.parity_report import build_parity_report
 
     def settle(job: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         record = state["fixes"].get(fix_id)
-        if not record or record.get("status") != APPLYING:
+        late = bool(record and record.get("_stale") and record.get("status") == "failed" and not stale)
+        if not record or (record.get("status") != APPLYING and not late):
             raise ParityConflict(f"Fix {fix_id} is not being applied.")
         record.update(status="applied" if ok else "failed", applied_at=now_iso(), result=result)
+        record.pop("_stale", None)
+        if stale:
+            record["_stale"] = True
+        elif late:
+            record["result"] = f"{result} (finished after the claim was settled as stale)"
         if ok and record["action"] in {"resync_keys", "widen_column"}:
             table = str(record.get("_table") or "")
             keys = list(record.get("_keys") or [])

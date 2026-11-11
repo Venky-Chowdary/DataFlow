@@ -14,6 +14,7 @@ workspace is a 404, exactly as ``GET /jobs/{id}``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
@@ -42,8 +43,18 @@ class SignoffBody(BaseModel):
     expected_version: int | None = Field(default=None, ge=0)
 
 
+#: How long an approve waits for the re-run route to answer.
+_RERUN_START_SECONDS = 60.0
+
+
 def _http(exc: ParityError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+def _detail_text(detail: Any) -> str:
+    if isinstance(detail, dict):
+        return str(detail.get("message") or detail.get("error") or detail.get("reason") or detail)
+    return str(detail)
 
 
 def _visible_job(job_id: str, request: Request, *, write: bool = False) -> dict[str, Any]:
@@ -110,16 +121,26 @@ async def approve_parity_fix(
     loop = asyncio.get_running_loop()
 
     def start_rerun() -> str:
-        # The existing re-run route, with its own refusals and audit trail.
+        # The existing re-run route, with its own refusals and audit trail. A
+        # refusal wrote nothing, so the fix's claim is released (RerunRefused).
+        from services.parity_apply import RerunRefused
+
         from .connectors_router import rerun_transfer_job
 
         future = asyncio.run_coroutine_threadsafe(
             rerun_transfer_job(job_id, background_tasks, request), loop
         )
         try:
-            started = future.result(timeout=60)
+            started = future.result(timeout=_RERUN_START_SECONDS)
+        except concurrent.futures.TimeoutError as exc:
+            if future.cancel():
+                # Never started: no orphan re-run behind a failed fix.
+                raise RerunRefused(
+                    f"the re-run route did not answer within {_RERUN_START_SECONDS:g}s; nothing was started"
+                ) from exc
+            started = future.result()  # it finished as the wait ran out
         except HTTPException as exc:
-            raise RuntimeError(f"the re-run was refused: {exc.detail}") from exc
+            raise RerunRefused(f"the re-run was refused: {_detail_text(exc.detail)}") from exc
         return str((started or {}).get("job_id") or "")
 
     try:
