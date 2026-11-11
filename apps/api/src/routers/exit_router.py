@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from services.audit_log import actor_from_request
@@ -147,3 +147,58 @@ async def delete_exit_system(system_id: str, request: Request):
     except ExitError as exc:
         raise _http(exc) from exc
     return Response(status_code=204)
+
+
+# ------------------------------------------------------------------ rehearsals
+
+
+def _visible_rehearsal(rehearsal_id: str, request: Request, *, write: bool = False) -> dict[str, Any]:
+    from services import exit_store
+    from services.workspace_access import assert_resource_workspace
+
+    doc = exit_store.get(exit_store.REHEARSALS, rehearsal_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Rehearsal not found")
+    assert_resource_workspace(request, doc.get("workspace_id") or None, write=write,
+                              not_found_detail="Rehearsal not found")
+    return doc
+
+
+@router.post("/exit/systems/{system_id}/rehearsals", status_code=202)
+async def start_exit_rehearsal(system_id: str, request: Request):
+    from services.exit_rehearsal import public, start
+
+    system = _visible_system(system_id, request, write=True)
+    try:
+        doc = await asyncio.to_thread(start, system, actor=actor_from_request(request), trigger="manual")
+    except ExitError as exc:
+        raise _http(exc) from exc
+    return await asyncio.to_thread(public, doc)
+
+
+@router.get("/exit/systems/{system_id}/rehearsals")
+async def list_exit_rehearsals(system_id: str, request: Request, limit: int = Query(default=20, ge=1, le=100)):
+    from services.exit_inventory import rehearsal_summary, rehearsals_of
+    from services.exit_rehearsal import trend
+
+    _visible_system(system_id, request)
+
+    def build() -> dict[str, Any]:
+        rows = rehearsals_of(system_id, limit=limit)
+        latest = rows[0] if rows else None
+        return {"rehearsals": [rehearsal_summary(r) for r in rows],
+                "trend": trend(latest) if latest else {"points": [], "growth_pct_rows": None, "projection": None}}
+
+    return await asyncio.to_thread(build)
+
+
+@router.get("/exit/rehearsals/{rehearsal_id}")
+async def get_exit_rehearsal(rehearsal_id: str, request: Request):
+    from services.exit_rehearsal import public, settle
+
+    doc = _visible_rehearsal(rehearsal_id, request)
+
+    def build() -> dict[str, Any]:
+        return public(settle(rehearsal_id) or doc)
+
+    return await asyncio.to_thread(build)

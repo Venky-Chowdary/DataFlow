@@ -32,6 +32,7 @@ from ..rag.query_analysis import (
 )
 from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
+from .exit_tools import EXIT_TOOL_DEFINITIONS
 from .parity_tools import PARITY_TOOL_DEFINITIONS
 from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
@@ -1658,6 +1659,7 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     *LIFECYCLE_TOOL_DEFINITIONS,
     *PARITY_TOOL_DEFINITIONS,
+    *EXIT_TOOL_DEFINITIONS,
 ]
 
 TOOL_FAMILIES: list[dict] = [
@@ -1718,6 +1720,9 @@ TOOL_FAMILIES: list[dict] = [
             "list_jobs",
             "get_job",
             "explain_parity",
+            "get_exit_readiness",
+            "explain_exit_rehearsal",
+            "check_reversibility",
             "navigate",
             "get_preflight_run",
             "remediate_validation",
@@ -1925,6 +1930,9 @@ class DataPilotTools:
             "get_preflight_run": self._get_preflight_run,
             "remediate_validation": self._remediate_validation,
             "explain_parity": self._explain_parity,
+            "get_exit_readiness": self._get_exit_readiness,
+            "explain_exit_rehearsal": self._explain_exit_rehearsal,
+            "check_reversibility": self._check_reversibility,
             "compare_datasets": self._compare_datasets,
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
@@ -2905,6 +2913,21 @@ class DataPilotTools:
         from .parity_tools import explain_parity
 
         return explain_parity(job_id=job_id, selector=selector)
+
+    def _get_exit_readiness(self) -> ToolResult:
+        from .exit_tools import get_exit_readiness
+
+        return get_exit_readiness()
+
+    def _explain_exit_rehearsal(self, rehearsal_id: str = "", system_id: str = "") -> ToolResult:
+        from .exit_tools import explain_exit_rehearsal
+
+        return explain_exit_rehearsal(rehearsal_id=rehearsal_id, system_id=system_id)
+
+    def _check_reversibility(self, plan_id: str = "", job_id: str = "") -> ToolResult:
+        from .exit_tools import check_reversibility
+
+        return check_reversibility(plan_id=plan_id, job_id=job_id)
 
     def _remediate_validation(
         self,

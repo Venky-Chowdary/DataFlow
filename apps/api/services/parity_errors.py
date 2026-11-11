@@ -105,7 +105,7 @@ def error_code(text: str) -> str:
     return ""
 
 
-def safe_error(error: Any, *, what: str = "the fix", limit: int = 300) -> str:
+def safe_error(error: Any, *, what: str = "the fix", limit: int = 300, event: str = "parity.fix.failed") -> str:
     """``error`` (an exception or a child job's error text) as it may be shown, signed and audited.
 
     Only the exception class, the engine's error code and a fixed sentence for
@@ -120,7 +120,7 @@ def safe_error(error: Any, *, what: str = "the fix", limit: int = 300) -> str:
     code = error_code(text)
     _detail, cid = public_error(
         error if isinstance(error, BaseException) else RuntimeError(cls or "error"),
-        event="parity.fix.failed", public_message=what, logger=logger, error_code=code or None,
+        event=event, public_message=what, logger=logger, error_code=code or None,
     )
     logger.warning("parity: %s failed (%s%s) [reference %s]: %s", what, cls or "error", f" {code}" if code else "",
                    cid, text[:2000])
