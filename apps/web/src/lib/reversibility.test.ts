@@ -7,6 +7,9 @@ import { describe, it } from "node:test";
 import {
   checkText,
   columnLabel,
+  columnReasonLabel,
+  lossyColumnBadge,
+  lossyColumnName,
   columnPillPresentation,
   columnsForReview,
   countsText,
@@ -20,7 +23,7 @@ import {
   tableColumnCounts,
 } from "./reversibility.js";
 import { blockedReversibilityFixture, planReversibilityFixture } from "../components/exit/exitFixtures.js";
-import { realPlanReversibility } from "../components/exit/realExitPayloads.js";
+import { realPlanReversibility, realReversibilityCodes, realReversibilityEnum } from "../components/exit/realExitPayloads.js";
 
 describe("verdict pills", () => {
   it("maps reversible / partly / not reversible to words and tones", () => {
@@ -89,6 +92,48 @@ describe("review order", () => {
     assert.equal(columnLabel({ source: null, target: "region", transforms: ["default:EU"] }), "region (destination only)");
     assert.equal(columnLabel({ source: null, target: null, transforms: ["filter_rows"] }), "filter_rows step");
     assert.equal(rollbackLabel("keep_source_as_fallback"), "Keep source as fallback");
+  });
+});
+
+describe("contract 10 reason codes", () => {
+  it("names the new lossy and conditional codes in words", () => {
+    assert.equal(reasonCodeLabel("timezone"), "Time zone dropped");
+    assert.equal(reasonCodeLabel("json_normalize"), "JSON normalised (json → jsonb)");
+    assert.equal(reasonCodeLabel("charset"), "Character set");
+    assert.equal(reasonCodeLabel("enum"), "Into an enum");
+    assert.equal(reasonCodeLabel("blank_pad"), "Blank-padded (CHAR)");
+    assert.equal(reasonCodeLabel("text_width"), "Text width");
+  });
+
+  it("says which rows a row change keeps: row cap, source filter, top N", () => {
+    const rows = realReversibilityCodes.tables[0].columns.filter((c) => c.reason_code === "row_change");
+    assert.deepEqual(rows.map((c) => c.transforms[0]).sort(), ["limit", "rank_rows", "source_filter"]);
+    const byStep = Object.fromEntries(rows.map((c) => [c.transforms[0], c]));
+    assert.equal(columnReasonLabel(byStep.limit), "Row cap (limit)");
+    assert.equal(columnReasonLabel(byStep.source_filter), "Source filter");
+    assert.equal(columnReasonLabel(byStep.rank_rows), "Top rows only (rank_rows)");
+    assert.equal(columnLabel(byStep.limit), "All rows (row cap)");
+    assert.equal(columnLabel(byStep.source_filter), "All rows (source filter)");
+    assert.equal(columnLabel(byStep.rank_rows), "All rows (rank_rows step)");
+    // Any other row-changing step still reads as a step; a column code reads as its code.
+    assert.equal(columnReasonLabel({ reason_code: "row_change", transforms: ["filter_rows"] }), "Changes rows (filter_rows)");
+    assert.equal(columnReasonLabel({ reason_code: "timezone", transforms: [] }), "Time zone dropped");
+  });
+
+  it("lists every lossy column by name, and a row change as the table's rows with its own badge", () => {
+    const report = realReversibilityCodes;
+    const names = report.lossy_columns.map((c) => lossyColumnName(c));
+    assert.ok(names.includes("events.created_at"));
+    assert.equal(names.filter((n) => n === "events (rows)").length, 3);
+    assert.deepEqual(report.lossy_columns.map((c) => lossyColumnBadge(c, report)), [
+      "Time zone dropped", "JSON normalised (json → jsonb)", "Top rows only (rank_rows)", "Row cap (limit)", "Source filter",
+    ]);
+  });
+
+  it("the real enum report: a conditional column that fits its sample is never proof", () => {
+    const state = realReversibilityEnum.tables[0].columns.find((c) => c.reason_code === "enum")!;
+    assert.equal(columnPillPresentation(state).label, "Fits sample");
+    assert.equal(columnReasonLabel(state), "Into an enum");
   });
 });
 

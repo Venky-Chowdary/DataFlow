@@ -24,7 +24,7 @@ import {
   updateExitSystem,
   verifyExitEvidence,
 } from "./exitApi.js";
-import { realBoard, realPack, realPlanReversibility, realRunningRaw, realSigned, realVerify } from "../components/exit/realExitPayloads.js";
+import { realBoard, realPack, realPlanReversibility, realRunning, realSigned, realVerify } from "../components/exit/realExitPayloads.js";
 
 const realFetch = globalThis.fetch;
 const realWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -109,13 +109,13 @@ describe("exit inventory client", () => {
 
 describe("rehearsal client", () => {
   it("starts a rehearsal and normalises the running answer", async () => {
-    const calls = mockFetch(() => json(realRunningRaw, 202));
+    const calls = mockFetch(() => json(realRunning, 202));
     const r = await startExitRehearsal("exs_1");
     assert.equal(calls[0].method, "POST");
     assert.equal(path(calls[0].url), "/exit/systems/exs_1/rehearsals");
     assert.equal(r.verdict, "running");
     assert.equal(r.tables[0].key_set.match, null);
-    assert.equal(r.tables[0].value_parity.method, "none");
+    assert.equal(r.tables[0].value_parity.method, null, "pending while running (contract 10.1.5)");
   });
 
   it("lists rehearsals with a clamped limit and reads one", async () => {

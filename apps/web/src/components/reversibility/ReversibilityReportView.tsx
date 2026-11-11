@@ -16,12 +16,14 @@ import { badgeClass, formatDateTime } from "../../lib/parity";
 import {
   checkText,
   columnLabel,
+  columnReasonLabel,
+  lossyColumnBadge,
+  lossyColumnName,
   columnPillPresentation,
   columnsForReview,
   countsText,
   dataCheckedText,
   gatePresentation,
-  reasonCodeLabel,
   reversibilityVerdictPresentation,
   rollbackLabel,
   tableColumnCounts,
@@ -45,7 +47,9 @@ export interface ReversibilityReportViewProps {
   error?: string;
 }
 
-function typeText(col: Pick<ColumnInvertibility, "source_type" | "target_type">): string {
+function typeText(col: Pick<ColumnInvertibility, "source_type" | "target_type" | "reason_code">): string {
+  // A row change is about which rows land, not a column's types.
+  if (col.reason_code === "row_change") return "—";
   const s = col.source_type || "";
   const t = col.target_type || "";
   if (!s && !t) return "Types not declared";
@@ -62,12 +66,12 @@ function ColumnRow({ col }: { col: ColumnInvertibility }) {
       <td className="df2-rev-col-name" data-label="Column">
         <span className="df2-mono">{columnLabel(col)}</span>
       </td>
-      <td className="df2-rev-col-type" data-label="Types">
+      <td className={`df2-rev-col-type${col.reason_code === "row_change" ? " is-rows" : ""}`} data-label="Types">
         <span className="df2-mono">{typeText(col)}</span>
       </td>
       <td data-label="Mapping">
         <span className={badgeClass(pill.tone)}>{pill.label}</span>
-        <span className="df2-rev-code">{reasonCodeLabel(col.reason_code)}</span>
+        <span className="df2-rev-code">{columnReasonLabel(col)}</span>
       </td>
       <td className="df2-rev-col-why" data-label="Why">
         <span>{col.reason}</span>
@@ -302,8 +306,8 @@ export function ReversibilityReportView({
               {report.lossy_columns.map((c, i) => (
                 <li key={`${c.table}.${c.column}:${i}`}>
                   <span className="df2-rev-lossy-head">
-                    <span className={badgeClass("danger")}>{reasonCodeLabel(c.reason_code)}</span>
-                    <span className="df2-mono df2-rev-lossy-name">{c.table}.{c.column}</span>
+                    <span className={badgeClass("danger")}>{lossyColumnBadge(c, report)}</span>
+                    <span className="df2-mono df2-rev-lossy-name">{lossyColumnName(c)}</span>
                   </span>
                   <span className="df2-rev-lossy-reason">{c.reason}</span>
                 </li>

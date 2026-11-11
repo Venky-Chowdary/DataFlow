@@ -25,6 +25,8 @@ import {
   pillClass,
   readinessPresentation,
   rehearsalVerdictPresentation,
+  runningRehearsalId,
+  staleNotice,
   type ExitSystem,
   type RehearsalSummary,
   type Trend,
@@ -107,9 +109,11 @@ export function SystemDrawer({
 
   const shown = system && system.id === systemId ? system : null;
   const readiness = shown?.readiness;
-  const status = readiness ? readinessPresentation(readiness.state, readiness.overdue) : null;
+  const status = readiness ? readinessPresentation(readiness.state, readiness.overdue, readiness.stale) : null;
   const crit = shown ? criticalityPresentation(shown.criticality) : null;
-  const running = Boolean(shown?.running_rehearsal_id) || readiness?.state === "running";
+  const runningId = runningRehearsalId(shown);
+  const running = Boolean(runningId) || readiness?.state === "running";
+  const stale = staleNotice(readiness);
   const windowSeconds = (shown?.exit_window_hours ?? 0) * 3600;
 
   return (
@@ -148,8 +152,8 @@ export function SystemDrawer({
               <Button
                 size="sm"
                 variant="primary"
-                onClick={() => (running && shown.running_rehearsal_id ? onOpenRehearsal(shown.running_rehearsal_id) : onRunRehearsal(shown))}
-                disabled={running ? !shown.running_rehearsal_id : !canRun || starting}
+                onClick={() => (running && runningId ? onOpenRehearsal(runningId) : onRunRehearsal(shown))}
+                disabled={running ? !runningId : !canRun || starting}
                 loading={starting}
                 loadingLabel="Starting…"
                 title={!running && !canRun ? runDeniedReason : undefined}
@@ -178,6 +182,15 @@ export function SystemDrawer({
       ) : (
         <div className="df2-exit-drawer-body">
           {shown.description && <p className="df2-parity-confidence">{shown.description}</p>}
+          {stale && (
+            <p className="df2-parity-notice" role="status">
+              <DtIcon name="alert" size={14} />
+              <span>
+                <b>{stale.label}.</b>
+                {stale.detail ? ` ${stale.detail}` : ""}
+              </span>
+            </p>
+          )}
           {readiness && (
             <p className={`df2-parity-notice${readiness.overdue ? "" : " is-muted"}`} role="status">
               <DtIcon name="clock" size={14} />
@@ -249,6 +262,7 @@ export function SystemDrawer({
                             {r.tables_proven.toLocaleString("en-US")} of {r.tables_declared.toLocaleString("en-US")} tables proven
                             {r.total_bytes != null ? ` · ${formatBytes(r.total_bytes)}` : ""}
                             {r.signed ? " · signed" : ""}
+                            {r.current === false ? " · earlier definition" : ""}
                           </span>
                         </span>
                         <span className="df2-exit-rehearsal-window">
@@ -266,7 +280,8 @@ export function SystemDrawer({
             {readiness?.last_proven_rehearsal && readiness.last_proven_rehearsal.id !== readiness.last_rehearsal?.id && (
               <p className="df2-parity-muted">
                 Last proven: rehearsal #{readiness.last_proven_rehearsal.n} on {formatDate(readiness.last_proven_rehearsal.started_at)}
-                {readiness.last_proven_rehearsal.measured_seconds != null ? `, ${formatDuration(readiness.last_proven_rehearsal.measured_seconds)} measured` : ""}.
+                {readiness.last_proven_rehearsal.measured_seconds != null ? `, ${formatDuration(readiness.last_proven_rehearsal.measured_seconds)} measured` : ""}
+                {readiness.last_proven_rehearsal.current === false ? ", of an earlier definition (it does not prove this one)" : ""}.
               </p>
             )}
           </section>

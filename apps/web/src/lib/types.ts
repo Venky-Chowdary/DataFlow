@@ -1601,6 +1601,8 @@ export interface ScheduleInput {
   contract_id?: string;
   /** When true (default if contract_id set), refuse to schedule/enable until SIGNED. */
   require_signed_contract?: boolean;
+  /** Each scheduled run must be reversible (g24_reversibility), carried to the run's request. */
+  require_reversibility?: boolean;
   /** Persist mappings onto this parked draft instead of creating a second row. */
   replay_schedule_id?: string;
 }
@@ -1739,6 +1741,8 @@ export interface PipelineSchedule {
   /** Data contract bound to this pipeline (enforced when require_signed_contract). */
   contract_id?: string;
   require_signed_contract?: boolean;
+  /** Each run is blocked unless every table it writes is reversible (g24_reversibility). */
+  require_reversibility?: boolean;
   /** Autopilot, on list summaries: this schedule is waiting on a decision. */
   needs_approval?: boolean;
   approval_id?: string;

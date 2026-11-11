@@ -130,6 +130,13 @@ const REASON_CODES: Record<string, string> = {
   default: "Default value",
   assume_timezone: "Time zone assumed",
   type_unknown: "Type not declared",
+  // Contract 10.3: lossy type mappings the type system read as widening, and conditional ones checked value by value.
+  timezone: "Time zone dropped",
+  json_normalize: "JSON normalised (json → jsonb)",
+  charset: "Character set",
+  enum: "Into an enum",
+  blank_pad: "Blank-padded (CHAR)",
+  text_width: "Text width",
   row_change: "Changes rows",
   recipe_lossy: "Recipe step changes values",
   recipe_invertible: "Recipe step (invertible)",
@@ -139,6 +146,37 @@ const REASON_CODES: Record<string, string> = {
 /** "hash_pii" -> "Hashed (hash_pii)"; an unknown code still reads as words. */
 export function reasonCodeLabel(code: string): string {
   return REASON_CODES[code] ?? humanize(code);
+}
+
+/** A `row_change` entry by the step that changes the rows (contract 10.1.1). */
+const ROW_CHANGES: Record<string, { reason: string; label: string }> = {
+  limit: { reason: "Row cap (limit)", label: "All rows (row cap)" },
+  source_filter: { reason: "Source filter", label: "All rows (source filter)" },
+  rank_rows: { reason: "Top rows only (rank_rows)", label: "All rows (rank_rows step)" },
+};
+
+/** The badge for one column entry: its reason code, or for a row change the step that changes the rows. */
+export function columnReasonLabel(col: Pick<ColumnInvertibility, "reason_code" | "transforms">): string {
+  if (col.reason_code !== "row_change") return reasonCodeLabel(col.reason_code);
+  const step = col.transforms[0] ?? "";
+  return ROW_CHANGES[step]?.reason ?? (step ? `Changes rows (${step})` : reasonCodeLabel("row_change"));
+}
+
+/** A lossy entry's name: "events.created_at", or "events (rows)" for a row change. */
+export function lossyColumnName(c: Pick<LossyColumn, "table" | "column" | "reason_code">): string {
+  return c.column === "(rows)" || (c.reason_code === "row_change" && !c.column) ? `${c.table} (rows)` : `${c.table}.${c.column}`;
+}
+
+/**
+ * A lossy entry's badge. The list carries only the reason code; a row change is
+ * matched back to its table entry (same reason) to name the step.
+ */
+export function lossyColumnBadge(c: LossyColumn, report: Pick<ReversibilityReport, "tables">): string {
+  if (c.reason_code !== "row_change") return reasonCodeLabel(c.reason_code);
+  const entry = report.tables
+    .find((t) => t.name === c.table)
+    ?.columns.find((col) => col.reason_code === "row_change" && col.reason === c.reason);
+  return entry ? columnReasonLabel(entry) : reasonCodeLabel(c.reason_code);
 }
 
 function plural(n: number, one: string, many = `${one}s`): string {
@@ -207,10 +245,12 @@ export function columnsForReview(columns: ColumnInvertibility[]): ColumnInvertib
 }
 
 /** "email → email_hash", "email (dropped)", "→ region (destination only)", "filter_rows step". */
-export function columnLabel(col: Pick<ColumnInvertibility, "source" | "target" | "transforms">): string {
+export function columnLabel(col: Pick<ColumnInvertibility, "source" | "target" | "transforms"> & { reason_code?: string }): string {
   if (col.source && col.target) return col.source === col.target ? col.source : `${col.source} → ${col.target}`;
   if (col.source) return `${col.source} (not carried)`;
   if (col.target) return `${col.target} (destination only)`;
+  const rows = ROW_CHANGES[col.transforms[0] ?? ""];
+  if (rows && (!("reason_code" in col) || col.reason_code === "row_change")) return rows.label;
   return col.transforms.length ? `${col.transforms[0]} step` : "Recipe step";
 }
 

@@ -12,7 +12,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ReversibilityReportView, type ReversibilityReportViewProps } from "./ReversibilityReportView.js";
 import { JobReversibilityTab, PlanReversibilityCard } from "./ReversibilityPanels.js";
 import { blockedReversibilityFixture, planReversibilityFixture } from "../exit/exitFixtures.js";
-import { realPlanReversibility } from "../exit/realExitPayloads.js";
+import { realPlanReversibility, realReversibilityCodes } from "../exit/realExitPayloads.js";
 import type { ReversibilityReport } from "../../lib/reversibility.js";
 
 function text(html: string): string {
@@ -116,6 +116,23 @@ describe("Reversibility tab (static)", () => {
     assert.match(t, /Dropped payments\.note note is not mapped, so the destination does not hold it\./);
     assert.match(t, /email → email_hash/);
     assert.match(t, /Blocks Execute/);
+  });
+
+  it("names the contract 10 reason codes and row changes in words, with badges", () => {
+    const html = view(realReversibilityCodes);
+    const t = text(html);
+    assert.match(t, /created_at timestamp with time zone → timestamp without time zone Lossy Time zone dropped/);
+    assert.match(t, /payload json → jsonb Lossy JSON normalised \(json → jsonb\)/);
+    assert.match(t, /code varchar\(10\) → char\(10\) Does not fit Blank-padded \(CHAR\)/);
+    assert.match(t, /span interval → varchar\(8\) Does not fit Text width/);
+    assert.match(t, /All rows \(row cap\) — Lossy Row cap \(limit\)/);
+    assert.match(t, /All rows \(source filter\) — Lossy Source filter/);
+    assert.match(t, /All rows \(rank_rows step\) — Lossy Top rows only \(rank_rows\)/);
+    // The lossy list: a row change is the table's rows, never "(rows)" as a column name.
+    // (The gate's own message is the API's text and is shown as sent.)
+    const lossyList = t.slice(t.indexOf("Lossy mappings ("));
+    assert.match(lossyList, /Row cap \(limit\) events \(rows\)/);
+    assert.doesNotMatch(lossyList, /events\.\(rows\)/);
   });
 });
 

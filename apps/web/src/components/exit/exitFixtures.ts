@@ -42,9 +42,11 @@ function row(over: Partial<ExitBoardRow> & Pick<ExitBoardRow, "id" | "name">): E
     next_due_at: "2027-01-30T09:00:00Z",
     last_rehearsal_at: "2026-11-02T09:00:00Z",
     last_rehearsal_id: `exr_${over.id.slice(4)}`,
+    running_rehearsal_id: over.state === "running" ? `exr_${over.id.slice(4)}` : null,
     measured_seconds: 6 * H,
     window_seconds: 30 * D,
     fits_window: true,
+    stale: false,
     completeness_label: `Proven, ${over.tables ?? 10} tables`,
     ...over,
   };
@@ -64,11 +66,12 @@ export function boardFixture(): ExitReadiness {
     }),
     row({
       id: "exs_warehouse001", name: "Data warehouse", criticality: "important", engine: "snowflake", tables: 146, state: "incomplete",
-      measured_seconds: 40 * H, window_seconds: 36 * H, fits_window: false, completeness_label: "Incomplete",
+      // Measured, but only a proven run is compared with the window (contract 10.1.4).
+      measured_seconds: 40 * H, window_seconds: 36 * H, fits_window: null, completeness_label: "Incomplete",
     }),
     row({ id: "exs_hr0000000001", name: "HR records", criticality: "important", engine: "mysql", tables: 24, state: "running", measured_seconds: null, fits_window: null, completeness_label: "Rehearsal running" }),
     row({ id: "exs_billing00001", name: "Billing", criticality: "critical", engine: "postgresql", tables: 57, measured_seconds: 9 * H + 20 * 60, completeness_label: "Proven, 57 tables" }),
-    row({ id: "exs_docs00000001", name: "Document store", criticality: "standard", engine: "mongodb", tables: 12, state: "not_proven", measured_seconds: 3 * H, completeness_label: "Not proven" }),
+    row({ id: "exs_docs00000001", name: "Document store", criticality: "standard", engine: "mongodb", tables: 12, state: "not_proven", measured_seconds: 3 * H, fits_window: null, completeness_label: "Not proven" }),
     row({ id: "exs_treasury0001", name: "Treasury", criticality: "critical", engine: "db2", tables: 64, measured_seconds: 14 * H, completeness_label: "Proven, 64 tables" }),
     row({
       id: "exs_loyalty00001", name: "Loyalty", criticality: "standard", engine: "postgresql", tables: 9, overdue: true, state: "failed",
@@ -119,6 +122,9 @@ export function systemFixture(over: Partial<ExitSystem> = {}): ExitSystem {
       state: "proven",
       overdue: false,
       next_due_at: "2027-01-31T02:00:00Z",
+      running_rehearsal_id: null,
+      stale: false,
+      stale_reason: null,
       last_rehearsal: null,
       last_proven_rehearsal: null,
       ...over.readiness,
@@ -170,8 +176,8 @@ function provenTable(i: number, method: RehearsalTable["value_parity"]["method"]
     key_set: keyed ? { source_sha256: h, extract_sha256: h, match: true } : { source_sha256: null, extract_sha256: null, match: null },
     row_set: { source_sha256: sha(i + 900), extract_sha256: sha(i + 900), match: true },
     control_totals: [
-      { column: "amount", source: { sum: "48213004.25", min: "-1200.00", max: "998001.10" }, extract: { sum: "48213004.25", min: "-1200.00", max: "998001.10" }, match: true },
-      { column: "entry_id", source: { sum: String(rows * 3), min: "1", max: String(rows) }, extract: { sum: String(rows * 3), min: "1", max: String(rows) }, match: true },
+      { column: "amount", source: { sum: "48213004.25", min: "-1200.00", max: "998001.10" }, extract: { sum: "48213004.25", min: "-1200.00", max: "998001.10" }, match: true, masked: false },
+      { column: "entry_id", source: { sum: String(rows * 3), min: "1", max: String(rows) }, extract: { sum: String(rows * 3), min: "1", max: String(rows) }, match: true, masked: false },
     ],
     value_parity: { method, parity_verdict: "unverifiable", unexplained: 0, report: `/api/v1/jobs/6af4${String(i).padStart(20, "0")}/parity-report` },
     differences: [],
@@ -241,6 +247,7 @@ export function provenRehearsal(over: Partial<ExitRehearsal> = {}): ExitRehearsa
     finished_at: "2026-11-03T15:00:00Z",
     verdict: "proven",
     verdict_reason: "Every one of the 412 declared table(s) was extracted and proven complete.",
+    definition_sha256: sha(31),
     timeline: [
       { stage: "inventory", status: "done", started_at: "2026-11-01T02:00:00Z", finished_at: "2026-11-01T02:00:03Z", seconds: 3 },
       { stage: "extract", status: "done", started_at: "2026-11-01T02:00:03Z", finished_at: "2026-11-03T06:00:03Z", seconds: 52 * H },
@@ -362,8 +369,8 @@ export function incompleteRehearsal(): ExitRehearsal {
     key_set: { source_sha256: sha(1), extract_sha256: sha(2), match: false },
     row_set: { source_sha256: sha(3), extract_sha256: sha(4), match: false },
     control_totals: [
-      { column: "amount", source: { sum: "2287.50", min: "1.25", max: "75" }, extract: { sum: "2212.50", min: "1.25", max: "73.75" }, match: false },
-      { column: "order_id", source: { sum: "1830", min: "1", max: "60" }, extract: { sum: "1830", min: "1", max: "60" }, match: true },
+      { column: "amount", source: { sum: "2287.50", min: "1.25", max: "75" }, extract: { sum: "2212.50", min: "1.25", max: "73.75" }, match: false, masked: false },
+      { column: "order_id", source: { sum: "1830", min: "1", max: "60" }, extract: { sum: "1830", min: "1", max: "60" }, match: true, masked: false },
     ],
     differences: [
       { kind: "missing_rows", rows: 1, rows_at_least: true, detail: "The extract holds 1 row(s) fewer than the source." },
@@ -384,7 +391,7 @@ export function incompleteRehearsal(): ExitRehearsal {
     tables,
     seal: sealOf(tables, 32),
     completeness: { tables_declared: 6, tables_extracted: 6, tables_proven: 5, tables_not_proven: 0, tables_incomplete: 1, tables_failed: 0, value_methods: { full_checksum: 5, population_digest: 1 }, statement: "6 of 6 declared table(s) extracted. 5 proven complete (rows, key sets, every value and control totals). Value check: full checksum on 5, population digest on 1." },
-    duration: { ...base.duration, measured_seconds: 40 * H, extract_seconds: 34 * H, verify_seconds: 6 * H, window_seconds: 36 * H, fits_window: false, margin_pct: -11.1, statement: "Measured 40 h for 1.1 TB (extract 34 h, verify 6 h) against a window of 36.0 h: this exit does not fit the window. The figure is measured, not projected." },
+    duration: { ...base.duration, measured_seconds: 40 * H, extract_seconds: 34 * H, verify_seconds: 6 * H, window_seconds: 36 * H, fits_window: null, margin_pct: null, statement: "Measured 40 h (extract 34 h, verify 6 h), but the rehearsal is not proven (incomplete), so it is not compared with the window." },
     trend: { points: [], growth_pct_rows: null, projection: null },
     signoff: { ...base.signoff, approvals: [], status: "blocked", blocked_reason: "Only a proven rehearsal can be signed; this one is incomplete: 1 of 6 table(s) differ from the source: fact_orders." },
   };
@@ -431,6 +438,8 @@ export function verifyFixture(over: Partial<ExitVerifyResult> = {}): ExitVerifyR
     merkle_ok: true,
     merkle_root: `sha256:${sha(4242)}`,
     anchor: { status: "anchored", digest: sha(77), provider: "s3", retention: { mode: "COMPLIANCE", retain_until: "2033-11-03T10:02:00Z" }, checked_at: "2026-11-11T12:00:00Z", reason: null },
+    parts_reread: false,
+    note: "The stored extract parts are not re-read here: the Merkle root is recomputed from the part hashes the pack lists. Comparing a stored part with its listed SHA-256 needs the part itself (it may have expired from the export bucket).",
     ...over,
   };
 }

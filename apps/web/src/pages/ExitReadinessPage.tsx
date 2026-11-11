@@ -233,6 +233,7 @@ export function ExitReadinessPage({ active = true, connectors = [], focus = null
         onFilterChange={setFilter}
         selectedId={systemId}
         onOpenSystem={setSystemId}
+        onOpenRehearsal={openRehearsal}
         onRunRehearsal={(id) => setRunDialog({ open: true, systemId: id })}
         onDeclare={() => setForm({ open: true, system: null })}
         canDeclare={manageGate.allowed}

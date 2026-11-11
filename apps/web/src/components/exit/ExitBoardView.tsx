@@ -31,6 +31,7 @@ import {
   pillClass,
   readinessPresentation,
   sortBoardRows,
+  staleNotice,
   type BoardFilter,
   type ExitBoardRow,
   type ExitReadiness,
@@ -57,9 +58,12 @@ export function boardMetrics(readiness: ExitReadiness): MetricItem[] {
       tone: kpis.overdue > 0 ? "red" : "default",
     },
     {
+      // Counts proven systems only (contract 10.1.4): a failed or partial run's clock is not an exit's duration.
       label: "Longest measured exit",
       value: kpis.longest_measured_seconds == null ? "—" : formatDuration(kpis.longest_measured_seconds),
-      sub: kpis.longest_measured_seconds == null ? "Not measured yet" : `${longest?.name ?? "A declared system"} · measured, not estimated`,
+      sub: kpis.longest_measured_seconds == null
+        ? "No proven exit measured yet"
+        : `${longest?.name ?? "A declared system"} · proven, not estimated`,
       tone: "default",
     },
     {
@@ -79,6 +83,8 @@ export interface ExitBoardViewProps {
   onFilterChange: (f: BoardFilter) => void;
   selectedId: string | null;
   onOpenSystem: (systemId: string) => void;
+  /** Open a rehearsal (the running one, from its row). */
+  onOpenRehearsal?: (rehearsalId: string) => void;
   onRunRehearsal: (systemId: string | null) => void;
   onDeclare: () => void;
   canDeclare: boolean;
@@ -109,6 +115,7 @@ export function ExitBoardView({
   onFilterChange,
   selectedId,
   onOpenSystem,
+  onOpenRehearsal,
   onRunRehearsal,
   onDeclare,
   canDeclare,
@@ -227,10 +234,13 @@ export function ExitBoardView({
               <tbody>
                 {rows.map((row, index) => {
                   const crit = criticalityPresentation(row.criticality);
-                  const status = readinessPresentation(row.state, row.overdue);
+                  const status = readinessPresentation(row.state, row.overdue, row.stale);
                   const due = dueText(row.next_due_at, row.overdue, now);
                   const selected = row.id === selectedId;
                   const running = row.state === "running";
+                  const runningId = running && onOpenRehearsal ? row.running_rehearsal_id : null;
+                  const stale = staleNotice(row);
+                  const uncompared = row.fits_window == null && row.measured_seconds != null && !running;
                   return (
                     <tr
                       key={row.id}
@@ -250,7 +260,22 @@ export function ExitBoardView({
                       <td data-label="Last rehearsal">
                         <div className="df2-exit-grid-stack">
                           <span>{row.last_rehearsal_at ? formatDate(row.last_rehearsal_at) : "Never"}</span>
-                          {due && <span className={`df2-exit-grid-meta${row.overdue ? " is-overdue" : ""}`}>{due}</span>}
+                          {runningId ? (
+                            <button
+                              type="button"
+                              className="df2-exit-grid-link"
+                              tabIndex={row.id === activeId ? 0 : -1}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenRehearsal?.(runningId);
+                              }}
+                              onKeyDown={(e) => e.stopPropagation()}
+                            >
+                              Running now · open
+                            </button>
+                          ) : due ? (
+                            <span className={`df2-exit-grid-meta${row.overdue ? " is-overdue" : ""}`}>{due}</span>
+                          ) : null}
                         </div>
                       </td>
                       <td className="df2-exit-grid-col-window" data-label="Measured vs window">
@@ -260,31 +285,48 @@ export function ExitBoardView({
                           ) : null}
                           <span className={`df2-exit-grid-num${row.measured_seconds == null ? " df2-exit-grid-meta" : ""}`}>
                             {measuredVsWindowText(row.measured_seconds, row.window_seconds)}
-                            {row.fits_window === false ? " · does not fit" : ""}
+                            {row.fits_window === false ? " · does not fit" : uncompared ? " · not compared" : ""}
                           </span>
                         </div>
                       </td>
                       <td data-label="Completeness">
-                        <span className="df2-exit-grid-completeness">{row.completeness_label}</span>
+                        <div className="df2-exit-grid-stack">
+                          <span className="df2-exit-grid-completeness">{row.completeness_label}</span>
+                          {stale && <span className="df2-exit-grid-meta is-stale" title={stale.detail || undefined}>{stale.label}</span>}
+                        </div>
                       </td>
                       <td data-label="Status">
                         <span className={pillClass(status.tone)}>{status.label}</span>
                       </td>
                       <td className="df2-exit-grid-col-actions">
                         <div className="df2-exit-grid-actions" role="presentation" onKeyDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="df2-exit-grid-icon-btn"
-                            onClick={() => onRunRehearsal(row.id)}
-                            disabled={!canRun || running || startingId === row.id}
-                            loading={startingId === row.id}
-                            aria-label={running ? `A rehearsal of ${row.name} is running` : `Run a rehearsal of ${row.name}`}
-                            title={!canRun ? runDeniedReason : running ? "A rehearsal is running." : "Run rehearsal"}
-                            tabIndex={row.id === activeId ? 0 : -1}
-                          >
-                            <DtIcon name="play" size={14} />
-                          </Button>
+                          {runningId ? (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="df2-exit-grid-icon-btn"
+                              onClick={() => onOpenRehearsal?.(runningId)}
+                              aria-label={`Open the running rehearsal of ${row.name}`}
+                              title="Open the running rehearsal"
+                              tabIndex={row.id === activeId ? 0 : -1}
+                            >
+                              <DtIcon name="activity" size={14} />
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="df2-exit-grid-icon-btn"
+                              onClick={() => onRunRehearsal(row.id)}
+                              disabled={!canRun || running || startingId === row.id}
+                              loading={startingId === row.id}
+                              aria-label={running ? `A rehearsal of ${row.name} is running` : `Run a rehearsal of ${row.name}`}
+                              title={!canRun ? runDeniedReason : running ? "A rehearsal is running." : "Run rehearsal"}
+                              tabIndex={row.id === activeId ? 0 : -1}
+                            >
+                              <DtIcon name="play" size={14} />
+                            </Button>
+                          )}
                           <Button
                             size="sm"
                             variant="ghost"
@@ -306,8 +348,9 @@ export function ExitBoardView({
           </div>
         )}
         <p className="df2-exit-grid-note">
-          Statuses come from each system's latest finished rehearsal. Durations are measured from job clocks, never
-          estimated. Datawrap produces the evidence; your auditors decide what it satisfies.
+          Statuses come from each system's latest finished rehearsal, while the system still has the definition it
+          rehearsed. Durations are measured from job clocks, never estimated; only a proven run is compared with its
+          window. Datawrap produces the evidence; your auditors decide what it satisfies.
         </p>
       </section>
     </>

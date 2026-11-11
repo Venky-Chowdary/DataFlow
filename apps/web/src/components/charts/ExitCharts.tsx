@@ -22,7 +22,11 @@ import {
 export interface WindowBarProps {
   measured: number | null | undefined;
   window: number | null | undefined;
-  /** The API's verdict on the fit; drawing never decides it. */
+  /**
+   * The API's verdict on the fit; drawing never decides it. Null with a
+   * measurement means "not compared" (only a proven run is, contract 10.1.4-5):
+   * the bar is drawn to scale but never marked over the window.
+   */
   fits?: boolean | null;
   size?: "sm" | "lg";
 }
@@ -34,17 +38,20 @@ export interface WindowBarProps {
  */
 export function WindowBar({ measured, window, fits, size = "sm" }: WindowBarProps) {
   const ratio = windowRatio(measured, window);
-  const over = fits === false || Boolean(ratio?.over);
+  const notCompared = fits === null && ratio != null;
+  const over = !notCompared && (fits === false || Boolean(ratio?.over));
   const label =
     ratio == null
       ? `Not measured against a ${formatWindow(window)} window`
-      : `${formatDuration(measured)} measured of a ${formatWindow(window)} window, ${ratio.label}${over ? ", does not fit" : ""}`;
+      : `${formatDuration(measured)} measured of a ${formatWindow(window)} window, ${ratio.label}${
+          notCompared ? ", not compared with the window (only proven runs are)" : over ? ", does not fit" : ""
+        }`;
   const height = size === "lg" ? 12 : 6;
   // A fit under 1% still shows a sliver, so a fast exit does not read as "nothing ran".
   const pct = ratio == null ? 0 : Math.max(ratio.fraction * 100, ratio.ratio > 0 ? 1.5 : 0);
   return (
     <svg
-      className={`df2-exit-window-bar is-${size}${over ? " is-over" : ""}${ratio == null ? " is-unmeasured" : ""}`}
+      className={`df2-exit-window-bar is-${size}${over ? " is-over" : ""}${ratio == null ? " is-unmeasured" : ""}${notCompared ? " is-uncompared" : ""}`}
       width="100%"
       height={height}
       role="img"

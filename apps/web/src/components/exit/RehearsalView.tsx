@@ -20,8 +20,8 @@ import { SignoffPanel, type ParityBusy } from "../parity/SignoffPanel";
 import { formatDateTime } from "../../lib/parity";
 import {
   anchorPresentation,
+  controlTotalText,
   coverageLines,
-  fitsText,
   formatBytes,
   formatDuration,
   formatWindow,
@@ -35,7 +35,10 @@ import {
   stageLabel,
   stageStatusPresentation,
   tableStatusPresentation,
+  unprovableColumns,
   valueMethodPresentation,
+  verifyPartsNote,
+  windowComparison,
   windowRatio,
   type ExitRehearsal,
   type ExitVerifyResult,
@@ -84,6 +87,11 @@ function MatchText({ match, what }: { match: boolean | null; what: string }) {
 
 function totalsSummary(table: RehearsalTable): { text: string; match: boolean | null } {
   const totals = table.control_totals ?? [];
+  // A table still running (or that never started), or a source that could not be re-read, measured no totals:
+  // that is not "no numeric columns".
+  if (!totals.length && (table.value_parity.method == null || table.status === "running" || table.status === "pending" || table.rows_source == null)) {
+    return { text: "Not measured", match: null };
+  }
   if (!totals.length) return { text: "No numeric columns", match: null };
   const measured = totals.filter((t) => t.match != null);
   const differ = totals.filter((t) => t.match === false).length;
@@ -101,9 +109,21 @@ function rowsText(table: RehearsalTable): string {
 }
 
 function TableDetail({ table, onOpenJob }: { table: RehearsalTable; onOpenJob?: (jobId: string) => void }) {
+  const unprovable = unprovableColumns(table.reason);
   return (
     <div className="df2-exit-table-detail">
       <p className="df2-exit-table-reason">{table.reason}</p>
+      {unprovable.length > 0 && (
+        <ul className="df2-exit-diffs" aria-label={`Columns of ${table.name} that cannot be proven`}>
+          {unprovable.map((u) => (
+            <li key={`${u.kind}:${u.column}`}>
+              <span className={pillClass("warn")}>Not provable</span>
+              <span className="df2-mono">{u.column}</span>
+              <span className={pillClass("muted")}>{u.label}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       {table.differences.length > 0 && (
         <ul className="df2-exit-diffs" aria-label={`Differences in ${table.name}`}>
           {table.differences.map((d, i) => (
@@ -172,9 +192,9 @@ function TableDetail({ table, onOpenJob }: { table: RehearsalTable; onOpenJob?: 
               {table.control_totals.map((t) => (
                 <tr key={t.column}>
                   <td className="df2-mono">{t.column}</td>
-                  <td className="is-num df2-mono">{t.source?.sum ?? "—"}</td>
-                  <td className="is-num df2-mono">{t.extract?.sum ?? "—"}</td>
-                  <td className="is-num df2-mono">{t.source ? `${t.source.min} / ${t.source.max}` : "—"}</td>
+                  <td className={`is-num${t.masked ? "" : " df2-mono"}`}>{controlTotalText(t, "source", "sum")}</td>
+                  <td className={`is-num${t.masked ? "" : " df2-mono"}`}>{controlTotalText(t, "extract", "sum")}</td>
+                  <td className={`is-num${t.masked ? "" : " df2-mono"}`}>{controlTotalText(t, "source", "range")}</td>
                   <td><MatchText match={t.match} what={`The ${t.column} total`} /></td>
                 </tr>
               ))}
@@ -208,6 +228,14 @@ function VerifyResultCard({ result }: { result: ExitVerifyResult }) {
         <li>
           <MatchText match={result.merkle_ok} what="The Merkle root" /> <span>Merkle root recomputed from the parts</span>
         </li>
+        {verifyPartsNote(result) && (
+          <li>
+            <span className="df2-exit-match is-none">
+              <DtIcon name="minus" size={12} /> Not re-read
+            </span>{" "}
+            <span>{verifyPartsNote(result)}</span>
+          </li>
+        )}
         <li>
           <span className={pillClass(anchor.tone)}>{anchor.label}</span> <span>{anchor.detail}</span>
         </li>
@@ -243,6 +271,7 @@ export function RehearsalView({
   const verdict = rehearsalVerdictPresentation(rehearsal.verdict);
   const { completeness, duration, seal, evidence, trend } = rehearsal;
   const ratio = windowRatio(duration.measured_seconds, duration.window_seconds);
+  const windowWords = windowComparison(duration, rehearsal.verdict);
   const coverage = coverageLines(completeness.value_methods);
   const anchor = anchorPresentation(evidence.anchor);
   const signed = rehearsal.signoff.status === "signed";
@@ -421,22 +450,17 @@ export function RehearsalView({
               <dd>{formatWindow(duration.window_seconds)}</dd>
             </div>
             <div className="df2-parity-kpi">
-              <dt>{duration.fits_window === false ? "over by" : "margin"}</dt>
-              <dd>
-                {duration.margin_pct == null
-                  ? "—"
-                  : duration.fits_window === false
-                    ? formatDuration((duration.measured_seconds ?? 0) - duration.window_seconds)
-                    : `${Math.floor(duration.margin_pct)}%`}
-              </dd>
+              <dt>{windowWords.marginLabel}</dt>
+              <dd>{windowWords.margin}</dd>
             </div>
           </dl>
           <div className="df2-exit-window-row">
             <WindowBar measured={duration.measured_seconds} window={duration.window_seconds} fits={duration.fits_window} size="lg" />
             <span className={`df2-exit-fit is-${duration.fits_window == null ? "none" : duration.fits_window ? "ok" : "bad"}`}>
-              {fitsText(duration.fits_window)}
-              {ratio ? ` · ${ratio.label}` : ""}
+              {windowWords.fit}
+              {ratio && windowWords.compared ? ` · ${ratio.label}` : ""}
             </span>
+            {windowWords.note && <span className="df2-parity-muted df2-exit-fit-note">{windowWords.note}</span>}
           </div>
           <p className="df2-parity-confidence">{duration.statement}</p>
           <p className="df2-parity-muted">
@@ -477,6 +501,7 @@ export function RehearsalView({
                 const st = tableStatusPresentation(table.status);
                 const totals = totalsSummary(table);
                 const method = valueMethodPresentation(table.value_parity.method);
+                const unprovable = unprovableColumns(table.reason).length;
                 const expanded = open.has(table.name);
                 const detailId = `${tablesId}-${table.name.replace(/[^A-Za-z0-9_-]/g, "_")}`;
                 return (
@@ -493,7 +518,10 @@ export function RehearsalView({
                       <td>
                         <span className="df2-exit-method">
                           {method.label}
-                          {!method.proves && table.value_parity.method !== "none" ? <span className="df2-parity-muted"> (not proof)</span> : null}
+                          {!method.proves && table.value_parity.method != null && table.value_parity.method !== "none" ? <span className="df2-parity-muted"> (not proof)</span> : null}
+                          {unprovable > 0 ? (
+                            <span className="df2-exit-unprovable"> · {unprovable} {unprovable === 1 ? "column" : "columns"} not provable</span>
+                          ) : null}
                         </span>
                       </td>
                       <td className="df2-exit-expand">
@@ -545,6 +573,14 @@ export function RehearsalView({
               <dt>Algorithm</dt>
               <dd className="df2-mono">{seal.algorithm}</dd>
             </div>
+            {rehearsal.definition_sha256 && (
+              <div>
+                <dt>Definition SHA-256</dt>
+                <dd className="df2-mono" title={`What this rehearsal proved: the source, tables, keys and window. ${rehearsal.definition_sha256}`}>
+                  {shortHash(rehearsal.definition_sha256)}
+                </dd>
+              </div>
+            )}
             <div>
               <dt>Parts</dt>
               <dd>{seal.parts_count.toLocaleString("en-US")} · {formatBytes(seal.total_bytes)}</dd>

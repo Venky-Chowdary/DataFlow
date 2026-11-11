@@ -44,6 +44,13 @@ import {
   validateDraft,
   valueMethodPresentation,
   windowRatio,
+  STALE_TEXT,
+  controlTotalText,
+  runningRehearsalId,
+  staleNotice,
+  unprovableColumns,
+  verifyPartsNote,
+  windowComparison,
   type ExitRehearsal,
 } from "./exitReadiness.js";
 import {
@@ -55,7 +62,7 @@ import {
   runningRehearsalRaw,
   systemFixture,
 } from "../components/exit/exitFixtures.js";
-import { realRunningRaw, realSigned } from "../components/exit/realExitPayloads.js";
+import { realBoard, realMasked, realNotProven, realRunning, realSigned, realSystemRunning, realSystemStale, realUnprovable, realVerify } from "../components/exit/realExitPayloads.js";
 
 const H = 3600;
 const D = 86400;
@@ -249,7 +256,7 @@ describe("sign-off", () => {
 
 describe("a running rehearsal as the API sends it", () => {
   it("fills every table field the views read with 'not measured', never a match", () => {
-    for (const raw of [realRunningRaw as ExitRehearsal, runningRehearsalRaw()]) {
+    for (const raw of [realRunning, runningRehearsalRaw()]) {
       const r = normalizeRehearsal(raw);
       assert.equal(r.verdict, "running");
       for (const t of r.tables) {
@@ -257,7 +264,8 @@ describe("a running rehearsal as the API sends it", () => {
         assert.equal(t.row_set.match, null);
         assert.deepEqual(t.control_totals, []);
         assert.deepEqual(t.differences, []);
-        assert.equal(t.value_parity.method, "none");
+        // Nothing measured yet: the method is pending (null), not "none" (a check that could not run).
+        assert.equal(t.value_parity.method, null);
         assert.equal(t.rows_source, null);
         assert.equal(t.part, null);
       }
@@ -355,5 +363,120 @@ describe("deep links and errors", () => {
     assert.match(exitErrorMessage(new ApiError("criticality must be one of", 422), "x"), /^The request was refused: criticality/);
     assert.match(exitErrorMessage(new ApiError("Exit system not found", 404), "x"), /Not found in this workspace/);
     assert.match(exitErrorMessage(new ApiError("boom", 503), "Could not load."), /HTTP 503/);
+  });
+});
+
+/* ── Contract section 10 (review fixes): stale, masked, pending, not compared ── */
+
+describe("a definition changed since the last rehearsal (stale)", () => {
+  it("is never shown as proven, even if a state still said so", () => {
+    assert.deepEqual(readinessPresentation("proven", false, true), { label: "Not proven", tone: "warn" });
+    assert.equal(readinessPresentation("not_proven", false, true).label, "Not proven");
+    // A running rehearsal still reads as running; overdue still outranks.
+    assert.equal(readinessPresentation("running", false, true).label, "Running");
+    assert.equal(readinessPresentation("proven", true, true).label, "Overdue");
+    assert.equal(readinessPresentation("proven", false, false).label, "Proven");
+  });
+
+  it("says to re-run, with the API's reason", () => {
+    assert.equal(STALE_TEXT, "Definition changed since the last rehearsal — re-run");
+    const stale = realSystemStale.readiness;
+    assert.equal(stale.state, "not_proven");
+    const notice = staleNotice(stale);
+    assert.ok(notice);
+    assert.equal(notice!.label, STALE_TEXT);
+    assert.match(notice!.detail, /changed since rehearsal 1; rehearse it again/);
+    assert.equal(staleNotice({ stale: false, stale_reason: null }), null);
+    assert.equal(staleNotice(realBoard.systems.find((s) => s.stale)!)?.label, STALE_TEXT);
+  });
+
+  it("counts a stale row as needing attention, never as proven", () => {
+    const row = { state: "proven" as const, overdue: false, stale: true };
+    assert.equal(boardFilterMatches(row, "proven"), false);
+    assert.equal(boardFilterMatches(row, "attention"), true);
+  });
+});
+
+describe("the running rehearsal is linked directly", () => {
+  it("reads the running id from the readiness, the board row or the system", () => {
+    const id = realSystemRunning.readiness.running_rehearsal_id;
+    assert.ok(id);
+    assert.equal(runningRehearsalId(realSystemRunning), id);
+    const row = realBoard.systems.find((s) => s.state === "running")!;
+    assert.equal(runningRehearsalId(row), row.running_rehearsal_id);
+    assert.equal(runningRehearsalId(realSystemStale), null);
+  });
+});
+
+describe("control totals of a PII column (masked)", () => {
+  it("reads Masked (PII), never 0 or blank, and still states the match", () => {
+    const zip = realMasked.tables[0].control_totals.find((t) => t.masked)!;
+    assert.equal(zip.column, "zip");
+    assert.equal(zip.source?.sum, null);
+    assert.equal(controlTotalText(zip, "source", "sum"), "Masked (PII)");
+    assert.equal(controlTotalText(zip, "extract", "sum"), "Masked (PII)");
+    assert.equal(controlTotalText(zip, "source", "range"), "Masked (PII)");
+    assert.equal(zip.match, true);
+    const plain = realMasked.tables[0].control_totals.find((t) => t.column === "balance")!;
+    assert.equal(controlTotalText(plain, "source", "sum"), plain.source!.sum);
+    assert.equal(controlTotalText(plain, "source", "range"), `${plain.source!.min} / ${plain.source!.max}`);
+    assert.equal(controlTotalText({ column: "x", source: null, extract: null, match: null, masked: false }, "source", "sum"), "—");
+  });
+});
+
+describe("a value check not measured yet (running)", () => {
+  it("reads Pending, never proof and never 'Not measured'", () => {
+    const pending = valueMethodPresentation(null);
+    assert.equal(pending.label, "Pending");
+    assert.equal(pending.proves, false);
+    assert.equal(realRunning.tables[0].value_parity.method, null);
+    assert.equal(valueMethodPresentation(realRunning.tables[0].value_parity.method).label, "Pending");
+  });
+});
+
+describe("the window is compared only for a proven run", () => {
+  it("a measured run that is not proven is not compared: margin —, and says why", () => {
+    assert.equal(realNotProven.duration.fits_window, null);
+    assert.equal(realNotProven.duration.margin_pct, null);
+    const c = windowComparison(realNotProven.duration, realNotProven.verdict);
+    assert.equal(c.fit, "Not compared with the window");
+    assert.equal(c.margin, "—");
+    assert.equal(c.note, "Only measured for proven runs.");
+    assert.doesNotMatch(c.fit, /fits/i);
+  });
+
+  it("a proven run states its fit and margin; a running one is not measured", () => {
+    const proven = windowComparison(provenRehearsal().duration, "proven");
+    assert.equal(proven.fit, "Fits the window");
+    assert.equal(proven.margin, "91%");
+    assert.equal(proven.note, "");
+    const over = windowComparison({ ...provenRehearsal().duration, measured_seconds: 40 * H, window_seconds: 36 * H, fits_window: false, margin_pct: -11 }, "proven");
+    assert.equal(over.marginLabel, "over by");
+    assert.equal(over.margin, "4 h");
+    const running = windowComparison(realRunning.duration, "running");
+    assert.equal(running.fit, "Not measured");
+    assert.equal(running.margin, "—");
+  });
+});
+
+describe("pack verification does not re-read stored parts", () => {
+  it("says so, with the API's note", () => {
+    assert.equal(realVerify.parts_reread, false);
+    const note = verifyPartsNote(realVerify);
+    assert.match(note, /^The stored extract parts are not re-read here/);
+    assert.match(note, /recomputed from the part hashes the pack lists/);
+    assert.match(verifyPartsNote({ parts_reread: false, note: "" }), /^The stored parts were not re-read/);
+    assert.equal(verifyPartsNote({ parts_reread: true, note: "" }), "");
+  });
+});
+
+describe("columns that cannot be proven (json, no declared type)", () => {
+  it("names each column and why, from the table's reason", () => {
+    const [table] = realUnprovable.tables;
+    assert.equal(table.status, "not_proven");
+    assert.deepEqual(unprovableColumns(table.reason), [{ column: "payload", kind: "untyped", label: "No declared type" }]);
+    const json = "Nothing differs where measured, but doc is json: the driver hands back a parsed document, so its exact text (key order, duplicate keys, number spelling) cannot be compared, so this table is not proven.";
+    assert.deepEqual(unprovableColumns(json), [{ column: "doc", kind: "json", label: "PostgreSQL json (parsed)" }]);
+    assert.deepEqual(unprovableColumns(realSigned.tables[0].reason), []);
   });
 });

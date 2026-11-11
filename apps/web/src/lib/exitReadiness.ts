@@ -37,18 +37,29 @@ export interface RehearsalSummary {
   finished_at: string | null;
   verdict: RehearsalVerdict;
   measured_seconds: number | null;
-  window_seconds: number;
+  /** Null on a rehearsal that is still running (its duration is not written yet). */
+  window_seconds: number | null;
   fits_window: boolean | null;
   tables_declared: number;
   tables_proven: number;
   total_bytes: number | null;
   signed: boolean;
+  /**
+   * The system still has the definition this rehearsal proved (contract 10.4).
+   * Null where the API did not compare (the rehearsal list).
+   */
+  current: boolean | null;
 }
 
 export interface SystemReadiness {
   state: ReadinessState;
   overdue: boolean;
   next_due_at: string | null;
+  /** The rehearsal running now, to link it directly. */
+  running_rehearsal_id: string | null;
+  /** The source, tables, keys or window changed since the last finished rehearsal: not proven. */
+  stale: boolean;
+  stale_reason: string | null;
   last_rehearsal: RehearsalSummary | null;
   last_proven_rehearsal: RehearsalSummary | null;
 }
@@ -103,10 +114,14 @@ export interface ExitBoardRow {
   overdue: boolean;
   next_due_at: string | null;
   last_rehearsal_at: string | null;
+  /** The last finished rehearsal (or the running one when none has finished). */
   last_rehearsal_id: string | null;
+  running_rehearsal_id: string | null;
   measured_seconds: number | null;
   window_seconds: number;
+  /** Null unless the latest rehearsal is proven and current. */
   fits_window: boolean | null;
+  stale: boolean;
   completeness_label: string;
 }
 
@@ -134,10 +149,21 @@ export interface Part {
   upload_parts: number | null;
 }
 
+/** Null parts are withheld: a PII column's totals are masked (contract 10.1.6). */
 export interface TotalsTriple {
-  sum: string;
-  min: string;
-  max: string;
+  sum: string | null;
+  min: string | null;
+  max: string | null;
+}
+
+export interface ControlTotal {
+  column: string;
+  source: TotalsTriple | null;
+  extract: TotalsTriple | null;
+  /** Computed on the real values, masked or not. */
+  match: boolean | null;
+  /** A PII column (by name, or a min / max that is itself a card number or SSN): the values are not shown. */
+  masked: boolean;
 }
 
 export interface RehearsalDifference {
@@ -158,8 +184,9 @@ export interface RehearsalTable {
   key_columns: string[];
   key_set: { source_sha256: string | null; extract_sha256: string | null; match: boolean | null };
   row_set: { source_sha256: string | null; extract_sha256: string | null; match: boolean | null };
-  control_totals: Array<{ column: string; source: TotalsTriple | null; extract: TotalsTriple | null; match: boolean | null }>;
-  value_parity: { method: ValueMethod; parity_verdict: string | null; unexplained: number | null; report: string | null };
+  control_totals: ControlTotal[];
+  /** `method` is null only while nothing was measured (a running table): "pending". */
+  value_parity: { method: ValueMethod | null; parity_verdict: string | null; unexplained: number | null; report: string | null };
   differences: RehearsalDifference[];
   extract_seconds: number | null;
   part: Part | null;
@@ -224,6 +251,8 @@ export interface ExitRehearsal {
   finished_at: string | null;
   verdict: RehearsalVerdict;
   verdict_reason: string;
+  /** SHA-256 of what was rehearsed: source connector, tables and keys, window (contract 10.4). */
+  definition_sha256: string;
   timeline: Array<{ stage: RehearsalStage; status: StageStatus; started_at: string | null; finished_at: string | null; seconds: number | null }>;
   completeness: {
     tables_declared: number;
@@ -277,6 +306,9 @@ export interface ExitVerifyResult {
   merkle_ok: boolean;
   merkle_root: string | null;
   anchor: AnchorVerification;
+  /** Always false: the stored parts are not re-read; the root is recomputed from the listed hashes. */
+  parts_reread: boolean;
+  note: string;
 }
 
 /* ── Normalising what the API sent ──────────────────────────── */
@@ -284,10 +316,11 @@ export interface ExitVerifyResult {
 const EMPTY_HASHES = { source_sha256: null, extract_sha256: null, match: null };
 
 /**
- * A rehearsal with every field the views read. While a rehearsal runs, the API
- * sends each table as {name, status, reason, job_id, key_columns, schema} only;
- * the rest is "not measured yet", which is what null means here — never zero,
- * never a match.
+ * A rehearsal with every field the views read. Since contract 10.1.5 the API
+ * sends a running table in the full shape (unmeasured fields null, the value
+ * method null = pending); an older answer sent only {name, status, reason,
+ * job_id, key_columns, schema}. Either way, what is missing is "not measured
+ * yet", which is what null means here — never zero, never a match.
  */
 export function normalizeRehearsal(raw: ExitRehearsal): ExitRehearsal {
   const tables = (raw.tables ?? []).map((t) => {
@@ -304,7 +337,7 @@ export function normalizeRehearsal(raw: ExitRehearsal): ExitRehearsal {
       key_set: partial.key_set ?? { ...EMPTY_HASHES },
       row_set: partial.row_set ?? { ...EMPTY_HASHES },
       control_totals: partial.control_totals ?? [],
-      value_parity: partial.value_parity ?? { method: "none" as const, parity_verdict: null, unexplained: null, report: null },
+      value_parity: partial.value_parity ?? { method: null, parity_verdict: null, unexplained: null, report: null },
       differences: partial.differences ?? [],
       extract_seconds: partial.extract_seconds ?? null,
       part: partial.part ?? null,
@@ -354,9 +387,27 @@ const STATES: Record<ReadinessState, { label: string; tone: ExitTone }> = {
  * "Overdue" on a proven system): an old proof is not a current one. The
  * verdict is still shown beside it, so nothing reads from colour alone.
  */
-export function readinessPresentation(state: string, overdue = false): { label: string; tone: ExitTone } {
+export function readinessPresentation(state: string, overdue = false, stale = false): { label: string; tone: ExitTone } {
   if (overdue && state !== "running") return { label: "Overdue", tone: "warn" };
+  // A proof of an older definition is not a proof of this one (contract 10.4): never "Proven".
+  if (stale && state !== "running") return STATES.not_proven;
   return STATES[state as ReadinessState] ?? { label: humanize(state) || "Unknown", tone: "muted" };
+}
+
+/** The words for a system whose definition changed since its last rehearsal. */
+export const STALE_TEXT = "Definition changed since the last rehearsal — re-run";
+
+/** The stale notice (label and the API's reason), or null while the definition is the one rehearsed. */
+export function staleNotice(r: { stale?: boolean | null; stale_reason?: string | null } | null | undefined): { label: string; detail: string } | null {
+  if (!r?.stale) return null;
+  return { label: STALE_TEXT, detail: (r.stale_reason || "").trim() };
+}
+
+/** The running rehearsal to open, from a system (its readiness first) or a board row. */
+export function runningRehearsalId(
+  r: { running_rehearsal_id?: string | null; readiness?: Pick<SystemReadiness, "running_rehearsal_id"> | null } | null | undefined,
+): string | null {
+  return r?.readiness?.running_rehearsal_id || r?.running_rehearsal_id || null;
 }
 
 export function rehearsalVerdictPresentation(verdict: string): { label: string; tone: ExitTone } {
@@ -423,8 +474,43 @@ const METHODS: Record<ValueMethod, { label: string; proves: boolean; note: strin
 
 export const VALUE_METHODS: ValueMethod[] = ["full_checksum", "key_diff", "population_digest", "sampled", "count_only", "none"];
 
-export function valueMethodPresentation(method: string): { label: string; proves: boolean; note: string } {
+/** Null is a table still running: nothing measured yet, so "Pending" (never "Not measured" as a verdict). */
+export function valueMethodPresentation(method: string | null | undefined): { label: string; proves: boolean; note: string } {
+  if (method == null) return { label: "Pending", proves: false, note: "not measured yet" };
   return METHODS[method as ValueMethod] ?? { label: humanize(method) || "Unknown", proves: false, note: "not a recognised check" };
+}
+
+export const MASKED_TEXT = "Masked (PII)";
+
+/**
+ * One control-total cell: the sum, or "min / max". A masked (PII) column reads
+ * "Masked (PII)", never 0 or blank; a side that was not measured reads "—".
+ */
+export function controlTotalText(total: ControlTotal, side: "source" | "extract", what: "sum" | "range"): string {
+  const t = total[side];
+  if (total.masked) return t || total.source || total.extract ? MASKED_TEXT : "—";
+  if (!t) return "—";
+  if (what === "sum") return t.sum ?? "—";
+  return t.min == null && t.max == null ? "—" : `${t.min ?? "—"} / ${t.max ?? "—"}`;
+}
+
+const UNPROVABLE: Array<{ kind: "json" | "untyped"; label: string; pattern: RegExp }> = [
+  { kind: "json", label: "PostgreSQL json (parsed)", pattern: /([A-Za-z0-9_$."-]+) is json: the driver hands back a parsed document/g },
+  { kind: "untyped", label: "No declared type", pattern: /([A-Za-z0-9_$."-]+) has no declared type/g },
+];
+
+/**
+ * Columns a rehearsal could not compare exactly (contract 10.5): a PostgreSQL
+ * `json` column and a column with no declared type keep the table from proven.
+ * The API names them in the table's reason; this reads them back for badges.
+ */
+export function unprovableColumns(reason: string | null | undefined): Array<{ column: string; kind: "json" | "untyped"; label: string }> {
+  const out: Array<{ column: string; kind: "json" | "untyped"; label: string }> = [];
+  const text = String(reason || "");
+  for (const { kind, label, pattern } of UNPROVABLE) {
+    for (const m of text.matchAll(pattern)) out.push({ column: m[1], kind, label });
+  }
+  return out;
 }
 
 /**
@@ -516,6 +602,45 @@ export function fitsText(fits: boolean | null | undefined): string {
   return fits ? "Fits the window" : "Does not fit the window";
 }
 
+export interface WindowComparison {
+  /** "Fits the window", "Does not fit the window", "Not compared with the window", "Not measured". */
+  fit: string;
+  /** Whether a comparison was made (only a proven run is compared, contract 10.1.5). */
+  compared: boolean;
+  marginLabel: "margin" | "over by";
+  margin: string;
+  /** Why there is no comparison, when there is a measurement. */
+  note: string;
+}
+
+/**
+ * The window card's words. Only a proven run is compared with the window: a
+ * measured run that is not proven reads "Not compared", its margin "—".
+ */
+export function windowComparison(
+  duration: Pick<ExitRehearsal["duration"], "measured_seconds" | "window_seconds" | "fits_window" | "margin_pct">,
+  verdict: string,
+): WindowComparison {
+  const measured = duration.measured_seconds != null;
+  if (duration.fits_window == null) {
+    const notCompared = measured && verdict !== "running";
+    return {
+      fit: notCompared ? "Not compared with the window" : "Not measured",
+      compared: false,
+      marginLabel: "margin",
+      margin: "—",
+      note: notCompared ? "Only measured for proven runs." : "",
+    };
+  }
+  const over = duration.fits_window === false;
+  const margin = duration.margin_pct == null
+    ? "—"
+    : over
+      ? formatDuration((duration.measured_seconds ?? 0) - duration.window_seconds)
+      : `${Math.floor(duration.margin_pct)}%`;
+  return { fit: fitsText(duration.fits_window), compared: true, marginLabel: over ? "over by" : "margin", margin, note: "" };
+}
+
 function dayDiff(fromMs: number, toMs: number): number {
   return Math.floor(Math.abs(toMs - fromMs) / (DAY * 1000));
 }
@@ -593,6 +718,14 @@ export function growthText(growth: number | null | undefined): string {
   return growth > 0 ? `Rows grew ${pct}% since the previous rehearsal` : `Rows shrank ${pct.replace("-", "")}% since the previous rehearsal`;
 }
 
+/** The verify answer's note: the stored parts are not re-read (contract 10.1.8). */
+export function verifyPartsNote(result: Pick<ExitVerifyResult, "parts_reread" | "note"> | null | undefined): string {
+  if (!result || result.parts_reread !== false) return "";
+  // The API's note already says it ("The stored extract parts are not re-read here: …"); say it once.
+  return (result.note || "").trim()
+    || "The stored parts were not re-read: the Merkle root is recomputed from the part hashes the pack lists.";
+}
+
 /* ── Anchor ─────────────────────────────────────────────────── */
 
 /**
@@ -665,15 +798,16 @@ export function shouldPollRehearsal(rehearsal: Pick<ExitRehearsal, "verdict"> | 
 
 export type BoardFilter = "all" | "proven" | "attention" | "overdue" | "never";
 
-export function boardFilterMatches(row: Pick<ExitBoardRow, "state" | "overdue">, filter: BoardFilter): boolean {
+export function boardFilterMatches(row: Pick<ExitBoardRow, "state" | "overdue"> & { stale?: boolean }, filter: BoardFilter): boolean {
   if (filter === "all") return true;
-  if (filter === "proven") return row.state === "proven" && !row.overdue;
+  if (filter === "proven") return row.state === "proven" && !row.overdue && !row.stale;
+  if (filter === "attention" && row.stale && row.state !== "running") return true;
   if (filter === "overdue") return row.overdue;
   if (filter === "never") return row.state === "never_rehearsed";
   return row.state === "not_proven" || row.state === "incomplete" || row.state === "failed";
 }
 
-export function boardFilterCounts(rows: Array<Pick<ExitBoardRow, "state" | "overdue">>): Record<BoardFilter, number> {
+export function boardFilterCounts(rows: Array<Pick<ExitBoardRow, "state" | "overdue"> & { stale?: boolean }>): Record<BoardFilter, number> {
   const out: Record<BoardFilter, number> = { all: 0, proven: 0, attention: 0, overdue: 0, never: 0 };
   for (const row of rows) {
     for (const f of Object.keys(out) as BoardFilter[]) if (boardFilterMatches(row, f)) out[f] += 1;

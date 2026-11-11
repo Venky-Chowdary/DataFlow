@@ -10,6 +10,7 @@ import {
   engineLabel,
   formatWindow,
   readinessPresentation,
+  STALE_TEXT,
   sortBoardRows,
   type ExitBoardRow,
 } from "../../lib/exitReadiness";
@@ -90,7 +91,10 @@ export function RunRehearsalDialog({ open, systems: given, systemId, starting, e
             </div>
             <div>
               <dt>Status now</dt>
-              <dd>{readinessPresentation(system.state, system.overdue).label}</dd>
+              <dd>
+                {readinessPresentation(system.state, system.overdue, system.stale).label}
+                {system.stale ? ` · ${STALE_TEXT}` : ""}
+              </dd>
             </div>
           </dl>
         )}

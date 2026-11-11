@@ -30,8 +30,8 @@ import {
   signedRehearsal,
   verifyFixture,
 } from "./exitFixtures.js";
-import { realBoard, realFailed, realIncomplete, realNotProven, realRunningRaw, realSigned } from "./realExitPayloads.js";
-import { formatDate, normalizeRehearsal, type ExitRehearsal } from "../../lib/exitReadiness.js";
+import { realBoard, realFailed, realIncomplete, realMasked, realNotProven, realRunning, realSigned, realUnprovable, realVerify } from "./realExitPayloads.js";
+import { STALE_TEXT, formatDate, normalizeRehearsal, type ExitRehearsal } from "../../lib/exitReadiness.js";
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -96,7 +96,7 @@ describe("Page A: the exit readiness board", () => {
     const t = text(board());
     assert.match(t, /Systems with a proven exit 4 \/ 9/);
     assert.match(t, /Rehearsals overdue 2 Past their rehearsal interval/);
-    assert.match(t, /Longest measured exit 61 h Core ledger · measured, not estimated/);
+    assert.match(t, /Longest measured exit 61 h Core ledger · proven, not estimated/);
     assert.match(t, new RegExp(`Next regulatory date ${esc(formatDate("2027-01-12"))} Data Act switching charges end · Core ledger`));
     assert.match(t, /Declare a system/);
     assert.match(t, /Run rehearsal/);
@@ -110,8 +110,8 @@ describe("Page A: the exit readiness board", () => {
     assert.match(t, new RegExp(`Payments SQL Server · 88 tables Critical ${esc(formatDate("2026-08-19T09:00:00Z"))} Overdue by 24 days 28 h / 30 d Proven, 88 tables Overdue`));
     // Never rehearsed: nothing measured, nothing invented.
     assert.match(t, /CRM Unknown engine · 31 tables Standard Never Due in 38 days Not measured Never rehearsed Never rehearsed/);
-    // Over the window: the words say so, not only the colour.
-    assert.match(t, /40 h \/ 36 h · does not fit Incomplete Incomplete/);
+    // Measured but not proven: not compared with the window (contract 10.1.4), in words.
+    assert.match(t, /40 h \/ 36 h · not compared Incomplete Incomplete/);
     assert.match(t, /Rehearsal running Running/);
   });
 
@@ -121,7 +121,7 @@ describe("Page A: the exit readiness board", () => {
     assert.deepEqual(order.slice(0, 2), ["exs_payments0001", "exs_loyalty00001"]);
     const bars = html.match(/class="df2-exit-window-bar/g) ?? [];
     assert.equal(bars.length, boardFixture().systems.filter((s) => s.measured_seconds != null).length);
-    assert.match(html, /aria-label="40 h measured of a 36 h window, 111% of the window, does not fit"/);
+    assert.match(html, /aria-label="40 h measured of a 36 h window, 111% of the window, not compared with the window \(only proven runs are\)"/);
   });
 
   it("keeps rows keyboard reachable with one tab stop and labelled actions", () => {
@@ -148,11 +148,11 @@ describe("Page A: the exit readiness board", () => {
       <ExitBoardView readiness={realBoard} query="" onQueryChange={noop} filter="all" onFilterChange={noop} selectedId={null}
         onOpenSystem={noop} onRunRehearsal={noop} onDeclare={noop} canDeclare canRun />,
     ));
-    assert.match(t, /Systems with a proven exit 1 \/ 5/);
+    assert.match(t, /Systems with a proven exit 2 \/ 8/);
     assert.match(t, /Rehearsal failed/);
     assert.match(t, /Rehearsal running Running/);
     const m = boardMetrics(realBoard);
-    assert.equal(m[2].value, "3 s");
+    assert.equal(m[2].value, "0 s");
   });
 });
 
@@ -197,8 +197,10 @@ describe("Page B: a rehearsal run", () => {
     assert.match(t, /control total Control totals of amount differ/);
     assert.match(t, /1,204,331 → 1,204,330/);
     assert.match(t, /1 of 2 differ/);
-    assert.match(t, /over by 4 h/);
-    assert.match(t, /Does not fit the window · 111% of the window/);
+    // Not proven, so not compared with the window (contract 10.1.5): no margin, no ratio, no fit claim.
+    assert.match(t, /margin — /);
+    assert.match(t, /Not compared with the window Only measured for proven runs\./);
+    assert.doesNotMatch(t, /over by|Does not fit the window|of the window ·/);
     assert.match(html, /aria-expanded="true"/, "a table that differs opens its details");
   });
 
@@ -250,7 +252,7 @@ describe("Page B: a rehearsal run", () => {
   });
 
   it("renders every rehearsal the API really returns", () => {
-    for (const r of [realSigned, realIncomplete, realNotProven, realFailed, normalizeRehearsal(realRunningRaw as ExitRehearsal)]) {
+    for (const r of [realSigned, realIncomplete, realNotProven, realFailed, realMasked, realUnprovable, normalizeRehearsal(realRunning)]) {
       const t = text(run(r));
       assert.match(t, new RegExp(`rehearsal ${r.n}`));
       assertHonest(t);
@@ -262,6 +264,94 @@ describe("Page B: a rehearsal run", () => {
     assert.match(notProven, /Not proof/);
     const signed = text(run(realSigned));
     assert.match(signed, /Not anchored the local stub is not a write-once store/);
+  });
+});
+
+describe("contract 10: what the review fixes changed on screen", () => {
+  function realBoardHtml(over: Partial<ExitBoardViewProps> = {}) {
+    return renderToStaticMarkup(
+      <ExitBoardView readiness={realBoard} query="" onQueryChange={noop} filter="all" onFilterChange={noop} selectedId={null}
+        onOpenSystem={noop} onRunRehearsal={noop} onDeclare={noop} canDeclare canRun {...over} />,
+    );
+  }
+
+  it("board: a system whose definition changed reads not proven and says to re-run", () => {
+    const stale = realBoard.systems.find((s) => s.stale)!;
+    assert.equal(stale.name, "Billing");
+    const html = realBoardHtml();
+    const rowHtml = html.match(new RegExp(`<tr[^>]*id="exit-system-${stale.id}"[\\s\\S]*?</tr>`))![0];
+    const t = text(rowHtml);
+    assert.match(t, new RegExp(`Not proven \\(changed since the last rehearsal\\) ${esc(STALE_TEXT)} Not proven`));
+    assert.doesNotMatch(t, /\bProven\b/);
+  });
+
+  it("board: the running rehearsal is linked directly", () => {
+    const html = realBoardHtml({ onOpenRehearsal: noop });
+    const row = realBoard.systems.find((s) => s.state === "running")!;
+    assert.match(html, new RegExp(`aria-label="Open the running rehearsal of ${esc(row.name)}"`));
+    assert.doesNotMatch(html, new RegExp(`aria-label="A rehearsal of ${esc(row.name)} is running"`));
+  });
+
+  it("board: the longest measured exit counts proven runs only, and says so", () => {
+    const m = boardMetrics(realBoard);
+    assert.match(m[2].sub ?? "", /proven, not estimated/);
+    const none = boardMetrics({ ...realBoard, kpis: { ...realBoard.kpis, longest_measured_seconds: null, longest_measured_system_id: null } });
+    assert.equal(none[2].sub, "No proven exit measured yet");
+  });
+
+  it("board: a measured run that is not proven is not compared with the window", () => {
+    const html = board();
+    assert.match(text(html), /40 h \/ 36 h · not compared Incomplete Incomplete/);
+    assert.match(html, /aria-label="40 h measured of a 36 h window, 111% of the window, not compared with the window \(only proven runs are\)"/);
+    assert.doesNotMatch(text(html), /does not fit/);
+  });
+
+  it("rehearsal: control totals of a PII column read Masked (PII), never 0 or blank", () => {
+    const html = run(realMasked);
+    assert.match(html, /aria-expanded="false"/);
+    const opened = renderToStaticMarkup(
+      <RehearsalView rehearsal={{ ...realMasked, tables: realMasked.tables.map((t) => ({ ...t, status: "incomplete" as const })) }} busy={null} canSign onBack={noop}
+        onRefresh={noop} onExportMarkdown={noop} onDownloadSigned={noop} onVerifySigned={noop} onVerifyFile={noop} onSign={noop} />,
+    );
+    const t = text(opened);
+    assert.match(t, /zip Masked \(PII\) Masked \(PII\) Masked \(PII\) Match/);
+    assert.doesNotMatch(t, /zip — —/);
+  });
+
+  it("rehearsal: a running table's value check reads Pending", () => {
+    const t = text(run(normalizeRehearsal(realRunning)));
+    assert.match(t, /orders Running Not counted Not measured Not measured Not measured Pending/);
+    assert.doesNotMatch(t, /Not measured \(not proof\)/);
+  });
+
+  it("rehearsal: a measured run that is not proven is not compared with the window", () => {
+    const t = text(run(realNotProven));
+    assert.match(t, /margin — /);
+    assert.match(t, /Not compared with the window/);
+    assert.match(t, /Only measured for proven runs\./);
+    assert.doesNotMatch(t, /Fits the window|Does not fit the window/);
+    // The source could not be re-read: its totals were not measured, not "no numeric columns".
+    assert.match(t, /orders Not proven \? → 60 Not measured Not measured Not measured Count only/);
+  });
+
+  it("rehearsal: the verify answer says the stored parts were not re-read", () => {
+    const t = text(run(realSigned, { verifyResult: realVerify }));
+    assert.match(t, /Not re-read The stored extract parts are not re-read here: the Merkle root is recomputed/);
+  });
+
+  it("rehearsal: a column that cannot be proven is named with why", () => {
+    const opened = renderToStaticMarkup(
+      <RehearsalView rehearsal={{ ...realUnprovable, tables: realUnprovable.tables.map((t) => ({ ...t, status: "incomplete" as const })) }} busy={null} canSign onBack={noop}
+        onRefresh={noop} onExportMarkdown={noop} onDownloadSigned={noop} onVerifySigned={noop} onVerifyFile={noop} onSign={noop} />,
+    );
+    assert.match(text(opened), /Not provable payload No declared type/);
+    // In the table row too, so it is seen before the details open.
+    assert.match(text(run(realUnprovable)), /notes Not proven .*1 column not provable/);
+  });
+
+  it("rehearsal: names the definition it proved", () => {
+    const t = text(run(realSigned));
+    assert.match(t, new RegExp(`Definition SHA-256 ${realSigned.definition_sha256.slice(0, 4)}…${realSigned.definition_sha256.slice(-4)}`));
   });
 });
 
@@ -295,6 +385,13 @@ describe("window bar", () => {
     const fit = renderToStaticMarkup(<WindowBar measured={61 * 3600} window={30 * 86400} fits />);
     assert.match(fit, /aria-label="61 h measured of a 30 d window, 8\.5% of the window"/);
     assert.match(fit, /df2-exit-window-fill/);
+    const over = renderToStaticMarkup(<WindowBar measured={40 * 3600} window={36 * 3600} fits={false} />);
+    assert.match(over, /aria-label="40 h measured of a 36 h window, 111% of the window, does not fit"/);
+    assert.match(over, /is-over/);
+    // Measured but not compared (fits null): never drawn as over the window.
+    const uncompared = renderToStaticMarkup(<WindowBar measured={40 * 3600} window={36 * 3600} fits={null} />);
+    assert.match(uncompared, /not compared with the window \(only proven runs are\)/);
+    assert.doesNotMatch(uncompared, /is-over|does not fit/);
     const none = renderToStaticMarkup(<WindowBar measured={null} window={30 * 86400} />);
     assert.match(none, /Not measured against a 30 d window/);
     assert.doesNotMatch(none, /df2-exit-window-fill/);

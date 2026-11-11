@@ -237,6 +237,36 @@
   font-weight: var(--df-fw-semibold);
 }
 
+/* The definition changed since the last rehearsal: not proven, re-run (contract 10.4). */
+.df2-exit-grid-meta.is-stale {
+  color: var(--df-warning-text);
+}
+
+/* "Running now · open": the running rehearsal, linked from its row. */
+.df2-exit-grid-link {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--df-fs-xs);
+  line-height: 16px;
+  color: var(--df-brand-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.df2-exit-grid-link:hover {
+  color: var(--df-text-primary);
+}
+
+.df2-exit-grid-link:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .df2-exit-grid-window {
   display: grid;
   gap: 4px;
@@ -415,6 +445,11 @@
 
 .df2-exit-window-bar.is-over .df2-exit-window-fill {
   fill: var(--df-danger);
+}
+
+/* Measured but not compared (only a proven run is): drawn to scale, in a neutral tone. */
+.df2-exit-window-bar.is-uncompared .df2-exit-window-fill {
+  fill: var(--df-text-tertiary);
 }
 
 /* ── Page B: a rehearsal ───────────────────────────────────────── */
@@ -1136,6 +1171,8 @@ table.df2-table.df2-exit-tables {
   gap: var(--df-space-3);
   min-width: 0;
   font-variant-numeric: tabular-nums;
+  /* The tab lives in a page, in the Jobs detail drawer and on a phone: lay out by its own width. */
+  container: df2-rev / inline-size;
 }
 
 .df2-rev-switch-row {
@@ -1341,4 +1378,142 @@ table.df2-table.df2-rev-columns {
 
 .df2-rev-rollback-card {
   border-left: 3px solid var(--df-border-brand);
+}
+
+/* ── Contract 10 states ────────────────────────────────────────── */
+
+/* A column the rehearsal could not compare exactly (json, no declared type). */
+.df2-exit-unprovable {
+  color: var(--df-warning-text);
+  font-size: var(--df-fs-xs);
+}
+
+/* Why a measured run is not compared with the window. */
+.df2-exit-fit-note {
+  font-size: var(--df-fs-sm);
+}
+
+/* A narrow Reversibility tab (the Jobs detail drawer, a phone): each table and each
+   column is a stacked row, so nothing scrolls sideways or clips. */
+@container df2-rev (max-width: 760px) {
+  .df2-rev table.df2-table.df2-rev-tables {
+    min-width: 0;
+  }
+
+  .df2-rev .df2-rev-tables thead,
+  .df2-rev .df2-rev-columns thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .df2-rev .df2-rev-tables,
+  .df2-rev .df2-rev-tables tbody,
+  .df2-rev .df2-rev-columns,
+  .df2-rev .df2-rev-columns tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .df2-rev .df2-rev-tables tbody tr:not(.df2-rev-detail-row),
+  .df2-rev .df2-rev-columns tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px var(--df-space-3);
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--df-border);
+  }
+
+  .df2-rev .df2-rev-tables tbody tr.df2-rev-detail-row {
+    display: block;
+  }
+
+  /* A block cell takes the table's fixed row height and 420px cap literally: release both. */
+  .df2-rev .df2-rev-tables tbody tr.df2-rev-detail-row td {
+    display: block;
+    width: 100%;
+    max-width: none;
+    height: auto;
+    overflow: visible;
+  }
+
+  .df2-rev .df2-rev-tables tbody tr:not(.df2-rev-detail-row) td,
+  .df2-rev .df2-rev-columns tbody td {
+    display: block;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    height: auto;
+    padding: 0;
+    border: 0;
+    overflow: visible;
+    white-space: normal;
+  }
+
+  .df2-rev .df2-rev-tables td.df2-rev-why,
+  .df2-rev .df2-rev-tables td[data-label="Rollback"],
+  .df2-rev .df2-rev-columns td.df2-rev-col-type,
+  .df2-rev .df2-rev-columns td.df2-rev-col-why {
+    grid-column: 1 / -1;
+  }
+
+  .df2-rev .df2-rev-tables td[data-label="Verdict"] {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .df2-rev .df2-rev-tables td.df2-rev-expand {
+    grid-column: 1 / -1;
+    text-align: left;
+  }
+
+  .df2-rev .df2-rev-columns td[data-label="Mapping"] {
+    grid-column: 2;
+    grid-row: 1;
+    text-align: right;
+  }
+
+  .df2-rev .df2-rev-col-name,
+  .df2-rev .df2-rev-col-type {
+    overflow-wrap: anywhere;
+  }
+
+  .df2-rev .df2-rev-col-type {
+    font-size: var(--df-fs-sm);
+    color: var(--df-text-secondary);
+  }
+
+  /* A row change has no column types: the stacked row leaves the empty line out. */
+  .df2-rev .df2-rev-columns td.df2-rev-col-type.is-rows {
+    display: none;
+  }
+
+  /* The detail row's own cell rules reach the nested column cells: reset them there. */
+  .df2-rev .df2-rev-tables .df2-rev-detail-row .df2-rev-columns tbody td {
+    padding: 0;
+    background: transparent;
+  }
+
+  .df2-rev .df2-rev-tables td[data-label="Rollback"]::before {
+    content: "Rollback: ";
+    color: var(--df-text-tertiary);
+  }
+
+  .df2-rev .df2-rev-why,
+  .df2-rev .df2-rev-col-why {
+    min-width: 0;
+  }
+
+  .df2-rev .df2-rev-tables > tbody > tr.df2-rev-detail-row > td {
+    padding: 0 0 var(--df-space-3);
+  }
+
+  .df2-rev table.df2-table.df2-rev-columns {
+    margin-top: var(--df-space-2);
+    border: 1px solid var(--df-border);
+    border-radius: var(--df-radius-md);
+  }
 }
