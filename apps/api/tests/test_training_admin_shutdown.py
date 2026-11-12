@@ -17,11 +17,41 @@ import socket
 import threading
 import time
 import urllib.request
+from types import SimpleNamespace
 
 import pytest
 
 import tests.r4_route_harness as h
 from tests.test_training_shutdown import _SpinAgent
+
+
+class _GatedSpin(_SpinAgent):
+    """Holds the GIL and ignores the stop event until the test opens ``release``.
+
+    The run cannot end on its own (cap 30 s), so "it was still running when
+    /health answered" needs no wall-clock threshold: a run on the event loop
+    would hold /health until the run ended.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(30.0, deaf_seconds=30.0)
+        self.release = threading.Event()
+
+    def run_full_training(self, include_embedding_tune=False, force=False, stop_event=None):
+        self.thread = threading.current_thread()
+        self.stop_event = stop_event
+        self.calls.append((include_embedding_tune, force))
+        self.started.set()
+        deadline = time.monotonic() + self.seconds
+        try:
+            while time.monotonic() < deadline and not self.release.is_set():
+                for _ in range(20_000):  # hold the GIL like real synthesis does
+                    self.spins += 1
+        finally:
+            self.exited.set()
+        return SimpleNamespace(
+            id="spin", status="completed", metrics={"spins": self.spins}, errors=[],
+        )
 
 
 def _use_agent(monkeypatch, agent) -> None:
@@ -114,7 +144,7 @@ def test_sync_admin_run_runs_on_the_runtime_thread_off_the_event_loop(tmp_path, 
     monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
     monkeypatch.setenv("DATAFLOW_TRAINING", "off")
     monkeypatch.delenv("DATAWRAP_TRAINING", raising=False)
-    agent = _SpinAgent(3.0, deaf_seconds=3.0)  # runs its full 3 s
+    agent = _GatedSpin()
     _use_agent(monkeypatch, agent)
 
     from fastapi.testclient import TestClient
@@ -122,6 +152,7 @@ def test_sync_admin_run_runs_on_the_runtime_thread_off_the_event_loop(tmp_path, 
     from src.main import app
 
     with TestClient(app) as client:
+        assert _wait(lambda: getattr(app.state, "ready", False), 60), "warm-up never finished"
         runtime = app.state.training_runtime
         result: dict = {}
         caller = threading.Thread(
@@ -134,12 +165,17 @@ def test_sync_admin_run_runs_on_the_runtime_thread_off_the_event_loop(tmp_path, 
             t0 = time.monotonic()
             health = client.get("/health")
             health_seconds = time.monotonic() - t0
+            run_still_going = not agent.exited.is_set()
         finally:
+            agent.release.set()
             caller.join(30)
 
         assert health.status_code == 200
-        assert health_seconds < 1.0, (
-            f"/health took {health_seconds:.1f}s during a sync admin run: the run blocks the event loop"
+        # No time threshold (PR 410 review M-T1: a cold first TestClient took
+        # 0.7-3 s under load). Only a free event loop answers mid-run.
+        assert run_still_going, (
+            f"/health answered only after the admin run ended ({health_seconds:.1f}s):"
+            " the run blocks the event loop"
         )
         response = result["response"]
         assert response.status_code == 200, response.text
