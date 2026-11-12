@@ -7,7 +7,8 @@ H5, L4). They are sealed with a local Fernet data key derived (HKDF, its own
 purpose label) from the key that protects saved connector credentials — never
 handed to the configured vault backend: with ``SECRETS_BACKEND=aws_secretsmanager``
 that backend turned every sampled row set into a permanent AWS secret (review
-H4). With no local key, state is kept in memory only. Each record carries who
+H4). With no local key — and the public default AUTH_SECRET is none (review 2,
+M5) — state is kept in memory only. Each record carries who
 staged it and in which workspace, which is what a read is checked against.
 """
 
@@ -31,11 +32,29 @@ _PREFIX = "pilot:v1:"
 _KEY_INFO = b"datawrap-pilot-state-v1"
 
 
+#: The AUTH_SECRET a non-production deployment runs with when none is set. It
+#: is in the source code, so a key derived from it is no key (review 2, M5).
+_PUBLIC_DEFAULT_SECRET = "dev-change-me-before-production"
+
+
+def _has_local_key() -> bool:
+    """A SECRETS_KEY, or an AUTH_SECRET that is not the public default."""
+    from services.brand_env import getenv_brand
+
+    if getenv_brand("SECRETS_KEY", "").strip():
+        return True
+    auth = getenv_brand("AUTH_SECRET", "").strip()
+    return bool(auth) and auth != _PUBLIC_DEFAULT_SECRET
+
+
 def _data_key() -> Any:
     """Fernet over a key derived for Pilot state only; raises when there is none."""
     from cryptography.fernet import Fernet
 
     from services.secret_vault import _fernet_key_material, _hkdf_32
+
+    if not _has_local_key():
+        raise LookupError("no local key: Pilot state stays in memory")
 
     root = base64.urlsafe_b64decode(_fernet_key_material())
     return Fernet(base64.urlsafe_b64encode(_hkdf_32(root, info=_KEY_INFO)))

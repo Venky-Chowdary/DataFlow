@@ -35,6 +35,8 @@ def stores(monkeypatch, tmp_path):
     from src.ai.copilot import ack_ledger, result_store
 
     pt.reset_workspace(monkeypatch)
+    # A deployment key: the public default secret seals nothing (review 2, M5).
+    monkeypatch.setenv("DATAFLOW_SECRETS_KEY", "pilot-truth-deployment-key-0123456789abcdef")
     monkeypatch.setenv("DATAFLOW_PILOT_RESULTS_PATH", str(tmp_path / "pilot_results.json"))
     monkeypatch.setenv("DATAFLOW_PILOT_ACK_PATH", str(tmp_path / "pilot_acks.json"))
     monkeypatch.setattr(result_store, "_store", None)
@@ -295,6 +297,38 @@ def test_without_a_local_key_pilot_state_stays_in_memory(stores, monkeypatch):
 
 
 # ---- review M7: SQL text sealed, actor check closed, expired rows purged -----
+
+
+@pytest.mark.parametrize("auth_secret", [None, "dev-change-me-before-production"])
+def test_the_default_non_production_secret_counts_as_no_key(stores, monkeypatch, auth_secret):
+    """Review 2, M5: the public default AUTH_SECRET is not a key; state stays in memory."""
+    from src.ai.copilot import result_store, sealed_state
+
+    for prefix in ("DATAFLOW", "DATAWRAP"):
+        for name in ("ENV", "SECRETS_KEY", "AUTH_SECRET"):
+            monkeypatch.delenv(f"{prefix}_{name}", raising=False)
+    if auth_secret:
+        monkeypatch.setenv("DATAFLOW_AUTH_SECRET", auth_secret)
+    assert sealed_state.seal({"rows": [{"salary": SALARY}]}) is None, "sealed under a public key"
+
+    monkeypatch.setattr(result_store, "_store", None)
+    store = result_store.get_result_store()
+    rid = store.put(rows=[{"salary": SALARY}], columns=["salary"], session_id="dev|s1")
+    assert store.get(rid) is not None, "the live process still has its result"
+    spill = Path(stores) / "pilot_results.json"
+    assert not spill.exists() or str(SALARY) not in spill.read_text()
+
+
+def test_a_deployment_secret_still_seals_outside_production(stores, monkeypatch):
+    from src.ai.copilot import sealed_state
+
+    for prefix in ("DATAFLOW", "DATAWRAP"):
+        for name in ("ENV", "SECRETS_KEY"):
+            monkeypatch.delenv(f"{prefix}_{name}", raising=False)
+    monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "a-real-deployment-secret-" + "x" * 16)
+    token = sealed_state.seal({"rows": [{"salary": SALARY}]})
+    assert token and str(SALARY) not in token
+    assert sealed_state.unseal(token) == {"rows": [{"salary": SALARY}]}
 
 
 def test_query_text_with_literals_is_not_plaintext_on_disk(alices_result, stores):
