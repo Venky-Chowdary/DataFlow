@@ -10,9 +10,14 @@ Rendered here: integers, floating point (single precision where the engine
 stores it; MySQL shows a ``FLOAT`` to six significant digits and a
 ``FLOAT(M,D)`` to ``D`` decimals), dates, zoneless timestamps and times without
 an offset (a fraction finer than the declared precision is rounded away), in
-the destination engine's own output format, the engine named by its family. A type not rendered here (decimal,
-boolean, an offset-keeping type, ...) answers ``None`` and keeps the gate's
-transform round trip.
+the destination engine's own output format, the engine named by its family.
+An offset-keeping timestamp is rendered where its text is the engine's own
+(SQLite: RFC 3339 in UTC) and refused elsewhere (the session time zone decides
+its text). A type not rendered here (decimal, boolean, a time with an offset,
+...) answers ``None`` and keeps the gate's transform round trip.
+
+On a text column the writer stores the transform's own text, so the gate's
+transform round trip is already what lands (review 5, M-2).
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from __future__ import annotations
 import math
 import re
 import struct
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -31,6 +36,9 @@ _FLOAT4 = {("postgresql", "REAL"), ("postgresql", "FLOAT4"), ("mysql", "FLOAT"),
 #: Engines that print an integral float without ".0".
 _BARE_INTEGRAL = frozenset({"postgresql", "mysql", "sqlserver"})
 _REFUSED = object()
+#: A timestamp type that keeps an offset (TIMESTAMPTZ, DATETIMEOFFSET, TIMESTAMP WITH TIME ZONE): the stored text is
+#: the engine's own (SQLite: RFC 3339 in UTC; elsewhere it follows the session time zone, so it is refused).
+OFFSET_DATETIME = "offset_datetime"
 
 
 def _base(ddl: str) -> str:
@@ -93,6 +101,8 @@ def render_value(value: Any, family: str, ddl: str, engine: str) -> Any:
     """The destination's text of a value already cast to ``family`` (``_REFUSED``: not that type)."""
     if isinstance(value, str):
         return render_text(value, family, ddl, engine)
+    if family == OFFSET_DATETIME:
+        return _offset_text(value, engine)
     if isinstance(value, bool):
         return _REFUSED
     try:
@@ -116,8 +126,29 @@ def render_value(value: Any, family: str, ddl: str, engine: str) -> Any:
     return _REFUSED
 
 
+def _offset_text(value: Any, engine: str) -> Any:
+    """How an offset-keeping timestamp column stores ``value`` (review 5, M-2).
+
+    SQLite's writer stores an aware value as RFC 3339 in UTC (``Z`` and
+    ``+02:00`` are respelled); a value without an offset is refused. Any other
+    engine renders it in the session's time zone, which the gate cannot know,
+    so a cast from text into it is refused rather than guessed.
+    """
+    if engine != "sqlite":
+        return _REFUSED
+    try:
+        parsed = datetime.fromisoformat(value.strip()) if isinstance(value, str) else value
+    except ValueError:
+        return _REFUSED
+    if not isinstance(parsed, datetime) or parsed.tzinfo is None or parsed.utcoffset() is None:
+        return _REFUSED
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def render_text(text: str, family: str, ddl: str, engine: str) -> Any:
     """The destination's text of ``text`` cast to ``family`` (``_REFUSED`` when the cast refuses it)."""
+    if family == OFFSET_DATETIME:
+        return _offset_text(text, engine)
     try:
         if family == "integer":
             if not re.fullmatch(r"\s*[+-]?\d+\s*", text):
@@ -144,11 +175,13 @@ def rendered_family(ddl: str) -> str | None:
     if family in {"datetime", "time"}:
         from services.type_system import datetime_timezone_polarity
 
-        if keeps_offset(ddl, "") or (family == "datetime" and datetime_timezone_polarity(ddl) in {"tz", "ltz"}):
-            return None  # an offset-keeping type: not rendered here
+        if family == "datetime" and (keeps_offset(ddl, "") or datetime_timezone_polarity(ddl) in {"tz", "ltz"}):
+            return OFFSET_DATETIME  # rendered by the engine's own rule, or refused (review 5, M-2)
+        if keeps_offset(ddl, ""):
+            return None  # a time with an offset: not rendered here
         if family == "time" and "ZONE" in str(ddl).upper().replace("WITHOUT TIME ZONE", ""):
             return None
-    return family if family in {"integer", "float", "date", "datetime", "time"} else None
+    return family if family in {"integer", "float", "date", "datetime", "time", OFFSET_DATETIME} else None
 
 
 #: Engine transforms that only cast text into a type (their family): checked by the destination's rendering.
@@ -162,7 +195,7 @@ def renders_rule(transform: str, ddl: str) -> bool:
     if family is None:
         return False
     name = str(transform or "").strip().lower()
-    return not name or _TYPE_CAST_TRANSFORMS.get(name) == family
+    return not name or _TYPE_CAST_TRANSFORMS.get(name) == ("datetime" if family == OFFSET_DATETIME else family)
 
 
 def cast_changes(text: str | None, converted: Any, ddl: str, engine: str, *, has_converted: bool = True) -> bool | None:

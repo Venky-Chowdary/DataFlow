@@ -267,3 +267,62 @@ def test_m1_a_stream_the_scan_cannot_read_first_is_named_in_the_gate_message(tmp
     assert gate["status"] == "pass", gate
     assert "The pre-write scan could not read orders before writing" in gate["message"], gate["message"]
     assert gate["details"]["prescan_unread"] == ["orders"]
+
+
+# ------------------------------------- M-2: the cast rule compares what the writer stores
+
+@pytest.mark.parametrize("value, engine, changed", [
+    ("2024-01-02T10:00:00Z", "sqlite", True),        # SQLite keeps RFC 3339 UTC: +00:00
+    ("2024-01-02T10:00:00+02:00", "sqlite", True),   # stored as 08:00:00+00:00
+    ("2024-01-02T10:00:00+00:00", "sqlite", False),
+    ("2024-01-02 10:00:00", "sqlite", True),         # no offset: the TZ carrier cannot keep it as given
+    ("2024-01-02T10:00:00Z", "postgresql", True),    # stored as the session time zone's text
+    ("2024-01-02 10:00:00+00", "postgresql", True),
+    ("2024-01-02T10:00:00Z", "supabase", True),
+])
+def test_m2_an_offset_keeping_destination_is_rendered_or_refused(value, engine, changed):
+    from services.reversibility_render import cast_changes, renders_rule
+
+    assert cast_changes(value, None, "TIMESTAMPTZ", engine, has_converted=False) is changed, (value, engine)
+    assert renders_rule("datetime", "TIMESTAMPTZ") and renders_rule("", "TIMESTAMP WITH TIME ZONE")
+
+
+def _ts_csv(dst, shape: str, **kw):
+    from tests.test_reversibility_review4 import _csv_request
+
+    body = ("\n".join(["id,v"] + [f"{i}," + shape.format(d=i % 28 + 1) for i in range(1, 61)]) + "\n").encode()
+    return _csv_request(dst, body, **kw)
+
+
+def test_m2_a_z_timestamp_into_a_sqlite_timestamptz_is_refused_not_respelled(tmp_path, fake):  # noqa: F811
+    dst = tmp_path / "d.sqlite"
+    res = _run(fake, _ts_csv(dst, "2024-01-{d:02d}T10:00:00Z"))
+    assert res.success is False, (res.destination_summary or {}).get("reversibility_enforcement")
+    assert "t.v" in str(res.error), res.error
+    rows = _q(dst, "SELECT name FROM sqlite_master WHERE name='t'") and _q(dst, "SELECT count(*) FROM t")
+    assert not rows or rows[0][0] == 0, rows
+
+
+@pytest.mark.parametrize("shape", ["2024-01-{d:02d} 10:00:00", "2024-01-{d:02d}T10:00:00",
+                                   "2024-01-{d:02d} 10:00:00.250", "2024-01-{d:02d}"])
+def test_m2_on_a_sqlite_text_column_the_gate_agrees_with_the_text_the_writer_stores(tmp_path, fake, monkeypatch,
+                                                                                     shape):  # noqa: F811
+    """The gate refuses exactly the shapes whose text the row writer changes (the only writer under the flag).
+
+    A reversible run never takes the local COPY path (it declines enforced
+    columns), so what the row writer stores with the flag off is what a
+    reversible run would store.
+    """
+    import services.copy_csv_local as copy_local
+
+    off = tmp_path / "off.sqlite"
+    monkeypatch.setattr(copy_local, "try_copy_local_csv", lambda *a, **k: None)
+    written = _run(fake, _ts_csv(off, shape, require_reversibility=False))
+    assert written.success, written.error
+    stored = _q(off, "SELECT v FROM t WHERE id = 1")[0][0]
+    changed = stored != shape.format(d=2)
+    on = tmp_path / "on.sqlite"
+    res = _run(fake, _ts_csv(on, shape))
+    assert res.success is (not changed), (shape, stored, res.error)
+    if res.success:
+        assert _q(on, "SELECT v FROM t WHERE id = 1") == [(shape.format(d=2),)]

@@ -91,3 +91,12 @@ def test_m2_a_csv_timestamp_postgres_would_cut_fails_the_run(pg_table, fake):  #
     assert res.success is False and f"{table}.v" in str(res.error), res.error
     assert ".123456789" not in str(res.error)
     assert _rows(conn, table) in (None, [])
+
+
+def test_review5_m2_a_z_timestamp_into_timestamptz_is_refused_not_respelled(pg_table, fake):  # noqa: F811
+    """Review 5, M-2: '...T10:00:00Z' lands in a TIMESTAMPTZ as '... 10:00:00+00' (the session's zone)."""
+    cfg, conn, table = pg_table
+    res = _run(fake, _request(cfg, table, "2024-01-05T10:00:00Z", good="2024-01-{d:02d}T10:00:00Z"))
+    assert res.success is False, (res.destination_summary or {}).get("reversibility_enforcement")
+    assert f"{table}.v" in str(res.error), res.error
+    assert _rows(conn, table) in (None, []), "the respelled timestamp was written"
