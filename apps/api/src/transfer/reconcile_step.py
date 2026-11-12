@@ -368,6 +368,11 @@ def _oracle_projection(
 
 
 _PROOF_OBJECT_STORES = frozenset({"s3", "gcs", "adls", "azure_blob", "minio", "r2"})
+# Sources with no catalog: a bucket or a flat file holds no constraints,
+# indexes or defaults, so the physical-state compare is not run against them.
+_NO_CATALOG_SOURCES = _PROOF_OBJECT_STORES | frozenset({
+    "azure", "sftp", "file", "local", "csv", "csv_local", "json", "parquet", "excel", "xlsx",
+})
 
 
 def _proof_file_dest(endpoint: EndpointConfig, dest_db_type: str) -> bool:
@@ -3986,6 +3991,14 @@ def _schema_state_evidence(
     src_type = resolve_driver_type(
         str(src_cfg.get("type") or source_endpoint.format or "")
     ).lower()
+    if src_type in _NO_CATALOG_SOURCES:
+        # Building a SQL engine for it only resolved its host (an S3 region
+        # label: 32 lookups in the r7 suite, review L-E2) and could not connect.
+        return {
+            "skipped": True,
+            "reason": "file_source",
+            "note": "An object store or file source holds no constraints, indexes or defaults to compare.",
+        }
     src_table = str(source_endpoint.table or src_cfg.get("table") or "")
     if not src_table:
         return {}

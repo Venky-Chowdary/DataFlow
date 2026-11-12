@@ -1404,7 +1404,9 @@ async def run_pipeline_now(
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ScheduleStartError as exc:
-        raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=exc.http_status, detail=str(exc), headers=exc.headers
+        ) from exc
     if not job_id:
         raise HTTPException(
             status_code=400,
@@ -1479,7 +1481,9 @@ async def recover_schedule_destination_route(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ScheduleStartError as exc:
         # The rebuild could not start; the finding stays open (audited as failed).
-        raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=exc.http_status, detail=str(exc), headers=exc.headers
+        ) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApiError:

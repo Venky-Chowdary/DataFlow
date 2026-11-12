@@ -51,6 +51,8 @@ jobs:
       DATAFLOW_DISABLE_OBJECT_STORE: "1"
       DATAFLOW_ENGINE_DIGEST: "1"
       DATAFLOW_EGRESS_ALLOWLIST: "127.0.0.0/8,::1/128"
+      # No background Training Agent inside TestClient lifespans.
+      DATAFLOW_TRAINING: "off"
       # Engine credentials come only from env / CI secrets — never literals
       # in test code (CI-2).
       MSSQL_SA_PASSWORD: "Dataflow_CI_2026!"
