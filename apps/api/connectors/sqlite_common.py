@@ -192,14 +192,15 @@ def _confine_embedded_path(
     (``platform_config.data_dir()``) is refused, except its ``sqlite`` /
     ``duckdb`` volume sub-directory, so a connector can never open the job
     store, ledgers or secrets (always on). So is the exports tree
-    (``services.export_paths.exports_dir``): every workspace's export files
-    live there, and a connector path is not scoped to a workspace (security
-    review, always on). Without a root any other path is
+    (``services.export_paths.exports_dir``), except the caller's own export
+    area (``connector_may_open_export_path``): every workspace's export files
+    live there, so a path into another workspace's folder is refused (security
+    review, always on), while a SQLite export the platform writes still opens. Without a root any other path is
     returned unchanged; in production with ``DATAFLOW_CONFINE_LOCAL_FILES`` off,
     one outside the volume sub-directory is first recorded as
     ``local_file.would_confine``.
     """
-    from services.export_paths import exports_dir
+    from services.export_paths import connector_may_open_export_path, exports_dir
     from services.platform_config import data_dir
 
     try:
@@ -232,10 +233,10 @@ def _confine_embedded_path(
             f"opened as a connector; place the file under {volume_dir} "
             f"or set {env_name}"
         )
-    if is_within(resolved, exports):
+    if is_within(resolved, exports) and not connector_may_open_export_path(resolved):
         raise ValueError(
-            f"{label} path is inside the Datawrap export folder, which holds every "
-            "workspace's export files, and cannot be opened as a connector; "
+            f"{label} path is inside another workspace's area of the Datawrap "
+            "export folder and cannot be opened as a connector; "
             f"place the file elsewhere or set {env_name}"
         )
     if not roots:

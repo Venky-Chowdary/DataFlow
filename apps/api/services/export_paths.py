@@ -122,6 +122,25 @@ def current_export_workspace() -> str:
     return bound_job_workspace() or current_workspace_stamp(for_write=False)
 
 
+def connector_may_open_export_path(resolved: Path) -> bool:
+    """Whether an embedded-database connector path inside the exports tree is
+    the caller's own export area.
+
+    The rule :func:`resolve_export_path` applies to an export name, applied to
+    an already-resolved path: with a workspace bound (the running job's, else
+    the request's), only that workspace's folder; with none (the single local
+    operator), the flat folder but never ``_workspaces``. A SQLite export the
+    platform writes therefore opens, and a path into another workspace's
+    folder never does.
+    """
+    root = exports_dir(create=False)
+    workspace = current_export_workspace()
+    if workspace:
+        own = root / WORKSPACES_DIRNAME / _workspace_segment(workspace)
+        return _is_within(own, resolved)
+    return _is_within(root, resolved) and not _is_within(root / WORKSPACES_DIRNAME, resolved)
+
+
 def _is_within(base: Path, candidate: Path) -> bool:
     b = os.path.normcase(str(base))
     c = os.path.normcase(str(candidate))
