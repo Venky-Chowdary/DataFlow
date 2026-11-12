@@ -134,15 +134,18 @@ def _signal_workspace_stamp(request: Request) -> str:
         raise
 
 
-def _visible_signal(request: Request, signal_id: str):
-    """The signal, or the same 404 for a missing id and another workspace's (D222)."""
+def _visible_signal(request: Request, signal_id: str, *, write: bool = False):
+    """The signal, or the same 404 for a missing id and another workspace's (D222).
+
+    ``write=True`` for a route that changes the signal: the caller must hold
+    write membership in the signal's own workspace (review M4)."""
     from services.cdc_incremental_snapshot import get_signal
     from services.workspace_access import assert_resource_workspace
 
     sig = get_signal(signal_id)
     if sig is None:
         raise HTTPException(404, "Snapshot signal not found")
-    assert_resource_workspace(request, sig.workspace_id, not_found_detail="Snapshot signal not found")
+    assert_resource_workspace(request, sig.workspace_id, write=write, not_found_detail="Snapshot signal not found")
     return sig
 
 
@@ -187,7 +190,7 @@ async def get_snapshot(signal_id: str, request: Request) -> dict[str, Any]:
 async def cancel_snapshot(signal_id: str, request: Request) -> dict[str, Any]:
     from services.cdc_incremental_snapshot import cancel_signal
 
-    _visible_signal(request, signal_id)
+    _visible_signal(request, signal_id, write=True)
     sig = cancel_signal(signal_id)
     if sig is None:
         raise HTTPException(404, "Snapshot signal not found")

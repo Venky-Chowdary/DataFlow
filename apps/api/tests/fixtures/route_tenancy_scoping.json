@@ -1,13 +1,16 @@
 {
   "_about": [
-    "How every route that takes a resource id is scoped to a tenant. One entry per",
-    "'METHOD path' of tests/fixtures/rbac_route_permissions.json that has a path parameter;",
-    "tests/test_tenancy_route_scoping.py fails when a route is missing here or listed twice.",
+    "How every route that takes a resource id is scoped to a tenant: the ONE registry for",
+    "id-addressed routes (tests/test_tenancy_route_scoping.py; the old matrix's id loop is gone).",
+    "One entry per 'METHOD path' of tests/fixtures/rbac_route_permissions.json that has a path parameter.",
     "scope=workspace: the id names a resource owned by one workspace. The suite seeds one in",
-    "  workspace A and calls the route as an administrator of workspace B: 404/403, nothing of",
-    "  A's in the body, and A's resource unchanged.",
-    "scope=platform: deployment-wide configuration or account administration. Called as the",
-    "  same workspace-B administrator (not a platform administrator): 403/404, nothing changed.",
+    "  workspace A and calls the route as B's administrator, as B's API key and (unless a GET) as a",
+    "  viewer of A who edits B with no workspace header: 404/403, nothing of A's in the body, and A's",
+    "  resource unchanged. Owner control: A's own administrator must get a different answer, or",
+    "  'owner_control_reason' says why that cannot be shown. 'viewer_may_call' (with a reason) lets a",
+    "  viewer of the owning workspace call a route that changes nothing.",
+    "scope=platform: deployment-wide configuration, account or workspace lifecycle administration.",
+    "  The same callers (none a platform administrator) are refused and nothing changes.",
     "scope=exempt: the parameter is not a tenant-owned resource; 'reason' says why."
   ],
   "routes": {
@@ -105,7 +108,8 @@
     },
     "POST /api/v1/connectors/saved/{connector_id}/region-verification": {
       "scope": "platform",
-      "resource": "saved_connector"
+      "resource": "saved_connector",
+      "reason": "Where a connector's data lands is the operator's statement for data residency (security review H1): platform administrators only, never a workspace role."
     },
     "POST /api/v1/connectors/saved/{connector_id}/rotate-secrets": {
       "scope": "workspace",
@@ -328,8 +332,9 @@
       "reason": "Deployment-level identity provisioning behind the SCIM bearer token (scim.provision), not a user session; covered by tests/test_scim_conformance.py."
     },
     "DELETE /api/v1/team/sandbox-workspaces/{workspace_id}": {
-      "scope": "workspace",
-      "resource": "workspace"
+      "scope": "platform",
+      "resource": "workspace",
+      "reason": "Workspace lifecycle is a platform administrator's (require_platform_admin): no workspace role, not even the workspace's own admin, renames, deletes or recovers a workspace."
     },
     "DELETE /api/v1/team/users/{email}": {
       "scope": "platform",
@@ -357,16 +362,19 @@
       "reason": "Account administration is a platform administrator's: a workspace admin of another workspace is refused."
     },
     "DELETE /api/v1/team/workspaces/{workspace_id}": {
-      "scope": "workspace",
-      "resource": "workspace"
+      "scope": "platform",
+      "resource": "workspace",
+      "reason": "Workspace lifecycle is a platform administrator's (require_platform_admin): no workspace role, not even the workspace's own admin, renames, deletes or recovers a workspace."
     },
     "PATCH /api/v1/team/workspaces/{workspace_id}": {
-      "scope": "workspace",
-      "resource": "workspace"
+      "scope": "platform",
+      "resource": "workspace",
+      "reason": "Workspace lifecycle is a platform administrator's (require_platform_admin): no workspace role, not even the workspace's own admin, renames, deletes or recovers a workspace."
     },
     "POST /api/v1/team/workspaces/{workspace_id}/break-glass/restore-admin": {
-      "scope": "workspace",
-      "resource": "workspace"
+      "scope": "platform",
+      "resource": "workspace",
+      "reason": "Workspace lifecycle is a platform administrator's (require_platform_admin): no workspace role, not even the workspace's own admin, renames, deletes or recovers a workspace."
     },
     "GET /api/v1/team/workspaces/{workspace_id}/invites": {
       "scope": "workspace",
