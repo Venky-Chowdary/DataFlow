@@ -376,8 +376,9 @@ def _request_tables(
     population_rows: int | None,
     enforce: str | None,
     live: bool,
-) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], list[Any] | None]]]:
-    """The run's tables, and for each the mapping dicts the writer will read (``None``: not reachable).
+) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], list[Any] | None, dict[str, Any] | None]]]:
+    """The run's tables, and for each the mapping dicts the writer will read (``None``: not reachable) and what
+    the pre-write scan reads for it (its source, types, sample and measured count; ``None``: not read here).
 
     ``live`` (Execute) reads every non-primary stream the way the sequential
     writer will; otherwise (Validate) they are analysed from what is declared.
@@ -416,8 +417,16 @@ def _request_tables(
         key_columns=keys, sample_rows=list(sample_rows or []), read_window=window,
         population_rows=population_rows, enforce=enforce, **common,
     )]
-    # The dicts the writer reads for the first stream: its own contract's, else the run's planned list.
-    writers: list[tuple[dict[str, Any], list[Any] | None]] = [(tables[0], primary_maps)]
+    # The dicts the writer reads for the first stream: its own contract's, else the run's planned list; and
+    # what the pre-write scan reads for it (review 5, M-1).
+    from services.reversibility_streams import _remapped
+
+    primary_scan = {"stream": names[0] if several else None, "column_types": column_types, "contract": first,
+                    "dest_types": dest_types, "sample": list(sample_rows or []), "total": population_rows,
+                    "source": _remapped(src, names[0]) if several and live and not isinstance(src, Mapping)
+                    and src is not None else src}
+    writers: list[tuple[dict[str, Any], list[Any] | None, dict[str, Any] | None]] = [
+        (tables[0], primary_maps, primary_scan)]
     for name in names[1:] if several else []:
         raw = contract_of(name)
         steps = by_stream.get(name, [])
@@ -425,7 +434,7 @@ def _request_tables(
             table = declared_stream_table(name, raw, source=_dict(src) if isinstance(src, Mapping) else {},
                                           read_options=read_options, recipe_steps=steps, enforce=enforce, **common)
             tables.append(table)
-            writers.append((table, None))
+            writers.append((table, None, None))
             continue
 
         def analyse(design: dict[str, Any], *, name: str = name, raw: Mapping[str, Any] = raw,
@@ -449,10 +458,12 @@ def _request_tables(
 
         table, design = execute_stream_table(request, name, raw, shared, analyse)
         tables.append(table)
-        writers.append((table, (design or {}).get("stamped")))
+        writers.append((table, (design or {}).get("stamped"), design and {
+            "stream": name, "source": design["source"], "column_types": design["column_types"], "contract": raw,
+            "dest_types": design["dest_types"], "sample": design["sample_rows"], "total": design["total_rows"]}))
     if several and not declared_first and live:
         # The first stream runs on the run's planned mappings (the list the engine hands the writer).
-        writers[0] = (tables[0], shared)
+        writers[0] = (tables[0], shared, primary_scan)
     return tables, writers
 
 
@@ -467,6 +478,7 @@ def request_report(
     enforce: str | None = None,
     live: bool = False,
     stamp_writers: bool = False,
+    scan_targets: list[tuple[list[Any] | None, dict[str, Any] | None]] | None = None,
 ) -> dict[str, Any]:
     """Execute's view: the run's planned mappings and types (Validate == Execute).
 
@@ -480,8 +492,10 @@ def request_report(
     tables, writers = _request_tables(request, mappings, column_types, dest_types, sample_rows=rows,
                                       population_rows=population_rows, enforce=enforce, live=live)
     if stamp_writers:
-        for table, dicts in writers:
+        for table, dicts, _scan in writers:
             _stamp_enforced(table, dicts, dest_db=_engine(getattr(request, "destination", None)))
+    if scan_targets is not None:
+        scan_targets.extend((dicts, scan) for _table, dicts, scan in writers)
     report = build_report(tables, scope="job", subject_id=str(getattr(request, "job_id", "") or ""),
                           require=True, data_rows=len(rows), data_source="preflight_sample",
                           population_rows=population_rows)
@@ -549,17 +563,23 @@ def execute_gate(request: Any, planned: tuple[Any, ...] | None) -> dict[str, Any
         column_types = dict(getattr(request, "column_types", None) or {})
     from services.reversibility import WHILE_WRITING
 
+    targets: list[tuple[list[Any] | None, dict[str, Any] | None]] = []
     gate = preflight_gate(request_report(request, mappings, column_types, dest_types, sample_rows=sample,
                                          population_rows=population, enforce=WHILE_WRITING, live=True,
-                                         stamp_writers=True))
+                                         stamp_writers=True, scan_targets=targets))
     if gate.get("status") == "pass":
-        # An append or upsert commits batch by batch: its enforced columns are checked on the whole
-        # source population before anything is written (review 4, M-1).
-        from services.reversibility_prescan import prescan
+        # An append or upsert commits batch by batch: the enforced columns of every selected stream are
+        # checked on that stream's own source population before anything is written (review 4 / 5, M-1).
+        from services.reversibility_prescan import prescan_streams
 
-        found = prescan(request, mappings, column_types, dest_types, held=sample, population=population)
+        found, unread = prescan_streams(request, targets)
         if found:
             gate.update(status="block", message=found)
+        elif unread:
+            gate["message"] = (str(gate.get("message") or "").rstrip() + " The pre-write scan could not read "
+                               f"{', '.join(unread)} before writing: there a value that would change stops the run "
+                               "while writing, and rows earlier batches committed are kept.").strip()
+            gate.setdefault("details", {})["prescan_unread"] = list(unread)
     return gate
 
 

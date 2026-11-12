@@ -78,13 +78,58 @@ def _population(request: Any, mappings: Sequence[Any], columns: list[str], colum
     )
 
 
+def _stream_request(request: Any, dicts: Sequence[Any] | None, target: Mapping[str, Any]) -> Any:
+    """``request`` as the sequential writer runs one stream: its source, its contract, its sync mode."""
+    if target.get("stream") is None:
+        return request
+    contract = dict(target.get("contract") or {})
+    sub = copy.copy(request)
+    sub.source = target.get("source") or request.source
+    sub.stream_contracts = [{**contract, "name": target["stream"], "selected": True}]
+    sub.sync_mode = str(contract.get("sync_mode") or getattr(request, "sync_mode", "") or "")
+    sub.mappings = list(dicts or [])
+    return sub
+
+
+def prescan_streams(request: Any, targets: Sequence[tuple[Sequence[Any] | None, Mapping[str, Any] | None]],
+                    ) -> tuple[str | None, list[str]]:
+    """(why Execute must commit nothing, the streams whose population could not be read before writing).
+
+    Every selected stream's stamped mappings are scanned against that stream's
+    own source (review 5, M-1): a multi-stream append commits stream by stream,
+    so a late value in any of them would otherwise leave earlier streams
+    written. A stream analysed nowhere (``None``) is already blocked by g24.
+    """
+    unread: list[str] = []
+    for dicts, target in targets:
+        if target is None:
+            continue
+        sub = _stream_request(request, dicts, target)
+        if not needs_prescan(sub, dicts):
+            continue
+        missed: list[bool] = []
+        found = prescan(sub, dicts, target.get("column_types"), target.get("dest_types"),
+                        held=list(target.get("sample") or []), population=target.get("total"), unread=missed)
+        if found:
+            return found, unread
+        if missed:
+            unread.append(str(target.get("stream") or _table_name(sub)))
+    return None, unread
+
+
+def _table_name(request: Any) -> str:
+    source = getattr(request, "source", None)
+    return str(getattr(source, "table", "") or getattr(source, "collection", "") or "the source")
+
+
 def prescan(request: Any, mappings: Sequence[Any] | None, column_types: Mapping[str, str] | None = None,
             dest_types: Mapping[str, str] | None = None, *, held: Sequence[Mapping[str, Any]] | None = None,
-            population: int | None = None) -> str | None:
+            population: int | None = None, unread: list[bool] | None = None) -> str | None:
     """Why Execute must commit nothing (the first enforced value that would change), else ``None``.
 
     ``None`` too when the run needs no scan or its population cannot be read
-    before the write (the write-time check then stops the run).
+    before the write (the write-time check then stops the run); the latter is
+    noted on ``unread`` when given.
     """
     if not needs_prescan(request, mappings):
         return None
@@ -98,8 +143,10 @@ def prescan(request: Any, mappings: Sequence[Any] | None, column_types: Mapping[
                            list(held or []), population)
     except Exception:  # noqa: BLE001 - an unreadable population leaves the write-time check in charge
         logger.warning("reversibility pre-scan could not read the source population", exc_info=True)
-        return None
+        rows = None
     if rows is None:
+        if unread is not None:
+            unread.append(True)
         return None
     job = str(stamped[0][STAMP].get("job_id") or "")
     scan_key = f"prescan:{job}"
@@ -142,6 +189,8 @@ def prescan(request: Any, mappings: Sequence[Any] | None, column_types: Mapping[
         return walk()
     except Exception:  # noqa: BLE001 - a walk that failed leaves the write-time check in charge, never a pass
         logger.warning("reversibility pre-scan stopped after %s row(s)", scanned, exc_info=True)
+        if unread is not None:
+            unread.append(True)
         return None
     finally:
         summary(scan_key)  # forget the scan's own tally

@@ -198,3 +198,72 @@ def test_h1_the_verification_re_read_does_not_count_as_checked_rows():
     map_rows_for_fingerprint(**kw)
     found = enforce.summary("h1fp")
     assert found["columns"][0]["rows_checked"] == 2, found
+
+
+# ------------------------------------- M-1: the pre-write scan covers every selected stream
+
+@pytest.mark.parametrize("bad_stream", ["people", "orders"])
+def test_m1_a_multi_stream_append_with_a_late_bad_value_in_either_table_writes_nothing(tmp_path, fake,  # noqa: F811
+                                                                                     bad_stream):
+    from tests.test_reversibility_review3 import _ID, _exec, _sqlite_request
+
+    n = 1500  # past the design sample, inside one write batch
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    for table, col in (("people", "email"), ("orders", "note")):
+        _exec(src, f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, {col} TEXT)")
+        rows = [(i, f"V{i}") for i in range(1, n + 1)]
+        if table == bad_stream:
+            rows[-1] = (n, "late Mixed")  # the one value the transform would change
+        _exec(src, f"INSERT INTO {table} VALUES (?, ?)", rows)
+        _exec(dst, f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, {col} TEXT)")
+        _exec(dst, f"INSERT INTO {table} VALUES (?, ?)", [(i, "OLD") for i in range(n + 1, n + 4)])
+    contracts = [{"name": "people", "primary_key": ["id"], "selected": True, "mappings": [dict(_ID), _up("email")]},
+                 {"name": "orders", "primary_key": ["id"], "selected": True, "mappings": [dict(_ID), _up("note")]}]
+    res = _run(fake, _sqlite_request(src, dst, mappings=[], stream_contracts=contracts,
+                                     sync_mode="full_refresh_append"))
+    assert res.success is False
+    column = "people.email" if bad_stream == "people" else "orders.note"
+    assert f"{column} would change under its transform" in str(res.error), res.error
+    assert "Nothing was written" in str(res.error), res.error
+    assert "late Mixed" not in str(res.error)
+    assert _q(dst, "SELECT (SELECT count(*) FROM people), (SELECT count(*) FROM orders)") == [(3, 3)]
+
+
+def test_m1_an_honest_multi_stream_append_is_scanned_and_written(tmp_path, fake):  # noqa: F811
+    from tests.test_reversibility_review3 import _ID, _exec, _sqlite_request
+
+    src, dst = _two_tables(tmp_path)
+    for table, col in (("people", "email"), ("orders", "note")):
+        _exec(dst, f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, {col} TEXT)")
+    contracts = [{"name": "people", "primary_key": ["id"], "selected": True, "mappings": [dict(_ID), _up("email")]},
+                 {"name": "orders", "primary_key": ["id"], "selected": True, "mappings": [dict(_ID), _up("note")]}]
+    res = _run(fake, _sqlite_request(src, dst, mappings=[], stream_contracts=contracts,
+                                     sync_mode="full_refresh_append"))
+    assert res.success is True, res.error
+    assert _q(dst, "SELECT (SELECT count(*) FROM people), (SELECT count(*) FROM orders)") == [(10, 30)]
+
+
+def test_m1_a_stream_the_scan_cannot_read_first_is_named_in_the_gate_message(tmp_path, fake, monkeypatch):  # noqa: F811
+    from services import reversibility_prescan
+    from tests.test_reversibility_review3 import _ID, _exec, _sqlite_request
+
+    real = reversibility_prescan._population
+
+    def orders_unreadable(request, *args, **kwargs):
+        if getattr(request.source, "table", "") == "orders":
+            return None  # e.g. a stream statement the population walk cannot page
+        return real(request, *args, **kwargs)
+
+    monkeypatch.setattr(reversibility_prescan, "_population", orders_unreadable)
+    src, dst = _two_tables(tmp_path)
+    for table, col in (("people", "email"), ("orders", "note")):
+        _exec(dst, f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, {col} TEXT)")
+    contracts = [{"name": "people", "primary_key": ["id"], "selected": True, "mappings": [dict(_ID), _up("email")]},
+                 {"name": "orders", "primary_key": ["id"], "selected": True, "mappings": [dict(_ID), _up("note")]}]
+    request = _sqlite_request(src, dst, mappings=[], stream_contracts=contracts, sync_mode="full_refresh_append")
+    from services.reversibility_sources import execute_gate
+
+    gate = execute_gate(request, None)
+    assert gate["status"] == "pass", gate
+    assert "The pre-write scan could not read orders before writing" in gate["message"], gate["message"]
+    assert gate["details"]["prescan_unread"] == ["orders"]
