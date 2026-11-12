@@ -1003,3 +1003,40 @@ def compose_transform_capability_response(*, followup: bool = False) -> CopilotR
         reasoning="Transform capability — real starter templates, Confirm-gated create",
         suggested_prompts=[f"Create the {t['name']} transform" for t in templates[:3]],
     )
+
+
+def compose_dataset_list(output: dict[str, Any]) -> str:
+    """The workspace's uploads by file name, counted apart from built-in templates.
+
+    Every stored upload is named ``<file id>_<name>`` on disk, and the old
+    listing dropped such names as index shards — so the owner never saw their
+    own upload, and the count was the templates' (review H6).
+    """
+    from .tools import looks_like_index_dump_name
+
+    datasets = [d for d in output.get("datasets") or [] if isinstance(d, dict) and d.get("name")]
+    uploads = [d for d in datasets if d.get("origin") == "upload"]
+    templates = [
+        d for d in datasets
+        if d.get("origin") != "upload" and not looks_like_index_dump_name(str(d.get("name")))
+    ]
+
+    def line(d: dict[str, Any]) -> str:
+        rows = f", {d['row_count']:,} rows" if d.get("row_count") else ""
+        return f"• **{d.get('display_name') or d.get('name')}** — {d.get('column_count', 0)} columns{rows}"
+
+    lines: list[str] = []
+    if output.get("uploads_unread"):
+        lines.append(
+            "I could not read your uploads just now — the upload directory is not there — "
+            "so I can't tell you which files you have uploaded."
+        )
+    elif uploads:
+        lines.append(f"You have **{len(uploads)}** uploaded dataset(s):")
+        lines += [line(d) for d in uploads[:8]]
+    else:
+        lines.append("You have **0** uploaded datasets in this workspace.")
+    if templates:
+        lines.append(f"Plus **{len(templates)}** built-in template dataset(s):")
+        lines += [line(d) for d in templates[:4]]
+    return "\n".join(lines)

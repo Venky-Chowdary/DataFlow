@@ -142,3 +142,30 @@ def test_a_file_with_no_upload_record_is_hidden_from_a_workspace_bound_caller(up
     analyst.feeder.invalidate_cache()
     with acting_as("ws-B", "bob@b.example"):
         assert _uploads(analyst.list_datasets()) == []
+
+
+# ---- review H6: the owner sees their own upload in "list my datasets" ---------
+
+
+@pytest.mark.parametrize("question", ["list my datasets", "how many datasets do I have"])
+def test_the_owner_sees_their_upload_by_its_filename_counted_apart_from_templates(payroll_in_a, question):
+    from src.ai.copilot.data_analyst import get_data_analyst
+
+    with acting_as("ws-A", "alice@a.example", role="viewer"):
+        templates = [d for d in get_data_analyst().list_datasets() if d["source"] != "upload"]
+        response = pt.ask(pt.agent(), question)
+    assert "payroll_acme.csv" in response.answer, response.answer
+    assert "**1** uploaded" in response.answer, response.answer
+    assert f"**{len(templates)}** built-in" in response.answer, response.answer
+    for cell in SECRETS:
+        assert cell not in response.answer
+
+
+def test_a_missing_upload_directory_is_reported_as_unread(upload_dir, monkeypatch, tmp_path):
+    # The configured directory cannot exist (its parent is a file): a lost mount.
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("DATAFLOW_UPLOAD_DIR", str(blocker / "uploads"))
+    response = pt.ask(pt.agent(), "list my datasets")
+    assert pt.says_unreadable(response.answer), response.answer
+    assert "uploaded" not in response.answer.split("could not read", 1)[0]

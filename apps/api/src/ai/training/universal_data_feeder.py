@@ -36,7 +36,13 @@ def _default_dataset_dirs() -> list[str]:
     from services.brand_env import getenv_brand
     from services.platform_config import upload_dir
 
-    dirs = [str(upload_dir())]
+    try:
+        dirs = [str(upload_dir())]
+    except OSError as exc:
+        # A lost mount must not fail every Pilot turn: no uploads are read,
+        # and ``list_datasets`` reports them as unread (review H6).
+        logger.warning("upload directory unavailable: %s", type(exc).__name__)
+        dirs = []
     for extra in (getenv_brand("PILOT_DATASET_DIRS", "") or "").split(os.pathsep):
         if extra.strip() and extra.strip() not in dirs:
             dirs.append(extra.strip())

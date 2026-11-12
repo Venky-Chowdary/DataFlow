@@ -2040,6 +2040,8 @@ class DataPilotTools:
         return _tool_executed(result, started, role=role)
 
     def _list_datasets(self) -> ToolResult:
+        # Checked before the listing: resolving the upload directory creates it.
+        uploads_unread = _upload_dir_missing()
         datasets = self.analyst.list_datasets()
         # QA DS03: the tool result is what the client shows — a full
         # `columns: [...]` dump per dataset reads as a raw metadata blob.
@@ -2053,11 +2055,19 @@ class DataPilotTools:
                 "column_preview": cols[:8],
                 "column_count": ds.get("column_count") or len(cols),
             })
-        return ToolResult(
-            name="list_datasets",
-            success=True,
-            output={"datasets": shaped, "count": len(shaped)},
-        )
+        uploads = [d for d in shaped if d.get("origin") == "upload"]
+        output = {
+            "datasets": shaped,
+            "count": len(shaped),
+            # The workspace's own uploads and the built-in templates are
+            # different things to an operator: counted apart (review H6).
+            "upload_count": len(uploads),
+            "template_count": len(shaped) - len(uploads),
+        }
+        if uploads_unread:
+            # No upload directory: uploads were not read, not "none".
+            output.update(uploads_unread=True, degraded=True)
+        return ToolResult(name="list_datasets", success=True, output=output)
 
     def _analyze_dataset(self, dataset_name: str = "") -> ToolResult:
         schema = self.analyst.resolve_dataset(dataset_name)
@@ -9135,6 +9145,22 @@ def _collapse_underspecified(
         if not redundant:
             keep.append((name, args))
     return keep
+
+
+def _upload_dir_missing() -> bool:
+    """True when the configured upload directory is not there (a lost volume)."""
+    from services.brand_env import getenv_brand
+    from services.platform_config import upload_dir
+
+    raw = getenv_brand("UPLOAD_DIR", "").strip()
+    if raw:
+        from pathlib import Path
+
+        return not Path(raw).is_dir()
+    try:
+        return not upload_dir().is_dir()
+    except OSError:
+        return True
 
 
 def format_tool_results_for_llm(results: list[ToolResult]) -> str:

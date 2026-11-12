@@ -3218,22 +3218,9 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 else:
                     parts.append("No data contracts yet. Open **Contracts** to define one.")
             elif tr.name == "list_datasets" and tr.success:
-                from .tools import looks_like_index_dump_name
+                from .conversation_composer import compose_dataset_list
 
-                datasets = [
-                    ds
-                    for ds in (tr.output.get("datasets") or [])
-                    if ds.get("name") and not looks_like_index_dump_name(str(ds.get("name")))
-                ]
-                if datasets:
-                    lines = [f"I have **{len(datasets)} datasets** indexed:"]
-                    for ds in datasets[:6]:
-                        lines.append(
-                            f"• **{ds['name']}** — {ds['column_count']} columns"
-                            + (f", {ds['row_count']:,} rows" if ds.get("row_count") else "")
-                            + f" ({ds['source']})"
-                        )
-                    parts.append("\n".join(lines))
+                parts.append(compose_dataset_list(tr.output or {}))
             elif tr.name == "brief_workspace" and tr.success:
                 from .conversation_composer import compose_briefing
 
