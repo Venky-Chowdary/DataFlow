@@ -420,3 +420,56 @@ def test_probe_guard_uses_the_driver_not_a_cfg_type(resolves, monkeypatch, ip):
     ok, message = registry._run_probe_impl("postgresql", {"type": "s3", "host": "us-east-1"})
     assert not ok
     assert "Refused connector host us-east-1" in message, message
+
+
+# --- review round 2, L-E2: no catalog compare against an object-store source -
+#
+# 32 lookups of ``us-east-1`` in 16 r7 tests came from one path:
+# ``_schema_state_evidence`` -> ``verify_physical_state`` -> a SQLAlchemy engine
+# for the S3 *source* -> ``generic_sql._build_engine``'s guard. A bucket has no
+# constraints, indexes or defaults to compare.
+
+
+@pytest.mark.parametrize("source_format", ["s3", "csv", "parquet", "sftp"])
+def test_schema_evidence_skips_an_object_store_or_file_source(lookups, monkeypatch, source_format):
+    import services.physical_state_diff as physical_state_diff
+    from src.transfer.models import EndpointConfig
+    from src.transfer.reconcile_step import _schema_state_evidence
+
+    compared: list[dict] = []
+    real = physical_state_diff.verify_physical_state
+    monkeypatch.setattr(
+        physical_state_diff, "verify_physical_state",
+        lambda **kwargs: compared.append(kwargs) or real(**kwargs),
+    )
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": source_format, "host": "us-east-1", "port": 42869,
+            "database": "r7-demo-bucket", "table": "orders.csv",
+            "username": "test", "password": "test-secret",
+        },
+    )
+    evidence = _schema_state_evidence(
+        source_endpoint=source,
+        db_type="postgresql",
+        cfg={"type": "postgresql", "host": "127.0.0.1", "port": 1, "database": "d"},
+        schema="public",
+        table="orders",
+    )
+    assert evidence.get("skipped") is True, evidence
+    assert evidence.get("reason") == "file_source"
+    assert compared == []
+    assert lookups.count("us-east-1") == 0, lookups
+
+
+def test_sql_engine_guard_is_told_the_engine_type(monkeypatch):
+    import services.egress_guard as egress_guard
+    from connectors.generic_sql import _build_engine
+
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        egress_guard, "assert_connector_dial_allowed", lambda *values, **kwargs: seen.append(kwargs)
+    )
+    _build_engine({"type": "postgresql", "host": "db.example", "port": 5432, "database": "d"})
+    assert seen and seen[0].get("db_type") == "postgresql", seen
