@@ -85,7 +85,11 @@ azure-storage-blob>=12.19.0
 
 # Local testing / emulators
 moto[server]>=5.0.0
-fakesnow>=0.8.0
+# fakesnow 0.11.22 requires duckdb~=1.5.6 and sqlglot~=30.22.0 (the pins below and
+# the installed duckdb 1.5.6); fakesnow 0.12 moved to duckdb 2.x. Stay on the 0.11
+# line until duckdb (local DuckDB connectors, the playground backstop) and
+# sqlglot (the T-SQL filter) are re-proven on the new majors.
+fakesnow>=0.11.22,<0.12
 # The SQL Server playground filter parses T-SQL with sqlglot (services/tsql_select.py,
 # security review round 3, M2). It was only transitive (fakesnow pins ~=30.22.0);
 # declared here at the same pin so the security check never loses its parser.
