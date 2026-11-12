@@ -143,6 +143,8 @@ class FilterReading:
     verification: str = ""
     #: The question with every applied phrase removed.
     rest: str = ""
+    #: The words of the applied window, as the operator wrote them ("yesterday").
+    window_text: str = ""
 
 
 def _blank(text: str, start: int, end: int) -> str:
@@ -174,6 +176,8 @@ def read_filters(message: str) -> FilterReading:
     spans: list[tuple[int, int]] = []
     unapplied: list[tuple[int, int]] = []
 
+    window_spans: list[tuple[int, int]] = []
+
     def take(match: re.Match[str], window: dict[str, str] | None) -> None:
         nonlocal text
         spans.append(match.span())
@@ -181,6 +185,7 @@ def read_filters(message: str) -> FilterReading:
             unapplied.append(match.span())
         else:
             windows.append(window)
+            window_spans.append(match.span())
         text = _blank(text, *match.span())
 
     verdicts: list[str] = []
@@ -221,7 +226,8 @@ def read_filters(message: str) -> FilterReading:
     if len(set(verdicts)) > 1:
         return FilterReading(window={}, unapplied="passed and failed verification", kind="filter")
     return FilterReading(
-        window=windows[0] if windows else {}, verification=verdicts[0] if verdicts else "", rest=text
+        window=windows[0] if windows else {}, verification=verdicts[0] if verdicts else "", rest=text,
+        window_text=" ".join(original[a:b].strip() for a, b in sorted(window_spans)),
     )
 
 

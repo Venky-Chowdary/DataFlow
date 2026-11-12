@@ -229,3 +229,61 @@ def ground_job_plan(message: str, planned: list[tuple[str, dict]]) -> list[tuple
         (name, {**args, **ask.tool_args()}) if name == "list_jobs" else (name, args)
         for name, args in planned
     ]
+
+
+# ---- elliptical follow-ups (review M3) --------------------------------------
+
+_ELLIPTICAL_RE = re.compile(
+    r"^\s*(?:(?:and|also|ok(?:ay)?\s+and|what\s+about|how\s+about|same\s+for|now)\b|"
+    r"(?:how\s+many|which)\s+of\s+(?:those|them|these)\b)",
+    re.I,
+)
+_STATUS_PHRASE = {
+    "failed": "failed", "completed": "completed", "running": "are running",
+    "attention": "need attention", "queued": "are queued", "pending": "are pending",
+    "cancelled": "were cancelled",
+}
+
+
+def _status_phrase(ask: JobAsk) -> str:
+    if ask.verification:
+        return f"{ask.verification} verification"
+    if ask.status:
+        return _STATUS_PHRASE.get(ask.status, "were " + ask.status.replace("_", " "))
+    return "ran"
+
+
+def resolve_job_followup(message: str, history: list[dict] | None) -> str:
+    """The full jobs question an elliptical follow-up stands for, or "".
+
+    "and yesterday?" after "how many jobs failed today" is "how many jobs failed
+    yesterday"; "and completed?" keeps the window. Only a follow-up that names
+    a window, a status or a qualifier is rewritten — anything else is left to
+    the normal reading, which refuses what it cannot apply.
+    """
+    text = (message or "").strip()
+    if not text or not _ELLIPTICAL_RE.search(text) or _JOBS_SUBJECT_RE.search(text):
+        return ""
+    previous = ""
+    for turn in reversed(history or []):
+        if str(turn.get("role") or "") == "user":
+            previous = str(turn.get("content") or "")
+            break
+    prior = parse_job_ask(previous)
+    if prior is None or prior.unapplied or prior.last or prior.metric:
+        return ""
+    here = read_filters(text)
+    status = asked_status(here.rest or text) if not here.unapplied else ""
+    if here.unapplied:
+        # Keep the qualifier in the question so it is refused by name.
+        return f"how many jobs {_status_phrase(prior)} {read_filters(previous).window_text} {here.unapplied}".strip()
+    window_text = here.window_text or read_filters(previous).window_text
+    if here.verification:
+        ask = JobAsk(verification=here.verification)
+    elif status:
+        ask = JobAsk(status=status)
+    elif here.window_text:
+        ask = prior
+    else:
+        return ""
+    return f"how many jobs {_status_phrase(ask)} {window_text}".strip()

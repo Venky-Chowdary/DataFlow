@@ -648,6 +648,8 @@ _SKIP_SUMMARY_LINE = (
     "Optional cloud polish",
     "Local Datawrap Pilot still answered",
     "_On your last ask",
+    "As of ",
+    "_This restates",
 )
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _STEP_HEADING = re.compile(
@@ -741,7 +743,11 @@ def _summary_sentences(text: str, *, max_sentences: int) -> list[str]:
             if not piece or any(piece.startswith(p) for p in _SKIP_SUMMARY_LINE):
                 continue
             if piece.endswith(":"):
-                continue
+                # "**2** of the **5** job(s) started today failed:" is the
+                # answer's lead, not a heading: it is what a summary keeps.
+                if not re.search(r"\d", piece):
+                    continue
+                piece = piece[:-1].rstrip() + "."
             if _STEP_HEADING.match(piece) and len(piece.split()) <= 10:
                 continue
             if re.match(r"^G\d+\b", piece):
@@ -930,6 +936,14 @@ def compose_history_turn(
     asked = last_user_text(history)
     if asked and act in {"summarize_last", "explain_simpler"} and asked not in answer:
         answer = f"_On your last ask — “{_clip(asked, 80)}” —_\n\n{answer}"
+    if act in {"summarize_last", "explain_simpler"}:
+        # Nothing was read for this turn: say so, and when the earlier answer was true.
+        stamp = re.search(r"^As of ([^\n]+?)\.?$", _last_substantive_answer(history) or last or "", re.M)
+        when = f" (as of {stamp.group(1)})" if stamp else ""
+        answer += (
+            f"\n\n_This restates my earlier answer{when}; I have not re-read your stores — "
+            "ask again for current numbers._"
+        )
     return CopilotResponse(
         answer=answer,
         intent=intent,

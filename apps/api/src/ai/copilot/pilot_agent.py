@@ -1430,6 +1430,14 @@ class DataPilotAgent:
                     pending_labels=pending_labels or None,
                 )
 
+        # "and yesterday?" after a jobs question is that question for yesterday
+        # (review M3): rewritten here so every check below reads the full ask.
+        from .job_questions import resolve_job_followup
+
+        resolved = resolve_job_followup(message, history)
+        if resolved:
+            message, lower_msg = resolved, resolved.lower()
+
         # Transcript questions, injection, attributed claims, cross-tenant reads
         # and gate bypasses are settled here, before Help retrieval or any LLM
         # can narrate an answer to them. Routing + lexical cue must both agree.
