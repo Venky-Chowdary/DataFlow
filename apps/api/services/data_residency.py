@@ -160,6 +160,15 @@ _DSN_HOST_KEY = re.compile(
 )
 #: URL query parameters that replace or add to the authority's host (libpq ``host=``).
 _URL_HOST_PARAMS = ("host", "hostaddr", "server", "account")
+#: URL query parameters that carry an address in another form (security review
+#: round 2, H2): an ODBC connection string, a TNS descriptor / EZConnect / alias,
+#: a libpq service-file name, an ODBC driver name (keywords injected into it
+#: reach the connect string).
+_URL_ADDRESS_PARAMS = ("odbc_connect", "dsn", "service", "driver")
+#: ``(HOST=...)`` in an Oracle TNS descriptor.
+_DESCRIPTOR_HOST = re.compile(r"(?i)\(\s*host\s*=\s*([^()\s]+)\s*\)")
+_EZCONNECT = re.compile(r"(?://)?(?P<host>\[[^\]]+\]|[^:/\s]+)(?::\d+)?(?:/[^\s]*)?")
+_PLAIN_DRIVER_NAME = re.compile(r"[A-Za-z0-9 ._+/()-]{1,128}")
 #: Drivers whose URL (in ``host`` or the connection string) ``resolve_sql_endpoint``
 #: resolves: the family it takes and its default port.
 _SQL_URL_FAMILIES = {"postgresql": ("postgresql", 5432), "pgvector": ("postgresql", 5432), "mysql": ("mysql", 3306)}
@@ -311,9 +320,39 @@ def _url_hosts(text: str) -> list[str] | None:
         if key.lower() in _URL_HOST_PARAMS:
             for value in values:
                 names.extend(_hostname(part) for part in value.split(",") if part.strip())
+        elif key.lower() in _URL_ADDRESS_PARAMS:
+            for value in values:
+                found = _address_param_hosts(key.lower(), value)
+                names.extend(found if found is not None else [None])
     if not names or any(name is None for name in names):
         return None
     return [name for name in names if name is not None]
+
+
+def _descriptor_hosts(text: str) -> list[str] | None:
+    """Every ``(HOST=...)`` of an Oracle TNS descriptor; ``None`` when one is unreadable."""
+    names = [_hostname(value) for value in _DESCRIPTOR_HOST.findall(text)]
+    if not names or any(name is None for name in names):
+        return None
+    return [name for name in names if name is not None]
+
+
+def _address_param_hosts(key: str, value: str) -> list[str] | None:
+    """The hosts an address-bearing URL parameter names: ``[]`` for a plain
+    ODBC driver name, ``None`` when the value cannot be read."""
+    text = str(value or "").strip()
+    if key == "driver":
+        return [] if _PLAIN_DRIVER_NAME.fullmatch(text.strip("{}")) else None
+    if key == "odbc_connect":
+        return _field_hosts(text)
+    if key == "dsn":
+        if text.startswith("("):
+            return _descriptor_hosts(text)
+        match = _EZCONNECT.fullmatch(text)
+        if match and ("/" in text or ":" in text):
+            host = _hostname(match.group("host").strip("[]"))
+            return [host] if host else None
+    return None  # an ODBC / TNS alias or a libpq service name: resolved from a file
 
 
 def _field_hosts(raw: Any) -> list[str] | None:
@@ -323,6 +362,8 @@ def _field_hosts(raw: Any) -> list[str] | None:
         text = text[5:]
     if "://" in text:
         return _url_hosts(text)
+    if text.startswith("("):
+        return _descriptor_hosts(text)
     keyed = _DSN_HOST_KEY.findall(text) if "=" in text else []
     if keyed:
         parts = [value.strip().removeprefix("tcp:").split(",", 1)[0] for value in keyed]
