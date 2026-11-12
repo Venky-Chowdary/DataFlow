@@ -497,12 +497,10 @@ def _place(target: Any) -> tuple[str, ...]:
 
 
 def region_verification_address(connector: Any) -> str:
-    """What a region verification is bound to: the connector's type and place."""
-    import hashlib
-    import json
+    """What a region verification is bound to: every addressing field (round 2, H4)."""
+    from services.region_verification import verification_address
 
-    key = [_norm(getattr(connector, "type", "")), *_place(connector)]
-    return hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()[:32]
+    return verification_address(connector)
 
 
 def _declared_region(endpoint: Any) -> str:
@@ -542,7 +540,19 @@ def _verified_region(endpoint: Any, workspace_id: str | None) -> DestinationRegi
     region = _norm(stamp.get("region"))
     if not region or not stamp.get("by"):
         return _UNKNOWN
-    if stamp.get("address") != region_verification_address(connector) or _place(endpoint) != _place(connector):
+    from services.region_verification import address_unreadable, overridden_by_request
+
+    try:
+        moved = (
+            stamp.get("address") != region_verification_address(connector)
+            or _place(endpoint) != _place(connector)
+            or address_unreadable(connector)
+            or address_unreadable(endpoint)
+            or overridden_by_request(endpoint, connector, workspace_id)
+        )
+    except Exception:  # noqa: BLE001 - a stamp that cannot be checked verifies nothing
+        return _UNKNOWN
+    if moved:
         return _UNKNOWN
     declared = _declared_region(endpoint)
     if declared and declared != region:

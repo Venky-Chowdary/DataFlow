@@ -511,12 +511,21 @@ def _kept_region_verification(before: Any, after: Mapping[str, Any]) -> dict[str
         return {}
     from types import SimpleNamespace
 
-    from services.data_residency import region_verification_address
+    from services.region_verification import address_unreadable, verification_address
 
-    moved = stamp.get("address") != region_verification_address(SimpleNamespace(**{
-        key: after.get(key, "") for key in ("type", "host", "endpoint_url", "connection_string", "database")
-    }))
+    target = SimpleNamespace(**{key: after.get(key, "") for key in _STAMP_ADDRESS_KEYS})
+    try:
+        moved = stamp.get("address") != verification_address(target) or address_unreadable(target)
+    except Exception:  # noqa: BLE001 - a stamp that cannot be re-checked is dropped
+        moved = True
     return {} if moved else dict(stamp)
+
+
+#: Every connector field a region verification is bound to (round 2, H4).
+_STAMP_ADDRESS_KEYS = (
+    "type", "host", "port", "database", "schema", "endpoint_url", "connection_string",
+    "username", "api_key", "service_account", "extra",
+)
 
 
 #: Trust extras that identify one endpoint's key — never valid for another host.
@@ -1169,7 +1178,10 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
                 tenant = tenant_id_from_workspace(doc.get("workspace_id") or "")
                 doc["region_verification"] = _kept_region_verification(raw.get("region_verification"), {
                     **doc,
-                    "connection_string": decrypt_secret(str(doc.get("connection_string") or ""), tenant_id=tenant),
+                    **{
+                        name: decrypt_secret(str(doc.get(name) or ""), tenant_id=tenant)
+                        for name in ("connection_string", "api_key", "service_account")
+                    },
                 })
             else:
                 doc.pop("region_verification", None)
@@ -1304,16 +1316,23 @@ def set_region_verification(
     connector = get_connector(connector_id, workspace_id=workspace_id)
     if connector is None:
         return None
-    from services.data_residency import region_verification_address
+    from services.region_verification import address_unreadable, resolved_address, verification_address
 
     region = str(region or "").strip().lower()
     stamp: dict[str, Any] = {}
     if region:
+        if address_unreadable(connector):
+            raise ValueError(
+                "This connector's address cannot be read (an alias, a service name or a "
+                "parameter residency cannot resolve), so its region cannot be verified; "
+                "give the host or endpoint explicitly"
+            )
         stamp = {
             "region": region,
             "by": str(verified_by or "").strip(),
             "at": _now(),
-            "address": region_verification_address(connector),
+            "address": verification_address(connector),
+            "resolved": resolved_address(connector),
         }
     patch = {"region_verification": stamp}
     if _use_mongo():

@@ -568,17 +568,26 @@ def verify_saved_connector_region(
     )
     actor = actor_from_request(request)
     region = body.region.strip().lower()
-    updated = set_region_verification(
-        connector_id, region, verified_by=actor, workspace_id=scope.header_workspace_id or None
-    )
+    try:
+        updated = set_region_verification(
+            connector_id, region, verified_by=actor, workspace_id=scope.header_workspace_id or None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Connector not found")
+    stamp = updated.region_verification or {}
     append_audit_event(
         action="connector.region_verified" if region else "connector.region_verification_withdrawn",
         resource=f"connector:{connector_id}",
         actor=actor,
         level="warning",
-        details={"region": region, "workspace_id": updated.workspace_id, "connector_type": updated.type},
+        details={
+            "region": region, "workspace_id": updated.workspace_id, "connector_type": updated.type,
+            # What the stamp is bound to (round 2, H4): its keyed hash and the
+            # credential-free address it was verified for.
+            "verified_address": stamp.get("address", ""), "resolved_address": stamp.get("resolved", {}),
+        },
     )
     return _to_ui(updated)
 
