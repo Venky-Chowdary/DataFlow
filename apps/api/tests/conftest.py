@@ -63,6 +63,19 @@ if not os.environ.get("DATAFLOW_DATA_DIR"):
     os.environ["DATAFLOW_DATA_DIR"] = _suite_data_dir
     atexit.register(shutil.rmtree, _suite_data_dir, ignore_errors=True)
 
+# Uploads land in the suite's data directory, never in the source tree's
+# apps/api/uploads: a test that stored an upload (e.g. "orders.csv") left it
+# there for every later test and every later run, so Pilot resolved "orders"
+# to that stale upload and routed a plan-only request to a real dataset
+# transfer (test_pilot_colloquial_ops_wave50 on PR 406 CI, shard 6).
+# Its own directory, not under the suite data dir: import-time paths under that
+# dir are re-pointed per module, which would split where an upload is stored
+# from where upload_dir() reads it back.
+if not os.environ.get("DATAFLOW_UPLOAD_DIR") and not os.environ.get("DATAWRAP_UPLOAD_DIR"):
+    _suite_upload_dir = tempfile.mkdtemp(prefix="df-suite-uploads-")
+    os.environ["DATAFLOW_UPLOAD_DIR"] = _suite_upload_dir
+    atexit.register(shutil.rmtree, _suite_upload_dir, ignore_errors=True)
+
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 # Engine fixtures stage file sources under pytest's tmp_path.
