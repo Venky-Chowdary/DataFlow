@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -32,6 +32,8 @@ from services.tenant_store import (
     get_tenant,
     get_tenant_for_workspace,
     list_tenants,
+    list_tenants_page,
+    tenants_for_workspaces,
     update_tenant,
 )
 
@@ -1164,26 +1166,48 @@ def get_current_tenant(request: Request):
 
 
 @router.get("/tenants")
-def get_all_tenants(request: Request):
-    """List tenants the caller is allowed to see.
+def get_all_tenants(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500, description="Tenants per page (newest first)"),
+    offset: int = Query(0, ge=0, description="The next_offset of the previous page"),
+):
+    """List tenants the caller is allowed to see, a page at a time.
 
     Platform admins see every tenant (or the header workspace when named).
     Workspace admins see only tenants they administer — never another
-    customer's domain, MFA flag, or IP allowlist.
+    customer's domain, MFA flag, or IP allowlist. ``next_offset`` is null on
+    the last page. Only the tenants of the page (or of the caller's own
+    workspaces) are read from the store (ops review round 2, High 3).
     """
     from src.services import auth_service
 
     named = workspace_id_from_request_headers(request.headers)
-    tenants = list_tenants()
-    if auth_service.auth_required() and not _is_platform_admin(request):
-        tenants = [
-            t
-            for t in tenants
-            if t.workspace_id and _can_admin_workspace(request, t.workspace_id)
-        ]
+    restricted = auth_service.auth_required() and not _is_platform_admin(request)
     if named:
-        tenants = [t for t in tenants if t.workspace_id == named]
-    return {"tenants": [t.to_dict() for t in tenants]}
+        tenant = get_tenant_for_workspace(named)
+        tenants = [tenant] if tenant else []
+    elif restricted:
+        tenants = tenants_for_workspaces(_caller_workspaces(request))
+    else:
+        tenants, next_offset = list_tenants_page(limit=limit, offset=offset)
+        return JSONResponse({"tenants": [t.to_dict() for t in tenants], "next_offset": next_offset})
+    if restricted:
+        tenants = [t for t in tenants if t.workspace_id and _can_admin_workspace(request, t.workspace_id)]
+    tenants = sorted(tenants, key=lambda t: t.created_at, reverse=True)
+    page = tenants[offset:offset + limit]
+    next_offset = offset + limit if len(tenants) > offset + limit else None
+    return JSONResponse({"tenants": [t.to_dict() for t in page], "next_offset": next_offset})
+
+
+def _caller_workspaces(request: Request) -> set[str]:
+    """Workspaces the caller belongs to (an API key: its own): the only ones it can administer."""
+    from services.team_store import list_memberships_for_user
+
+    user = getattr(request.state, "user", None)
+    user = user if isinstance(user, dict) else {}
+    found = {str(m.get("workspace_id") or "") for m in list_memberships_for_user(_actor(request))}
+    found.add(str(user.get("workspace_id") or ""))
+    return {w for w in found if w}
 
 
 @router.post("/tenant")

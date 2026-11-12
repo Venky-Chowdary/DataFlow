@@ -16,6 +16,17 @@ whole store in its file shape, ``save()`` takes it back) and stores it in
 its own ``rev``. Records belong to a partition (the tenant or workspace they
 carry).
 
+Reads query only what they need (ops review round 2, High 3): ``load(part=)``
+one tenant or workspace, ``load(parts=)`` several, ``load(keys=)`` records by
+id, ``load(tag=)`` records carrying a lookup tag (``tags=``, stored as
+``tags``, for example a tenant's custom domain or a grant's resource); each is
+an indexed query, and ``page()`` lists the store newest first, a page at a
+time. ``load()`` with no scope still reads the whole store (maintenance
+paths). In file mode every load returns the whole file, so callers always
+filter what they get. A save diffs against what its load read, so it only
+touches records in that scope. The read cache (``CONTROL_STORE_CACHE_SECONDS``,
+default 2 s) is kept per query.
+
 Invariants that span records (one tenant per workspace, one grant per
 principal and resource, one active BYOK key per tenant) are enforced by the
 database, not by the order of a check and an insert: each record family
@@ -70,6 +81,12 @@ logger = logging.getLogger(__name__)
 
 ITEMS_COLLECTION = "control_plane_items"
 MAX_RECORD_BYTES = 1024 * 1024
+#: The per-query read cache is emptied when it would hold more queries than this.
+MAX_CACHED_QUERIES = 4096
+#: Records updated per round trip by the one-time backfill of claims and lookup tags.
+BACKFILL_BATCH = 500
+#: One record as stored: (partition, body, unique claims, lookup tags).
+Row = tuple[str, str, list[str], list[str]]
 DUPLICATE_KIND = "duplicate_record"
 #: The partial unique index that enforces every store's claims.
 UNIQUE_INDEX = "store_uniq_unique"
@@ -140,12 +157,15 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         id_key: str = "id",
         partition_key: str = "workspace_id",
         unique: Callable[[dict[str, Any]], list[str]] | None = None,
+        tags: Callable[[dict[str, Any]], list[str]] | None = None,
     ) -> None:
         super().__init__(name, file_load=file_load, file_save=file_save, file_path=file_path, empty=empty)
         self._list_key = list_key
         self._id_key = id_key
         self._partition_key = partition_key
         self._unique = unique
+        self._tags = tags
+        self._cache: dict[str, tuple[float, dict[str, tuple[int, str, int, str]]]] = {}  # type: ignore[assignment]
         # The database the indexes and the claims backfill were done for (a test may switch databases).
         self._indexed: Any = None
         self._backfilled: Any = None
@@ -164,12 +184,20 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             return []
         return sorted({str(c) for c in self._unique(record) if c})
 
-    def _records(self, data: Any) -> dict[str, tuple[str, str, list[str]]]:
-        """``{key: (partition, body, claims)}`` for the store in its file shape."""
-        out: dict[str, tuple[str, str, list[str]]] = {}
+    def _lookup_tags(self, record: Any) -> list[str]:
+        if self._tags is None or not isinstance(record, dict):
+            return []
+        return sorted({str(t) for t in self._tags(record) if t})
+
+    def _row(self, record: Any, body: str) -> Row:
+        return (self._partition(record), body, self._claims(record), self._lookup_tags(record))
+
+    def _records(self, data: Any) -> dict[str, Row]:
+        """``{key: (partition, body, claims, tags)}`` for the store in its file shape."""
+        out: dict[str, Row] = {}
         if self._list_key is None:
             for key, record in (data.items() if isinstance(data, dict) else ()):
-                out[str(key)] = (self._partition(record), _dumps(record), self._claims(record))
+                out[str(key)] = self._row(record, _dumps(record))
             return out
         rows = data.get(self._list_key) if isinstance(data, dict) else None
         for record in rows or []:
@@ -180,7 +208,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             if key in out:
                 logger.warning("control-plane store %s: duplicate record id %s; the first is kept", self.name, key)
                 continue
-            out[key] = (self._partition(record), body, self._claims(record))
+            out[key] = self._row(record, body)
         return out
 
     def _assemble(self, ordered: list[tuple[str, str]]) -> Any:
@@ -191,14 +219,28 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         return data
 
     # -- reads ---------------------------------------------------------
-    def load(self, *, fresh: bool = False) -> Any:
-        """The store in its file shape. ``fresh`` reads the database even inside the cache window."""
+    def load(
+        self,
+        *,
+        fresh: bool = False,
+        part: str | None = None,
+        parts: Any = None,
+        keys: Any = None,
+        tag: str | None = None,
+    ) -> Any:
+        """The records in scope, in the store's file shape (see module docstring).
+
+        ``fresh`` reads the database even inside the cache window. In file
+        mode the whole file is returned whatever the scope.
+        """
         coll = _sds._collection(ITEMS_COLLECTION)
         if coll is None:
             return tracked(self._file_load(), None)
         self._prepare(coll)
+        flt = self._scope_filter(part=part, parts=parts, keys=keys, tag=tag)
+        query = _dumps(flt)
         ttl = self._ttl()
-        cached = self._cache
+        cached = self._cache.get(query) if isinstance(self._cache, dict) else None
         if (
             cached is not None
             and not fresh
@@ -209,17 +251,71 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             items = cached[1]
         else:
             self._refuse_while_importing(coll)
-            items = self._read(coll)
-            self._cache = (_sds._clock(), items)
+            items = self._read(coll, flt)
+            if not isinstance(self._cache, dict) or len(self._cache) >= MAX_CACHED_QUERIES:
+                self._cache = {}
+            self._cache[query] = (_sds._clock(), items)
         return self._tracked(items)
+
+    def _scope_filter(self, *, part: Any = None, parts: Any = None, keys: Any = None, tag: Any = None) -> dict[str, Any]:
+        flt: dict[str, Any] = {"store": self.name}
+        if part is not None:
+            flt["part"] = str(part)
+        elif parts is not None:
+            flt["part"] = {"$in": sorted({str(p) for p in parts})}
+        elif keys is not None:
+            flt["_id"] = {"$in": sorted({self._item_id(str(k)) for k in keys})}
+        elif tag is not None:
+            flt["tags"] = str(tag)
+        return flt
+
+    def page(self, *, offset: int = 0, limit: int = 100) -> tuple[Any, int | None]:
+        """One page of the store, newest first, and the offset of the next page (None: no more)."""
+        offset, limit = max(0, int(offset)), max(1, int(limit))
+        coll = _sds._collection(ITEMS_COLLECTION)
+        if coll is None:
+            data = self._file_load()
+            if self._list_key is None:
+                rows = list((data or {}).items())[::-1]
+                chosen = dict(rows[offset:offset + limit])
+            else:
+                rows = list((data or {}).get(self._list_key) or [])[::-1]
+                chosen = {self._list_key: rows[offset:offset + limit]}
+            more = len(rows) > offset + limit
+            return chosen, (offset + limit if more else None)
+        self._prepare(coll)
+        self._refuse_while_importing(coll)
+        cursor = coll.find({"store": self.name, "fence": {"$exists": False}})
+        docs = list(cursor.sort([("seq", -1), ("_id", -1)]).skip(offset).limit(limit + 1))
+        more = len(docs) > limit
+        ordered = [(str(d.get("key")), str(d.get("body") or "{}")) for d in docs[:limit]]
+        data = self._assemble(ordered)
+        return data, (offset + limit if more else None)
+
+    def trim(self, part: str, *, keep: int) -> int:
+        """Delete all but the ``keep`` most recently written records of one partition. Returns how many went.
+
+        Reads ids and write times only, never the records themselves. Does
+        nothing in file mode (the store's own save applies its cap there).
+        """
+        coll = _sds._collection(ITEMS_COLLECTION)
+        if coll is None:
+            return 0
+        cursor = coll.find({"store": self.name, "part": str(part)}, {"_id": 1, "updated_at": 1})
+        older = list(cursor.sort([("updated_at", -1), ("_id", -1)]).skip(max(0, int(keep))))
+        if not older:
+            return 0
+        coll.delete_many({"_id": {"$in": [d["_id"] for d in older]}})
+        self._cache = {}
+        return len(older)
 
     @staticmethod
     def _ttl() -> float:
         return _sds._cache_seconds()
 
-    def _read(self, coll: Any) -> dict[str, tuple[int, str, int, str]]:
+    def _read(self, coll: Any, flt: dict[str, Any] | None = None) -> dict[str, tuple[int, str, int, str]]:
         items: dict[str, tuple[int, str, int, str]] = {}
-        for doc in coll.find({"store": self.name}):
+        for doc in coll.find(flt or {"store": self.name}):
             if "fence" in doc:  # a per-partition fence an earlier build wrote: not a record
                 continue
             items[str(doc.get("key"))] = (
@@ -251,14 +347,14 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             self._file_save(data)
             return
         new = self._records(data)
-        for key, (_part, body, _claims) in new.items():
+        for key, (_part, body, _claims, _tags) in new.items():
             size = len(body.encode("utf-8"))
             if size > MAX_RECORD_BYTES:
                 raise RecordTooLarge(
                     f"A {self.name} record is {size // 1024} KB; the limit is {MAX_RECORD_BYTES // 1024} KB."
                 )
         token = rev if rev is not None else getattr(data, "rev", None)
-        self._cache = None
+        self._cache = {}
         if self._indexed != self._where(coll):
             self._ensure_indexes(coll)
         blind = not isinstance(token, ReadToken)
@@ -353,16 +449,17 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         for key in changed + added:
             token.bodies[key] = new[key][1]
 
-    def _record_doc(self, key: str, row: tuple[str, str, list[str]], seq: int) -> dict[str, Any]:
+    def _record_doc(self, key: str, row: Row, seq: int) -> dict[str, Any]:
         doc = {"_id": self._item_id(key), "store": self.name, "key": key, "part": row[0], "rev": 1,
-               "seq": seq, "body": row[1], "updated_at": _sds._now()}
+               "seq": seq, "body": row[1], "updated_at": _sds._now(), "tags": row[3]}
         if row[2]:
             doc["uniq"] = row[2]
         return doc
 
     @staticmethod
-    def _record_update(row: tuple[str, str, list[str]]) -> dict[str, Any]:
-        update: dict[str, Any] = {"$set": {"body": row[1], "part": row[0], "updated_at": _sds._now()}, "$inc": {"rev": 1}}
+    def _record_update(row: Row) -> dict[str, Any]:
+        update: dict[str, Any] = {"$set": {"body": row[1], "part": row[0], "updated_at": _sds._now(), "tags": row[3]},
+                                  "$inc": {"rev": 1}}
         if row[2]:
             update["$set"]["uniq"] = row[2]
         else:
@@ -378,7 +475,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
     def _where(coll: Any) -> Any:
         return getattr(coll, "full_name", None) or id(coll.database)
 
-    def _prepare(self, coll: Any) -> None:
+    def _prepare(self, coll: Any, *, import_file: bool = True) -> None:
         here = self._where(coll)
         if self._indexed != here:
             self._ensure_indexes(coll)
@@ -386,15 +483,20 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         if not self._split_checked:
             self._split_whole_document(coll, docs)
         if self._indexed == here and self._backfilled != here:
-            self._backfill_claims(coll, docs)
-        self._import_local_file(coll)
+            with self._lock:  # one backfill per process; other threads wait for it (never on the event loop)
+                if self._backfilled != here:
+                    self._backfill_fields(coll, docs)
+        if import_file:
+            self._import_local_file(coll)
 
     def _ensure_indexes(self, coll: Any) -> None:
         """The partition index and the claims index. Without the claims index the invariants are unguarded."""
         from services.control_plane_store import ControlPlaneUnavailable
 
         try:
-            coll.create_index([("store", 1)])
+            coll.create_index([("store", 1), ("seq", -1)])
+            coll.create_index([("store", 1), ("part", 1)])
+            coll.create_index([("store", 1), ("tags", 1)])
             coll.create_index(
                 [("store", 1), ("uniq", 1)], name=UNIQUE_INDEX, unique=True,
                 partialFilterExpression={"uniq": {"$exists": True}},
@@ -409,22 +511,52 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             return
         self._indexed = self._where(coll)
 
-    def _backfill_claims(self, coll: Any, docs: Any) -> None:
-        """Give records written before claims existed their claims, once per store (earliest record wins)."""
-        marker = f"claims:{self.name}"
-        if self._unique is None or docs.find_one({"_id": marker}) is not None:
+    def _backfill_fields(self, coll: Any, docs: Any) -> None:
+        """Give records written before claims and lookup tags existed both, once per store.
+
+        Claims go to the earliest record (by insertion); a later duplicate is reported.
+        """
+        marker = f"index_fields:{self.name}"
+        if (self._unique is None and self._tags is None) or docs.find_one({"_id": marker}) is not None:
             self._backfilled = self._where(coll)
             return
         rows = [d for d in coll.find({"store": self.name}) if "fence" not in d]
         rows.sort(key=lambda d: (int(d.get("seq") or 0), str(d.get("_id"))))
+        pending = []
         for doc in rows:
-            claims = self._claims(json.loads(str(doc.get("body") or "{}")))
-            if claims and doc.get("uniq") != claims:
-                self._claim_each(coll, docs, doc, claims)
-        docs.update_one({"_id": marker}, {"$set": {"kind": "claims", "store": self.name, "at": _sds._now()}},
+            record = json.loads(str(doc.get("body") or "{}"))
+            tags, claims = self._lookup_tags(record), self._claims(record)
+            if doc.get("tags") != tags or (claims and doc.get("uniq") != claims):
+                pending.append((doc, tags, claims))
+        self._write_fields(coll, docs, pending)
+        docs.update_one({"_id": marker}, {"$set": {"kind": "index_fields", "store": self.name, "at": _sds._now()}},
                         upsert=True)
         self._backfilled = self._where(coll)
-        self._cache = None
+        self._cache = {}
+
+    def _write_fields(self, coll: Any, docs: Any, pending: list[tuple[dict[str, Any], list[str], list[str]]]) -> None:
+        """Set tags and claims in ordered batches; a record whose claim is taken claims what is free, alone."""
+        from pymongo import UpdateOne
+        from pymongo.errors import BulkWriteError
+
+        done = 0
+        while done < len(pending):
+            batch = pending[done:done + BACKFILL_BATCH]
+            ops = [UpdateOne({"_id": doc["_id"]}, {"$set": {"tags": tags, **({"uniq": claims} if claims else {})}})
+                   for doc, tags, claims in batch]
+            try:
+                coll.bulk_write(ops, ordered=True)
+            except BulkWriteError as exc:
+                errors = (exc.details or {}).get("writeErrors") or []
+                if not errors or errors[0].get("code") != 11000:
+                    raise
+                index = int(errors[0].get("index") or 0)
+                doc, tags, claims = batch[index]
+                coll.update_one({"_id": doc["_id"]}, {"$set": {"tags": tags}})
+                self._claim_each(coll, docs, doc, claims)
+                done += index + 1
+            else:
+                done += len(batch)
 
     def _claim_each(self, coll: Any, docs: Any, doc: dict[str, Any], claims: list[str]) -> list[str]:
         """Claim what is free for an existing record; report each claim another record holds."""
@@ -455,9 +587,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             self.name, key, claim,
         )
 
-    def _write_imported(
-        self, coll: Any, docs: Any, key: str, row: tuple[str, str, list[str]], seq: int, *, stamp: str = ""
-    ) -> None:
+    def _write_imported(self, coll: Any, docs: Any, key: str, row: Row, seq: int, *, stamp: str = "") -> None:
         """Insert one imported or split record unless it exists; a claim another record holds is reported.
 
         ``stamp`` is the imported file's digest: an abandoned import's records are removed by it.
@@ -509,13 +639,13 @@ class SharedRecordSet(LeasedImport, SharedDoc):
                     self.name, meta.get("rev"), len(records),
                 )
                 self._split_checked = True
-                self._cache = None
+                self._cache = {}
                 return
 
     def import_local_file(self) -> dict[str, Any] | None:
+        """At API start: indexes, the one-time backfill and the split before any request, then the import."""
         coll = _sds._collection(ITEMS_COLLECTION)
         if coll is None:
             return None
-        if not self._split_checked:
-            self._split_whole_document(coll, coll.database[DOCS_COLLECTION])
+        self._prepare(coll, import_file=False)
         return self._import_local_file(coll)

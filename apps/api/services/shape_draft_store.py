@@ -37,9 +37,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load() -> dict[str, Any]:
-    """Drafts from the shared control-plane store when one is configured (H-5)."""
-    return _DOC.load()
+def _load(**scope: Any) -> dict[str, Any]:
+    """Drafts from the shared control-plane store when one is configured (H-5).
+
+    ``scope`` narrows the database read; a file store returns every draft.
+    """
+    return _DOC.load(**scope)
 
 
 def _save(data: dict[str, Any], *, rev: int | None = None) -> None:
@@ -136,9 +139,11 @@ def save_shape_draft(
         raise DraftTooLarge(
             f"The draft is {draft_bytes // 1024} KB; a draft may be at most {MAX_DRAFT_BYTES // 1024} KB."
         )
-    data = _load()
+    data = _load(keys=[_storage_key(key, workspace_id)])
     data[_storage_key(key, workspace_id)] = record
     _save(data)
+    # The cap is per workspace (in file mode ``_capped`` already applied it to the whole file).
+    _DOC.trim(workspace_id, keep=MAX_DRAFTS)
     return record
 
 
@@ -146,8 +151,9 @@ def load_shape_draft(route_key: str, *, workspace_id: str | None = None) -> dict
     """This workspace's draft for the route, else a legacy unscoped one the
     caller's scope still covers."""
     key = route_key.strip()
-    data = _load()
-    for candidate in (_storage_key(key, _owner(workspace_id)), key):
+    candidates = (_storage_key(key, _owner(workspace_id)), key)
+    data = _load(keys=candidates)
+    for candidate in candidates:
         found = data.get(candidate)
         if isinstance(found, dict) and bound_allows(found.get("workspace_id")):
             return found
@@ -157,8 +163,9 @@ def load_shape_draft(route_key: str, *, workspace_id: str | None = None) -> dict
 @_DOC.retrying
 def delete_shape_draft(route_key: str, *, workspace_id: str | None = None) -> None:
     key = route_key.strip()
-    data = _load()
-    data.pop(_storage_key(key, _owner(workspace_id)), None)
+    stored = _storage_key(key, _owner(workspace_id))
+    data = _load(keys=[stored])
+    data.pop(stored, None)
     _save(data)
 
 
@@ -167,7 +174,7 @@ def assign_unscoped_workspaces(workspace_for, *, apply: bool) -> dict[str, int]:
     """Move legacy unscoped drafts into ``workspace_for(draft)``'s workspace (D154 backfill)."""
     unscoped = WorkspaceFilter.only("")
     counts = {"assigned": 0, "skipped": 0}
-    data = _load()
+    data = _load(part="")
     moved: dict[str, Any] = {}
     for storage_key, record in data.items():
         if not isinstance(record, dict) or not unscoped.matches(record.get("workspace_id")):

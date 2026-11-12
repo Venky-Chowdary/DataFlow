@@ -48,7 +48,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_raw() -> dict[str, Any]:
+def _load_raw(**scope: Any) -> dict[str, Any]:
     """The store as a dict that always carries a ``tenants`` list.
 
     Callers append to ``data["tenants"]`` directly, so a file written by an
@@ -57,8 +57,10 @@ def _load_raw() -> dict[str, Any]:
 
     Read from the shared control-plane store when one is configured, so every
     API replica enforces the same IP allowlist and require-SSO flag (H-5).
+    ``scope`` narrows the database read (``part=``, ``parts=``, ``keys=``,
+    ``tag=``); a file store returns every tenant, so callers still filter.
     """
-    data = _DOC.load()
+    data = _DOC.load(**scope)
     if not isinstance(data.get("tenants"), list):
         data["tenants"] = []
     return data
@@ -96,6 +98,12 @@ def _unique_claims(record: dict[str, Any]) -> list[str]:
     return [f"workspace:{workspace}"] if workspace else []
 
 
+def _lookup_tags(record: dict[str, Any]) -> list[str]:
+    """Indexed lookups besides the workspace and the id: the custom domain (host routing, CORS)."""
+    domain = _normalize_domain(str(record.get("custom_domain") or ""))
+    return [f"domain:{domain}"] if domain else []
+
+
 _DOC = SharedRecordSet(
     "tenant_settings",
     file_load=lambda: _file_load(),
@@ -105,6 +113,7 @@ _DOC = SharedRecordSet(
     list_key="tenants",
     partition_key="workspace_id",
     unique=_unique_claims,
+    tags=_lookup_tags,
 )
 
 
@@ -256,7 +265,7 @@ def create_tenant(
     if custom_domain and get_tenant_by_domain(custom_domain):
         raise ValueError(f"Custom domain '{custom_domain}' is already in use")
 
-    data = _load_raw()
+    data = _load_raw(part=workspace_id or "")
     if workspace_id in WORKSPACE_VIEWS:
         # A platform admin's view names no workspace a tenant could belong to
         # (D218). Whether a real workspace exists is the route's check: the
@@ -290,7 +299,7 @@ def create_tenant(
 def get_tenant(tenant_id: str) -> Tenant | None:
     if not tenant_id:
         return None
-    for t in _tenants():
+    for t in _tenants(_load_raw(keys=[tenant_id])):
         if t.id == tenant_id:
             return t
     return None
@@ -305,7 +314,7 @@ def get_tenant_by_domain(domain: str, *, verified_only: bool = False) -> Tenant 
     target = _normalize_domain(domain)
     if not target:
         return None
-    for t in _tenants():
+    for t in _tenants(_load_raw(tag=f"domain:{target}")):
         # A record written before tenants were workspace-scoped belongs to no
         # workspace, so host routing cannot decide what data it would serve:
         # resolving it would answer a client domain out of an empty scope.
@@ -319,7 +328,7 @@ def get_tenant_by_domain(domain: str, *, verified_only: bool = False) -> Tenant 
 @_DOC.retrying
 def ensure_domain_challenge(tenant_id: str) -> Tenant | None:
     """The tenant, with a challenge token for its domain (a pre-D337 record has none)."""
-    data = _load_raw()
+    data = _load_raw(keys=[tenant_id])
     for raw in data.get("tenants", []):
         if isinstance(raw, dict) and raw.get("id") == tenant_id:
             if raw.get("custom_domain") and not raw.get("custom_domain_challenge"):
@@ -336,7 +345,7 @@ def mark_custom_domain_verified(tenant_id: str, domain: str) -> Tenant | None:
     Only services.custom_domain_verification calls this, after the TXT record
     matched. A domain changed since the lookup started is not marked.
     """
-    data = _load_raw()
+    data = _load_raw(keys=[tenant_id])
     for raw in data.get("tenants", []):
         if isinstance(raw, dict) and raw.get("id") == tenant_id:
             if not domain or _normalize_domain(str(raw.get("custom_domain") or "")) != domain:
@@ -352,7 +361,7 @@ def mark_custom_domain_verified(tenant_id: str, domain: str) -> Tenant | None:
 def get_tenant_for_workspace(workspace_id: str) -> Tenant | None:
     if not workspace_id:
         return None
-    for t in _tenants():
+    for t in _tenants(_load_raw(part=workspace_id)):
         if t.workspace_id == workspace_id:
             return t
     return None
@@ -363,16 +372,23 @@ def tenants_for_workspaces(workspace_ids: list[str] | set[str] | frozenset[str])
     wanted = {w for w in workspace_ids if w}
     if not wanted:
         return []
-    return [t for t in _tenants() if t.workspace_id in wanted]
+    return [t for t in _tenants(_load_raw(parts=wanted)) if t.workspace_id in wanted]
 
 
 def list_tenants() -> list[Tenant]:
+    """Every tenant, newest first: one read of the whole store (maintenance and counts)."""
     return sorted(_tenants(), key=lambda t: t.created_at, reverse=True)
+
+
+def list_tenants_page(*, limit: int = 100, offset: int = 0) -> tuple[list[Tenant], int | None]:
+    """One page of tenants, newest first, and the offset of the next page (None: the last page)."""
+    data, next_offset = _DOC.page(offset=offset, limit=limit)
+    return _tenants(data), next_offset
 
 
 @_DOC.retrying
 def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
-    data = _load_raw()
+    data = _load_raw(keys=[tenant_id])
     for raw in data.get("tenants", []):
         if isinstance(raw, dict) and raw.get("id") == tenant_id:
             if "custom_domain" in kwargs:
@@ -412,7 +428,7 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
 
 @_DOC.retrying
 def delete_tenant(tenant_id: str) -> bool:
-    data = _load_raw()
+    data = _load_raw(keys=[tenant_id])
     before = len(data.get("tenants", []))
     data["tenants"] = [t for t in data.get("tenants", []) if isinstance(t, dict) and t.get("id") != tenant_id]
     if len(data["tenants"]) == before:

@@ -199,6 +199,19 @@ class FakeCollection:
             self._docs[target["_id"]] = target
             return _Result(0 if created else 1, created)
 
+    def bulk_write(self, ops: list[Any], ordered: bool = True, **_kwargs: Any) -> _Result:
+        """``UpdateOne`` operations, stopping at the first error like an ordered MongoDB bulk write."""
+        from pymongo.errors import BulkWriteError
+
+        for index, op in enumerate(ops):
+            try:
+                self.update_one(op._filter, op._doc, upsert=bool(getattr(op, "_upsert", False)))
+            except DuplicateKeyError as exc:
+                raise BulkWriteError({"writeErrors": [{"index": index, "code": 11000, "errmsg": str(exc),
+                                                       "keyPattern": (exc.details or {}).get("keyPattern")}],
+                                      "nInserted": 0}) from exc
+        return _Result(len(ops))
+
     def delete_one(self, flt: dict[str, Any], **_kwargs: Any) -> _Result:
         self.calls += 1
         with self._lock:

@@ -46,13 +46,14 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_raw() -> dict[str, Any]:
+def _load_raw(**scope: Any) -> dict[str, Any]:
     """Key records from the shared control-plane store when one is configured.
 
     A secret wrapped with a tenant key on one replica must unwrap on every
-    other replica and on the workers (H-5).
+    other replica and on the workers (H-5). ``scope`` narrows the database
+    read; a file store returns every key, so callers still filter.
     """
-    data = _DOC.load()
+    data = _DOC.load(**scope)
     if not isinstance(data.get("keys"), list):
         data["keys"] = []
     return data
@@ -259,7 +260,7 @@ def create_key(
         key_reference=reference,
         status="active",
     )
-    data = _load_raw()
+    data = _load_raw(part=tenant_id)
     for raw in data.get("keys", []):
         if isinstance(raw, dict) and raw.get("tenant_id") == tenant_id and raw.get("status") == "active":
             raw["status"] = "rotated"
@@ -271,7 +272,7 @@ def create_key(
 
 
 def list_keys(tenant_id: str | None = None) -> list[BYOKKey]:
-    data = _load_raw()
+    data = _load_raw(part=tenant_id) if tenant_id is not None else _load_raw()
     keys = [BYOKKey.from_dict(k) for k in data.get("keys", []) if isinstance(k, dict)]
     if tenant_id is not None:
         keys = [k for k in keys if k.tenant_id == tenant_id]
@@ -279,9 +280,11 @@ def list_keys(tenant_id: str | None = None) -> list[BYOKKey]:
 
 
 def get_key(key_id: str) -> BYOKKey | None:
-    for k in list_keys():
-        if k.id == key_id:
-            return k
+    if not key_id:
+        return None
+    for raw in _load_raw(keys=[key_id]).get("keys", []):
+        if isinstance(raw, dict) and raw.get("id") == key_id:
+            return BYOKKey.from_dict(raw)
     return None
 
 
@@ -292,7 +295,7 @@ def get_active_key_for_tenant(tenant_id: str) -> BYOKKey | None:
         # Keys but none active: read once more from the database. A cached
         # read, or a read that crossed a rotation's commit, must not decide
         # that this BYOK tenant has no key.
-        data = _DOC.load(fresh=True)
+        data = _DOC.load(fresh=True, part=tenant_id)
         fresh = [BYOKKey.from_dict(k) for k in data.get("keys") or [] if isinstance(k, dict)]
         active = next((k for k in sorted(fresh, key=lambda k: k.created_at, reverse=True)
                        if k.tenant_id == tenant_id and k.status == "active"), None)
@@ -314,7 +317,7 @@ def tenant_uses_byok(tenant_id: str) -> bool:
 
 @_DOC.retrying
 def delete_key(key_id: str) -> bool:
-    data = _load_raw()
+    data = _load_raw(keys=[key_id])
     before = len(data.get("keys", []))
     data["keys"] = [k for k in data.get("keys", []) if isinstance(k, dict) and k.get("id") != key_id]
     if len(data["keys"]) == before:

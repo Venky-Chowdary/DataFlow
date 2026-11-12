@@ -67,9 +67,12 @@ class NotificationChannel:
         )
 
 
-def _load_raw() -> dict[str, Any]:
-    """Channels from the shared control-plane store when one is configured (H-5)."""
-    data = _DOC.load()
+def _load_raw(**scope: Any) -> dict[str, Any]:
+    """Channels from the shared control-plane store when one is configured (H-5).
+
+    ``scope`` narrows the database read; a file store returns every channel.
+    """
+    data = _DOC.load(**scope)
     if not isinstance(data.get("channels"), list):
         data["channels"] = []
     return data
@@ -225,7 +228,6 @@ def create_channel(
     if kind == "webhook":
         signing_secret = new_signing_secret()
         config[SECRET_CONFIG_KEY] = signing_secret
-    data = _load_raw()
     channel = NotificationChannel(
         id=str(uuid.uuid4()),
         workspace_id=workspace_id,
@@ -237,6 +239,7 @@ def create_channel(
         updated_at=_now(),
         created_by=created_by,
     )
+    data = _load_raw(keys=[channel.id])
     data["channels"].append(asdict(channel))
     _save(data)
     # Plaintext for the create response only (never persisted in clear).
@@ -245,7 +248,7 @@ def create_channel(
 
 
 def list_channels(workspace_id: str | None = None, enabled_only: bool = False) -> list[NotificationChannel]:
-    channels = _channels(_load_raw())
+    channels = _channels(_load_raw(part=workspace_id) if workspace_id is not None else _load_raw())
     if workspace_id is not None:
         channels = [c for c in channels if c.workspace_id == workspace_id]
     if enabled_only:
@@ -254,7 +257,7 @@ def list_channels(workspace_id: str | None = None, enabled_only: bool = False) -
 
 
 def get_channel(channel_id: str) -> NotificationChannel | None:
-    for c in _channels(_load_raw()):
+    for c in _channels(_load_raw(keys=[channel_id])):
         if c.id == channel_id:
             return c
     return None
@@ -269,7 +272,7 @@ def get_channel_decrypted(channel_id: str) -> NotificationChannel | None:
 
 @_DOC.retrying
 def update_channel(channel_id: str, *, updates: dict[str, Any]) -> NotificationChannel | None:
-    data = _load_raw()
+    data = _load_raw(keys=[channel_id])
     for i, raw in enumerate(data.get("channels", [])):
         if raw.get("id") == channel_id:
             if "config" in updates and isinstance(updates["config"], dict):
@@ -291,7 +294,7 @@ def update_channel(channel_id: str, *, updates: dict[str, Any]) -> NotificationC
 
 @_DOC.retrying
 def delete_channel(channel_id: str) -> bool:
-    data = _load_raw()
+    data = _load_raw(keys=[channel_id])
     before = len(data.get("channels", []))
     data["channels"] = [c for c in data.get("channels", []) if c.get("id") != channel_id]
     if len(data["channels"]) == before:
@@ -305,7 +308,7 @@ def rotate_signing_secret(channel_id: str) -> tuple[NotificationChannel, str] | 
     """Replace a webhook channel's signing secret; returns the new plaintext once."""
     from services.webhook_signing import SECRET_CONFIG_KEY, new_signing_secret
 
-    data = _load_raw()
+    data = _load_raw(keys=[channel_id])
     for raw in data.get("channels", []):
         if raw.get("id") != channel_id:
             continue

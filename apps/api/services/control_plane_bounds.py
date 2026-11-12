@@ -98,6 +98,20 @@ def is_unreachable(exc: BaseException) -> bool:
     return isinstance(exc, PyMongoError) and bool(getattr(exc, "timeout", False))
 
 
+def is_slow_query(exc: BaseException) -> bool:
+    """The server answered that this one operation ran out of time (``maxTimeMS``).
+
+    That call fails (closed), but the database is reachable: it is not
+    remembered as an outage, so one slow query does not fail every store of
+    the process for the outage window (ops review round 2, High 3).
+    """
+    try:
+        from pymongo.errors import ExecutionTimeout
+    except ImportError:  # pragma: no cover - pymongo is a dependency of the API
+        return False
+    return isinstance(exc, ExecutionTimeout)
+
+
 class _Deadline:
     """``pymongo.timeout`` around one call, with outage bookkeeping."""
 
@@ -112,7 +126,8 @@ class _Deadline:
     def __exit__(self, exc_type: Any, exc: BaseException | None, tb: Any) -> bool:
         self._ctx.__exit__(exc_type, exc, tb)
         if exc is not None and is_unreachable(exc):
-            note_outage(exc)
+            if not is_slow_query(exc):
+                note_outage(exc)
             raise ControlPlaneUnavailable(
                 f"the control-plane database did not answer within {operation_timeout_seconds():.1f}s"
             ) from exc

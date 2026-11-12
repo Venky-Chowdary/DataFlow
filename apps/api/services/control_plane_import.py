@@ -129,7 +129,7 @@ class LeasedImport:
             self.name, meta.get("owner") or meta.get("node") or "an earlier build", -self._lease_left(meta),
         )
         _audit_import(self.name, Path(str(meta.get("node") or "unknown")), report, abandoned=True)
-        self._cache = None
+        self._cache = {}
         return True
 
     # -- reads -----------------------------------------------------------
@@ -205,7 +205,7 @@ class LeasedImport:
         if settled:
             self._imported.add(key)
             self._seen_stamps.add(stamp)
-        self._cache = None
+        self._cache = {}
         quiet = ("conflict_already_recorded", "import_finished_by_another_process")
         return report if report and report["action"] not in quiet else None
 

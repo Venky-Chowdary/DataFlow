@@ -105,6 +105,15 @@ def _unique_claims(record: dict[str, Any]) -> list[str]:
     return ["grant:" + json.dumps(who, separators=(",", ":"))]
 
 
+def _resource_tag(tenant_id: str, resource_type: str, resource_id: str) -> str:
+    return "resource:" + json.dumps([tenant_id or "", resource_type or "", resource_id or ""], separators=(",", ":"))
+
+
+def _lookup_tags(record: dict[str, Any]) -> list[str]:
+    """An ACL check reads one resource's grants, not the tenant's (ops review round 2, High 3)."""
+    return [_resource_tag(*(str(record.get(k) or "") for k in ("tenant_id", "resource_type", "resource_id")))]
+
+
 _DOC = SharedRecordSet(
     "resource_acls",
     file_load=_file_load,
@@ -114,12 +123,14 @@ _DOC = SharedRecordSet(
     list_key="grants",
     partition_key="tenant_id",
     unique=_unique_claims,
+    tags=_lookup_tags,
 )
 
 
-def _load_all() -> list[ResourceAclGrant]:
+def _load_all(**scope: Any) -> list[ResourceAclGrant]:
+    """Grants in ``scope`` (a file store returns every grant: callers filter)."""
     try:
-        data = _DOC.load()
+        data = _DOC.load(**scope)
         out = tracked(
             [ResourceAclGrant.from_dict(raw) for raw in data.get("grants") or []], data.rev
         )
@@ -144,8 +155,11 @@ def list_grants(
     resource_id: str | None = None,
     principal: str | None = None,
 ) -> list[ResourceAclGrant]:
-    grants = _load_all()
     tid = tenant_id or ""
+    if resource_type and resource_id:
+        grants = _load_all(tag=_resource_tag(tid, resource_type, resource_id))
+    else:
+        grants = _load_all(part=tid)
     out = [g for g in grants if g.tenant_id == tid]
     if resource_type:
         out = [g for g in out if g.resource_type == resource_type]
@@ -174,7 +188,7 @@ def upsert_grant(
     principal_n = principal.strip().lower()
     if not principal_n or not resource_id.strip():
         raise ValueError("principal and resource_id are required")
-    grants = _load_all()
+    grants = _load_all(tag=_resource_tag(tenant_id or "", resource_type, resource_id))
     for g in grants:
         if (
             g.tenant_id == (tenant_id or "")
@@ -202,7 +216,7 @@ def upsert_grant(
 
 @_DOC.retrying
 def revoke_grant(grant_id: str, *, tenant_id: str = "") -> bool:
-    grants = _load_all()
+    grants = _load_all(keys=[grant_id])
     next_g = [g for g in grants if not (g.id == grant_id and g.tenant_id == (tenant_id or ""))]
     if len(next_g) == len(grants):
         return False
