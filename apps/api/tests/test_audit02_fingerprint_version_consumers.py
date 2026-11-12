@@ -16,7 +16,6 @@ pinned here so a later change cannot couple them silently.
 
 from __future__ import annotations
 
-import copy
 import json
 
 import pytest
@@ -119,29 +118,26 @@ def _signed(store) -> str:
     return job_id
 
 
-def test_parity_report_states_the_rules_it_compared_under(store):
+def test_a_parity_pack_names_the_rules_it_was_signed_under(store):
     from services.parity_report import build_parity_report
+    from services.parity_signoff import signed_pack
 
     job_id = _signed(store)
+    pack = signed_pack(store.get_job(job_id))
+    assert pack["fingerprint_version"] == FINGERPRINT_VERSION
+    # The API report keeps its shape (the web contract is typed against it).
     report = build_parity_report(store.get_job(job_id), reread=False)
-    assert report["evidence"]["fingerprint"] == {
-        "fingerprint_version": FINGERPRINT_VERSION, "run": 1, "resolved_keys": None,
-    }
+    assert "fingerprint" not in report["evidence"]
 
 
-def test_parity_report_names_the_rules_that_proved_its_resolved_keys(store):
-    from services.parity_report import build_parity_report
+def test_resolved_keys_record_the_rules_that_proved_them():
+    """parity_apply stamps the version beside the keys a fix re-check resolved."""
+    import inspect
 
-    job_id = _signed(store)
-    job = copy.deepcopy(store.get_job(job_id))
-    job["parity"]["resolved"] = {"t": ["7"]}
-    # Recorded by a build before the stamp existed: version 1.
-    assert build_parity_report(job, reread=False)["evidence"]["fingerprint"]["resolved_keys"] == 1
-    job["parity"]["resolved_fingerprint_version"] = FINGERPRINT_VERSION
-    assert (
-        build_parity_report(job, reread=False)["evidence"]["fingerprint"]["resolved_keys"]
-        == FINGERPRINT_VERSION
-    )
+    from services import parity_apply
+
+    source = inspect.getsource(parity_apply)
+    assert 'state["resolved_fingerprint_version"] = FINGERPRINT_VERSION' in source
 
 
 def test_a_parity_pack_signed_under_older_rules_verifies_and_reports_no_false_drift(store):
@@ -153,10 +149,9 @@ def test_a_parity_pack_signed_under_older_rules_verifies_and_reports_no_false_dr
     assert fresh["signoff"]["drift_since_signing"] is False
     assert "drift_not_comparable" not in fresh["signoff"]
 
-    # What a build before the stamp sealed: no fingerprint block in the sealed evidence.
+    # What a build before the stamp sealed: a pack that names no rules version.
     job = store._jobs[job_id]
-    sealed = job["parity"]["signed"]["pack"]["parity"]
-    sealed["evidence"].pop("fingerprint", None)
+    job["parity"]["signed"]["pack"].pop("fingerprint_version", None)
     # A rule change re-reads the stored cells differently: the live report moved.
     job["reconciliation"] = {**job["reconciliation"], "target_rows": 7, "passed": False}
 

@@ -19,7 +19,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from services.fingerprint_rules import stored_fingerprint_version
+from services.fingerprint_rules import FINGERPRINT_VERSION, stored_fingerprint_version
 from services.value_serializer import json_default, sanitize_json_value
 
 logger = logging.getLogger(__name__)
@@ -1214,6 +1214,9 @@ def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str)
         "issued_at": datetime.now(timezone.utc).isoformat(),
         "job_id": job_id,
         "actor": actor,
+        # Rules the report's cell compares ran under when it was signed; a
+        # later reading under other rules is not "drift since signing".
+        "fingerprint_version": FINGERPRINT_VERSION,
         "parity": report,
     }
     return sign_body(body, subject=pack_subject(body))
