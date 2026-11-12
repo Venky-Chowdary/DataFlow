@@ -131,3 +131,72 @@ def test_a_tool_that_ran_but_was_not_used_does_not_make_the_turn_grounded():
                              tools_used=[{"name": "list_jobs", "success": True, "summary": "3 jobs", "used": False}])
     assert carries_evidence(used) is True
     assert carries_evidence(unused) is False
+
+
+# ---- review M2: a non-answer is not grounded and not 0.96 ---------------------
+
+
+def _not_an_answer(response) -> None:
+    assert not pt.grounded(response), f"a non-answer was marked grounded: {response.answer!r}"
+    assert response.confidence <= 0.5, response.confidence
+
+
+@pytest.mark.parametrize("question", [
+    "how long did my last job take",  # the last job has not finished: declined
+    "how long do my jobs usually take",
+    "how many rows did I move today",  # more rows than one read: declined
+])
+def test_declines_are_not_grounded(ledger, question):
+    pt.seed_job("running", at=NOW - timedelta(minutes=1))
+    for i in range(120):
+        pt.seed_job("completed", at=NOW - timedelta(seconds=30 + i), records_processed=7)
+    response = pt.ask(pt.agent(), question)
+    assert "can't" in response.answer or "don't have" in response.answer, response.answer
+    _not_an_answer(response)
+
+
+@pytest.mark.parametrize("question,phrase", [
+    ("who approved my last job", "who approved"),
+    ("how many rows were quarantined in my last job", "quarantined"),
+])
+def test_a_question_the_last_job_card_does_not_answer_is_refused(ledger, question, phrase):
+    response = pt.ask(pt.agent(), question)
+    assert phrase in response.answer.lower(), response.answer
+    _not_an_answer(response)
+
+
+def test_a_compound_question_is_not_half_answered_as_grounded(ledger):
+    pt.seed_schedules(4)
+    response = pt.ask(pt.agent(), "how many jobs failed and how many pipelines are paused")
+    _not_an_answer(response)
+    assert "one question at a time" in response.answer.lower() or "paused" in response.answer.lower()
+
+
+def test_a_recovery_listing_after_a_failed_read_is_not_grounded(ledger):
+    response = pt.ask(pt.agent(), "show me 5 rows from orders on Nonexistent Warehouse")
+    _not_an_answer(response)
+
+
+@pytest.mark.parametrize("question", ["which pipeline runs next", "what is the next run"])
+def test_next_run_without_a_name_is_read_from_the_pipelines(ledger, question):
+    rows = pt.seed_schedules(4, enabled_every=1)
+    response = pt.ask(pt.agent(), question)
+    soonest = min(rows, key=lambda s: s.next_run_at)
+    assert soonest.name in response.answer and soonest.next_run_at in response.answer, response.answer
+    assert pt.grounded(response)
+
+
+def test_a_schedule_store_error_on_a_next_run_question_says_unreadable(ledger, monkeypatch):
+    import services.schedule_store as schedule_store
+
+    pt.seed_schedules(4)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("schedule store exploded")
+
+    monkeypatch.setattr(schedule_store, "list_schedules", _boom)
+    response = pt.ask(pt.agent(), "when does nightly-02 run next")
+    # Surfaced as the masked tool error (with its log reference), not Help text.
+    assert "Nothing was read" in response.answer or pt.says_unreadable(response.answer), response.answer
+    assert "Source:" not in response.answer
+    _not_an_answer(response)

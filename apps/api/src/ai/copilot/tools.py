@@ -4029,6 +4029,7 @@ class DataPilotTools:
         if down:
             # The store would answer from its local fallback: no count is stated.
             return ToolResult(name="list_schedules", success=True, output=unread_schedules_output(down))
+        # A store that raises is an unhandled tool error: masked, with a reference.
         output, refusal = schedules_output(
             list_schedules(current_workspace_filter()), self._schedule_summary, limit, state
         )

@@ -32,7 +32,7 @@ from .schedule_questions import (
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
-from .job_narration import job_duration_line, narrate_jobs
+from .job_narration import is_decline, job_duration_line, narrate_jobs
 from .tool_permissions import (
     MUTATE,
     bind_current_context,
@@ -66,6 +66,8 @@ _UNNARRATED_TOOLS = frozenset({
     "explain_parity", "get_preflight_run", "list_connector_objects", "list_cdc_captures",
     "rank_connector_tables",
 })
+#: Listings recovery runs after a failed read; never evidence for the answer.
+_RECOVERY_LISTINGS = frozenset({"list_connectors", "list_datasets", "list_connector_objects"})
 _NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w])")
 
 
@@ -1303,6 +1305,9 @@ class PilotTurn:
     needs_clarification: str = ""
     #: ids of successful tool results the composer rendered nothing from.
     silent: set[int] = field(default_factory=set)
+    #: ids of listings run only because the planned read failed ("which
+    #: connector?"): help for the next question, not evidence for this one.
+    recovery: set[int] = field(default_factory=set)
 
 
 class DataPilotAgent:
@@ -1441,9 +1446,9 @@ class DataPilotAgent:
         # A jobs question naming a time phrase or qualifier no filter applies
         # is refused by name before any tool runs (review C2): never the
         # unfiltered number, never a narrated guess.
-        from .job_narration import unapplied_filter_answer
+        from .job_narration import compound_answer, unapplied_filter_answer
 
-        refusal = unapplied_filter_answer(message)
+        refusal = compound_answer(message) or unapplied_filter_answer(message)
         if refusal:
             return _with_llm_footnote(
                 CopilotResponse(
@@ -1562,6 +1567,20 @@ class DataPilotAgent:
         return _with_llm_footnote(max(candidates, key=_score_response), engine)
 
     def _run_local_recovery(
+        self,
+        turn: PilotTurn,
+        message: str,
+        data_context: dict | None,
+    ) -> None:
+        before = len(turn.tool_results)
+        self._recover(turn, message, data_context)
+        failed = any(not tr.success for tr in turn.tool_results[:before])
+        if failed:
+            turn.recovery |= {
+                id(tr) for tr in turn.tool_results[before:] if tr.name in _RECOVERY_LISTINGS
+            }
+
+    def _recover(
         self,
         turn: PilotTurn,
         message: str,
@@ -3229,7 +3248,11 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     facts = tr.output or {}
                 parts.append(compose_briefing(facts))
             elif tr.name == "list_jobs" and tr.success:
-                parts.append(narrate_jobs(tr.output or {}, message))
+                spoken = narrate_jobs(tr.output or {}, message)
+                parts.append(spoken)
+                if is_decline(spoken):
+                    # A decline is not evidence, however real the read behind it.
+                    rendered.silent.add(id(tr))
             elif tr.name == "get_job" and tr.success:
                 job = tr.output or {}
                 lines = [
@@ -3883,7 +3906,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     )
 
         rendered.close()
-        turn.silent = rendered.silent
+        turn.silent = rendered.silent | turn.recovery
         if insight and not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
             if not any(
                 tr.name in (

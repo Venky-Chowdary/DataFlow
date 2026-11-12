@@ -10,6 +10,7 @@ empty workspace (audit C1, C2, C3, H2, H3).
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -289,6 +290,52 @@ def _window_answer(output: dict, census: dict, scope: str) -> str:
     return _finish(lines, output)
 
 
+#: Sentences that decline a jobs question. A turn that answers with one is not
+#: grounded, whatever tool ran to find that out (review M2).
+_DECLINES = (
+    "has no completion time recorded",
+    "I don't have a duration summary",
+    "I can't total rows",
+)
+
+
+def is_decline(text: str) -> bool:
+    return any(mark in (text or "") for mark in _DECLINES)
+
+
+_CLAUSE_SPLIT = re.compile(
+    r"\s*(?:\?|;|,?\s+(?:and|also|plus)\s+(?=(?:how|which|what|when|list|show|are|is|did|do)\b))\s*",
+    re.I,
+)
+_CLAUSE_SUBJECTS = (
+    ("jobs", re.compile(r"\b(?:jobs?|transfers?|runs?)\b", re.I)),
+    ("pipelines", re.compile(r"\b(?:pipelines?|schedules?)\b", re.I)),
+    ("connectors", re.compile(r"\b(?:connectors?|connections?)\b", re.I)),
+    ("datasets", re.compile(r"\b(?:datasets?|uploads?)\b", re.I)),
+)
+
+
+def compound_answer(message: str | None) -> str | None:
+    """Two questions about two different things in one turn, asked back one at a time.
+
+    "how many jobs failed and how many pipelines are paused" was answered for
+    the jobs half only, as if that were the whole answer (review M2).
+    """
+    clauses = [c.strip() for c in _CLAUSE_SPLIT.split(message or "") if c and c.strip()]
+    subjects = []
+    for clause in clauses:
+        found = next((name for name, pattern in _CLAUSE_SUBJECTS if pattern.search(clause)), "")
+        if found:
+            subjects.append((found, clause))
+    if len({name for name, _ in subjects}) < 2:
+        return None
+    asks = " and then ".join(f"“{clause}”" for _, clause in subjects[:3])
+    return (
+        "That is more than one question, and I answer one at a time so each number is read "
+        f"for exactly what it asks. Ask {asks}."
+    )
+
+
 def unapplied_filter_answer(message: str | None) -> str | None:
     """A named refusal when the question names a filter Pilot cannot apply.
 
@@ -300,6 +347,12 @@ def unapplied_filter_answer(message: str | None) -> str | None:
         return None
     from .job_window import SUPPORTED_WINDOWS_HINT
 
+    if ask.unapplied_kind == "unanswered":
+        return (
+            f"I can't answer “{ask.unapplied}” from the job ledger in chat yet, so I won't guess. "
+            "Open the job in **Jobs** — its Trust Report and Quarantine tabs record who approved "
+            "the run and which rows were held out."
+        )
     lead = (
         f"I can't apply the time window “{ask.unapplied}” to the job ledger — I can't filter jobs by it yet"
         if ask.unapplied_kind == "time"

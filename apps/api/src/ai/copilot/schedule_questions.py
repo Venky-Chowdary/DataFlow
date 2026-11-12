@@ -20,6 +20,8 @@ _SUBJECT_RE = re.compile(r"\b(?:pipelines?|schedules?|recurring\s+syncs?)\b", re
 _WHICH_RE = re.compile(r"\b(?:which|list|show|what)\b", re.I)
 _NEXT_RUN_RE = re.compile(
     r"\bnext\s+(?:run|tick|fire|execution|sync)\b"
+    r"|\b(?:which|what)\s+(?:pipeline|schedule|sync)s?\s+(?:runs?|fires?|ticks?|is\s+due|goes)\s+next\b"
+    r"|\b(?:what|which)\b[^?]*\b(?:runs?|fires?|is\s+due)\s+next\b"
     r"|\b(?:when|what\s+time)\b[^?]*\b(?:runs?|fires?|ticks?|due|executes?|scheduled|kicks?\s+off)\b[^?]*\b(?:next|again)\b"
     r"|\bwhen\s+is\b[^?]*\b(?:due|scheduled)\b",
     re.I,
@@ -156,6 +158,9 @@ def schedule_list_lead(output: dict[str, Any]) -> str:
         return f"**{matched}** of your **{total}** pipeline(s) {phrase}:"
     if state:
         lead += f" The {state} ones:" if rows else f" None are {state}."
+    nxt = output.get("next_due") or {}
+    if state == "enabled" and nxt.get("at"):
+        lead = lead.rstrip(":") + f". Next due: **{nxt.get('name')}** at `{nxt.get('at')}`."
     return lead
 
 
@@ -273,12 +278,13 @@ def ground_schedule_plan(message: str, planned: list[tuple[str, dict]]) -> list[
     if asks_next_run(message) and names <= {"explain_product", "search_knowledge", "list_schedules", "list_jobs"}:
         try:
             named = _named_schedule(message)
-        except Exception:  # noqa: BLE001 - the read below reports the outage
-            named = ""
+        except Exception:  # noqa: BLE001 - list_schedules below reports the outage as unread
+            return [("list_schedules", {"state": "enabled"})]
         if named:
             return [("get_schedule", {"name": named})]
-        if _SUBJECT_RE.search(message or ""):
-            return [("list_schedules", {"state": "enabled"})]
+        # "which pipeline runs next", "what is the next run": the soonest run
+        # over every pipeline, read from the store — not Help text (review M2).
+        return [("list_schedules", {"state": "enabled"})]
     state = schedule_state_asked(message)
     if state in ("parked", "failed") and _OWN_PIPELINES_RE.search(message or "") and not _CONCEPT_RE.search(
         message or ""

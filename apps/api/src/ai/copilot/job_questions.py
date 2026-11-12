@@ -29,10 +29,15 @@ _OTHER_SUBJECT_RE = re.compile(
     r"datasets?|gates?|preflight|validat\w+)\b",
     re.I,
 )
+#: Questions about a job the ledger row does not answer.
+_UNANSWERED_RE = re.compile(
+    r"\bwho\s+(?:approved|confirmed|signed(?:\s+off)?|started|triggered|ran)\b|\bquarantined\b",
+    re.I,
+)
 _EXACT_STATUSES = (
     (re.compile(r"\bcomplete(?:d)?[\s_]+with[\s_]+errors?\b", re.I), "completed_with_errors"),
     (re.compile(r"\bcomplete(?:d)?[\s_]+with[\s_]+warnings?\b", re.I), "completed_with_warnings"),
-    (re.compile(r"\bcomplete(?:d)?[\s_]+with[\s_]+quarantine\b", re.I), "completed_with_quarantine"),
+    (re.compile(r"\bcomplete(?:d)?[\s_]+with[\s_]+quarantine\b|\bquarantined\b", re.I), "completed_with_quarantine"),
     (re.compile(r"\bpartial(?:ly)?\b", re.I), "partial"),
     (re.compile(r"\bpaused\b", re.I), "paused"),
     (re.compile(r"\bretrying\b", re.I), "retrying"),
@@ -73,7 +78,7 @@ _SUCCESS_RATE_RE = re.compile(
     re.I,
 )
 _DURATION_RE = re.compile(
-    r"\bhow\s+long\s+(?:did|does|has|have|is|was|were)\b|\bduration\b|\bhow\s+much\s+time\b"
+    r"\bhow\s+long\s+(?:did|does|do|has|have|is|was|were|will)\b|\bduration\b|\bhow\s+much\s+time\b"
     r"|\b(?:elapsed|run)\s*time\b",
     re.I,
 )
@@ -127,6 +132,12 @@ def parse_job_ask(message: str) -> JobAsk | None:
         return None
     if _HOW_TO_RE.search(text) or _CONCEPT_RE.search(text) or _COMMAND_RE.search(text):
         return None
+    unanswered = _UNANSWERED_RE.search(text)
+    if unanswered and unanswered.group(0).lower() == "quarantined" and not _DATA_SCOPE_RE.search(text):
+        unanswered = None  # "jobs that were quarantined": the completed_with_quarantine status
+    if unanswered and (LAST_JOB_RE.search(text) or _JOBS_SUBJECT_RE.search(text)):
+        # The last-job card does not say who approved a run or what it quarantined.
+        return JobAsk(last=True, unapplied=unanswered.group(0).lower(), unapplied_kind="unanswered")
     rows_moved = bool(_ROWS_MOVED_RE.search(text))
     about_jobs = bool(_JOBS_SUBJECT_RE.search(text))
     reading = read_filters(text)
