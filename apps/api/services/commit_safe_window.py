@@ -332,10 +332,19 @@ _TEMPORAL_FORMATS = (
 )
 
 
+def _strftime(moment: datetime, fmt: str) -> str:
+    """``strftime`` with a four-digit year everywhere (glibc writes year 1 as '1')."""
+    return moment.strftime(fmt.replace("%Y", f"{moment.year:04d}"))
+
+
+class ClampedSeed(str):
+    """A seed the re-read window could not reach: the earliest representable time."""
+
+
 def _parse_temporal(text: str) -> tuple[datetime, Callable[[datetime], str]] | None:
     for fmt in _TEMPORAL_FORMATS:
         try:
-            return datetime.strptime(text, fmt), (lambda d, f=fmt: d.strftime(f))
+            return datetime.strptime(text, fmt), (lambda d, f=fmt: _strftime(d, f))
         except ValueError:
             continue
     if len(text) < 19:
@@ -384,7 +393,13 @@ def overlap_seed(
         if parsed is None:
             return None
         moment, render = parsed
-        return render(moment - timedelta(seconds=int(seconds)))
+        try:
+            return render(moment - timedelta(seconds=int(seconds)))
+        except OverflowError:
+            # A year-1 watermark, or a window wider than the calendar: the
+            # re-read starts at the earliest representable time, and the run
+            # says so — never a run with no window and no statement.
+            return ClampedSeed(render(datetime.min.replace(tzinfo=moment.tzinfo)))
     return None
 
 
@@ -543,6 +558,11 @@ def plan_commit_safe_window(
                 stored,
                 lead + "the stored watermark cannot be shifted by the re-read window",
                 probe_error=probe_error,
+            )
+        if isinstance(seed, ClampedSeed):
+            lead += (
+                "the re-read window reaches past the earliest representable time, so it "
+                "is clamped there; "
             )
         return CommitSafeWindow(
             strategy=STRATEGY_OVERLAP,
@@ -714,15 +734,28 @@ def _plan_pg(
             "read" + floor_note,
             census_recommended=bool(late.floor),
         )
-    if not can_replay or late.min_cursor in (None, ""):
+    if not can_replay:
+        # Counted and reported (evidence and a Gate-8 warning) this run; the
+        # bound then moves on, so the probe's range does not grow run after run.
         return CommitSafeWindow(
-            **{**base, "bound": previous},
+            **base,
             **judged,
             guarantee=GUARANTEE_NONE,
             reason=(
                 f"{changed}, and {_UNGUARDED_REASON.split(':', 1)[0]}: this route "
                 "appends without a key, so they cannot be re-read without duplicating "
                 "rows already delivered. Run the key census, or give the stream a key."
+            ),
+            census_recommended=True,
+        )
+    if late.min_cursor in (None, ""):
+        return CommitSafeWindow(
+            **{**base, "bound": previous},
+            **judged,
+            guarantee=GUARANTEE_NONE,
+            reason=unguarded_reason(
+                f"{changed}, but the lowest cursor among them could not be read; the stored "
+                "bound is kept and the next run asks again"
             ),
             census_recommended=True,
         )

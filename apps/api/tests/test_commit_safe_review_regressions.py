@@ -1110,3 +1110,73 @@ def test_census_says_when_a_reader_cannot_take_the_bound():
     assert pg == (' WHERE "seq" <= %s', ("20",))
     lite = census_bound_clause("sqlite", '"ts"', "2026-01-01T10:00:00")
     assert lite is not None and lite[1] == ("2026-01-01 10:00:00",)
+
+
+# --------------------------------------------------------------------------
+# Lows — overflow, and the keyless-append bound
+# --------------------------------------------------------------------------
+
+
+def test_an_overflowing_overlap_is_clamped_never_a_silent_no_window_run():
+    assert csw.overlap_seed("0001-01-01 00:01:00", "TIMESTAMP", seconds=300, values=0) == (
+        "0001-01-01 00:00:00"
+    )
+    assert csw.overlap_seed("2026-03-01 10:00:00", "TIMESTAMP", seconds=10**12, values=0) == (
+        "0001-01-01 00:00:00"
+    )
+    assert csw.overlap_seed("0001-01-01T00:01:00+00:00", "TIMESTAMPTZ", seconds=300, values=0) == (
+        "0001-01-01T00:00:00+00:00"
+    )
+    for stored, contract in (
+        ("2026-03-01 10:00:00", {"cursor_overlap_seconds": 10**12}),
+        ("0001-01-01 00:01:00", {}),
+    ):
+        window = csw.plan_commit_safe_window(
+            source_type="mysql", sync_mode="incremental_append", cursor_column="ts",
+            cursor_type="DATETIME", stored_watermark=stored, metadata={}, can_replay=True,
+            contract=contract,
+        )
+        assert window.strategy == csw.STRATEGY_OVERLAP and window.seed == "0001-01-01 00:00:00"
+        assert window.replays and "clamped" in window.reason, window
+
+
+def test_keyless_append_reports_a_late_row_once_then_moves_its_bound():
+    """The bound stayed at the previous value forever once a late row was seen,
+    so the probe's range and count grew every run."""
+    reported = csw.plan_commit_safe_window(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="seq",
+        cursor_type="BIGINT", stored_watermark="13",
+        metadata={"commit_horizon": {"strategy": csw.STRATEGY_PG, "xmin": "900"}},
+        can_replay=False, contract={},
+        capture_bound=lambda: {"strategy": csw.STRATEGY_PG, "xmin": "950", "xmax": "955"},
+        probe_late=lambda **_: csw.LateRows(count=1, min_cursor="11"),
+    )
+    assert reported.guarantee == csw.GUARANTEE_NONE and reported.late_rows_detected == 1
+    assert reported.metadata()["commit_horizon"]["xmin"] == "950"
+
+
+def test_keyless_append_probe_range_stays_bounded_after_a_late_row(isolated, pg):
+    _sql(f"CREATE TABLE {SCHEMA}.ev (seq bigint NOT NULL, v text)")
+    _sql(f"INSERT INTO {SCHEMA}.ev SELECT g, 'base' || g FROM generate_series(1, 10) g")
+    dst = "keyless_" + uuid.uuid4().hex[:6]
+    kw = dict(cursor="seq", mode="incremental_append")
+    assert _run(isolated, "ev", dst, **kw).success
+    slow = _connect(autocommit=False)
+    try:
+        slow.cursor().execute(f"INSERT INTO {SCHEMA}.ev VALUES (11, 'SLOW-TXN')")
+        _sql(f"INSERT INTO {SCHEMA}.ev VALUES (12, 'fast-1'), (13, 'fast-2')")
+        assert _run(isolated, "ev", dst, **kw).success
+        slow.commit()
+    finally:
+        slow.close()
+    third = _run(isolated, "ev", dst, **kw)
+    assert int(_window(third).get("late_rows_detected") or 0) == 1, _window(third)
+    warnings = " ".join((third.reconciliation or {}).get("warnings") or [])
+    assert "committed behind the watermark" in warnings
+    for _ in range(2):
+        _sql(f"INSERT INTO {SCHEMA}.ev SELECT max(seq) + 1, 'n' FROM {SCHEMA}.ev")
+        later = _run(isolated, "ev", dst, **kw)
+        assert later.success, later.error
+        evidence = _window(later)
+        assert int(evidence.get("late_rows_detected") or 0) == 0, evidence
+        assert evidence["previous_bound"]["xmin"] != _window(third)["previous_bound"]["xmin"]
