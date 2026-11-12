@@ -226,7 +226,7 @@ def audit_would_confine(subdir: str, resolved: Path) -> None:
 # explicitly, so a self-hoster on any cloud can turn it back on.
 SQLITE_DESTINATION_FLAG = "DATAWRAP_SQLITE_DESTINATION"
 SQLITE_DESTINATION_UNAVAILABLE_LABEL = "Not available on cloud"
-_SQLITE_DRIVERS = frozenset({"sqlite", "sqlite3"})
+SQLITE_DRIVERS = _SQLITE_DRIVERS = frozenset({"sqlite", "sqlite3"})
 
 
 def sqlite_destination_message() -> str:

@@ -11,13 +11,18 @@ the playground now requires, with ``sqlglot``'s T-SQL parser (pinned in
   ``SELECT`` (optionally ``WITH … SELECT``, or a ``UNION`` / ``INTERSECT`` /
   ``EXCEPT`` of them) with no ``INTO``;
 * nothing in it is a raw command the parser did not understand;
+* no ``NEXT VALUE FOR`` (it advances the sequence: a write) and no table named
+  with four parts (``server.database.schema.table`` reaches a linked server
+  with this connection's credentials) (PR 403 review 4, lows);
 * no unquoted identifier (column, alias, table) is a T-SQL reserved keyword.
   SQL Server never reads a reserved keyword as a name, so where the parser
   accepted one as an alias (``select 1 commit``), the server would start a
   new statement there. A reserved name must be quoted (``[open]``), as SQL
   Server itself requires.
 
-A text the parser cannot read is refused. Other dialects never come here.
+Leading semicolons are dropped first: ``;WITH cte AS (...) SELECT`` is the
+T-SQL idiom for a CTE. A text the parser cannot read is refused. Other
+dialects never come here.
 """
 
 from __future__ import annotations
@@ -54,6 +59,8 @@ def tsql_single_select(sql: str) -> bool:
     text = str(sql or "").strip()
     while text.endswith(";"):
         text = text[:-1].rstrip()
+    while text.startswith(";"):
+        text = text[1:].lstrip()
     if not text:
         return False
     try:
@@ -66,8 +73,10 @@ def tsql_single_select(sql: str) -> bool:
     root = statements[0]
     if not isinstance(root, (exp.Select, exp.Union, exp.Intersect, exp.Except)):
         return False
-    if any(True for _ in root.find_all(exp.Command, exp.Into)):
+    if any(True for _ in root.find_all(exp.Command, exp.Into, exp.NextValueFor)):
         return False
+    if any(len(table.parts) > 3 for table in root.find_all(exp.Table)):
+        return False  # a linked server: server.database.schema.table
     for node in root.find_all(exp.Identifier):
         if not node.quoted and str(node.this or "").lower() in TSQL_RESERVED:
             return False
