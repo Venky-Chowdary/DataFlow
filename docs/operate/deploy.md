@@ -162,6 +162,10 @@ only enforces on an address it can trust.
   port 8000.
 - `Dockerfile.railway.web` uses `deploy/nginx.conf.template` and needs
   `DATAWRAP_API_BASE` at run time; it refuses to start without it.
+- Both nginx configurations send a Content-Security-Policy and the other
+  browser security headers on the app shell. See
+  [security.md](security.md#browser-security-headers) before you change
+  `apps/web/index.html` or the nginx files.
 
 ## Not covered
 

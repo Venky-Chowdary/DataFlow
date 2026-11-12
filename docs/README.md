@@ -36,7 +36,7 @@ verified. Where the product does not do something, the page says so.
 |---|---|
 | [operate/deploy.md](operate/deploy.md) | Processes and roles, one node or several, backing services, the Helm chart |
 | [operate/configuration.md](operate/configuration.md) | Every environment flag the code reads (generated) |
-| [operate/security.md](operate/security.md) | Sign-in, roles and permissions, workspace isolation, secrets, egress, residency, the audit chain |
+| [operate/security.md](operate/security.md) | Sign-in, roles and permissions, workspace isolation and file areas, the query playground, secrets, egress, residency, the audit chain, browser headers |
 | [operate/runbooks.md](operate/runbooks.md) | Stuck, orphaned and failed jobs, locks, CDC lag, failed verification, error references |
 | [operate/backup-and-upgrade.md](operate/backup-and-upgrade.md) | Where state lives, what to back up, what to check after an upgrade |
 

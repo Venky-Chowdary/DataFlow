@@ -1,8 +1,8 @@
 # Security model
 
 This page describes how Datawrap authenticates callers, what each role may do,
-how workspaces are kept apart, how secrets and outbound connections are
-handled, and how the audit chain works. Each section says plainly what is
+how workspaces are kept apart, how secrets, outbound connections and data
+residency are handled, and how the audit chain works. Each section says plainly what is
 enforced today and what is not.
 
 Nothing here is a compliance certification, and the repository contains no
@@ -26,9 +26,11 @@ person can list and revoke their own sessions under `/api/v1/auth/sessions`.
 
 - An SSO identity is accepted when the account already exists, or when its
   email domain is in `DATAWRAP_SSO_ALLOWED_DOMAINS`.
-- With `DATAWRAP_SSO_AUTO_PROVISION=1` and an empty domain list, every
-  identity the provider returns is accepted and given an account. Set the
-  domain list before turning auto-provisioning on.
+- With `DATAWRAP_SSO_AUTO_PROVISION=1`, a new identity is given an account
+  only when its email domain is in `DATAWRAP_SSO_ALLOWED_DOMAINS`. With the
+  list empty, no new identity is provisioned: sign-in answers 403 naming the
+  setting, people who already have an account still sign in, and the API logs
+  a warning at start.
 - A group pushed through SCIM can be mapped to a role in one workspace
   (`GET` and `PUT /api/v1/iam/scim/group-mappings`). A caller cannot map a
   group to a role higher than their own in that workspace.
@@ -98,7 +100,10 @@ Datawrap separates data by workspace. The model has two halves:
 What this means in practice:
 
 - Jobs, schedules, audit events, usage and the dead-letter queue are filtered
-  by the bound workspace.
+  by the bound workspace. So are saved transfer plans and Validate runs, and
+  repair proposals (list, get and decide). The repair proposal file keeps at
+  most 200 proposals per workspace, so one workspace cannot push out
+  another's.
 - A platform administrator can view all workspaces (`__all__`) or rows that
   carry no workspace (`__unassigned__`).
 - When the request host resolves to a tenant, the caller must hold a claim for
@@ -106,13 +111,92 @@ What this means in practice:
   (`DATAWRAP_AUTH_TENANT_BIND`).
 - A workspace can set an IP allowlist, a session timeout and require-SSO.
 
-**Known gaps at this commit.** The isolation depends on every store applying
-the filter. A product audit of this code line found stores that did not:
-transfer plan updates, repair proposals, and locally stored export files,
-which are kept in one folder shared by all workspaces. Other changes are
-addressing these. Until you have confirmed they are fixed in your build, do
-not put mutually untrusted tenants in one deployment that uses local exports.
-The audit findings were not re-tested for this page.
+### Another workspace's id is a 404
+
+A route that takes an id in its path, or stores or acts on an id named in its
+request body, answers 404 for an id the caller's workspace does not own,
+exactly as for an id that does not exist. The body ids checked when written
+are connectors, jobs, contracts, schedules, transfer plans and transform
+recipes, an access grant's resource, and a tenant's customer-managed key
+(`byok_key_id`). A schedule's connectors, contract, recipe and replayed
+schedule are checked before its key probe reads any catalog. An invitation id from another workspace is also a 404.
+`services/body_id_ownership.py` holds these checks;
+`apps/api/tests/test_cross_workspace_resource_matrix.py` and
+`apps/api/tests/test_d154_cross_tenant_sweep.py` cover the id-addressed routes.
+
+### Export folders
+
+File exports written on the API host are confined to the exports folder
+(`DATAWRAP_EXPORTS_DIR`, else `apps/api/exports`):
+
+- An export made for a workspace lands in
+  `<exports>/_workspaces/<workspace id>/`. A client-supplied name is confined
+  to that folder, so two workspaces that both name `orders.csv` hold two files.
+  The folder is chosen from the running job's workspace, else the stored
+  connector's, never from the request header.
+- The flat `<exports>/` folder is the unscoped one: what the single local
+  operator writes with authentication off, and files exported before
+  workspaces had folders.
+- `GET /api/v1/transfer/download/{filename}` serves a bare file name from the
+  caller's own workspace folders first. A flat file is served only to the
+  workspace whose job records prove it owns it, or, when no job proves an
+  owner, only to a caller whose scope covers unscoped rows (a platform
+  administrator while isolation is enforced). Everything else is the same 404.
+- At start, the API moves each flat file whose owner the job records prove
+  into that workspace's folder, in the background (see
+  [backup-and-upgrade.md](backup-and-upgrade.md#things-to-check-after-an-upgrade)).
+- Workspace teardown removes the workspace's export folder.
+
+### SQLite and DuckDB volumes
+
+`<data dir>/sqlite` and `<data dir>/duckdb` are the only parts of the data
+directory a SQLite or DuckDB connector may open. Each is partitioned the same
+way: workspace W's files live in `<volume>/_workspaces/<W>/`.
+
+- A path in the bound workspace's own area opens. A path in another
+  workspace's area is refused.
+- A path in the flat part of the volume opens for a workspace only when that
+  workspace provably owns the file, and the file is first moved into its area.
+  The proof is that every saved SQLite or DuckDB connector naming the file was
+  created before the volume was partitioned and belongs to that one workspace.
+  A connector saved afterwards proves nothing, so naming another workspace's
+  file does not claim it. The API records the partition time at start, before
+  it serves a request, and moves provably owned files in the background.
+- A new name in the flat part is created in the bound workspace's area.
+- Any other flat file has no provable owner. Only a caller with no workspace in
+  play (system code, a platform administrator's all-workspace view, a
+  deployment without workspaces) opens it, and such a caller never opens a
+  workspace's area.
+- With authentication off, every path opens as before.
+- SQLite and DuckDB connectors never open the exports tree. A `file:` URI
+  database, and `uri`, `mode`, `vfs`, `immutable` or `nolock` parameters, are
+  refused, so a URI cannot name a file the path check did not see.
+- A SQLite or DuckDB connector's `database` is a path and may be up to 1,024
+  characters. Other engines keep the 128-character identifier limit.
+
+### Query playground
+
+The playground (`/api/v1/query`) runs reads only. The guards, from
+`src/routers/query_router.py`:
+
+- A statement filter on every dialect. It refuses writes, more than one
+  statement, `exec`, `execute` and `waitfor` as bare words, PostgreSQL
+  Unicode-escaped identifiers (`U&"..."`), Oracle database links
+  (`name@link`), and a list of functions with side effects matched on their
+  whole dotted name (for example `utl_http.request`, `master..xp_cmdshell`,
+  file and URL readers).
+- SQL Server, Azure SQL and Synapse: the text must parse as exactly one
+  `SELECT` with no `INTO`, and an unquoted name that is a T-SQL reserved
+  keyword is refused (`services/tsql_select.py`). The connection is closed
+  without a commit.
+- A read-only transaction on PostgreSQL-family, MySQL-family and Oracle
+  connections, `query_only` on SQLite, and `readonly=1` on each ClickHouse
+  query. This is best effort: if a dialect refuses the setting, the filter
+  is the remaining guard.
+- DuckDB: the connection opens with external access off. Path and URL readers,
+  `DESCRIBE`, `SHOW`, `SUMMARIZE`, `PIVOT` or `UNPIVOT` over a quoted path,
+  DuckDB configuration in the connection URL, and MotherDuck databases are
+  refused.
 
 ## Secrets
 
@@ -160,19 +244,120 @@ cannot be allowlisted.
 
 ## Data residency
 
-A workspace can record a data region. Enforcement is narrow today:
+A workspace's data region is a fence on where its data may be written. The
+code is `services/data_residency.py`, `services/residency_addressing.py`,
+`services/region_verification.py` and `connectors/s3_residency.py`.
 
-- It applies only to S3 and DynamoDB destinations.
-- It runs only on `POST /api/v1/transfer/run` and `POST /api/v1/transfer/execute`.
-  Transfers started by a schedule, by Pilot or through MCP are not checked.
-- It is skipped when the workspace region is the default (`us-east-1`) unless
-  `DATAWRAP_RESIDENCY_STRICT=1`.
-- A destination in `us-east-1`, or one whose region cannot be determined, is
-  not refused.
-- A `data_region` value sent in the request replaces the workspace's region
-  for that request.
+### When a workspace is fenced
 
-Treat the region setting as a record, not as a control, elsewhere.
+- Its tenant record has a `data_region`. Any region counts, `us-east-1`
+  included; no region is allowed implicitly.
+- A tenant record that belongs to no workspace (a single-tenant deployment set
+  up before tenants were workspace-scoped) fences every workspace that has no
+  region of its own. If such records name more than one region, every
+  destination is refused until each record is assigned to its workspace.
+- With `DATAWRAP_RESIDENCY_STRICT=1`, every workspace that records no region
+  is fenced to `DATAWRAP_DEFAULT_REGION` (`us-east-1` when unset).
+
+Otherwise nothing on this section applies. The region comes from the tenant
+record only. A `data_region` sent in a request, a schedule or a tool argument
+never moves the fence; a job in a fenced workspace is tagged with the fenced
+region whatever the caller sent.
+
+Only a platform administrator can set, change or clear a workspace's data
+region (`POST /api/v1/workspace/tenant`, `PATCH` and `DELETE
+/api/v1/workspace/tenant/{tenant_id}`). A workspace administrator who tries
+gets 403.
+
+### Where it is checked
+
+- When a job is created: REST, schedules, sync-now, retries, MCP and Pilot all
+  go through the same submit path, so nothing out of region is queued.
+- At the start of every tracked run: resume, retry, a worker claim and the
+  orphan sweep each judge the address the run dials now.
+- Quarantine replay, CDC drift repair (before any write) and
+  `POST /api/v1/query/export`, which writes without a job (its connector and
+  its local-file destination alike).
+- `POST /api/v1/transfer/execute`, `POST /api/v1/transfer/run` and the query
+  export answer before anything is queued: 422 for a refused connection key,
+  403 for a destination outside the region. Other routes that queue a job
+  answer 403 with `{"error": "data_residency", "detail": ...}`.
+
+### What proves a destination's region
+
+| Destination | Evidence accepted |
+|---|---|
+| File export, local file, SQLite, DuckDB, or a server engine on loopback | `DATAWRAP_DEFAULT_REGION`, the operator's statement of where this deployment runs. Nothing else. **With it unset, these destinations are refused in a fenced workspace.** |
+| S3 and DynamoDB | The region the AWS client is given. When an endpoint URL is dialled, the region in that AWS hostname, which must agree with a `host` that names a region. |
+| A host under a known provider suffix | The region label next to the suffix (for example `<x>.<region>.rds.amazonaws.com`, `<account>.<region>.snowflakecomputing.com`). Every address the destination names must prove the same region. |
+| Anything else: an IP address, a custom domain, an S3-compatible endpoint, a bucket or project named without a host (GCS, BigQuery, ADLS), an Iceberg warehouse, a SaaS API | A region a platform administrator verified for the saved connector. |
+
+A destination whose region none of these establishes is refused: an unknown
+location is not an in-region one. A `region`, `extra.region` or
+`extra.location` typed on the destination is not evidence; it is only used to
+refuse a destination whose typed region contradicts its verified one. A
+region-shaped label elsewhere in a hostname (`db.eu-west-1.example.com`)
+proves nothing.
+
+### Connection options in a fenced workspace (deny by default)
+
+Each review of the residency check found another connection option that sends
+the driver somewhere the check did not read: `Address=` and
+`Failover_Partner=` in an ODBC string, ClickHouse `alt_hosts`, MySQL
+`unix_socket`, an Iceberg `s3.endpoint`, the Redshift staging endpoint. So in a
+fenced workspace the check no longer lists what to read. Each connector family
+has an allowlist of the keys its driver may be given, and **any key not on it
+is refused with a 422 that names the key**. This covers:
+
+- the URL query of `connection_string`, and of a URL in `host`;
+- an ODBC (`k=v;k=v`) or libpq (`k=v k=v`) connection string, and the string
+  inside `odbc_connect`;
+- the request's `extra` overrides and the saved connector's `extra`.
+
+A connection string that cannot be read as the driver would read it (for
+example an unterminated brace in an ODBC value) is refused, not skipped.
+
+Options that never choose a place (write modes, batch sizes, procedure
+parameters, schema and journal options, TLS trust and host-key pins, operator
+acknowledgements) are allowed for every family. Allowlisted keys that do
+choose where the driver connects are judged as addresses:
+
+| Family (and aliases) | Address keys judged |
+|---|---|
+| PostgreSQL (pgvector, CockroachDB, Greenplum, YugabyteDB) | `host`, `hostaddr` |
+| Redshift (Redshift Serverless) | `host`, `hostaddr`; the COPY staging bucket is judged as the S3 endpoint of its region, and a staging endpoint that is not a regional AWS S3 endpoint is refused |
+| MySQL (MariaDB, TiDB, SingleStore) | `unix_socket`, which means a server on this machine |
+| SQL Server | `Server`, `Data Source`, `Address`, `Addr`, `Network Address`, `Failover_Partner` |
+| ClickHouse | `alt_hosts` |
+| Oracle | `dsn` |
+| Snowflake | `account`, `host` |
+| Iceberg | `s3.endpoint`, `gcs.endpoint`, `adls.endpoint`; a non-`file://` warehouse or an ADLS account name needs a verified region |
+| MongoDB, DuckDB (MotherDuck), Trino (Presto), S3-style stores (MinIO, GCS, Azure Blob, ADLS, R2), DynamoDB | none: options only |
+
+Any other family accepts only the endpoint's own fields and the options that
+never choose a place. The full lists are `FAMILIES` in
+`services/residency_addressing.py`. Nothing here runs for an unfenced
+workspace.
+
+### S3 writes
+
+For an S3 client that dials AWS in a fenced workspace, each bucket's real
+region is read before the first write to it (`GetBucketLocation`, else
+`HeadBucket`). A bucket outside the region, or one whose region cannot be
+read, is refused. A write that S3 answers with a redirect to another region is
+refused rather than re-sent. While any workspace is fenced, an S3 write that
+cannot name its workspace is refused.
+
+### Region verification
+
+`POST /api/v1/connectors/saved/{connector_id}/region-verification` lets a
+platform administrator state a saved connector's region; an empty region
+withdraws it. The statement is bound to every field the driver addresses or
+authenticates with (host, port, database, endpoint, connection string,
+account, project, dataset and bucket extras, and, for drivers that dial no host
+of their own, the credential identity, held only as a keyed hash). Changing any
+of them clears it, and a run whose resolved destination differs from the
+stored connector in any of them is not covered by it.
 
 ## The audit chain
 
@@ -191,17 +376,19 @@ signed with an HMAC key, so a removed or altered event is detectable.
   `unverifiable_key_lost`, which is reported separately from tampering.
 - `GET /api/v1/audit/verify` re-walks the chain. `GET /api/v1/audit/export`
   downloads events. `GET /api/v1/audit/tip` returns the chain head.
-- Retention is off by default (`DATAFLOW_AUDIT_RETENTION_DAYS`). A legal hold
-  (`DATAFLOW_AUDIT_LEGAL_HOLD=1`) suspends purges. These two are read under the
-  `DATAFLOW_` name only.
+- Retention is off by default (`DATAWRAP_AUDIT_RETENTION_DAYS`). A legal hold
+  (`DATAWRAP_AUDIT_LEGAL_HOLD=1`) suspends purges.
 
 ### Anchors
 
 An anchor records the chain head somewhere the application cannot rewrite.
-**Today the anchor is a local file** (`audit_tip_anchors.jsonl`).
-`DATAWRAP_AUDIT_ANCHOR_PROVIDER` only changes the label on the receipt; the
-write still goes to the local file. There is no external, write-once anchor.
-Someone who can rewrite the data directory can rewrite the anchors.
+**Today the anchor is a local file** (`audit_tip_anchors.jsonl`). It is the
+only provider implemented. A receipt always names the store that holds it and
+carries `externally_anchored: false`. If `DATAWRAP_AUDIT_ANCHOR_PROVIDER` asks
+for another provider (for example `s3`), the receipt records it as
+`requested_provider`, says the request was not met, and the API logs a
+warning. There is no external, write-once anchor. Someone who can rewrite the
+data directory can rewrite the anchors.
 
 Command-line check: `apps/api/scripts/audit_chain_check.py`.
 
@@ -211,9 +398,31 @@ Command-line check: `apps/api/scripts/audit_chain_check.py`.
   Counters are held in each process, so the budget multiplies with the number
   of API replicas.
 - The limiter for unauthenticated routes is off unless
-  `DATAFLOW_PUBLIC_RATE_LIMIT=1` (this exact name).
+  `DATAWRAP_PUBLIC_RATE_LIMIT=1` (or `DATAFLOW_PUBLIC_RATE_LIMIT=1`).
 - MCP and Pilot have their own limits (`DATAFLOW_MCP_RATE_*`,
   `DATAFLOW_PILOT_RATE_*`).
+
+## Browser security headers
+
+The web container's nginx configurations (`deploy/nginx.conf` and
+`deploy/nginx.conf.template`) send a Content-Security-Policy on the app shell
+and its assets. Inline script is allowed only by hash: the theme script in
+`apps/web/index.html` and the API-base line `deploy/start-nginx.sh` writes into
+it. There is no `unsafe-eval`. The only outside origins are the signup
+Turnstile widget (`challenges.cloudflare.com`) and the marketing videos
+(`www.youtube-nocookie.com`, `i.ytimg.com`). `connect-src` is `'self'` and
+`frame-ancestors` is `'none'`. If you change either inline script, the hash
+must change with it; `apps/api/tests/test_audit_m1_spa_security_headers.py`
+fails until it does.
+
+The same locations send `X-Frame-Options: DENY`, `nosniff`, a referrer policy
+and a permissions policy. `deploy/nginx.static.conf`, for a shell served apart
+from the API, sends those but no CSP, because its `connect-src` depends on
+where the API is.
+
+API responses carry their own policy: `default-src 'none'; frame-ancestors
+'none'; base-uri 'none'` (a looser one on `/docs` and `/redoc`), and HSTS on
+HTTPS requests or when `DATAWRAP_HSTS=1`.
 
 ## Static analysis in CI
 
@@ -231,6 +440,14 @@ been rebuilt.
   what [deploy.md](deploy.md) states.
 - End-to-end behaviour of SSO, SAML, MFA enrolment and SCIM against a real
   identity provider.
+- Residency end to end against real cloud accounts. The rules above were read
+  from the code and its tests; no fenced workspace was run against AWS, GCP or
+  Azure for this page.
+- Isolation of stores not named on this page. The product audit's findings
+  were not re-tested for this page beyond reading the code and the tests
+  named in "Verified against".
+- The CSP in a browser. The policy was read from the nginx files, not checked
+  against every page of the app.
 
 ## Verified against
 
@@ -243,8 +460,22 @@ been rebuilt.
 - `apps/api/services/workspace_filter.py`, `apps/api/services/tenant_bind.py`,
   `apps/api/services/tenant_store.py`
 - `apps/api/services/secret_vault.py`
+- `apps/api/services/body_id_ownership.py`, `apps/api/services/agentic_repair.py`,
+  `apps/api/services/transfer_plan_store.py`
+- `apps/api/services/export_paths.py`, `apps/api/services/export_migration.py`,
+  `apps/api/services/workspace_teardown.py`
+- `apps/api/services/embedded_volume.py`, `apps/api/connectors/sqlite_common.py`,
+  `apps/api/services/connector_request_limits.py`
+- `apps/api/src/routers/query_router.py`, `apps/api/services/tsql_select.py`
 - `apps/api/services/egress_guard.py`
-- `apps/api/src/routers/transfer_router.py` (`_residency_check`)
+- `apps/api/services/data_residency.py`, `apps/api/services/residency_addressing.py`,
+  `apps/api/services/region_verification.py`, `apps/api/connectors/s3_residency.py`
+- `apps/api/src/routers/transfer_router.py` (`_residency_check`),
+  `apps/api/src/routers/workspace_router.py` (`_require_region_admin`),
+  `apps/api/src/routers/saved_connectors_router.py` (region verification)
+- `apps/api/src/transfer/job_submission.py`, `apps/api/src/transfer/job_scope.py`
+- `deploy/nginx.conf`, `deploy/nginx.conf.template`, `deploy/nginx.static.conf`,
+  `apps/api/src/main.py` (API response headers)
 - `apps/api/services/audit_log.py`, `apps/api/services/audit_chain_keys.py`,
   `apps/api/services/audit_anchor.py`
 - `apps/api/services/auth_rate_limit.py`
