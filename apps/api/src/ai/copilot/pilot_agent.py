@@ -1676,8 +1676,10 @@ class DataPilotAgent:
             if tr.success and not turn.needs_clarification:
                 conns = (tr.output or {}).get("connectors") or []
                 if conns:
+                    from .md_safe import md_text
+
                     listed = ", ".join(
-                        f"**{c.get('name')}**" for c in conns[:6] if c.get("name")
+                        f"**{md_text(c.get('name'))}**" for c in conns[:6] if c.get("name")
                     )
                     turn.needs_clarification = (
                         "Which saved connector should I use? "
@@ -1705,8 +1707,10 @@ class DataPilotAgent:
             if ds.success and not turn.needs_clarification:
                 datasets = (ds.output or {}).get("datasets") or []
                 if datasets:
+                    from .md_safe import md_text
+
                     listed = ", ".join(
-                        f"**{d.get('name')}**" for d in datasets[:6] if d.get("name")
+                        f"**{md_text(d.get('name'))}**" for d in datasets[:6] if d.get("name")
                     )
                     turn.needs_clarification = (
                         "I couldn't find that dataset. Indexed uploads: "
@@ -1824,10 +1828,12 @@ class DataPilotAgent:
                     self._append_tool_actions(turn, objs)
                     if objs.success and not turn.needs_clarification:
                         names = (objs.output or {}).get("objects") or []
-                        listed = ", ".join(f"`{n}`" for n in names[:12] if n)
+                        from .md_safe import md_code, md_text
+
+                        listed = ", ".join(md_code(n) for n in names[:12] if n)
                         turn.needs_clarification = (
                             f"{tr.error} Those look like live tables — on "
-                            f"**{focus.connector_name or 'this connector'}** I see: "
+                            f"**{md_text(focus.connector_name or 'this connector')}** I see: "
                             f"{listed or 'none'}. "
                             'Try: "diff schema orders on PilotSQLite vs orders on Warehouse".'
                         )
@@ -3784,18 +3790,21 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         ]
                     else:
                         lines = [f"You have **{len(conns)} saved connector(s)**."]
+                    from .md_safe import md_text
+
                     for c in conns:
                         # An arrow with nothing after it reads like a truncated
                         # answer. A connector with neither database nor host
                         # recorded simply has no target to point at.
-                        target = str(
+                        target = md_text(str(
                             c.get("database") or c.get("host") or ""
-                        ).strip()
-                        row = f"• **{c.get('name')}** ({c.get('type')})"
+                        ).strip())
+                        # Names, types and targets are operator-written (review 2, H2).
+                        row = f"• **{md_text(c.get('name'))}** ({md_text(c.get('type'))})"
                         lines.append(f"{row} → {target}" if target else row)
                     if ask_tables:
                         names = [str(c.get("name") or "") for c in conns if c.get("name")]
-                        sample = names[0] if names else "your connector"
+                        sample = md_text(names[0]) if names else "your connector"
                         lines.append(
                             f'To list tables, name the connector: '
                             f'"list tables on {sample}".'
@@ -3924,12 +3933,15 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         "**Indexed datasets:** none named yet — upload in **New Transfer** "
                         "and I can profile them."
                     )
+                from .md_safe import md_text
+
                 conns = o.get("connectors") or []
                 if conns:
                     lines.append(
                         "**Saved connectors:** "
                         + ", ".join(
-                            f"{c.get('name')} ({c.get('type')})" for c in conns[:6] if c.get("name")
+                            f"{md_text(c.get('name'))} ({md_text(c.get('type'))})"
+                            for c in conns[:6] if c.get("name")
                         )
                     )
                 examples = o.get("ask_examples") or []

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .agent import CopilotResponse
+from .md_safe import md_text
 from .dialogue_acts import (
     DialogueAct,
     last_assistant_text,
@@ -141,7 +142,7 @@ def compose_briefing(facts: dict[str, Any]) -> str:
         conn_bit += ")"
     names = [n for n in (facts.get("connector_names") or []) if n]
     if names:
-        conn_bit += ": " + ", ".join(f"**{n}**" for n in names[:6])
+        conn_bit += ": " + ", ".join(f"**{md_text(n)}**" for n in names[:6])
         if n_conn > 6:
             conn_bit += f", and {n_conn - 6} more"
     lines.append(_briefing_line("Connections", conn_bit, "connectors", "connector store", unreadable))
@@ -167,7 +168,7 @@ def compose_briefing(facts: dict[str, Any]) -> str:
         sched_bit += f". Next due: {nxt}"
     parked_names = [n for n in (facts.get("parked_names") or []) if n]
     if parked_names:
-        sched_bit += " — waiting: " + ", ".join(f"**{n}**" for n in parked_names[:4])
+        sched_bit += " — waiting: " + ", ".join(f"**{md_text(n)}**" for n in parked_names[:4])
     lines.append(_briefing_line("Pipelines", sched_bit, "pipelines", "schedule store", unreadable))
 
     if "contracts" in unreadable:
@@ -269,7 +270,7 @@ def compose_trouble_intake(
     ]
     names = [str(n) for n in (ctx.get("connector_names") or []) if n][:3]
     if names:
-        shown = ", ".join(f"**{n}**" for n in names)
+        shown = ", ".join(f"**{md_text(n)}**" for n in names)
         lines.append(f"Saved connectors: {shown}.")
     lines.append("Or say *give me a workspace briefing* and I'll start from what needs you.")
     return "\n".join(lines)

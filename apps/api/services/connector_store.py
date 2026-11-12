@@ -1009,6 +1009,9 @@ def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
     from connectors.sftp_common import apply_sftp_uri_endpoint, split_sftp_host_edit
+    from services.connector_request_limits import refuse_control_characters
+
+    refuse_control_characters("Connector name", data.get("name"))
 
     data = apply_sftp_uri_endpoint(split_sftp_host_edit(data, data.get("type")))
     conn_type = data["type"]
@@ -1105,6 +1108,10 @@ def _coerce_secret_update(new: Any, existing: Any) -> Any:
 
 
 def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
+    from services.connector_request_limits import refuse_control_characters
+
+    if "name" in data:
+        refuse_control_characters("Connector name", data.get("name"))
     workspace_id = _workspace_scope(workspace_id)
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return None
