@@ -27,7 +27,8 @@ _URLS = [
     "mysql+pymysql://u:p@db.example.com/db?unix_socket=%2Fvar%2Frun%2Fmysqld%2Fmysqld.sock",
     "mysql+pymysql://u:p@/db?unix_socket=/tmp/mysql.sock",
     "mariadb+pymysql://u:p@db.example.com/db?charset=utf8mb4&unix_socket=/run/mysqld/mysqld.sock",
-    "mysql+pymysql://u:p@db.example.com/db?x=1#&unix_socket=/tmp/mysql.sock",
+    # Not ``x=1``: a key PyMySQL does not take is refused at save (follow-up review 2, H3).
+    "mysql+pymysql://u:p@db.example.com/db?charset=utf8mb4#&unix_socket=/tmp/mysql.sock",
     "mysql+pymysql://u:p@db.example.com/db?unix_socket=mysql.sock",
 ]
 _ORDINARY = "mysql+pymysql://u:p@db.example.com:3306/db?charset=utf8mb4"

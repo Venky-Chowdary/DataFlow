@@ -571,6 +571,22 @@ def assert_connector_dial_allowed(
         )
     if refusal:
         raise EgressRefused(refusal)
+    from connectors.mysql_options import url_option_refusal
+
+    # A MySQL URL hands PyMySQL its query keys; only the ones the product uses
+    # (follow-up review 2, H3 + H4: an option file or LOCAL INFILE on this host).
+    mysql_family = _dials_mysql_sockets(db_type)
+    for value in values:
+        if mysql_family or _is_mysql_url(value):
+            refusal = url_option_refusal(value)
+            if refusal:
+                raise EgressRefused(refusal)
+
+
+def _is_mysql_url(value: str) -> bool:
+    from connectors.mysql_options import is_mysql_url
+
+    return is_mysql_url(value)
 
 
 # Engines whose ``host`` field is a label, not a dial target: the connection
@@ -769,11 +785,17 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     from services.platform_aws_credentials import iceberg_connector_refusal
     from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
 
+    from connectors.mysql_options import connector_option_refusal
+
     platform_credentials = (
         default_credentials_refusal(data)
         or iceberg_connector_class_refusal(data)
         or iceberg_connector_refusal(data)
         or iceberg_gcp_azure_connector_refusal(data)
+        # No PyMySQL option that reads a host file or socket (follow-up review 2, H3 + H4).
+        or connector_option_refusal(
+            data, mysql_family=_dials_mysql_sockets(str(data.get("type") or data.get("format") or ""))
+        )
     )
     if platform_credentials:
         return platform_credentials

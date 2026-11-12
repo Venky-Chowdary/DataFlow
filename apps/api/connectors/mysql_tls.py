@@ -227,10 +227,23 @@ def connect_kwargs_for(base: dict[str, Any], plan: TlsPlan) -> dict[str, Any]:
     return {**_without_tls(base), **plan.kwargs}
 
 
-def dial_pymysql(kwargs: dict[str, Any], *, plan: TlsPlan, host: str = "") -> Any:
-    """The one MySQL dial: apply ``plan``, connect, record what happened."""
+def dial_pymysql(
+    kwargs: dict[str, Any], *, plan: TlsPlan, host: str = "", local_infile_ok: bool = False
+) -> Any:
+    """The one MySQL dial: apply ``plan``, connect, record what happened.
+
+    Only the options the product uses reach PyMySQL, and ``local_infile`` only
+    when the bulk writer asks (``local_infile_ok``; follow-up review 2, H3 + H4).
+    """
     import pymysql
 
+    from connectors.mysql_conn import _install_local_infile_guard
+    from connectors.mysql_options import MySQLOptionRefused, dial_option_refusal
+
+    refusal = dial_option_refusal(kwargs, local_infile_ok=local_infile_ok)
+    if refusal:
+        raise MySQLOptionRefused(refusal)
+    _install_local_infile_guard()
     args = connect_kwargs_for(kwargs, plan)
     note = ""
     try:
@@ -271,6 +284,11 @@ def resolved_kwargs_for_external_dial(base: dict[str, Any], plan: TlsPlan, host:
     It cannot re-dial on 3159, so DISABLED is tried once here: a server that
     requires secure transport gets the TLS keywords (and the upgrade is noted).
     """
+    from connectors.mysql_options import MySQLOptionRefused, dial_option_refusal
+
+    refusal = dial_option_refusal(base, local_infile_ok=False)
+    if refusal:
+        raise MySQLOptionRefused(refusal)
     if plan.mode != TLS_DISABLED:
         return connect_kwargs_for(base, plan)
     import pymysql
@@ -367,3 +385,19 @@ def describe_session_encryption(enc: dict[str, Any]) -> str:
         head = "session NOT encrypted"
     note = f"; {enc['note']}" if enc.get("note") else ""
     return f"{head} — {asked}{note}" if asked else f"{head}{note}"
+
+
+def _install_local_infile_guard_at_import() -> None:
+    """Every PyMySQL connection, not only a bulk write's, sends only a staged file
+    (follow-up review 2, H4): the LOAD DATA LOCAL allowlist is installed when the
+    MySQL dial module loads, before any connection exists."""
+    try:
+        import pymysql.connections  # noqa: F401
+    except ImportError:
+        return
+    from connectors.mysql_conn import _install_local_infile_guard
+
+    _install_local_infile_guard()
+
+
+_install_local_infile_guard_at_import()
