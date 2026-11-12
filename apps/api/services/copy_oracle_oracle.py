@@ -137,6 +137,9 @@ def _oracle_connect(cfg: dict[str, Any]) -> Any:
     from connectors.tls_file_options import check_dial
 
     check_dial({"dsn": dsn})  # a descriptor's wallet directory: never a folder on this host
+    from connectors.oracle_dsn_guard import check_dsn
+
+    check_dsn(dsn)  # no config provider, LDAP or pyo. wallet (follow-up review 3, M3 + M4)
     try:
         conn = oracledb.connect(user=user, password=password, dsn=dsn)
     except Exception as exc:

@@ -96,6 +96,8 @@ def _path_refused(value: Any) -> bool:
 
 def _option_refusal(key: Any, value: Any, where: str) -> str:
     folded = _fold(key)
+    if folded.startswith("pyo") and folded[3:] in FILE_OPTIONS:
+        folded = folded[3:]  # python-oracledb Easy Connect ``pyo.wallet_location`` (follow-up review 3, M3)
     if folded in FILE_OPTIONS and _path_refused(value):
         return message(key, where)
     if folded in _SSL_DICTS and isinstance(value, Mapping):
@@ -172,6 +174,10 @@ def text_refusal(text: Any, where: str) -> str:
     raw = str(text or "")
     if not raw.strip():
         return ""
+    if raw.strip().lower().startswith("config-"):  # python-oracledb's config providers (review 3, M4)
+        from connectors.oracle_dsn_guard import dsn_refusal
+
+        return dsn_refusal(raw, where)
     for match in _DESCRIPTOR.finditer(raw):
         if _path_refused(match.group(2)):
             return message(match.group(1), where)
@@ -244,3 +250,7 @@ def check_guarded_dial(dialect: Any, cargs: Any, cparams: Any) -> None:
     """:func:`check_dial` for a connection of an engine :func:`guard_engine` marked."""
     if getattr(dialect, _GUARDED, False):
         check_dial(cparams, *cargs)
+        if getattr(dialect, "name", "") == "oracle":
+            from connectors.oracle_dsn_guard import check_dsn
+
+            check_dsn((cparams or {}).get("dsn"))  # no config-file:// / ldap:// / pyo. wallet (review 3)
