@@ -332,7 +332,7 @@ def recover_schedule_destination(
         from services.schedule_runner import ScheduleStartError, _run_schedule
 
         # The run starts first, and the finding stays open until it SUCCEEDS:
-        # the runner closes it on a completed run (close_finding_after_successful_run)
+        # the runner closes it on a completed run (finding_closed_by_success)
         # and sets the cadence; a run that starts and then fails leaves it
         # open (or parks a fresh finding). A start that is refused, raises, or
         # returns no job is a failed recovery: audited, finding untouched.

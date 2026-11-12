@@ -1287,6 +1287,9 @@ def _transient_backoff(current: Any, now: datetime) -> tuple[str, int]:
 
     Doubles from the base per failed beat in a row, capped, and never earlier
     than the schedule's own next slot. ``current`` already holds the failed run.
+    The finalizer stores it with the run instead of parking a transient fault
+    for approval: ``next_run_at`` stays set (the API shows when it fires next),
+    no approval request opens, and the first success resets the run of failures.
     """
     from services.schedule_store import next_run_for
 
@@ -1315,29 +1318,6 @@ def _transient_backoff(current: Any, now: datetime) -> tuple[str, int]:
     except ValueError:
         due = backoff_at.isoformat()
     return str(due), delay
-
-
-def _back_off_transient(schedule_id: str, sched: Any, park: str) -> None:
-    """Push the next beat out instead of parking a transient fault for approval.
-
-    ``next_run_at`` stays set (the API shows when it fires next) and no approval
-    request opens; the first success resets the run of failures. A finished run
-    stores the same back-off in the write that records it (``_finalize_run``).
-    """
-    from services.schedule_store import get_schedule, update_schedule
-
-    due, delay = _transient_backoff(
-        get_schedule(schedule_id) or sched, datetime.now(timezone.utc)
-    )
-    update_schedule(schedule_id, {"next_run_at": due, "retry_at": None, "retry_attempt": 0})
-    emit_event(
-        logger,
-        "schedule.run.backoff",
-        outcome="backing_off",
-        schedule_id=schedule_id,
-        reason_code=park,
-        delay_seconds=delay,
-    )
 
 
 def _append_replay_blocked(sched: Any) -> str | None:

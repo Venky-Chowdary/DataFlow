@@ -516,21 +516,13 @@ def close_request_record(
     return _resolved(request, status=STATUS_APPROVED, actor=actor, reason=reason)
 
 
-def close_finding_after_successful_run(schedule_id: str) -> None:
-    """A completed run makes the parked refusal stale.
-
-    The cadence stays on the boundary ``mark_schedule_run`` just computed.
-    Leaving the finding open kept ``needs_approval`` after the operator had
-    already proved the pipeline runs, so later beats never fired (QA R2-107).
-    """
-    sched = get_schedule(schedule_id)
-    patch = finding_closed_by_success(sched) if sched else None
-    if patch:
-        update_schedule(schedule_id, patch)
-
-
 def finding_closed_by_success(sched: Any) -> dict[str, Any] | None:
     """The fields that close ``sched``'s open finding after a completed run.
+
+    A completed run makes the parked refusal stale. Leaving the finding open
+    kept ``needs_approval`` after the operator had already proved the pipeline
+    runs, so later beats never fired (QA R2-107). The cadence stays on the
+    boundary ``mark_schedule_run`` computes.
 
     None when nothing is open. A run's finalizer stores them in the write that
     records the run, so a completed run is never visible still parked.
