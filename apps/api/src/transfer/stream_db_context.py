@@ -75,6 +75,7 @@ class RunConfig:
     replay_identity: Any = ""
     #: ``(every, due this run, counter to store)`` of the periodic key census.
     census_plan: Any = None
+    text_cursor_judged: bool = False
     backfill_new_fields: Any = None
     batch_quality_enabled: Any = None
     drift_detector: Any = None

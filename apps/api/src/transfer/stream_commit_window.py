@@ -82,6 +82,9 @@ def bind_commit_window(run: Any, scope: Any, catalog: tuple | None, contract: An
     """Plan this run's window once and return the scope that reads through it."""
     cfg = run.cfg
     cfg.route_watermark = scope.watermark
+    if table and not getattr(cfg, "text_cursor_judged", False):
+        cfg.text_cursor_judged = True
+        refuse_unorderable_text_cursor(cfg, scope, catalog, table)
     if getattr(cfg, "census_plan", None) is None:
         from services.incremental_census import census_schedule
 
@@ -99,6 +102,42 @@ def bind_commit_window(run: Any, scope: Any, catalog: tuple | None, contract: An
     if window is None:
         return scope
     return dataclasses.replace(scope, commit_safe=window)
+
+
+def refuse_unorderable_text_cursor(cfg: Any, scope: Any, catalog: tuple | None, table: str) -> None:
+    """Refuse a text cursor the source orders differently from the sync (audit C3/H4b).
+
+    The source orders a text column as text. Numbers of more than one width and
+    timestamps in more than one offset sort differently as text, so rows land
+    on the wrong side of the watermark and are skipped while the run reports
+    success. Judged on the live source before anything is read or written; a
+    source that cannot be probed is read as before.
+    """
+    from connectors.cursor_bind import declared_type_is_zone_bearing
+    from services.cursor_order import is_text_declared, probe_text_cursor
+
+    # The sync's type for the column is inferred; the source's ordering is not.
+    # SQLite compares stored text as text whatever the column is declared, so
+    # it is always asked; elsewhere only a text-typed cursor is.
+    typed = _cursor_type(cfg, scope, (catalog or ({},))[0])
+    if not (is_text_declared(typed) or (cfg.src_read_type or "").lower() == "sqlite"):
+        return
+    try:
+        from services.null_cursor_probe import _resolve_source_cfg
+        from services.source_duplicate_probe import is_sqlish_source
+
+        src_cfg, db_type = _resolve_source_cfg("", dict(cfg.src_cfg or {}), None)
+        if not src_cfg or not is_sqlish_source(db_type):
+            return
+        reason = probe_text_cursor(
+            src_cfg, table, cfg.cursor_source_col,
+            utc_watermark=declared_type_is_zone_bearing(typed),
+        )
+    except Exception as exc:  # noqa: BLE001 — unmeasured, not refused
+        logger.warning("text cursor ordering probe skipped: %s", exc)
+        return
+    if reason:
+        raise ValueError(reason)
 
 
 def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str) -> CommitSafeWindow | None:
