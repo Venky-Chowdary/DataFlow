@@ -786,6 +786,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
 
     from connectors.mysql_options import connector_option_refusal
+    from connectors.mongodb_auth_mechanism import settings_refusal as mongo_auth_refusal
     from connectors.oracle_dsn_guard import settings_refusal as oracle_dsn_refusal
     from connectors.tls_file_options import connector_refusal as tls_files_refusal
     from services.google_credentials_policy import google_connector_refusal
@@ -805,6 +806,8 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         or tls_files_refusal(data)
         # No Oracle config provider / LDAP DSN or pyo. wallet (follow-up review 3, M3 + M4).
         or oracle_dsn_refusal(data)
+        # No MongoDB auth mechanism that uses this host's identity (follow-up review 3).
+        or mongo_auth_refusal(data)
     )
     if platform_credentials:
         return platform_credentials
