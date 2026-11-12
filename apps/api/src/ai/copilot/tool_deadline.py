@@ -67,6 +67,38 @@ QUERY_DEADLINE_TOOLS = frozenset(
 )
 
 
+#: Reads of Datawrap's own job ledger. They dial no customer system, so they
+#: do not take a connector-executor slot; they get a short deadline of their
+#: own: a 6 s count made a 13.7 s turn (review M6).
+LEDGER_DEADLINE_TOOLS = frozenset({"list_jobs", "brief_workspace"})
+DEFAULT_LEDGER_DEADLINE_SECONDS = 8.0
+_ledger_pool: Any = None
+
+
+def run_ledger_read(tool: str, fn: Callable[[], Any], on_timeout: Callable[[str], Any]) -> Any:
+    """``fn()`` under the ledger deadline, or ``on_timeout(message)``.
+
+    The read that outlives the deadline is abandoned, not cancelled: it ends
+    into nothing on its worker thread.
+    """
+    import concurrent.futures
+
+    from services.tracing import submit_in_context
+
+    global _ledger_pool
+    if _ledger_pool is None:
+        _ledger_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-ledger")
+    limit = _seconds_from_env("LEDGER_TOOL_DEADLINE_SECONDS", DEFAULT_LEDGER_DEADLINE_SECONDS)
+    future = submit_in_context(_ledger_pool, fn)
+    try:
+        return future.result(timeout=limit)
+    except concurrent.futures.TimeoutError:
+        return on_timeout(
+            f"I could not read the job ledger within {limit:g}s — the job store is slow to answer, "
+            "so I have no count to give. Try again shortly; **Jobs** reads the same store."
+        )
+
+
 def _seconds_from_env(name: str, default: float) -> float:
     """A positive number of seconds from ``DATAWRAP_<name>``, else ``DATAFLOW_<name>``."""
     raw = getenv_brand(name, "") or ""

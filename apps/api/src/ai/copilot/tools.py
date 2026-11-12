@@ -34,7 +34,13 @@ from .job_ledger import LIST_JOBS_TOOL
 from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
 from .parity_tools import PARITY_TOOL_DEFINITIONS
-from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
+from .tool_deadline import (
+    DEADLINE_TOOLS,
+    LEDGER_DEADLINE_TOOLS,
+    QUERY_DEADLINE_TOOLS,
+    run_ledger_read,
+    run_with_deadline,
+)
 from .tool_errors import safe_tool_error, unhandled_tool_error
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
@@ -2013,6 +2019,12 @@ class DataPilotTools:
                     lambda message: ToolResult(
                         name=name, success=False, output=None, error=message
                     ),
+                )
+            elif name in LEDGER_DEADLINE_TOOLS:
+                result = run_ledger_read(
+                    name,
+                    lambda: handler(**bound),
+                    lambda message: ToolResult(name=name, success=False, output=None, error=message),
                 )
             else:
                 result = handler(**bound)

@@ -46,6 +46,34 @@ def reset_context_cooldowns() -> None:
     """Forget which sources are cooling off, so the next turn redials them."""
     with _cooldown_lock:
         _cooling.clear()
+        _recent.clear()
+
+
+#: The preamble's ledger reads are reused for this long. Without it every turn,
+#: "hi" included, ran a whole-collection aggregate (review M6). Answers that
+#: state job numbers read the ledger themselves (``list_jobs``).
+CONTEXT_REUSE_S = 15.0
+_recent: dict[tuple[str, str], tuple[float, Any]] = {}
+
+
+def _reused(source: str, read: Callable[[], Any]) -> Callable[[], Any]:
+    """``read`` memoised per source and caller scope for :data:`CONTEXT_REUSE_S`."""
+    from services.workspace_filter import current_actor, current_workspace_filter, current_workspace_stamp
+
+    key = (source, f"{current_workspace_filter()!r}|{current_workspace_stamp(for_write=False)}|{current_actor()}")
+
+    def cached() -> Any:
+        now = time.monotonic()
+        with _cooldown_lock:
+            hit = _recent.get(key)
+        if hit and now - hit[0] < CONTEXT_REUSE_S:
+            return hit[1]
+        value = read()
+        with _cooldown_lock:
+            _recent[key] = (time.monotonic(), value)
+        return value
+
+    return cached
 
 
 def _gather(
@@ -148,10 +176,10 @@ class PilotContextBuilder:
         rag_on = (getenv_brand("PILOT_RAG") or "").lower() in {"1", "true", "on", "yes"}
         reads: dict[str, tuple[Callable[[], Any], Any]] = {
             "connectors": (self._read_connectors, []),
-            "recent_jobs": (self._read_jobs, []),
+            "recent_jobs": (_reused("recent_jobs", self._read_jobs), []),
             # The whole-history census: ``recent_jobs`` is a page of 8 and its
             # length was being stated as the number of jobs (audit H3).
-            "job_counts": (self._read_job_counts, {}),
+            "job_counts": (_reused("job_counts", self._read_job_counts), {}),
             "transfer_capabilities": (self._read_capabilities, {}),
         }
         if rag_on and message.strip():
