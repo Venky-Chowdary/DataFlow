@@ -260,7 +260,7 @@ def test_high_the_buffered_route_re_applies_its_population_and_is_compared_in_fu
     enforcement = (second.destination_summary or {}).get("reversibility_enforcement") or {}
     assert second.success is True, (second.error, enforcement)
     assert enforcement.get("resumed", {}).get("reapplied") is True, enforcement
-    assert all(c["rows_written"] == 7 and c["rows_checked"] >= 7 for c in enforcement["columns"]), enforcement
+    assert {(c["rows_checked"], c["rows_written"]) for c in enforcement["columns"]} == {(7, 7)}, enforcement
     assert all("resumed_from" not in c for c in enforcement["columns"]), enforcement
     assert "unverified" not in enforcement, enforcement
     assert _count(db) == 7
@@ -292,3 +292,22 @@ def test_medium_an_empty_stream_is_written_as_zero_rows_not_failed_as_an_empty_s
     # Every stream landed: no partial write behind an "empty source" failure.
     assert _q(dst, "SELECT (SELECT count(*) FROM people), (SELECT count(*) FROM orders), "
                    "(SELECT count(*) FROM items)") == [(30, 0, 7)]
+
+# ------------------------------------- Low: the staging route counts each written row once
+
+def test_low_the_staging_route_counts_the_stage_write_as_checked_not_written(tmp_path, fake):  # noqa: F811
+    from tests.test_reversibility_review3 import _ID, _exec, _q, _run, _sqlite_request
+
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    _exec(src, "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT)")
+    _exec(src, "INSERT INTO people VALUES (?, ?)", [(i, f"U{i}@EXAMPLE.COM") for i in range(1, 41)])
+    request = _sqlite_request(src, dst, mappings=[dict(_ID), dict(_RESUME_MAPS[1])])
+    request.write_via_staging = True
+    res = _run(fake, request)
+    summary = res.destination_summary or {}
+    enforcement = summary.get("reversibility_enforcement") or {}
+    assert res.success is True, (res.error, enforcement)
+    assert (summary.get("pre_ingestion_staging") or {}).get("enabled") is True, sorted(summary)
+    assert [(c["column"], c["rows_checked"], c["rows_written"]) for c in enforcement["columns"]] == [
+        ("email", 40, 40)], enforcement
+    assert _q(dst, "SELECT count(*) FROM people") == [(40,)]

@@ -277,6 +277,7 @@ def test_m1_a_stream_the_scan_cannot_read_first_is_named_in_the_gate_message(tmp
     ("2024-01-02T10:00:00+00:00", "sqlite", False),
     ("2024-01-02 10:00:00", "sqlite", True),         # no offset: the TZ carrier cannot keep it as given
     ("2024-01-02T10:00:00Z", "postgresql", True),    # stored as the session time zone's text
+    ("2024-01-02T10:00:00+00:00", "postgresql", True),  # SQLite's own RFC 3339 form: still the session's text (review 6)
     ("2024-01-02 10:00:00+00", "postgresql", True),
     ("2024-01-02T10:00:00Z", "supabase", True),
 ])
