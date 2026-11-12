@@ -51,11 +51,17 @@ import services as _canonical_services  # noqa: E402,F401
 # value would shadow every test that monkeypatches DATAFLOW_DATA_DIR to
 # isolate itself — those tests would all share one dir and pollute each
 # other. With only the fallback var set, a test patching either var wins.
+import atexit  # noqa: E402
+import shutil  # noqa: E402
 import tempfile  # noqa: E402
 
-os.environ.setdefault(
-    "DATAFLOW_DATA_DIR",
-    tempfile.mkdtemp(prefix="df-suite-data-"))
+if not os.environ.get("DATAFLOW_DATA_DIR"):
+    # Created only when the caller set none, and removed when this process
+    # exits: one was left behind per pytest process before (about 10,000
+    # directories, ~490 MB, on one shared machine in a day).
+    _suite_data_dir = tempfile.mkdtemp(prefix="df-suite-data-")
+    os.environ["DATAFLOW_DATA_DIR"] = _suite_data_dir
+    atexit.register(shutil.rmtree, _suite_data_dir, ignore_errors=True)
 
 # Uploads land in the suite's data directory, never in the source tree's
 # apps/api/uploads: a test that stored an upload (e.g. "orders.csv") left it
