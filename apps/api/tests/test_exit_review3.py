@@ -378,10 +378,11 @@ def test_h1_a_rehearsal_request_never_runs_as_another_job_and_the_sealed_part_is
     # The rehearsal's own job cannot run again either once the rehearsal is closed.
     with pytest.raises(ExtractRefused, match="is closed"):
         before_run(str(job["_id"]) if job.get("_id") else out["tables"][0]["job_id"], request, job_store())
-    # And the file layer never replaces a sealed extract, whoever asks.
+    # And the file layer never replaces a sealed extract, whoever asks. Exports land in the job's
+    # workspace folder (audit H-2), so the rehearsal's own job id is what reaches the sealed file.
     with pytest.raises(ValueError, match="never overwritten"):
-        land_export_bytes(request.destination, b'{"id": 1}\n', job_id="other", export_name=path.name,
-                          sync_mode="full_refresh_overwrite")
+        land_export_bytes(request.destination, b'{"id": 1}\n', job_id=out["tables"][0]["job_id"],
+                          export_name=path.name, sync_mode="full_refresh_overwrite")
     assert hashlib.sha256(path.read_bytes()).hexdigest() == sealed
 
 

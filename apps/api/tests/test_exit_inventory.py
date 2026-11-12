@@ -144,19 +144,23 @@ def test_store_update_is_compare_and_swap(file_store):
 
 @pytest.fixture()
 def world(ent, tmp_path):
-    (tmp_path / "sqlite").mkdir()
-    db = tmp_path / "sqlite" / "ledger.sqlite"
+    from services.embedded_volume import volume_workspace_dir
+
+    ws, other = ent.workspace("Exit"), ent.workspace("Exit elsewhere")
+    # The workspace's own area of the SQLite volume (a flat file has no provable owner).
+    area = volume_workspace_dir(tmp_path / "sqlite", ws)
+    area.mkdir(parents=True)
+    db = area / "ledger.sqlite"
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, amount NUMERIC)")
     conn.commit()
     conn.close()
-    ws, other = ent.workspace("Exit"), ent.workspace("Exit elsewhere")
     editor = ent.member(email="exit-editor@example.com", workspace_id=ws, role="editor")
     res = editor.post("/api/v1/connectors/saved", json={"name": "ledger", "type": "sqlite", "role": "source",
                                                          "database": str(db)})
     assert res.status_code == 200, res.text
     return {
-        "ws": ws, "editor": editor, "connector": res.json()["id"],
+        "ws": ws, "editor": editor, "connector": res.json()["id"], "db": db,
         "viewer": ent.member(email="exit-viewer@example.com", workspace_id=ws, role="viewer"),
         "stranger": ent.member(email="exit-stranger@example.com", workspace_id=other, role="admin"),
     }
@@ -228,7 +232,7 @@ def test_rehearsal_signoff_and_evidence_over_rest(ent, world, monkeypatch, tmp_p
 
     monkeypatch.setenv("DATAWRAP_EXPORTS_DIR", str(tmp_path / "exports"))
     monkeypatch.setenv("DATAFLOW_AUDIT_ANCHOR_STORE", str(tmp_path / "anchors.jsonl"))
-    conn = sqlite3.connect(str(tmp_path / "sqlite" / "ledger.sqlite"))
+    conn = sqlite3.connect(str(world["db"]))
     with conn:
         conn.executemany("INSERT INTO orders VALUES (?, ?)", [(i, i * 2) for i in range(1, 26)])
     conn.close()

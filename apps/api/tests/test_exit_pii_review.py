@@ -129,14 +129,18 @@ def test_gap1_a_changed_definition_needs_a_new_acknowledgement_and_it_can_be_wit
 
 
 def test_gap1_the_acknowledgement_routes_need_job_manage_and_workspace_write(ent):  # noqa: F811
-    (ent.tmp / "sqlite").mkdir(exist_ok=True)
-    db = ent.tmp / "sqlite" / "pii.sqlite"
+    from services.embedded_volume import volume_workspace_dir
+
+    ws, other = ent.workspace("Exit PII"), ent.workspace("Exit PII elsewhere")
+    # The workspace's own area of the SQLite volume (a flat file has no provable owner).
+    area = volume_workspace_dir(ent.tmp / "sqlite", ws)
+    area.mkdir(parents=True, exist_ok=True)
+    db = area / "pii.sqlite"
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE people (id INTEGER PRIMARY KEY, ssn TEXT)")
     conn.execute("INSERT INTO people VALUES (1, '078-05-1120')")
     conn.commit()
     conn.close()
-    ws, other = ent.workspace("Exit PII"), ent.workspace("Exit PII elsewhere")
     editor = ent.member(email="exit-pii-editor@example.com", workspace_id=ws, role="editor")
     viewer = ent.member(email="exit-pii-viewer@example.com", workspace_id=ws, role="viewer")
     stranger = ent.member(email="exit-pii-stranger@example.com", workspace_id=other, role="admin")

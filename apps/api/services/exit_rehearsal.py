@@ -267,6 +267,7 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
     """Start a rehearsal of ``system``: one extract job per declared table (contract 4)."""
     from services.exit_inventory import default_roles
     from services.exit_pii import snapshot as pii_snapshot
+    from services.export_paths import connector_export_scope
     from src.transfer.background import run_transfer_async
     from src.transfer.engine import get_transfer_engine
 
@@ -302,20 +303,23 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
                    "pii_acknowledged_at": (taken or {}).get("at")})
     engine = get_transfer_engine()
     launches: list[tuple[int, Any, str]] = []
-    for index, table in enumerate(tables):
-        try:
-            endpoint = _source_endpoint(rehearsal["source"], table, rehearsal["workspace_id"])
-            table["key_columns"] = _keys(table, endpoint)
-            req = extract_request(rehearsal, index, table, endpoint)
-            job_id = engine._create_pending_job(req)
-            _job_store().update_job_fields(job_id, {"exit_rehearsal_id": rid})
-            table.update(job_id=job_id, status="running", reason="Extracting.")
-            launches.append((index, req, job_id))
-        except Exception as exc:  # noqa: BLE001 - this table failed to start; the others still run
-            from services.parity_errors import safe_error
+    # Reading the source's key columns opens it as the system's workspace, also on a scheduled run
+    # with no request in play (its embedded file lives in that workspace's volume area).
+    with connector_export_scope(str(rehearsal.get("workspace_id") or "")):
+        for index, table in enumerate(tables):
+            try:
+                endpoint = _source_endpoint(rehearsal["source"], table, rehearsal["workspace_id"])
+                table["key_columns"] = _keys(table, endpoint)
+                req = extract_request(rehearsal, index, table, endpoint)
+                job_id = engine._create_pending_job(req)
+                _job_store().update_job_fields(job_id, {"exit_rehearsal_id": rid})
+                table.update(job_id=job_id, status="running", reason="Extracting.")
+                launches.append((index, req, job_id))
+            except Exception as exc:  # noqa: BLE001 - this table failed to start; the others still run
+                from services.parity_errors import safe_error
 
-            table.update(status="failed", reason=safe_error(exc, what="Starting the extract job", event=ERROR_EVENT,
-                                                                    reference=True))
+                table.update(status="failed", reason=safe_error(exc, what="Starting the extract job",
+                                                                event=ERROR_EVENT, reference=True))
 
     def record(doc: dict[str, Any]) -> None:
         doc["tables"] = tables
@@ -885,15 +889,19 @@ def verify(doc: dict[str, Any], jobs: dict[str, dict[str, Any]], *,
     measuring: every extracted table reads not proven with that reason.
     """
     from services.exit_completeness import MERKLE_ALGORITHM, merkle_root, rehearsal_verdict
+    from services.export_paths import connector_export_scope
 
     verify_started = datetime.now(timezone.utc)
     clock = time.monotonic()
-    tables = [
-        verify_table(doc, t, jobs.get(str(t.get("job_id") or ""), {}))
-        if t["status"] != "failed" and timed_out_after is None else
-        _not_verified(t, jobs.get(str(t.get("job_id") or ""), {}), float(timed_out_after or 0))
-        for t in doc["tables"]
-    ]
+    # The source is re-read as the system's workspace: its embedded SQLite/DuckDB file lives in that
+    # workspace's area of the shared volume, which no unscoped caller may open (review round 3, H3).
+    with connector_export_scope(str(doc.get("workspace_id") or "")):
+        tables = [
+            verify_table(doc, t, jobs.get(str(t.get("job_id") or ""), {}))
+            if t["status"] != "failed" and timed_out_after is None else
+            _not_verified(t, jobs.get(str(t.get("job_id") or ""), {}), float(timed_out_after or 0))
+            for t in doc["tables"]
+        ]
     verify_seconds = time.monotonic() - clock
     finished = datetime.now(timezone.utc)
     parts = [t["part"] for t in tables if t.get("part")]
