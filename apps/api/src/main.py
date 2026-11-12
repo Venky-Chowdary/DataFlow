@@ -139,6 +139,12 @@ async def lifespan(app: FastAPI):
     )
 
     warn_if_platform_aws_credentials_allowed(logging.getLogger("datawrap.security"))
+    from services.platform_gcp_azure_credentials import (
+        platform_gcp_azure_settings,
+        warn_if_platform_gcp_azure_credentials_allowed,
+    )
+
+    warn_if_platform_gcp_azure_credentials_allowed(logging.getLogger("datawrap.security"))
     from services.sso_authorization import warn_sso_auto_provision_without_domains
 
     warn_sso_auto_provision_without_domains(logging.getLogger("datawrap.security"))
@@ -181,6 +187,7 @@ async def lifespan(app: FastAPI):
                     "config_error_count": len(config_errors),
                     **local_file_settings(),
                     **platform_aws_settings(),
+                    **platform_gcp_azure_settings(),
                 },
             )
         except Exception as exc:

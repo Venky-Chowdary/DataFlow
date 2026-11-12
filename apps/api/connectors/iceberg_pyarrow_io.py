@@ -13,6 +13,10 @@ Only the second is a spelling problem rather than a missing feature, so the
 warehouse is written as a ``file://`` URI (see ``iceberg_catalog``) and this IO
 drops the slash the URI grammar requires and the filesystem does not accept.
 POSIX locations are returned untouched.
+
+Every FileIO here also refuses to open Google Cloud or Azure storage without
+the table's own credential (follow-up review 1): pyarrow would use the API
+host's identity (``services.platform_gcp_azure_credentials``).
 """
 
 from __future__ import annotations
@@ -42,6 +46,23 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
             return scheme, netloc, strip_uri_drive_slash(path)
         return scheme, netloc, path
 
+    def _initialize_gcs_fs(self) -> Any:
+        from services.platform_gcp_azure_credentials import gcs_fileio_refusal
+
+        _refuse(gcs_fileio_refusal(self.properties))
+        return super()._initialize_gcs_fs()
+
+    def _initialize_azure_fs(self) -> Any:
+        from services.platform_gcp_azure_credentials import azure_fileio_refusal
+
+        _refuse(azure_fileio_refusal(self.properties))
+        return super()._initialize_azure_fs()
+
+
+def _refuse(refusal: str) -> None:
+    if refusal:
+        raise ValueError(refusal)
+
 
 class KeyedS3PyArrowFileIO(LocalUriPyArrowFileIO):
     """Refuses to open S3 with the API process's AWS credentials (follow-up review 1, H2).
@@ -49,12 +70,17 @@ class KeyedS3PyArrowFileIO(LocalUriPyArrowFileIO):
     pyarrow's S3 filesystem falls back to the process's credential chain when
     the properties carry no keys. The properties are the merged ones the
     catalog hands the FileIO, so keys a REST catalog vends with a table count.
+    pyiceberg opens ``oss://`` with the same S3 filesystem.
     """
 
     def _initialize_s3_fs(self, netloc: str | None) -> Any:
         from services.platform_aws_credentials import s3_fileio_refusal
 
-        refusal = s3_fileio_refusal(self.properties)
-        if refusal:
-            raise ValueError(refusal)
+        _refuse(s3_fileio_refusal(self.properties))
         return super()._initialize_s3_fs(netloc)
+
+    def _initialize_oss_fs(self) -> Any:
+        from services.platform_aws_credentials import s3_fileio_refusal
+
+        _refuse(s3_fileio_refusal(self.properties))
+        return super()._initialize_oss_fs()

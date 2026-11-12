@@ -253,13 +253,15 @@ def test_a_fileio_built_outside_a_catalog_cannot_name_a_class(mode, evil):
 # --- the FileIO classes Datawrap ships still work ------------------------------
 
 
+# pyiceberg's plain PyArrowFileIO (named or inferred) is its local-URI subclass, which
+# refuses GCS / Azure without the table's own credential (secfu21).
 @pytest.mark.parametrize(
     ("server_io", "table_io", "expected"),
     [
-        ("pyiceberg.io.pyarrow.PyArrowFileIO", None, "PyArrowFileIO"),
+        ("pyiceberg.io.pyarrow.PyArrowFileIO", None, "LocalUriPyArrowFileIO"),
         ("pyiceberg.io.pyarrow.PyArrowFileIO", "pyiceberg.io.fsspec.FsspecFileIO", "FsspecFileIO"),
         (None, "connectors.iceberg_pyarrow_io.LocalUriPyArrowFileIO", "LocalUriPyArrowFileIO"),
-        (None, None, "PyArrowFileIO"),
+        (None, None, "LocalUriPyArrowFileIO"),
     ],
 )
 def test_the_fileios_datawrap_ships_are_accepted(mode, evil, server, server_io, table_io, expected):
