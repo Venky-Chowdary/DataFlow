@@ -127,7 +127,11 @@ def named_window(key: str, *, now: datetime | None = None, zone: str | None = No
             "day": timedelta(days=n), "week": timedelta(weeks=n),
         }[unit]
         plural = unit if n == 1 else unit + "s"
-        return build(f"the last {n} {plural}", f"to {current.strftime('%H:%M')}", current - span, current)
+        # Elapsed time, not wall-clock arithmetic: on a DST day "the last 24
+        # hours" taken on the local clock covered 23 or 25 real hours (review 2,
+        # C2a). The span is cut from the UTC instant; only the label is local.
+        end_utc = current.astimezone(timezone.utc)
+        return build(f"the last {n} {plural}", f"to {current.strftime('%H:%M')}", end_utc - span, end_utc)
     return None
 
 
