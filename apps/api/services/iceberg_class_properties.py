@@ -13,7 +13,11 @@ metadata a commit returns. pyiceberg 0.12's S3 signer (``s3.signer``) is
 looked up in a fixed registry, not imported.
 
 ``py-io-impl`` may name only a FileIO in :data:`ALLOWED_FILE_IO`. Any other
-class-name property (:func:`names_a_class`) is refused. The message names the
+class-name property (:func:`names_a_class`) is refused, and so is a registered
+auth manager that signs with the API host's own credentials (``google``:
+Application Default Credentials or a credentials file on the host; ``entra``:
+``DefaultAzureCredential``), which would send the platform's bearer token to
+the tenant's catalog server (follow-up review 1, secfu20). The message names the
 property and where it came from, and repeats no value. The operator's
 platform-AWS-credentials opt-in does not change this. Where each source is
 checked: ``connectors.iceberg_credential_guard`` and ``iceberg_catalog.load_catalog``
@@ -37,8 +41,11 @@ ALLOWED_FILE_IO = frozenset(
         "connectors.iceberg_pyarrow_io.KeyedS3PyArrowFileIO",
     }
 )
-#: pyiceberg's registered REST auth managers; any other ``auth.type`` is imported by path.
-_AUTH_TYPES = frozenset({"noop", "basic", "legacyoauth2", "oauth2", "google", "entra"})
+#: pyiceberg's registered REST auth managers that use only their configuration's
+#: secret; any other ``auth.type`` is imported by path, or (``google``, ``entra``)
+#: signs with the API host's own cloud credentials.
+_AUTH_TYPES = frozenset({"noop", "basic", "legacyoauth2", "oauth2"})
+_HOST_CREDENTIAL_AUTH_TYPES = frozenset({"google", "entra"})
 _CLASS_SUFFIXES = ("-impl", ".impl", "_impl", "credentials-provider", "credential-provider")
 
 SETTINGS = "in this connector's Iceberg settings"
@@ -83,6 +90,13 @@ def class_property_refusal(props: Any, where: str) -> str:
             auth_type = value.get("type")
             if value.get("impl") not in (None, ""):
                 return _message(f"{_shown(key)}.impl", where)
+            if isinstance(auth_type, str) and auth_type in _HOST_CREDENTIAL_AUTH_TYPES:
+                return (
+                    f"Iceberg property {_shown(key)}.type {where} selects an auth manager that signs "
+                    "with the API host's own cloud credentials. Datawrap does not send the platform's "
+                    "credentials to a workspace's catalog. Authenticate with this connector's own "
+                    "token or credential instead."
+                )
             if auth_type is not None and not (isinstance(auth_type, str) and auth_type in _AUTH_TYPES):
                 return _message(f"{_shown(key)}.type", where)
         elif names_a_class(key) and value not in (None, ""):
