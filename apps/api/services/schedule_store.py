@@ -813,6 +813,10 @@ class _WriteSuperseded(Exception):
     """Another writer already stored what this conditional write was for."""
 
 
+class _ScheduleGone(Exception):
+    """The schedule was deleted between this caller's read and its write."""
+
+
 class _OutcomeStale(Exception):
     """The schedule moved after the run's outcome was decided on it: decide again."""
 
@@ -834,7 +838,9 @@ class _RunWrite:
     ``reload_if_moved`` is set when the write carries a run outcome decided on
     the loaded copy: if the stored revision moved, the outcome is decided again
     on it (:class:`_OutcomeStale`) instead of being merged over a newer write —
-    an operator's rejection, or the plan the finding has to bind to.
+    an operator's rejection, or the plan the finding has to bind to. A guarded
+    schedule that is gone raises :class:`_ScheduleGone`: the run was not
+    recorded, so nothing about it may be announced.
     """
 
     schedule_id: str
@@ -874,6 +880,8 @@ def _save_one_mongo(
     for _attempt in range(_SAVE_CAS_ATTEMPTS):
         existing = coll.find_one({"_id": sched.id})
         if existing is None:
+            if guard is not None:
+                raise _ScheduleGone(sched.id)
             if base is not None:
                 logging.getLogger(__name__).info(
                     "Schedule %s was deleted concurrently; stale copy not re-inserted",
@@ -2903,6 +2911,10 @@ def mark_schedule_run(
     appended to the capped ``run_history``. ``cursor_value`` advances the
     incremental watermark so the next run only reads new rows. ``outcome``
     (:class:`RunOutcome`) lands in the same store write as the claim release.
+
+    None when the schedule does not exist, also when it was deleted between
+    this read and this write (nothing was recorded; ``outcome.recorded`` stays
+    False).
     """
     with _CLAIM_LOCK:
         return _mark_schedule_run_locked(
@@ -2994,6 +3006,8 @@ def _mark_schedule_run_once(
                 _save_all(schedules, guard=guard)
             except _WriteSuperseded:
                 return next((x for x in _load_all() if x.id == schedule_id), None)
+            except _ScheduleGone:
+                return None
             outcome.recorded = True
             return schedules[i]
         missed = count_missed_windows(
@@ -3052,6 +3066,11 @@ def _mark_schedule_run_once(
             # Another replica's finalizer recorded this run between this read
             # and this write: its record and its outcome stand.
             return next((x for x in _load_all() if x.id == schedule_id), None)
+        except _ScheduleGone:
+            # Deleted between this read and this write: nothing was recorded,
+            # so the caller announces nothing (no finding for a schedule that
+            # no longer exists), and the schedule is never re-created.
+            return None
         if outcome is not None:
             outcome.recorded = True
         if missed:

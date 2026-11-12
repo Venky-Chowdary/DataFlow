@@ -513,3 +513,51 @@ def test_a_concurrent_writer_waits_for_the_finalize(store, runner, monkeypatch):
     final = store.get_schedule(sched.id)
     assert final.run_count == 1 and final.last_status == "completed"
     assert final.approval_request["resolved_by"] == "operator@x"
+
+
+@mongo_only
+def test_a_schedule_deleted_while_its_run_is_recorded_asks_for_no_approval(
+    store, runner, monkeypatch, caplog
+):
+    """I4: a finding is never announced for a schedule that no longer exists."""
+    sched, _run = _claimed(store, "gone", "job-gone")
+    runner.jobs["job-gone"] = REFUSED_BY_GATE
+    state = _write_inside_finalize(store, monkeypatch, lambda: store.delete_schedule(sched.id))
+
+    with caplog.at_level("INFO"):
+        runner._finalize_run(sched.id, "job-gone", 0, _now())
+
+    assert not state["pending"], "the delete never landed inside the finalize"
+    assert store.get_schedule(sched.id) is None, "a deleted schedule came back"
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "approval.requested" not in events
+    assert events.count("schedule.run.give_up") == 1
+    # The job did fail: that is still said once (as before this fix).
+    assert runner.notified == [("job-gone", "failed")]
+
+
+@mongo_only
+@pytest.mark.parametrize("with_outcome", [True, False])
+def test_recording_a_run_on_a_schedule_deleted_meanwhile_reports_no_schedule(
+    store, monkeypatch, with_outcome
+):
+    sched, run_id = _claimed(store, f"gone-{with_outcome}", "job-x")
+    decided: list[str] = []
+
+    def decide(after):
+        decided.append(after.id)
+        return {"approval_request": {"id": "apr_x", "status": "open", "code": "RUN_REFUSED",
+                                     "job_id": "job-x", "occurrences": 1}}
+
+    outcome = store.RunOutcome(decide) if with_outcome else None
+    _write_inside_finalize(store, monkeypatch, lambda: store.delete_schedule(sched.id))
+
+    result = store.mark_schedule_run(
+        sched.id, "job-x", status="failed",
+        run_entry={"run_id": run_id, "job_id": "job-x", "status": "failed"}, outcome=outcome,
+    )
+
+    assert result is None
+    if outcome is not None:
+        assert decided == [sched.id] and outcome.recorded is False
+    assert store.get_schedule(sched.id) is None
