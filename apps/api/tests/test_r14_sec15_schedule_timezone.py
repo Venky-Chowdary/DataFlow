@@ -93,13 +93,15 @@ def test_route_disables_a_legacy_row_and_refuses_an_invented_zone(ent):
 
 
 def test_runner_backs_off_a_legacy_row(ent):
-    from services.schedule_runner import _back_off_transient
-    from services.schedule_store import get_schedule
+    from services.schedule_runner import _transient_backoff
+    from services.schedule_store import get_schedule, update_schedule
 
     ws = ent.workspace("Legacy tz runner")
     sched = _legacy(ws)
     before = datetime.now(timezone.utc)
-    _back_off_transient(sched.id, sched, "transient_source_error")
+    # What a finalized transient failure stores with its run (_finalize_run).
+    backoff_at, _delay = _transient_backoff(get_schedule(sched.id) or sched, before)
+    update_schedule(sched.id, {"next_run_at": backoff_at, "retry_at": None, "retry_attempt": 0})
     due = datetime.fromisoformat(str(get_schedule(sched.id).next_run_at))
     assert due.replace(tzinfo=due.tzinfo or timezone.utc) > before
 
