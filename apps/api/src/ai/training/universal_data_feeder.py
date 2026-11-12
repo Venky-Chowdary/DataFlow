@@ -52,20 +52,24 @@ class UniversalSchema:
     path: str = ""
 
 
+def default_upload_dirs(api_root: Path | None = None) -> list[str]:
+    """Upload directories read when the caller names none.
+
+    Never a test or fixture directory: those hold repo test data (the RBAC
+    route-permission map, golden files), not customer uploads, and Pilot and
+    production training must not treat them as datasets.
+    """
+    base = api_root or Path(__file__).resolve().parents[3]  # apps/api
+    return [str(base / "uploads"), str(base / "src" / "uploads")]
+
+
 class UniversalDataFeeder:
     """Feed universal data schemas into the training pipeline."""
 
     def __init__(self, upload_dirs: list[str] | None = None):
         #: upload stem -> why the parser refused it (round 10).
         self.unreadable: dict[str, str] = {}
-        base = Path(__file__).resolve().parents[3]  # apps/api
-        default_dirs = [
-            str(base / "uploads"),
-            str(base / "src" / "uploads"),
-            str(base / "tests" / "fixtures"),
-            str(base.parent / "api" / "uploads"),
-        ]
-        self.upload_dirs = upload_dirs or default_dirs
+        self.upload_dirs = upload_dirs or default_upload_dirs()
         self._parser = None
         self._feed_cache: list[UniversalSchema] | None = None
         self._feed_cache_at: float = 0.0

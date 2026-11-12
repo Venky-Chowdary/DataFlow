@@ -59,10 +59,14 @@ def test_parse_100k_rows():
     assert elapsed < 20, f"Parse took {elapsed:.1f}s for {ROW_COUNT} rows"
 
 
-def test_100k_csv_to_sqlite_scale_transfer(tmp_path: Path) -> None:
+def test_100k_csv_to_sqlite_scale_transfer(tmp_path: Path, monkeypatch) -> None:
     """End-to-end 100k CSV -> SQLite with strict reconciliation must pass."""
     if not FIXTURE.exists():
         pytest.skip("Scale fixture not generated")
+    # tests/fixtures is not an upload directory (PR 410 took it out of the
+    # dataset roots), so a transfer may not read it unless the operator
+    # declares it a source root, as this benchmark does.
+    monkeypatch.setenv("DATAWRAP_SOURCE_PATH_ROOTS", str(FIXTURE.parent))
 
     db_path = tmp_path / "scale.db"
     request = TransferRequest(
