@@ -2900,9 +2900,9 @@ def _stream_database_transfer_impl(
                     removed_on_read=removed_on_read_total,
                 ),
             )
-        if run.cfg.columns and (getattr(run.cfg.destination, "extra", None) or {}).get(
+        if run.cfg.columns and (run.cfg.total_rows == 0 or (getattr(run.cfg.destination, "extra", None) or {}).get(
             "create_empty_source"
-        ):
+        )):  # measured empty: one stream of several has no engine peek of its own (review 6)
             written_n, checksum, empty_summary = _stream._write_batch(
                 run.cfg.dest_type,
                 run.cfg.destination,

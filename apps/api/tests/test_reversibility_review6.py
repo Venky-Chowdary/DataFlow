@@ -13,6 +13,8 @@ import uuid
 
 import pytest
 
+from tests.test_reversibility_review3 import fake  # noqa: F401
+
 # ------------------------------------- High: the backstop is resume-aware
 
 _RESUME_MAPS = [
@@ -262,3 +264,31 @@ def test_high_the_buffered_route_re_applies_its_population_and_is_compared_in_fu
     assert all("resumed_from" not in c for c in enforcement["columns"]), enforcement
     assert "unverified" not in enforcement, enforcement
     assert _count(db) == 7
+
+# ------------------------------------- Medium: an empty stream in a multi-stream run
+
+@pytest.mark.parametrize("mode", ["full_refresh_overwrite", "full_refresh_append"])
+def test_medium_an_empty_stream_is_written_as_zero_rows_not_failed_as_an_empty_source(tmp_path, fake, mode):  # noqa: F811
+    from tests.test_reversibility_review3 import _ID, _exec, _q, _run, _sqlite_request
+
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    specs = (("people", "email", 30), ("orders", "note", 0), ("items", "label", 7))
+    up = dict(_RESUME_MAPS[1])
+    for table, col, n in specs:
+        _exec(src, f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, {col} TEXT)")
+        if n:
+            _exec(src, f"INSERT INTO {table} VALUES (?, ?)", [(i, f"V{i}") for i in range(1, n + 1)])
+        if mode == "full_refresh_append":
+            _exec(dst, f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, {col} TEXT)")
+    contracts = [{"name": t, "primary_key": ["id"], "selected": True,
+                  "mappings": [dict(_ID), dict(up, source=c, target=c)]} for t, c, _n in specs]
+    res = _run(fake, _sqlite_request(src, dst, mappings=[], stream_contracts=contracts, sync_mode=mode))
+    enforcement = (res.destination_summary or {}).get("reversibility_enforcement") or {}
+    assert res.success is True, (res.error, enforcement)
+    assert res.records_transferred == 37
+    assert enforcement.get("enforced") is True, enforcement
+    assert {(c["table"], c["rows_checked"], c["rows_written"]) for c in enforcement["columns"]} == {
+        ("people", 30, 30), ("orders", 0, 0), ("items", 7, 7)}, enforcement
+    # Every stream landed: no partial write behind an "empty source" failure.
+    assert _q(dst, "SELECT (SELECT count(*) FROM people), (SELECT count(*) FROM orders), "
+                   "(SELECT count(*) FROM items)") == [(30, 0, 7)]
