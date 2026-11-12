@@ -222,3 +222,30 @@ def test_save_artifacts_never_leaves_a_half_written_file(tmp_path, monkeypatch):
     assert conv_path.read_text(encoding="utf-8") == '{"previous": "complete run"}\n'
     leftovers = sorted(p.name for p in Path(agent.OUTPUT_DIR).iterdir() if p.name != "conversations.jsonl")
     assert leftovers == [], leftovers
+
+
+# --- the test suite's own default ------------------------------------------
+
+
+def test_suite_default_has_training_off():
+    """conftest turns training off so a TestClient never starts a CPU-bound run."""
+    from services.brand_env import getenv_brand
+
+    assert getenv_brand("TRAINING", "on").strip().lower() in ("off", "0", "false")
+
+
+def test_ci_api_test_jobs_turn_training_off():
+    yaml = pytest.importorskip("yaml")
+    root = Path(__file__).resolve().parents[3]
+    ci = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    step = next(s for s in ci["jobs"]["api-tests"]["steps"] if s.get("name") == "Run API tests")
+    assert str(step["env"]["DATAFLOW_TRAINING"]).lower() == "off"
+
+    full = yaml.safe_load((root / ".github" / "workflows" / "full-suite.yml").read_text(encoding="utf-8"))
+    suite_jobs = [
+        job for job in full["jobs"].values()
+        if any("pytest tests " in str(s.get("run", "")) for s in job.get("steps", []))
+    ]
+    assert suite_jobs
+    for job in suite_jobs:
+        assert str(job["env"]["DATAFLOW_TRAINING"]).lower() == "off"
