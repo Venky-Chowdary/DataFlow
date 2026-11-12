@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 
 import hmac
 
+from services.control_plane_store import ControlPlaneUnavailable
 from services.platform_config import docs_enabled
 from services.tenant_bind import principal_allowed_for_tenant
 
@@ -219,7 +220,14 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
         # Same statuses as the cookie path (review 5): disabled and banned.
         if stored and stored.get("status") in ("disabled", "banned"):
             return "disabled_user"
-        if _session_idled_out(token, email):
+        try:
+            idled_out = _session_idled_out(token, email)
+        except ControlPlaneUnavailable:
+            # The workspace idle policy is unreadable: neither allowed nor
+            # touched (touching would restart the idle clock). 503.
+            logger.warning("session idle policy unreadable; request refused with 503")
+            return "auth_store_unavailable"
+        if idled_out:
             return "session_idle_timeout"
         _heal_rekey_if_pending(stored, email)
         user = lookup_user(email)
@@ -359,7 +367,12 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     from services.auth_state import get_auth_state
     from services.session_policy import enforce_idle
 
-    if not enforce_idle(email=email, last_seen_at=doc.get("last_seen_at") or doc.get("created_at")):
+    try:
+        may_continue = enforce_idle(email=email, last_seen_at=doc.get("last_seen_at") or doc.get("created_at"))
+    except ControlPlaneUnavailable:
+        logger.warning("session idle policy unreadable; request refused with 503")
+        return "auth_store_unavailable"
+    if not may_continue:
         get_auth_state().revoke_session(doc["jti"])
         return "session_idle_timeout"
     request.state.cookie_session_jti = doc["jti"]
