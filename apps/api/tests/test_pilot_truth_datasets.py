@@ -169,3 +169,34 @@ def test_a_missing_upload_directory_is_reported_as_unread(upload_dir, monkeypatc
     response = pt.ask(pt.agent(), "list my datasets")
     assert pt.says_unreadable(response.answer), response.answer
     assert "uploaded" not in response.answer.split("could not read", 1)[0]
+
+
+@pytest.mark.parametrize("restarted", [False, True])
+def test_an_upload_volume_recreated_empty_is_reported_as_unread(payroll_in_a, upload_dir, restarted):
+    """Review 2, M2: the directory exists again, the uploads it recorded do not."""
+    import shutil
+
+    from services import file_parser
+
+    shutil.rmtree(upload_dir)
+    upload_dir.mkdir()  # the volume comes back empty, as a startup mkdir recreates it
+    if restarted:
+        file_parser._file_registry.clear()
+        file_parser._load_registry()
+    with acting_as("ws-A", "alice@a.example"):
+        response = pt.ask(pt.agent(), "list my datasets")
+    assert pt.says_unreadable(response.answer), response.answer
+    assert "**0** uploaded" not in response.answer, "a lost volume is not an empty workspace"
+
+
+def test_an_upload_deleted_by_its_owner_is_not_a_lost_volume(upload_dir):
+    from services.file_parser import store_upload
+
+    with acting_as("ws-A", "alice@a.example"):
+        kept = store_upload("kept.csv", PAYROLL)
+        gone = store_upload("gone.csv", PAYROLL)
+    Path(gone["path"]).unlink()
+    with acting_as("ws-A", "alice@a.example"):
+        response = pt.ask(pt.agent(), "list my datasets")
+    assert not pt.says_unreadable(response.answer), response.answer
+    assert "kept.csv" in response.answer and kept["file_id"]

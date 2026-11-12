@@ -9168,19 +9168,29 @@ def _collapse_underspecified(
 
 
 def _upload_dir_missing() -> bool:
-    """True when the configured upload directory is not there (a lost volume)."""
+    """True when the uploads cannot be read: the volume is gone, or came back empty.
+
+    A missing directory is a lost mount. But a startup ``mkdir`` recreates a
+    lost volume empty, so the directory existing proves nothing (review 2,
+    M2): when the upload registry records uploads in it and not one of their
+    files is there, the uploads were not read — it is not "0 uploads".
+    """
+    from pathlib import Path
+
     from services.brand_env import getenv_brand
     from services.platform_config import upload_dir
 
     raw = getenv_brand("UPLOAD_DIR", "").strip()
-    if raw:
-        from pathlib import Path
-
-        return not Path(raw).is_dir()
     try:
-        return not upload_dir().is_dir()
+        root = Path(raw) if raw else upload_dir()
+        if not root.is_dir():
+            return True
     except OSError:
         return True
+    from services.file_parser import recorded_upload_files
+
+    recorded, present = recorded_upload_files(root)
+    return recorded > 0 and present == 0
 
 
 def format_tool_results_for_llm(results: list[ToolResult]) -> str:
