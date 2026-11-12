@@ -61,7 +61,7 @@ import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { TrustReportTab } from "../components/parity/TrustReportTab";
 import { destHeadline, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
-import { readCoercedNullRows, formatStreamNames, jobEndpointLabels, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { readCoercedNullRows, formatStreamNames, jobDestinationPath, jobEndpointLabels, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
 import { IdentityAlignmentNote } from "../components/jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
@@ -845,9 +845,7 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
       const contractId = String(liveJob?.transfer_request?.contract_id || "").trim();
       const labels = jobEndpointLabels(liveJob, {
         source: liveJob?.source_name || "",
-        dest: liveJob
-          ? `${liveJob.destination_database || ""}.${liveJob.destination_collection || ""}`
-          : "",
+        dest: jobDestinationPath(liveJob),
       });
       const accepted = await confirm({
         title: mode === "full" ? "Re-sync from the start" : "Sync now",
@@ -1072,11 +1070,8 @@ export function JobsPage({ jobs: recentJobs, history: recentHistory, onRefresh, 
   const multiStream = streamNames.length >= 2;
   const routeLabels = jobEndpointLabels(liveJob ?? selected, {
     source: liveJob?.source_name || selected?.source_name || "",
-    dest: liveJob
-      ? `${liveJob.destination_database}.${liveJob.destination_collection}`
-      : selected
-        ? `${selected.destination_database}.${selected.destination_collection}`
-        : "",
+    // Only the parts the job has; empty falls back to jobEndpointLabels' own label.
+    dest: jobDestinationPath(liveJob ?? selected),
   });
   const explanationText = presentStoredExplanation(liveJob?.explanation, liveJob);
   const rejectedCount = readRejectedRows(liveJob);

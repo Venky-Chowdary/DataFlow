@@ -52,8 +52,13 @@ import {
   parityErrorMessage,
   rereadLabel,
   roleLabel,
+  signoffShortcut,
   parityIsLowerBound,
   parityRowsChecked,
+  parityUnknownCaption,
+  rowsDifferLabel,
+  unverifiableNotice,
+  verdictReasonDetail,
   shouldPollApplying,
   approveOutcome,
   assuranceTone,
@@ -281,6 +286,8 @@ export interface TrustReportViewProps {
   onOpenDetail?: () => void;
   /** The automatic re-read while a fix is applying stopped at its limit; say so. */
   pollStopped?: boolean;
+  /** The job's status: a failed run that never reached verification is said plainly. */
+  jobStatus?: string;
 }
 
 function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: ParityTone; detail?: string }> {
@@ -323,6 +330,7 @@ export function TrustReportView({
   onOpenGate8,
   onOpenDetail,
   pollStopped = false,
+  jobStatus,
 }: TrustReportViewProps) {
   const verdict = verdictPresentation(report);
   const { parity, confidence } = report;
@@ -333,6 +341,23 @@ export function TrustReportView({
   const doneFixes = report.fixes.filter((f) => f.status !== "proposed");
   const ringTone = report.verdict === "unexplained" ? "warn" : report.verdict === "unverifiable" ? "idle" : "ok";
   const signoffAnchor = `parity-signoff-${report.job_id}`;
+  const shortcut = signoffShortcut(report);
+  // The verdict pill is in the header; the notice says why it cannot be verified.
+  const notice = unverifiableNotice(report, jobStatus);
+  const reasonDetail = verdictReasonDetail(report);
+  const differLabel = rowsDifferLabel(report);
+  const kpis: Array<{ label: string; value: string; figure: boolean }> = [
+    { label: "rows in source", value: formatCount(parity.rows_source), figure: parity.rows_source != null },
+    { label: "rows in destination", value: formatCount(parity.rows_destination), figure: parity.rows_destination != null },
+    { label: "rows differ", value: differLabel, figure: /^[\d,]+$/.test(differLabel) },
+  ];
+  if (parity.rows_differ > 0) {
+    kpis.push({
+      label: "explained",
+      value: `${parity.explained.toLocaleString("en-US")} / ${parity.rows_differ.toLocaleString("en-US")}`,
+      figure: true,
+    });
+  }
   const tablesTitleId = useId();
 
   return (
@@ -356,35 +381,53 @@ export function TrustReportView({
           >
             Refresh
           </Button>
+          {/* Compact labels keep the toolbar on one row; the sign-off panel spells them out.
+              The Markdown report is always available; the signed pack exists only once signed (else 409). */}
           <Button
             size="sm"
             onClick={onExport}
             disabled={anyBusy}
             loading={busy?.kind === "export"}
-            loadingLabel="Exporting…"
+            loadingLabel="Downloading…"
             leadingIcon={<DtIcon name="download" size={14} />}
+            title="Download the trust report as Markdown, as it reads now."
           >
-            Export pack
+            Report (.md)
           </Button>
+          {report.signoff.status === "signed" && onDownloadSigned && (
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={onDownloadSigned}
+              disabled={anyBusy}
+              loading={busy?.kind === "pack"}
+              loadingLabel="Downloading…"
+              leadingIcon={<DtIcon name="download" size={14} />}
+              title="Download the signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature."
+            >
+              Signed pack (.json)
+            </Button>
+          )}
           {/* Not an anchor: the app routes on location.hash, so a #fragment would navigate away. */}
           <Button
             size="sm"
-            variant="primary"
+            variant={shortcut.primary ? "primary" : "ghost"}
+            title={shortcut.title}
             onClick={() => {
               const target = typeof document !== "undefined" ? document.getElementById(signoffAnchor) : null;
               target?.scrollIntoView?.({ behavior: "smooth", block: "start" });
               target?.focus({ preventScroll: true });
             }}
           >
-            Go to sign-off
+            {shortcut.label}
           </Button>
         </div>
       </header>
 
-      {report.verdict === "unverifiable" && report.verdict_reason && (
+      {notice && (
         <p className="df2-parity-notice is-warn" role="status">
           <DtIcon name="alert" size={14} />
-          <span>{report.verdict_reason}</span>
+          <span>{notice}</span>
         </p>
       )}
 
@@ -395,36 +438,23 @@ export function TrustReportView({
             tone={ringTone}
             lowerBound={parityIsLowerBound(report)}
             checked={parityRowsChecked(report)}
+            caption={parity.proven_equal_pct == null ? parityUnknownCaption(report) : undefined}
           />
-          <span className={badgeClass(verdict.tone)}>{verdict.label}</span>
         </div>
-        <div className="df2-parity-card">
-          <dl className="df2-parity-kpis">
-            <div className="df2-parity-kpi">
-              <dt>rows in source</dt>
-              <dd>{formatCount(parity.rows_source)}</dd>
-            </div>
-            <div className="df2-parity-kpi">
-              <dt>rows in destination</dt>
-              <dd>{formatCount(parity.rows_destination)}</dd>
-            </div>
-            <div className="df2-parity-kpi">
-              <dt>rows differ</dt>
-              <dd>{formatCount(parity.rows_differ)}</dd>
-            </div>
-            <div className="df2-parity-kpi">
-              <dt>explained</dt>
-              <dd>
-                {parity.explained.toLocaleString("en-US")} / {parity.rows_differ.toLocaleString("en-US")}
-              </dd>
-            </div>
+        <div className="df2-parity-card df2-parity-kpi-card">
+          {/* "explained n / m" means something only when rows differ; 3 or 4 tiles, never an orphan. */}
+          <dl className={`df2-parity-kpis is-${kpis.length}`}>
+            {kpis.map((kpi) => (
+              <div key={kpi.label} className="df2-parity-kpi">
+                <dt>{kpi.label}</dt>
+                <dd className={kpi.figure ? undefined : "is-unknown"}>{kpi.value}</dd>
+              </div>
+            ))}
           </dl>
           <p className="df2-parity-confidence">
             <b>How sure is this?</b> {confidence.statement}
           </p>
-          {report.verdict !== "unverifiable" && report.verdict_reason && (
-            <p className="df2-parity-muted">{report.verdict_reason}</p>
-          )}
+          {reasonDetail && <p className="df2-parity-muted">{reasonDetail}</p>}
         </div>
       </div>
 
@@ -759,7 +789,7 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
               : area === "signoff"
                 ? "Could not record your sign-off."
                 : next.kind === "export"
-                  ? "Could not export the evidence pack."
+                  ? "Could not download the Markdown report."
                   : next.kind === "pack"
                     ? "Could not download the signed pack."
                   : "Could not refresh the trust report.";
@@ -868,6 +898,7 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
       }
       onOpenGate8={onOpenGate8}
       onOpenDetail={onOpenDetail}
+      jobStatus={jobStatus}
     />
   );
 }

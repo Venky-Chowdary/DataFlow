@@ -6074,7 +6074,7 @@ export async function signParityReport(jobId: string, role: string, note?: strin
 /** The evidence pack as Markdown, signature included, for a download. */
 export async function downloadParityReportMarkdown(jobId: string): Promise<Blob> {
   const res = await apiFetch(parityReportUrl(jobId, "/export?format=markdown"));
-  if (!res.ok) throw await apiErrorFrom(res, "Could not export the evidence pack.");
+  if (!res.ok) throw await apiErrorFrom(res, "Could not download the Markdown report.");
   return res.blob();
 }
 
