@@ -60,6 +60,37 @@ async def run_background_training(runtime: TrainingRuntime) -> None:
         print(f"[!] Copilot training warning: {te}")
 
 
+def _admin_run(include_embedding_tune: bool, force: bool, stop_event):
+    from .training_agent import get_training_agent
+
+    return get_training_agent().run_full_training(
+        include_embedding_tune=include_embedding_tune, force=force, stop_event=stop_event,
+    )
+
+
+async def run_admin_training(runtime: TrainingRuntime, *, include_embedding_tune: bool, force: bool):
+    """An admin-requested run on the runtime's thread; await its ``TrainingRun``.
+
+    The event loop stays free, and lifespan shutdown stops the run.
+    """
+    return await runtime.run(_admin_run, include_embedding_tune, force, runtime.stop_event)
+
+
+def start_admin_training(runtime: TrainingRuntime, *, include_embedding_tune: bool, force: bool) -> asyncio.Task:
+    """Start an admin-requested run in the background (not tied to the request)."""
+
+    async def _background() -> None:
+        try:
+            run = await run_admin_training(
+                runtime, include_embedding_tune=include_embedding_tune, force=force,
+            )
+            logger.info("Admin training run %s: %s", run.id, run.status)
+        except Exception as exc:
+            logger.warning("Admin training run failed: %s", exc)
+
+    return runtime.start_task(_background(), name="training-admin")
+
+
 def schedule_training_on_transfer(filename: str, columns: list[str], row_count: int, samples: dict | None = None):
     """Ingest a completed transfer into training data (sync, lightweight)."""
     try:

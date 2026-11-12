@@ -71,6 +71,7 @@ class TrainingRuntime:
     def start_task(self, coro: Coroutine[Any, Any, Any], *, name: str) -> asyncio.Task:
         """Schedule a training coroutine; shutdown cancels it."""
         task = asyncio.create_task(coro, name=name)
+        self._tasks = [t for t in self._tasks if not t.done()]
         self._tasks.append(task)
         return task
 
@@ -130,3 +131,17 @@ class TrainingRuntime:
         logger.warning(
             "Training run still stopping after %.1fs; leaving its daemon thread", join_seconds,
         )
+
+
+def app_training_runtime(app: Any) -> TrainingRuntime:
+    """The app's ``TrainingRuntime``, which its lifespan shuts down.
+
+    The ``src.main`` lifespan always creates one. An app without that
+    lifespan (a bare router in a test or probe) gets one on first use; its
+    threads are daemons, so even unstopped they never block process exit.
+    """
+    runtime = getattr(app.state, "training_runtime", None)
+    if runtime is None:
+        runtime = TrainingRuntime()
+        app.state.training_runtime = runtime
+    return runtime

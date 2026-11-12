@@ -215,7 +215,9 @@ async def lifespan(app: FastAPI):
     )
     from .ai.training.training_runtime import TrainingRuntime
 
-    app.state.training_runtime = TrainingRuntime() if training_enabled else None
+    # Always one runtime: admin routes (/training-agent/run, /copilot/train)
+    # run on it even with background training off, and shutdown stops them.
+    app.state.training_runtime = TrainingRuntime()
 
     # Accept traffic immediately — do not block on HuggingFace / RAG init.
     app.state.ready = False
@@ -234,7 +236,7 @@ async def lifespan(app: FastAPI):
             print(f"[+] Knowledge Base: {get_pattern_count()} patterns, {get_synonym_count()} synonyms")
 
             training = app.state.training_runtime
-            if training is not None:
+            if training_enabled:
                 # Own daemon threads + stop event: shutdown never waits on a run.
                 app.state.training_task = training.start_task(
                     run_background_training(training), name="training-warmup")
@@ -355,7 +357,7 @@ async def lifespan(app: FastAPI):
             pass
     training = getattr(app.state, "training_runtime", None)
     if training is not None:
-        # Sets the stop event, cancels both training tasks, waits <= 1 s.
+        # Sets the stop event, cancels the training tasks, waits <= 1 s.
         await training.shutdown()
     try:
         from services.otel_logging import shutdown_otel_logging

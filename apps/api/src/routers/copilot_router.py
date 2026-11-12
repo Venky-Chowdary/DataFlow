@@ -1114,16 +1114,18 @@ async def copilot_models():
 
 
 @router.post("/train", response_model=TrainResponse)
-async def train_copilot(request: TrainRequest):
+async def train_copilot(request: TrainRequest, http_request: Request):
     """
     Run the separate Training Agent.
     Feeds universal data, synthesizes conversations, updates RAG knowledge.
+    Runs on the app's training runtime thread; API shutdown stops it.
     """
     try:
-        from ..ai.training.training_agent import get_training_agent
-        agent = get_training_agent()
-        run = await run_in_threadpool(
-            agent.run_full_training,
+        from ..ai.training.training_runtime import app_training_runtime
+        from ..ai.training.training_scheduler import run_admin_training
+
+        run = await run_admin_training(
+            app_training_runtime(http_request.app),
             include_embedding_tune=request.include_embedding_tune,
             force=request.force,
         )
