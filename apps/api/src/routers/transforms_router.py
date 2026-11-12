@@ -167,6 +167,10 @@ def create_project(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
     ws = resolve_write_workspace(request, workspace_id)
+    from services.body_id_ownership import assert_body_ids
+
+    # The destination and contract a project stores must be the caller's (review 3, Low).
+    assert_body_ids(request, connectors=(body.destination_connector_id,), contracts=(body.contract_id or "",))
     try:
         project = TransformProject(
             name=body.name,
@@ -212,6 +216,9 @@ def update_project(
         if body.name is not None:
             project.name = body.name
         if body.destination_connector_id is not None:
+            from services.body_id_ownership import assert_body_ids
+
+            assert_body_ids(request, connectors=(body.destination_connector_id,))
             project.destination_connector_id = body.destination_connector_id
         if body.contract_id is not None:
             project.contract_id = (body.contract_id or "").strip()

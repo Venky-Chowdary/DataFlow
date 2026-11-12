@@ -144,6 +144,10 @@ function validateQuery(language: QueryLanguage, code: string): string | null {
       new Function(trimmed);
       return null;
     } catch (e) {
+      // The hosted app's Content-Security-Policy has no 'unsafe-eval', so the
+      // browser refuses new Function with an EvalError. That is "cannot check
+      // here", not a syntax error: the server still validates the query.
+      if (e instanceof EvalError) return null;
       return `Invalid JavaScript syntax: ${(e as Error).message}`;
     }
   }

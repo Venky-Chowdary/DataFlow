@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from services.brand_env import getenv_brand
 from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
 from services.safe_errors import safe_http_exception
@@ -116,41 +115,36 @@ def _stamp_job_mapping_artifacts(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
-def _destination_data_region(endpoint) -> str | None:
-    """Infer the cloud region for S3-compatible destinations from host/endpoint."""
-    if endpoint.format not in ("s3", "dynamodb"):
-        return None
-    from connectors.aws_common import resolve_region
-
-    cfg = {
-        "host": endpoint.host or "",
-        "connection_string": endpoint.connection_string or "",
-        "endpoint_url": endpoint.endpoint_url or "",
-    }
-    region = resolve_region(cfg)
-    return region if region and region not in ("us-east-1", "") else None
+def _host_tenant_id(request) -> str:
+    """The tenant this request's custom domain resolved to (``TenantMiddleware``)."""
+    return str(getattr(request.state, "tenant_id", "") or "")
 
 
-def _residency_check(request, endpoint, allowed_region: str):
-    """Fail closed when the destination region conflicts with the workspace region.
+def _job_region(request, workspace_id: str, requested: str = "") -> str:
+    """The job's ``data_region`` tag: the workspace's own region wins over the
+    caller's (``services.data_residency``, audit H-4)."""
+    from services.data_residency import job_data_region
 
-    Only enforced when the tenant has a non-default region or when
-    DATAFLOW_RESIDENCY_STRICT is enabled.
+    return job_data_region(workspace_id, requested, host_tenant_id=_host_tenant_id(request))
+
+
+def _residency_check(request, endpoint, workspace_id: str):
+    """403 when the destination is outside the workspace's configured region.
+
+    The region is the workspace tenant's, never the request's; a destination
+    whose region cannot be established is refused too. The engine repeats the
+    check where every job is created (``services.data_residency``).
     """
-    if not allowed_region:
-        return
-    tenant_region = getattr(request.state, "data_region", "") or getenv_brand("DEFAULT_REGION", "us-east-1")
-    strict = getenv_brand("RESIDENCY_STRICT", "").lower() in ("1", "true", "yes")
-    if not strict and (not tenant_region or tenant_region == "us-east-1"):
-        return
-    dest_region = _destination_data_region(endpoint)
-    if not dest_region:
-        return
-    if dest_region != allowed_region:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Data residency violation: destination region '{dest_region}' does not match workspace region '{allowed_region}'.",
-        )
+    from services.data_residency import addressing_refusal_for, residency_refusal
+
+    # A connection option or extra not on the family's allowlist: 422 naming it
+    # (review round 3, H1/H2).
+    keyed = addressing_refusal_for(workspace_id, endpoint, host_tenant_id=_host_tenant_id(request))
+    if keyed:
+        raise HTTPException(status_code=422, detail=keyed)
+    refusal = residency_refusal(workspace_id, endpoint, host_tenant_id=_host_tenant_id(request))
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
 
 
 def _actor_email(request: Request) -> str:
@@ -550,11 +544,14 @@ async def introspect_endpoint_route(request: AnalyzeRequest, http_request: Reque
 
 
 @router.post("/map")
-async def map_columns_route(body: MapColumnsRequest):
+async def map_columns_route(body: MapColumnsRequest, request: Request):
     """
     Map source columns to destination columns using semantic engine.
     Uses real destination schema when target_columns are provided.
     """
+    from services.body_id_ownership import assert_body_ids
+
+    assert_body_ids(request, jobs=(str(body.job_id or ""),))  # review 3, body routes
     import sys
     from pathlib import Path
 
@@ -750,9 +747,15 @@ async def list_transfer_plans(limit: int = 50):
 
 
 @router.post("/plans")
-async def create_transfer_plan(body: CreatePlanRequest):
+async def create_transfer_plan(body: CreatePlanRequest, request: Request):
     from services.audit_log import append_audit_event
+    from services.body_id_ownership import assert_body_ids
     from services.transfer_plan_store import create_plan
+
+    # A plan stores its endpoints' connector ids: they must be the caller's (review 3, Low).
+    assert_body_ids(request, connectors=tuple(
+        str((side or {}).get("connector_id") or "") for side in (body.source, body.destination)
+    ))
 
     plan = create_plan(body.model_dump())
     append_audit_event(
@@ -1093,11 +1096,7 @@ async def execute_transfer_json(
     src = src_preview
     dst = dst_preview
     require_admin_for_endpoints(request, workspace_id, src, dst)
-    region = (
-        (body.data_region or "").strip()
-        or getattr(request.state, "data_region", "")
-        or "us-east-1"
-    )
+    region = _job_region(request, workspace_id, body.data_region or "")
     request_obj = TransferRequest(
         source=src,
         destination=dst,
@@ -1173,6 +1172,10 @@ async def execute_transfer_json(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
     )
+    from services.body_id_ownership import assert_body_ids as _assert_body_ids
+
+    # The plan and recipe a run uses must be the caller's (review 3, body routes).
+    _assert_body_ids(request, plans=(str(body.plan_id or ""),), recipes=(str(body.transform_recipe_id or ""),))
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import merge_plan_into_run
         try:
@@ -1195,7 +1198,11 @@ async def execute_transfer_json(
     else:
         plan_payload = None
 
-    _residency_check(request, dst, region)
+    _residency_check(request, dst, workspace_id)
+    from services.body_id_ownership import assert_body_ids
+
+    # Another workspace's contract answers like a missing one (review 3, Low).
+    assert_body_ids(request, contracts=(body.contract_id or "",))
     from src.transfer.contract_engine import stamp_request_contract
 
     plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
@@ -1607,11 +1614,7 @@ async def run_universal_transfer(
         except Exception:
             source_filter = {}
 
-    region = (
-        data_region.strip()
-        or getattr(request.state, "data_region", "")
-        or "us-east-1"
-    )
+    region = _job_region(request, workspace_id, data_region)
     request_obj = TransferRequest(
         source=source,
         destination=destination,
@@ -1775,7 +1778,7 @@ async def run_universal_transfer(
     if form_contracts is not None:
         request_obj.stream_contracts = form_contracts
 
-    _residency_check(request, destination, region)
+    _residency_check(request, destination, workspace_id)
 
     if form_risk_acceptance:
         try:
@@ -1791,8 +1794,10 @@ async def run_universal_transfer(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    from services.body_id_ownership import assert_body_ids
     from src.transfer.contract_engine import stamp_request_contract
 
+    assert_body_ids(request, contracts=(contract_id,))  # review 3, Low
     try:
         stamp_request_contract(
             request_obj,
@@ -2405,20 +2410,20 @@ async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request)
 
 
 @router.get("/download/{filename}")
-async def download_export(filename: str):
-    """Serve an exported file from the exports directory.
+async def download_export(filename: str, request: Request):
+    """Serve an export of the caller's own workspace.
 
-    The folder the writers use (``export_paths.exports_dir()``, which honours
-    ``DATAFLOW_EXPORTS_DIR``), not a second hard-coded copy of the default.
+    Looked up in the caller's workspace folder(s) under the exports folder
+    (``export_paths``, which honours ``DATAFLOW_EXPORTS_DIR``); a file left in
+    the flat folder by an earlier release is served only to its job's
+    workspace. Another workspace's export, a name that leaves the folder and a
+    name that does not exist all answer the same 404 (audit H-2).
     """
-    from services.export_paths import exports_dir
+    from services.export_paths import downloadable_export
+    from services.workspace_access import tenant_scope
 
-    export_dir = exports_dir()
-    file_path = export_dir / filename
-    # Security: refuse to serve files outside the exports directory
-    if not file_path.resolve().is_relative_to(export_dir.resolve()):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    if not file_path.exists():
+    file_path = downloadable_export(filename, tenant_scope(request))
+    if file_path is None:
         raise HTTPException(status_code=404, detail="Export not found")
     return FileResponse(file_path, filename=filename)
 

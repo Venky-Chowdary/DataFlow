@@ -56,11 +56,15 @@ def _connector(r9, *, ctype: str = "postgresql", name: str = "rb6 pg") -> str:
     return conn.id
 
 
-def _sqlite_args(tmp_path, name: str) -> dict:
+def _sqlite_args(tmp_path, name: str, workspace_id: str) -> dict:
     import sqlite3
 
-    (tmp_path / "sqlite").mkdir(exist_ok=True)
-    path = tmp_path / "sqlite" / f"{name.replace(' ', '_')}.db"
+    from services.embedded_volume import volume_workspace_dir
+
+    # The workspace's own area of the sqlite volume (review 3, H3).
+    folder = volume_workspace_dir(tmp_path.resolve() / "sqlite", workspace_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{name.replace(' ', '_')}.db"
     with sqlite3.connect(path) as db:
         db.execute("create table if not exists t (id integer primary key, v text)")
     return {"name": name, "type": "sqlite", "database": str(path)}
@@ -112,7 +116,7 @@ def test_workspace_editor_with_member_platform_label_acts_as_editor_over_mcp(r9,
     editor = "editor-rb6@example.test"
     r9.world.member(editor, "editor")
     e = r9.login(editor, PASSWORD, r9.acme)
-    args = _sqlite_args(tmp_path, "rb6 staged")
+    args = _sqlite_args(tmp_path, "rb6 staged", r9.acme)
     # REST lets the workspace editor create a connector; MCP must agree (it
     # read the platform label "member" -> viewer on 9c75ada4).
     res = _rest_call(e, "create_connector", args)
@@ -129,7 +133,7 @@ def test_api_key_is_capped_at_its_creator_current_role_over_mcp(r9, tmp_path):
     r9.world.member(lead, "admin")
     lead_client = r9.login(lead, PASSWORD, r9.acme)
     key = r9.world.mint_key("admin", by=lead_client, name="rb6-lead-key")
-    args = _sqlite_args(tmp_path, "rb6 capped")
+    args = _sqlite_args(tmp_path, "rb6 capped", r9.acme)
     first = _rest_call(r9.world.as_key(key), "create_connector", args)
     assert first.status_code == 200, first.text
 

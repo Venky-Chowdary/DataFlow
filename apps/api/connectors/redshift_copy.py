@@ -53,18 +53,25 @@ def resolve_redshift_copy_config(
     """Return staging config when both bucket and IAM role are present."""
     import os
 
-    getter = env_get or os.getenv
+    from services.brand_env import getenv_brand
+
+    plain_env = env_get or os.getenv
+
+    def _deployment_setting(name: str) -> Any:
+        """The deployment-wide fallback: DATAWRAP_ then DATAFLOW_ (or the caller's reader)."""
+        return env_get(name) if env_get is not None else getenv_brand(name)
+
     extra = extra if isinstance(extra, dict) else {}
     bucket = str(
         extra.get("staging_bucket")
         or extra.get("redshift_staging_bucket")
-        or getter("DATAFLOW_REDSHIFT_STAGING_BUCKET")
+        or _deployment_setting("DATAFLOW_REDSHIFT_STAGING_BUCKET")
         or ""
     ).strip()
     role = str(
         extra.get("iam_role")
         or extra.get("redshift_iam_role")
-        or getter("DATAFLOW_REDSHIFT_IAM_ROLE")
+        or _deployment_setting("DATAFLOW_REDSHIFT_IAM_ROLE")
         or ""
     ).strip()
     if not bucket or not role:
@@ -74,7 +81,7 @@ def resolve_redshift_copy_config(
     return RedshiftCopyConfig(
         bucket=bucket,
         iam_role=role,
-        region=str(extra.get("region") or extra.get("aws_region") or getter("AWS_REGION") or "").strip(),
+        region=str(extra.get("region") or extra.get("aws_region") or plain_env("AWS_REGION") or "").strip(),
         key_prefix=str(extra.get("staging_prefix") or "dataflow/redshift-stage").strip()
         or "dataflow/redshift-stage",
         endpoint_url=str(extra.get("endpoint_url") or extra.get("s3_endpoint") or "").strip(),

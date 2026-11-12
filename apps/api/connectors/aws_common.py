@@ -167,7 +167,7 @@ def resolve_region(cfg: dict[str, Any]) -> str:
     return "us-east-1"
 
 
-def boto3_client(service: str, cfg: dict[str, Any]):
+def boto3_client(service: str, cfg: dict[str, Any], *, workspace_id: str = ""):
     import boto3
     from botocore.config import Config
 
@@ -202,4 +202,10 @@ def boto3_client(service: str, cfg: dict[str, Any]):
     # endpoint) stays on the SDK default.
     if service == "s3" and (endpoint_url or cfg.get("path_style")):
         kwargs["config"] = Config(s3={"addressing_style": "path"})
-    return boto3.client(service, **kwargs)
+    client = boto3.client(service, **kwargs)
+    if service == "s3":
+        from connectors.s3_residency import install_bucket_region_guard
+
+        # The bucket's region decides where a write lands (review round 2, H3).
+        install_bucket_region_guard(client, cfg, workspace_id=workspace_id)
+    return client

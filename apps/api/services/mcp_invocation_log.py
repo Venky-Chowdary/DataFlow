@@ -10,12 +10,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.audit_log import append_audit_event
+from services.brand_env import getenv_brand
 from services.ops_events import emit_event
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "mcp_invocations.jsonl"
-MAX_ROWS = int(__import__("os").getenv("DATAFLOW_MCP_LOG_MAX", "2000"))
+MAX_ROWS = int(getenv_brand("DATAFLOW_MCP_LOG_MAX", "2000"))
 logger = logging.getLogger(__name__)
 
 
