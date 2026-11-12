@@ -33,6 +33,7 @@ from services.value_serializer import json_default
 from services.upload_limits import PayloadTooLarge, read_upload
 from services.connector_telemetry import connector_operation, driver_family
 from services.rbac import require_admin_connector_access
+from services import shutdown_signal
 from services.threadpool_handler import off_event_loop
 
 from ..services.file_parser import FileParser
@@ -1621,7 +1622,11 @@ async def stream_transfer_job(job_id: str, request: Request):
                 # The client reconnects (EventSource) or falls back to polling.
                 yield f"event: timeout\ndata: {json.dumps({'reason': 'stream_max_age'})}\n\n"
                 break
-            await asyncio.sleep(JOB_STREAM_POLL_SECONDS)
+            # On SIGTERM the stream ends at once so the server can run its
+            # shutdown; the client reconnects to another replica (ops review High 4).
+            if await shutdown_signal.sleep_unless_shutdown(JOB_STREAM_POLL_SECONDS):
+                yield f"event: shutdown\ndata: {json.dumps({'reason': 'server_restarting'})}\n\n"
+                break
 
     return StreamingResponse(
         event_generator(),

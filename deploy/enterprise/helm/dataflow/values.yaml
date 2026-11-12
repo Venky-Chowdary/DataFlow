@@ -34,8 +34,13 @@ api:
     readinessPath: /health/ready
   # Time between SIGTERM and SIGKILL. The API stops its background loops in
   # the lifespan teardown; preStop keeps the pod serving while the load
-  # balancer deregisters it.
+  # balancer deregisters it. After SIGTERM uvicorn waits at most
+  # gracefulShutdownSeconds for open connections (job streams end at once)
+  # before the teardown runs. The chart refuses a grace period shorter than
+  # preStopSleepSeconds + gracefulShutdownSeconds + the teardown's 25 s drain
+  # + 5.
   preStopSleepSeconds: 5
+  gracefulShutdownSeconds: 10
   terminationGracePeriodSeconds: 45
   nodeSelector:
     workload: api

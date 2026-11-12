@@ -100,6 +100,13 @@ async def lifespan(app: FastAPI):
     Railway ``/health`` liveness can pass within the healthcheck window.
     """
     apply_railway_defaults()
+    # SIGTERM sets a process-wide flag before uvicorn's own handler runs, so
+    # long-lived responses (the job stream) end at once and the teardown below
+    # is reached within --timeout-graceful-shutdown (ops review High 4).
+    from services import shutdown_signal
+
+    shutdown_signal.reset()
+    shutdown_signal.install()
     # Do not sys.exit here. The socket is not accepting yet, so a fatal
     # config used to fail Railway's /health probe as "service unavailable"
     # for the whole window. Liveness stays up; other routes return 503.
@@ -372,6 +379,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    shutdown_signal.request()
     warm = getattr(app.state, "warm_task", None)
     if warm and not warm.done():
         warm.cancel()
@@ -409,6 +417,8 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     print("[*] Datawrap API shutting down…")
+    # The process exits next; an in-process restart (tests) starts clean.
+    shutdown_signal.reset()
 
 
 _docs = "/docs" if docs_enabled() else None

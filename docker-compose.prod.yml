@@ -52,6 +52,10 @@ services:
       context: .
       dockerfile: Dockerfile.api
     restart: unless-stopped
+    # SIGTERM -> open connections (start-api.sh bounds them at 10 s) -> the
+    # lifespan teardown (drain up to 25 s) -> exit. Docker's default 10 s
+    # would kill the API before its teardown.
+    stop_grace_period: 45s
     env_file: .env
     environment:
       # Prefer DATAWRAP_*; DATAFLOW_* still accepted by dual-read during cutover.
