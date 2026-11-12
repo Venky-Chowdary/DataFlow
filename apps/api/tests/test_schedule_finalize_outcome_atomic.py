@@ -1239,3 +1239,76 @@ def test_a_back_off_on_a_schedule_deleted_meanwhile_is_not_reported(
     # The job did fail: that is still said once (as for a refusal, I4).
     assert events.count("schedule.run.give_up") == 1
     assert runner.notified == [("job-3", "failed")]
+
+
+# --- Finalizing again after a contended write (review round 2, L-E) -----------
+
+
+def test_a_rebuild_failure_finalized_again_is_audited_once(store, runner, monkeypatch):
+    """The beat re-finalizes a run whose first write lost; the rebuild fails once."""
+    import services.audit_coverage as audit_coverage
+    import services.schedule_recovery as recovery
+
+    sched, _run = _claimed(store, "rebuild-again", "job-rebuild")
+    store.update_schedule(sched.id, {"approval_request": {
+        "id": "apr_cont", "status": "open", "code": recovery.DESTINATION_CONTINUITY_CODE,
+        "job_id": "job-before", "occurrences": 1, "finding": "the destination changed",
+        "recovery": {"action": "rebuild", "job_id": "job-rebuild", "actor": "qa@x",
+                     "reason": "rebuild it", "started_at": _now().isoformat()},
+    }})
+    runner.jobs["job-rebuild"] = REFUSED_BY_GATE
+    audited: list[dict] = []
+    real = audit_coverage.record_security_event
+
+    def capture(action, **kw):
+        if action == "schedule.destination.recovered":
+            audited.append(kw)
+        return real(action, **kw)
+
+    monkeypatch.setattr(audit_coverage, "record_security_event", capture)
+    real_once, real_save = store._mark_schedule_run_once, store._save_all
+    attempts = _contend(store, monkeypatch, sched.id)
+    with pytest.raises(store.ScheduleWriteContended):
+        runner._finalize_run(sched.id, "job-rebuild", 0, _now())
+    assert attempts and store.get_schedule(sched.id).running is True
+    # The contention ends; the beat finalizes the finished job again.
+    monkeypatch.setattr(store, "_mark_schedule_run_once", real_once)
+    monkeypatch.setattr(store, "_save_all", real_save)
+
+    runner._finalize_run(sched.id, "job-rebuild", 0, _now())
+
+    final = store.get_schedule(sched.id)
+    assert final.run_count == 1 and final.running is False
+    assert [a.get("outcome") for a in audited] == ["failed"], audited
+    rec = (final.approval_request or {}).get("evidence", {}).get("recovery_context") or {}
+    assert rec.get("recovery", {}).get("outcome") == "failed", final.approval_request
+
+
+def test_a_retry_finalized_again_after_a_lost_write_is_reported_once(
+    store, runner, monkeypatch, caplog
+):
+    """The retry write lost (nothing parked): only the write that parks it reports it."""
+    runner.jobs["job-1"] = TRANSIENT
+    sched, _run = _claimed(store, "retry-again", "job-1", max_retries=1,
+                           retry_backoff_seconds=0)
+    real_retry = store.schedule_retry
+    calls: list[int] = []
+
+    def contended_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise store.ScheduleWriteContended("lost every attempt")
+        return real_retry(*args, **kwargs)
+
+    monkeypatch.setattr(store, "schedule_retry", contended_once)
+
+    with caplog.at_level("INFO"):
+        with pytest.raises(store.ScheduleWriteContended):
+            runner._finalize_run(sched.id, "job-1", 0, _now())
+        assert store.get_schedule(sched.id).running is True
+        runner._finalize_run(sched.id, "job-1", 0, _now())
+
+    parked = store.get_schedule(sched.id)
+    assert parked.retry_attempt == 1 and parked.running is False
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert events.count("schedule.run.retry") == 1, events
