@@ -330,3 +330,46 @@ def test_calendar_text_refusal_names_the_date_order_remedy_first():
     remedy = message.index("date order")
     assert all(remedy < message.index(other) for other in ("ISO-8601", "full refresh")), message
     assert "Declare the column" not in message[:remedy], message
+
+
+# --------------------------------------------------------------------------
+# The one-snapshot walk is bounded in time (it holds a snapshot on the source)
+# --------------------------------------------------------------------------
+
+
+def test_the_snapshot_walk_stops_at_its_time_budget_and_rereads_from_the_oldest(pg, monkeypatch):
+    """The count and the page walk share one REPEATABLE READ snapshot on the
+    customer's database. A long walk (many candidates, a slow destination check)
+    would hold that snapshot, and vacuum's horizon, open without limit. Past
+    DATAFLOW_COMMIT_SAFE_WALK_SECONDS the walk stops and the run takes the
+    conservative path: re-read from the oldest candidate, never a skipped row."""
+    from services import commit_safe_window as csw
+    from tests.test_commit_safe_review_round2 import _pg_cfg
+
+    _sql(f'CREATE TABLE "{SCHEMA}".wb (id int PRIMARY KEY, c int NOT NULL)')
+    _sql(f'INSERT INTO "{SCHEMA}".wb SELECT g, g FROM generate_series(1, 9) g')
+    horizon = str(_sql("SELECT txid_snapshot_xmin(txid_current_snapshot())", fetch=True)[0][0])
+    _sql(f'UPDATE "{SCHEMA}".wb SET c = c')  # every row is "late" against the horizon
+
+    monkeypatch.setattr(csw, "PG_CHECK_PAGE_ROWS", 2)
+    pages: list[int] = []
+
+    def delivered(page):
+        pages.append(len(page))
+        return []  # the destination holds every row
+
+    def probe():
+        return csw.probe_pg_late_rows(
+            {**_pg_cfg(), "schema": SCHEMA}, schema=SCHEMA, table="wb", cursor_column="c",
+            since_xmin=horizon, below="100", identity_columns=("id",), undelivered=delivered,
+        )
+
+    full = probe()
+    assert (full.count, full.checked, full.undelivered, full.min_cursor) == (9, 9, 0, None)
+    pages.clear()
+
+    monkeypatch.setenv("DATAFLOW_COMMIT_SAFE_WALK_SECONDS", "0")
+    cut = probe()
+    assert pages == [2], pages  # stopped after the first page
+    assert cut.count == 9 and cut.undelivered is None and cut.checked is None
+    assert cut.min_cursor == "1"  # re-read from the oldest candidate

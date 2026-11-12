@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
@@ -89,6 +90,11 @@ PG_XIP_MAX = 512
 #: Every probe connection runs under this statement timeout (milliseconds).
 PROBE_TIMEOUT_ENV = "DATAFLOW_COMMIT_SAFE_PROBE_TIMEOUT_MS"
 DEFAULT_PROBE_TIMEOUT_MS = 5_000
+#: The late-commit walk holds one REPEATABLE READ snapshot on the source (and
+#: so vacuum's horizon) while it pages; past this budget it stops and the run
+#: re-reads from the oldest candidate instead.
+WALK_SECONDS_ENV = "DATAFLOW_COMMIT_SAFE_WALK_SECONDS"
+DEFAULT_WALK_SECONDS = 30
 
 OVERLAP_SECONDS_ENV = "DATAFLOW_CURSOR_OVERLAP_SECONDS"
 OVERLAP_VALUES_ENV = "DATAFLOW_CURSOR_OVERLAP_VALUES"
@@ -918,6 +924,11 @@ def _plan_pg(
 # --------------------------------------------------------------------------
 
 
+def walk_seconds() -> int:
+    """Budget of one late-commit snapshot walk (``0`` = stop after one page)."""
+    return _env_int(WALK_SECONDS_ENV, DEFAULT_WALK_SECONDS)
+
+
 def probe_timeout_ms() -> int:
     """Statement timeout of every commit-safe probe connection (``0`` = none)."""
     return _env_int(PROBE_TIMEOUT_ENV, DEFAULT_PROBE_TIMEOUT_MS)
@@ -1235,6 +1246,14 @@ def probe_pg_late_rows(
             # candidate set between them, the walk never matches the count,
             # and every run of a busy table re-read it from its oldest edit.
             cur.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            budget = walk_seconds()
+            deadline = time.monotonic() + budget
+            # The server ends the snapshot even if this process stalls mid-walk
+            # (e.g. on the destination check between pages).
+            cur.execute(
+                "SELECT set_config('idle_in_transaction_session_timeout', %s, true)",
+                (str((budget * 1000) + max(probe_timeout_ms(), 1000)),),
+            )
             cur.execute(_PG_RELATION_SIZE_SQL, (*(schema or "public", table) * 2, PG_UNBOUNDED_PROBE_ROWS))
             est = cur.fetchone()
             est_rows = int(est[1]) if est and est[1] is not None else -1
@@ -1313,6 +1332,16 @@ def probe_pg_late_rows(
                             break
                         if len(page) < PG_CHECK_PAGE_ROWS:
                             missing = 0
+                            break
+                        if time.monotonic() >= deadline:
+                            # Out of budget: the unchecked rows all count, so
+                            # the run re-reads from the oldest candidate.
+                            logger.info(
+                                "commit-safe window: late-commit walk on %s.%s stopped after "
+                                "%d checked row(s) (%ss budget, %s)", schema, table, checked,
+                                budget, WALK_SECONDS_ENV,
+                            )
+                            missing, first_gap = None, None
                             break
                         last = rows[-1]
                 except Exception as exc:  # noqa: BLE001 — unchecked rows all count
