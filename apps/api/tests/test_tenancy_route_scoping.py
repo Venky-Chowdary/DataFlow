@@ -185,11 +185,16 @@ def _seed_job(world) -> Seeded:
         },
     )
 
+    # A real snapshot signal of this job, so the job-scoped signal routes are
+    # judged on something the owner can reach.
+    signal = world.admin_a.post(f"/api/v1/transfer/{job_id}/cdc/snapshots", json={"table": "t", "primary_key": "id"})
+    assert signal.status_code == 200, signal.text
+
     def intact() -> bool:
         job = get_mongodb_service().get_job(job_id) or {}
         return job.get("status") == "failed" and job.get("name") == SENTINEL
 
-    return Seeded({"job_id": job_id, "fix_id": "fix-1", "signal_id": "snap_000000000000"}, intact)
+    return Seeded({"job_id": job_id, "fix_id": "fix-1", "signal_id": signal.json()["id"]}, intact)
 
 
 def _seed_proposal(world) -> Seeded:
