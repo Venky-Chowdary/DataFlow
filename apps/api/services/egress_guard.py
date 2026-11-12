@@ -730,9 +730,14 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     new or changed target is audited, or refused under the enforce flag.
     """
     from connectors.aws_common import default_credentials_refusal
+    from services.iceberg_class_properties import iceberg_connector_class_refusal
     from services.platform_aws_credentials import iceberg_connector_refusal
 
-    platform_credentials = default_credentials_refusal(data) or iceberg_connector_refusal(data)
+    platform_credentials = (
+        default_credentials_refusal(data)
+        or iceberg_connector_class_refusal(data)
+        or iceberg_connector_refusal(data)
+    )
     if platform_credentials:
         return platform_credentials
     values = [str(data.get(key) or "") for key in _SAVE_TARGET_KEYS]

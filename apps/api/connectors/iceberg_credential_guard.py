@@ -17,6 +17,11 @@ own settings, so the check runs where each signer is built:
 
 ``DATAFLOW_ALLOW_PLATFORM_AWS_CREDENTIALS`` on (a single-tenant deployment)
 turns all three off (``services.platform_aws_credentials``).
+
+A FileIO's properties, the REST server's ``/v1/config`` answer and the
+metadata a commit returns are also refused when a property names a class
+Datawrap does not ship (``services.iceberg_class_properties``), whatever that
+setting says; ``load_catalog`` checks the connector's own settings.
 """
 
 from __future__ import annotations
@@ -24,6 +29,12 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+from services.iceberg_class_properties import (
+    COMMIT,
+    FILE_IO,
+    SERVER_CONFIG,
+    check_class_properties,
+)
 from services.platform_aws_credentials import iceberg_credentials_refusal, s3_fileio_refusal
 
 KEYED_S3_FILE_IO = "connectors.iceberg_pyarrow_io.KeyedS3PyArrowFileIO"
@@ -44,6 +55,7 @@ def file_io_properties(properties: Any) -> dict[str, Any]:
     them here; the keyed IO refuses only when S3 is opened, and a local
     warehouse still works.
     """
+    check_class_properties(properties, FILE_IO)
     merged = dict(properties or {})
     if s3_fileio_refusal(merged):
         merged[_PY_IO_IMPL] = KEYED_S3_FILE_IO
@@ -66,12 +78,22 @@ def guarded_catalog(base: type) -> type:
                 check_catalog_properties("glue", properties)
             super().__init__(name, *args, **properties)
 
+        def _fetch_config(self) -> None:  # REST: the server's defaults and overrides
+            super()._fetch_config()
+            check_class_properties(self.properties, SERVER_CONFIG)
+
         def _init_sigv4(self, session: Any) -> None:  # REST: after the server's overrides
             check_catalog_properties("rest", {**self.properties, "rest.sigv4-enabled": "true"})
             super()._init_sigv4(session)
 
         def _load_file_io(self, properties: Any = None, location: str | None = None) -> Any:
             return super()._load_file_io(file_io_properties(properties), location)
+
+        def commit_table(self, *args: Any, **kwargs: Any) -> Any:
+            response = super().commit_table(*args, **kwargs)
+            # The next write loads the location provider from these properties.
+            check_class_properties(response.metadata.properties, COMMIT)
+            return response
 
     Guarded.__name__ = Guarded.__qualname__ = f"Keyed{base.__name__}"
     return Guarded

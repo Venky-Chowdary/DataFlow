@@ -491,7 +491,12 @@ def load_catalog(endpoint: Any) -> Any:
     """Load or create a pyiceberg Catalog from endpoint configuration."""
     _ensure_pyiceberg()
     from connectors.iceberg_credential_guard import check_catalog_properties, guarded_catalog
+    from services.iceberg_class_properties import connector_class_refusal
 
+    # No class a tenant names, even one the parse would drop (follow-up review 1).
+    named_class = connector_class_refusal(endpoint)
+    if named_class:
+        raise ValueError(named_class)
     config = parse_iceberg_catalog_config(endpoint)
     catalog_type = config["catalog_type"]
     name = config["catalog_name"]
