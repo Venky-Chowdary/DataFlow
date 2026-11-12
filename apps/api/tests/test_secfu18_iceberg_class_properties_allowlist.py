@@ -11,7 +11,8 @@ from a table's load response (its config, its metadata properties, its
 storage credentials) and from a commit response.
 
 Only the FileIO classes Datawrap ships are accepted (pyiceberg's
-``PyArrowFileIO`` and ``FsspecFileIO`` and Datawrap's two PyArrow subclasses).
+``PyArrowFileIO`` and Datawrap's two PyArrow subclasses; FsspecFileIO was dropped
+in follow-up review 2, L1).
 Every other class-name property is refused before anything imports it, with a
 message that names the property and repeats no value. The operator's
 platform-AWS-credentials opt-in does not change this.
@@ -259,7 +260,8 @@ def test_a_fileio_built_outside_a_catalog_cannot_name_a_class(mode, evil):
     ("server_io", "table_io", "expected"),
     [
         ("pyiceberg.io.pyarrow.PyArrowFileIO", None, "LocalUriPyArrowFileIO"),
-        ("pyiceberg.io.pyarrow.PyArrowFileIO", "pyiceberg.io.fsspec.FsspecFileIO", "FsspecFileIO"),
+        # FsspecFileIO is no longer accepted (follow-up review 2, L1; tests/test_secfu26).
+        ("pyiceberg.io.pyarrow.PyArrowFileIO", "connectors.iceberg_pyarrow_io.KeyedS3PyArrowFileIO", "KeyedS3PyArrowFileIO"),
         (None, "connectors.iceberg_pyarrow_io.LocalUriPyArrowFileIO", "LocalUriPyArrowFileIO"),
         (None, None, "LocalUriPyArrowFileIO"),
     ],

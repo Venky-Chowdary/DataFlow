@@ -218,7 +218,8 @@ def _sql_catalog(tmp_path, **props):
 def test_a_catalogs_s3_fileio_without_keys(mode, tmp_path, s3_filesystems):
     catalog = _sql_catalog(tmp_path)
     # A REST server may name another FileIO with the table; it is not used while off.
-    io = catalog._load_file_io({"py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO"}, location="s3://bucket/wh/t")
+    # (Not FsspecFileIO: no setting may name it since follow-up review 2, L1.)
+    io = catalog._load_file_io({"py-io-impl": "pyiceberg.io.pyarrow.PyArrowFileIO"}, location="s3://bucket/wh/t")
     if mode == "off":
         assert type(io).__name__ == "KeyedS3PyArrowFileIO"
         with pytest.raises(ValueError) as caught:
@@ -226,7 +227,7 @@ def test_a_catalogs_s3_fileio_without_keys(mode, tmp_path, s3_filesystems):
         _refused(str(caught.value))
         assert s3_filesystems == []
     else:
-        assert type(io).__name__ == "FsspecFileIO"
+        assert type(io).__name__ == "LocalUriPyArrowFileIO"
 
 
 def test_a_fileio_with_vended_or_own_keys_opens_s3(mode, tmp_path, s3_filesystems):

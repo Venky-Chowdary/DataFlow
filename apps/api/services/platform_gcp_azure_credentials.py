@@ -22,7 +22,8 @@ single-tenant deployment whose connectors use the instance's Google or Azure
 identity. The API warns at every start and the security-settings snapshot
 records ``platform_gcp_azure_chain`` (a key the audit redaction leaves
 readable). An endpoint a property names never gets that identity, on or off.
-pyiceberg's ``FsspecFileIO`` would use gcsfs / adlfs, which are not installed.
+pyiceberg's ``FsspecFileIO`` would use gcsfs / adlfs (not installed); no setting
+may select it (``services.iceberg_class_properties.ALLOWED_FILE_IO``).
 """
 
 from __future__ import annotations

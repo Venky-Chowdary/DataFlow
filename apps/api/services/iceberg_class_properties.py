@@ -30,13 +30,16 @@ from collections.abc import Mapping
 from typing import Any
 
 PY_IO_IMPL = "py-io-impl"
-#: The FileIO classes Datawrap ships and uses: pyiceberg's own two (pyiceberg
-#: also picks them by a location's scheme) and Datawrap's local-URI and keyed
-#: S3 subclasses of ``PyArrowFileIO`` (``connectors.iceberg_pyarrow_io``).
+#: The FileIO classes Datawrap ships and uses: pyiceberg's ``PyArrowFileIO``
+#: (the guard substitutes its local-URI subclass) and Datawrap's local-URI and
+#: keyed S3 subclasses of it (``connectors.iceberg_pyarrow_io``), which refuse
+#: GCS / Azure / S3 without the table's own credential. Not
+#: ``pyiceberg.io.fsspec.FsspecFileIO`` (follow-up review 2, L1): its gs / gcs /
+#: abfs / abfss / hf filesystems (gcsfs, adlfs, huggingface_hub) fall back to the
+#: API host's identity and are not guarded; Datawrap never selects it.
 ALLOWED_FILE_IO = frozenset(
     {
         "pyiceberg.io.pyarrow.PyArrowFileIO",
-        "pyiceberg.io.fsspec.FsspecFileIO",
         "connectors.iceberg_pyarrow_io.LocalUriPyArrowFileIO",
         "connectors.iceberg_pyarrow_io.KeyedS3PyArrowFileIO",
     }
