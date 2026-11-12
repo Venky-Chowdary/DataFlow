@@ -37,27 +37,49 @@ _DETERMINISTIC_PHASES = frozenset(
 )
 
 
+#: The reason phrase a server sends with each status that is matched here.
+_STATUS_REASON = {"403": "forbidden", "429": "too many requests"}
+
+
 def _http_status(code: str) -> str:
-    """``code`` as an HTTP status, never as digits inside a port, host or id.
+    """``code`` as an HTTP status, read only where the message says it is one.
 
     A bare ``403`` matched ``port 40312 failed: Connection refused``, so a
     refused connection on about one ephemeral port in 180 parked as a
     credential refusal instead of being retried (the r5 schedule e2e flake).
+    Excluding the shapes a number took one by one (a port, a position, a row
+    count, an id) never ended: a key value (``Key (id)=(429)``), a column
+    width (``varying(429)``), a line, a character or an index each still read
+    as a status. So the code counts only in a status context:
 
-    Not a status: digits inside a number or name (``wh_4031``, ``40312``), a
-    dotted address or path (``10.0.0.7``, ``/v1/403x``), a hyphenated name
-    (``db-403.internal``), after ``port ``, ``port: ``, ``port=``, ``position ``
-    or ``id=``, or before ``rows`` (``inserted 403 rows``). A colon is not
-    excluded: compact JSON and logs write ``"code":403`` and ``status:429``, and a port of
-    exactly 403 or 429 is near-impossible (``host:4290`` is still excluded by
-    the digit after it). ``HTTP/403``, ``HTTP-429`` and ``E403`` are statuses
-    by their prefix, and ``403-forbidden`` by the word after it. Matched
-    against lower-cased text.
+    * after ``http`` (``HTTP 403``, ``HTTP/1.1 403``, ``HTTP-429``), ``status``
+      (``status=403``, ``statusCode: 403``, JSON ``"status":429``), ``code``
+      (``Error Code 403``, JSON ``"code":403``, ``code=E429``), ``error``
+      (``HTTP Error 403``, ``HTTPError: 403``, ``ApiError(429``) or
+      ``exception(`` (``AuthorizationException(403``), with only punctuation
+      or spaces between;
+    * at the very start of the message (``403 Client Error``, ``E403 ...``);
+    * in a recognised shape: ``(403)`` or ``[403]`` after a space,
+      ``403 Forbidden``, ``429 Too Many Requests``, ``403 Client Error``,
+      google-api-core's ``403 POST https://...`` and urllib3's
+      ``too many 429 error responses``.
+
+    Digits after it keep it a number (``40312``, ``403.5``, ``403-1``,
+    ``req_429abc``). Matched against lower-cased text.
     """
+    num = rf"{code}(?!\w|-\d|\.\d)"
+    alone = r"(?<![\w.:/-])"
     return (
-        rf"(?:(?<![\w./-])(?<!port )(?<!port: )(?<!port=)(?<!position )(?<!id=)"
-        rf"|(?<=\bhttp[/-])|(?<=\be))"
-        rf"{code}(?!\w|-\d|\.\d| rows?\b)"
+        r"(?:"
+        rf"(?:\bhttps?(?:/\d(?:\.\d)?)?|\bstatus(?:[ _]?code)?|\bcode|error|exception)"
+        rf"[\s:=(\[{{'\"/-]+e?{num}"
+        rf"|^e?{num}"
+        rf"|(?<!\S)[(\[]{num}[)\]]"
+        rf"|{alone}{num}[\s:'\"-]*{_STATUS_REASON[code]}"
+        rf"|{alone}{num} client error"
+        rf"|{alone}{num} (?:get|post|put|patch|delete|head) (?:https?://|/)"
+        rf"|too many {num} error responses"
+        r")"
     )
 
 
@@ -167,7 +189,7 @@ _TRANSIENT_PATTERNS: tuple[str, ...] = (
     r"too many connections|connection pool|max connections",
     r"temporarily unavailable|service unavailable|try again|please retry",
     r"broken pipe|eof occurred|reset by peer|network is unreachable",
-    r"rate limit|throttl|slow ?down|" + _http_status("429"),
+    r"rate limit|throttl|slow ?down|too many requests|" + _http_status("429"),
     r"50[0234] (server )?error|internal server error|bad gateway",
     r"worker (lost|died|terminated)|lease expired|heartbeat lost",
     r"warehouse .*(suspend|resum)|is being resumed",
