@@ -596,6 +596,16 @@ def _try_copy_fast_path(
         # A capture-once run must see every row it moves; server-to-server
         # copies never surface rows, so the journal takes the row path.
         return None
+    from services.copy_fast_path import note_copy_decline as _note_decline
+    from services.reversibility_enforce import enforced_columns
+
+    held_to = enforced_columns(mappings)
+    if held_to:
+        # A run that must be reversible checks these columns value by value as it
+        # writes; a server-to-server copy never surfaces a value to check.
+        _note_decline("reversibility is required: " + ", ".join(held_to[:6])
+                          + " must be checked row by row while writing")
+        return None
 
     # Studio may set source.table to the procedure stream name (e.g. get_orders).
     # COPY of a colliding real table would move the wrong population — refuse.

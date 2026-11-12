@@ -119,7 +119,14 @@ _REASON = {
     "default": "has blanks filled ({transform}); reversible only if no value is blank",
     "assume_timezone": "is read with an assumed zone ({transform}); reversible only if no value changes",
     "type_unknown": "has no declared {side} type, so whether it fits cannot be decided from types",
+    "not_analysed": "{why}",
 }
+
+#: How a conditional column is held to its condition when the run must be reversible (review 3, M3).
+#: ``at_execute``: Validate checked the sample, Execute checks every row. ``while_writing``: this run's
+#: transform stage checks every value and stops on the first that would change
+#: (:mod:`services.reversibility_enforce`). ``unavailable``: Execute cannot reach this mapping.
+AT_EXECUTE, WHILE_WRITING, UNAVAILABLE = "at_execute", "while_writing", "unavailable"
 
 
 def _norm(value: Any) -> str:
@@ -272,16 +279,29 @@ def _entry(source: str | None, target: str | None, stype: str | None, ttype: str
     body = template.format(
         target=target, stype=stype or "?", ttype=ttype or "?", **fmt
     )
-    reason = body if code == "row_change" else f"{name} {body}"
+    reason = body if code in {"row_change", "not_analysed"} else f"{name} {body}"
     if source and target and source != target and code != "rename":
         reason += f" (renamed to {target})"
     if kind == CONDITIONAL and check:
-        if check["status"] == "fits" and check.get("covers_population") is True:
+        enforcement = check.get("enforcement")
+        seen = (f"{check['rows_checked']} observed value(s) round-trip" if check["status"] == "fits"
+                else "no observed value to check it against")
+        if check["status"] == "does_not_fit":
+            reason += f"; {check['rows_not_fitting']} of {check['rows_checked']} observed value(s) would change"
+        elif enforcement == AT_EXECUTE:
+            reason += f"; checked on the sample ({seen}); enforced on every row at Execute"
+        elif enforcement == WHILE_WRITING:
+            reason += (f"; enforced while writing: every row is checked and the run stops on the first value that "
+                       f"would change ({seen} in the sample)")
+        elif enforcement == UNAVAILABLE:
+            reason += (f"; {seen} in the sample, but it cannot be enforced while writing on a mapping this stream "
+                       "inherits: declare the stream's own mappings")
+        elif check["status"] == "fits" and check.get("covers_population") is True:
             reason += (f"; every one of its {check['rows_checked']} value(s) round-trips and the check covered "
                        "the whole table, so it is invertible")
         elif check["status"] == "fits" and check.get("covers_population") is False:
-            reason += (f"; it fits the sample ({check['rows_checked']} observed value(s) round-trip), but will be "
-                       "blocked at Execute unless the whole table is checked (rows not sampled are not proven)")
+            reason += (f"; it fits the sample ({check['rows_checked']} observed value(s) round-trip); rows not "
+                       "sampled are not proven (under require reversibility every row is checked while writing)")
         elif check["status"] == "fits":
             reason += (f"; every one of the {check['rows_checked']} observed value(s) round-trips, "
                        "so it is invertible for the data seen (rows not sampled are not proven)")
@@ -298,11 +318,14 @@ def _entry(source: str | None, target: str | None, stype: str | None, ttype: str
     }
 
 
-def _covered(check: dict[str, Any], covers_population: bool | None) -> dict[str, Any]:
-    """The check, with whether it covered the whole source population (when that is said)."""
-    if covers_population is None:
-        return check
-    return {**check, "covers_population": bool(covers_population)}
+def _covered(check: dict[str, Any], covers_population: bool | None, enforce: str | None = None) -> dict[str, Any]:
+    """The check, with whether it covered the whole source population and how it is enforced (when said)."""
+    out = dict(check)
+    if covers_population is not None:
+        out["covers_population"] = bool(covers_population)
+    if enforce:
+        out["enforcement"] = enforce
+    return out
 
 
 def classify_mapping(
@@ -314,12 +337,18 @@ def classify_mapping(
     source_db: str = "",
     observed: Sequence[Any] | None = None,
     covers_population: bool | None = None,
+    enforce: str | None = None,
 ) -> dict[str, Any]:
     """The invertibility of one mapped column (see the module docstring).
 
     ``covers_population`` says whether ``observed`` is every row of the source
     (``None``: not said). A conditional column whose check fits counts as
-    invertible only when it is (:func:`_effective`, fail closed).
+    invertible only when it is (:func:`_effective`, fail closed) - or when the
+    run must be reversible and its condition is enforced on every row
+    (``enforce``: ``at_execute`` / ``while_writing``; ``unavailable`` when
+    Execute cannot reach the mapping). Only a column with a value rule (its
+    transform, the target type's cast, a type check) can be enforced: an
+    undeclared type stays open.
     """
     source = _norm(mapping.get("source")) or None
     target = _norm(mapping.get("target")) or source
@@ -350,7 +379,7 @@ def classify_mapping(
             return _entry(source, target, stype, ttype, [], INVERTIBLE, "type_preserving_bind")
         tcode = next((c for c in ("replace", "default", "assume_timezone") if transform.startswith(c)),
                      "normalize")
-        check = _covered(check_values(values, transform), covers_population)
+        check = _covered(check_values(values, transform), covers_population, enforce)
         return _entry(source, target, stype, ttype, transforms, CONDITIONAL, tcode, check, transform=transform)
     if kind == CONDITIONAL:
         side = "source" if not slog else "destination"
@@ -358,10 +387,12 @@ def classify_mapping(
         check = check_values(values, cast) if (code == "cast" and cast) else None
         if code in TYPE_CHECKED:
             check = check_type_values(code, values, ttype, strict_text)
+        # No value rule (an undeclared type, a cast with no engine parse): nothing to enforce row by row.
+        enforceable = check is not None
         if check is None:
             check = {"status": "not_checked", "rows_checked": 0, "rows_not_fitting": 0}
         return _entry(source, target, stype, ttype, transforms, CONDITIONAL, code,
-                      _covered(check, covers_population), side=side)
+                      _covered(check, covers_population, enforce if enforceable else None), side=side)
     if code == "identity" and source and target and source != target:
         code = "rename"
     return _entry(source, target, stype, ttype, transforms, INVERTIBLE, code)
@@ -434,17 +465,28 @@ def _effective(entry: dict[str, Any]) -> str:
     the rows checked were every source row (fail closed).
     """
     check = entry.get("check") or {}
-    if (entry["invertibility"] == CONDITIONAL and check.get("status") == "fits"
-            and check.get("covers_population") is True):
+    if entry["invertibility"] != CONDITIONAL or check.get("enforcement") == UNAVAILABLE:
+        return entry["invertibility"]
+    if check.get("status") == "fits" and check.get("covers_population") is True:
+        return INVERTIBLE
+    # Enforced on every row (review 3, M3): only a value already seen to change keeps it open.
+    if check.get("enforcement") in {AT_EXECUTE, WHILE_WRITING} and check.get("status") != "does_not_fit":
         return INVERTIBLE
     return entry["invertibility"]
+
+
+def enforced(entry: Mapping[str, Any]) -> bool:
+    """A conditional column let through because every row is (or will be) checked while writing."""
+    check = entry.get("check") or {}
+    return (entry.get("invertibility") == CONDITIONAL and check.get("enforcement") in {AT_EXECUTE, WHILE_WRITING}
+            and check.get("status") != "does_not_fit")
 
 
 def _sample_only(entry: dict[str, Any]) -> bool:
     """A conditional column that fits the sample, but the sample is not the whole table."""
     check = entry.get("check") or {}
     return (entry["invertibility"] == CONDITIONAL and check.get("status") == "fits"
-            and check.get("covers_population") is not True)
+            and check.get("covers_population") is not True and not check.get("enforcement"))
 
 
 def table_verdict(columns: list[dict[str, Any]], key_columns: Iterable[str] = ()) -> tuple[str, str]:
@@ -458,6 +500,15 @@ def table_verdict(columns: list[dict[str, Any]], key_columns: Iterable[str] = ()
                  or str(c.get("target") or "").lower() in keys]
     if not lossy and not open_:
         renamed = any(c["reason_code"] == "rename" for c in columns)
+        held_to = [c for c in columns if enforced(c)]
+        if held_to:
+            names = ", ".join(str(c.get("source") or c.get("target")) for c in held_to[:6])
+            how = ("checked on the sample and enforced on every row at Execute"
+                   if (held_to[0].get("check") or {}).get("enforcement") == AT_EXECUTE else
+                   "enforced while writing (the run stops on the first value that would change)")
+            return REVERSIBLE, (f"Every mapping is lossless or enforced: {names}"
+                                + (f" (+{len(held_to) - 6} more)" if len(held_to) > 6 else "")
+                                + f" {'is' if len(held_to) == 1 else 'are'} {how}.")
         return REVERSIBLE, ("Every mapping is lossless"
                             + (": renamed columns, widened or lossless types" if renamed else "")
                             + ", and no transform drops information.")
@@ -492,16 +543,19 @@ _READ_ROW_CHANGES = {
                          "returns."),
     "skip_rows": "the read skips the first {n} data row(s), so those rows cannot be rebuilt from the destination.",
     "skip_footer": "the read skips the last {n} data row(s), so those rows cannot be rebuilt from the destination.",
+    "header_row": ("the read takes its header from row {n}, so the {before} row(s) above it are not written and "
+                   "cannot be rebuilt from the destination."),
 }
 
 
 def population_entries(row_limit: int = 0, source_filter: Mapping[str, Any] | None = None, *,
-                       read_mode: str = "table", skip_rows: int = 0, skip_footer: int = 0) -> list[dict[str, Any]]:
+                       read_mode: str = "table", skip_rows: int = 0, skip_footer: int = 0,
+                       header_row: int = 0) -> list[dict[str, Any]]:
     """What writes only part of the source (or not the table itself): a lossy ``row_change`` each.
 
     A row cap, a source filter, a query or a stored procedure read in place of
     the table, and a file read window that drops data rows (``skip_rows`` /
-    ``skip_footer``).
+    ``skip_footer``, a header taken from a row below the first: ``header_row`` > 1).
     """
     out = []
     if int(row_limit or 0) > 0:
@@ -517,9 +571,10 @@ def population_entries(row_limit: int = 0, source_filter: Mapping[str, Any] | No
     ops = [("source_query", 0)] if read_mode == "query" else []
     ops += [("source_procedure", 0)] if read_mode == "procedure" else []
     ops += [(op, int(n or 0)) for op, n in (("skip_rows", skip_rows), ("skip_footer", skip_footer)) if int(n or 0) > 0]
+    ops += [("header_row", int(header_row))] if int(header_row or 0) > 1 else []
     for op, n in ops:
         entry = _entry(None, None, None, None, [op], LOSSY, "row_change", op=op)
-        entry["reason"] = _READ_ROW_CHANGES[op].format(n=n)
+        entry["reason"] = _READ_ROW_CHANGES[op].format(n=n, before=n - 1)
         out.append(entry)
     return out
 
@@ -541,8 +596,13 @@ def analyze_table(
     recipe_input_columns: Sequence[str] | None = None,
     read_window: Mapping[str, Any] | None = None,
     population_rows: int | None = None,
+    enforce: str | None = None,
 ) -> dict[str, Any]:
     """One table's ReversibilityTable (contract 1).
+
+    ``enforce`` says how conditional columns are held to their condition when
+    the run must be reversible (see :func:`classify_mapping`); ``None`` when
+    it need not be.
 
     ``recipe_input_columns`` are the columns the shape recipe reads (before any
     step); ``None`` when they are not known. ``read_window`` is how the source
@@ -567,7 +627,7 @@ def analyze_table(
         observed = [row.get(source) for row in rows] if source else []
         columns.append(classify_mapping(
             mapping, source_type=stypes.get(source, ""), target_type=ttypes.get(target, ""),
-            dest_db=dest_db, source_db=source_db, observed=observed, covers_population=covers,
+            dest_db=dest_db, source_db=source_db, observed=observed, covers_population=covers, enforce=enforce,
         ))
     for name in source_columns:
         if _norm(name) and _norm(name).lower() not in mapped:
@@ -583,11 +643,25 @@ def analyze_table(
     window = dict(read_window or {})
     columns.extend(population_entries(row_limit, source_filter, read_mode=str(window.get("read_mode") or "table"),
                                       skip_rows=_count(window.get("skip_rows")),
-                                      skip_footer=_count(window.get("skip_footer"))))
+                                      skip_footer=_count(window.get("skip_footer")),
+                                      header_row=_count(window.get("header_row"))))
+    return table_of(table, columns, key_columns)
+
+
+def table_of(table: str, columns: list[dict[str, Any]], key_columns: Sequence[str] = ()) -> dict[str, Any]:
+    """A ReversibilityTable around classified column rows."""
     verdict, reason = table_verdict(columns, key_columns)
     kind, note = rollback_note(table, verdict)
     return {"name": table, "verdict": verdict, "reason": reason, "rollback": kind,
             "rollback_note": note, "columns": columns}
+
+
+def not_analysed_table(table: str, why: str) -> dict[str, Any]:
+    """A selected stream the analysis could not read: open (never a pass), named with why (review 3, C1)."""
+    unchecked = {"status": "not_checked", "rows_checked": 0, "rows_not_fitting": 0}
+    entry = _entry(None, None, None, None, [], CONDITIONAL, "not_analysed", unchecked,
+                   why=f"{table} was not analysed: {why.rstrip('.')}")
+    return table_of(table, [entry])
 
 
 def build_report(
@@ -607,9 +681,11 @@ def build_report(
     """
     counts = {INVERTIBLE: 0, CONDITIONAL: 0, LOSSY: 0}
     lossy: list[dict[str, Any]] = []
+    held_to = 0
     for table in tables:
         for col in table["columns"]:
             counts[_effective(col)] += 1
+            held_to += int(enforced(col))
             if col["invertibility"] == LOSSY:
                 lossy.append({"table": table["name"], "column": col.get("source") or col.get("target") or "(rows)",
                               "reason_code": col["reason_code"], "reason": col["reason"]})
@@ -620,15 +696,17 @@ def build_report(
         verdict = NOT_REVERSIBLE
     else:
         verdict = PARTLY
-    reason = (f"{len(tables)} table(s): {counts[INVERTIBLE]} column(s) invertible, {counts[CONDITIONAL]} "
-              f"conditional and not shown to fit, {counts[LOSSY]} lossy.")
+    reason = (f"{len(tables)} table(s): {counts[INVERTIBLE]} column(s) invertible"
+              + (f" ({held_to} of them conditional and enforced on every row)" if held_to else "")
+              + f", {counts[CONDITIONAL]} conditional and not shown to fit, {counts[LOSSY]} lossy.")
     report = {
         "scope": scope, "subject_id": subject_id,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "verdict": verdict, "verdict_reason": reason, "require_reversibility": bool(require),
         "data_checked": {"rows": int(data_rows), "source": data_source if data_rows else "none",
                          "population_rows": None if population_rows is None else int(population_rows)},
-        "counts": {"invertible": counts[INVERTIBLE], "conditional": counts[CONDITIONAL], "lossy": counts[LOSSY]},
+        "counts": {"invertible": counts[INVERTIBLE], "conditional": counts[CONDITIONAL], "lossy": counts[LOSSY],
+                   "enforced": held_to},
         "lossy_columns": lossy, "tables": tables,
         "rollback_note": " ".join(t["rollback_note"] for t in tables),
     }
@@ -640,7 +718,8 @@ def build_report(
 _ROW_CHANGE_LABEL = {
     "limit": "row cap", "source_filter": "source filter", "rank_rows": "top rows only",
     "source_query": "source query", "source_procedure": "stored procedure", "skip_rows": "skipped leading rows",
-    "skip_footer": "skipped trailing rows", "filter_rows": "row filter", "divert_rows": "diverted rows",
+    "skip_footer": "skipped trailing rows", "header_row": "rows above the header",
+    "filter_rows": "row filter", "divert_rows": "diverted rows",
     "dedupe_rows": "dedupe", "unnest_json": "unnest", "nest_json": "nest", "scd2": "SCD2 history",
 }
 
@@ -657,18 +736,28 @@ def gate_for(report: Mapping[str, Any]) -> dict[str, Any]:
         return {"id": GATE_ID, "status": "skip",
                 "message": "Reversibility is not required for this transfer; the analysis is shown for review."}
     if report.get("verdict") == REVERSIBLE:
-        return {"id": GATE_ID, "status": "pass", "message": "Every table is reversible."}
+        held_to = [c for t in report.get("tables") or [] for c in t["columns"] if enforced(c)]
+        if not held_to:
+            return {"id": GATE_ID, "status": "pass", "message": "Every table is reversible."}
+        how = ("checked on the sample; enforced on every row at Execute"
+               if (held_to[0].get("check") or {}).get("enforcement") == AT_EXECUTE else
+               "enforced while writing: the run stops on the first value that would change")
+        return {"id": GATE_ID, "status": "pass",
+                "message": f"Every table is reversible. {len(held_to)} conditional column(s): {how}."}
     items: list[str] = []
     for t in report.get("tables") or []:
         open_ = [c for c in t["columns"] if _effective(c) != INVERTIBLE]
         # Each table's row changes once, by kind ("events: row cap, source filter"), never "events.(rows)" each.
         kinds = list(dict.fromkeys(row_change_label(c) for c in open_ if c["reason_code"] == "row_change"))
+        kinds += ["not analysed"] if any(c["reason_code"] == "not_analysed" for c in open_) else []
         if kinds:
             items.append(f"{t['name']}: {', '.join(kinds)}")
         items.extend(dict.fromkeys(
             f"{t['name']}.{c.get('source') or c.get('target') or '(column)'}"
             + (" (fits the sample only; the whole table was not checked)" if _sample_only(c) else "")
-            for c in open_ if c["reason_code"] != "row_change"))
+            + (" (cannot be enforced on an inherited mapping)"
+               if (c.get("check") or {}).get("enforcement") == UNAVAILABLE else "")
+            for c in open_ if c["reason_code"] not in {"row_change", "not_analysed"}))
     shown = "; ".join(items[:12]) + (f" (+{len(items) - 12} more)" if len(items) > 12 else "")
     return {
         "id": GATE_ID, "status": "block",

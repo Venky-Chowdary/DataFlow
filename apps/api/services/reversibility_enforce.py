@@ -1,0 +1,159 @@
+"""Writer-side enforcement of conditional columns when a run must be reversible (review 3, M3).
+
+The reversibility gate (:mod:`services.reversibility`) reads a sample: a
+conditional column (a normalising transform, a cast out of text, a
+value-dependent type fit) may fit every sampled row and still change a row the
+sample never saw - one inserted after the gate ran, one past the first page, a
+CDC event next week. So when ``require_reversibility`` is on, Execute stamps
+each such mapping (:func:`stamp`) and the transform stage every writer shares
+(``connectors.writer_common._convert_mapped_cell``) calls
+:func:`refuse_changed_value` on each value it converts: the first value whose
+exact text the conversion would change (or that the destination type would
+not keep) raises :class:`ReversibilityViolation`. The batch that holds it is
+not written and the run fails through the engine's own failure path (what
+earlier batches wrote is kept or undone exactly as for any writer failure).
+
+The error names the column, its rule and how many rows had been checked; never
+the value. With the flag off no mapping carries a stamp and none of this runs
+(one dictionary membership test per converted value is the whole footprint).
+"""
+
+from __future__ import annotations
+
+import threading
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+#: The mapping key Execute stamps on a conditional column it enforces while writing.
+STAMP = "reversibility_enforce"
+#: Destination summary key: which columns were enforced and how many rows were checked.
+SUMMARY_KEY = "reversibility_enforcement"
+
+_LOCK = threading.Lock()
+#: (job id, table, column) -> rows whose batch was checked and accepted. Bounded: a run that never
+#: reports (a crashed worker) is evicted by newer ones.
+_ROWS: OrderedDict[tuple[str, str, str], int] = OrderedDict()
+_MAX_TRACKED = 20_000
+
+
+class ReversibilityViolation(ValueError):
+    """A value would not round-trip on a run that must be reversible (the write stops)."""
+
+
+def _job_id() -> str:
+    from services.logging_config import current_job_id
+
+    return current_job_id() or ""
+
+
+def stamp(mapping: Any, *, table: str, column: str, code: str, transform: str = "", target_type: str = "",
+          job_id: str | None = None) -> bool:
+    """Mark ``mapping`` (the dict the writer will read) as enforced; ``False`` when it cannot be marked."""
+    if not isinstance(mapping, dict):
+        return False
+    job = _job_id() if job_id is None else job_id
+    mapping[STAMP] = {"job_id": job, "table": table, "column": column, "code": code,
+                      "transform": transform, "target_type": target_type}
+    with _LOCK:
+        _ROWS.setdefault((job, table, column), 0)
+        while len(_ROWS) > _MAX_TRACKED:
+            _ROWS.popitem(last=False)
+    return True
+
+
+def enforced_columns(mappings: Sequence[Any] | None) -> list[str]:
+    """Source columns of the mappings that carry the stamp (a server-side copy cannot check them)."""
+    return [str(m[STAMP].get("column") or m.get("source") or m.get("target") or "")
+            for m in mappings or [] if isinstance(m, dict) and isinstance(m.get(STAMP), dict)]
+
+
+def _is_null(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and "_" in value:
+        from services.transform_engine import _engine_cell_sentinel
+
+        return _engine_cell_sentinel(value) == "null"
+    return False
+
+
+def changes(rule: Mapping[str, Any], raw: Any, converted: Any, error: str | None = None) -> bool:
+    """Whether writing ``converted`` for the source value ``raw`` changes it (the gate's own round-trip rule)."""
+    if error:
+        return True  # a value the writer cannot convert does not land: that is a change
+    if _is_null(raw):
+        return not _is_null(converted)  # NULL filled in (``default:``)
+    from services.reversibility import strict_text
+
+    text = strict_text(raw)
+    if _is_null(converted) or strict_text(converted) != text:
+        return True
+    code = str(rule.get("code") or "")
+    from services.reversibility_types import TYPE_CHECKED, check_type_values
+
+    if code in TYPE_CHECKED:
+        return check_type_values(code, [raw], str(rule.get("target_type") or ""), strict_text)["status"] != "fits"
+    return False
+
+
+def refuse_changed_value(mapping: Mapping[str, Any], raw: Any, converted: Any, error: str | None = None) -> None:
+    """Raise :class:`ReversibilityViolation` when the stamped ``mapping`` would change ``raw``."""
+    rule = mapping.get(STAMP)
+    if not isinstance(rule, Mapping) or not changes(rule, raw, converted, error):
+        return
+    key = (str(rule.get("job_id") or ""), str(rule.get("table") or ""), str(rule.get("column") or ""))
+    with _LOCK:
+        checked = _ROWS.get(key, 0)
+    how = (f"its transform ({rule.get('transform')})" if rule.get("transform")
+           else f"the cast into {rule.get('target_type') or 'the destination type'}")
+    where = f"{key[1]}.{key[2]}" if key[1] else key[2]
+    raise ReversibilityViolation(
+        f"Reversibility is required and {where} would change under {how}: a value in the batch after the first "
+        f"{checked:,} checked row(s) does not round-trip ({rule.get('code')}). That batch was not written; "
+        "reversibility blocks partial write. Fix the value at the source, remove the transform, or turn off "
+        "require reversibility."
+    )
+
+
+def note_rows_checked(mappings: Sequence[Any] | None, first_row: int, rows: int) -> None:
+    """A batch (``rows`` rows from row number ``first_row``) passed every enforced column's check.
+
+    Called once per mapped batch. The same rows pass the transform stage more
+    than once (the write, then the verification's re-read), so the tally is the
+    highest row number that has passed, not a count of passes.
+    """
+    if rows <= 0:
+        return
+    reached = max(1, int(first_row or 1)) - 1 + int(rows)
+    for mapping in mappings or []:
+        rule = mapping.get(STAMP) if isinstance(mapping, dict) else None
+        if isinstance(rule, Mapping):
+            key = (str(rule.get("job_id") or ""), str(rule.get("table") or ""), str(rule.get("column") or ""))
+            with _LOCK:
+                _ROWS[key] = max(_ROWS.get(key, 0), reached)
+
+
+def summary(job_id: str, *, forget: bool = True) -> dict[str, Any] | None:
+    """{enforced, columns: [{table, column, rows_checked}]} for ``job_id``'s run, or ``None`` when none was."""
+    with _LOCK:
+        keys = [k for k in _ROWS if k[0] == job_id]
+        rows = [{"table": k[1], "column": k[2], "rows_checked": _ROWS[k]} for k in keys]
+        if forget:
+            for k in keys:
+                _ROWS.pop(k, None)
+    if not rows:
+        return None
+    return {"enforced": True, "columns": sorted(rows, key=lambda r: (r["table"], r["column"]))}
+
+
+def record_on_success(job_id: str, fields: dict[str, Any]) -> None:
+    """Keep the run's enforcement tally on its destination summary (read by the job's reversibility report)."""
+    found = summary(job_id)
+    if found is None:
+        return
+    dest = fields.get("destination_summary")
+    if isinstance(dest, dict):
+        dest[SUMMARY_KEY] = found
+    else:
+        fields["destination_summary"] = {SUMMARY_KEY: found}

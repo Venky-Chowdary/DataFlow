@@ -20,6 +20,8 @@ from sqlalchemy.engine import CursorResult
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.rule_compiler.apply import evaluate_contract
+from services.reversibility_enforce import STAMP as _REVERSIBILITY_STAMP
+from services.reversibility_enforce import note_rows_checked, refuse_changed_value
 from services.transform_engine import apply_transform
 from services.transform_resolver import LiveDestTypes, resolve_transform
 from services.value_serializer import (
@@ -2163,6 +2165,8 @@ def _convert_mapped_cell(
                         f"failed: {reason}"
                     )
                     break
+    if isinstance(mapping, dict) and _REVERSIBILITY_STAMP in mapping:  # reversible run: stop on a value that changes
+        refuse_changed_value(mapping, val, converted, err)
     return converted, err
 
 
@@ -2568,6 +2572,7 @@ def build_mapped_rows_with_details(
         if accepted_source_rows is not None:
             accepted_source_rows.append(row_number)
 
+    note_rows_checked(mappings, start_no, len(data_rows))  # counts only for reversibility-enforced columns
     return mapped, errors, rejected_details
 
 

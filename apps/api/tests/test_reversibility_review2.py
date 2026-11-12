@@ -171,14 +171,15 @@ def test_n2_a_conditional_column_fits_only_when_the_check_covered_the_whole_popu
     email = sampled["columns"][1]
     assert email["invertibility"] == CONDITIONAL and email["check"]["status"] == "fits"
     assert email["check"]["covers_population"] is False
-    assert "fits the sample" in email["reason"]
-    assert "will be blocked at Execute unless the whole table is checked" in email["reason"]
+    assert "fits the sample" in email["reason"] and "rows not sampled are not proven" in email["reason"]
     assert sampled["verdict"] == PARTLY
     # An unknown population is not assumed to be the sample (fail closed).
     assert _upper_table()["verdict"] == PARTLY
 
 
-def test_n2_execute_blocks_when_its_sample_is_not_the_whole_table():
+def test_n2_execute_enforces_a_sampled_conditional_column_instead_of_blocking_the_table():
+    """Review 3, M3 (reverses the review-2 block): the sample is checked, every row is enforced while writing."""
+    from services.reversibility_enforce import STAMP
     from services.reversibility_sources import execute_gate
 
     def req():
@@ -186,15 +187,21 @@ def test_n2_execute_blocks_when_its_sample_is_not_the_whole_table():
 
     types = {"id": "INTEGER", "email": "TEXT"}
     rows = [{"id": 1, "email": "A@X.COM"}, {"id": 2, "email": "B@X.COM"}]
-    assert execute_gate(req(), (_UPPER, types, types, rows, 2))["status"] == "pass"
-    blocked = execute_gate(req(), (_UPPER, types, types, rows, 3000))
+    for planned in ((_UPPER, types, types, rows, 2), (_UPPER, types, types, rows, 3000),
+                    (_UPPER, types, types, rows)):
+        maps = [dict(m) for m in planned[0]]
+        gate = execute_gate(req(), (maps, *planned[1:]))
+        assert gate["status"] == "pass" and "enforced while writing" in gate["message"], gate
+        # The writer's own mapping dict is marked: its transform stage checks every value.
+        assert STAMP not in maps[0] and maps[1][STAMP]["column"] == "email"
+    # A value already seen to change still blocks before any row is read.
+    bad = rows + [{"id": 3, "email": "c@x.com"}]
+    blocked = execute_gate(req(), ([dict(m) for m in _UPPER], types, types, bad, 3))
     assert blocked["status"] == "block" and "t.email" in blocked["message"]
-    assert "whole table" in blocked["message"]
-    # Without a source row count Execute cannot know the sample is the table: it blocks.
-    assert execute_gate(req(), (_UPPER, types, types, rows))["status"] == "block"
 
 
-def test_n2_validate_says_the_same_as_execute_for_a_sampled_plan():
+def test_n2_validate_says_checked_on_the_sample_and_enforced_at_execute():
+    """Review 3, M3 + M4: a plan's row count is the client's estimate and never proves coverage."""
     from services.reversibility_sources import plan_report
 
     rev = SimpleNamespace(mappings=_UPPER)
@@ -204,16 +211,28 @@ def test_n2_validate_says_the_same_as_execute_for_a_sampled_plan():
         source_schema={"id": "INTEGER", "email": "TEXT"}, target_schema={"id": "INTEGER", "email": "TEXT"},
         sample_rows=[{"id": 1, "email": "A@X.COM"}], policies={"require_reversibility": True},
         row_count_estimate=3000, active_revision=lambda: rev)
-    report = plan_report(plan)
-    assert report["gate"]["status"] == "block"
-    assert report["data_checked"] == {"rows": 1, "source": "plan_sample", "population_rows": 3000}
-    email = report["tables"][0]["columns"][1]
-    assert "will be blocked at Execute unless the whole table is checked" in email["reason"]
+    for estimate in (3000, 1, 0):
+        plan.row_count_estimate = estimate
+        report = plan_report(plan)
+        assert report["gate"]["status"] == "pass"
+        assert "checked on the sample; enforced on every row at Execute" in report["gate"]["message"]
+        assert report["data_checked"] == {"rows": 1, "source": "plan_sample", "population_rows": None}
+        email = report["tables"][0]["columns"][1]
+        assert email["check"] == {"status": "fits", "rows_checked": 1, "rows_not_fitting": 0,
+                                  "covers_population": False, "enforcement": "at_execute"}
+        assert "checked on the sample (1 observed value(s) round-trip); enforced on every row at Execute" \
+            in email["reason"]
+        assert report["counts"]["enforced"] == 1
+    # Not required: nothing is enforced, so the sample-only fit stays open (and is never called covered).
+    plan.policies = {}
     plan.row_count_estimate = 1
-    assert plan_report(plan)["gate"]["status"] == "pass"
+    open_report = plan_report(plan)
+    assert open_report["verdict"] == "partly_reversible" and open_report["gate"]["status"] == "skip"
+    assert open_report["tables"][0]["columns"][1]["check"]["covers_population"] is False
 
 
-def test_n2_engine_blocks_a_transform_that_fits_only_the_design_sample(tmp_path, fake_store):  # noqa: F811
+def test_n2_engine_stops_on_the_first_value_that_changes_beyond_the_design_sample(tmp_path, fake_store):  # noqa: F811
+    """Review 3, M3: the run is not blocked over its sample size; the writer fails closed on row 3000."""
     from tests.test_reversibility_review_fixes import _exec
 
     src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
@@ -221,8 +240,10 @@ def test_n2_engine_blocks_a_transform_that_fits_only_the_design_sample(tmp_path,
     rows = [(i, f"U{i}@EXAMPLE.COM") for i in range(1, 3000)] + [(3000, "mixed3000@Example.com")]
     _exec(src, "INSERT INTO people VALUES (?, ?)", rows)
     result = _execute(fake_store, src, dst, mappings=_UPPER)
-    assert not result.success and _blocked_by_g24(result), result.error
-    assert _dest_rows(dst) is None
+    assert not result.success and not _blocked_by_g24(result), result.error
+    assert "Reversibility is required and people.email would change" in str(result.error)
+    assert "mixed3000" not in str(result.error) and "Example.com" not in str(result.error)
+    assert "reversibility blocks partial write" in str(result.error)
 
 
 # ------------------------------------------- N3: type mappings still read as lossless

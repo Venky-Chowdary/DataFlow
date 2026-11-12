@@ -244,13 +244,16 @@ def _validate_reversibility(body: Any, source_types: dict[str, str], dest_types:
     """``g24_reversibility`` for a direct Validate that requires reversibility (else ``[]``).
 
     The same report Execute builds (``services.reversibility_sources``): the
-    Studio's sample checks conditional columns, and covers the table only when
-    it holds ``row_count`` rows. The report is also returned as ``reversibility``.
+    Studio's sample checks conditional columns, which Execute then enforces on
+    every row. ``row_count`` is the caller's figure, never a measured one, so
+    the sample is not said to cover the table (review 3, M4). The report is
+    also returned as ``reversibility``.
     """
     if not getattr(body, "require_reversibility", False):
         return []
     from types import SimpleNamespace
 
+    from services.reversibility import AT_EXECUTE
     from services.reversibility_sources import preflight_gate, request_report
 
     mappings = [m.model_dump() if hasattr(m, "model_dump") else dict(m) for m in body.mappings or []]
@@ -266,7 +269,7 @@ def _validate_reversibility(body: Any, source_types: dict[str, str], dest_types:
     report = request_report(request, mappings, dict(source_types or body.column_types or {}),
                             {**dict(dest_types or {}), **dict(body.destination_column_types or {})},
                             sample_rows=[r for r in body.sample_rows or [] if isinstance(r, dict)],
-                            population_rows=int(body.row_count) if body.row_count else None)
+                            population_rows=None, enforce=AT_EXECUTE)
     result["reversibility"] = report
     return [preflight_gate(report)]
 

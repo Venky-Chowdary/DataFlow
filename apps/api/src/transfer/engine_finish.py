@@ -105,8 +105,10 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
     # The next append compares against this run's baseline: record it before
     # "completed" is visible, never after (it reads the whole destination).
     from services.append_continuity import record_before_success_status
+    from services.reversibility_enforce import record_on_success
 
     record_before_success_status()
+    record_on_success(job_id, fields)  # a reversible run: which conditional columns were checked on every row
     written = mongo.update_job_status(job_id, status, **fields)
     if written is not False:
         return written
