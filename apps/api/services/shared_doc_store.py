@@ -36,6 +36,16 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from services.brand_env import getenv_brand
+from services.control_plane_bounds import (  # noqa: F401 - re-exported for callers and tests
+    bounded,
+    deadline,
+    note_outage,
+    operation_timeout_seconds,
+    outage_retry_at,
+    outage_seconds,
+    raise_if_recent_outage,
+    reset_outage_state,
+)
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -85,19 +95,31 @@ def control_store_backend() -> str:
 
 
 def _collection(name: str) -> Any | None:
-    """The shared collection, or None in file mode. Raises when it must exist and does not."""
+    """The shared collection, or None in file mode. Raises when it must exist and does not.
+
+    Every call on the returned collection is bounded (about 1 s) and an
+    unreachable database is remembered for a short window, so an outage costs
+    a request at most one short wait and never the client's 5 s timeout
+    (services.control_plane_bounds).
+    """
     if control_store_backend() == "file":
         return None
     from services.control_plane_store import ControlPlaneUnavailable, shared_collection
 
-    coll = shared_collection(name)
+    raise_if_recent_outage()
+    try:
+        with deadline():  # a reconnect attempt is bounded like any other call
+            coll = shared_collection(name)
+    except ControlPlaneUnavailable as exc:
+        note_outage(exc)
+        raise
     if coll is None:
         raise ControlPlaneUnavailable(
             f"{BACKEND_SETTING}=mongo (or MULTI_REPLICA=1) needs a MongoDB control-plane "
             "database, and none is connected. Configure MONGODB_URI, or set "
             f"{BACKEND_SETTING}=file on a single-node install."
         )
-    return coll
+    return bounded(coll)
 
 
 def _cache_seconds() -> float:

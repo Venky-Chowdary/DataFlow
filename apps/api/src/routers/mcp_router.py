@@ -309,7 +309,8 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     if denial:
         from services.mcp_invocation_log import log_mcp_invocation
 
-        log_mcp_invocation(
+        await asyncio.to_thread(
+            log_mcp_invocation,
             tool=request.name,
             client=http_request.headers.get("X-MCP-Client") or "mcp-rest",
             arguments=request.arguments,
@@ -342,7 +343,8 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     if not limit.get("allowed"):
         from services.mcp_invocation_log import log_mcp_invocation
 
-        log_mcp_invocation(
+        await asyncio.to_thread(
+            log_mcp_invocation,
             tool=request.name,
             client=client,
             arguments=request.arguments,
@@ -374,7 +376,8 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             reset_mcp_request(request_token)
     except Exception as exc:
         masked = mask_secrets_in_text(str(exc))
-        receipt = log_mcp_invocation(
+        receipt = await asyncio.to_thread(
+            log_mcp_invocation,
             tool=request.name,
             client=client,
             arguments=request.arguments,
@@ -397,7 +400,8 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     ms = (time.perf_counter() - start) * 1000
     if not result.success:
         error = mask_secrets_in_text(str(result.error or "tool failed"))
-        receipt = log_mcp_invocation(
+        receipt = await asyncio.to_thread(
+            log_mcp_invocation,
             tool=request.name,
             client=client,
             arguments=request.arguments,
@@ -423,7 +427,8 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             detail={"error": error, "tool": request.name, "receipt_id": receipt.get("id")},
         )
 
-    receipt = log_mcp_invocation(
+    receipt = await asyncio.to_thread(
+        log_mcp_invocation,
         tool=request.name,
         client=client,
         arguments=request.arguments,
@@ -449,7 +454,7 @@ async def mcp_request_logs(http_request: Request, limit: int = 50):
     _require_mcp_tool_auth(http_request)
     from services.mcp_invocation_log import list_mcp_invocations
 
-    rows = list_mcp_invocations(limit=min(limit, 200))
+    rows = await asyncio.to_thread(list_mcp_invocations, limit=min(limit, 200))
     return {"logs": rows, "count": len(rows)}
 
 
@@ -493,7 +498,7 @@ async def mcp_status(http_request: Request):
     except Exception:
         connectors = 0
 
-    recent = list_mcp_invocations(limit=1)
+    recent = await asyncio.to_thread(list_mcp_invocations, limit=1)
     return {
         "status": "online",
         "agent_mode": "anthropic_tools" if anthropic_available else "local_tools",
