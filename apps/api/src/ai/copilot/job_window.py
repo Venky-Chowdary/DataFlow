@@ -196,7 +196,9 @@ def _resolve_window(
     end = end or current
     if start >= end:
         return None, "date_from must be before date_to."
-    label = f"{str(date_from).strip() or 'the beginning'} to {str(date_to).strip() or 'now'} ({zone_name})"
+    # A bare end date is that whole day: "through", so the label says the window it applied.
+    to_word = "through" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(date_to or "").strip()) else "to"
+    label = f"{str(date_from).strip() or 'the beginning'} {to_word} {str(date_to).strip() or 'now'} ({zone_name})"
     return (
         JobWindow("range", label, start.astimezone(timezone.utc), end.astimezone(timezone.utc), zone_name),
         "",

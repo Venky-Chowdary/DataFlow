@@ -34,12 +34,28 @@ _ISO = r"\d{4}-\d{2}-\d{2}"
 
 #: Phrases that are applied, in the order they are tried. Each match is removed
 #: from the text before the next is tried.
-_RANGE = re.compile(rf"\b(?:from|between)\s+({_ISO})\s+(?:to|and|until|through|-)\s+({_ISO})\b", re.I)
+#: "until" is not read as a range end: inclusive or not, it is not exact (review 2, C2b).
+_RANGE = re.compile(rf"\b(?:from|between)\s+({_ISO})\s+(?:to|and|through|thru|-)\s+({_ISO})\b", re.I)
 _SINCE_ISO = re.compile(rf"\b(?:since|from)\s+({_ISO})\b", re.I)
 _ON_ISO = re.compile(rf"\b(?:on\s+)?({_ISO})\b", re.I)
 _ROLLING = re.compile(
     r"\b(?:(?:in|over|during|for|within)\s+)?(?P<the>the\s+)?(?P<edge>last|past|previous)\s+"
-    rf"(?:(?P<n>{_NUM})\s*)?(?P<unit>minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|(?<=\d)[hdwm](?![a-z]))\b",
+    rf"(?:(?P<n>{_NUM})\s*)?(?P<unit>minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|(?<=\d)[hdwm](?![a-z]))\b"
+    # A fuzzy span ("an hour and a half", "a day or two") has no exact window.
+    r"(?P<fuzz>\s+(?:and\s+an?\s+half|or\s+(?:so|two|three|more|\d+)(?:\s+(?:days?|hours?|weeks?))?)\b|-?ish\b)?",
+    re.I,
+)
+#: A word before a date that changes what the date means ("by", "prior to", "pre-").
+_DATE_PREFIX = re.compile(
+    r"\b(?:by|through|thru|till|until|before|after|starting(?:\s+(?:on|from|at))?|beginning|ending|"
+    r"as\s+of|prior\s+to|up\s+to|pre|post|between|around|about|approximately|circa|near|at|in|within|"
+    r"during|past|effective|of|not|except)[\s-]+(?:on\s+)?$",
+    re.I,
+)
+#: ...or after it ("2026-11-08 onwards", "2026-11-08 or later").
+_DATE_SUFFIX = re.compile(
+    r"^[\s-]*(?:onwards?|forwards?|and\s+(?:later|after|before|earlier|on|up|beyond)|or\s+(?:later|after|before|earlier)|"
+    r"later|earlier|before|after|on\b|plus|ish|and\s+since)\b",
     re.I,
 )
 _NAMED = (
@@ -68,14 +84,15 @@ _MONTHS = (
 _WEEKDAYS = r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thur?s?|fri|sat|sun"
 #: A time-like word left over after the applied phrases were removed.
 _TIME_TOKEN = re.compile(
-    r"(?:\b(?:in|over|during|for|within|since|before|after|until|till|on|by|from|at|between|of)\s+)?"
+    r"(?:\b(?:in|over|during|for|within|since|before|after|until|till|on|by|from|at|between|of|per|each|every)\s+)?"
     r"(?:\b(?:the|this|that|last|past|previous|next|coming|few|several|couple\s+of|a|"
     + "|".join(w for w in _NUMBER_WORDS if " " not in w) + r")\s+)*"
     r"(?:\b\d+\s+)?"
     r"(?:\b(?:today|tonight|tomorrow|yesterday|hours?|hrs?|minutes?|mins?|days?|weeks?|"
     r"weekends?|months?|years?|quarters?|fortnights?|mornings?|afternoons?|evenings?|nights?|"
     r"overnight|midnight|noon|ago|since|before|after|until|till|between|during|earlier|later|"
-    r"wtd|mtd|ytd|to[\s-]date|eod|eow|eom|q[1-4]|o'?clock|" + _MONTHS + "|" + _WEEKDAYS + r")\b"
+    r"wtd|mtd|ytd|to[\s-]date|eod|eow|eom|q[1-4]|o'?clock|daily|weekly|hourly|monthly|nightly|yearly|"
+    r"annually|onwards?|thru|through|" + _MONTHS + "|" + _WEEKDAYS + r")\b"
     r"|\bmay\s+\d{1,2}\b|\b(?:in|on|since)\s+may\b"
     r"|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}(?:st|nd|rd|th)\b"
     r"|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b|\b(?:19|20)\d{2}\b|\b\d+\s*[hdwm]\b)"
@@ -196,17 +213,33 @@ def read_filters(message: str) -> FilterReading:
         for match in list(pattern.finditer(text)):
             verdicts.append(verdict)
             text = _blank(text, *match.span())
-    for match in list(_RANGE.finditer(text)):
-        take(match, {"date_from": match.group(1), "date_to": match.group(2)})
-    for match in list(_SINCE_ISO.finditer(text)):
-        take(match, {"date_from": match.group(1)})
-    for match in list(_ON_ISO.finditer(text)):
-        take(match, {"date_from": match.group(1), "date_to": match.group(1)})
+    def take_date(match: re.Match[str], window: dict[str, str]) -> None:
+        """A date form, unless a word around it changes what it means (review 2, C2b)."""
+        nonlocal text
+        before = _DATE_PREFIX.search(original[:match.start()])
+        after = _DATE_SUFFIX.search(original[match.end():])
+        if before or after:
+            start = before.start() if before else match.start()
+            end = match.end() + (after.end() if after else 0)
+            spans.append((start, end))
+            unapplied.append((start, end))
+            text = _blank(text, start, end)
+            return
+        take(match, window)
+
+    for pattern, build in (
+        (_RANGE, lambda m: {"date_from": m.group(1), "date_to": m.group(2)}),
+        (_SINCE_ISO, lambda m: {"date_from": m.group(1)}),
+        (_ON_ISO, lambda m: {"date_from": m.group(1), "date_to": m.group(1)}),
+    ):
+        for match in list(pattern.finditer(text)):
+            if text[match.start():match.end()].strip() == match.group(0).strip():
+                take_date(match, build(match))  # not already read as part of an earlier date phrase
     for key, pattern in _NAMED[:1]:
         for match in list(pattern.finditer(text)):
             take(match, {"window": key})
     for match in list(_ROLLING.finditer(text)):
-        key = _rolling_key(match)
+        key = None if match.group("fuzz") else _rolling_key(match)
         take(match, {"window": key} if key else None)
     for key, pattern in _NAMED[1:]:
         for match in list(pattern.finditer(text)):
