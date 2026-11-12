@@ -29,10 +29,18 @@ def test_sample_length_is_not_a_load_volume():
 def test_a_measured_volume_drop_still_flags():
     report = build_load_history_report(
         current_profile=profile_batch([{"id": "1"}], {"id": "INTEGER"}),
-        prior_runs=[_prior(6000), _prior(6000)],
+        prior_runs=[_prior(6000)] * 8,
         current_row_count=100,
     )
     assert [a for a in report["anomalies"] if "prior median" in a]
+    # With less than 8 prior loads the same finding is advice, not a block
+    # (audit H6).
+    short = build_load_history_report(
+        current_profile=profile_batch([{"id": "1"}], {"id": "INTEGER"}),
+        prior_runs=[_prior(6000), _prior(6000)],
+        current_row_count=100,
+    )
+    assert not short["anomalies"] and [a for a in short["advisories"] if "prior median" in a]
 
 
 def test_all_null_kafka_envelope_key_maps_onto_the_existing_column():

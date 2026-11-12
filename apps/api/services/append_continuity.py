@@ -28,6 +28,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from services.atomic_file import write_json_atomic
+from services.fingerprint_rules import FINGERPRINT_VERSION, VERSION_KEY
 from services.platform_config import data_dir
 
 logger = logging.getLogger(__name__)
@@ -207,13 +208,25 @@ def resolve_target(endpoint: Any) -> ContinuityTarget | None:
     )
 
 
+#: Gate-8 Python fingerprint under rules version 1. Retired: those rules are
+#: gone, so a baseline carrying this name (or no name — it predates the field)
+#: can no longer be recomputed and is never compared with a fresh digest.
 LEGACY_ALGO = "gate8_python_v0"
+#: Gate-8 Python fingerprint under the current rules; the name carries the
+#: fingerprint version so a rule change retires it the same way.
+GATE8_ALGO = f"gate8_python_fp{FINGERPRINT_VERSION}"
+
+
+def is_retired_algo(algo: str | None) -> bool:
+    """A Gate-8 Python algorithm of an older fingerprint version."""
+    name = str(algo or LEGACY_ALGO)
+    return name.startswith("gate8_python_") and name != GATE8_ALGO
 
 
 def preferred_algo(db_type: str) -> str:
     from services.continuity_digest import ALGO, SUPPORTED
 
-    return ALGO if db_type in SUPPORTED else LEGACY_ALGO
+    return ALGO if db_type in SUPPORTED else GATE8_ALGO
 
 
 def fingerprint(
@@ -233,16 +246,18 @@ def fingerprint(
             table=target.table,
             path=target.path,
         )
-    if algo != LEGACY_ALGO:
+    if algo != GATE8_ALGO:
+        # A retired algorithm cannot be recomputed (see ``_rebaseline_retired``).
         return None
-    fp = _legacy_fingerprint(target)
+    fp = _gate8_fingerprint(target)
     if fp is not None:
-        fp["algo"] = LEGACY_ALGO
+        fp["algo"] = GATE8_ALGO
+        fp[VERSION_KEY] = FINGERPRINT_VERSION
     return fp
 
 
-def _legacy_fingerprint(target: ContinuityTarget) -> dict[str, Any] | None:
-    """Gate-8 Python fingerprint (baselines written before ``engine_v1``)."""
+def _gate8_fingerprint(target: ContinuityTarget) -> dict[str, Any] | None:
+    """Gate-8 Python fingerprint, for engines without an in-engine digest."""
     from services.reconciliation import EMPTY_POPULATION_DIGEST, verify_target
 
     rows, checksum = verify_target(
@@ -326,6 +341,7 @@ def save_baseline(key: str, fp: dict[str, Any], job_id: str) -> None:
         "rows": int(fp["rows"]),
         "checksum": str(fp["checksum"]),
         "algo": str(fp.get("algo") or LEGACY_ALGO),
+        VERSION_KEY: fp.get(VERSION_KEY),
         "columns": fp.get("columns"),
         "unreadable": bool(fp.get("unreadable")),
         "job_id": job_id,
@@ -543,6 +559,64 @@ def _upgrade_algo(target: ContinuityTarget, baseline: dict[str, Any]) -> None:
     save_baseline(target.key, fp, str(baseline.get("job_id") or "algo-upgrade"))
 
 
+def _rebaseline_retired(
+    target: ContinuityTarget, baseline: dict[str, Any]
+) -> ContinuityViolation | None:
+    """Carry a baseline of a retired fingerprint version over to the current one.
+
+    Its digest was computed under rules that no longer exist, so comparing it
+    with a fresh digest would report every such table as "changed since the
+    last verified run". The row count is version-independent and is still
+    enforced; the value digest is re-read and recorded under the current
+    version, with an audit event saying the values were not re-proven.
+    """
+    old_algo = str(baseline.get("algo") or LEGACY_ALGO)
+    try:
+        current = fingerprint(target)
+    except Exception:  # noqa: BLE001 — unreadable is decided by compare()
+        logger.warning("continuity re-read failed for %s", target.table, exc_info=True)
+        current = None
+    if current is None:
+        missing = None
+        try:
+            missing = destination_missing(target)
+        except Exception:  # noqa: BLE001 — unknown stays unknown
+            missing = None
+        return compare(target.table, baseline, None, dest_missing=missing)
+    if int(current.get("rows") or 0) != int(baseline.get("rows") or 0):
+        return compare(
+            target.table,
+            baseline,
+            {"rows": int(current.get("rows") or 0), "checksum": "", "algo": old_algo},
+        )
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="append_continuity.fingerprint_version_rebaselined",
+        resource=f"table:{target.table}",
+        actor="system",
+        level="warning",
+        outcome="success",
+        details={
+            "db_type": target.db_type,
+            "table": target.table,
+            "from_algo": old_algo,
+            "to_algo": str(current.get("algo") or ""),
+            "to_fingerprint_version": FINGERPRINT_VERSION,
+            "verified_rows": baseline.get("rows"),
+            "baseline_job_id": baseline.get("job_id"),
+            "values_reproven": False,
+            "note": (
+                "The stored value digest was computed under retired fingerprint "
+                "rules and cannot be compared. The row count matched; the digest "
+                "was re-read and recorded under the current rules."
+            ),
+        },
+    )
+    save_baseline(target.key, current, str(baseline.get("job_id") or "fingerprint-upgrade"))
+    return None
+
+
 def destination_missing(target: ContinuityTarget) -> bool | None:
     """Whether the baselined table is gone — ``None`` when it cannot be decided.
 
@@ -577,6 +651,7 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
     if target is None:
         return None
     try:
+        pending = unfinished_append(target)
         baseline = load_baseline(target.key)
     except ContinuityStoreCorrupt as exc:
         logger.error("append continuity: %s", exc)
@@ -592,8 +667,14 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
                 "store_error": str(exc),
             },
         )
+    if pending:
+        # A failed append left rows here (audit H3): say that, rather than
+        # "changed outside this pipeline", and never append on top of them.
+        return _unfinished_violation(target, pending)
     if not baseline:
         return None
+    if is_retired_algo(baseline.get("algo")) and not baseline.get("unreadable"):
+        return _rebaseline_retired(target, baseline)
     try:
         current = fingerprint(target, str(baseline.get("algo") or LEGACY_ALGO))
     except Exception:  # noqa: BLE001
@@ -681,6 +762,11 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
         return
     _clear_accepted_reset(target)
     mode = effective_sync_mode(request)
+    if mode is not None and is_overwrite_sync(mode):
+        # Only a rebuild settles a failed append's leftover rows. Any other
+        # success (a one-row upsert) proved its own rows, not that the table
+        # no longer holds the batch the next append would write again (M1).
+        _settle_unfinished_append(target, job_id=job_id, sync_mode=mode)
     if mode is None or not (
         is_append_sync(mode) or is_overwrite_sync(mode) or requires_upsert(mode)
     ):
@@ -715,6 +801,126 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
 #: next append start a new history from the watermark. One-shot: the next
 #: verified run's baseline clears it (QA C9).
 ACCEPTED_RESET_PREFIX = "accepted_reset:"
+
+
+#: A full-refresh append that failed after committing rows into a table that
+#: already held some. The rows cannot be removed (no key list is the batch),
+#: so the next append would write them a second time. The marker makes that
+#: next append a refusal until the state is settled: an audited rebaseline, or
+#: a full-refresh overwrite that succeeds (it rebuilds the table; audited too).
+UNFINISHED_APPEND_PREFIX = "unfinished_append:"
+_UNFINISHED_CHECKSUM = "unfinished-append:rows_before="
+UNFINISHED_RECOVERY_HINT = (
+    "To recover: remove the failed run's rows and accept the destination "
+    f"({REBASELINE_REMEDY}; audited, a reason is required), accept it as it is "
+    "the same way if those rows should stay, or re-run with "
+    "full_refresh_overwrite to rebuild the table from the source."
+)
+
+
+def record_unfinished_append(
+    endpoint: Any, *, job_id: str, rows_before: int, rows_committed: int
+) -> bool:
+    """Remember that ``job_id`` left ``rows_committed`` rows behind when it failed."""
+    if int(rows_committed or 0) <= 0:
+        return False
+    target = resolve_target(endpoint)
+    if target is None:
+        return False
+    save_baseline(
+        UNFINISHED_APPEND_PREFIX + target.key,
+        {
+            "rows": int(rows_committed),
+            "checksum": f"{_UNFINISHED_CHECKSUM}{int(rows_before)}",
+            "algo": "marker",
+        },
+        str(job_id or ""),
+    )
+    return True
+
+
+def unfinished_append(target: ContinuityTarget | None) -> dict[str, Any] | None:
+    """The unsettled failed append on this table, or ``None``."""
+    if target is None:
+        return None
+    entry = load_baseline(UNFINISHED_APPEND_PREFIX + target.key)
+    checksum = str((entry or {}).get("checksum") or "")
+    if not entry or not checksum.startswith(_UNFINISHED_CHECKSUM):
+        return None
+    try:
+        rows_before = int(checksum[len(_UNFINISHED_CHECKSUM):])
+    except ValueError:
+        rows_before = 0
+    return {
+        "job_id": str(entry.get("job_id") or ""),
+        "rows_committed": int(entry.get("rows") or 0),
+        "rows_before": rows_before,
+        "recorded_at": entry.get("recorded_at"),
+    }
+
+
+def clear_unfinished_append(target: ContinuityTarget | None) -> dict[str, Any] | None:
+    """Drop the marker; returns what it held. Never raises."""
+    try:
+        pending = unfinished_append(target)
+        if pending:
+            clear_baseline(UNFINISHED_APPEND_PREFIX + target.key)  # type: ignore[union-attr]
+        return pending
+    except Exception:  # noqa: BLE001
+        logger.warning("unfinished-append marker not cleared", exc_info=True)
+        return None
+
+
+def _settle_unfinished_append(target: ContinuityTarget, *, job_id: str, sync_mode: str) -> None:
+    """A verified overwrite rebuilt the table: drop the marker, audited first."""
+    pending = unfinished_append(target)
+    if not pending:
+        return
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="append_continuity.unfinished_append_settled",
+        resource=f"table:{target.table}",
+        actor="system",
+        level="info",
+        outcome="success",
+        details={
+            "db_type": target.db_type,
+            "table": target.table,
+            "unfinished_job_id": pending["job_id"],
+            "rows_committed": pending["rows_committed"],
+            "rows_before": pending["rows_before"],
+            "settled_by_job_id": str(job_id or ""),
+            "sync_mode": sync_mode,
+        },
+    )
+    clear_unfinished_append(target)
+
+
+def _unfinished_violation(
+    target: ContinuityTarget, pending: dict[str, Any]
+) -> ContinuityViolation:
+    committed, before = int(pending["rows_committed"]), int(pending["rows_before"])
+    return ContinuityViolation(
+        f"Verification failed for table '{target.table}': an earlier append "
+        f"(job {pending['job_id'] or 'unknown'}) failed after committing "
+        f"{committed:,} row(s) to it and those rows were left in place (the table "
+        f"held {before:,} row(s) before that run). Appending the source again "
+        "would write them a second time. Nothing was written; the destination "
+        f"is unchanged. {UNFINISHED_RECOVERY_HINT}",
+        {
+            "reason": "destination_continuity_mismatch",
+            "error_code": CONTINUITY_ERROR_CODE,
+            "verification_status": "failed",
+            "table": target.table,
+            "mismatch": "unfinished_append",
+            "unfinished_job_id": pending["job_id"],
+            "rows_committed": committed,
+            "rows_before": before,
+            "recorded_at": pending.get("recorded_at"),
+            "recovery": UNFINISHED_RECOVERY_HINT,
+        },
+    )
 
 
 def _accepted_reset_key(target: ContinuityTarget) -> str:
@@ -865,6 +1071,10 @@ def rebaseline(
         previous = None
         store_error = str(exc)
     rebaseline_id = f"rebaseline-{uuid.uuid4().hex[:12]}"
+    try:
+        settled = unfinished_append(target)
+    except ContinuityStoreCorrupt:
+        settled = None
     prev_view = (
         {
             "rows": previous.get("rows"),
@@ -892,6 +1102,12 @@ def rebaseline(
             "store_error": store_error,
             "current": dict(current) if current else None,
             "destination_missing": removal,
+            # A failed append's leftover rows the operator accepts with this.
+            "unfinished_append_settled": (
+                {k: settled[k] for k in ("job_id", "rows_committed", "rows_before")}
+                if settled
+                else None
+            ),
             # Shared keys left alone: runs that key on them (an endpoint built
             # from the inline host) keep the old baseline.
             "skipped_shared_keys": skipped_shared_keys,
@@ -914,6 +1130,7 @@ def rebaseline(
             clear_baseline(key)
         else:
             save_baseline(key, current, rebaseline_id)
+    clear_unfinished_append(target)
     reset_key = _accepted_reset_key(target)
     if reset_key and (removal or int((current or {}).get("rows") or 0) == 0):
         # The entry's presence is the marker; job_id names the audited

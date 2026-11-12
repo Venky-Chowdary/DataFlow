@@ -15,6 +15,12 @@ When an open transaction grows large, events **spill to a temp JSONL file**
 (``DATAFLOW_CDC_TXN_SPILL_AFTER``, default half of max) so memory stays bounded.
 Oversized open transactions still **raise** :class:`CdcTxnBufferOverflow` past
 ``DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS`` — never silently truncate or drop events.
+
+The same holds for the two events the buffer used to discard without a word:
+a DELETE whose key could not be resolved (:class:`CdcUnkeyedDelete`) and a
+spill line that no longer parses (:class:`CdcSpillCorrupt`). Both leave the
+transaction open, so nothing is emitted and the cursor does not move past a
+change that was not applied.
 """
 
 from __future__ import annotations
@@ -32,10 +38,32 @@ from services.cdc_net_effect import CdcTxnEvent, coalesce_cdc_txn_events, infer_
 from services.value_serializer import json_loads_exact
 
 
+class CdcUnkeyedDelete(RuntimeError):
+    """A DELETE with no resolvable key: it cannot be applied, so it is not dropped."""
+
+    def __init__(self, table: str = "", lsn: str | None = None) -> None:
+        where = f" on {table}" if table else ""
+        at = f" at {lsn}" if lsn else ""
+        super().__init__(
+            f"CDC delete{where}{at} has no resolvable key, so the change was not "
+            "applied and the stream position was not advanced. Dropping it would "
+            "leave the deleted row at the destination. Give the table a primary "
+            "key (or a replica identity that carries one) and resume."
+        )
+        self.table = table
+        self.lsn = lsn
+
+
+class CdcSpillCorrupt(RuntimeError):
+    """A line of the on-disk transaction spill is not a DML event any more."""
+
+
 def load_cdc_txn_spill_event(line: str) -> dict[str, Any] | None:
     """One spilled CDC txn JSONL event. Numbers match ``json_loads_exact``.
 
-    Invalid JSON or a non-object line is skipped — never invent a DML event.
+    ``None`` for invalid JSON or a non-object line — never an invented DML
+    event. The caller must not skip such a line: it was an event of the
+    transaction (:class:`CdcSpillCorrupt`).
     """
     try:
         rec = json_loads_exact(line)
@@ -175,7 +203,7 @@ class TransactionBuffer:
 
     def delete(self, pk: str, *, lsn: str | None = None) -> None:
         if not pk:
-            return
+            raise CdcUnkeyedDelete(lsn=lsn)
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC transaction buffer is not open after delete")
@@ -313,16 +341,21 @@ class TransactionBuffer:
         ordered: list[CdcTxnEvent] = []
         if self._open.spill_path and Path(self._open.spill_path).exists():
             with open(self._open.spill_path, encoding="utf-8") as fh:
-                for line in fh:
+                for number, line in enumerate(fh, start=1):
                     line = line.strip()
                     if not line:
                         continue
                     rec = load_cdc_txn_spill_event(line)
-                    if rec is None:
-                        continue
-                    op = rec.get("op")
+                    op = rec.get("op") if rec is not None else None
                     if op not in {"i", "u", "d"}:
-                        continue
+                        # Every line was an event of this transaction. Skipping
+                        # one commits the transaction without it.
+                        raise CdcSpillCorrupt(
+                            f"CDC transaction spill for xid={self._open.xid} is "
+                            f"unreadable at line {number}: the transaction was not "
+                            "applied and stays open for redelivery (a skipped line "
+                            "would be a change silently lost)."
+                        )
                     row = rec.get("row") if isinstance(rec.get("row"), dict) else None
                     pk = str(rec.get("pk") or "")
                     if not pk and row is not None:

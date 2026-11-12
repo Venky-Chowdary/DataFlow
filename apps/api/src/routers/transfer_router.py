@@ -168,6 +168,22 @@ def _validated_read_options(raw: dict | str | None) -> dict:
         ) from exc
 
 
+def _validated_source_filter(raw: str) -> dict:
+    """The form's ``source_filter_json``, or 400 before any job or read.
+
+    Text that is not a filter object used to become "no filter", and every row
+    landed under a filter the operator declared (review 1 H3).
+    """
+    from services.row_filter import filter_spec_from_json
+
+    try:
+        return filter_spec_from_json(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(f"source_filter_json: {exc}")
+        ) from exc
+
+
 def _validated_shape_recipe(raw: dict | str | None) -> dict:
     """Normalize the declared shaping recipe, or 400 with the operation at fault.
 
@@ -1604,15 +1620,7 @@ async def run_universal_transfer(
     )
     require_admin_for_endpoints(request, workspace_id, source, destination)
 
-    source_filter: dict = {}
-    if source_filter_json.strip():
-        try:
-            import json as _json
-            parsed = _json.loads(source_filter_json)
-            if isinstance(parsed, dict):
-                source_filter = parsed
-        except Exception:
-            source_filter = {}
+    source_filter = _validated_source_filter(source_filter_json)
 
     region = _job_region(request, workspace_id, data_region)
     request_obj = TransferRequest(

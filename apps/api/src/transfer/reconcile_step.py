@@ -18,6 +18,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
+from services.expected_rows import expected_destination_rows
 from services.ops_events import emit_event
 from services.dest_precount import (
     OVERWRITE_SOURCE_KEYS_KEY,
@@ -113,6 +114,26 @@ def _read_target_sample_retrying(purpose: str, *args: Any, **kwargs: Any) -> lis
             purpose, attempts, transient, kwargs.get("table_name"), exc,
         )
         raise _SampleReadExhausted(exc, attempts=attempts, transient=transient) from exc
+
+
+def _read_side_row_terms(dest_summary: dict[str, Any] | None) -> dict[str, int]:
+    """Rows a declared filter / an approved recipe removed or added on the read.
+
+    The same three terms for Gate-8's expected count and ladder L1. A reader
+    that reports only its removal total (``rows_removed_on_read``) attributes
+    what the recipe did not remove to the source filter.
+    """
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    shaped = int(summary.get("rows_shaped_out", 0) or 0)
+    filtered = int(summary.get("rows_source_filtered", 0) or 0)
+    removed = int(summary.get("rows_removed_on_read", 0) or 0)
+    if "rows_source_filtered" not in summary and removed > shaped + filtered:
+        filtered = removed - shaped
+    return {
+        "rows_shaped_out": shaped,
+        "rows_source_filtered": filtered,
+        "rows_expanded": int(summary.get("rows_expanded", 0) or 0),
+    }
 
 
 def _finalize_reconcile(
@@ -2901,7 +2922,11 @@ def _ladder_declined(report: dict[str, Any], rows: int, budget: int) -> dict[str
         "localization": {},
         "localization_summary": "",
     }
-    return out
+    # The cut-off is a coverage limit of the verdict, never a silent pass.
+    from services.verification_ladder import ladder_coverage_limit, stamp_coverage_limit
+
+    out["verification_ladder"]["coverage_limit"] = ladder_coverage_limit(rows, budget)
+    return stamp_coverage_limit(out, rows, budget)
 
 
 def _ladder_declined_for_shape(
@@ -3582,6 +3607,26 @@ def _maybe_attach_verification_ladder(
         for m in mappings
         if m.get("target") and (m.get("target_type") or m.get("inferredType"))
     }
+    # A source column the catalog declares datetime / boolean, landing in a text
+    # column, compares as what it is in whichever spelling the writer stored —
+    # the engine copy writes '2024-01-01 00:00:00', the re-read reads the ISO
+    # 'T' (review 1 H2). The report-level digests were taken on the plain text
+    # basis, so the ladder recomputes both sides when a column is marked.
+    carried_types = False
+    if source_endpoint is not None and str(getattr(source_endpoint, "kind", "")) == "database":
+        from services.dest_physical_types import mark_typed_source_text_carriers
+
+        _cat_cfg = resolve_connector_config(source_endpoint)
+        _marked = mark_typed_source_text_carriers(
+            dest_types,
+            mappings,
+            resolve_driver_type(source_endpoint.format),
+            _cat_cfg,
+            str(source_endpoint.table or _cat_cfg.get("table") or ""),
+            source=source_endpoint,  # a query / procedure never marks (review 2 F2)
+        )
+        carried_types = _marked != dest_types
+        dest_types = _marked
     from services.sync_cursor import is_overwrite_sync
 
     sync_mode = str(
@@ -3835,12 +3880,12 @@ def _maybe_attach_verification_ladder(
         # destination digest — recompute on the compared populations (D67/D95).
         source_checksum=(
             ""
-            if (batch_scoped or window_scoped_target or _rej_keys)
+            if (batch_scoped or window_scoped_target or _rej_keys or carried_types)
             else str(report.get("source_checksum") or "")
         ),
         target_checksum=(
             ""
-            if (batch_scoped or window_scoped_target or _rej_keys)
+            if (batch_scoped or window_scoped_target or _rej_keys or carried_types)
             else str(report.get("target_checksum") or "")
         ),
         dest_db_type=dest_type,
@@ -3850,6 +3895,9 @@ def _maybe_attach_verification_ladder(
         target_rows_before=dest_before,
         keyed_cardinality=keyed,
         keyed_expected_delta=census.expected_delta if keyed and census else None,
+        # Rows removed or added on the read: L1 expects what Gate-8 expects
+        # (services.expected_rows), or a correct filtered load fails L1.
+        **_read_side_row_terms(dest_summary),
         # maximum: always run L4/L5. strict/balanced: localize only on L3 fail.
         always_localize=str(validation_mode or "").lower() == "maximum",
         # A table re-read is the pre-image. Crosswalks, masks, and renames
@@ -6737,22 +6785,17 @@ def _run_reconciliation_impl(
     # they belong to the source population this run counted — and they are
     # deliberately not at the destination, so conservation has to name them
     # instead of reading their absence as short delivery.
-    rows_shaped_out = int(dest_summary.get("rows_shaped_out", 0) or 0)
-    rows_expanded = int(dest_summary.get("rows_expanded", 0) or 0)
     # Rows a declared source filter removed on the read. The source population
     # this run counted includes them (the source paged and counted them), so the
     # filter has to be stated here for the same reason a recipe does.
-    rows_source_filtered = int(dest_summary.get("rows_source_filtered", 0) or 0)
     # The streaming reader counts every row it removed on the read — a declared
     # filter's and a recipe's — for committed pages only, and cumulatively across
     # resumes. When it reports that, it is the authoritative removal total: the
     # recipe's own tally covers this pass alone.
-    rows_removed_on_read = int(dest_summary.get("rows_removed_on_read", 0) or 0)
-    if (
-        "rows_source_filtered" not in dest_summary
-        and rows_removed_on_read > rows_shaped_out + rows_source_filtered
-    ):
-        rows_source_filtered = rows_removed_on_read - rows_shaped_out
+    _read_terms = _read_side_row_terms(dest_summary)
+    rows_shaped_out = _read_terms["rows_shaped_out"]
+    rows_expanded = _read_terms["rows_expanded"]
+    rows_source_filtered = _read_terms["rows_source_filtered"]
     # A resumed pass reads and writes only the tail of the population, while the
     # destination read-back is always full-table. Comparing the two directly
     # reports a mismatch on data that is correct, so the resumed slice must be
@@ -6799,14 +6842,14 @@ def _run_reconciliation_impl(
         source_rows = resume_full_source_rows
     elif resumed_from:
         source_rows += resumed_from
-    expected_written = max(
-        source_rows
-        + rows_expanded
-        - dropped_rows
-        - rows_skipped
-        - rows_shaped_out
-        - rows_source_filtered,
-        0,
+    expected_written = expected_destination_rows(
+        source_rows,
+        rejected_rows=rejected_rows,
+        coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
     )
     # Destinations with no read-back are accounted from writer counts, so rows a
     # previous pass already committed have to be added back or a correct resume
@@ -9190,7 +9233,15 @@ def run_reconciliation(
     # real full_checksum on an engine-copy route, not count-only. Promote it
     # over the "no rows entered this process" stamp instead of telling the
     # operator to set the flag they already set.
-    if _engine_digest_enabled() and not recon.get("checksum_match"):
+    # Strict validation never settles for the count on a same-engine copy:
+    # where the ladder re-read and digested both populations, that digest is
+    # the verdict (it used to need the flag, and the run passed on COUNT(*)
+    # with assurance_level none).
+    _strict_count_only = (
+        str(validation_mode or "").strip().lower() in {"strict", "maximum"}
+        and _engine_count_proof_only(dest_summary) is not None
+    )
+    if (_engine_digest_enabled() or _strict_count_only) and not recon.get("checksum_match"):
         _l3_run = recon.get("verification_ladder") or {}
         _l3_layer = (_l3_run.get("layers") or {}).get("L3") or {}
         _l3_details = _l3_layer.get("details") or {}
@@ -9452,15 +9503,11 @@ def _bind_endpoints_to_last_stream(
     def _bound(ep: EndpointConfig | None) -> EndpointConfig | None:
         if ep is None or getattr(ep, "kind", "") != "database":
             return ep
+        from services.multi_stream_targets import bind_endpoint_to_stream
+
+        # The orchestrator's own rule, so Gate-8 reads the object it wrote.
         bound = copy.copy(ep)
-        if getattr(ep, "format", "") == "mongodb" or (
-            getattr(ep, "collection", None) and not getattr(ep, "table", None)
-        ):
-            bound.collection = name
-        elif getattr(ep, "table", None):
-            bound.table = name
-        else:
-            return ep
+        bind_endpoint_to_stream(bound, name)
         return bound
 
     return _bound(endpoint) or endpoint, _bound(source_endpoint)
@@ -9483,6 +9530,9 @@ def _run_reconciliation_with_rules(
     endpoint, source_endpoint = _bind_endpoints_to_last_stream(
         endpoint, source_endpoint, dest_summary
     )
+    from services.reconcile_coverage import last_stream_rows_written
+
+    rows_written = last_stream_rows_written(dest_summary, rows_written)
     recon = _run_reconciliation_impl(
         endpoint=endpoint,
         records=records,

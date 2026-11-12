@@ -259,7 +259,7 @@ def freshness_summary(
     from services.cdc_lag_honesty import (
         BYTE_CRITICAL,
         BYTE_WARN,
-        merge_freshness_severity,
+        fold_evidence_severity,
         observe_cdc_lag,
         severity_from_byte_lag,
     )
@@ -310,17 +310,17 @@ def freshness_summary(
                 sec_sev = "warn"
             else:
                 sec_sev = "ok"
-            severity = merge_freshness_severity(obs.get("freshness_severity"), sec_sev)
+            severity = fold_evidence_severity(obs.get("freshness_severity"), sec_sev)
             if worst is None or lag_f > worst:
                 worst = lag_f
         else:
             severity = str(obs.get("freshness_severity") or "unknown")
             byte_sev = severity_from_byte_lag(byte_f)
             if byte_sev:
-                severity = merge_freshness_severity(severity, byte_sev)
+                severity = fold_evidence_severity(severity, byte_sev)
 
         if heartbeat_stale:
-            severity = merge_freshness_severity(severity, "critical")
+            severity = fold_evidence_severity(severity, "critical")
 
         stale = severity in {"warn", "critical"}
         pipelines.append({

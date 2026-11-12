@@ -539,6 +539,15 @@ def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, s
         prior = None
     kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
     message = str(blocked)
+    measured = getattr(blocked, "rows_committed_measured", None)
+    if isinstance(measured, int) and measured >= 0:
+        # The destination was re-counted after the failure (audit H3): that is
+        # the run's committed total, and the note that carries it replaces the
+        # writer tallies ("N rows were already written") that disagreed with it.
+        note = str(getattr(blocked, "failed_batch_undo_note", "") or "")
+        if note and note not in message:
+            message = f"{message.rstrip()} {note}"
+        return measured, message
     try:
         incoming = max(0, int(getattr(blocked, "rows_written", 0) or 0))
     except (TypeError, ValueError):
@@ -673,7 +682,12 @@ def _fail_runtime_job(
         # A route that did not count its destination (COPY fast paths,
         # adapters) reports a progress meter, not committed batches.
         unmeasured = getattr(exc, "destination_rows_now", None) is None
-        if unmeasured and request is not None:
+        from services.multi_stream_cancel import measure_multi_stream_cancel
+
+        # A multi-stream run is counted on every stream object it reached,
+        # each against its own pre-run count, never on one object for the job.
+        per_stream = request is not None and measure_multi_stream_cancel(exc, request)
+        if unmeasured and request is not None and not per_stream:
             _measure_unmeasured_cancel(exc, request)
         outcome = cancel_outcome_for(
             status_kwargs.get("records_processed", prev.get("records_processed")),
@@ -682,8 +696,10 @@ def _fail_runtime_job(
             destination_table_exists=getattr(exc, "destination_table_exists", None),
             destination_rows_before=getattr(exc, "destination_rows_before", None),
             write_rolled_back=getattr(exc, "write_rolled_back", None) is True,
-            tally_is_commit_evidence=not (unmeasured and request is not None),
+            tally_is_commit_evidence=not ((unmeasured or per_stream) and request is not None),
         )
+        if per_stream:
+            outcome["streams"] = list(getattr(exc, "destination_streams", None) or [])
         status_kwargs["cancel_outcome"] = outcome
         if outcome.get("rows_committed_source") == "destination_count":
             # D199 — the destination's own count replaces the committed-batch
