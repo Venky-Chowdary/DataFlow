@@ -87,6 +87,15 @@ HORIZON_KEY = "commit_horizon"
 
 #: Sources whose snapshot horizon bounds a read in commit order.
 _SNAPSHOT_HORIZON_SOURCES = frozenset({"postgresql", "postgres"})
+#: PostgreSQL relation kinds whose rows carry the writing transaction's id
+#: (``xmin``): an ordinary and a partitioned table. A view, materialized view or
+#: foreign table has no such column to bound, so it takes the re-read window.
+_TABLE_RELKINDS = frozenset({"r", "p"})
+_RELKIND_NAMES = {
+    "v": "a view",
+    "m": "a materialized view",
+    "f": "a foreign table",
+}
 #: Sources with one write transaction at a time.
 _SERIALIZED_WRITER_SOURCES = frozenset({"sqlite"})
 #: Transactional SQL sources whose cursor seek is pushed into the read, so a
@@ -184,6 +193,9 @@ class CommitSafeWindow:
     guarantee: str = GUARANTEE_NONE
     reason: str = ""
     census_recommended: bool = False
+    #: A source probe this run could not complete ("" = none failed). Never
+    #: silent: Gate-8 carries it as a warning.
+    probe_error: str = ""
 
     @property
     def replays(self) -> bool:
@@ -215,6 +227,8 @@ class CommitSafeWindow:
             out["late_rows_detected"] = int(self.late_rows_detected)
         if self.late_rows_undelivered is not None:
             out["late_rows_undelivered"] = int(self.late_rows_undelivered)
+        if self.probe_error:
+            out["probe_error"] = self.probe_error
         if rows_replayed is not None:
             out["rows_replayed"] = int(rows_replayed)
             landed = int(rows_already_landed or 0)
@@ -403,12 +417,16 @@ def plan_commit_safe_window(
     contract: Mapping[str, Any] | None,
     capture_bound: Callable[[], dict[str, Any]] | None = None,
     probe_late: Callable[..., LateRows] | None = None,
+    relation_kind: str | None = None,
 ) -> CommitSafeWindow | None:
     """Decide one run's read window. Pure: engine access is injected.
 
     ``capture_bound`` returns the source's current commit-order bound and must
     be called *before* the run reads. ``probe_late`` reports rows behind
     ``below`` written by transactions at or above ``since_xmin``.
+    ``relation_kind`` is the PostgreSQL ``pg_class.relkind`` of the source
+    (``""`` when it could not be read; None when the caller did not ask): only
+    a table carries the ``xmin`` the horizon bounds.
     """
     from services.sync_cursor import normalize_sync_mode, requires_incremental
 
@@ -427,7 +445,13 @@ def plan_commit_safe_window(
             reason="the source runs one write transaction at a time: commit order is write order",
         )
 
-    if strategy == STRATEGY_PG and capture_bound is not None:
+    fallback = ""
+    probe_error = ""
+    if strategy == STRATEGY_PG and relation_kind is not None and relation_kind not in _TABLE_RELKINDS:
+        fallback = not_a_table_note(relation_kind)
+        if not relation_kind:
+            probe_error = "the source relation's kind could not be read"
+    elif strategy == STRATEGY_PG and capture_bound is not None:
         # Captured before anything is read: a row this run does not see belongs
         # to a transaction at or above this horizon.
         bound = dict(capture_bound() or {})
@@ -441,28 +465,43 @@ def plan_commit_safe_window(
                 probe_late=probe_late,
             )
         # A PostgreSQL-compatible source without snapshot functions falls back
-        # to the re-read window below.
+        # to the re-read window below; a horizon that could not be read is said.
+        fallback = "the source's snapshot horizon could not be read"
+        probe_error = str(bound.get("error") or "")
+        if probe_error:
+            probe_error = f"snapshot horizon unreadable: {probe_error}"
 
     if strategy in (STRATEGY_OVERLAP, STRATEGY_PG):
-        # PostgreSQL lands here only when its bound could not be captured.
+        # PostgreSQL lands here only when its bound could not be captured, or
+        # when the source is not a table.
+        lead = f"{fallback}; " if fallback else ""
         if not can_replay:
             return _unguarded(
                 stored,
-                "this route appends without a key, so a re-read window cannot be "
+                lead + "this route appends without a key, so a re-read window cannot be "
                 "de-duplicated",
+                probe_error=probe_error,
             )
         unit = cursor_distance_unit(cursor_type, cursor_part(stored) if stored else None)
         size = seconds if unit == "seconds" else values if unit == "values" else 0
         if not unit or size <= 0:
             return _unguarded(
                 stored,
-                "no re-read window is declared for this cursor"
-                if unit
-                else "this cursor type has no distance a re-read window can be measured in",
+                lead
+                + (
+                    "no re-read window is declared for this cursor"
+                    if unit
+                    else "this cursor type has no distance a re-read window can be measured in"
+                ),
+                probe_error=probe_error,
             )
         seed = overlap_seed(stored, cursor_type, seconds=seconds, values=values) if stored else None
         if stored and seed is None:
-            return _unguarded(stored, "the stored watermark cannot be shifted by the re-read window")
+            return _unguarded(
+                stored,
+                lead + "the stored watermark cannot be shifted by the re-read window",
+                probe_error=probe_error,
+            )
         return CommitSafeWindow(
             strategy=STRATEGY_OVERLAP,
             stored_watermark=stored,
@@ -471,17 +510,33 @@ def plan_commit_safe_window(
             overlap={"unit": unit, "size": int(size)},
             guarantee=GUARANTEE_WITHIN_WINDOW,
             reason=(
-                f"each run re-reads the last {size:,} {unit} behind the watermark and "
+                lead
+                + f"each run re-reads the last {size:,} {unit} behind the watermark and "
                 "collapses re-reads on the row identity; a transaction that stays open "
                 "longer than that is not re-read"
             ),
             census_recommended=True,
+            probe_error=probe_error,
         )
 
     return _unguarded(stored, "this source exposes no commit-order bound")
 
 
-def _unguarded(stored: str | None, why: str) -> CommitSafeWindow:
+def not_a_table_note(relation_kind: str) -> str:
+    """Why a PostgreSQL source of this ``relkind`` gets no snapshot horizon."""
+    name = _RELKIND_NAMES.get(relation_kind or "")
+    if name:
+        return (
+            f"the source is {name}, whose rows carry no transaction id the "
+            "snapshot horizon can bound"
+        )
+    return (
+        "the source could not be confirmed to be a table, and only a table's rows "
+        "carry the transaction id the snapshot horizon bounds"
+    )
+
+
+def _unguarded(stored: str | None, why: str, *, probe_error: str = "") -> CommitSafeWindow:
     return CommitSafeWindow(
         strategy=STRATEGY_NONE,
         stored_watermark=stored,
@@ -489,6 +544,30 @@ def _unguarded(stored: str | None, why: str) -> CommitSafeWindow:
         guarantee=GUARANTEE_NONE,
         reason=f"{_UNGUARDED_REASON} — {why}. Run the periodic key census to detect them.",
         census_recommended=True,
+        probe_error=probe_error,
+    )
+
+
+def unplanned_window(
+    stored: str | None, previous_bound: Mapping[str, Any] | None, exc: BaseException
+) -> CommitSafeWindow:
+    """The window of a run whose plan itself failed: it reads from the watermark,
+    keeps the stored bound for the next run, and says it is not guaranteed."""
+    previous = dict(previous_bound or {})
+    return CommitSafeWindow(
+        strategy=STRATEGY_NONE,
+        stored_watermark=stored,
+        seed=stored,
+        bound=previous,
+        previous_bound=previous,
+        guarantee=GUARANTEE_NONE,
+        reason=(
+            f"{_UNGUARDED_REASON} — the commit-safe window could not be planned this run "
+            f"({type(exc).__name__}); the run reads from the watermark and the next run "
+            "plans again. Run the periodic key census to detect them."
+        ),
+        census_recommended=True,
+        probe_error=f"{type(exc).__name__}: {exc}"[:300],
     )
 
 
@@ -539,6 +618,7 @@ def _plan_pg(
                 "kept and the next run asks again"
             ),
             census_recommended=True,
+            probe_error=f"{type(exc).__name__}: {exc}"[:300],
         )
     floor_note = (
         f" (probe looks back to cursor {late.floor}; a row committed with an older "
@@ -635,7 +715,7 @@ def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
         conn = _pg_connect(src_cfg)
     except Exception as exc:  # noqa: BLE001 — the route then states it is unguarded
         logger.warning("commit-safe window: source connect failed: %s", exc)
-        return {}
+        return {"error": f"{type(exc).__name__}: {exc}"[:300]}
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
@@ -643,7 +723,7 @@ def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
             row = cur.fetchone()
     except Exception as exc:  # noqa: BLE001
         logger.warning("commit-safe window: snapshot horizon unreadable: %s", exc)
-        return {}
+        return {"error": f"{type(exc).__name__}: {exc}"[:300]}
     finally:
         try:
             conn.close()
@@ -657,6 +737,40 @@ def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
         "xmax": str(row[1] or ""),
         "captured_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def pg_relation_kind(src_cfg: Mapping[str, Any], schema: str, table: str) -> str:
+    """``pg_class.relkind`` of the source relation, or ``""`` when it cannot be read.
+
+    Never raises: an unreadable kind is planned as "not a table" and said.
+    """
+    from connectors.sql_identifiers import split_qualified_table
+
+    qualified, bare = split_qualified_table(table, (schema or "").strip() or None)
+    try:
+        conn = _pg_connect(src_cfg)
+    except Exception as exc:  # noqa: BLE001 — planned as "not a table", and said
+        logger.warning("commit-safe window: relation kind unreadable: %s", exc)
+        return ""
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.relkind::text FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = %s AND c.relname = %s",
+                (qualified or "public", bare),
+            )
+            row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("commit-safe window: relation kind unreadable: %s", exc)
+        return ""
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("commit-safe window: close skipped", exc_info=True)
+    return str(row[0]) if row and row[0] else ""
 
 
 def probe_pg_late_rows(
@@ -766,11 +880,14 @@ def static_commit_safety(
     cursor_type: Any = None,
     has_identity: bool,
     contract: Mapping[str, Any] | None = None,
+    relation_kind: str | None = None,
 ) -> dict[str, Any]:
-    """What a route may claim about late commits, judged without touching the source.
+    """What a route may claim about late commits, judged without reading rows.
 
     Preflight and the cursor-semantics verdict use this; a run executes the
     same decision with the engine's bound filled in (:func:`plan_commit_safe_window`).
+    ``relation_kind``: the PostgreSQL source's ``pg_class.relkind`` when
+    preflight read it (``""`` = unreadable); only a table gets the horizon.
     """
     from services.sync_cursor import normalize_sync_mode, requires_incremental
 
@@ -779,6 +896,11 @@ def static_commit_safety(
     strategy = commit_safety_strategy(source_type)
     seconds, values = declared_overlap(contract)
     overlap: dict[str, Any] = {}
+    lead = ""
+    if strategy == STRATEGY_PG and relation_kind is not None and relation_kind not in _TABLE_RELKINDS:
+        note = not_a_table_note(relation_kind)
+        lead = note[0].upper() + note[1:] + ". "
+        strategy = STRATEGY_OVERLAP
     census = "Run the periodic key census (key_census_every) to detect skipped rows."
     keyless = (
         "this route appends without a key, so rows committed behind the watermark "
@@ -834,6 +956,12 @@ def static_commit_safety(
             "Cannot guarantee no skipped rows: this source exposes no commit-order "
             f"bound. {census}"
         )
+    head = "Cannot guarantee no skipped rows: "
+    if lead and statement.startswith(head):
+        # The refusal leads; the reason the horizon does not apply follows it.
+        statement = head + lead + statement[len(head):]
+    elif lead:
+        statement = lead + statement
     return {
         "strategy": strategy,
         "guarantee": guarantee,

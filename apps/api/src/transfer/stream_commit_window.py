@@ -20,8 +20,10 @@ from services.commit_safe_window import (
     CommitSafeWindow,
     capture_pg_bound,
     commit_safety_strategy,
+    pg_relation_kind,
     plan_commit_safe_window,
     probe_pg_late_rows,
+    unplanned_window,
 )
 from services.keyset_pagination import header_column_index
 
@@ -134,7 +136,8 @@ def bind_commit_window(run: Any, scope: Any, catalog: tuple | None, contract: An
             window = _plan(cfg, scope, catalog, contract, table)
         except Exception as exc:  # noqa: BLE001 — never weaker than the read it replaces
             logger.warning("commit-safe window unavailable (%s): reading from the watermark", exc)
-            window = None
+            # Read from the watermark as before, and say so on the report.
+            window = unplanned_window(scope.watermark, scope.commit_horizon, exc)
         cfg.commit_window = window
     cfg.replay_through = window.replay_through if window is not None else ""
     if window is None:
@@ -187,6 +190,7 @@ def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str
     schema = str(src_cfg.get("schema") or "public")
     is_pg = commit_safety_strategy(cfg.src_read_type) == STRATEGY_PG
     return plan_commit_safe_window(
+        relation_kind=pg_relation_kind(src_cfg, schema, table) if is_pg else None,
         source_type=cfg.src_read_type,
         sync_mode=cfg.effective_sync,
         cursor_column=cfg.cursor_source_col,

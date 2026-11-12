@@ -309,3 +309,167 @@ def test_mysql_longtext_cursor_delivers_every_new_row(isolated, pg):
         with conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS {src}")
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# H2 — a view (or any relation that is not a table) as the source
+# --------------------------------------------------------------------------
+
+
+def test_only_tables_get_the_snapshot_horizon():
+    def plan(kind):
+        return csw.plan_commit_safe_window(
+            source_type="postgresql", sync_mode="incremental_append", cursor_column="id",
+            cursor_type="BIGINT", stored_watermark="13",
+            metadata={"commit_horizon": {"strategy": csw.STRATEGY_PG, "xmin": "900"}},
+            can_replay=True, contract={},
+            capture_bound=lambda: {"strategy": csw.STRATEGY_PG, "xmin": "950", "xmax": "955"},
+            probe_late=lambda **_: csw.LateRows(count=0),
+            relation_kind=kind,
+        )
+
+    assert plan("r").strategy == csw.STRATEGY_PG
+    assert plan("p").strategy == csw.STRATEGY_PG
+    for kind in ("v", "m", "f", ""):
+        window = plan(kind)
+        assert window.strategy == csw.STRATEGY_OVERLAP, (kind, window)
+        assert window.guarantee == csw.GUARANTEE_WITHIN_WINDOW
+        assert window.seed == str(13 - csw.DEFAULT_OVERLAP_VALUES)
+        assert window.bound == {}  # no horizon is stored for a relation without one
+    assert "view" in plan("v").reason
+    # Unknown kind: the lookup failed — said on the window, never silent.
+    assert plan("").probe_error
+    # No distance on the cursor: not guaranteed, with the census.
+    text = csw.plan_commit_safe_window(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="code",
+        cursor_type="TEXT", stored_watermark="a", metadata={}, can_replay=True, contract={},
+        capture_bound=lambda: {"strategy": csw.STRATEGY_PG, "xmin": "950"},
+        probe_late=lambda **_: csw.LateRows(count=0), relation_kind="v",
+    )
+    assert text.guarantee == csw.GUARANTEE_NONE and text.census_recommended
+
+
+def test_static_claim_for_a_view_is_never_covered():
+    view = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="id",
+        cursor_type="BIGINT", has_identity=True, relation_kind="v",
+    )
+    assert view["strategy"] == csw.STRATEGY_OVERLAP and view["guarantee"] == csw.GUARANTEE_WITHIN_WINDOW
+    assert "view" in view["statement"]
+    assert "Late commits are covered: each run records" not in view["statement"]
+    unknown = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="v",
+        cursor_type="TEXT", has_identity=True, relation_kind="",
+    )
+    assert unknown["guarantee"] == csw.GUARANTEE_NONE, unknown
+
+
+def _view_source():
+    _sql(f"CREATE TABLE {SCHEMA}.base (id bigserial PRIMARY KEY, v text)")
+    _sql(f"INSERT INTO {SCHEMA}.base (v) SELECT 'b' || g FROM generate_series(1, 10) g")
+    _sql(f"CREATE VIEW {SCHEMA}.v_base AS SELECT id, v FROM {SCHEMA}.base")
+
+
+def test_preflight_names_a_view_source_and_does_not_claim_the_horizon(pg):
+    from services.preflight_transfer_policy import run_transfer_policy_gates
+
+    _view_source()
+    c = pg_creds()
+    contract = {"name": "v_base", "cursor_field": "id", "cursor_semantics": "monotonic_sequence",
+                "sync_mode": "incremental_append", "primary_key": "id"}
+    gates = run_transfer_policy_gates(
+        sync_mode="incremental_append", validation_mode="strict", stream_contracts=[contract],
+        source_columns=["id", "v"], dest_type="postgresql", source_type="postgresql",
+        source_kind="database", source_table="v_base",
+        source_config={"type": "postgresql", "host": c["host"], "port": int(c["port"]),
+                       "database": c["database"], "username": c["username"],
+                       "password": c["password"], "schema": SCHEMA},
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    safety = (g9["details"]["cursor_semantics"] or [{}])[0].get("commit_safety") or {}
+    assert safety.get("strategy") == csw.STRATEGY_OVERLAP, safety
+    assert "Late commits are covered: each run records" not in str(safety.get("statement"))
+    assert "view" in str(safety.get("statement"))
+
+
+def test_view_source_recovers_a_late_commit_within_the_window(isolated, pg):
+    """Every horizon probe on a view failed (a view has no xmin), the runs stayed
+    green and the late row was skipped with no warning on the report."""
+    _view_source()
+    dst = "vout_" + uuid.uuid4().hex[:6]
+    kw = dict(cursor="id", mode="incremental_append", pk="id")
+    first = _run(isolated, "v_base", dst, **kw)
+    assert first.success, first.error
+    assert _window(first).get("strategy") == csw.STRATEGY_OVERLAP, _window(first)
+    slow = _connect(autocommit=False)
+    try:
+        slow.cursor().execute(f"INSERT INTO {SCHEMA}.base (v) VALUES ('SLOW')")
+        _sql(f"INSERT INTO {SCHEMA}.base (v) VALUES ('fast1'), ('fast2')")
+        assert _run(isolated, "v_base", dst, **kw).success
+        slow.commit()
+    finally:
+        slow.close()
+    third = _run(isolated, "v_base", dst, **kw)
+    # The run's only write is the recovered row, outside the cursor window the
+    # ladder grades: graded on Gate-8's count and digests, never as an empty
+    # (failed) digest — which left the route stuck on the continuity check.
+    assert third.success, third.error
+    assert (third.reconciliation or {}).get("ladder_declined_reason") == (
+        "only_rows_recovered_behind_the_watermark"
+    ), third.reconciliation
+    evidence = _window(third)
+    assert evidence.get("strategy") == csw.STRATEGY_OVERLAP, evidence
+    assert evidence.get("guarantee") == csw.GUARANTEE_WITHIN_WINDOW, evidence
+    assert int(evidence.get("rows_recovered") or 0) == 1, evidence
+    missing = _sql(
+        f"SELECT s.id, s.v FROM {SCHEMA}.base s LEFT JOIN {SCHEMA}.{dst} d ON d.id = s.id "
+        "WHERE d.id IS NULL", fetch=True,
+    )
+    assert missing == []
+    fourth = _run(isolated, "v_base", dst, **kw)
+    assert fourth.success, fourth.error
+    assert int(fourth.records_transferred) == 0
+    dupes = _sql(f"SELECT id FROM {SCHEMA}.{dst} GROUP BY id HAVING count(*) > 1", fetch=True)
+    assert dupes == []
+
+
+def test_a_failed_late_commit_probe_is_a_gate8_warning(isolated, pg, monkeypatch):
+    import src.transfer.stream_commit_window as scw
+
+    _sql(f"CREATE TABLE {SCHEMA}.ev (id bigserial PRIMARY KEY, v text)")
+    _sql(f"INSERT INTO {SCHEMA}.ev (v) SELECT 'b' || g FROM generate_series(1, 5) g")
+    dst = "pfail_" + uuid.uuid4().hex[:6]
+    kw = dict(cursor="id", mode="incremental_append")
+    assert _run(isolated, "ev", dst, **kw).success
+
+    def boom(*_a, **_k):
+        raise RuntimeError("probe connection reset")
+
+    monkeypatch.setattr(scw, "probe_pg_late_rows", boom)
+    _sql(f"INSERT INTO {SCHEMA}.ev (v) VALUES ('new')")
+    second = _run(isolated, "ev", dst, **kw)
+    evidence = _window(second)
+    assert evidence.get("guarantee") == csw.GUARANTEE_NONE, evidence
+    assert "RuntimeError" in str(evidence.get("probe_error")), evidence
+    warnings = " ".join((second.reconciliation or {}).get("warnings") or [])
+    assert "not guaranteed" in warnings.lower() and "RuntimeError" in warnings, second.reconciliation
+
+
+def test_a_failed_window_plan_is_a_gate8_warning(isolated, pg, monkeypatch):
+    import src.transfer.stream_commit_window as scw
+
+    _sql(f"CREATE TABLE {SCHEMA}.ev (id bigserial PRIMARY KEY, v text)")
+    _sql(f"INSERT INTO {SCHEMA}.ev (v) SELECT 'b' || g FROM generate_series(1, 5) g")
+    dst = "plfail_" + uuid.uuid4().hex[:6]
+
+    def boom(*_a, **_k):
+        raise RuntimeError("catalog unreadable")
+
+    monkeypatch.setattr(scw, "plan_commit_safe_window", boom)
+    first = _run(isolated, "ev", dst, cursor="id", mode="incremental_append")
+    assert first.success, first.error
+    evidence = _window(first)
+    assert evidence.get("guarantee") == csw.GUARANTEE_NONE, evidence
+    assert "RuntimeError" in str(evidence.get("probe_error")), evidence
+    warnings = " ".join((first.reconciliation or {}).get("warnings") or [])
+    assert "RuntimeError" in warnings, first.reconciliation

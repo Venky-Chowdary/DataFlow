@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from preflight.models import GateStatus
-from services.preflight_cursor_gate import build_sync_contract_gate
+from services.preflight_cursor_gate import build_sync_contract_gate, source_relation_kind
 from typing import Any
 
 logger = logging.getLogger("services.preflight_service")
@@ -96,6 +96,7 @@ def run_transfer_policy_gates(
             catalog_primary_key_columns=catalog_primary_key_columns,
             mappings=mappings,
             source_table=source_table,
+            source_relation_kind=source_relation_kind(src, source_config, source_table, sync),
         )
     )
 

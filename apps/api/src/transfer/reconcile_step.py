@@ -3350,6 +3350,21 @@ def _rejected_key(detail: dict[str, Any], key_cols: list[str]) -> tuple[str, ...
     return None
 
 
+def _only_rows_recovered_behind_watermark(
+    report: dict[str, Any], dest_summary: dict[str, Any] | None
+) -> bool:
+    """True when every row this run wrote was recovered behind the watermark.
+
+    Such rows are outside the cursor window the ladder grades (D188 keeps
+    recovered rows out of it), so the window holds no row this run wrote.
+    """
+    window = (dest_summary or {}).get("commit_safe_window")
+    if not isinstance(window, dict):
+        return False
+    recovered = int(window.get("rows_recovered") or 0)
+    return recovered > 0 and _as_count(report.get("source_rows")) <= recovered
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -3403,6 +3418,12 @@ def _maybe_attach_verification_ladder(
         return report_
 
     dest_type = resolve_driver_type(endpoint.format)
+    if _only_rows_recovered_behind_watermark(report, dest_summary):
+        # A commit-safe re-read whose only writes are rows recovered behind the
+        # stored watermark: the cursor window holds none of them, so there is
+        # no in-window batch to grade — digesting nothing is not a failed
+        # proof. Gate-8's count and digests own the verdict, as for a quiet poll.
+        return _return(report, "only_rows_recovered_behind_the_watermark")
 
     # Oversized same-engine SQL routes: the in-memory ladder below declines, but
     # the engine can still profile every column at full scale. Purely additive —

@@ -289,6 +289,7 @@ def evaluate_stream_cursor_semantics(
     source_type: str = "",
     catalog_primary_key_columns: list[str] | None = None,
     destination_dedupes: bool = True,
+    source_relation_kind: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Judge each stream's cursor declaration; return verdicts and blocking issues.
 
@@ -311,6 +312,7 @@ def evaluate_stream_cursor_semantics(
                 c, cursor, sync_mode, source_type,
                 catalog_primary_key_columns if destination_dedupes else None,
                 destination_dedupes,
+                relation_kind=source_relation_kind,
             ),
         )
         if verdict.status == "not_applicable":
@@ -331,6 +333,8 @@ def _stream_commit_safety(
     source_type: str,
     catalog_primary_key_columns: list[str] | None,
     destination_dedupes: bool = True,
+    *,
+    relation_kind: str | None = None,
 ) -> dict[str, Any]:
     """What this stream may claim about late commits (audit C1); ``{}`` when unknown.
 
@@ -349,7 +353,30 @@ def _stream_commit_safety(
         has_identity=destination_dedupes
         and bool(_declared_primary_key_columns(contract) or (catalog_primary_key_columns or [])),
         contract=contract,
+        relation_kind=relation_kind,
     )
+
+
+def source_relation_kind(
+    source_type: str, source_config: dict[str, Any] | None, source_table: str, sync_mode: str
+) -> str | None:
+    """``pg_class.relkind`` of a PostgreSQL incremental source (review H2).
+
+    None when the question does not apply (not PostgreSQL, not incremental, no
+    table or no connection facts); ``""`` when it applies and could not be read.
+    """
+    from services.commit_safe_window import STRATEGY_PG, commit_safety_strategy, pg_relation_kind
+    from services.sync_cursor import normalize_sync_mode, requires_incremental
+
+    cfg = source_config if isinstance(source_config, dict) else {}
+    if (
+        commit_safety_strategy(source_type) != STRATEGY_PG
+        or not requires_incremental(normalize_sync_mode(sync_mode))
+        or not (source_table or "").strip()
+        or not (cfg.get("host") or cfg.get("connection_string"))
+    ):
+        return None
+    return pg_relation_kind(cfg, str(cfg.get("schema") or ""), source_table)
 
 
 CLEAR_CURSOR_ENDPOINT = "POST /api/v1/ops/cdc-cursors/clear"
@@ -508,6 +535,7 @@ def build_sync_contract_gate(
     catalog_primary_key_columns: list[str] | None = None,
     mappings: list[dict[str, Any]] | None = None,
     source_table: str = "",
+    source_relation_kind: str | None = None,
 ) -> dict[str, Any]:
     """The g9 gate: is this route's sync contract complete and semantically sound?
 
@@ -670,6 +698,7 @@ def build_sync_contract_gate(
         source_type=src if source_kind != "file" else "",
         catalog_primary_key_columns=catalog_primary_key_columns,
         destination_dedupes=not _file_export(dest),
+        source_relation_kind=source_relation_kind if source_kind != "file" else None,
     )
     issues.extend(semantics_issues)
     # Audit C1 — a route that cannot re-read late commits says so on the gate

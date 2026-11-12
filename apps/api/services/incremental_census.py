@@ -101,6 +101,20 @@ def _with_window_evidence(recon: dict[str, Any], summary: dict[str, Any]) -> dic
     out = dict(recon)
     out["commit_safe_window"] = dict(window)
     late = int(window.get("late_rows_detected") or 0)
+    failed = str(window.get("probe_error") or "")
+    if failed:
+        # A probe the window depends on did not complete: the run read without
+        # the bound it planned, and the report says so (never a log line only).
+        limit = (
+            "rows committed behind the watermark are not guaranteed this run"
+            if window.get("guarantee") == "not_guaranteed"
+            else "rows committed behind the watermark are covered only within the "
+            "re-read window this run"
+        )
+        out["warnings"] = list(out.get("warnings") or []) + [
+            f"Commit-safe window: a source probe failed ({failed}); {limit}. "
+            + str(window.get("reason") or "")
+        ]
     if late and window.get("guarantee") == "not_guaranteed":
         note = (
             f"Up to {late:,} source row(s) were committed behind the watermark since the "
