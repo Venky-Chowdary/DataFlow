@@ -311,13 +311,21 @@ FAMILIES: dict[str, Family] = {
     "duckdb": Family("connectors.generic_sql._build_url_unconfined (duckdb)",
                      _keys("threads", "memory_limit", "max_memory", "access_mode", "default_order",
                            "preserve_insertion_order", "motherduck_token")),
+    # connectors.aws_common.boto3_client and the object-store writers: where in the bucket, how written.
+    "s3": Family("connectors.aws_common.boto3_client + object-store writers", frozenset(), (), frozenset(),
+                 _keys("prefix", "file_format", "compression", "delimiter", "header", "sse",
+                       "server_side_encryption", "kms_key_id", "storage_class", "partition_by",
+                       "use_default_aws_credentials")),
+    "dynamodb": Family("connectors.aws_common.boto3_client (dynamodb)", frozenset(), (), frozenset(),
+                       _keys("use_default_aws_credentials", "billing_mode")),
     "trino": Family("SQLAlchemy trino", _keys("protocol", "verify", "source", "catalog", "schema",
                                                  "http_scheme", "client_tags", "roles")),
 }
 for _alias, _name in (("pgvector", "postgresql"), ("cockroachdb", "postgresql"), ("greenplum", "postgresql"),
                       ("yugabytedb", "postgresql"), ("mariadb", "mysql"), ("tidb", "mysql"),
                       ("singlestore", "mysql"), ("presto", "trino"), ("amazon_redshift", "redshift"),
-                      ("redshift_serverless", "redshift"), ("motherduck", "duckdb")):
+                      ("redshift_serverless", "redshift"), ("motherduck", "duckdb"),
+                      ("minio", "s3"), ("gcs", "s3"), ("azure_blob", "s3"), ("adls", "s3"), ("r2", "s3")):
     FAMILIES[_alias] = FAMILIES[_name]
 #: Families with no URL keys and no address extras of their own: only the engine options.
 _DEFAULT = Family("the endpoint's own fields only")

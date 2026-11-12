@@ -17,8 +17,14 @@ family:
 - BigQuery: ``schema`` (the dataset fixes the location);
 - drivers that dial no host of their own (cloud storage, SaaS APIs): the
   credential identity, ``username`` (a storage account or access key),
-  ``api_key`` and ``service_account``. The values are only ever fed to a keyed
-  hash (HKDF subkey of the vault key), never stored.
+  ``api_key``, ``service_account``, ``password`` (a SaaS token kept there)
+  and ``private_key``. The values are only ever fed to a keyed hash (HKDF
+  subkey of the vault key), never stored;
+- round 3 (H6), for every family: ``extra`` credentials (``token``,
+  ``oauth_token``, ``credential`` …), the Iceberg ``warehouse`` and every
+  ``s3.*`` / ``client.*`` / ``gcs.*`` / ``adls.*`` FileIO property,
+  ``staging_*`` and ``*_endpoint`` extras, and every address extra a family
+  allowlists (``services.residency_addressing``).
 
 Any change to those fields clears the stamp, an address field residency
 cannot read counts as moved, and a run whose resolved destination differs
@@ -35,7 +41,7 @@ from typing import Any
 #: Fields every driver addresses with.
 _ADDRESS_FIELDS = ("host", "port", "database", "endpoint_url", "connection_string")
 #: Per driver family, further fields that choose where data lands.
-_FAMILY_FIELDS: dict[str, tuple[str, ...]] = {"bigquery": ("schema",)}
+_FAMILY_FIELDS: dict[str, tuple[str, ...]] = {"bigquery": ("schema",), "iceberg": ("warehouse",)}
 #: ``extra`` keys that name where data lands.
 _ADDRESS_EXTRA_KEYS = frozenset({
     "account", "account_name", "account_url", "storage_account", "project", "project_id",
@@ -45,8 +51,20 @@ _ADDRESS_EXTRA_KEYS = frozenset({
     "http_path", "catalog", "workspace_url", "cluster", "connection_string", "uri",
     "tenant", "tenant_id", "org", "org_id", "portal_id", "odbc_connect", "database",
 })
-#: Credentials that choose the account for a driver that dials no host of its own.
-_IDENTITY_FIELDS = ("username", "api_key", "service_account")
+#: Credentials that choose the account for a driver that dials no host of its own
+#: (review round 3, H6: ``saas_common.token`` falls back to ``password``).
+_IDENTITY_FIELDS = ("username", "api_key", "service_account", "password", "private_key")
+#: ``extra`` keys that choose the account or credential, for every family (H6).
+_IDENTITY_EXTRA_KEYS = frozenset({
+    "token", "oauth_token", "credential", "credentials", "access_token", "refresh_token",
+    "client_id", "client_secret", "iam_role", "redshift_iam_role", "aws_access_key_id",
+    "role_arn", "service_account", "key_file", "keyfile",
+})
+#: ``extra`` key prefixes (FileIO / storage properties, staging) and suffix that
+#: choose where data lands (H6). Compared on the normalised key.
+_BOUND_EXTRA_PREFIXES = ("s3", "client", "gcs", "adls", "hdfs", "webhdfs", "staging", "redshiftstaging",
+                         "openshift", "unixsocket", "althosts", "failoverpartner", "address", "addr")
+_BOUND_EXTRA_SUFFIXES = ("endpoint", "endpointurl", "baseurl")
 #: SQL warehouses address by host/account, not by login: no credential identity.
 _HOST_ADDRESSED_WAREHOUSES = frozenset({"snowflake", "redshift", "generic_sql", "databricks"})
 #: Address fields shown in the audit event and the stamp (never a credential or DSN).
@@ -76,6 +94,19 @@ def _field(target: Any, name: str) -> Any:
     return _value(target, name)
 
 
+def is_bound_extra(key: Any) -> bool:
+    """Whether an ``extra`` key is part of what a region stamp is bound to."""
+    from services.residency_addressing import FAMILIES, _norm_key
+
+    raw = str(key or "").strip().lower()
+    norm = _norm_key(raw)
+    if raw in _ADDRESS_EXTRA_KEYS or raw in _IDENTITY_EXTRA_KEYS:
+        return True
+    if norm.startswith(_BOUND_EXTRA_PREFIXES) or norm.endswith(_BOUND_EXTRA_SUFFIXES):
+        return True
+    return any(norm in family.address_extra for family in FAMILIES.values())
+
+
 def address_fields(target: Any) -> dict[str, str]:
     """Every addressing field of a connector or resolved endpoint, normalised."""
     from services.data_residency import _dials_host, _norm
@@ -89,8 +120,9 @@ def address_fields(target: Any) -> dict[str, str]:
     fields["host"] = fields["host"].lower().rstrip(".")
     extra = getattr(target, "extra", None)
     if isinstance(extra, dict):
-        for key in sorted(_ADDRESS_EXTRA_KEYS & set(extra)):
-            fields[f"extra.{key}"] = _text(extra[key])
+        for key in sorted(str(k) for k in extra):
+            if is_bound_extra(key):
+                fields[f"extra.{key}"] = _text(extra[key])
     return {name: value for name, value in fields.items() if value}
 
 
@@ -132,7 +164,10 @@ def resolved_address(target: Any) -> dict[str, Any]:
             shown[name] = fields[name]
     shown.update({
         name: value for name, value in fields.items()
-        if name.startswith("extra.") and name[6:] not in ("connection_string", "odbc_connect", "uri", "url")
+        if name.startswith("extra.")
+        and name[6:] not in ("connection_string", "odbc_connect", "uri", "url")
+        and name[6:] not in _IDENTITY_EXTRA_KEYS
+        and "key" not in name[6:] and "secret" not in name[6:] and "token" not in name[6:]
     })
     return shown
 
@@ -156,6 +191,7 @@ def overridden_by_request(endpoint: Any, connector: Any, workspace_id: str | Non
 
 __all__ = [
     "address_fields",
+    "is_bound_extra",
     "address_unreadable",
     "overridden_by_request",
     "resolved_address",

@@ -521,10 +521,11 @@ def _kept_region_verification(before: Any, after: Mapping[str, Any]) -> dict[str
     return {} if moved else dict(stamp)
 
 
-#: Every connector field a region verification is bound to (round 2, H4).
+#: Every connector field a region verification is bound to (round 2, H4; round 3,
+#: H6: a SaaS token in ``password``, ``private_key``, the Iceberg ``warehouse``).
 _STAMP_ADDRESS_KEYS = (
     "type", "host", "port", "database", "schema", "endpoint_url", "connection_string",
-    "username", "api_key", "service_account", "extra",
+    "username", "api_key", "service_account", "password", "private_key", "warehouse", "extra",
 )
 
 
@@ -1180,7 +1181,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
                     **doc,
                     **{
                         name: decrypt_secret(str(doc.get(name) or ""), tenant_id=tenant)
-                        for name in ("connection_string", "api_key", "service_account")
+                        for name in ("connection_string", "api_key", "service_account", "password", "private_key")
                     },
                 })
             else:
