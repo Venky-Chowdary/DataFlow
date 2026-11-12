@@ -36,6 +36,17 @@ _DETERMINISTIC_PHASES = frozenset(
     {"validating", "validate", "preflight", "mapping", "planning"}
 )
 
+
+def _http_status(code: str) -> str:
+    """``code`` as an HTTP status, never as digits inside a port, host or id.
+
+    A bare ``403`` matched ``port 40312 failed: Connection refused``, so a
+    refused connection on about one ephemeral port in 180 parked as a
+    credential refusal instead of being retried (the r5 schedule e2e flake).
+    """
+    return rf"(?<![\w.:/-])(?<!port ){code}(?![\w-]|\.\d)"
+
+
 # Deterministic refusals the engine states in words. Each is owned by a gate or
 # a contract check and is resolved by changing the job, not by trying again.
 _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -72,7 +83,7 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
     # Classifying them differently made an unattended retry depend on the
     # server's pg_hba.conf, not on the failure.
     (r"authentication failed|invalid credentials|access denied|permission "
-     r"denied|not authorized|403|role \"[^\"]*\" does not exist|"
+     r"denied|not authorized|" + _http_status("403") + r"|role \"[^\"]*\" does not exist|"
      r"login failed for user|ora-01017|invalid username/password",
      "Credentials or grants are rejected — fix them on the connector."),
     (r"strict error policy blocks partial write",
@@ -142,7 +153,7 @@ _TRANSIENT_PATTERNS: tuple[str, ...] = (
     r"too many connections|connection pool|max connections",
     r"temporarily unavailable|service unavailable|try again|please retry",
     r"broken pipe|eof occurred|reset by peer|network is unreachable",
-    r"rate limit|throttl|429|slow ?down",
+    r"rate limit|throttl|slow ?down|" + _http_status("429"),
     r"50[0234] (server )?error|internal server error|bad gateway",
     r"worker (lost|died|terminated)|lease expired|heartbeat lost",
     r"warehouse .*(suspend|resum)|is being resumed",
