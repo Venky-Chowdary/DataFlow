@@ -100,6 +100,9 @@ services:
       dockerfile: Dockerfile.api
     command: ["/app/scripts/start-scheduler.sh"]
     restart: unless-stopped
+    # A stopping worker hands its in-flight jobs over within WORKER_DRAIN_SECONDS (25 s):
+    # Docker's 10 s default would kill it first and the jobs would wait for their lease.
+    stop_grace_period: 40s
     env_file: .env
     environment:
       DATAWRAP_ENV: production
@@ -135,6 +138,9 @@ services:
       dockerfile: Dockerfile.api
     command: ["/app/scripts/start-worker.sh"]
     restart: unless-stopped
+    # A stopping worker hands its in-flight jobs over within WORKER_DRAIN_SECONDS (25 s):
+    # Docker's 10 s default would kill it first and the jobs would wait for their lease.
+    stop_grace_period: 40s
     env_file: .env
     environment:
       DATAWRAP_ENV: production
@@ -173,6 +179,9 @@ services:
       dockerfile: Dockerfile.api
     command: ["/app/scripts/start-worker.sh"]
     restart: unless-stopped
+    # A stopping worker hands its in-flight jobs over within WORKER_DRAIN_SECONDS (25 s):
+    # Docker's 10 s default would kill it first and the jobs would wait for their lease.
+    stop_grace_period: 40s
     env_file: .env
     environment:
       DATAWRAP_ENV: production
