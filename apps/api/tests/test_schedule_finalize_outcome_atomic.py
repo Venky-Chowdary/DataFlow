@@ -1492,6 +1492,68 @@ def test_a_retry_finalized_again_after_a_lost_write_is_reported_once(
     assert events.count("schedule.run.retry") == 1, events
 
 
+# --- Only the write that parks the retry reports it (review round 3, Low 3) ---
+
+
+def _retry_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if "failed; retrying at" in r.getMessage()]
+
+
+def test_schedule_retry_says_whether_this_call_parked_the_retry(store):
+    """The second write for one attempt parks nothing, and says so."""
+    sched, run_id = _claimed(store, "retry-says", "job-1", max_retries=1,
+                             retry_backoff_seconds=0)
+    entry = {"run_id": run_id, "job_id": "job-1", "status": "failed", "attempt": 0,
+             "retry_scheduled": True}
+
+    first = store.schedule_retry(sched.id, retry_at=_now(), attempt=1, run_entry=entry)
+    second = store.schedule_retry(sched.id, retry_at=_now(), attempt=1, run_entry=entry)
+
+    assert first is not None and first.retry_attempt == 1 and first.running is False
+    assert second is None
+    assert store.schedule_retry("no-such-schedule", retry_at=_now(), attempt=1,
+                                run_entry=entry) is None
+
+
+@mongo_only
+def test_a_retry_parked_by_a_racing_finalizer_is_reported_once(store, runner, monkeypatch, caplog):
+    """RE1: the peer finalizer parks the retry inside this one's write window.
+
+    This finalizer's write is superseded and parks nothing; reported anyway, the
+    retry event and its warning went out twice for one retry.
+    """
+    runner.jobs["job-1"] = TRANSIENT
+    sched, _run = _claimed(store, "retry-race", "job-1", max_retries=2,
+                           retry_backoff_seconds=600)
+    results: list[Any] = []
+    real_retry = store.schedule_retry
+
+    def recorded_retry(*args, **kwargs):
+        result = real_retry(*args, **kwargs)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(store, "schedule_retry", recorded_retry)
+    state = _write_inside_finalize(
+        store, monkeypatch, lambda: runner._finalize_run(sched.id, "job-1", 0, _now()),
+        around="schedule_retry",
+    )
+
+    with caplog.at_level("INFO"):
+        runner._finalize_run(sched.id, "job-1", 0, _now())
+
+    assert not state["pending"], "the peer finalizer never ran inside the retry write"
+    parked = store.get_schedule(sched.id)
+    assert parked.retry_attempt == 1 and parked.running is False and parked.retry_at
+    assert [r.get("job_id") for r in parked.run_history] == ["job-1"]
+    # The peer's write parked it; this one's was superseded.
+    assert [r is not None for r in results] == [True, False], results
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert events.count("schedule.run.retry") == 1, events
+    assert len(_retry_warnings(caplog)) == 1, _retry_warnings(caplog)
+
+
 @mongo_only
 def test_a_late_outcome_on_a_schedule_deleted_meanwhile_records_nothing(store, runner, monkeypatch):
     """The late path's write finds the schedule gone: no schedule, nothing recorded."""

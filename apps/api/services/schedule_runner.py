@@ -1479,14 +1479,18 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     if decision["retry"]:
         delay = max(0, sched.retry_backoff_seconds) * (attempt + 1)
         retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-        schedule_retry(
+        parked = schedule_retry(
             schedule_id,
             retry_at=retry_at,
             attempt=attempt + 1,
             run_entry={**entry, "retry_scheduled": True, "retry_at": retry_at.isoformat()},
         )
-        # Reported once the retry write returned. Reported first, a write that lost
-        # (ScheduleWriteContended, the claim kept for the beat) reported a
+        if parked is None:
+            # Parked already (a racing finalizer's write landed first), or the
+            # schedule is gone: the write that parked it reports it.
+            return
+        # Reported once this write parked the retry. Reported first, a write that
+        # lost (ScheduleWriteContended, the claim kept for the beat) reported a
         # retry that did not exist, and the beat's finalize reported it again.
         logger.warning(
             "Schedule %s attempt %s failed; retrying at %s",

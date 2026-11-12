@@ -3302,6 +3302,11 @@ def schedule_retry(
     Holding the attempt in an in-process timer instead loses it whenever the
     service restarts — routine on a rolling deploy — and leaves the schedule
     flagged running until the staleness window expires hours later.
+
+    Returns the schedule only when this call parked the retry. ``None`` when it
+    parked nothing: the attempt was parked already (another finalizer for the
+    same job, also one whose write landed inside this one's), or the schedule
+    is gone. Only the caller that parked it reports the retry.
     """
     from services.schedule_run_lifecycle import merge_run_entry, run_finished, trim_history
 
@@ -3314,7 +3319,7 @@ def schedule_retry(
             if job_id and run_finished(s, job_id):
                 # A second finalizer for this attempt: the retry is parked and
                 # the claim released already — the retry may even hold it now.
-                return s
+                return None
             # The same check against what is stored when this write lands: on
             # the Mongo store another replica's finalizer can park this retry
             # meanwhile, and with no back-off the retry can already hold the
@@ -3340,9 +3345,7 @@ def schedule_retry(
             schedules[i] = updated
             try:
                 _save_all(schedules, guard=guard)
-            except _WriteSuperseded:
-                return next((x for x in _load_all() if x.id == schedule_id), None)
-            except _ScheduleGone:
+            except (_WriteSuperseded, _ScheduleGone):
                 return None
             return updated
     return None
