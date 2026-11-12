@@ -433,6 +433,8 @@ def test_startup_snapshot_is_safe_and_written_once(security_app):
     )
     assert isinstance(details["docs_enabled"], bool)
     assert isinstance(details["config_error_count"], int)
+    # Security follow-up 1: local-file confinement (off outside production).
+    assert details["local_file_confinement"] == "off"
     assert "phase2c-secret-sentinel" not in security_app["audit_log"].STORE_PATH.read_text(
         encoding="utf-8"
     )

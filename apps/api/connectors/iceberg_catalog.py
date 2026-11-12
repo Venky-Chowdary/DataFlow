@@ -106,7 +106,8 @@ def iceberg_local_root() -> Path | None:
     ``DATAFLOW_ICEBERG_ROOT`` wins. With ``DATAFLOW_CONFINE_LOCAL_FILES`` on, the
     production jail defaults to ``<data_dir>/iceberg`` (the persistent volume),
     so a tenant cannot point a warehouse at an arbitrary worker path. Without
-    the variable and the flag (the default) nothing is jailed, as before.
+    the variable and with the flag off (the default outside production) nothing
+    is jailed, as before.
     """
     raw = (getenv_brand("ICEBERG_ROOT") or "").strip()
     if raw:
@@ -137,8 +138,9 @@ def _jail_local_path(path_str: str, label: str) -> Path:
         candidate = root / candidate
     resolved = candidate.resolve()
     if not is_within(resolved, root):
-        raise ValueError(
-            f"Iceberg {label} must be under the Iceberg warehouse root {root} (DATAFLOW_ICEBERG_ROOT)"
+        raise ValueError(  # no host path in the message (security follow-up 1)
+            f"Iceberg {label} must be under the Iceberg warehouse folder (DATAFLOW_ICEBERG_ROOT, "
+            "else the data folder's iceberg area)"
         )
     return resolved
 

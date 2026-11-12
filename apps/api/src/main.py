@@ -129,6 +129,9 @@ async def lifespan(app: FastAPI):
     from services.brand_env import warn_brand_flag_conflicts
 
     warn_brand_flag_conflicts(logger)
+    from services.local_file_policy import local_file_settings, warn_if_local_file_confinement_off
+
+    warn_if_local_file_confinement_off(logging.getLogger("datawrap.security"))
     from services.sso_authorization import warn_sso_auto_provision_without_domains
 
     warn_sso_auto_provision_without_domains(logging.getLogger("datawrap.security"))
@@ -169,6 +172,7 @@ async def lifespan(app: FastAPI):
                     "audit_retention_days": audit_retention_days,
                     "docs_enabled": bool(docs_enabled()),
                     "config_error_count": len(config_errors),
+                    **local_file_settings(),
                 },
             )
         except Exception as exc:
