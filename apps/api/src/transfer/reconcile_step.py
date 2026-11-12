@@ -4959,6 +4959,7 @@ def _generic_key_census(
     endpoint: Any,
     dest_summary: dict[str, Any] | None,
     mappings: list[dict[str, Any]] | None,
+    source_cursor_bound: tuple[str, Any] | None = None,
 ) -> tuple[list[Any], list[Any], list[Any], str | None]:
     """Cross-engine key census: (changed, missing, extra, unavailable_reason).
 
@@ -5041,6 +5042,19 @@ def _generic_key_census(
             "the recorded column mappings do not pair source and target "
             "columns for the census join"
         )
+    # R1b — an incremental census joins only the source rows at or behind the
+    # watermark: ``(source cursor column, keep(cell))`` bounds the source side.
+    bound_idx: int | None = None
+    bound_keep = None
+    if source_cursor_bound is not None:
+        _bound_col, bound_keep = source_cursor_bound
+        _src_selected = [c.lower() for c in [*src_pks, *src_cols]]
+        if str(_bound_col).lower() not in _src_selected:
+            return [], [], [], (
+                f"the cursor column '{_bound_col}' is not among the mapped columns, "
+                "so the census cannot be bounded to rows behind the watermark"
+            )
+        bound_idx = _src_selected.index(str(_bound_col).lower())
     try:
         from services.reconciliation import normalize_cell
         from .connector_capabilities import resolve_driver_type
@@ -5123,6 +5137,9 @@ def _generic_key_census(
                                     ).hexdigest(),
                                 )
                                 for r in chunk
+                                if side
+                                or bound_idx is None
+                                or bound_keep(r[bound_idx])
                             ),
                         )
                     db.commit()
@@ -9240,6 +9257,15 @@ def run_reconciliation(
                         f"{recon['message']} "
                         f"({recon['culprit_keys_unavailable_reason']})"
                     )
+    # R1b — a run that is due the periodic key census joins every source key
+    # at or behind the watermark to the destination; a missing one is drift
+    # and the run is not green.
+    from services.incremental_census import apply_incremental_census
+
+    recon = apply_incremental_census(
+        recon, source_endpoint=source_endpoint, endpoint=endpoint,
+        dest_summary=dest_summary, mappings=mappings, key_census=_generic_key_census,
+    )
     # D188 — message rewrites above rebuild the text from its head; the
     # out-of-window drift sentence is a finding and must stay in it.
     from services.incremental_drift import DRIFT_KEY, drift_sentence

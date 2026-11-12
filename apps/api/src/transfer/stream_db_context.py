@@ -66,6 +66,15 @@ class RunConfig:
     source_filter: Any = None
     validation_mode: Any = None
     _tie_dedupe: Any = None
+    #: Commit-safe window of this run (services.commit_safe_window) and what
+    #: it implies: the stored route watermark, the cursor value up to which
+    #: rows are re-reads, and the source column a re-read row is recognised by.
+    commit_window: Any = None
+    route_watermark: Any = None
+    replay_through: Any = ""
+    replay_identity: Any = ""
+    #: ``(every, due this run, counter to store)`` of the periodic key census.
+    census_plan: Any = None
     backfill_new_fields: Any = None
     batch_quality_enabled: Any = None
     drift_detector: Any = None

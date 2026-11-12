@@ -286,6 +286,9 @@ def evaluate_stream_cursor_semantics(
     *,
     sync_mode: str,
     validation_mode: str,
+    source_type: str = "",
+    catalog_primary_key_columns: list[str] | None = None,
+    destination_dedupes: bool = True,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Judge each stream's cursor declaration; return verdicts and blocking issues.
 
@@ -304,6 +307,11 @@ def evaluate_stream_cursor_semantics(
             declared=str(c.get("cursor_semantics") or ""),
             validation_mode=validation_mode,
             lookback_days=_contract_lookback(c),
+            commit_safety=_stream_commit_safety(
+                c, cursor, sync_mode, source_type,
+                catalog_primary_key_columns if destination_dedupes else None,
+                destination_dedupes,
+            ),
         )
         if verdict.status == "not_applicable":
             continue
@@ -314,6 +322,34 @@ def evaluate_stream_cursor_semantics(
         if verdict.blocks:
             issues.append(f"{stream}.{cursor}: {verdict.reason}")
     return verdicts, issues
+
+
+def _stream_commit_safety(
+    contract: dict[str, Any],
+    cursor: str,
+    sync_mode: str,
+    source_type: str,
+    catalog_primary_key_columns: list[str] | None,
+    destination_dedupes: bool = True,
+) -> dict[str, Any]:
+    """What this stream may claim about late commits (audit C1); ``{}`` when unknown.
+
+    A file export cannot recognise a re-read row, whatever key the stream
+    declares, so it is judged as a route with no identity.
+    """
+    if not (source_type or "").strip():
+        return {}
+    from services.commit_safe_window import static_commit_safety
+
+    return static_commit_safety(
+        source_type=source_type,
+        sync_mode=sync_mode,
+        cursor_column=cursor,
+        # A declared or catalog key is the identity a re-read collapses on.
+        has_identity=destination_dedupes
+        and bool(_declared_primary_key_columns(contract) or (catalog_primary_key_columns or [])),
+        contract=contract,
+    )
 
 
 CLEAR_CURSOR_ENDPOINT = "POST /api/v1/ops/cdc-cursors/clear"
@@ -625,10 +661,24 @@ def build_sync_contract_gate(
     if unknown_pk:
         issues.append(f"Primary key not in source schema: {', '.join(unknown_pk[:5])}")
 
+    from services.type_system import destination_is_file_export as _file_export
+
     verdicts, semantics_issues = evaluate_stream_cursor_semantics(
-        contracts, sync_mode=sync, validation_mode=validation
+        contracts,
+        sync_mode=sync,
+        validation_mode=validation,
+        source_type=src if source_kind != "file" else "",
+        catalog_primary_key_columns=catalog_primary_key_columns,
+        destination_dedupes=not _file_export(dest),
     )
     issues.extend(semantics_issues)
+    # Audit C1 — a route that cannot re-read late commits says so on the gate
+    # it passes; it is never left to read as "nothing is skipped".
+    unguarded = [
+        f"{v.get('stream')}.{v.get('cursor_field')}: {(v.get('commit_safety') or {}).get('statement')}"
+        for v in verdicts
+        if (v.get("commit_safety") or {}).get("guarantee") == "not_guaranteed"
+    ]
 
     cursor_conflict = cursor_identity_issue(read_scope)
     if cursor_conflict:
@@ -649,9 +699,11 @@ def build_sync_contract_gate(
     return {
         "id": "g9_sync_contract",
         "status": pass_status,
-        "message": f"Sync contract valid for {sync.replace('_', ' ')}",
+        "message": f"Sync contract valid for {sync.replace('_', ' ')}"
+        + (f" — {unguarded[0]}" if unguarded else ""),
         "duration_ms": 0,
         "details": {
+            "commit_safety_warnings": unguarded or None,
             "sync_mode": sync,
             "streams": len(contracts),
             "requires_cursor": requires_cursor,

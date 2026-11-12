@@ -11,7 +11,7 @@ import json
 import logging
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from collections.abc import Mapping
 from typing import Any
@@ -289,6 +289,12 @@ class SyncContract:
     #: snapshot reader filter on it and skip rows the log had captured.
     poll_cursor_field: str = ""
     poll_cursor_semantics: str = ""
+    #: Fallback commit-safe re-read window (services.commit_safe_window): None
+    #: = product default, 0 = declared off.
+    cursor_overlap_seconds: int | None = None
+    cursor_overlap_values: int | None = None
+    #: Run the full key census every N runs of this route (0 = off).
+    key_census_every: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SyncContract:
@@ -318,12 +324,35 @@ class SyncContract:
             cursor_lookback_days=_contract_lookback_days(data),
             poll_cursor_field=str(data.get("poll_cursor_field") or "").strip(),
             poll_cursor_semantics=str(data.get("poll_cursor_semantics") or "").strip().lower(),
+            cursor_overlap_seconds=_contract_optional_int(data, "cursor_overlap_seconds"),
+            cursor_overlap_values=_contract_optional_int(data, "cursor_overlap_values"),
+            key_census_every=_contract_optional_int(data, "key_census_every") or 0,
         )
+
+    def overlap_declaration(self) -> dict[str, int]:
+        """The declared re-read window keys, absent when left to the default."""
+        out: dict[str, int] = {}
+        if self.cursor_overlap_seconds is not None:
+            out["cursor_overlap_seconds"] = self.cursor_overlap_seconds
+        if self.cursor_overlap_values is not None:
+            out["cursor_overlap_values"] = self.cursor_overlap_values
+        return out
 
     def primary_key_columns(self) -> list[str]:
         """Return PK columns; supports ``id`` or ``order_id,line_id`` / ``primary_keys``."""
         raw = (self.primary_key or "").replace(";", ",")
         return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _contract_optional_int(data: dict[str, Any], key: str) -> int | None:
+    """A declared non-negative integer, or None when absent/invalid."""
+    raw = data.get(key)
+    if raw is None or isinstance(raw, bool) or str(raw).strip() == "":
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 def _contract_lookback_days(data: dict[str, Any]) -> int:
@@ -618,6 +647,15 @@ class IncrementalReadScope:
     #: Declared business-date re-read window in days (0 = none). Only
     #: ``business_date`` cursors may declare one — see evaluate_cursor_semantics.
     lookback_days: int = 0
+    #: Declared type the stored watermark was measured on ("" when unrecorded).
+    watermark_cursor_type: str = ""
+    #: Commit-order bound stored with the watermark (``{}`` when none).
+    commit_horizon: Mapping[str, Any] = field(default_factory=dict)
+    #: Runs of this route since its last key census (services.incremental_census).
+    runs_since_key_census: int = 0
+    #: This run's commit-safe window (services.commit_safe_window), attached by
+    #: a read path that de-duplicates re-read rows. None = read from the mark.
+    commit_safe: Any = None
 
     @property
     def read_watermark(self) -> str | None:
@@ -625,7 +663,10 @@ class IncrementalReadScope:
 
         The stored mark never moves — only the read seed does. An unparseable
         watermark refuses rather than silently skipping the declared window.
+        A commit-safe window that re-reads behind the mark supplies the seed.
         """
+        if self.commit_safe is not None and getattr(self.commit_safe, "replays", False):
+            return self.commit_safe.seed
         if not self.lookback_days or self.watermark in (None, ""):
             return self.watermark
         text = str(self.watermark)
@@ -740,6 +781,9 @@ def resolve_incremental_read_scope(
         watermark_cursor_column=str(metadata.get("cursor_column") or ""),
         watermark_tiebreak_column=stored_tiebreak,
         lookback_days=contract.cursor_lookback_days if contract else 0,
+        watermark_cursor_type=str(metadata.get("cursor_type") or ""),
+        commit_horizon=dict(metadata.get("commit_horizon") or {}),
+        runs_since_key_census=int(metadata.get("runs_since_key_census") or 0),
     )
 
 
