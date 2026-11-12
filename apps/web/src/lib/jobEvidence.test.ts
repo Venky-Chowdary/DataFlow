@@ -8,6 +8,7 @@ import {
   formatJobRoute,
   identityAlignmentSentence,
   jobEndpointLabels,
+  jobDestinationPath,
   presentChecksumNote,
   presentJobPhases,
   presentStoredEventLog,
@@ -542,5 +543,21 @@ describe("readSchemaFidelity", () => {
       }),
       null,
     );
+  });
+});
+
+describe("destination label from partial job fields (jobs header showed undefined.undefined)", () => {
+  it("joins only the parts that are set", () => {
+    assert.equal(jobDestinationPath({ destination_database: "e2e", destination_collection: "orders" }), "e2e.orders");
+    assert.equal(jobDestinationPath({ destination_collection: "orders" }), "orders");
+    assert.equal(jobDestinationPath({ destination_database: "e2e", destination_collection: "  " }), "e2e");
+    assert.equal(jobDestinationPath({}), "");
+    assert.equal(jobDestinationPath(null), "");
+  });
+
+  it("an empty path falls back to the header's own fallback, never \".\" or \"undefined\"", () => {
+    const job = { destination_type: "sqlite" };
+    assert.equal(jobEndpointLabels(job, { dest: jobDestinationPath(job) }).dest, "sqlite");
+    assert.equal(jobEndpointLabels(null, { dest: jobDestinationPath(null) }).dest, "Destination");
   });
 });

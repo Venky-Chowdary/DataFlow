@@ -226,10 +226,11 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
               onClick={onExport}
               disabled={anyBusy}
               loading={exporting}
-              loadingLabel="Exporting…"
+              loadingLabel="Downloading…"
               leadingIcon={<DtIcon name="download" size={14} />}
+              title="The trust report as Markdown, as it reads now."
             >
-              Export Markdown
+              Download report (.md)
             </Button>
             {signed && onDownloadSigned && (
               <Button
@@ -242,7 +243,7 @@ export function SignoffPanel({ report, busy, canSign, signDeniedReason, onSign, 
                 leadingIcon={<DtIcon name="download" size={14} />}
                 title="The signed JSON pack; POST /api/v1/transfer/proof-pack/verify checks its signature."
               >
-                Download signed pack
+                Download signed pack (.json)
               </Button>
             )}
           </div>
