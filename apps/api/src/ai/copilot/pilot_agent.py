@@ -2089,8 +2089,12 @@ class DataPilotAgent:
         self._append_tool_actions(turn, tr)
         # What the model is handed is not what the app shows: under the
         # metadata-only policy a row-returning result is reduced to its shape.
+        from .pilot_egress import failed_error_for_model
+
         payload = json.dumps(
-            model_payload(tr.name, tr.output) if tr.success else {"error": tr.error},
+            model_payload(tr.name, tr.output) if tr.success
+            # A failed call's error is gated too: secrets masked, cell text withheld.
+            else {"error": failed_error_for_model(tr.name, tr.error)},
             default=json_default,
         )
         if len(payload) > _NATIVE_TOOL_OUTPUT_CHARS:

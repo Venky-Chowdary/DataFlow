@@ -127,20 +127,41 @@ class PilotResultStore:
             self._merge_payload_locked(raw)
 
     def _persist(self) -> None:
+        from .spill_lock import read_spill, spill_lock
+
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "entries": {
+            with spill_lock(self.path):
+                entries = {
                     rid: spilled
                     for rid, doc in self._entries.items()
                     if (spilled := self._sealed_doc(rid, doc)) is not None
-                },
-                "latest_by_session": self._latest_by_session,
-                "latest_global": self._latest_global,
-            }
-            tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
-            tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
-            tmp.replace(self.path)
+                }
+                # Another worker's results on the same file are kept, not
+                # overwritten by this worker's view (review 2, low).
+                disk = read_spill(self.path)
+                now = _now()
+                for rid, stored in (disk.get("entries") or {}).items():
+                    if (
+                        rid not in entries and rid not in self._entries and isinstance(stored, dict)
+                        and "rows" not in stored and float(stored.get("expires_at") or 0) > now
+                    ):
+                        entries[rid] = stored
+                if len(entries) > _MAX_ENTRIES:
+                    keep = sorted(entries, key=lambda r: float(entries[r].get("created_at") or 0))
+                    for rid in keep[: len(entries) - _MAX_ENTRIES]:
+                        entries.pop(rid, None)
+                latest = {
+                    sid: rid for sid, rid in (disk.get("latest_by_session") or {}).items() if rid in entries
+                } | self._latest_by_session
+                payload = {
+                    "entries": entries,
+                    "latest_by_session": latest,
+                    "latest_global": self._latest_global or disk.get("latest_global"),
+                }
+                tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+                tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
+                tmp.replace(self.path)
         except OSError as exc:
             _log.warning("pilot result store persist failed: %s", exc)
 

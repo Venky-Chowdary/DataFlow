@@ -53,7 +53,21 @@ def reset_context_cooldowns() -> None:
 #: "hi" included, ran a whole-collection aggregate (review M6). Answers that
 #: state job numbers read the ledger themselves (``list_jobs``).
 CONTEXT_REUSE_S = 15.0
+#: At most this many reads are held; expired ones are dropped first (review 2,
+#: low: one entry per actor and source was kept for the life of the process).
+MAX_REUSED_READS = 256
 _recent: dict[tuple[str, str], tuple[float, Any]] = {}
+
+
+def _remember_read_locked(key: tuple[str, str], value: Any) -> None:
+    now = time.monotonic()
+    _recent[key] = (now, value)
+    if len(_recent) <= MAX_REUSED_READS:
+        return
+    for stale in [k for k, (at, _v) in _recent.items() if now - at >= CONTEXT_REUSE_S]:
+        _recent.pop(stale, None)
+    while len(_recent) > MAX_REUSED_READS:
+        _recent.pop(min(_recent, key=lambda k: _recent[k][0]), None)
 
 
 def _reused(source: str, read: Callable[[], Any]) -> Callable[[], Any]:
@@ -70,7 +84,7 @@ def _reused(source: str, read: Callable[[], Any]) -> Callable[[], Any]:
             return hit[1]
         value = read()
         with _cooldown_lock:
-            _recent[key] = (time.monotonic(), value)
+            _remember_read_locked(key, value)
         return value
 
     return cached

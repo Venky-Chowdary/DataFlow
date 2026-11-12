@@ -91,6 +91,7 @@ _ROWS_MOVED_RE = re.compile(
     re.I,
 )
 
+_NOW_RE = re.compile(r"\b(?:right\s+now|currently|at\s+the\s+moment|at\s+present|as\s+we\s+speak)\b", re.I)
 #: The status classes the ledger read filters by (``list_jobs`` ``status``).
 _LEDGER_STATUSES = ("failed", "running", "completed", "attention")
 #: A plan made only of these read nothing the ledger read does not replace.
@@ -150,7 +151,11 @@ def parse_job_ask(message: str) -> JobAsk | None:
         # The last-job card does not say who approved a run or what it quarantined.
         return JobAsk(last=True, unapplied=unanswered.group(0).lower(), unapplied_kind="unanswered")
     rows_moved = bool(_ROWS_MOVED_RE.search(text))
-    about_jobs = bool(_JOBS_SUBJECT_RE.search(text))
+    # "is anything failing right now" is a jobs status question with no noun.
+    about_jobs = bool(_JOBS_SUBJECT_RE.search(text)) or bool(
+        re.search(r"\b(?:anything|something)\b", text, re.I) and asked_status(text)
+        and not _OTHER_SUBJECT_RE.search(text)
+    )
     reading = read_filters(text)
     # A cause or size clause ("due to connection resets", "with more than 1000
     # rows") is a qualifier of the jobs asked about, not their subject.
@@ -182,6 +187,10 @@ def parse_job_ask(message: str) -> JobAsk | None:
     # from the words the verdict did not use ("completed jobs failed verification").
     status = "" if metric else asked_status(reading.rest if verification else text)
     unapplied, kind = reading.unapplied, reading.kind
+    if not unapplied and status and status != "running" and not reading.window and _NOW_RE.search(text):
+        # "failing right now": a failure is an event, not a state a job is in
+        # now; the whole history is not the answer (review 2, low).
+        unapplied, kind = _NOW_RE.search(text).group(0), "time"
     if verification and status and status not in _LEDGER_STATUSES and not unapplied:
         # The ledger filters a verdict with a status class, not an exact status.
         unapplied, kind = status.replace("_", " "), "filter"
@@ -326,6 +335,7 @@ def _status_phrase(ask: JobAsk) -> str:
     return status or "ran"
 
 
+_FOLLOWUP_DEPTH = 40
 _OF_THOSE_RE = re.compile(r"\b(?:of|among)\s+(?:those|them|these)\b", re.I)
 
 
@@ -339,7 +349,7 @@ def job_followup_conflict(message: str, history: list[dict] | None) -> str:
     text = (message or "").strip()
     if not text or not _OF_THOSE_RE.search(text) or _JOBS_SUBJECT_RE.search(text):
         return ""
-    prior = parse_job_ask(_effective_question(history, 4))
+    prior = parse_job_ask(_effective_question(history, _FOLLOWUP_DEPTH))
     if prior is None or prior.unapplied or prior.last or prior.metric or not prior.status:
         return ""
     here = read_filters(text)
@@ -361,7 +371,9 @@ def resolve_job_followup(message: str, history: list[dict] | None) -> str:
     a window, a status or a qualifier is rewritten — anything else is left to
     the normal reading, which refuses what it cannot apply.
     """
-    return _resolve_followup(message, history, depth=4)
+    # As deep as the transcript the router keeps (40 turns): a chain of
+    # elliptical turns lost its window after four (review 2, low).
+    return _resolve_followup(message, history, depth=_FOLLOWUP_DEPTH)
 
 
 def _effective_question(history: list[dict] | None, depth: int) -> str:

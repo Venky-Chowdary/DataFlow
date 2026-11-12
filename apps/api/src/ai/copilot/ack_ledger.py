@@ -116,6 +116,12 @@ def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
             out[f"has_{k}"] = bool(v)
         elif isinstance(v, dict):
             out[k] = redact_payload(v)
+        elif isinstance(v, str):
+            # A host or endpoint written as a URL carries its password in the
+            # userinfo; "host" is not secret-named (review 2, low).
+            from services.secret_config import mask_secrets_in_text
+
+            out[k] = mask_secrets_in_text(v)
         else:
             out[k] = v
     return out
@@ -178,6 +184,19 @@ def _open_secrets(node: Any) -> Any:
     return node
 
 
+def _has_plain_secret(node: Any) -> bool:
+    """Whether a stored payload holds a secret in clear (written before sealing)."""
+    if isinstance(node, dict):
+        return any(
+            (value and _is_secret_key(node, key) and not (isinstance(value, dict) and _SEALED in value))
+            or _has_plain_secret(value)
+            for key, value in node.items()
+        )
+    if isinstance(node, list):
+        return any(_has_plain_secret(item) for item in node)
+    return False
+
+
 def _sealed_at_rest(doc: dict[str, Any]) -> dict[str, Any] | None:
     """The stored form of an approval: every secret in its payload sealed.
 
@@ -221,6 +240,8 @@ class PilotAckLedger:
         self.ttl_sec = max(60, int(ttl_sec))
         self._lock = threading.RLock()
         self._entries: dict[str, dict[str, Any]] = {}
+        #: Approvals another worker wrote to the same file, kept as stored.
+        self._carried: dict[str, dict[str, Any]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -229,7 +250,9 @@ class PilotAckLedger:
                 return
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             now = _now()
+            legacy = False
             for aid, doc in (raw.get("entries") or {}).items():
+                legacy = legacy or _has_plain_secret((doc or {}).get("payload") if isinstance(doc, dict) else None)
                 doc = _opened(doc)
                 if doc is None:
                     continue  # sealed under a key this process does not hold
@@ -244,24 +267,56 @@ class PilotAckLedger:
                     self._entries[str(aid)] = doc
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             _log.warning("pilot ack ledger load failed: %s", exc)
+            return
+        if legacy:
+            # A secret an earlier release wrote in clear is sealed now, not at
+            # the next write, which may never come (review 2, low).
+            self._persist()
 
     def _persist(self) -> None:
+        from .spill_lock import read_spill, spill_lock
+
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            # Keep recently consumed for idempotent replay window. A pending
-            # payload is sealed; one the vault cannot seal stays in memory only.
-            payload = {
-                "entries": {
+            with spill_lock(self.path):
+                self._merge_disk_locked(read_spill(self.path))
+                # Keep recently consumed for idempotent replay window. A pending
+                # payload is sealed; one the vault cannot seal stays in memory only.
+                entries = {
                     aid: stored
                     for aid, doc in self._entries.items()
                     if (stored := _sealed_at_rest(doc)) is not None
                 }
-            }
-            tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
-            tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
-            tmp.replace(self.path)
+                for aid, stored in self._carried.items():
+                    entries.setdefault(aid, stored)
+                tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+                tmp.write_text(json.dumps({"entries": entries}, default=str), encoding="utf-8")
+                tmp.replace(self.path)
         except OSError as exc:
             _log.warning("pilot ack ledger persist failed: %s", exc)
+
+    def _merge_disk_locked(self, disk: dict[str, Any]) -> None:
+        """Fold in another worker's approvals and consumes (review 2, low).
+
+        An approval only this file knows is carried through as stored. A consume
+        is one-way: when the file says an approval was used, this worker's
+        pending copy takes that, so a later write cannot make it pending again.
+        """
+        now = _now()
+        self._carried = {}
+        for aid, stored in (disk.get("entries") or {}).items():
+            if not isinstance(stored, dict):
+                continue
+            consumed = float(stored.get("consumed_at") or 0)
+            if (consumed and consumed + 3600 < now) or (not consumed and float(stored.get("expires_at") or 0) <= now):
+                continue
+            mine = self._entries.get(aid)
+            if mine is None:
+                self._carried[aid] = stored
+            elif consumed and not mine.get("consumed_at"):
+                opened = _opened(stored)
+                if opened is not None:
+                    self._entries[aid] = opened
 
     def _gc_locked(self) -> None:
         now = _now()

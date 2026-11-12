@@ -351,11 +351,49 @@ def blockers_for_model(blockers: list[Any] | None) -> list[str]:
     return [WITHHELD for _ in texts]
 
 
+_FAILED_TEXT_WITHHELD = (
+    "[withheld: metadata-only] The tool failed; its error text can quote cell values, so it is not sent."
+)
+
+
 def tool_results_for_model(results: list[Any]) -> list[Any]:
-    """Copies of tool results with each payload reduced to what a model may see."""
+    """Copies of tool results with each payload reduced to what a model may see.
+
+    A failed result is gated too (review 2, low): its output can echo what was
+    asked (a URL with a password) and its error text can quote the row a driver
+    choked on.
+    """
     from dataclasses import replace
 
-    return [replace(r, output=model_payload(r.name, r.output)) if r.success else r for r in results]
+    return [
+        replace(r, output=model_payload(r.name, r.output)) if r.success
+        else replace(r, output=model_payload(r.name, _redacted(r.output)),
+                     error=failed_error_for_model(r.name, r.error))
+        for r in results
+    ]
+
+
+def _redacted(output: Any) -> Any:
+    """A failed tool's echo of its arguments, secrets and URL passwords masked."""
+    if not isinstance(output, dict):
+        return output
+    from .ack_ledger import redact_payload
+
+    return redact_payload(output)
+
+
+def failed_error_for_model(tool_name: str, error: Any) -> Any:
+    """A failed tool's error as a model may see it: secrets masked, cell text withheld."""
+    if not error:
+        return error
+    from services.secret_config import mask_secrets_in_text
+
+    text = mask_secrets_in_text(str(error))
+    if tool_name in CELL_TOOLS or tool_name in FREE_TEXT_TOOLS:
+        if metadata_only_enabled():
+            return _FAILED_TEXT_WITHHELD
+        declare_cells([text])
+    return text
 
 
 def _row_values(payload: Any) -> list[Any]:
@@ -372,7 +410,9 @@ def _row_values(payload: Any) -> list[Any]:
 
 
 def model_payload(tool_name: str, output: Any) -> Any:
-    """What a model's tool loop is handed for one successful tool result."""
+    """What a model's tool loop is handed for one tool result."""
+    if output is None:
+        return None
     if not metadata_only_enabled():
         declare_cells(_row_values(output))
         if tool_name in FREE_TEXT_TOOLS:
