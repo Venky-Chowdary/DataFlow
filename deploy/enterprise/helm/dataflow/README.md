@@ -22,6 +22,37 @@ contend with each other and no store is bound by MongoDB's 16 MB document
 limit. A record is at most 1 MB; a shape draft's canvas layout at most 256 KB
 (the API answers 413 above that), with at most 50 drafts per workspace.
 
+## Choosing the backend
+
+`DATAWRAP_CONTROL_STORE_BACKEND` (or `DATAFLOW_CONTROL_STORE_BACKEND`) picks
+where these stores live:
+
+| Value   | Stores live in                                                     |
+|---------|--------------------------------------------------------------------|
+| `file`  | This node's files under the data directory (single node, dev). Refused with `MULTI_REPLICA=1`. |
+| `mongo` | The shared collections above. An unreachable database fails the request closed (503); it never falls back to a node's file. |
+| unset   | `mongo` when `DATAWRAP_MULTI_REPLICA=1`, or when a MongoDB control-plane database is part of the deployment (connected, configured by URI, or reached by this node before); otherwise `file`. |
+
+The chart sets `mongo` (`controlPlane.storeBackend`). With the setting unset,
+**a single-node install that has MongoDB connected moves from its files to
+MongoDB on upgrade**, importing each file once as described below. To stay on
+files, set it to `file` before upgrading; to move later, unset it or set
+`mongo` (the import then runs on the first start).
+
+Reads are cached per process for 2 s
+(`DATAWRAP_CONTROL_STORE_CACHE_SECONDS`, default `2`, `0` turns the cache
+off). A change saved on one replica, including a revoked ACL grant, a tighter
+IP allowlist or require-SSO, is therefore enforced by every other replica
+within 2 s, not at once. Writes always re-read the database.
+
+Each call to the control-plane database is bounded by
+`DATAWRAP_CONTROL_STORE_TIMEOUT_SECONDS` (default `1`, at most `5`). When the
+database cannot be reached, the failure is remembered for
+`DATAWRAP_CONTROL_STORE_OUTAGE_SECONDS` (default `2`, at most `10`): requests
+in that window get 503 at once instead of each waiting for the timeout, and
+health probes never read these stores. `DATAWRAP_POD_LOCAL_STORES_ACK` is
+explained below.
+
 ### Stores that are still files
 
 `transfer_plans` and `pilot_results` have no shared backend yet; they are files
