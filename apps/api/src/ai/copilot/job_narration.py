@@ -126,17 +126,25 @@ def _degraded(output: dict) -> str:
     return "\n".join(lines)
 
 
+_STARTED = " started"
+
+
+def _plain(scope: str) -> str:
+    """``scope`` without its " started" ("No job has finished today")."""
+    return scope[len(_STARTED):] if scope.startswith(_STARTED) else scope
+
+
 def _success_rate(census: dict, scope: str, output: dict) -> str:
     counts = census["status_counts"]
     completed = _count(counts, _class_statuses("completed"))
     failed = _count(counts, tuple(FAILED_STATUSES))
     finished = completed + failed
     if not finished:
-        return _finish([f"No job has finished{scope}, so there is no success rate to state."], output)
+        return _finish([f"No job has finished{_plain(scope)}, so there is no success rate to state."], output)
     rate = 100.0 * completed / finished
     other = int(census["total"]) - finished
     line = (
-        f"**{completed:,}** of **{finished:,}** finished job(s) completed{scope} — "
+        f"**{completed:,}** of **{finished:,}** finished job(s) completed{_plain(scope)} — "
         f"a **{rate:.1f}%** success rate; {failed:,} failed."
     )
     if other > 0:
@@ -158,17 +166,17 @@ def _rows_moved(output: dict, census: dict, scope: str) -> str:
     if output.get("truncated"):
         return _finish(
             [
-                f"I can't total rows{scope}: **{int(census['total']):,}** job(s) match and I can "
+                f"I can't total rows{_plain(scope)}: **{int(census['total']):,}** job(s) match and I can "
                 f"read only the latest {len(jobs)} here, so a sum would be a partial one. "
                 "Open **Jobs** and filter the same window for the full figure."
             ],
             output,
         )
     if not jobs:
-        return _finish([f"No jobs started{scope}, so no rows were moved in it."], output)
+        return _finish([f"No jobs{scope}, so no rows were moved in it."], output)
     rows = sum(int(j.get("records") or 0) for j in jobs)
     return _finish(
-        [f"**{rows:,}** row(s) were processed by the **{len(jobs):,}** job(s) started{scope}."],
+        [f"**{rows:,}** row(s) were processed by the **{len(jobs):,}** job(s){scope}."],
         output,
     )
 
@@ -216,7 +224,7 @@ def _status_answer(status: str, output: dict, census: dict, scope: str, windowed
     jobs = output.get("jobs") or []
     counts = census["status_counts"]
     total = int(census["total"])
-    population = f"the **{total:,}** job(s) started{scope}" if windowed else f"your **{total:,}** job(s)"
+    population = f"the **{total:,}** job(s){scope}" if windowed else f"your **{total:,}** job(s)"
     if status == "attention":
         counted = int(census["attention_count"])
         here = [
@@ -264,7 +272,7 @@ def _verification_answer(verdict: str, output: dict, census: dict, scope: str, w
     """Jobs whose recorded Gate-8 verdict is ``verdict``: the store's own filter count."""
     jobs = output.get("jobs") or []
     total = int(census["total"])
-    population = f"the **{total:,}** job(s) started{scope}" if windowed else f"your **{total:,}** job(s)"
+    population = f"the **{total:,}** job(s){scope}" if windowed else f"your **{total:,}** job(s)"
     counted = int(output.get("filtered_total") or 0)
     phrase = f"{verdict} Gate-8 verification"
     if not counted:
@@ -282,7 +290,7 @@ def _window_answer(output: dict, census: dict, scope: str) -> str:
     jobs = output.get("jobs") or []
     total = int(census["total"])
     if not total:
-        return _finish([f"No jobs started{scope}."], output)
+        return _finish([f"No jobs{scope}."], output)
     counts = census["status_counts"]
     parts = [
         f"{n:,} {label}"
@@ -293,7 +301,7 @@ def _window_answer(output: dict, census: dict, scope: str) -> str:
         )
         if n
     ]
-    lines = [f"**{total:,}** job(s) started{scope}" + (f": {', '.join(parts)}." if parts else ".")]
+    lines = [f"**{total:,}** job(s){scope}" + (f": {', '.join(parts)}." if parts else ".")]
     lines += [_bullet(j) for j in jobs[:_SHOW_LIMIT]]
     note = _window_note(min(len(jobs), _SHOW_LIMIT), total)
     if note:
@@ -354,9 +362,24 @@ def unapplied_filter_answer(message: str | None) -> str | None:
     failed in 2025" came back as the all-time failure count (review C2).
     """
     ask = parse_job_ask(message or "")
-    if ask is None or not ask.unapplied:
+    if ask is None:
         return None
     from .job_window import SUPPORTED_WINDOWS_HINT
+
+    name = (ask.narrowing or {}).get("name", "")
+    if not ask.unapplied and name:
+        from .job_ledger import named_job_exists
+
+        if not named_job_exists(name):
+            return (
+                f"I can't filter jobs by “{md_text(name)}” — no job in this workspace has a source or "
+                "destination with that name, so I won't give you a number for it.\n"
+                "Here is what I can do: count or list jobs by a source or destination name your jobs "
+                "have, by connector type or sync mode, by status and by time window "
+                f"({SUPPORTED_WINDOWS_HINT})."
+            )
+    if not ask.unapplied:
+        return None
 
     if ask.unapplied_kind == "unanswered":
         return (
@@ -388,13 +411,19 @@ def narrate_jobs(output: dict, message: str | None) -> str:
     # (or an older stored turn) never counted.
     total = int(output.get("total") or 0) or len(jobs)
     window = (output.get("filter") or {}).get("window") or {}
-    in_window = output.get("window_counts") if window else None
+    narrowing = (output.get("filter") or {}).get("narrowing") or {}
+    in_window = output.get("window_counts") if (window or narrowing) else None
     census = {
         "total": int((in_window or {}).get("total") or 0) if in_window is not None else total,
         "status_counts": (in_window or {}).get("status_counts") or {} if in_window is not None else status_counts,
         "attention_count": int((in_window if in_window is not None else output).get("attention_count") or 0),
     }
-    scope = f" {window.get('label')}" if window else ""
+    from .job_words import describe_narrowing
+
+    # " started <window>" for a created window; a name / type / sync mode follows it.
+    scope = (f"{_STARTED} {window.get('label')}" if window else "") + describe_narrowing(narrowing)
+    # A population narrowed by a name, type or sync mode is not "your jobs".
+    windowed = bool(window or narrowing)
 
     if not total and not jobs:
         return (
@@ -414,14 +443,14 @@ def narrate_jobs(output: dict, message: str | None) -> str:
             "I don't have a duration summary across jobs."
         )
     if ask and ask.verification and not ask.last:
-        return _verification_answer(ask.verification, output, census, scope, bool(window))
+        return _verification_answer(ask.verification, output, census, scope, windowed)
     unfiltered_page = (output.get("filter") or {}).get("status", "all") == "all"
     if LAST_JOB_RE.search(message or "") and jobs and unfiltered_page:
         # The newest row of the ledger is the last job only when no status filter cut the page.
         return _last_job(jobs, ask, status, census)
     if status:
-        return _status_answer(status, output, census, scope, bool(window))
-    if window:
+        return _status_answer(status, output, census, scope, windowed)
+    if windowed:
         return _window_answer(output, census, scope)
 
     if not jobs:

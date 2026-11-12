@@ -15,8 +15,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .job_phrases import narrowing_in, read_filters
+from .job_phrases import NARROWING_WORDS, read_filters
 from .job_window import window_args_from_message
+from .job_words import account_for_words, narrowing_words, without_clauses
 
 LAST_JOB_RE = re.compile(
     r"\b(?:last|latest|most\s+recent|newest)\s+(?:transfer|job|run|sync)\b"
@@ -44,6 +45,8 @@ _EXACT_STATUSES = (
 )
 #: A question that asks the ledger for a count or a list.
 _LEDGER_ASK_RE = re.compile(r"\b(?:how\s+many|which|list|show|count|number\s+of|any|did|status)\b", re.I)
+#: A question that asks for a number: every word of it must be accounted for.
+_COUNT_ASK_RE = re.compile(r"\b(?:how\s+many|count|number\s+of|total)\b", re.I)
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _JOB_ID_RE = re.compile(r"\b[0-9a-f]{24}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}\b", re.I)
 _HOW_TO_RE = re.compile(r"^\s*(?:how\s+(?:do|can|would|should|to)\b|what\s+(?:does|do)\b|explain\b)", re.I)
@@ -107,6 +110,10 @@ class JobAsk:
     unapplied_kind: str = ""
     #: The Gate-8 verdict asked for: the store's ``verification`` filter.
     verification: str = ""
+    #: Exact store filters the question's other words name (review 2, C2c):
+    #: ``name`` (a source / destination, the Jobs page search), ``source_type``,
+    #: ``destination_type``, ``sync_mode``.
+    narrowing: dict[str, str] = field(default_factory=dict)
 
     def tool_args(self) -> dict[str, Any]:
         """Arguments that make ``list_jobs`` filter and count server-side."""
@@ -122,6 +129,8 @@ class JobAsk:
             args["status"] = self.status
         if self.verification and not self.last and not self.metric:
             args["verification"] = self.verification
+        if not self.last:
+            args.update(self.narrowing)
         return args
 
 
@@ -141,16 +150,21 @@ def parse_job_ask(message: str) -> JobAsk | None:
     rows_moved = bool(_ROWS_MOVED_RE.search(text))
     about_jobs = bool(_JOBS_SUBJECT_RE.search(text))
     reading = read_filters(text)
+    # A cause or size clause ("due to connection resets", "with more than 1000
+    # rows") is a qualifier of the jobs asked about, not their subject.
+    scrubbed = without_clauses(text)
     # "failed gate 8" names a gate, but asks the ledger for a verdict.
-    if _OTHER_SUBJECT_RE.search(reading.rest if reading.verification else text) and not rows_moved:
+    if _OTHER_SUBJECT_RE.search(without_clauses(reading.rest) if reading.verification else scrubbed) and not rows_moved:
         return None
     window = reading.window
     if rows_moved:
         metric = "rows_moved" if (window or about_jobs) else ""
         if not metric:
             return None
-        return JobAsk(metric=metric, window=window, unapplied=reading.unapplied, unapplied_kind=reading.kind)
-    if not about_jobs or _DATA_SCOPE_RE.search(text):
+        unapplied, kind, narrowing = _account(reading, reading.unapplied, reading.kind)
+        return JobAsk(metric=metric, window=window, unapplied=unapplied, unapplied_kind=kind if unapplied else "",
+                      narrowing=narrowing)
+    if not about_jobs or _DATA_SCOPE_RE.search(scrubbed):
         return None
     last = bool(LAST_JOB_RE.search(text))
     if _SUCCESS_RATE_RE.search(text):
@@ -167,14 +181,31 @@ def parse_job_ask(message: str) -> JobAsk | None:
     if unapplied and not (status or metric or last or _LEDGER_ASK_RE.search(text)):
         # "if I run the same CDC change twice is it safe" is not a ledger read.
         return None
-    if not unapplied and not last and (status or metric or window or verification):
-        # "failed jobs on Local Postgres", "did not fail": a connector filter
-        # and a negated count are not computed.
-        unapplied, kind = narrowing_in(text), "filter"
-    if not (status or window or metric or unapplied or verification):
+    narrowing: dict[str, str] = {}
+    if last and not unapplied:
+        # The last job is the newest row of the whole ledger: a connector type
+        # or sync mode on it is not applied, so it is refused by name.
+        found = NARROWING_WORDS.search(text)
+        if found:
+            unapplied, kind = found.group(0), "filter"
+    elif status or metric or window or verification or _COUNT_ASK_RE.search(text):
+        # Every remaining word is accounted for, or the question is refused
+        # by name (review 2, C2c): never answered with a broader number.
+        unapplied, kind, narrowing = _account(reading, unapplied, kind)
+    if not (status or window or metric or unapplied or verification or narrowing):
         return None
     return JobAsk(status=status, metric=metric, last=last, window=window, verification=verification,
-                  unapplied=unapplied, unapplied_kind=kind if unapplied else "")
+                  unapplied=unapplied, unapplied_kind=kind if unapplied else "", narrowing=narrowing)
+
+
+def _account(reading, unapplied: str, kind: str) -> tuple[str, str, dict[str, str]]:
+    """``(unapplied, kind, narrowing)`` once every remaining word is read."""
+    if unapplied:
+        return unapplied, kind, {}
+    account = account_for_words(reading.rest)
+    if account.unhandled:
+        return "”, “".join(account.unhandled), "filter", {}
+    return "", "", account.filters()
 
 
 def asked_status(message: str) -> str:
@@ -218,7 +249,7 @@ def ground_job_plan(message: str, planned: list[tuple[str, dict]]) -> list[tuple
         ]
     # "failed on 2026-11-08" reads to the data planner as a connector named
     # 2026-11-08: a date is never a connector name.
-    misread_aggregate = names == {"aggregate_data"} and not any(
+    misread_aggregate = names - _REPLACEABLE == {"aggregate_data"} and not any(
         str(args.get(key) or "").strip() and not _ISO_DATE.fullmatch(str(args.get(key) or "").strip())
         for _, args in planned
         for key in ("name", "connector_id", "connector_name")
@@ -236,6 +267,12 @@ def ground_job_plan(message: str, planned: list[tuple[str, dict]]) -> list[tuple
 _ELLIPTICAL_RE = re.compile(
     r"^\s*(?:(?:and|also|ok(?:ay)?\s+and|what\s+about|how\s+about|same\s+for|now)\b|"
     r"(?:how\s+many|which)\s+of\s+(?:those|them|these)\b)",
+    re.I,
+)
+#: The words that make a turn a follow-up; the rest is what it asks.
+_FOLLOWUP_LEAD = re.compile(
+    r"^\s*(?:(?:and|also|ok(?:ay)?\s+and|what\s+about|how\s+about|same\s+for|now)\b|"
+    r"(?:how\s+many|which)\s+of\s+(?:those|them|these)\b(?:\s+(?:were|are|was|is|did|have|had))?)",
     re.I,
 )
 _STATUS_PHRASE = {
@@ -291,9 +328,18 @@ def _resolve_followup(message: str, history: list[dict] | None, *, depth: int) -
         return ""
     here = read_filters(text)
     status = asked_status(here.rest or text) if not here.unapplied else ""
-    if here.unapplied:
+    # A qualifier on "those" is read like any other word of a jobs question
+    # (review 2, C2c): applied when the store filters by it, else refused.
+    account = account_for_words(_FOLLOWUP_LEAD.sub(" ", here.rest)) if not here.unapplied else None
+    unhandled = "”, “".join(account.unhandled) if account and account.unhandled else here.unapplied
+    if unhandled:
         # Keep the qualifier in the question so it is refused by name.
-        return f"how many jobs {_status_phrase(prior)} {read_filters(previous).window_text} {here.unapplied}".strip()
+        return f"how many jobs {_status_phrase(prior)} {read_filters(previous).window_text} {unhandled}".strip()
+    if account and account.filters():
+        words = narrowing_words(account.filters())
+        ask = JobAsk(status=status) if status else prior
+        window_text = here.window_text or read_filters(previous).window_text
+        return f"how many {words} jobs {_status_phrase(ask)} {window_text}".strip()
     window_text = here.window_text or read_filters(previous).window_text
     if here.verification:
         ask = JobAsk(verification=here.verification)

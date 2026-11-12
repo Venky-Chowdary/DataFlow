@@ -21,6 +21,10 @@ from services.workspace_filter import (
 )
 
 
+#: Filters that define the population a census is taken over (not the status pivot).
+_POPULATION_FILTERS = ("date_from", "date_to", "search", "source_type", "destination_type", "sync_mode")
+
+
 def summarize_listed_job(doc: dict[str, Any]) -> dict[str, Any]:
     """Operator-facing row shared by ``list_jobs`` and the briefing."""
     rejected = doc.get("rejected_rows")
@@ -240,6 +244,10 @@ def list_transfer_jobs(
     date_from: Any = None,
     date_to: Any = None,
     verification: str | None = None,
+    search: str = "",
+    source_type: str = "",
+    destination_type: str = "",
+    sync_mode: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
     """One page of jobs plus counts over the whole scoped history.
 
@@ -247,7 +255,9 @@ def list_transfer_jobs(
     grid's own server-side filters (``services.job_list_filters``). With any of
     them set, the page holds only matching rows and ``counts`` also carries
     ``filtered_total`` (rows matching the filter) and, for a created window,
-    ``window`` (the per-status census inside it).
+    ``window`` (the per-status census inside it). ``search`` / ``source_type`` /
+    ``destination_type`` / ``sync_mode`` narrow the population too: the census
+    in ``window`` is then over the jobs that match them (and the window).
 
     Mongo is preferred when it answers. A connection failure falls through to
     the engine job_store — the same store a transfer writes when Mongo is down —
@@ -260,6 +270,8 @@ def list_transfer_jobs(
         for key, value in (
             ("status", status), ("date_from", date_from),
             ("date_to", date_to), ("verification", verification),
+            ("search", search), ("source_type", source_type),
+            ("destination_type", destination_type), ("sync_mode", sync_mode),
         )
         if value
     }
@@ -293,7 +305,7 @@ def list_transfer_jobs(
         counts = dict(mongo.count_jobs(**scope) or {"total": 0, "by_status": {}})
         if filters:
             counts["filtered_total"] = int(mongo.count_job_matches(**scope, **filters) or 0)
-            window = {k: v for k, v in filters.items() if k in ("date_from", "date_to")}
+            window = {k: v for k, v in filters.items() if k in _POPULATION_FILTERS}
             if window:
                 counts["window"] = dict(mongo.count_jobs(**scope, **window) or {})
         summaries = [summarize_listed_job(j) for j in (raw or []) if isinstance(j, dict)]

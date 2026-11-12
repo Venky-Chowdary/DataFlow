@@ -2637,12 +2637,19 @@ class DataPilotTools:
         date_from: str = "",
         date_to: str = "",
         verification: str = "",
+        name: str = "",
+        search: str = "",
+        source_type: str = "",
+        destination_type: str = "",
+        sync_mode: str = "",
     ) -> ToolResult:
         from .job_ledger import read_job_ledger
 
         output, refusal = read_job_ledger(
             limit=limit, scope=scope, status=status, window=window,
             date_from=date_from, date_to=date_to, verification=verification,
+            name=name, search=search, source_type=source_type,
+            destination_type=destination_type, sync_mode=sync_mode,
         )
         if refusal:
             return ToolResult(name="list_jobs", success=False, output=None, error=refusal)

@@ -77,13 +77,30 @@ def test_unapplied_time_phrase_is_refused_by_name(ledger, question, phrase):
 
 
 @pytest.mark.parametrize("question,phrase", [
-    ("how many failed mysql jobs today", "mysql"),
-    ("how many cdc jobs failed today", "cdc"),
-    ("how many of my jobs were CDC", "cdc"),
     ("list failed jobs on Local Postgres", "postgres"),
 ])
 def test_unapplied_qualifier_is_refused_by_name(ledger, question, phrase):
     _refused(pt.ask(ledger, question), phrase)
+
+
+#: Round 2 (review 2, C2c): a connector type or sync mode the store filters by
+#: exactly is applied, not refused — and the count is the store's for it.
+@pytest.mark.parametrize("question,filters,named", [
+    ("how many failed mysql jobs today", {"status": "failed", "source_type": "mysql"}, "mysql"),
+    ("how many cdc jobs failed today", {"status": "failed", "sync_mode": "cdc"}, "cdc"),
+    ("how many completed mysql jobs today", {"status": "completed", "source_type": "mysql"}, "mysql"),
+    ("how many of my jobs were CDC", {"sync_mode": "cdc"}, "cdc"),
+])
+def test_a_type_or_sync_mode_qualifier_is_applied_exactly(ledger, question, filters, named):
+    response = pt.ask(ledger, question)
+    window = {"date_from": TODAY, "date_to": TODAY + timedelta(days=1)} if "today" in question else {}
+    truth = int(pt.mongo().count_job_matches(**filters, **window) or 0)
+    assert pt.bold_ints(response.answer)[:1] == [truth] or (truth == 0 and "None of" in response.answer), (
+        response.answer
+    )
+    assert 20 not in pt.bold_ints(response.answer), "whole-history failed count stated"
+    assert named in response.answer.lower(), response.answer
+    assert pt.grounded(response)
 
 
 @pytest.mark.parametrize("question,span", [
@@ -131,3 +148,4 @@ def test_window_upper_bound_is_exclusive_to_the_instant(monkeypatch):
     assert pt.bold_ints(yesterday.answer)[:1] == [2], yesterday.answer
     today = pt.ask(agent, "how many jobs failed today")
     assert pt.bold_ints(today.answer)[:1] == [1], today.answer
+

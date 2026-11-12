@@ -38,8 +38,20 @@ def read_job_ledger(
     date_from: str = "",
     date_to: str = "",
     verification: str = "",
+    name: str = "",
+    search: str = "",
+    source_type: str = "",
+    destination_type: str = "",
+    sync_mode: str = "",
 ) -> tuple[dict[str, Any] | None, str]:
-    """``(output, "")`` for a ledger read, or ``(None, refusal)``."""
+    """``(output, "")`` for a ledger read, or ``(None, refusal)``.
+
+    ``search``, ``source_type``, ``destination_type`` and ``sync_mode`` are the
+    Jobs page's own filters. ``name`` is a source or destination name an
+    operator said in words: it is applied as the Jobs page search only when a
+    job in scope has that name, so an unknown word ("production") is refused
+    rather than counted as a search that happens to match nothing.
+    """
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 100:
         return None, "limit must be an integer from 1 to 100."
     try:
@@ -54,6 +66,17 @@ def read_job_ledger(
     verdict = str(verification or "").strip().lower()
     if verdict and verdict not in VERIFICATION_FILTERS:
         return None, "verification must be one of: " + ", ".join(VERIFICATION_FILTERS) + "."
+    narrowing, refusal = _narrowing(name, search, source_type, destination_type, sync_mode)
+    if refusal:
+        return None, refusal
+    if narrowing.get("name"):
+        needle = narrowing.pop("name")
+        if not _has_named_job(needle, workspace_id):
+            return None, (
+                f"No job in this workspace has a source or destination named “{needle}”, "
+                "so I can't count jobs for it."
+            )
+        narrowing["search"] = needle
     as_of = job_window.utc_now()
     resolved, refusal = job_window.resolve_window(window, date_from, date_to, now=as_of)
     if refusal:
@@ -67,6 +90,7 @@ def read_job_ledger(
     if resolved:
         # Exact instants: the store filters created_at in [start, end).
         filters.update(date_from=resolved.start, date_to=resolved.end)
+    filters.update(narrowing)
     # Filters ride along only when set, so a plain read keeps the plain call.
     jobs, counts, source = list_transfer_jobs(limit=limit, workspace_id=workspace_id, **filters)
 
@@ -99,8 +123,9 @@ def read_job_ledger(
             "status": status_filter,
             "verification": verdict,
             "window": resolved.to_dict() if resolved else None,
+            "narrowing": dict(narrowing),
         }
-    if resolved:
+    if resolved or narrowing:
         in_window = counts.get("window") or {}
         output["window_counts"] = {
             "total": int(in_window.get("total") or 0),
@@ -108,6 +133,55 @@ def read_job_ledger(
             "attention_count": int(in_window.get("attention") or 0),
         }
     return output, ""
+
+
+def _narrowing(name: str, search: str, source_type: str, destination_type: str,
+               sync_mode: str) -> tuple[dict[str, str], str]:
+    from services.job_list_filters import SEARCH_MAX
+
+    out: dict[str, str] = {}
+    for key, value in (("name", name), ("search", search), ("source_type", source_type),
+                       ("destination_type", destination_type), ("sync_mode", sync_mode)):
+        if not isinstance(value, str):
+            return {}, f"{key} must be a string."
+        text = value.strip()
+        if len(text) > SEARCH_MAX or any(ord(ch) < 32 for ch in text):
+            return {}, f"{key} must be at most {SEARCH_MAX} printable characters."
+        if text:
+            out[key] = text
+    if out.get("name") and out.get("search"):
+        return {}, "Pass name or search, not both."
+    return out, ""
+
+
+def named_job_exists(name: str, scope: str = "workspace") -> bool:
+    """Whether a job the caller may read has ``name`` as a source or destination.
+
+    Read before answering, so a word that names nothing ("production") is
+    refused by name instead of being counted as a search that matches nothing.
+    An unreadable scope answers False: the question is then refused, never guessed.
+    """
+    try:
+        workspace_id = job_list_workspace_scope(scope)
+    except ValueError:
+        return False
+    if workspace_id == "" and workspace_scope_unresolved():
+        return False
+    try:
+        return _has_named_job(name.strip(), workspace_id)
+    except Exception:  # noqa: BLE001 - an unread ledger refuses the name rather than guessing
+        return False
+
+
+def _has_named_job(needle: str, workspace_id: str | None) -> bool:
+    """Whether a job in scope has ``needle`` in its source or destination name."""
+    jobs, _counts, _source = list_transfer_jobs(limit=100, workspace_id=workspace_id, search=needle)
+    want = needle.casefold()
+    return any(
+        want in str(job.get(key) or "").casefold()
+        for job in jobs
+        for key in ("source", "destination", "source_table", "dest_table")
+    )
 
 
 #: The tool definition advertised to MCP clients and the model.
@@ -175,6 +249,20 @@ LIST_JOBS_TOOL: dict[str, Any] = {
                 "enum": ["", "failed", "passed", "none"],
                 "description": "Gate-8 verification verdict recorded on the run.",
             },
+            "search": {
+                "type": "string",
+                "description": "The Jobs page search: a substring of a job's id, names, types, status or error.",
+            },
+            "name": {
+                "type": "string",
+                "description": (
+                    "A source or destination name. Refused unless a job in scope has it; "
+                    "then applied as the Jobs page search."
+                ),
+            },
+            "source_type": {"type": "string", "description": "Exact source connector type (e.g. postgresql)."},
+            "destination_type": {"type": "string", "description": "Exact destination connector type."},
+            "sync_mode": {"type": "string", "description": "Exact sync mode (e.g. cdc, full_refresh_append)."},
         },
         "required": [],
     },

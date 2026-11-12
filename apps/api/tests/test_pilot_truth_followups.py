@@ -75,11 +75,25 @@ def test_and_completed_carries_the_window(chat):
 
 
 def test_a_qualifier_on_those_is_refused_by_name(chat):
+    # Round 2 (review 2, C2c): CDC is a sync mode the store filters by, so it is
+    # applied (below); a qualifier nothing applies is the one refused by name.
     chat("how many jobs failed today")
-    response = chat("how many of those were CDC?")
-    assert "cdc" in response.answer.lower() and "can't filter" in response.answer.lower(), response.answer
+    response = chat("how many of those were nightly?")
+    assert "nightly" in response.answer.lower() and "can't filter" in response.answer.lower(), response.answer
     assert pt.bold_ints(response.answer) == []
     assert not pt.grounded(response)
+
+
+def test_a_sync_mode_on_those_is_applied_with_the_earlier_filters(chat):
+    """Review 2, C2c / H4: "of those were CDC" is the earlier question narrowed, not the ledger."""
+    chat("how many jobs failed today")
+    response = chat("how many of those were CDC?")
+    truth = int(pt.mongo().count_job_matches(status="failed", sync_mode="cdc", date_from=TODAY,
+                                             date_to=TODAY + timedelta(days=1)) or 0)
+    stated = pt.bold_ints(response.answer)
+    assert stated[:1] == [truth] or (truth == 0 and response.answer.startswith("None of")), response.answer
+    assert 20 not in stated and "cdc" in response.answer.lower(), response.answer
+    assert "today" in response.answer
 
 
 def test_summarize_that_says_it_restates_the_earlier_answer(chat):
@@ -97,5 +111,6 @@ def test_a_follow_up_to_a_follow_up_keeps_the_conversation(chat):
     assert truth == 0
     assert response.answer.startswith("None of") and "completed" in response.answer, response.answer
     assert "yesterday" in response.answer
-    cdc = chat("how many of those were CDC?")
-    assert "cdc" in cdc.answer.lower() and "can't filter" in cdc.answer.lower(), cdc.answer
+    # A qualifier nothing applies is refused (CDC is applied since review 2, C2c).
+    cdc = chat("how many of those were nightly?")
+    assert "nightly" in cdc.answer.lower() and "can't filter" in cdc.answer.lower(), cdc.answer

@@ -121,6 +121,8 @@ _QUALIFIERS = (
     ),
     re.compile(r"\b(?:verif\w*|gate[\s-]*8|g8|parity|reconcil\w*|trust\s+report)\b", re.I),
 )
+#: Connector types and sync modes: a filter on a count, never on "the last job".
+NARROWING_WORDS = re.compile("|".join(f"(?:{p.pattern})" for p in _QUALIFIERS[:2]), re.I)
 _NEGATION = re.compile(
     r"\b(?:not|never|no|without|except|excluding|other\s+than|non[\s-]\w+)\b|\w+n['’]t\b", re.I
 )
@@ -220,7 +222,10 @@ def read_filters(message: str) -> FilterReading:
         every = spans + leftover
         start, end = min(s for s, _ in every), max(e for _, e in every)
         return FilterReading(window={}, unapplied=original[start:end].strip(" ,.?!"), kind="time")
-    for pattern in _QUALIFIERS:
+    # Connector types and sync modes are applied, or refused by name, by the
+    # word account (``job_words``); the states and verification words are not
+    # filters at all.
+    for pattern in _QUALIFIERS[2:]:
         found = pattern.search(text)
         if found:
             return FilterReading(window={}, unapplied=found.group(0), kind="filter")
