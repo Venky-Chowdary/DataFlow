@@ -359,9 +359,9 @@ def test_run_recorded_by_another_replica_is_not_recorded_twice(store, runner, mo
 # it must be decided again on what is stored now, never merged over it.
 
 
-def _write_inside_finalize(store, monkeypatch, peer_write):
-    """Run ``peer_write()`` once, after the finalizer has loaded and decided."""
-    real_save, real_mark = store._save_all, store.mark_schedule_run
+def _write_inside_finalize(store, monkeypatch, peer_write, around: str = "mark_schedule_run"):
+    """Run ``peer_write()`` once, after ``store.<around>`` has loaded and decided."""
+    real_save, real_mark = store._save_all, getattr(store, around)
     state = {"inside": False, "pending": True}
 
     def mark(*args, **kwargs):
@@ -377,7 +377,7 @@ def _write_inside_finalize(store, monkeypatch, peer_write):
             peer_write()
         return real_save(schedules, **kwargs)
 
-    monkeypatch.setattr(store, "mark_schedule_run", mark)
+    monkeypatch.setattr(store, around, mark)
     monkeypatch.setattr(store, "_save_all", save)
     return state
 
@@ -652,3 +652,109 @@ def test_a_late_outcome_is_stored_without_the_fields_of_the_next_run(store, runn
     assert _newer_run(after) == _newer_run(before)
     assert after.approval_request == finding and after.last_status == "needs_approval"
     assert outcome.recorded is True
+
+
+# --- Retries and contended writes across replicas ------------------------------
+
+
+def _retry_claimed_by_peer(store, schedule_id: str, entry: dict) -> None:
+    """A peer replica parked the same retry, and the retry then took the claim."""
+    store.schedule_retry(schedule_id, retry_at=_now(), attempt=1, run_entry=entry)
+    assert store.mark_schedule_running(schedule_id, "beat-b", "job-retry") is not None
+
+
+@mongo_only
+def test_retry_parked_by_another_replica_is_not_parked_twice(store, runner, monkeypatch):
+    """A second finalizer's retry write never releases the retry's own claim."""
+    runner.jobs["job-1"] = TRANSIENT
+    sched, run_id = _claimed(store, "retry-peer", "job-1", max_retries=1,
+                             retry_backoff_seconds=0)
+    entry = {"run_id": run_id, "job_id": "job-1", "status": "failed", "attempt": 0,
+             "error": TRANSIENT["error"], "retry_scheduled": True}
+    state = _write_inside_finalize(
+        store, monkeypatch, lambda: _retry_claimed_by_peer(store, sched.id, entry),
+        around="schedule_retry",
+    )
+
+    runner._finalize_run(sched.id, "job-1", 0, _now())
+
+    assert not state["pending"], "the peer write never landed inside the retry"
+    final = store.get_schedule(sched.id)
+    assert final.running is True and final.running_job_id == "job-retry", (
+        final.running, final.running_job_id)
+    assert final.retry_attempt == 1
+    assert [r.get("job_id") for r in final.run_history] == ["job-1"]
+
+
+class _ContendedSvc:
+    """The Mongo store, where a peer writes the schedule before every CAS update."""
+
+    def __init__(self, svc, peer_write) -> None:
+        self.client, self._svc, self._peer_write = svc.client, svc, peer_write
+
+    def get_database(self):
+        db, peer_write = self._svc.get_database(), self._peer_write
+
+        class _Db:
+            def __getitem__(self, name):
+                coll = db[name]
+                return _Coll(coll) if name == "pipeline_schedules" else coll
+
+        class _Coll:
+            def __init__(self, coll) -> None:
+                self._coll = coll
+
+            def find_one_and_update(self, filt, update, **kwargs):
+                if "version" in filt:
+                    peer_write(self._coll, filt["_id"])
+                return self._coll.find_one_and_update(filt, update, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._coll, name)
+
+        return _Db()
+
+
+@mongo_only
+@pytest.mark.parametrize("peer_records_the_retry_last", [False, True])
+def test_a_contended_retry_write_is_never_written_blind(
+    store, monkeypatch, peer_records_the_retry_last
+):
+    """Past every CAS attempt the write keeps its guard: superseded, or it raises."""
+    sched, run_id = _claimed(store, f"contended-{peer_records_the_retry_last}", "job-1",
+                             max_retries=1, retry_backoff_seconds=0)
+    entry = {"run_id": run_id, "job_id": "job-1", "status": "failed", "attempt": 0,
+             "retry_scheduled": True}
+    peer_writes: list[int] = []
+    real_backend = store._mongo_backend
+
+    def peer_write(coll, schedule_id):
+        peer_writes.append(1)
+        if peer_records_the_retry_last and len(peer_writes) == store._SAVE_CAS_ATTEMPTS:
+            # The last attempt loses to a peer that parked this retry and whose
+            # retry then claimed the schedule.
+            monkeypatch.setattr(store, "_mongo_backend", real_backend)
+            _retry_claimed_by_peer(store, schedule_id, entry)
+            monkeypatch.setattr(store, "_mongo_backend", lambda: contended)
+            return
+        coll.update_one({"_id": schedule_id},
+                        {"$set": {"enabled_note": f"peer {len(peer_writes)}"},
+                         "$inc": {"version": 1}})
+
+    contended = _ContendedSvc(real_backend(), peer_write)
+    monkeypatch.setattr(store, "_mongo_backend", lambda: contended)
+
+    if peer_records_the_retry_last:
+        store.schedule_retry(sched.id, retry_at=_now(), attempt=1, run_entry=entry)
+        monkeypatch.setattr(store, "_mongo_backend", real_backend)
+        final = store.get_schedule(sched.id)
+        assert final.running is True and final.running_job_id == "job-retry"
+    else:
+        with pytest.raises(store.ScheduleWriteContended):
+            store.schedule_retry(sched.id, retry_at=_now(), attempt=1, run_entry=entry)
+        monkeypatch.setattr(store, "_mongo_backend", real_backend)
+        final = store.get_schedule(sched.id)
+        # Nothing of this caller's was written: the claim is still held.
+        assert final.running is True and final.running_job_id == "job-1"
+        assert final.retry_attempt == 0 and final.retry_at is None
+    assert len(peer_writes) == store._SAVE_CAS_ATTEMPTS

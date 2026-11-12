@@ -955,6 +955,18 @@ def _save_one_mongo(
         if result is not None:
             _remember_base(_schedule_from_doc(result))
             return
+    if guard is not None:
+        # A guarded write is never applied blind: the condition it carries is
+        # checked once more on what is stored now, and otherwise it fails.
+        latest = coll.find_one({"_id": sched.id})
+        if latest is None:
+            raise _ScheduleGone(sched.id)
+        if guard.superseded is not None and guard.superseded(_schedule_from_doc(latest)):
+            raise _WriteSuperseded(sched.id)
+        raise ScheduleWriteContended(
+            f"Schedule {sched.id} changed under every one of {_SAVE_CAS_ATTEMPTS} "
+            "conditional writes; this run's write was not applied."
+        )
     # Contended past every retry: apply only this caller's fields, never the
     # whole stale snapshot, and never resurrect a deleted document.
     if delta:
@@ -3264,6 +3276,15 @@ def schedule_retry(
                 # A second finalizer for this attempt: the retry is parked and
                 # the claim released already — the retry may even hold it now.
                 return s
+            # The same check against what is stored when this write lands: on
+            # the Mongo store another replica's finalizer can park this retry
+            # meanwhile, and with no back-off the retry can already hold the
+            # claim this write would release. (The file store: one process,
+            # under this lock — see ``_save_all``.)
+            guard = _RunWrite(
+                schedule_id,
+                superseded=partial(_attempt_finished, job_id=job_id) if job_id else None,
+            )
             history = list(s.run_history)
             if run_entry:
                 history = trim_history(merge_run_entry(history, run_entry), RUN_HISTORY_LIMIT)
@@ -3278,9 +3299,20 @@ def schedule_retry(
                 "run_history": history,
             })
             schedules[i] = updated
-            _save_all(schedules)
+            try:
+                _save_all(schedules, guard=guard)
+            except _WriteSuperseded:
+                return next((x for x in _load_all() if x.id == schedule_id), None)
+            except _ScheduleGone:
+                return None
             return updated
     return None
+
+
+def _attempt_finished(stored: PipelineSchedule, job_id: str) -> bool:
+    from services.schedule_run_lifecycle import run_finished
+
+    return run_finished(stored, job_id)
 
 
 def record_run_history(schedule_id: str, run_entry: dict[str, Any]) -> PipelineSchedule | None:
