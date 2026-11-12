@@ -201,17 +201,17 @@ def enforced_region(workspace_id: str | None, *, host_tenant_id: str = "") -> st
     configured = _norm(tenant.data_region) if tenant is not None else ""
     if configured:
         return configured
-    if tenant is None:
-        # Security review H3: a tenant record that belongs to no workspace (a
-        # single-tenant deployment set up before tenants were workspace-scoped)
-        # speaks for every workspace that has no record of its own. Only a
-        # route knows a request's host tenant; the engine, a schedule and a
-        # worker do not, and must reach the same answer.
-        unscoped = sorted({_norm(t.data_region) for t in list_tenants() if not t.workspace_id} - {""})
-        if len(unscoped) == 1:
-            return unscoped[0]
-        if unscoped:
-            return _CONFLICTING_REGIONS
+    # Security review H3: a tenant record that belongs to no workspace (a
+    # single-tenant deployment set up before tenants were workspace-scoped)
+    # speaks for every workspace with no region of its own. Only a route knows
+    # a request's host tenant; the engine, a schedule and a worker do not, and
+    # must reach the same answer. Round 2 (M1): a workspace record with an
+    # empty region inherits it too, so creating one never escapes the fence.
+    unscoped = sorted({_norm(t.data_region) for t in list_tenants() if not t.workspace_id} - {""})
+    if len(unscoped) == 1:
+        return unscoped[0]
+    if unscoped:
+        return _CONFLICTING_REGIONS
     return _norm(default_region()) if _strict() else ""
 
 

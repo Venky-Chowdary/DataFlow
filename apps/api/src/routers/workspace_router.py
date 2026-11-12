@@ -227,6 +227,19 @@ def _is_platform_admin(request: Request) -> bool:
     return actor_is_unrestricted(getattr(request.state, "user", None))
 
 
+def _require_region_admin(request: Request, before: str, after: str | None) -> None:
+    """Setting, changing or clearing ``data_region`` is platform-admin only
+    (security review round 2, M1): it is the fence residency enforces, and a
+    workspace admin could lift it for the workspace they administer."""
+    if after is None or (after or "").strip().lower() == (before or "").strip().lower():
+        return
+    if not _is_platform_admin(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Only a platform administrator can set, change or clear a workspace's data region.",
+        )
+
+
 def _require_tenant_admin(request: Request, workspace_id: str) -> None:
     """Fail closed: a workspace-bound tenant needs that workspace's admin, an
     unbound one (legacy ``workspace_id: ""``) needs a platform admin."""
@@ -1229,6 +1242,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             status_code=403,
             detail="workspace_id does not match X-Workspace-Id",
         )
+    _require_region_admin(request, "", body.data_region)
     if body.mfa_required:
         from services.mfa_enforcement import assert_may_require_mfa
 
@@ -1264,6 +1278,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             "tenant_id": tenant.id,
             "workspace_id": tenant.workspace_id,
             "custom_domain": tenant.custom_domain,
+            "data_region_before": "",
             "data_region": tenant.data_region,
         },
     )
@@ -1279,6 +1294,7 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
         raise HTTPException(status_code=404, detail="Tenant not found")
     actor = _actor(request)
     _require_tenant_admin(request, tenant.workspace_id)
+    _require_region_admin(request, tenant.data_region, body.data_region)
     if body.mfa_required and not tenant.mfa_required:
         from services.mfa_enforcement import assert_may_require_mfa
 
@@ -1307,6 +1323,8 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
                and body.mfa_required != tenant.mfa_required else {}),
             **({"sso_enforced": body.sso_enforced} if body.sso_enforced is not None
                and body.sso_enforced != tenant.sso_enforced else {}),
+            **({"data_region_before": tenant.data_region, "data_region": updated.data_region}
+               if body.data_region is not None and updated.data_region != tenant.data_region else {}),
         },
     )
     return _tenant_with_enforcement(updated, request)
@@ -1368,6 +1386,7 @@ async def delete_tenant_route(tenant_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Tenant not found")
     actor = _actor(request)
     _require_tenant_admin(request, tenant.workspace_id)
+    _require_region_admin(request, tenant.data_region, "")
     if not delete_tenant(tenant_id):
         raise HTTPException(status_code=404, detail="Tenant not found")
     append_audit_event(
@@ -1375,7 +1394,8 @@ async def delete_tenant_route(tenant_id: str, request: Request):
         resource=f"/workspace/tenant/{tenant_id}",
         actor=actor,
         level="warn",
-        details={"tenant_id": tenant_id, "workspace_id": tenant.workspace_id},
+        details={"tenant_id": tenant_id, "workspace_id": tenant.workspace_id,
+                 "data_region_before": tenant.data_region, "data_region": ""},
     )
     return {"ok": True}
 
