@@ -6,7 +6,9 @@ appears in a view, an export, a repr, the audit event or the store in clear;
 a key the vault cannot encrypt is never kept; a retired key verifies and never
 signs again; rotation retires the previous set; a hybrid signer signs with
 Ed25519 and ML-DSA-65 when the build has it, and "classical" when it does not;
-two racing creators end with one keyring.
+the algorithms are bound into what is signed, so a signature cannot be dropped
+or relabelled; every key event is an entry in the ledger's log, signed by the
+outgoing and the incoming keys; two racing creators end with one keyring.
 """
 
 from __future__ import annotations
@@ -22,12 +24,18 @@ from tools import datawrap_verify as verifier
 PAYLOAD = verifier.STATEMENT_PAYLOAD
 
 
+def _bound(signer) -> dict:
+    """The part of a signed body that binds who signs and with which algorithm."""
+    return {"signer_key_ids": signer.key_ids, "signer_algs": signer.algs}
+
+
 @pytest.fixture()
 def keys(tmp_path, monkeypatch):
-    from services import ledger_keys, ledger_store
+    from services import ledger_keys, ledger_log, ledger_store
 
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(ledger_store, "_db", lambda: None)
+    ledger_log.reset_cache()
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(ledger_keys, "_audit",
                         lambda action, scope, actor, details: events.append((action, {**details, "actor": actor})))
@@ -96,14 +104,14 @@ def test_a_signer_signs_with_every_active_key_and_the_signatures_verify(keys):
     assert sorted(s["key_id"] for s in signatures) == signer.key_ids
     trusted = keys.trusted_keys(signer.key_ids)
     status, _detail, rows = verifier.check_signature_set(
-        {"signer_key_ids": signer.key_ids}, signatures, message=verifier.pae(PAYLOAD, body), keys=trusted,
+        _bound(signer), signatures, message=verifier.pae(PAYLOAD, body), keys=trusted,
         role="statement")
     assert status == "passed" and all(r["status"] == "passed" for r in rows)
     # Another payload type, another body, a checkpoint role: none verifies.
     for message, role in ((verifier.pae(verifier.CHECKPOINT_PAYLOAD, body), "statement"),
                           (verifier.pae(PAYLOAD, body + b" "), "statement"),
                           (verifier.pae(PAYLOAD, body), "checkpoint")):
-        assert verifier.check_signature_set({"signer_key_ids": signer.key_ids}, signatures, message=message,
+        assert verifier.check_signature_set(_bound(signer), signatures, message=message,
                                             keys=trusted, role=role)[0] == "failed"
 
 
@@ -117,15 +125,25 @@ def test_dropping_one_signature_of_a_hybrid_pair_is_detected(keys):
     trusted = keys.trusted_keys(signer.key_ids)
     only_classical = [s for s in signatures if s["alg"] == "Ed25519"]
     status, detail, _rows = verifier.check_signature_set(
-        {"signer_key_ids": signer.key_ids}, only_classical, message=verifier.pae(PAYLOAD, body), keys=trusted,
+        _bound(signer), only_classical, message=verifier.pae(PAYLOAD, body), keys=trusted,
         role="statement")
     assert status == "failed" and "no signature for a listed signer key" in detail
+    # Relabelling a signature's algorithm, or the bound list, does not get past the binding either.
+    relabelled = [dict(s, alg="Ed25519") for s in signatures]
+    assert verifier.check_signature_set(_bound(signer), relabelled, message=verifier.pae(PAYLOAD, body),
+                                        keys=trusted, role="statement")[0] == "failed"
+    shorter = {"signer_key_ids": signer.key_ids[:1], "signer_algs": signer.algs[:1]}
+    assert verifier.check_signature_set(shorter, signatures, message=verifier.pae(PAYLOAD, body), keys=trusted,
+                                        role="statement")[0] == "failed"  # a signature from an unlisted key
+    assert verifier.check_signature_set({"signer_key_ids": signer.key_ids}, signatures,
+                                        message=verifier.pae(PAYLOAD, body), keys=trusted,
+                                        role="statement")[1].startswith("signer_algs is missing")
 
 
 def test_without_ml_dsa_the_signer_is_classical_and_says_so(keys, monkeypatch):
     monkeypatch.setenv("DATAWRAP_EVIDENCE_PQ", "off")
     assert keys.post_quantum_status()["enabled"] is False
-    assert "Classical signature only" in keys.post_quantum_status()["note"]
+    assert keys.post_quantum_status()["note"].startswith("Classical signature (Ed25519), no post-quantum signature")
     views = keys.create("ws:w2", actor="a")
     assert [v["alg"] for v in views] == ["Ed25519"]
     assert keys.signer("ws:w2").scheme == "classical" and keys.signature_scheme("ws:w2") == "classical"
@@ -133,7 +151,12 @@ def test_without_ml_dsa_the_signer_is_classical_and_says_so(keys, monkeypatch):
     monkeypatch.delenv("DATAWRAP_EVIDENCE_PQ")
     status = keys.post_quantum_status()
     assert status == {"alg": "ML-DSA-65", "available": False, "enabled": False,
-                      "note": "Classical signature only: this build has no ML-DSA implementation."}
+                      "note": "Classical signature (Ed25519), no post-quantum signature: this build has no "
+                              "ML-DSA implementation."}
+    monkeypatch.undo()
+    if keys.pq_available():
+        assert keys.post_quantum_status()["note"] == (
+            "Hybrid classical and post-quantum signature: Ed25519 and a post-quantum signature (ML-DSA-65).")
 
 
 def test_rotation_retires_the_previous_set_which_still_verifies_and_never_signs(keys):
@@ -150,7 +173,7 @@ def test_rotation_retires_the_previous_set_which_still_verifies_and_never_signs(
     assert retired["retired_by"] == "b@example.com" and retired["retired_at"]
     trusted = keys.trusted_keys(old.key_ids)
     status, _detail, rows = verifier.check_signature_set(
-        {"signer_key_ids": old.key_ids}, old_signatures, message=verifier.pae(PAYLOAD, body), keys=trusted,
+        _bound(old), old_signatures, message=verifier.pae(PAYLOAD, body), keys=trusted,
         role="statement")
     assert status == "passed" and {r["key_status"] for r in rows} == {"retired"}
     assert keys.events[-1][0] == "evidence.key.rotated"
@@ -251,3 +274,89 @@ def test_two_racing_first_uses_end_with_one_keyring(keys):
         t.join()
     assert len(seen) == 4 and all(ids == seen[0] for ids in seen)
     assert len(keys.list_keys("ws:race")) == len(seen[0])
+
+
+def _events(keys) -> list[dict]:
+    from services import ledger_store
+
+    return [e for e in ledger_store.find(ledger_store.ENTRIES, newest_first=False) if e["kind"] == "key_set"]
+
+
+def _verifies(keys, entry, key_ids) -> bool:
+    statement = entry["statement"]
+    status, _detail, _rows = verifier.check_signature_set(
+        statement, entry["signatures"], message=verifier.pae(PAYLOAD, verifier.statement_bytes(statement)),
+        keys=keys.trusted_keys(key_ids), role=statement["key_set"]["role"])
+    return status == "passed"
+
+
+def test_every_key_event_is_a_ledger_entry_signed_by_the_outgoing_and_incoming_keys(keys):
+    created = keys.create("ws:w1", actor="admin@example.com")
+    first = sorted(v["key_id"] for v in created)
+    events = _events(keys)
+    assert len(events) == 1 and events[0]["workspace_id"] == "w1" and events[0]["subject"] == "key_set:statement"
+    detail = events[0]["statement"]["key_set"]
+    assert detail["event"] == "created" and detail["role"] == "statement" and detail["retired_key_ids"] == []
+    assert sorted(j["kid"] for j in detail["keys"]) == first == events[0]["statement"]["signer_key_ids"]
+    for jwk in detail["keys"]:  # public keys, nothing else
+        assert "d" not in jwk and "priv" not in jwk and jwk["datawrap_status"] == "active"
+    assert _verifies(keys, events[0], first)  # self-signed: proof of possession
+    assert {keys.published_at(k) for k in first} == {events[0]["index"]}
+
+    rotated = keys.rotate("ws:w1", actor="admin@example.com")
+    second = sorted(v["key_id"] for v in rotated if v["status"] == "active")
+    event = _events(keys)[-1]
+    detail = event["statement"]["key_set"]
+    assert detail["event"] == "rotated" and sorted(j["kid"] for j in detail["keys"]) == second
+    assert detail["retired_key_ids"] == first
+    # The successors are announced under the signatures of the keys they replace, and their own.
+    assert event["statement"]["signer_key_ids"] == sorted(first + second)
+    assert _verifies(keys, event, first + second)
+    assert {keys.published_at(k) for k in second} == {event["index"]}
+    assert {keys.published_at(k) for k in first} == {events[0]["index"]}  # where they were introduced
+
+    keys.retire("ws:w1", second[0], actor="admin@example.com")
+    event = _events(keys)[-1]
+    assert event["statement"]["key_set"]["event"] == "retired"
+    assert second[0] in event["statement"]["key_set"]["retired_key_ids"]
+    assert second[0] in event["statement"]["signer_key_ids"]  # its last signature
+    assert [e["statement"]["key_set"]["event"] for e in _events(keys)] == ["created", "rotated", "retired"]
+    # The log's own keys are published the same way.
+    keys.signer("log")
+    assert _events(keys)[-1]["statement"]["key_set"]["role"] == "checkpoint"
+    assert _events(keys)[-1]["workspace_id"] == ""
+
+
+def test_a_key_event_that_did_not_reach_the_log_is_published_on_next_use(keys, monkeypatch):
+    from services import ledger_log
+
+    real_append = ledger_log.append
+    monkeypatch.setattr(ledger_log, "append", lambda **_kw: (_ for _ in ()).throw(OSError("store down")))
+    views = keys.create("ws:w1", actor="a")  # the keys exist although the log could not be written
+    assert len(views) >= 1 and _events(keys) == []
+    assert keys.published_at(views[0]["key_id"]) is None
+    monkeypatch.setattr(ledger_log, "append", real_append)
+    signer = keys.signer("ws:w1")
+    keys.ensure_published(signer)
+    events = _events(keys)
+    assert len(events) == 1 and events[0]["statement"]["key_set"]["event"] == "published"
+    assert all(keys.published_at(k) == events[0]["index"] for k in signer.key_ids)
+    keys.ensure_published(signer)
+    assert len(_events(keys)) == 1  # published once
+
+
+def test_a_key_that_cannot_be_decrypted_can_still_be_retired_and_replaced(keys, monkeypatch):
+    from services import secret_vault
+
+    views = keys.create("ws:w1", actor="a")
+    real = secret_vault.decrypt_secret
+    monkeypatch.setattr(secret_vault, "decrypt_secret",
+                        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("vault key rotated away")))
+    with pytest.raises(keys.KeystoreUnavailable):
+        keys.signer("ws:w1")
+    assert keys.retire("ws:w1", views[0]["key_id"], actor="a")["status"] == "retired"
+    monkeypatch.setattr(secret_vault, "decrypt_secret", real)
+    rotated = keys.rotate("ws:w1", actor="a")
+    assert keys.signer("ws:w1").key_ids == sorted(v["key_id"] for v in rotated if v["status"] == "active")
+    # A document naming a crowd of keys is not looked up key by key.
+    assert len(keys.trusted_keys([v["key_id"] for v in rotated] + [f"{n:064x}" for n in range(500)])) <= 16

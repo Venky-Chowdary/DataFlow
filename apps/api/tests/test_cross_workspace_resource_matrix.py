@@ -69,13 +69,6 @@ ROUTE_SKIPPED_WITH_REASON = {
     ("POST", "/api/v1/connectors/jobs/{job_id}/resume"): (
         "Resume requires a serialized transfer request query parameter and can start work."
     ),
-    # Evidence Ledger entries need real signed packs in the log; another workspace's
-    # entry, receipt and withdrawal are probed (404) in tests/test_ledger_routes.py.
-    ("GET", "/api/v1/evidence/entries/{index}"): "Covered by tests/test_ledger_routes.py (404).",
-    ("POST", "/api/v1/evidence/entries/{index}/withdraw"): "Covered by tests/test_ledger_routes.py (404).",
-    ("GET", "/api/v1/evidence/receipts/{content_sha256}"): "Covered by tests/test_ledger_routes.py (404).",
-    ("GET", "/api/v1/evidence/keys/{key_id}"): "Covered by tests/test_ledger_routes.py (404).",
-    ("POST", "/api/v1/evidence/keys/{key_id}/retire"): "Covered by tests/test_ledger_routes.py (404).",
 }
 PREFLIGHT_RUN_XFAIL = (
     "GET",
@@ -316,6 +309,15 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             "workspace_id": workspace_b,
         },
     )
+    # Evidence Ledger: a signed entry and the signing keys of workspace B, on the file store.
+    from services import ledger_keys, ledger_log, ledger_store
+
+    monkeypatch.setattr(ledger_store, "_db", lambda: None)
+    ledger_log.reset_cache()
+    ledger_signer = ledger_keys.signer(ledger_keys.scope_for(workspace_b))
+    ledger_entry, _created = ledger_log.append(
+        kind="proof_pack", subject="B_LEDGER_SENTINEL", content_sha256="b" * 64, workspace_id=workspace_b,
+        actor="B_MEMBER_SENTINEL@example.com", signer=ledger_signer)
     mongo = _MongoFixture(workspace_b)
     connectors_module = importlib.import_module("src.routers.connectors_router")
     monkeypatch.setattr(connectors_module, "get_mongodb_service", lambda: mongo)
@@ -376,6 +378,11 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
                 "workspace_id": workspace_b,
                 "email": "B_MEMBER_SENTINEL@example.com",
             }
+        elif template.startswith("/api/v1/evidence/"):
+            # B's ledger entry, its digest and one of B's signing keys: 404 for the A-only editor
+            # (403 where the route needs workspace.manage, which an editor does not hold).
+            values = {"index": ledger_entry["index"], "content_sha256": ledger_entry["content_sha256"],
+                      "key_id": ledger_signer.key_ids[0]}
         else:
             unseeded = next(
                 (param for param in params if param in SKIPPED_WITH_REASON),
@@ -413,6 +420,8 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
                 body = {"email": "B_MEMBER_SENTINEL@example.com", "role": "viewer"}
             if template.endswith("/members"):
                 body = {"email": "B_MEMBER_SENTINEL@example.com", "role": "viewer"}
+            if template.endswith("/withdraw"):
+                body = {"reason": "matrix probe"}
         response = _request(editor, method, path, body=body)
         assert response.status_code in {403, 404}, (
             f"unexpected response for {method} {template}: {response.status_code} {response.text}"
@@ -429,11 +438,16 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             "B_MEMBER_SENTINEL",
             "B_BENCH_SENTINEL",
             "B_JOURNAL_SENTINEL",
+            "B_LEDGER_SENTINEL",
         ):
             assert sentinel not in response.text, f"{method} {template} leaked {sentinel}"
         covered += 1
 
     assert journal_dir.is_dir(), "a cross-workspace journal DELETE removed workspace B's journal"
+    assert ledger_log.withdrawal_of("b" * 64) is None, "an A-only editor withdrew workspace B's evidence"
+    assert {k["status"] for k in ledger_keys.list_keys(ledger_keys.scope_for(workspace_b))} == {"active"}, (
+        "an A-only editor retired workspace B's signing key")
+    ledger_log.reset_cache()
     assert team_store.get_workspace(workspace_b) is not None, "an A-only editor deleted workspace B"
     assert covered > 0
     print(

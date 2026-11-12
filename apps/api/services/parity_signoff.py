@@ -108,6 +108,10 @@ def sign_off(
         raise ParityConflict(str(signoff["blocked_reason"] or "Sign-off is blocked."))
     digest = content_sha256(report)
     authority = authority_note(role, signer_role)
+    # Decided before the compare-and-swap: what the pack will say about its public-key signatures.
+    from services.ledger_packs import commitment
+
+    promised = commitment(str(job.get("workspace_id") or ""))
 
     def approve(job_now: dict[str, Any], state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
         pack = _approve(state)
@@ -140,7 +144,7 @@ def sign_off(
             "blocked_reason": None, "signature": None, "signed_at": signed_at,
         }
         final["version"] = int(state.get("version") or 0) + 1
-        pack = build_signed_parity_pack(job_id=job_id, report=final, actor=actor)
+        pack = build_signed_parity_pack(job_id=job_id, report=final, actor=actor, ledger_commitment=promised)
         state["signed"] = {
             "signature": "hmac-sha256:" + str(pack["signature"]["value"]),
             "signed_at": signed_at,

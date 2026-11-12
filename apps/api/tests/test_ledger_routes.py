@@ -76,9 +76,17 @@ def test_exports_carry_a_receipt_and_the_existing_verify_routes_report_the_evide
     chain = ent.admin.post("/api/v1/audit/verify-pack", json=pack, headers={"X-Workspace-Id": world["ws"]})
     assert chain.status_code == 200, chain.text
     assert chain.json()["evidence"]["signature_scheme"] == receipt["signature_scheme"]
-    old = {k: v for k, v in pack.items() if k != "ledger"}
+    # The pack without its receipt: its body says it has signatures, so the service looks the
+    # receipt up; it is not "HMAC only".
+    bare = {k: v for k, v in pack.items() if k != "ledger"}
+    looked_up = editor.post("/api/v1/transfer/proof-pack/verify", json={"pack": bare}).json()
+    assert looked_up["ok"] is True and looked_up["evidence"]["verdict"] == "incomplete"
+    # A pack from before the ledger (no receipt, no commitment) verifies as it always did.
+    from services.signed_proof_pack import sign_body
+
+    old = sign_body({"version": 1, "job_id": "job-before-ledger"}, subject="job-before-ledger")
     legacy = editor.post("/api/v1/transfer/proof-pack/verify", json={"pack": old}).json()
-    assert legacy["ok"] is True and legacy["evidence"]["verdict"] == "hmac_only"
+    assert legacy["ok"] is True and legacy["errors"] == [] and legacy["evidence"]["verdict"] == "hmac_only"
 
 
 def test_keys_are_listed_exported_and_never_show_private_material(ent, world):  # noqa: F811
@@ -156,54 +164,78 @@ def test_log_reads_are_scoped_and_the_proofs_verify_offline(ent, world):  # noqa
     viewer, stranger = world["viewer"], world["stranger"]
     packs = [_pack(viewer, world["job"]) for _ in range(3)]
     foreign = _pack(stranger, world["foreign_job"])
-    page = viewer.get("/api/v1/evidence/entries", params={"limit": 2})
+    sizes = [p["ledger"]["checkpoint"]["tree_size"] for p in packs]
+    tree = foreign["ledger"]["checkpoint"]["tree_size"]  # the log now: both workspaces, key events included
+    page = viewer.get("/api/v1/evidence/entries", params={"limit": 2, "kind": "proof_pack"})
     assert page.status_code == 200, page.text
     body = page.json()
     assert [e["content_sha256"] for e in body["entries"]] == [packs[2]["content_sha256"], packs[1]["content_sha256"]]
-    assert body["tree_size"] == 4 and {e["workspace_id"] for e in body["entries"]} == {world["ws"]}
-    rest = viewer.get("/api/v1/evidence/entries", params={"limit": 2, "before": body["next_before"]}).json()
+    assert body["tree_size"] == tree and {e["workspace_id"] for e in body["entries"]} == {world["ws"]}
+    rest = viewer.get("/api/v1/evidence/entries",
+                      params={"limit": 2, "before": body["next_before"], "kind": "proof_pack"}).json()
     assert [e["content_sha256"] for e in rest["entries"]] == [packs[0]["content_sha256"]]
     assert rest["next_before"] is None
-    theirs = stranger.get("/api/v1/evidence/entries").json()
-    assert [e["content_sha256"] for e in theirs["entries"]] == [foreign["content_sha256"]]
+    # Unfiltered: the workspace's packs, its own key event, and the log's key event (the deployment's
+    # public checkpoint keys, shown to every reader). Never another workspace's.
+    everything = viewer.get("/api/v1/evidence/entries").json()["entries"]
+    assert sorted(e["kind"] for e in everything) == ["key_set", "key_set"] + ["proof_pack"] * 3
+    events = {e["subject"]: e for e in everything if e["kind"] == "key_set"}
+    assert events["key_set:statement"]["workspace_id"] == world["ws"]
+    assert events["key_set:checkpoint"]["workspace_id"] == ""
+    assert {e["workspace_id"] for e in everything} == {world["ws"], ""}
+    theirs = stranger.get("/api/v1/evidence/entries").json()["entries"]
+    assert [e["content_sha256"] for e in theirs if e["kind"] == "proof_pack"] == [foreign["content_sha256"]]
+    assert {e["workspace_id"] for e in theirs} == {world["other"], ""}
     index = body["entries"][0]["index"]
     assert viewer.get(f"/api/v1/evidence/entries/{index}").json()["status"] == "issued"
     assert stranger.get(f"/api/v1/evidence/entries/{index}").status_code == 404
+    assert stranger.get(f"/api/v1/evidence/entries/{events['key_set:statement']['index']}").status_code == 404
+    assert stranger.get(f"/api/v1/evidence/entries/{events['key_set:checkpoint']['index']}").status_code == 200
     assert viewer.get("/api/v1/evidence/entries/999").status_code == 404
     assert viewer.get("/api/v1/evidence/entries", params={"kind": "certificate"}).status_code == 422
 
     checkpoint = viewer.get("/api/v1/evidence/checkpoint").json()
-    assert checkpoint["checkpoint"]["tree_size"] == 4 and checkpoint["anchor"]["status"] == "not_anchored"
+    assert checkpoint["checkpoint"]["tree_size"] == tree and checkpoint["anchor"]["status"] == "not_anchored"
     assert checkpoint["checkpoint_sha256"] == verifier.checkpoint_sha256(checkpoint["checkpoint"])
-    assert viewer.get("/api/v1/evidence/checkpoint", params={"tree_size": 2}).json()["checkpoint"]["tree_size"] == 2
-    assert viewer.get("/api/v1/evidence/checkpoint", params={"tree_size": 40}).status_code == 404
+    earlier = viewer.get("/api/v1/evidence/checkpoint", params={"tree_size": sizes[0]}).json()["checkpoint"]
+    assert earlier == packs[0]["ledger"]["checkpoint"]
+    assert viewer.get("/api/v1/evidence/checkpoint", params={"tree_size": 400}).status_code == 404
     proof = viewer.get(f"/api/v1/evidence/entries/{index}/proof").json()
     root = verifier.root_from_inclusion(bytes.fromhex(proof["leaf_hash"]), index, proof["tree_size"],
                                         [bytes.fromhex(h) for h in proof["hashes"]])
     assert root.hex() == proof["root_hash"] == checkpoint["checkpoint"]["root_hash"]
     assert viewer.get(f"/api/v1/evidence/entries/{index}/proof", params={"tree_size": 1}).status_code == 422
-    earlier = viewer.get("/api/v1/evidence/checkpoint", params={"tree_size": 2}).json()["checkpoint"]
-    consistency = viewer.get("/api/v1/evidence/consistency", params={"from": 2, "to": 4})
+    consistency = viewer.get("/api/v1/evidence/consistency", params={"from": sizes[0], "to": tree})
     assert consistency.status_code == 200, consistency.text
     assert verifier.check_consistency(earlier, consistency.json(), checkpoint["checkpoint"])["status"] == "passed"
     assert viewer.get("/api/v1/evidence/consistency", params={"from": 3, "to": 2}).status_code == 422
-    assert viewer.get("/api/v1/evidence/consistency", params={"from": 1, "to": 50}).status_code == 422
+    assert viewer.get("/api/v1/evidence/consistency", params={"from": 1, "to": 500}).status_code == 422
 
     receipt = viewer.get(f"/api/v1/evidence/receipts/{packs[0]['content_sha256']}")
     assert receipt.status_code == 200, receipt.text
-    assert receipt.json()["checkpoint"]["tree_size"] == 4  # against the latest checkpoint
+    assert receipt.json()["checkpoint"]["tree_size"] == tree  # against the latest checkpoint
     assert receipt.json()["statement"] == packs[0]["ledger"]["statement"]
+    bare = {k: v for k, v in packs[0].items() if k != "ledger"}
     keys = verifier.KeySet()
     keys.add_text(viewer.get("/api/v1/evidence/keys/jwks").text)
-    offline = verifier.verify_evidence({k: v for k, v in packs[0].items() if k != "ledger"}, receipt.json(), keys,
-                                       previous_checkpoint=earlier, consistency_proof=consistency.json())
+    offline = verifier.verify_evidence(bare, receipt.json(), keys, previous_checkpoint=earlier,
+                                       consistency_proof=consistency.json())
     offline_statuses = _statuses(offline)
     assert [offline_statuses[c] for c in ("content_digest", "statement", "signatures", "inclusion",
                                           "checkpoint_signature", "consistency")] == ["passed"] * 6
+    # Trust root: with nothing but the log's key ids pinned (they are in every checkpoint and on the
+    # keys page), the receipt's own key events are enough to check the workspace's signatures.
+    pinned = verifier.KeySet()
+    for key in viewer.get("/api/v1/evidence/keys").json()["log_keys"]:
+        pinned.pin(key["key_id"])
+    by_pin = verifier.verify_evidence(bare, receipt.json(), pinned)
+    assert _statuses(by_pin)["signatures"] == _statuses(by_pin)["checkpoint_signature"] == "passed"
+    assert {s["trust"].split(" (")[0] for s in by_pin["signatures"]} == {"the log published this key"}
     assert stranger.get(f"/api/v1/evidence/receipts/{packs[0]['content_sha256']}").status_code == 404
     assert viewer.get("/api/v1/evidence/receipts/" + "0" * 64).status_code == 404
     audit = viewer.get("/api/v1/evidence/log/audit").json()
-    assert audit == {"ok": True, "tree_size": 4, "checkpoints_checked": 4, "problems": []}
+    assert audit["ok"] is True and audit["problems"] == [] and audit["tree_size"] == tree
+    assert audit["checkpoints_checked"] >= 4  # at least one per issued pack
 
 
 def test_online_verify_looks_up_a_missing_receipt_only_inside_the_callers_workspace(ent, world):  # noqa: F811
@@ -221,9 +253,12 @@ def test_online_verify_looks_up_a_missing_receipt_only_inside_the_callers_worksp
     assert _statuses(looked_up["evidence"]) == _statuses(body["evidence"])
     beside = viewer.post("/api/v1/evidence/verify", json={"pack": bare, "receipt": pack["ledger"]}).json()
     assert beside["evidence"]["verdict"] == "incomplete"
-    # Someone in another workspace holding the bare pack is not told it is in the ledger.
+    # Someone in another workspace holding the bare pack gets no lookup outside their workspaces:
+    # the pack says it had signatures and shows none, so it fails (it is not "HMAC only").
     outside = stranger.post("/api/v1/evidence/verify", json=bare).json()
-    assert outside["hmac"]["ok"] is True and outside["evidence"]["verdict"] == "hmac_only"
+    assert outside["hmac"]["ok"] is True and outside["evidence"]["verdict"] == "failed"
+    assert "its receipt was removed" in next(c["detail"] for c in outside["evidence"]["checks"]
+                                             if c["id"] == "signatures")
     forged = {**copy.deepcopy(pack), "actor": "mallory"}
     bad = viewer.post("/api/v1/evidence/verify", json={"pack": forged}).json()
     assert bad["hmac"]["ok"] is False and bad["evidence"]["verdict"] == "failed"
@@ -250,8 +285,13 @@ def test_public_verify_needs_no_session_and_answers_verdicts_only(ent, world):  
     bare = {k: v for k, v in pack.items() if k != "ledger"}
     beside = public.post("/api/v1/evidence/public/verify", json={"pack": bare, "receipt": pack["ledger"]})
     assert beside.json()["evidence"]["verdict"] == "incomplete"
-    # No receipt: the public route does not search the ledger.
-    assert public.post("/api/v1/evidence/public/verify", json=bare).json()["evidence"]["verdict"] == "hmac_only"
+    # No receipt: the public route does not search the ledger. A pack that says it was issued with
+    # signatures fails; one from before the ledger reads "HMAC only".
+    assert public.post("/api/v1/evidence/public/verify", json=bare).json()["evidence"]["verdict"] == "failed"
+    from services.signed_proof_pack import sign_body
+
+    old = sign_body({"version": 1, "job_id": "job-before-ledger"}, subject="job-before-ledger")
+    assert public.post("/api/v1/evidence/public/verify", json=old).json()["evidence"]["verdict"] == "hmac_only"
     forged = {**copy.deepcopy(pack), "actor": "mallory"}
     assert public.post("/api/v1/evidence/public/verify", json=forged).json()["evidence"]["verdict"] == "failed"
     # A receipt that is not this log's learns nothing about this log.

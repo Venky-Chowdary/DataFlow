@@ -17,8 +17,16 @@ says which checks pass:
 * anchor           - the checkpoint sits in a write-once store (needs the service)
 
 Every check is reported as passed, failed or not checked. The verdict is
-"verified" only when every check passed; a check that could not run makes it
-"incomplete", never "verified".
+"verified" when every check passed and at no other time; a check that could
+not run makes it "incomplete".
+
+Trust comes from you, not from the pack: give the public keys (--keys) or the
+key ids (--pin) that you obtained out of band. Pinning the log's key id is
+enough: a checkpoint carries its own public keys (checked against the pinned
+id), and a workspace key that the log published is accepted when its key
+event is in the log under that checkpoint. A pack that says it was issued
+with public-key signatures and arrives without them fails; it is never
+reported as "HMAC only".
 
 This shows that a record was issued, has not been altered and is in the log.
 It does not show that the recorded facts are true.
@@ -42,6 +50,7 @@ from typing import Any
 STATEMENT_TYPE = "datawrap.evidence.statement.v1"
 CHECKPOINT_TYPE = "datawrap.evidence.checkpoint.v1"
 RECEIPT_TYPE = "datawrap.evidence.receipt.v1"
+COMMITMENT_TYPE = "datawrap.evidence.commitment.v1"
 STATEMENT_PAYLOAD = "application/vnd.datawrap.evidence.statement+json"
 CHECKPOINT_PAYLOAD = "application/vnd.datawrap.evidence.checkpoint+json"
 
@@ -49,6 +58,11 @@ CHECKPOINT_PAYLOAD = "application/vnd.datawrap.evidence.checkpoint+json"
 ENVELOPE_KEYS = ("content_sha256", "signature", "ledger")
 PACK_KINDS = ("proof_pack", "parity_report", "exit_evidence")
 WITHDRAWAL = "withdrawal"
+KEY_SET = "key_set"
+#: A pack body's statement that it was issued with public-key signatures (inside the content hash).
+COMMITMENT_KEY = "ledger_commitment"
+#: Fields of a checkpoint outside its signed bytes. ``cosignatures`` is reserved for witnesses.
+CHECKPOINT_UNSIGNED = ("signatures", "cosignatures")
 
 ED25519 = "Ed25519"
 ML_DSA_65 = "ML-DSA-65"
@@ -62,6 +76,11 @@ LABELS = {
     "content_digest": "content digest", "statement": "statement", "signatures": "signatures",
     "inclusion": "inclusion in the log", "checkpoint_signature": "checkpoint signature",
     "consistency": "consistency", "withdrawal": "withdrawal", "anchor": "anchor",
+}
+SCHEME_LABELS = {
+    "hmac_only": "HMAC only",
+    "classical": "classical signature (Ed25519)",
+    "hybrid": "hybrid: Ed25519 and a post-quantum signature (ML-DSA-65)",
 }
 EXIT_CODES = {"verified": 0, "failed": 1, "incomplete": 2, "hmac_only": 2, "withdrawn": 3}
 SCOPE_NOTE = ("This shows that the record was issued, has not been altered and is in the log. "
@@ -121,7 +140,7 @@ def statement_bytes(statement: dict[str, Any]) -> bytes:
 
 
 def checkpoint_body(checkpoint: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in checkpoint.items() if k != "signatures"}
+    return {k: v for k, v in checkpoint.items() if k not in CHECKPOINT_UNSIGNED}
 
 
 def checkpoint_bytes(checkpoint: dict[str, Any]) -> bytes:
@@ -233,11 +252,15 @@ def _b64url(text: str) -> bytes:
 
 
 def _mldsa() -> Any:
+    """The ML-DSA module when this build of ``cryptography`` and its backend provide it, else None."""
     try:
+        from cryptography.hazmat.backends.openssl.backend import backend
         from cryptography.hazmat.primitives.asymmetric import mldsa
-    except ImportError:
+
+        supported = bool(backend.mldsa_supported())
+    except (ImportError, AttributeError):
         return None
-    return mldsa if hasattr(mldsa, "MLDSA65PublicKey") else None
+    return mldsa if supported and hasattr(mldsa, "MLDSA65PublicKey") else None
 
 
 def ml_dsa_available() -> bool:
@@ -282,9 +305,45 @@ class KeySet:
     def __init__(self) -> None:
         self._keys: dict[str, Key] = {}
         self.unusable: dict[str, str] = {}
+        #: Key ids trusted out of band; the key itself may come with the document it signed.
+        self.pinned: set[str] = set()
 
     def add(self, key: Key) -> None:
         self._keys[key.key_id] = key
+
+    def pin(self, key_id: str) -> None:
+        key_id = str(key_id).strip().lower()
+        if len(key_id) != 64 or any(c not in "0123456789abcdef" for c in key_id):
+            raise ValueError("a pinned key id is 64 hex characters (the SHA-256 of the public key)")
+        self.pinned.add(key_id)
+
+    def extended(self) -> "KeySet":
+        """A copy that can take more keys without changing what the caller trusts."""
+        out = KeySet()
+        out._keys, out.unusable, out.pinned = dict(self._keys), dict(self.unusable), set(self.pinned)
+        return out
+
+    def adopt(self, jwks: Any, *, role: str, when: Any = None) -> list[str]:
+        """Take the keys of ``jwks`` this set does not hold yet. ``when(key_id)`` decides which.
+
+        The key id of each is recomputed from its key material, so a JWK
+        cannot claim an id that is not its own. Returns the ids adopted.
+        """
+        taken: list[str] = []
+        for jwk in jwks if isinstance(jwks, list) else []:
+            if not isinstance(jwk, dict):
+                continue
+            probe = KeySet()
+            try:
+                probe.add_jwk({**jwk, "datawrap_role": role})
+            except ValueError:
+                continue
+            self.unusable.update({k: v for k, v in probe.unusable.items() if when is None or when(k)})
+            for key in probe._keys.values():
+                if key.key_id not in self._keys and (when is None or when(key.key_id)):
+                    self.add(key)
+                    taken.append(key.key_id)
+        return taken
 
     def get(self, key_id: str) -> Key | None:
         return self._keys.get(key_id)
@@ -360,6 +419,11 @@ def check_signature_set(body: dict[str, Any], signatures: Any, *, message: bytes
     if (not isinstance(signer_ids, list) or not signer_ids or len(set(signer_ids)) != len(signer_ids)
             or not all(isinstance(k, str) and k for k in signer_ids)):
         return FAILED, "signer_key_ids is missing or malformed", []
+    signer_algs = body.get("signer_algs")
+    if (not isinstance(signer_algs, list) or len(signer_algs) != len(signer_ids)
+            or not all(isinstance(a, str) and a for a in signer_algs)):
+        return FAILED, "signer_algs is missing or does not match signer_key_ids", []
+    bound = dict(zip(signer_ids, signer_algs))
     signatures = signatures if isinstance(signatures, list) else []
     by_key: dict[str, list[dict[str, Any]]] = {}
     for sig in signatures:
@@ -379,7 +443,10 @@ def check_signature_set(body: dict[str, Any], signatures: Any, *, message: bytes
                              else "more than one signature for one key")
             continue
         sig = found[0]
-        row["alg"] = sig.get("alg")
+        row["alg"] = bound[key_id]
+        if sig.get("alg") != bound[key_id]:
+            row["detail"] = "the signature's algorithm is not the one the signed content binds to this key"
+            continue
         key = keys.get(key_id)
         if key is None:
             row["status"] = NOT_CHECKED
@@ -413,11 +480,24 @@ def check_signature_set(body: dict[str, Any], signatures: Any, *, message: bytes
     return PASSED, f"{len(results)} signature(s) valid ({algs})", results
 
 
-def signature_scheme(signatures: Any) -> str:
-    algs = {str(s.get("alg")) for s in signatures or [] if isinstance(s, dict)}
+def scheme_of(algs: Any) -> str:
+    algs = {str(a) for a in algs or []}
     if not algs:
         return "hmac_only"
     return "hybrid" if {ED25519, ML_DSA_65} <= algs else "classical"
+
+
+def signature_scheme(signatures: Any) -> str:
+    return scheme_of(s.get("alg") for s in signatures or [] if isinstance(s, dict))
+
+
+def commitment_of(pack: Any) -> list[str] | None:
+    """The signature algorithms a pack's own (hashed) body says it was issued with, or None."""
+    commitment = pack.get(COMMITMENT_KEY) if isinstance(pack, dict) else None
+    if not isinstance(commitment, dict) or commitment.get("type") != COMMITMENT_TYPE:
+        return None
+    algs = commitment.get("signature_algs")
+    return sorted(str(a) for a in algs) if isinstance(algs, list) and algs else None
 
 
 def _check(status: str, detail: str) -> dict[str, str]:
@@ -460,12 +540,48 @@ def _inclusion(receipt: dict[str, Any], statement: dict[str, Any], checkpoint: d
 
 
 def _checkpoint_signature(checkpoint: dict[str, Any], keys: KeySet) -> tuple[str, str]:
+    """The checkpoint's own signatures. A pinned key id may take its key from the checkpoint itself."""
     if checkpoint.get("type") != CHECKPOINT_TYPE:
         return FAILED, "the checkpoint type is not one this verifier knows"
+    trusted = keys.extended()
+    trusted.adopt(checkpoint.get("keys"), role=ROLE_CHECKPOINT, when=lambda key_id: key_id in keys.pinned)
     status, detail, _rows = check_signature_set(
         checkpoint_body(checkpoint), checkpoint.get("signatures"),
-        message=pae(CHECKPOINT_PAYLOAD, checkpoint_bytes(checkpoint)), keys=keys, role=ROLE_CHECKPOINT)
+        message=pae(CHECKPOINT_PAYLOAD, checkpoint_bytes(checkpoint)), keys=trusted, role=ROLE_CHECKPOINT)
     return status, detail
+
+
+def statement_keys(receipt: dict[str, Any], checkpoint: dict[str, Any], keys: KeySet, *,
+                   checkpoint_trusted: bool) -> tuple[KeySet, dict[str, str]]:
+    """The keys a statement's signatures may be checked with, and why each added one is trusted.
+
+    Beside the caller's own keys: a pinned key id takes its key from the
+    receipt's key events; and, when the checkpoint's signature is trusted, a
+    key the log published is accepted if its key event is in the log under
+    that checkpoint (the audit path is checked here).
+    """
+    trusted, notes = keys.extended(), {}
+    for proof in receipt.get("key_sets") if isinstance(receipt.get("key_sets"), list) else []:
+        event = proof.get("statement") if isinstance(proof, dict) else None
+        detail = event.get(KEY_SET) if isinstance(event, dict) else None
+        if not isinstance(detail, dict) or event.get("type") != STATEMENT_TYPE or event.get("kind") != KEY_SET:
+            continue
+        role = str(detail.get("role") or "")
+        for key_id in trusted.adopt(detail.get("keys"), role=role, when=lambda key_id: key_id in keys.pinned):
+            notes[key_id] = "the key id is pinned"
+        if not checkpoint_trusted:
+            continue
+        try:
+            index, size = int(proof.get("leaf_index")), int(checkpoint.get("tree_size"))
+            root = root_from_inclusion(leaf_hash(statement_bytes(event)), index, size,
+                                       _hex_list(proof.get("inclusion_proof")))
+        except (TypeError, ValueError):
+            continue
+        if root.hex() != str(checkpoint.get("root_hash") or ""):
+            continue
+        for key_id in trusted.adopt(detail.get("keys"), role=role):
+            notes[key_id] = f"the log published this key (leaf {index})"
+    return trusted, notes
 
 
 def check_consistency(previous: dict[str, Any], proof: Any, checkpoint: dict[str, Any]) -> dict[str, str]:
@@ -488,14 +604,24 @@ def check_consistency(previous: dict[str, Any], proof: Any, checkpoint: dict[str
     return _check(PASSED, f"the log at size {second} extends the log at size {first}")
 
 
+def _signatures(receipt: dict[str, Any], statement: dict[str, Any], checkpoint: dict[str, Any], keys: KeySet,
+                *, checkpoint_trusted: bool) -> tuple[str, str, list[dict[str, Any]]]:
+    trusted, notes = statement_keys(receipt, checkpoint, keys, checkpoint_trusted=checkpoint_trusted)
+    status, detail, rows = check_signature_set(
+        statement, receipt.get("signatures"), message=pae(STATEMENT_PAYLOAD, statement_bytes(statement)),
+        keys=trusted, role=ROLE_STATEMENT)
+    for row in rows:
+        row["trust"] = notes.get(row["key_id"]) or ("the key was supplied" if row["status"] != NOT_CHECKED else None)
+    return status, detail, rows
+
+
 def _receipt_core(receipt: dict[str, Any], keys: KeySet) -> dict[str, dict[str, str]]:
     """Signatures, inclusion and checkpoint signature of a receipt standing alone."""
     statement = receipt.get("statement") if isinstance(receipt.get("statement"), dict) else {}
     checkpoint = receipt.get("checkpoint") if isinstance(receipt.get("checkpoint"), dict) else {}
-    sig_status, sig_detail, _rows = check_signature_set(
-        statement, receipt.get("signatures"), message=pae(STATEMENT_PAYLOAD, statement_bytes(statement)),
-        keys=keys, role=ROLE_STATEMENT)
     cp_status, cp_detail = _checkpoint_signature(checkpoint, keys)
+    sig_status, sig_detail, _rows = _signatures(receipt, statement, checkpoint, keys,
+                                                checkpoint_trusted=cp_status == PASSED)
     return {"signatures": _check(sig_status, sig_detail), "inclusion": _inclusion(receipt, statement, checkpoint),
             "checkpoint_signature": _check(cp_status, cp_detail)}
 
@@ -541,7 +667,7 @@ def conclude(checks: dict[str, dict[str, str]], *, scheme: str, mode: str,
     if scheme == "hmac_only":
         verdict = "hmac_only"
         summary = ("This pack carries no public-key signature and no ledger receipt (HMAC only). "
-                   "Only the service that issued it can check it.")
+                   "The service that issued it can check it; nobody else can.")
     elif failed:
         verdict = "failed"
         summary = f"{len(failed)} check(s) failed ({', '.join(failed)}). Do not rely on this pack."
@@ -557,8 +683,9 @@ def conclude(checks: dict[str, dict[str, str]], *, scheme: str, mode: str,
                    f"({', '.join(skipped)}), so this is not a full verification.")
     else:
         verdict = "verified"
-        summary = ("Every check passed: the pack is the one that was issued, it is in the log, "
-                   "and the log's checkpoint was read back from a write-once store.")
+        summary = ("Every check passed: the pack is the one that was issued, it is independently verifiable "
+                   "with the published key, it is in the log, and the log's checkpoint was read back from a "
+                   "write-once store.")
     withdrawal_status = checks["withdrawal"]["status"]
     issuance = ("issued_later_withdrawn" if withdrawal else
                 "issued" if withdrawal_status == PASSED else "unknown")
@@ -569,9 +696,40 @@ def conclude(checks: dict[str, dict[str, str]], *, scheme: str, mode: str,
     return out
 
 
-def hmac_only_verdict(mode: str = "offline", *, detail: str = "") -> dict[str, Any]:
+def hmac_only_verdict(mode: str = "offline", *, detail: str = "", pack: Any = None) -> dict[str, Any]:
+    """Nothing could be checked. "HMAC only" unless ``pack`` says it was issued with signatures."""
     reason = detail or "the pack carries no ledger receipt"
-    return conclude({cid: _check(NOT_CHECKED, reason) for cid in CHECK_IDS}, scheme="hmac_only", mode=mode)
+    return conclude({cid: _check(NOT_CHECKED, reason) for cid in CHECK_IDS},
+                    scheme=scheme_of(commitment_of(pack)), mode=mode)
+
+
+def no_receipt_verdict(pack: Any, mode: str = "offline") -> dict[str, Any]:
+    """The verdict for a pack presented without a receipt.
+
+    A pack whose own body says it was issued with public-key signatures has
+    been stripped of them: that is a failure, never "HMAC only". A pack that
+    never had any reads "HMAC only".
+    """
+    promised = commitment_of(pack)
+    if not promised:
+        return hmac_only_verdict(mode)
+    checks = {cid: _check(NOT_CHECKED, "there is no receipt to check") for cid in CHECK_IDS}
+    checks["signatures"] = _check(
+        FAILED, f"the pack says it was issued with public-key signatures ({' and '.join(promised)}) and carries "
+                "none: its receipt was removed")
+    return conclude(checks, scheme=scheme_of(promised), mode=mode)
+
+
+def _downgrade(pack: Any, statement: dict[str, Any]) -> str | None:
+    """Why the receipt carries fewer or other signatures than the pack was issued with, or None."""
+    promised = commitment_of(pack)
+    if not promised:
+        return None
+    present = sorted(str(a) for a in statement.get("signer_algs") or [])
+    if present == promised:
+        return None
+    return (f"the pack was issued with {' and '.join(promised)}; the receipt carries "
+            f"{' and '.join(present) or 'no signature'}: a signature was removed or replaced")
 
 
 def verify_evidence(pack: dict[str, Any] | None, receipt: dict[str, Any] | None, keys: KeySet, *,
@@ -588,18 +746,19 @@ def verify_evidence(pack: dict[str, Any] | None, receipt: dict[str, Any] | None,
     if receipt is None and isinstance(pack, dict) and isinstance(pack.get("ledger"), dict):
         receipt = pack["ledger"]
     if not isinstance(receipt, dict):
-        return hmac_only_verdict(mode)
+        return no_receipt_verdict(pack, mode)
     statement = receipt.get("statement") if isinstance(receipt.get("statement"), dict) else {}
     checkpoint = receipt.get("checkpoint") if isinstance(receipt.get("checkpoint"), dict) else {}
     overrides = overrides or {}
     checks: dict[str, dict[str, str]] = {}
     checks["content_digest"], checks["statement"] = _content_and_statement(pack, receipt, statement)
-    sig_status, sig_detail, sig_rows = check_signature_set(
-        statement, receipt.get("signatures"), message=pae(STATEMENT_PAYLOAD, statement_bytes(statement)),
-        keys=keys, role=ROLE_STATEMENT)
-    checks["signatures"] = _check(sig_status, sig_detail)
+    cp_status, cp_detail = _checkpoint_signature(checkpoint, keys)
+    checks["checkpoint_signature"] = _check(cp_status, cp_detail)
+    sig_status, sig_detail, sig_rows = _signatures(receipt, statement, checkpoint, keys,
+                                                   checkpoint_trusted=cp_status == PASSED)
+    downgrade = _downgrade(pack, statement)
+    checks["signatures"] = _check(FAILED, downgrade) if downgrade else _check(sig_status, sig_detail)
     checks["inclusion"] = _inclusion(receipt, statement, checkpoint)
-    checks["checkpoint_signature"] = _check(*_checkpoint_signature(checkpoint, keys))
 
     withdrawal_info: dict[str, Any] | None = None
     if "consistency" in overrides:
@@ -629,10 +788,10 @@ def verify_evidence(pack: dict[str, Any] | None, receipt: dict[str, Any] | None,
         if checkpoint else None,
         "anchor": anchor,
     }
-    scheme = signature_scheme(receipt.get("signatures"))
+    # The scheme the pack was issued with (bound in the signed statement), not what happens to be attached.
+    scheme = scheme_of(commitment_of(pack) or statement.get("signer_algs"))
     if scheme == "hmac_only":
-        # A receipt with no signature at all is not HMAC only: it is a broken receipt.
-        scheme = "classical"
+        scheme = "classical"  # a receipt that binds no signature is a broken receipt, not "HMAC only"
     return conclude(checks, scheme=scheme, mode=mode, withdrawal=withdrawal_info, extra=extra)
 
 
@@ -659,7 +818,7 @@ def render_text(result: dict[str, Any]) -> str:
         label = LABELS[row["id"]]
         lines.append(f"{label} {'.' * (24 - len(label))} {words[row['status']]}: {row['detail']}")
     counts = result["counts"]
-    lines += ["", f"signature scheme: {result['signature_scheme'].replace('_', ' ')}",
+    lines += ["", f"signature scheme: {SCHEME_LABELS.get(result['signature_scheme'], result['signature_scheme'])}",
               f"result: {result['verdict'].replace('_', ' ').upper()} "
               f"({counts[PASSED]} passed, {counts[FAILED]} failed, {counts[NOT_CHECKED]} not checked)",
               result["summary"], SCOPE_NOTE]
@@ -675,6 +834,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--receipt", help="the ledger receipt (JSON), when it is not embedded in the pack")
     parser.add_argument("--keys", action="append", default=[],
                         help="trusted public keys: a JWK Set, one JWK, or PEM public keys (repeatable)")
+    parser.add_argument("--pin", action="append", default=[], metavar="KEY_ID",
+                        help="a key id you trust (SHA-256 of the public key, 64 hex), obtained out of band; "
+                             "the key itself is then taken from the checkpoint or the receipt (repeatable)")
     parser.add_argument("--previous-checkpoint", help="a checkpoint (JSON) saved from an earlier verification")
     parser.add_argument("--consistency-proof", help="the consistency proof (JSON) between the two checkpoints")
     parser.add_argument("--withdrawal", help="the receipt (JSON) of a withdrawal of this pack, if you hold one")
@@ -698,6 +860,11 @@ def main(argv: list[str] | None = None) -> int:
                 keys.add_text(handle.read())
         except (OSError, ValueError) as exc:
             return _usage_error(f"keys {path!r} could not be used: {exc}")
+    for key_id in args.pin:
+        try:
+            keys.pin(key_id)
+        except ValueError as exc:
+            return _usage_error(f"--pin {key_id!r}: {exc}")
     if bool(args.previous_checkpoint) != bool(args.consistency_proof):
         return _usage_error("--previous-checkpoint and --consistency-proof go together")
     previous = _load_json(args.previous_checkpoint, "checkpoint") if args.previous_checkpoint else None

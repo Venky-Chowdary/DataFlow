@@ -29,7 +29,7 @@ from tools import datawrap_verify as verifier
 
 logger = logging.getLogger(__name__)
 
-KINDS = (*verifier.PACK_KINDS, verifier.WITHDRAWAL)
+KINDS = (*verifier.PACK_KINDS, verifier.WITHDRAWAL, verifier.KEY_SET)
 ORIGIN_PREFIX = "datawrap-evidence-ledger/"
 _lock = threading.RLock()
 _trees: dict[str, Tree] = {}
@@ -105,16 +105,21 @@ def root_hash(size: int | None = None) -> str:
 
 
 def append(*, kind: str, subject: str, content_sha256: str, workspace_id: str, actor: str,
-           signer: ledger_keys.Signer, withdrawal: dict[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
-    """Sign a statement and append it. Returns ``(entry, created)``; idempotent on kind + digest."""
+           signer: ledger_keys.Signer, detail: dict[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
+    """Sign a statement and append it. Returns ``(entry, created)``; idempotent on kind + digest.
+
+    The signer key ids and their algorithms are part of the signed statement
+    (and so of the leaf): a signature cannot be removed or swapped for another
+    algorithm without the statement failing. ``detail`` adds the kind's own
+    member (``withdrawal`` or ``key_set``).
+    """
     if kind not in KINDS:
         raise LedgerInvalid(f"Unknown evidence kind {kind!r}.")
     statement: dict[str, Any] = {
         "type": verifier.STATEMENT_TYPE, "kind": kind, "subject": subject, "content_sha256": content_sha256,
-        "signer_key_ids": signer.key_ids, "issued_at": now_iso(), "nonce": secrets.token_hex(16),
+        "signer_key_ids": signer.key_ids, "signer_algs": signer.algs, "issued_at": now_iso(),
+        "nonce": secrets.token_hex(16), **(detail or {}),
     }
-    if withdrawal is not None:
-        statement["withdrawal"] = withdrawal
     body = verifier.statement_bytes(statement)
     doc = {
         "dedupe": f"{kind}:{content_sha256}", "leaf_hash": verifier.leaf_hash(body).hex(), "kind": kind,
@@ -165,9 +170,20 @@ def public_entry(entry: dict[str, Any], withdrawn_by: dict[str, Any] | None = No
     return out
 
 
+def visible(entry: dict[str, Any], allows: Any) -> bool:
+    """Whether a caller may see an entry: its workspace's, or one of the log's own key events.
+
+    The log's key events hold the deployment's public checkpoint keys, which
+    every reader of the ledger is shown anyway.
+    """
+    if entry.get("kind") == verifier.KEY_SET and not entry.get("workspace_id"):
+        return True
+    return bool(allows(entry.get("workspace_id") or None))
+
+
 def list_entries(*, allows: Any, limit: int = 50, before: int | None = None, kind: str = "",
                  subject: str = "") -> dict[str, Any]:
-    """A page of entries the caller may see (``allows(workspace_id)``), newest first."""
+    """A page of entries the caller may see (:func:`visible`), newest first."""
     query: dict[str, Any] = {}
     if kind:
         query["kind"] = kind
@@ -182,7 +198,7 @@ def list_entries(*, allows: Any, limit: int = 50, before: int | None = None, kin
                 more = True
                 break
             cursor = int(doc["index"])
-            if allows(doc.get("workspace_id") or None):
+            if visible(doc, allows):
                 page.append(doc)
         if more or len(batch) < chunk:
             break
@@ -202,17 +218,24 @@ def checkpoint(size: int | None = None, *, create: bool = True) -> dict[str, Any
     A record is ``{"tree_size", "checkpoint", "checkpoint_sha256", "anchor"}``.
     ``None`` for an empty log, or when ``create`` is false and none is stored.
     """
+    signer = None
+    if size is None and create and tree_size() > 0:
+        # Before the size is read: creating the log's keys appends their key event to the log.
+        signer = ledger_keys.signer(ledger_keys.LOG_SCOPE)
     size = tree_size() if size is None else int(size)
     if size <= 0:
         return None
     stored = ledger_store.get(ledger_store.CHECKPOINTS, size)
     if stored or not create:
         return stored
-    signer = ledger_keys.signer(ledger_keys.LOG_SCOPE)
+    signer = signer or ledger_keys.signer(ledger_keys.LOG_SCOPE)
     if signer is None:
         raise LedgerUnavailable("The log has no active checkpoint key.")
+    # The checkpoint publishes its own public keys: a verifier who pinned a key id out of band
+    # needs nothing else from the server.
     body = {"type": verifier.CHECKPOINT_TYPE, "origin": origin(), "tree_size": size,
-            "root_hash": root_hash(size), "timestamp": now_iso(), "signer_key_ids": signer.key_ids}
+            "root_hash": root_hash(size), "timestamp": now_iso(), "signer_key_ids": signer.key_ids,
+            "signer_algs": signer.algs, "keys": signer.jwks}
     signed = {**body, "signatures": signer.sign(verifier.CHECKPOINT_PAYLOAD, verifier.checkpoint_bytes(body))}
     record = {"tree_size": size, "checkpoint": signed, "checkpoint_sha256": verifier.checkpoint_sha256(signed),
               "anchor": None}
@@ -261,13 +284,35 @@ def receipt(entry: dict[str, Any], *, size: int | None = None) -> dict[str, Any]
     record = checkpoint(size)
     if record is None or int(record["tree_size"]) <= int(entry["index"]):
         raise LedgerInvalid("That checkpoint does not cover this entry.")
-    proof = inclusion_proof(int(entry["index"]), int(record["tree_size"]))
+    covered = int(record["tree_size"])
+    proof = inclusion_proof(int(entry["index"]), covered)
     return {
         "type": verifier.RECEIPT_TYPE, "statement": entry["statement"], "signatures": entry["signatures"],
         "signature_scheme": entry.get("signature_scheme"), "leaf_index": int(entry["index"]),
         "leaf_hash": entry["leaf_hash"], "inclusion_proof": proof["hashes"],
+        "key_sets": key_set_proofs(list(entry["statement"].get("signer_key_ids") or []), covered),
         "checkpoint": record["checkpoint"], "anchor": record.get("anchor"),
     }
+
+
+def key_set_proofs(key_ids: list[str], size: int) -> list[dict[str, Any]]:
+    """For each signer key: the key event that published it, with its audit path at ``size``.
+
+    This is what lets a verifier holding the log's key id check a workspace's
+    keys against the log. A key whose event is not below ``size`` is left out
+    (the verifier then needs that key from elsewhere).
+    """
+    proofs: dict[int, dict[str, Any]] = {}
+    for key_id in key_ids:
+        index = ledger_keys.published_at(key_id)
+        if index is None or index >= size or index in proofs:
+            continue
+        event = get_entry(index)
+        if not event or event.get("kind") != verifier.KEY_SET:
+            continue
+        proofs[index] = {"leaf_index": index, "statement": event["statement"],
+                         "inclusion_proof": inclusion_proof(index, size)["hashes"]}
+    return [proofs[i] for i in sorted(proofs)]
 
 
 # ---------------------------------------------------------------- self-check

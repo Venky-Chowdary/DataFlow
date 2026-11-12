@@ -317,6 +317,8 @@ def hmac_sha256_hex(secret: bytes, text: str) -> str:
 #: ``signature`` it travels beside the signed body, outside the content hash.
 LEDGER_KEY = "ledger"
 ENVELOPE_KEYS = ("content_sha256", "signature", LEDGER_KEY)
+#: Inside the hash: the pack's own statement that it is issued with public-key signatures.
+LEDGER_COMMITMENT_KEY = "ledger_commitment"
 
 
 def sign_body(body: dict[str, Any], *, subject: str) -> dict[str, Any]:
@@ -810,6 +812,7 @@ def build_signed_proof_pack(
     governance_operations: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
     parity: dict[str, Any] | None = None,
+    ledger_commitment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -927,6 +930,10 @@ def build_signed_proof_pack(
     if parity:
         # Parity Studio sign-off: the verdict people signed and its own signature.
         body["parity"] = parity
+    if ledger_commitment:
+        # The pack says, inside its hash, that it is issued with public-key signatures
+        # (services.ledger_packs.commitment): stripped of them it fails, it is not "HMAC only".
+        body[LEDGER_COMMITMENT_KEY] = ledger_commitment
     from services.ai_egress import proof_pack_ai_egress
 
     body["ai_egress"] = proof_pack_ai_egress(job_id)
@@ -1116,8 +1123,12 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
             and str(dest.get("checksum_mode") or "") == "source_reread"
         ):
             reconciliation["source_checksum_provenance"] = "independent_source_reread"
+    from services.ledger_packs import commitment, with_ledger
+
+    workspace_id = str(job.get("workspace_id") or "")
     pack = build_signed_proof_pack(
         job_id=str(job.get("_id") or job.get("id") or ""),
+        ledger_commitment=commitment(workspace_id),
         reconciliation=reconciliation,
         mapping_proof=mapping_proof or None,
         preflight_summary=(
@@ -1176,9 +1187,7 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         parity=parity_section_for_pack(job),
     )
     # Beside the HMAC: a public-key signature and a transparency-log receipt (Evidence Ledger).
-    from services.ledger_packs import with_ledger
-
-    return with_ledger(pack, workspace_id=str(job.get("workspace_id") or ""), actor=actor)
+    return with_ledger(pack, workspace_id=workspace_id, actor=actor)
 
 
 def parity_section_for_pack(job: dict[str, Any]) -> dict[str, Any] | None:
@@ -1221,7 +1230,8 @@ def build_signed_exit_pack(body: dict[str, Any]) -> dict[str, Any]:
     return sign_body({**body, "kind": EXIT_PACK_KIND}, subject=pack_subject({**body, "kind": EXIT_PACK_KIND}))
 
 
-def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str) -> dict[str, Any]:
+def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str,
+                             ledger_commitment: dict[str, Any] | None = None) -> dict[str, Any]:
     """Sign a final parity report with the proof-pack key, in its own signature domain.
 
     Same envelope as the proof pack (``content_sha256`` + HMAC), so
@@ -1237,4 +1247,6 @@ def build_signed_parity_pack(*, job_id: str, report: dict[str, Any], actor: str)
         "actor": actor,
         "parity": report,
     }
+    if ledger_commitment:
+        body[LEDGER_COMMITMENT_KEY] = ledger_commitment
     return sign_body(body, subject=pack_subject(body))

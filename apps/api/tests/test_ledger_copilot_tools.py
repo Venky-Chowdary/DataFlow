@@ -38,8 +38,12 @@ def test_listing_and_verifying_answer_only_inside_the_workspace(ledger, store): 
     with bound_workspace_filter(WorkspaceFilter.only("ws-a")):
         listed = DataPilotTools().execute("list_evidence_entries", {})
         assert listed.success, listed.error
-        assert [e["content_sha256"] for e in listed.output["entries"]] == [mine["content_sha256"]]
-        assert listed.output["entries"][0]["status"] == "issued" and listed.output["open"] == "/#/evidence"
+        # The workspace's pack, its own key event and the log's key event; nothing of workspace ws-b.
+        packs = [e for e in listed.output["entries"] if e["kind"] == "proof_pack"]
+        assert [e["content_sha256"] for e in packs] == [mine["content_sha256"]]
+        assert sorted(e["subject"] for e in listed.output["entries"] if e["kind"] == "key_set") == [
+            "key_set:checkpoint", "key_set:statement"]
+        assert packs[0]["status"] == "issued" and listed.output["open"] == "/#/evidence"
         assert "does not show that the recorded facts are true" in listed.output["note"]
         bad = DataPilotTools().execute("list_evidence_entries", {"kind": "certificate"})
         assert not bad.success and "Kind must be one of" in bad.error

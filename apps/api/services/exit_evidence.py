@@ -96,7 +96,11 @@ def _pack_body(doc: dict[str, Any], approvals: list[dict[str, Any]], *, signed_a
     view["signoff"] = {**view["signoff"], "approvals": approvals, "invalidated_approvals": [],
                        "status": "signed", "blocked_reason": None, "signature": None, "signed_at": signed_at}
     seal = doc.get("seal") or {}
+    from services.ledger_packs import commitment
+
+    promised = commitment(str(doc.get("workspace_id") or ""))
     return {
+        **({"ledger_commitment": promised} if promised else {}),
         "version": PACK_VERSION, "kind": PACK_KIND, "issued_at": signed_at,
         "system_id": doc.get("system_id"), "rehearsal_id": doc.get("id"), "workspace_id": doc.get("workspace_id"),
         "actor": actor,

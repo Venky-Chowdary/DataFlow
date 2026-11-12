@@ -6,10 +6,17 @@ about its packs (``ws:<workspace id>``), the log's own keys sign checkpoints
 (``log``). Every key ever used stays on its keyring, so a retired key keeps
 verifying what it signed; it never signs again.
 
-Algorithms: Ed25519 always, and ML-DSA-65 beside it when the installed
-``cryptography`` provides it and ``DATAWRAP_EVIDENCE_PQ`` is not ``off``
-("hybrid classical and post-quantum signature"). Nothing here implements a
-primitive: keys, signatures and encodings all come from ``cryptography``.
+Algorithms: Ed25519 always, and a post-quantum signature (ML-DSA-65) beside it
+when the installed ``cryptography`` and its backend provide it and
+``DATAWRAP_EVIDENCE_PQ`` is not ``off`` ("hybrid classical and post-quantum
+signature"). Nothing here implements a primitive: keys, signatures and
+encodings all come from ``cryptography``.
+
+Trust root: every key event (a key set created, rotated, a key retired) is
+itself an entry in the ledger's log (kind ``key_set``), carrying the public
+keys and signed by the keys that were active before the event and by the new
+ones. A verifier who holds the log's key id from outside can therefore check
+a workspace's keys against the log instead of asking the issuing server.
 
 Custody: a private key exists in this module only. It is generated here, kept
 encrypted by :func:`services.secret_vault.encrypt_secret` (the deployment's
@@ -41,9 +48,12 @@ _PLAIN_PREFIX = "ledgerkey:"
 #: An opaque reference a real vault returns. ``enc:v0`` is base64, not encryption: refused.
 _ENCRYPTED_PREFIXES = ("enc:v1:", "sm:", "byok:")
 CAS_ATTEMPTS = 6
-PQ_NOTE = "Hybrid classical and post-quantum signature: Ed25519 and ML-DSA-65."
-CLASSICAL_NOTE = "Classical signature only: this build has no ML-DSA implementation."
-PQ_OFF_NOTE = "Classical signature only: the post-quantum signature is switched off (DATAWRAP_EVIDENCE_PQ=off)."
+PQ_NOTE = "Hybrid classical and post-quantum signature: Ed25519 and a post-quantum signature (ML-DSA-65)."
+CLASSICAL_NOTE = "Classical signature (Ed25519), no post-quantum signature: this build has no ML-DSA implementation."
+PQ_OFF_NOTE = ("Classical signature (Ed25519), no post-quantum signature: it is switched off "
+               "(DATAWRAP_EVIDENCE_PQ=off).")
+KEY_INDEX = "key:"  # ledger_store.META id prefix: key id -> the leaf that published it
+MAX_KEYS_PER_DOCUMENT = 16
 
 
 class LedgerKeyError(RuntimeError):
@@ -167,7 +177,8 @@ def _unwrap(entry: dict[str, Any], scope: str) -> Any:
     return private
 
 
-def _new_entry(alg: str, scope: str, actor: str) -> dict[str, Any]:
+def _new_entry(alg: str, scope: str, actor: str) -> tuple[dict[str, Any], Any]:
+    """A new keyring entry and its private key (kept by the caller just long enough to sign the key event)."""
     private = _generate(alg)
     public = private.public_key()
     stored, custody = _wrap(private, scope)
@@ -176,7 +187,12 @@ def _new_entry(alg: str, scope: str, actor: str) -> dict[str, Any]:
         "public_key": base64.b64encode(public.public_bytes_raw()).decode("ascii"),
         "private_enc": stored, "custody": custody, "status": "active",
         "created_at": _now(), "created_by": actor, "retired_at": None, "retired_by": None,
-    }
+    }, private
+
+
+def _new_set(scope: str, actor: str) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], Any]]]:
+    made = [_new_entry(alg, scope, actor) for alg in _algorithms()]
+    return [entry for entry, _private in made], made
 
 
 # ------------------------------------------------------------------ keyring
@@ -225,11 +241,13 @@ def _audit(action: str, scope: str, actor: str, details: dict[str, Any]) -> None
 
 
 def create(scope: str, *, actor: str) -> list[dict[str, Any]]:
-    """Create the scope's first key set. :class:`KeyConflict` when it already has a keyring."""
+    """Create the scope's initial key set. :class:`KeyConflict` when it already has a keyring."""
+    entries, made = _new_set(scope, actor)
     doc = {"scope": scope, "workspace_id": _workspace_of(scope), "revision": 1, "created_at": _now(),
-           "keys": [_new_entry(alg, scope, actor) for alg in _algorithms()]}
+           "keys": entries}
     if not ledger_store.put_if_absent(ledger_store.KEYS, scope, doc):
         raise KeyConflict("This workspace already has signing keys; rotate them instead.")
+    _publish(scope, doc, "created", Signer(scope, made), actor)
     _audit("evidence.key.created", scope, actor,
            {"key_ids": [k["key_id"] for k in doc["keys"]], "algorithms": [k["alg"] for k in doc["keys"]]})
     return [public_view(k, scope) for k in doc["keys"]]
@@ -250,13 +268,15 @@ def rotate(scope: str, *, actor: str) -> list[dict[str, Any]]:
                 continue
         revision = int(doc.get("revision") or 0)
         retired = [k["key_id"] for k in doc["keys"] if k.get("status") == "active"]
+        outgoing = _outgoing(doc, scope)  # the keys being retired sign the announcement of their successors
         for entry in doc["keys"]:
             if entry.get("status") == "active":
                 _retire(entry, actor)
-        fresh = [_new_entry(alg, scope, actor) for alg in _algorithms()]
+        fresh, made = _new_set(scope, actor)
         doc["keys"] = doc["keys"] + fresh
         doc["revision"] = revision + 1
         if ledger_store.replace_if(ledger_store.KEYS, scope, doc, revision=revision):
+            _publish(scope, doc, "rotated", Signer(scope, outgoing + made), actor)
             _audit("evidence.key.rotated", scope, actor,
                    {"new_key_ids": [k["key_id"] for k in fresh], "retired_key_ids": retired})
             return [public_view(k, scope) for k in doc["keys"]]
@@ -272,9 +292,11 @@ def retire(scope: str, key_id: str, *, actor: str) -> dict[str, Any]:
         if entry.get("status") != "active":
             raise KeyConflict("This key is already retired.")
         revision = int(doc.get("revision") or 0)
+        outgoing = _outgoing(doc, scope)  # including the key being retired: its last signature
         _retire(entry, actor)
         doc["revision"] = revision + 1
         if ledger_store.replace_if(ledger_store.KEYS, scope, doc, revision=revision):
+            _publish(scope, doc, "retired", Signer(scope, outgoing), actor)
             _audit("evidence.key.retired", scope, actor, {"key_id": key_id, "alg": entry.get("alg")})
             return public_view(entry, scope)
     raise KeyConflict("The keys changed while this one was being retired; try again.")
@@ -284,33 +306,68 @@ def retire(scope: str, key_id: str, *, actor: str) -> dict[str, Any]:
 
 
 class Signer:
-    """The active keys of one scope, able to sign. It exposes key ids and signatures only."""
+    """The active keys of one scope, able to sign. It exposes key ids, public keys and signatures."""
 
     __slots__ = ("_keys", "scope")
 
-    def __init__(self, scope: str, keys: list[tuple[str, str, Any]]) -> None:
+    def __init__(self, scope: str, keys: list[tuple[dict[str, Any], Any]]) -> None:
         self.scope = scope
-        self._keys = keys
+        self._keys = sorted(keys, key=lambda item: str(item[0]["key_id"]))
 
     def __repr__(self) -> str:
-        return f"Signer(scope={self.scope!r}, keys={[kid[:16] for kid, _alg, _key in self._keys]})"
+        return f"Signer(scope={self.scope!r}, keys={[str(e['key_id'])[:16] for e, _key in self._keys]})"
 
     @property
     def key_ids(self) -> list[str]:
-        return sorted(kid for kid, _alg, _key in self._keys)
+        return [str(entry["key_id"]) for entry, _key in self._keys]
+
+    @property
+    def algs(self) -> list[str]:
+        """The algorithm of each key, in the order of :attr:`key_ids` (bound into what is signed)."""
+        return [str(entry["alg"]) for entry, _key in self._keys]
+
+    @property
+    def jwks(self) -> list[dict[str, Any]]:
+        return [jwk(entry) for entry, _key in self._keys]
 
     @property
     def scheme(self) -> str:
-        return "hybrid" if {ED25519, ML_DSA_65} <= {alg for _kid, alg, _key in self._keys} else "classical"
+        return verifier.scheme_of(self.algs)
 
     def sign(self, payload_type: str, body: bytes) -> list[dict[str, str]]:
         message = verifier.pae(payload_type, body)
-        return [{"alg": alg, "key_id": kid, "value": base64.b64encode(key.sign(message)).decode("ascii")}
-                for kid, alg, key in sorted(self._keys, key=lambda item: item[0])]
+        return [{"alg": str(entry["alg"]), "key_id": str(entry["key_id"]),
+                 "value": base64.b64encode(key.sign(message)).decode("ascii")} for entry, key in self._keys]
+
+
+def _usable(doc: dict[str, Any] | None, scope: str) -> list[tuple[dict[str, Any], Any]]:
+    """The active keys of a keyring this build can sign with, unwrapped."""
+    usable = []
+    for entry in (doc or {}).get("keys") or []:
+        if entry.get("status") != "active":
+            continue
+        if entry.get("alg") == ML_DSA_65 and not pq_available():
+            continue
+        usable.append((entry, _unwrap(entry, scope)))
+    return usable
+
+
+def _outgoing(doc: dict[str, Any], scope: str) -> list[tuple[dict[str, Any], Any]]:
+    """The keys that sign a rotation or retirement; none when they cannot be read.
+
+    Retiring or replacing a key must not depend on being able to decrypt it
+    (that may be the very reason it is retired). The key event is then signed
+    by the incoming keys alone, or not published when there are none.
+    """
+    try:
+        return _usable(doc, scope)
+    except LedgerKeyError as exc:
+        logger.error("evidence keys of %s could not sign their own key event (%s)", scope, type(exc).__name__)
+        return []
 
 
 def signer(scope: str, *, actor: str = "system") -> Signer | None:
-    """A signer over the scope's active keys; its first key set is created on first use.
+    """A signer over the scope's active keys; its initial key set is created on first use.
 
     ``None`` when the scope has a keyring and no active key (every key was
     retired): nothing is created silently after an explicit retirement. A key
@@ -322,16 +379,56 @@ def signer(scope: str, *, actor: str = "system") -> Signer | None:
         try:
             create(scope, actor=actor)
         except KeyConflict:
-            pass  # another replica created it first: adopt its keys
+            pass  # another replica created it at the same moment: adopt its keys
         doc = _keyring(scope)
-    usable = []
-    for entry in (doc or {}).get("keys") or []:
-        if entry.get("status") != "active":
-            continue
-        if entry.get("alg") == ML_DSA_65 and not pq_available():
-            continue
-        usable.append((str(entry["key_id"]), str(entry["alg"]), _unwrap(entry, scope)))
+    usable = _usable(doc, scope)
     return Signer(scope, usable) if usable else None
+
+
+# ----------------------------------------------------------------- key events
+
+
+def _publish(scope: str, doc: dict[str, Any], event: str, signed_by: Signer, actor: str) -> None:
+    """Append a key event to the ledger's log: the scope's public keys, signed by ``signed_by``.
+
+    Best effort: the keyring change stands if the log cannot be written, and
+    :func:`ensure_published` publishes the keys the next time they sign.
+    """
+    from services import ledger_log
+
+    if not signed_by.key_ids:
+        logger.error("evidence key event (%s) has no key to sign it; not published to the log", event)
+        return
+    active = [k for k in doc.get("keys") or [] if k.get("status") == "active"]
+    key_set = {"role": _role_of(scope), "event": event, "keys": [jwk(k) for k in active],
+               "retired_key_ids": sorted(str(k["key_id"]) for k in doc.get("keys") or []
+                                         if k.get("status") != "active")}
+    digest = verifier.sha256_hex(verifier.canonical_json(key_set).encode("utf-8"))
+    try:
+        entry, _created = ledger_log.append(
+            kind=verifier.KEY_SET, subject=f"{verifier.KEY_SET}:{key_set['role']}", content_sha256=digest,
+            workspace_id=_workspace_of(scope) or "", actor=actor, signer=signed_by, detail={verifier.KEY_SET: key_set})
+        for key in active:
+            ledger_store.put_if_absent(ledger_store.META, KEY_INDEX + str(key["key_id"]),
+                                       {"leaf_index": int(entry["index"])})
+    except Exception as exc:  # noqa: BLE001 - the keys exist and sign; publication is retried on next use
+        logger.error("evidence key event (%s) was not published to the log (%s)", event, type(exc).__name__,
+                     exc_info=exc)
+
+
+def published_at(key_id: str) -> int | None:
+    """The leaf index of the key event that published ``key_id``, or None."""
+    meta = ledger_store.get(ledger_store.META, KEY_INDEX + str(key_id))
+    return int(meta["leaf_index"]) if meta and meta.get("leaf_index") is not None else None
+
+
+def ensure_published(signed_by: Signer) -> None:
+    """Publish the signer's keys to the log if an earlier attempt did not reach it."""
+    if all(published_at(key_id) is not None for key_id in signed_by.key_ids):
+        return
+    doc = _keyring(signed_by.scope)
+    if doc is not None:
+        _publish(signed_by.scope, doc, "published", signed_by, "system")
 
 
 # ------------------------------------------------------------------- public
@@ -378,7 +475,8 @@ def jwks(scopes: list[str]) -> dict[str, Any]:
 def trusted_keys(key_ids: list[str]) -> verifier.KeySet:
     """The deployment's own registry, as the verifier's key set, for the ids a document names."""
     out = verifier.KeySet()
-    for key_id in dict.fromkeys(str(k) for k in key_ids if k):
+    # A document names a handful of keys; one that names a crowd is not looked up key by key.
+    for key_id in list(dict.fromkeys(str(k) for k in key_ids if k))[:MAX_KEYS_PER_DOCUMENT]:
         found = find_key(key_id)
         if not found:
             continue

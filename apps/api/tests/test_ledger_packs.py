@@ -42,6 +42,10 @@ def _assert_sound(pack: dict, kind: str) -> dict:
     assert statement["kind"] == kind and statement["subject"] == pack_subject(pack) == verifier.pack_subject(pack)
     assert statement["content_sha256"] == pack["content_sha256"] == verifier.pack_content_sha256(pack)
     assert pack["signature"]["alg"] == "HMAC-SHA256"  # the HMAC is still there
+    # Inside the hash, the pack says which signatures it was issued with; the statement binds the same.
+    assert pack["ledger_commitment"] == {"type": "datawrap.evidence.commitment.v1",
+                                         "signature_algs": sorted(statement["signer_algs"])}
+    assert len(statement["signer_algs"]) == len(statement["signer_key_ids"]) == len(receipt["signatures"])
     checked = verify_signed_proof_pack(copy.deepcopy(pack))
     assert checked["ok"] is True and checked["errors"] == [] and checked["kind"] == kind
     evidence = checked["evidence"]
@@ -95,6 +99,11 @@ def test_the_parity_sign_off_issues_once_and_the_export_carries_the_receipt(ledg
     job = store.get_job(job_id)
     stored = signed_pack(job)
     assert "ledger" not in stored  # the stored pack is the signed body; the receipt is attached on export
+    # The stored copy says it has signatures, so verifying it looks the receipt up: never "HMAC only".
+    from services.signed_proof_pack import verify_signed_proof_pack
+
+    assert verify_signed_proof_pack(stored)["ok"] is True
+    assert verify_signed_proof_pack(stored)["evidence"]["verdict"] == "incomplete"
     entry = ledger.find_entry(stored["content_sha256"], "parity_report")
     assert entry and entry["subject"] == f"parity_report:{job_id}" and entry["workspace_id"] == "w"
     size = ledger.tree_size()
@@ -174,8 +183,9 @@ def test_a_statement_is_never_issued_for_a_pack_this_deployment_did_not_sign(led
     altered = {**genuine, "version": 2}
     assert issue(altered, workspace_id="w1", actor="a") is None
     assert with_ledger(altered, workspace_id="w1", actor="a") == altered
-    assert ledger.tree_size() == 0
-    assert issue(genuine, workspace_id="w1", actor="a")["index"] == 0
+    assert ledger.tree_size() == 0  # refused before a key was even created
+    issued = issue(genuine, workspace_id="w1", actor="a")
+    assert issued["kind"] == "proof_pack" and issued["content_sha256"] == genuine["content_sha256"]
 
 
 # ----------------------------------------------------------------------- tamper
@@ -209,6 +219,90 @@ def test_a_tampered_pack_or_receipt_fails_and_turns_ok_false(ledger):  # noqa: F
     assert ok is False and statuses["consistency"] == "failed"
     errors = verify_signed_proof_pack({**copy.deepcopy(pack), "ledger": {"statement": {}}})["errors"]
     assert any("Evidence Ledger receipt does not verify" in e for e in errors)
+
+
+# -------------------------------------------------------------------- downgrade
+
+
+def test_a_pack_stripped_of_its_receipt_fails_and_is_never_reported_hmac_only(ledger):  # noqa: F811
+    from services import ledger_verify
+    from services.ledger_packs import commitment
+    from services.signed_proof_pack import build_signed_proof_pack, export_proof_pack_for_job, verify_signed_proof_pack
+
+    pack = export_proof_pack_for_job(_job("job-strip"), actor="ops")
+    bare = {k: v for k, v in pack.items() if k != "ledger"}
+    promised = " and ".join(pack["ledger_commitment"]["signature_algs"])
+    # Offline, and for a caller without a session: no receipt is a failure, with the reason.
+    for evidence in (verifier.verify_evidence(bare, None, _trusted(pack["ledger"])),
+                     ledger_verify.verify_online(bare, public=True)):
+        statuses = _statuses(evidence)
+        assert evidence["verdict"] == "failed" and statuses["signatures"] == "failed"
+        assert evidence["signature_scheme"] == pack["ledger"]["signature_scheme"] != "hmac_only"
+        detail = next(c["detail"] for c in evidence["checks"] if c["id"] == "signatures")
+        assert detail == (f"the pack says it was issued with public-key signatures ({promised}) and carries "
+                          "none: its receipt was removed")
+    # The service, asked about its own pack, finds the receipt in the ledger instead.
+    looked_up = verify_signed_proof_pack(bare)
+    assert looked_up["ok"] is True and looked_up["evidence"]["verdict"] == "incomplete"
+    assert _statuses(looked_up["evidence"])["signatures"] == "passed"
+    # A pack that says it has signatures and is not in the ledger at all does not verify.
+    never_issued = build_signed_proof_pack(job_id="job-ghost", reconciliation=None, mapping_proof=None,
+                                           ledger_commitment=commitment("w1"))
+    checked = verify_signed_proof_pack(never_issued)
+    assert checked["ok"] is False and checked["evidence"]["verdict"] == "failed"
+    assert any("Evidence Ledger receipt does not verify (signatures)" in e for e in checked["errors"])
+    # The statement cannot be edited to agree with fewer signatures, and the commitment cannot be
+    # taken out of the pack: both are under a hash that is signed.
+    uncommitted = {k: v for k, v in pack.items() if k != "ledger_commitment"}
+    assert _statuses(verify_signed_proof_pack(uncommitted)["evidence"])["content_digest"] == "failed"
+    # The ledger cannot be read: nothing is claimed, and it is still not called "HMAC only".
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ledger_verify, "stored_receipt", lambda *_a, **_k: (_ for _ in ()).throw(OSError("down")))
+        unread = ledger_verify.verify_online(bare, search=True)
+    assert unread["verdict"] == "incomplete" and unread["signature_scheme"] != "hmac_only"
+
+
+def test_one_signature_of_a_hybrid_pair_removed_or_never_made_is_a_failed_downgrade(ledger, monkeypatch):  # noqa: F811
+    if not verifier.ml_dsa_available():
+        pytest.skip("this build signs classical; there is no pair to break")
+    from services import ledger_keys
+    from services.ledger_packs import commitment, with_ledger
+    from services.signed_proof_pack import build_signed_proof_pack, export_proof_pack_for_job, verify_signed_proof_pack
+
+    pack = export_proof_pack_for_job(_job("job-pair"), actor="ops")
+    assert pack["ledger_commitment"]["signature_algs"] == ["Ed25519", "ML-DSA-65"]
+    assert pack["ledger"]["statement"]["signer_algs"].count("ML-DSA-65") == 1
+    # Remove the post-quantum signature: failed, not "classical".
+    stripped = copy.deepcopy(pack)
+    stripped["ledger"]["signatures"] = [s for s in stripped["ledger"]["signatures"] if s["alg"] == "Ed25519"]
+    checked = verify_signed_proof_pack(stripped)
+    assert checked["ok"] is False and _statuses(checked["evidence"])["signatures"] == "failed"
+    assert checked["evidence"]["signature_scheme"] == "hybrid"  # what it was issued with
+    offline = verifier.verify_evidence(stripped, None, _trusted(pack["ledger"]))
+    assert offline["verdict"] == "failed" and offline["signature_scheme"] == "hybrid"
+    # A pack promised hybrid whose statement was then signed with Ed25519 alone (the post-quantum
+    # signature switched off between signing and issuance): the receipt is internally sound, and
+    # the pack still fails, naming the downgrade.
+    promised = commitment("w1")
+    late = build_signed_proof_pack(job_id="job-late", reconciliation=None, mapping_proof=None,
+                                   ledger_commitment=promised)
+    monkeypatch.setenv("DATAWRAP_EVIDENCE_PQ", "off")
+    ledger_keys.rotate("ws:w1", actor="admin")  # the new key set is classical
+    downgraded = with_ledger(late, workspace_id="w1", actor="ops")
+    assert downgraded["ledger"]["statement"]["signer_algs"] == ["Ed25519"]
+    checked = verify_signed_proof_pack(downgraded)
+    detail = next(c["detail"] for c in checked["evidence"]["checks"] if c["id"] == "signatures")
+    assert checked["ok"] is False and checked["evidence"]["verdict"] == "failed"
+    assert detail == ("the pack was issued with Ed25519 and ML-DSA-65; the receipt carries Ed25519: "
+                      "a signature was removed or replaced")
+    assert _statuses(checked["evidence"])["inclusion"] == "passed"
+    # A pack signed while the workspace signs classical promises classical, and verifies as that.
+    honest = export_proof_pack_for_job(_job("job-classical"), actor="ops")
+    assert honest["ledger_commitment"]["signature_algs"] == ["Ed25519"]
+    assert verify_signed_proof_pack(honest)["evidence"]["signature_scheme"] == "classical"
+    assert _statuses(verify_signed_proof_pack(honest)["evidence"])["signatures"] == "passed"
 
 
 # -------------------------------------------------------------------- the verdict
@@ -336,7 +430,12 @@ def test_a_pack_signed_by_a_retired_key_still_verifies(ledger):  # noqa: F811
 
 # -------------------------------------------------------------------------- words
 
-BANNED = re.compile(r"complian|regulat|legal|certif|qualified|quantum[- ]proof|guarantee|tamper[- ]proof", re.I)
+#: Claims no description may make (doc strings included; route doc strings are the API descriptions).
+OVERCLAIM = re.compile(r"scitt|sigstore|rekor|quantum[- ]proof|tamper[- ]proof"
+                       r"|\b(?:the|is the|as the) (?:first|only)\b|\bunique", re.I)
+#: And, in anything shown to a reader, no word of compliance at all. (Doc strings may name S3 Object
+#: Lock's "compliance mode", which is that product's name for a retention mode, not a claim.)
+BANNED = re.compile(OVERCLAIM.pattern + r"|complian|regulat|legal|certif|qualified|guarantee", re.I)
 
 
 def test_no_message_claims_compliance_or_more_than_was_checked(ledger):  # noqa: F811
@@ -344,7 +443,15 @@ def test_no_message_claims_compliance_or_more_than_was_checked(ledger):  # noqa:
     import ast
     from pathlib import Path
 
-    from services import ledger_anchor, ledger_keys, ledger_log, ledger_packs, ledger_store, ledger_verify
+    from services import (
+        ledger_anchor,
+        ledger_keys,
+        ledger_log,
+        ledger_merkle,
+        ledger_packs,
+        ledger_store,
+        ledger_verify,
+    )
 
     def shown_strings(path: str) -> list[str]:
         tree = ast.parse(Path(path).read_text(encoding="utf-8"))
@@ -354,9 +461,22 @@ def test_no_message_claims_compliance_or_more_than_was_checked(ledger):  # noqa:
         return [n.value for n in ast.walk(tree)
                 if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings]
 
-    for module in (verifier, ledger_anchor, ledger_keys, ledger_log, ledger_packs, ledger_store, ledger_verify):
+    from src.ai.copilot import ledger_tools
+    from src.routers import evidence_router
+
+    modules = (verifier, ledger_anchor, ledger_keys, ledger_log, ledger_merkle, ledger_packs, ledger_store,
+               ledger_verify, ledger_tools, evidence_router)
+    for module in modules:
         for text in shown_strings(module.__file__):
             assert not BANNED.search(text), (module.__name__, text)
+        # Doc strings too: the route ones are the API descriptions.
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                doc = ast.get_docstring(node) or ""
+                assert not OVERCLAIM.search(doc), (module.__name__, getattr(node, "name", "module"), doc)
+                if module in (evidence_router, ledger_tools):
+                    assert not BANNED.search(doc), (module.__name__, getattr(node, "name", "module"), doc)
     # And what a run actually prints, for each verdict.
     checks = {cid: {"status": "passed", "detail": "ok"} for cid in verifier.CHECK_IDS}
     for result in (verifier.conclude(checks, scheme="hybrid", mode="online"),
@@ -370,4 +490,7 @@ def test_no_message_claims_compliance_or_more_than_was_checked(ledger):  # noqa:
         text = verifier.render_text(result)
         assert not BANNED.search(text), text
         assert "It does not show that the recorded facts are true." in text
-    assert "post-quantum" in ledger_keys.PQ_NOTE and "hybrid" in ledger_keys.PQ_NOTE.lower()
+    assert "post-quantum signature (ML-DSA-65)" in ledger_keys.PQ_NOTE and "hybrid" in ledger_keys.PQ_NOTE.lower()
+    assert "post-quantum signature (ML-DSA-65)" in verifier.SCHEME_LABELS["hybrid"]
+    verified = verifier.conclude(checks, scheme="hybrid", mode="online")["summary"]
+    assert "independently verifiable with the published key" in verified

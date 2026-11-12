@@ -53,6 +53,24 @@ def _signed_here(pack: dict[str, Any]) -> bool:
     return not errors
 
 
+def commitment(workspace_id: str) -> dict[str, Any] | None:
+    """What a pack about to be signed states about its public-key signatures, or None.
+
+    It goes inside the pack's hashed body (``ledger_commitment``), so a pack
+    that was issued with signatures and later arrives without them, or with
+    fewer, is a failed verification and can never pass as "HMAC only". ``None``
+    when the workspace cannot sign now: such a pack makes no promise.
+    """
+    try:
+        signer = ledger_keys.signer(ledger_keys.scope_for(workspace_id), actor="system")
+    except Exception as exc:  # noqa: BLE001 - signing a pack must never wait on the ledger
+        logger.error("evidence ledger commitment not made (%s)", type(exc).__name__, exc_info=exc)
+        return None
+    if signer is None:
+        return None
+    return {"type": verifier.COMMITMENT_TYPE, "signature_algs": sorted(signer.algs)}
+
+
 def issue(pack: dict[str, Any], *, workspace_id: str, actor: str) -> dict[str, Any] | None:
     """The ledger entry of a signed pack, appending one if none exists. ``None`` when it cannot be issued."""
     digest = str((pack or {}).get("content_sha256") or "")
@@ -66,10 +84,11 @@ def issue(pack: dict[str, Any], *, workspace_id: str, actor: str) -> dict[str, A
         signer = ledger_keys.signer(ledger_keys.scope_for(workspace_id), actor="system")
         if signer is None:
             raise ledger_log.LedgerUnavailable("the workspace has no active signing key")
+        ledger_keys.ensure_published(signer)
         entry, created = ledger_log.append(
             kind=kind, subject=verifier.pack_subject(pack), content_sha256=digest, workspace_id=workspace_id,
             actor=actor, signer=signer)
-        ledger_log.checkpoint(int(entry["index"]) + 1)
+        ledger_log.checkpoint()  # a signed (and anchored) tree head that covers the new leaf
     except Exception as exc:  # noqa: BLE001 - issuance must never break a signing or export path
         reason = str(exc) if isinstance(exc, (ledger_log.LedgerError, ledger_keys.LedgerKeyError)) \
             else type(exc).__name__
@@ -106,6 +125,8 @@ def withdraw(entry: dict[str, Any], *, reason: str, superseded_by: str | None, a
         raise ledger_log.LedgerInvalid(f"Give a reason of 1 to {MAX_REASON} characters.")
     if entry.get("kind") == verifier.WITHDRAWAL:
         raise ledger_log.LedgerInvalid("A withdrawal cannot itself be withdrawn.")
+    if entry.get("kind") not in verifier.PACK_KINDS:
+        raise ledger_log.LedgerInvalid("A key event cannot be withdrawn; retire the key instead.")
     digest, workspace_id = str(entry["content_sha256"]), str(entry.get("workspace_id") or "")
     if ledger_log.withdrawal_of(digest):
         raise ledger_log.LedgerConflict("This pack is already withdrawn.")
@@ -123,10 +144,11 @@ def withdraw(entry: dict[str, Any], *, reason: str, superseded_by: str | None, a
     withdrawal, created = ledger_log.append(
         kind=verifier.WITHDRAWAL, subject=str(entry["subject"]), content_sha256=digest,
         workspace_id=workspace_id, actor=actor, signer=signer,
-        withdrawal={"withdrawn_kind": entry["kind"], "reason": reason, "superseded_by": superseded_by})
+        detail={"withdrawal": {"withdrawn_kind": entry["kind"], "reason": reason,
+                               "superseded_by": superseded_by}})
     if not created:
         raise ledger_log.LedgerConflict("This pack is already withdrawn.")
-    ledger_log.checkpoint(int(withdrawal["index"]) + 1)
+    ledger_log.checkpoint()
     _audit("evidence.entry.withdrawn", workspace_id=workspace_id, actor=actor,
            details={"kind": entry["kind"], "content_sha256": digest, "subject": entry["subject"],
                     "leaf_index": withdrawal["index"], "withdrawn_leaf_index": entry["index"],

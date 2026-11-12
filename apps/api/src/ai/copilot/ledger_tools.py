@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .tools import ToolResult
 
-KINDS = ("proof_pack", "parity_report", "exit_evidence", "withdrawal")
+KINDS = ("proof_pack", "parity_report", "exit_evidence", "withdrawal", "key_set")
 
 LEDGER_TOOL_DEFINITIONS: list[dict] = [
     {
@@ -22,8 +22,8 @@ LEDGER_TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Entries of the Evidence Ledger in this workspace, newest first: each signed pack (proof pack, "
             "Parity report, exit evidence) with its log index, digest, signature scheme and whether it was "
-            "later withdrawn. Use for 'what evidence have we issued', 'was this pack withdrawn', "
-            "'show the ledger'."
+            "later withdrawn, and each signing-key event (key_set). Use for 'what evidence have we issued', "
+            "'was this pack withdrawn', 'when were the signing keys rotated', 'show the ledger'."
         ),
         "input_schema": {
             "type": "object",
@@ -54,9 +54,11 @@ LEDGER_TOOL_DEFINITIONS: list[dict] = [
     },
 ]
 
-NOTE = ("The verdict comes from deterministic checks. The ledger shows that a record was issued, has not been "
-        "altered and is in the log; it does not show that the recorded facts are true. A verdict is "
-        "'verified' only when every check passed. Keys, withdrawal and anchoring are done on the Evidence page.")
+NOTE = ("The verdict comes from deterministic checks. A pack with a receipt is independently verifiable with "
+        "the published key. The ledger shows that a record was issued, has not been altered and is in the "
+        "log; it does not show that the recorded facts are true. A verdict is 'verified' when every check "
+        "passed, and 'incomplete' when one was not made. Keys, withdrawal and anchoring are done on the "
+        "Evidence page.")
 LINK = "/#/evidence"
 
 

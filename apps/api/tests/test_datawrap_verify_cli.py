@@ -28,6 +28,7 @@ from tests.test_exit_rehearsal_e2e import world  # noqa: F401
 from tests.test_ledger_log import ledger  # noqa: F401
 from tests.test_ledger_packs import _job
 from tests.test_parity_review2_f12_f13_seal_and_verify import _signed, store  # noqa: F401
+from tools import datawrap_verify as verifier
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "datawrap_verify.py"
 OFFLINE_CHECKS = ("content digest", "statement", "signatures", "inclusion in the log", "checkpoint signature")
@@ -90,12 +91,12 @@ def test_a_sound_proof_pack_passes_every_offline_check_and_is_not_called_verifie
         assert rows[check] == "passed", (check, done.stdout)
     assert rows["consistency"] == rows["withdrawal"] == rows["anchor"] == "not checked"
     assert "result: INCOMPLETE (5 passed, 0 failed, 3 not checked)" in done.stdout
+    assert "signature scheme: " + verifier.SCHEME_LABELS[
+        "hybrid" if verifier.ml_dsa_available() else "classical"] in done.stdout
     assert "VERIFIED" not in done.stdout and done.returncode == 2, done.stdout
     assert "It does not show that the recorded facts are true." in done.stdout
     assert done.stderr == ""
     # --json is the EvidenceVerdict, and equals what the same code answers in process.
-    from tools import datawrap_verify as verifier
-
     as_json = json.loads(_run(tmp_path, pack_file, "--keys", keys_file, "--json").stdout)
     keys = verifier.KeySet()
     keys.add_text(json.dumps(_jwks("w1")))
@@ -123,10 +124,50 @@ def test_the_receipt_may_be_a_separate_file_and_keys_may_be_pem(ledger, tmp_path
                 "--keys", _write(tmp_path / "keys.pem", pems))
     assert [_lines(done.stdout)[c] for c in OFFLINE_CHECKS] == ["passed"] * 5, done.stdout
     assert done.returncode == 2
-    # Without the receipt the pack is HMAC only: nothing is checked, nothing is claimed.
+    # Without the receipt this pack fails: its own body says it was issued with signatures.
     alone = _run(tmp_path, str(tmp_path / "bare.json"), "--keys", str(tmp_path / "keys.pem"))
-    assert set(_lines(alone.stdout).values()) == {"not checked"} and "result: HMAC ONLY" in alone.stdout
-    assert alone.returncode == 2 and "VERIFIED" not in alone.stdout
+    assert _lines(alone.stdout)["signatures"] == "FAILED" and "its receipt was removed" in alone.stdout
+    assert alone.returncode == 1 and "result: FAILED" in alone.stdout and "HMAC ONLY" not in alone.stdout
+    # A pack from before the ledger is HMAC only: nothing is checked, nothing is claimed.
+    from services.signed_proof_pack import sign_body
+
+    old = sign_body({"version": 1, "job_id": "job-old"}, subject="job-old")
+    before = _run(tmp_path, _write(tmp_path / "old.json", old), "--keys", str(tmp_path / "keys.pem"))
+    assert set(_lines(before.stdout).values()) == {"not checked"} and "result: HMAC ONLY" in before.stdout
+    assert before.returncode == 2 and "VERIFIED" not in before.stdout
+
+
+def test_pinning_the_logs_key_id_is_enough_and_the_server_is_not_asked_for_keys(ledger, tmp_path):  # noqa: F811
+    """The trust root: a key id obtained out of band; the keys themselves come with the receipt."""
+    pack = _export("job-pin")
+    pack_file = _write(tmp_path / "pack.json", pack)
+    log_ids = pack["ledger"]["checkpoint"]["signer_key_ids"]
+    pins = [arg for key_id in log_ids for arg in ("--pin", key_id)]
+    done = _run(tmp_path, pack_file, *pins, "--json")
+    result = json.loads(done.stdout)
+    statuses = {c["id"]: c["status"] for c in result["checks"]}
+    assert [statuses[c] for c in ("content_digest", "statement", "signatures", "inclusion",
+                                  "checkpoint_signature")] == ["passed"] * 5, result["checks"]
+    assert {s["trust"].split(" (")[0] for s in result["signatures"]} == {"the log published this key"}
+    assert done.returncode == 2
+    # A pin that is not the log's key leaves everything unchecked; it never passes.
+    other = _run(tmp_path, pack_file, "--pin", "ab" * 32)
+    rows = _lines(other.stdout)
+    assert rows["signatures"] == rows["checkpoint signature"] == "not checked" and other.returncode == 2
+    # The key event removed from the receipt: the workspace's signature cannot be checked from the pin.
+    cut = copy.deepcopy(pack)
+    cut["ledger"]["key_sets"] = []
+    without = _run(tmp_path, _write(tmp_path / "cut.json", cut), *pins)
+    assert _lines(without.stdout)["signatures"] == "not checked"
+    assert _lines(without.stdout)["checkpoint signature"] == "passed"
+    # A substituted key under the pinned id is not the pinned key.
+    swapped = copy.deepcopy(pack)
+    donor = swapped["ledger"]["key_sets"][0]["statement"]["key_set"]["keys"][0]
+    swapped["ledger"]["checkpoint"]["keys"][0] = {**donor, "kid": swapped["ledger"]["checkpoint"]["keys"][0]["kid"]}
+    forged = _run(tmp_path, _write(tmp_path / "swapped.json", swapped), *pins)
+    assert _lines(forged.stdout)["checkpoint signature"] == "FAILED" and forged.returncode == 1
+    bad = _run(tmp_path, pack_file, "--pin", "not-a-key-id")
+    assert bad.returncode == 64 and "64 hex" in bad.stderr
 
 
 def _assert_offline_sound(tmp_path: Path, name: str, pack: dict, workspace: str, kind: str) -> None:
@@ -231,9 +272,7 @@ def test_a_saved_checkpoint_shows_the_log_only_grew_or_exposes_a_rewrite(ledger,
     # The operator rewrites the first entry, drops the checkpoints and re-signs the history.
     path = tmp_path / "data" / "evidence_ledger.json"
     data = json.loads(path.read_text())
-    from tools import datawrap_verify as verifier
-
-    target = data["evidence_ledger_entries"]["0"]
+    target = data["evidence_ledger_entries"][str(first["ledger"]["leaf_index"])]
     target["statement"]["content_sha256"] = "e" * 64
     target["leaf_hash"] = verifier.leaf_hash(verifier.statement_bytes(target["statement"])).hex()
     data["evidence_ledger_checkpoints"] = {}

@@ -121,9 +121,10 @@ def verify_online(pack: dict[str, Any] | None, receipt: dict[str, Any] | None = 
             receipt = stored_receipt(pack, allows=allows)
         except Exception as exc:  # noqa: BLE001 - the ledger could not be read: nothing is claimed
             logger.error("evidence lookup could not run (%s)", type(exc).__name__, exc_info=exc)
-            return verifier.hmac_only_verdict("online", detail="the ledger could not be read now")
+            return verifier.hmac_only_verdict("online", detail="the ledger could not be read now", pack=pack)
     if not isinstance(receipt, dict):
-        return verifier.hmac_only_verdict("online")
+        # "HMAC only" for a pack that never had signatures; a failure for one that says it had.
+        return verifier.no_receipt_verdict(pack, "online")
     statement = receipt.get("statement") if isinstance(receipt.get("statement"), dict) else {}
     checkpoint = receipt.get("checkpoint") if isinstance(receipt.get("checkpoint"), dict) else {}
     named = [*(statement.get("signer_key_ids") or []), *(checkpoint.get("signer_key_ids") or [])]
@@ -149,11 +150,17 @@ def verify_online(pack: dict[str, Any] | None, receipt: dict[str, Any] | None = 
 
 
 def evidence_for_pack(pack: dict[str, Any]) -> dict[str, Any]:
-    """The verdict the pack-verify routes add: the embedded receipt, or "HMAC only"."""
+    """The verdict the pack-verify routes add: the pack's receipt, or "HMAC only".
+
+    A pack that says it was issued with public-key signatures
+    (``ledger_commitment``) and carries no receipt — the stored copy of a
+    signed pack, for one — is looked up in the ledger by its digest; if it is
+    not there either, that is a failed verification, not "HMAC only".
+    """
     try:
-        return verify_online(pack)
+        return verify_online(pack, search=verifier.commitment_of(pack) is not None)
     except Exception as exc:  # noqa: BLE001 - the HMAC answer must still be given
         logger.error("evidence verification could not run (%s)", type(exc).__name__, exc_info=exc)
         if isinstance(pack.get("ledger"), dict):
             return verifier.verify_evidence(pack, None, verifier.KeySet(), mode="online")
-        return verifier.hmac_only_verdict("online")
+        return verifier.hmac_only_verdict("online", detail="the ledger could not be read now", pack=pack)

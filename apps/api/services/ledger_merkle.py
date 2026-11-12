@@ -9,7 +9,7 @@ the Evidence Ledger both build their trees here.
 
 :class:`Tree` holds leaf hashes and remembers the hash of every complete,
 aligned subtree it has computed. Leaves are append-only, so those never
-change: after the first pass a root or a proof costs O(log n) hashes.
+change: once computed, a root or a proof costs O(log n) hashes.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ class Tree:
         return self._range(0, n) if n else EMPTY_ROOT
 
     def inclusion_proof(self, index: int, size: int | None = None) -> list[bytes]:
-        """The audit path for leaf ``index`` in the tree of the first ``size`` leaves."""
+        """The audit path for leaf ``index`` in the tree of the leaves below ``size``."""
         n = self._size(size)
         if index < 0 or index >= n:
             raise ValueError(f"leaf {index} is not in a tree of {n}")

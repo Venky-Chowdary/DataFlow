@@ -193,7 +193,7 @@ async def anchor_evidence_checkpoint(request: Request):
 async def list_evidence_entries(
     request: Request, workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     limit: int = Query(default=50, ge=1, le=200), before: int | None = Query(default=None, ge=0),
-    kind: Literal["", "proof_pack", "parity_report", "exit_evidence", "withdrawal"] = Query(default=""),
+    kind: Literal["", "proof_pack", "parity_report", "exit_evidence", "withdrawal", "key_set"] = Query(default=""),
     subject: str = Query(default="", max_length=300),
 ):
     from services import ledger_log
@@ -210,6 +210,8 @@ def _visible_entry(index: int, request: Request, *, write: bool = False) -> dict
     entry = ledger_log.get_entry(index)
     if not entry:
         raise HTTPException(status_code=404, detail=NOT_FOUND_ENTRY)
+    if not write and ledger_log.visible(entry, lambda _workspace: False):
+        return entry  # one of the log's own key events: the deployment's public keys
     assert_resource_workspace(request, entry.get("workspace_id") or None, write=write,
                               not_found_detail=NOT_FOUND_ENTRY)
     return entry
@@ -241,7 +243,7 @@ async def get_consistency_proof(first: int = Query(alias="from", ge=1), second: 
 @router.get("/evidence/receipts/{content_sha256}")
 async def get_evidence_receipt(
     content_sha256: str, request: Request,
-    kind: Literal["", "proof_pack", "parity_report", "exit_evidence", "withdrawal"] = Query(default=""),
+    kind: Literal["", "proof_pack", "parity_report", "exit_evidence", "withdrawal", "key_set"] = Query(default=""),
 ):
     """The receipt of a pack by its content digest, against the latest checkpoint."""
     from services import ledger_log
