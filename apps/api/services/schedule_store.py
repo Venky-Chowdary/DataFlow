@@ -984,6 +984,30 @@ def schedule_overdue_seconds(
     return max(0, int((current - due).total_seconds()))
 
 
+def schedule_store_unreadable() -> str:
+    """Why the configured schedule store cannot be read right now, or "".
+
+    Read-side only: the engine and the scheduler keep their file fallback. A
+    caller that reports on the workspace (Pilot) must not state the fallback's
+    rows - or an empty list - as the workspace's pipelines when Mongo is the
+    configured store and does not answer, or when the file does not parse.
+    """
+    try:
+        svc = get_mongodb_service()
+    except Exception:  # noqa: BLE001 - an unopenable store is the answer itself
+        return "the pipeline store did not answer"
+    if type(svc).__name__ != "MemoryMongoDBService" and getattr(svc, "client", None) is None:
+        return "the pipeline store did not answer"
+    if _mongo_backend() is None and STORE_PATH.exists():
+        try:
+            raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "the pipeline file could not be read"
+        if not isinstance(raw, dict) or not isinstance(raw.get("schedules", []), list):
+            return "the pipeline file could not be read"
+    return ""
+
+
 def list_schedules(workspace_filter: WorkspaceFilter | None = None) -> list[PipelineSchedule]:
     """Newest first. ``workspace_filter`` is the caller's tenant scope; ``None``
     is system scope (the scheduler, CDC workers)."""

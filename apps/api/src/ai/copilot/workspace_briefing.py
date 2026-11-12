@@ -184,6 +184,10 @@ def _load_connectors(workspace_id: str) -> list[dict[str, Any]]:
     from services import connector_store
     from services.workspace_filter import current_workspace_filter
 
+    down = connector_store.connector_store_unreadable()
+    if down:
+        # The listing would fall back to the local file: not this workspace's.
+        raise _Unreadable(down)
     rows = connector_store.list_connectors(workspace_id=workspace_id)
     visible = current_workspace_filter()
     out = []
@@ -238,9 +242,12 @@ def _load_jobs(workspace_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]
 
 
 def _load_schedules(workspace_id: str) -> list[dict[str, Any]]:
-    from services.schedule_store import list_schedules
+    from services.schedule_store import list_schedules, schedule_store_unreadable
     from services.workspace_filter import current_workspace_filter
 
+    down = schedule_store_unreadable()
+    if down:
+        raise _Unreadable(down)
     rows = list_schedules(current_workspace_filter())
     out = []
     for s in rows or []:

@@ -67,6 +67,25 @@ def schedules_output(
     }, ""
 
 
+def unread_schedules_output(reason: str) -> dict[str, Any]:
+    """A pipelines read that did not reach the configured store: no counts."""
+    return {
+        "schedules": [],
+        "count": 0,
+        "total": 0,
+        "degraded": True,
+        "unread": True,
+        "degraded_reason": reason,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+UNREAD_PIPELINES = (
+    "I could not read your pipelines just now — {reason} — so I can't tell you how many "
+    "you have or whether they are running. Open **Pipelines** or try again shortly."
+)
+
+
 def schedule_list_lead(output: dict[str, Any]) -> str:
     """The counted sentence that opens a pipelines list."""
     rows = output.get("schedules") or []
@@ -101,6 +120,8 @@ def render_schedule_list(
     ``health`` is the "why are my schedules not running" register; ``bind_phrase``
     is the agent's contract/breaker phrase for one row.
     """
+    if output.get("unread"):
+        return UNREAD_PIPELINES.format(reason=output.get("degraded_reason") or "the store did not answer")
     rows = output.get("schedules", [])
     if rows:
         enabled = [

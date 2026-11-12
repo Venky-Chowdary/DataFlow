@@ -3917,7 +3917,11 @@ class DataPilotTools:
 
     def _resolve_schedule(self, schedule_id: str = "", name: str = ""):
         """Resolve schedule by id or name. Returns (schedule|None, clarification|None)."""
-        from services.schedule_store import get_schedule, list_schedules
+        from services.schedule_store import get_schedule, list_schedules, schedule_store_unreadable
+
+        down = schedule_store_unreadable()
+        if down:
+            return None, f"I could not read your pipelines just now — {down}. Try again shortly."
 
         sid = (schedule_id or "").strip()
         if sid:
@@ -4005,10 +4009,14 @@ class DataPilotTools:
         return row
 
     def _list_schedules(self, limit: int = 20, state: str = "") -> ToolResult:
-        from services.schedule_store import list_schedules
+        from services.schedule_store import list_schedules, schedule_store_unreadable
 
-        from .schedule_questions import schedules_output
+        from .schedule_questions import schedules_output, unread_schedules_output
 
+        down = schedule_store_unreadable()
+        if down:
+            # The store would answer from its local fallback: no count is stated.
+            return ToolResult(name="list_schedules", success=True, output=unread_schedules_output(down))
         output, refusal = schedules_output(
             list_schedules(current_workspace_filter()), self._schedule_summary, limit, state
         )

@@ -128,3 +128,74 @@ def test_an_empty_workspace_is_still_reported_as_empty(monkeypatch):
     response = pt.ask(pt.agent(), "how many jobs do I have")
     assert "No transfer jobs yet" in response.answer
     assert not pt.says_unreadable(response.answer)
+
+
+# ---- configured store unreachable or unparseable (review H1) -----------------
+#
+# The schedule and connector stores fall back to the local file when Mongo does
+# not answer, and a corrupt schedules file reads as no schedules. The engine
+# keeps that fallback; what Pilot reports must not: "No pipeline schedules
+# yet" and "0 connector(s)" are statements about the workspace.
+
+_DEAD_MONGO = "mongodb://127.0.0.1:9/?serverSelectionTimeoutMS=200&connectTimeoutMS=200"
+
+
+@pytest.fixture
+def mongo_down(monkeypatch):
+    """A Mongo-backed deployment whose Mongo does not answer, default backends."""
+    from services import connector_store, mongodb_service
+
+    pt.reset_workspace(monkeypatch)
+    monkeypatch.setenv("MONGODB_URI", _DEAD_MONGO)
+    monkeypatch.setenv("DATAFLOW_JOB_STORE", "mongo")
+    monkeypatch.delenv("DATAFLOW_CONNECTOR_STORE_BACKEND", raising=False)
+    monkeypatch.setattr(mongodb_service, "_mongodb_service", None)
+    monkeypatch.setattr(connector_store, "_backend_choice", None)
+    from src.ai.copilot import context_builder
+
+    context_builder.reset_context_cooldowns()
+    return pt.agent()
+
+
+@pytest.mark.parametrize("question", [
+    "how many pipelines do I have",
+    "why are my schedules not running",
+    "list my pipelines",
+])
+def test_pipeline_question_with_mongo_down_says_unreadable(mongo_down, question):
+    response = pt.ask(mongo_down, question)
+    assert pt.says_unreadable(response.answer), response.answer
+    assert "No pipeline" not in response.answer and "No pipelines" not in response.answer
+    assert pt.bold_ints(response.answer) == []
+    assert not pt.grounded(response)
+
+
+def test_pipeline_question_does_not_state_a_stale_local_file(mongo_down):
+    """A leftover schedules file is not the workspace's pipelines while Mongo is configured."""
+    pt.seed_schedules(3)  # written to the file: Mongo is not answering
+    response = pt.ask(mongo_down, "how many pipelines do I have")
+    assert pt.says_unreadable(response.answer), response.answer
+    assert 3 not in pt.bold_ints(response.answer)
+
+
+def test_briefing_with_mongo_down_states_no_connector_or_pipeline_count(mongo_down):
+    response = pt.ask(mongo_down, "give me a workspace briefing")
+    for label in ("Connections", "Pipelines"):
+        line = _line(response.answer, label)
+        assert "0 " not in line.replace("**", ""), f"{label} stated as empty: {line!r}"
+    assert "could not read" in response.answer.lower() or "couldn't read" in response.answer.lower()
+
+
+def test_corrupt_schedules_file_says_unreadable(workspace, monkeypatch):
+    import services.schedule_store as schedule_store
+
+    schedule_store.STORE_PATH.write_text("{corrupt", encoding="utf-8")
+    try:
+        response = pt.ask(pt.agent(), "how many pipelines do I have")
+        briefing = pt.ask(pt.agent(), "give me a workspace briefing")
+    finally:
+        schedule_store._save_all([])
+    assert pt.says_unreadable(response.answer), response.answer
+    assert "No pipeline" not in response.answer
+    assert not pt.grounded(response)
+    assert "0 pipeline" not in _line(briefing.answer, "Pipelines").replace("**", "")
