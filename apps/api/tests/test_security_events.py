@@ -445,13 +445,23 @@ def test_domain_security_events_include_safe_request_metadata(domain_security_ap
     headers = domain_security_app["headers"]
     workspace_id = domain_security_app["workspace_id"]
     assert not is_sensitive_key("principal")
+    from services import connector_store, schedule_store
+
+    # Ids in a body are ownership-checked (security review round 3): real ones of this workspace.
+    source_id, dest_id = (connector_store.create_connector({
+        "name": name, "type": "postgresql", "host": "h.example.com", "database": "d", "workspace_id": workspace_id,
+    }).id for name in ("source-1", "destination-1"))
+    granted_schedule = schedule_store.create_schedule({
+        "name": "sched-test", "source_connector_id": "", "source_table": "t", "dest_connector_id": "",
+        "dest_table": "t", "interval": "daily", "workspace_id": workspace_id,
+    }).id
 
     created_acl = client.post(
         "/api/v1/resource-acls",
         headers=headers,
         json={
             "resource_type": "schedule",
-            "resource_id": "sched-test",
+            "resource_id": granted_schedule,
             "principal": "group:analytics",
             "role": "viewer",
         },
@@ -465,9 +475,9 @@ def test_domain_security_events_include_safe_request_metadata(domain_security_ap
 
     schedule_payload = {
         "name": "Security event schedule",
-        "source_connector_id": "source-1",
+        "source_connector_id": source_id,
         "source_table": "public.source_table",
-        "dest_connector_id": "destination-1",
+        "dest_connector_id": dest_id,
         "dest_table": "public.destination_table",
     }
     created_schedule = client.post(

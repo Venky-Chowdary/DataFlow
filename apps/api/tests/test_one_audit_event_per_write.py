@@ -100,6 +100,28 @@ def _correlation_id() -> str:
     return str(uuid4())
 
 
+def _workspace_schedule(context, name: str) -> str:
+    """A schedule of the test's workspace: an ACL grant names a resource of its
+    own workspace (security review round 3, Lows)."""
+    from services import schedule_store
+
+    return schedule_store.create_schedule({
+        "name": name, "source_connector_id": "", "source_table": "t", "dest_connector_id": "", "dest_table": name,
+        "interval": "daily", "workspace_id": context["workspace_id"],
+    }).id
+
+
+def _workspace_connector(context, name: str) -> str:
+    """A connector of the test's workspace: a schedule's connector ids are
+    ownership-checked (security review round 3, body routes)."""
+    from services import connector_store
+
+    return connector_store.create_connector({
+        "name": name, "type": "postgresql", "host": "h.example.com", "database": "d",
+        "workspace_id": context["workspace_id"],
+    }).id
+
+
 def _headers(context, correlation_id: str, *, token: str | None = None) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {token or context['admin_token']}",
@@ -178,7 +200,7 @@ def test_each_named_write_produces_one_correlated_event(one_event_app):
         headers=_headers(one_event_app, correlation_id),
         json={
             "resource_type": "schedule",
-            "resource_id": "one-event-schedule",
+            "resource_id": _workspace_schedule(one_event_app, "one-event-schedule"),
             "principal": "group:reporting",
             "role": "viewer",
         },
@@ -192,9 +214,9 @@ def test_each_named_write_produces_one_correlated_event(one_event_app):
         headers=_headers(one_event_app, correlation_id),
         json={
             "name": "One-event schedule",
-            "source_connector_id": "source-1",
+            "source_connector_id": _workspace_connector(one_event_app, "source-1"),
             "source_table": "public.source_table",
-            "dest_connector_id": "destination-1",
+            "dest_connector_id": _workspace_connector(one_event_app, "destination-1"),
             "dest_table": "public.destination_table",
         },
     )
@@ -287,7 +309,7 @@ def test_acl_named_event_retains_invalid_correlation_rejection(one_event_app):
         },
         json={
             "resource_type": "schedule",
-            "resource_id": "invalid-correlation-grant",
+            "resource_id": _workspace_schedule(one_event_app, "invalid-correlation-grant"),
             "principal": "group:reporting",
             "role": "viewer",
         },

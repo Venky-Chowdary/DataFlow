@@ -544,11 +544,14 @@ async def introspect_endpoint_route(request: AnalyzeRequest, http_request: Reque
 
 
 @router.post("/map")
-async def map_columns_route(body: MapColumnsRequest):
+async def map_columns_route(body: MapColumnsRequest, request: Request):
     """
     Map source columns to destination columns using semantic engine.
     Uses real destination schema when target_columns are provided.
     """
+    from services.body_id_ownership import assert_body_ids
+
+    assert_body_ids(request, jobs=(str(body.job_id or ""),))  # review 3, body routes
     import sys
     from pathlib import Path
 
@@ -1169,6 +1172,10 @@ async def execute_transfer_json(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
     )
+    from services.body_id_ownership import assert_body_ids as _assert_body_ids
+
+    # The plan and recipe a run uses must be the caller's (review 3, body routes).
+    _assert_body_ids(request, plans=(str(body.plan_id or ""),), recipes=(str(body.transform_recipe_id or ""),))
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import merge_plan_into_run
         try:

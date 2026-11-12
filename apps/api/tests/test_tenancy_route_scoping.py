@@ -774,38 +774,199 @@ def _body_declarations() -> dict[str, dict[str, Any]]:
     return json.loads((FIXTURES / "route_tenancy_scoping.json").read_text(encoding="utf-8")).get("body_routes", {})
 
 
-def _cdc_snapshot_bodies(seeded: Seeded) -> list[dict[str, Any]]:
+#: Stands for the calling workspace's own connector on the side of a body that is
+#: not under test (B's when B calls, A's for the owner control).
+OWN = "__CALLERS_OWN_CONNECTOR__"
+
+
+def _b_connector(world) -> str:
+    return OWN
+
+
+def _own_connector(world, workspace_id: str) -> str:
+    from services import connector_store
+
+    return connector_store.create_connector({
+        "name": f"own-{_next(world)}", "type": "sqlite", "database": ":memory:", "workspace_id": workspace_id,
+    }).id
+
+
+def _as_caller(body: dict[str, Any], own: str) -> dict[str, Any]:
+    return json.loads(json.dumps(body).replace(OWN, own))
+
+
+def _a_connector(world) -> str:
+    return SEEDERS["saved_connector"](world).params["connector_id"]
+
+
+def _a_endpoint(connector_id: str) -> dict[str, Any]:
+    return {"kind": "database", "format": "postgresql", "connector_id": connector_id, "table": "t"}
+
+
+_FILE_DEST = {"kind": "file_export", "format": "csv"}
+_MAP = [{"source": "id", "target": "id", "confidence": 1.0}]
+
+
+def _cdc_snapshot_bodies(world, seeded: Seeded) -> list[dict[str, Any]]:
     return [{"table": "t", "primary_key": "id", "job_id": seeded.params["job_id"]}]
 
 
+def _connector_bodies(*shapes: str) -> Callable[[Any, Seeded], list[dict[str, Any]]]:
+    """Bodies naming A's connector under each key in ``shapes`` (dotted = nested)."""
+    def bodies(world, seeded: Seeded) -> list[dict[str, Any]]:
+        cid = seeded.params["connector_id"]
+        out = []
+        for shape in shapes:
+            out.append(_BODY_SHAPES[shape](world, cid))
+        return out
+
+    return bodies
+
+
+#: Body templates: A's connector id where the route reads it.
+_BODY_SHAPES: dict[str, Callable[[Any, str], dict[str, Any]]] = {
+    "query": lambda w, c: {"connector_id": c, "query": "select 1", "language": "sql"},
+    "schema": lambda w, c: {"connector_id": c},
+    "export.source": lambda w, c: {"connector_id": c, "query": "select 1 as id", "language": "sql", "format": "csv"},
+    "export.destination": lambda w, c: {"connector_id": _b_connector(w), "query": "select 1 as id", "language": "sql",
+                                        "destination_connector_id": c, "destination": "t"},
+    "cdc.cleanup": lambda w, c: {"connector_id": c},
+    "cdc.execute": lambda w, c: {"connector_id": c, "table": "t", "primary_key": "id"},
+    "connectors.transfer": lambda w, c: {"connector_id": c, "table": "t", "destination_type": "postgresql",
+                                         "destination_host": "b.example.com", "destination_database": "b",
+                                         "destination_table": "t"},
+    "execute.source": lambda w, c: {"source": _a_endpoint(c), "destination": _FILE_DEST, "mappings": _MAP,
+                                    "async_mode": True},
+    "execute.destination": lambda w, c: {"source": _a_endpoint(_b_connector(w)), "destination": _a_endpoint(c),
+                                         "mappings": _MAP, "async_mode": True},
+    "plans.source": lambda w, c: {"name": "p", "source": _a_endpoint(c), "source_columns": ["id"],
+                                  "target_columns": ["id"]},
+    "plans.destination": lambda w, c: {"name": "p", "destination": _a_endpoint(c), "source_columns": ["id"],
+                                       "target_columns": ["id"]},
+    "preflight.run": lambda w, c: {"connector_id": c, "table": "t", "columns": ["id"], "mappings": _MAP},
+    "schedules.source": lambda w, c: {"name": f"s{_next(w)}", "interval": "daily", "source_connector_id": c,
+                                      "source_table": "t", "dest_connector_id": _b_connector(w), "dest_table": "t",
+                                      "mappings": _MAP},
+    "schedules.destination": lambda w, c: {"name": f"s{_next(w)}", "interval": "daily",
+                                           "source_connector_id": _b_connector(w), "source_table": "t",
+                                           "dest_connector_id": c, "dest_table": "t", "mappings": _MAP},
+    "transforms": lambda w, c: {"name": f"z{_next(w)}", "destination_connector_id": c,
+                                "models": [{"name": "m", "sql": "select 1"}]},
+}
+
+
+def _job_bodies(*kinds: str) -> Callable[[Any, Seeded], list[dict[str, Any]]]:
+    def bodies(world, seeded: Seeded) -> list[dict[str, Any]]:
+        job_id = seeded.params["job_id"]
+        made = {
+            "propose.quarantine": {"job_id": job_id, "rejected_details": [{"column": "c", "reason": "bad"}]},
+            "propose.preflight": {"job_id": job_id, "preflight": {"passed": False, "blockers": []}},
+            "map": {"job_id": job_id, "source_columns": ["id"], "target_columns": ["id"]},
+            "acl": {"resource_type": "job", "resource_id": job_id, "principal": "nobody@example.com", "role": "viewer"},
+        }
+        return [made[k] for k in kinds]
+
+    return bodies
+
+
+def _contract_bodies(world, seeded: Seeded) -> list[dict[str, Any]]:
+    cid = seeded.params["contract_id"]
+    source = _a_endpoint(_b_connector(world))
+    return [
+        {"contract_id": cid, "rows": [{"id": 1}]},
+        {"source": source, "destination": _FILE_DEST, "mappings": _MAP, "async_mode": True, "contract_id": cid},
+    ]
+
+
+def _schedule_bodies(world, seeded: Seeded) -> list[dict[str, Any]]:
+    sid = seeded.params["schedule_id"]
+    return [
+        {"schedule_id": sid},
+        {"resource_type": "schedule", "resource_id": sid, "principal": "nobody@example.com", "role": "viewer"},
+    ]
+
+
+def _plan_bodies(world, seeded: Seeded) -> list[dict[str, Any]]:
+    return [{"plan_id": seeded.params["plan_id"], "async_mode": True,
+             "source": _a_endpoint(_b_connector(world)), "destination": _FILE_DEST, "mappings": _MAP}]
+
+
+def _recipe_bodies(world, seeded: Seeded) -> list[dict[str, Any]]:
+    return [{"source": _a_endpoint(_b_connector(world)), "destination": _FILE_DEST, "mappings": _MAP,
+             "async_mode": True, "transform_recipe_id": seeded.params["recipe_id"]}]
+
+
+def _preflight_explain_bodies(world, seeded: Seeded) -> list[dict[str, Any]]:
+    return [{"run_id": seeded.params["run_id"]}]
+
+
+def _byok_bodies(world, seeded: Seeded) -> list[dict[str, Any]]:
+    return [{"workspace_id": world.workspace_b, "name": "B", "byok_key_id": seeded.params["key_id"]}]
+
+
 #: For each declared body route: the bodies that name workspace A's seeded ids.
-_BODY_ROUTE_BODIES: dict[str, Callable[[Seeded], list[dict[str, Any]]]] = {
+_BODY_ROUTE_BODIES: dict[str, Callable[[Any, Seeded], list[dict[str, Any]]]] = {
     "POST /api/v1/cdc/snapshots": _cdc_snapshot_bodies,
+    "POST /api/v1/cdc/signals/execute-snapshot": _connector_bodies("cdc.execute"),
+    "POST /api/v1/contracts/test": lambda w, s: _contract_bodies(w, s)[:1],
+    "POST /api/v1/fidelity/check": lambda w, s: _schedule_bodies(w, s)[:1],
+    "POST /api/v1/ops/cdc-captures/cleanup": _connector_bodies("cdc.cleanup"),
+    "POST /api/v1/preflight/explain": _preflight_explain_bodies,
+    "POST /api/v1/preflight/run": _connector_bodies("preflight.run"),
+    "POST /api/v1/query/execute": _connector_bodies("query"),
+    "POST /api/v1/query/export": _connector_bodies("export.source", "export.destination"),
+    "POST /api/v1/query/schema": _connector_bodies("schema"),
+    "POST /api/v1/query/schemas": _connector_bodies("schema"),
+    "POST /api/v1/repair/propose/preflight": _job_bodies("propose.preflight"),
+    "POST /api/v1/repair/propose/quarantine": _job_bodies("propose.quarantine"),
+    "POST /api/v1/resource-acls": _job_bodies("acl"),
+    "POST /api/v1/schedules/": _connector_bodies("schedules.source", "schedules.destination"),
+    "POST /api/v1/schedules/admin/orphans/reconcile": lambda w, s: [{"schedule_ids": [s.params["schedule_id"]]}],
+    "POST /api/v1/transfer/execute": _connector_bodies("execute.source", "execute.destination"),
+    "POST /api/v1/transfer/execute#contract_id": lambda w, s: _contract_bodies(w, s)[1:],
+    "POST /api/v1/transfer/execute#plan_id": _plan_bodies,
+    "POST /api/v1/transfer/execute#transform_recipe_id": _recipe_bodies,
+    "POST /api/v1/transfer/map": _job_bodies("map"),
+    "POST /api/v1/transfer/plans": _connector_bodies("plans.source", "plans.destination"),
+    "POST /api/v1/transforms/": _connector_bodies("transforms"),
+    "POST /api/v1/workspace/tenant": _byok_bodies,
 }
 
 
 def test_every_body_id_route_refuses_other_tenants_and_serves_its_owner(world):
-    """Security review round 2 (M2): a route whose resource id travels in the body
-    is declared in ``body_routes`` and judged like a path-id route: B's
-    administrator and API key are refused for A's ids and leave nothing of A's,
-    and A's own administrator is served (owner control)."""
+    """Security review round 2 (M2) and round 3 (body routes): every route whose
+    resource id travels in the body is declared in ``body_routes`` and judged
+    like a path-id route: B's administrator and API key are refused (403/404)
+    for A's ids and leave nothing of A's, and A's own administrator is not
+    refused (owner control: 200, or the entry's declared ``owner_status`` when
+    the route cannot complete in this world, never 403/404). Routes whose body
+    ids name no workspace resource (auth challenges, devices, Pilot acks) are
+    declared with ``scope: none`` and the reason."""
     declared = _body_declarations()
-    assert set(declared) == set(_BODY_ROUTE_BODIES), "every declared body route needs request bodies here"
-    problems: list[str] = []
+    judged = {route for route, entry in declared.items() if entry["scope"] == "workspace"}
+    assert judged == set(_BODY_ROUTE_BODIES), "every declared body route needs request bodies here"
     for route, entry in declared.items():
-        assert entry["scope"] == "workspace" and entry["resource"] in SEEDERS, (route, entry)
-        method, path = route.split(" ", 1)
+        assert entry["scope"] in ("workspace", "none") and entry.get("reason"), route
+    problems: list[str] = []
+    for route in sorted(judged):
+        entry = declared[route]
+        assert entry["resource"] in SEEDERS, (route, entry)
+        method, path = route.split("#", 1)[0].split(" ", 1)
         seeded = SEEDERS[entry["resource"]](world)
-        for body in _BODY_ROUTE_BODIES[route](seeded):
+        owner_ok = set(entry.get("owner_status") or [200])
+        b_own, a_own = _own_connector(world, world.workspace_b), _own_connector(world, world.workspace_a)
+        b_header = {"X-Workspace-Id": world.workspace_b}
+        for body in _BODY_ROUTE_BODIES[route](world, seeded):
             for who, client in (("B's administrator", world.admin_b), ("B's API key", world.key_b)):
-                r = client.request(method, path, json=body)
+                r = client.request(method, path, json=_as_caller(body, b_own), headers=b_header)
                 if r.status_code not in (403, 404) or _leaks(r):
-                    problems.append(f"{route} {who} {body}: {r.status_code} {r.text[:120]}")
-            own = world.admin_a.request(method, path, json=body)
-            if own.status_code != 200:
-                problems.append(f"{route} owner control {body}: {own.status_code} {own.text[:120]}")
-        if not seeded.intact():
-            problems.append(f"{route}: A's resource changed")
+                    problems.append(f"{route} {who} {body}: {r.status_code} {r.text[:160]}")
+            if not seeded.intact():  # judged before A's own call, which may use it
+                problems.append(f"{route}: A's resource changed")
+            if entry.get("owner_control", True):
+                own = world.admin_a.request(method, path, json=_as_caller(body, a_own))
+                if own.status_code not in owner_ok or own.status_code in (403, 404):
+                    problems.append(f"{route} owner control {body}: {own.status_code} {own.text[:160]}")
     assert not problems, "\n".join(problems)
 
 

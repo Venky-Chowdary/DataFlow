@@ -3258,6 +3258,9 @@ async def transfer_data(
         region = job_data_region(
             workspace_id, data_region, host_tenant_id=str(getattr(request.state, "tenant_id", "") or "")
         )
+        from services.body_id_ownership import assert_body_ids
+
+        assert_body_ids(request, connectors=(connector_id or "",), write=True)  # review 3, body routes
         request_obj = TransferRequest(
             source=EndpointConfig(kind="file", format=src_fmt),
             destination=EndpointConfig(

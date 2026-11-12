@@ -626,8 +626,433 @@
     "POST /api/v1/cdc/snapshots": {
       "scope": "workspace",
       "resource": "job",
-      "body_ids": ["connector_id", "job_id", "source_key"],
+      "body_ids": [
+        "connector_id",
+        "job_id",
+        "source_key"
+      ],
       "reason": "Queues a CDC snapshot signal on a source named in the body: the key must resolve from a connector or job the caller can write, and the signal belongs to that workspace (security review round 2, M2)."
+    },
+    "POST /api/v1/cdc/signals/execute-snapshot": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "source_key",
+        "connector_id",
+        "job_id"
+      ],
+      "reason": "Runs a CDC snapshot of a source named in the body; the connector must be one the caller can write.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422,
+        500
+      ]
+    },
+    "POST /api/v1/connectors/transfer": {
+      "scope": "none",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "A multipart form with a file upload: its destination connector is checked by assert_body_ids before the job is created (review 3, test_review3_lows); the JSON harness here cannot send a form."
+    },
+    "POST /api/v1/contracts/test": {
+      "scope": "workspace",
+      "resource": "contract",
+      "body_ids": [
+        "contract_id"
+      ],
+      "reason": "Tests rows against a contract named in the body.",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/fidelity/check": {
+      "scope": "workspace",
+      "resource": "schedule",
+      "body_ids": [
+        "schedule_id"
+      ],
+      "reason": "Checks a schedule's fidelity; the schedule must be the caller's.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/ops/cdc-captures/cleanup": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Drops CDC capture objects of a connector named in the body.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422,
+        502
+      ]
+    },
+    "POST /api/v1/preflight/explain": {
+      "scope": "workspace",
+      "resource": "preflight_run",
+      "body_ids": [
+        "run_id"
+      ],
+      "reason": "Explains a stored preflight run; another workspace's run answers like a missing one (review 3).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/preflight/run": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id",
+        "source_connector_id",
+        "source_file_id"
+      ],
+      "reason": "Validates against connectors and an upload named in the body.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/query/execute": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Reads through a connector named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/query/schema": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Reads through a connector named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/query/schemas": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Reads through a connector named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/query/export": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id",
+        "destination_connector_id"
+      ],
+      "reason": "Reads through one connector and may write through another, both named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/repair/propose/preflight": {
+      "scope": "workspace",
+      "resource": "job",
+      "body_ids": [
+        "job_id"
+      ],
+      "reason": "Stores a repair proposal for a job named in the body (review 3, Low).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/repair/propose/quarantine": {
+      "scope": "workspace",
+      "resource": "job",
+      "body_ids": [
+        "job_id"
+      ],
+      "reason": "Stores a repair proposal for a job named in the body (review 3, Low).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/resource-acls": {
+      "scope": "workspace",
+      "resource": "job",
+      "body_ids": [
+        "resource_id"
+      ],
+      "reason": "A grant names a resource of the granting workspace (review 3, Low).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/schedules/": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "source_connector_id",
+        "dest_connector_id",
+        "contract_id",
+        "transform_recipe_id",
+        "replay_schedule_id"
+      ],
+      "reason": "A schedule stores the connectors, contract and recipe named in its body.",
+      "owner_status": [
+        200,
+        201,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/schedules/admin/orphans/reconcile": {
+      "scope": "workspace",
+      "resource": "schedule",
+      "body_ids": [
+        "schedule_ids"
+      ],
+      "reason": "Platform administrators only: a workspace administrator (A's included) is refused, so there is no workspace owner control.",
+      "owner_control": false
+    },
+    "POST /api/v1/transfer/execute": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "source.connector_id",
+        "destination.connector_id"
+      ],
+      "reason": "Runs a transfer between connectors named in the body (nested endpoints).",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/execute#contract_id": {
+      "scope": "workspace",
+      "resource": "contract",
+      "body_ids": [
+        "contract_id"
+      ],
+      "reason": "Binds a contract named in the body; another workspace's answers like a missing one (review 3, Low).",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/execute#plan_id": {
+      "scope": "workspace",
+      "resource": "plan",
+      "body_ids": [
+        "plan_id"
+      ],
+      "reason": "Runs a stored plan named in the body.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/execute#transform_recipe_id": {
+      "scope": "workspace",
+      "resource": "recipe",
+      "body_ids": [
+        "transform_recipe_id"
+      ],
+      "reason": "Applies a stored transform recipe named in the body.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/map": {
+      "scope": "workspace",
+      "resource": "job",
+      "body_ids": [
+        "job_id"
+      ],
+      "reason": "Maps columns for a job named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/plans": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "source.connector_id",
+        "destination.connector_id"
+      ],
+      "reason": "A plan stores its endpoints' connector ids (review 3, Low).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/transforms/": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "destination_connector_id",
+        "contract_id"
+      ],
+      "reason": "A transformation project stores its destination connector and contract (review 3, Low).",
+      "owner_status": [
+        201,
+        422
+      ]
+    },
+    "POST /api/v1/workspace/tenant": {
+      "scope": "workspace",
+      "resource": "byok_key",
+      "body_ids": [
+        "byok_key_id"
+      ],
+      "reason": "A tenant's BYOK key must be one of its own workspace's keys (review 3, Low); A's administrator names A's key for A's tenant.",
+      "owner_control": false
+    },
+    "POST /api/v1/auth/email/change/confirm": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/auth/password/forgot": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/auth/resend": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/auth/signup": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/auth/verify-email": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id",
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/email/change/confirm": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/password/forgot": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/resend": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/signup": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/verify-email": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id",
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/invites/accept": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "A device id of the accepting browser, not a workspace resource."
+    },
+    "POST /api/v1/copilot/confirm": {
+      "scope": "none",
+      "body_ids": [
+        "ack_id"
+      ],
+      "reason": "A Pilot acknowledgement is bound to the actor and conversation that staged it (test_copilot_confirm_route)."
+    },
+    "POST /api/v1/connectors/": {
+      "scope": "none",
+      "body_ids": [
+        "group_id"
+      ],
+      "reason": "group_id is a Kafka consumer-group name stored with the connector, not a Datawrap resource id."
+    },
+    "POST /api/v1/connectors/saved": {
+      "scope": "none",
+      "body_ids": [
+        "group_id"
+      ],
+      "reason": "group_id is a Kafka consumer-group name stored with the connector, not a Datawrap resource id."
+    },
+    "POST /api/v1/transfer/run": {
+      "scope": "none",
+      "body_ids": [
+        "dest_connector_id",
+        "source_connector_id",
+        "plan_id",
+        "transform_recipe_id",
+        "source_file_id",
+        "contract_id"
+      ],
+      "reason": "A multipart form route: its connector ids are checked read/write by the route (test_connector_route_authz) and its contract by assert_body_ids (review 3, Low); the JSON harness here cannot send a form."
     }
   }
 }

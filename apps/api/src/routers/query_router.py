@@ -1084,6 +1084,12 @@ async def query_export(
     connector = connector_store.get_connector(body.connector_id, workspace_id=workspace_id)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
+    if (body.destination_connector_id or "").strip():
+        from services.body_id_ownership import assert_body_ids
+
+        # Before the query is read (review 3, body routes): another workspace's
+        # destination answers like a missing one.
+        assert_body_ids(request, connectors=(body.destination_connector_id,), write=True)
     # Security review H2: an export writes the workspace's rows without a job,
     # so nothing else would ask where they land. Both branches (a connector, a
     # file on this deployment) are judged before the query is read.
