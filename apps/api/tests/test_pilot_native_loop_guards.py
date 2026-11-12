@@ -82,6 +82,9 @@ def test_per_turn_tool_budget_is_enforced_server_side(agent):
 
 def test_oversized_tool_output_is_clipped_to_valid_json(agent, monkeypatch):
     big = {"rows": [{"i": i, "pad": "x" * 200} for i in range(400)]}
+    # Rows reach the model only when the operator turned metadata-only off
+    # (audit C6); clipping is what bounds them then.
+    monkeypatch.setenv("DATAFLOW_AI_METADATA_ONLY", "false")
     monkeypatch.setattr(
         agent.tools,
         "execute",

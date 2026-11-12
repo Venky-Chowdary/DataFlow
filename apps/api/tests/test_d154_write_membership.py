@@ -67,8 +67,8 @@ def test_editor_membership_is_enough_to_mutate(world):
     assert patched.status_code == 200, patched.text
 
 
-_GUARDS = ("assert_resource_workspace", "_bound_schedule", "_scoped_contract")
-_ROUTERS = ("connectors", "saved_connectors", "schedules", "contracts", "transforms", "transform_library")
+_GUARDS = ("assert_resource_workspace", "_bound_schedule", "_scoped_contract", "_visible_signal")
+_ROUTERS = ("connectors", "saved_connectors", "schedules", "contracts", "transforms", "transform_library", "transfer", "repair")
 # POST routes that only compute (preview / plan / test) and change nothing.
 _READ_ONLY_POSTS = {"compile_for_transfer", "upgrade_preview", "preview", "test_contract"}
 

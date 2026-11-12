@@ -24,6 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pymongo.errors import PyMongoError
 from services.runtime_estimate import estimate_for_job_doc
+from services.data_residency import ResidencyRefused, enforce_request_residency
 from services.workspace_access import (
     assert_resource_workspace,
     resolve_write_workspace,
@@ -243,7 +244,13 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
     connector executor under the test_connector deadline, never on the event
     loop (D321: one silent Oracle host froze every /api/v1 route).
     """
+    from services.egress_guard import egress_workspace
+    from services.workspace_filter import current_workspace_stamp
+
     from ..ai.copilot.tool_deadline import note_step, run_off_event_loop
+
+    # Whatever the probe writes is made for the caller's workspace (review 3, H4).
+    workspace = current_workspace_stamp(for_write=False)
 
     def _timed_out(message: str) -> dict[str, Any]:
         op.failed(category="probe_failed")
@@ -257,7 +264,8 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             "connection_string": request.connection_string or "",
         }
         note_step("test_connector: reaching the host", target, role="connector")
-        return _test_connection_blocking(request, op)
+        with egress_workspace(workspace):
+            return _test_connection_blocking(request, op)
 
     return await run_off_event_loop("test_connector", _probe, _timed_out)
 
@@ -1095,7 +1103,7 @@ async def retry_transfer_job(
                 "(at-least-once)."
             ),
         }
-    except HTTPException:
+    except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1259,7 +1267,7 @@ async def rerun_transfer_job(
                 + (f" {read_scope['reason']}" if read_scope else "")
             ),
         }
-    except HTTPException:
+    except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1361,6 +1369,10 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             )
         xfer_req_probe = transfer_request_from_dict(payload)
         _refresh_saved_connectors(xfer_req_probe)
+        # Review H3: resume reuses the job, so job creation's residency check
+        # never sees the connector as it is now. Answer 403 here; the engine
+        # refuses the run itself as well (job_scope.start_refusal).
+        enforce_request_residency(xfer_req_probe)
         from services.transfer_file_staging import (
             file_source_bytes_available,
             hydrate_file_source,
@@ -1462,7 +1474,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             "warnings": safety.get("warnings") or [],
             "honesty": safety.get("honesty"),
         }
-    except HTTPException:
+    except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1825,7 +1837,8 @@ async def export_job_quarantine(job_id: str, request: Request):
 
     # The folder GET /transfer/download serves (DATAFLOW_EXPORTS_DIR aware).
     filename = f"quarantine_{job_id}_{uuid.uuid4().hex[:8]}.csv"
-    export_path = generated_export_path(filename)
+    # In the job's own workspace folder, so only that workspace downloads it.
+    export_path = generated_export_path(filename, workspace_id=str(job.get("workspace_id") or ""))
     export_path.write_bytes(content)
 
     return {
@@ -2432,6 +2445,18 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     dest = transfer_req.destination
     if dest.kind == "file_export":
         raise HTTPException(status_code=400, detail="Quarantine replay is not supported for file_export destinations")
+    # A replay writes like a run, so it is judged like one (review 3, H5): the
+    # destination as it resolves now, in the parent job's workspace, before any
+    # connect or write (a saved connector moved out of region after the job
+    # ran, or an inline destination stored before the workspace was fenced).
+    replay_workspace = str(job.get("workspace_id") or "")
+    transfer_req.workspace_id = replay_workspace
+    from ..transfer.job_scope import start_refusal
+
+    replay_refusal = start_refusal(transfer_req)
+    if replay_refusal:
+        logger.warning("Quarantine replay of job %s refused before any write", job_id)
+        raise HTTPException(status_code=403, detail=replay_refusal)
 
     # Replay must never carry the parent's overwrite semantics. A parent that
     # ran full_refresh_overwrite stamps overwrite-class flags on the request
@@ -2459,7 +2484,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
 
         from ..transfer.adapters import resolve_connector_config
 
-        dest_cfg = resolve_connector_config(dest)
+        dest_cfg = resolve_connector_config(dest, workspace_id=replay_workspace or None)
         mappings = refresh_mapping_target_types(
             mappings,
             resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
@@ -2622,7 +2647,9 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         # The replay digests with the PARENT job's hash_pii key version (retired
         # versions are kept), so remediated rows match the rows the parent
         # wrote; the child job records that version (review B2).
-        with transfer_job_scope(
+        from services.egress_guard import egress_workspace
+
+        with egress_workspace(replay_workspace), transfer_job_scope(
             child_req,
             child_job_id,
             store=get_mongodb_service,
@@ -3263,11 +3290,15 @@ async def transfer_data(
             except Exception:
                 source_filter = {}
 
-        region = (
-            data_region.strip()
-            or getattr(request.state, "data_region", "")
-            or "us-east-1"
+        # The workspace's own region wins over the caller's tag (audit H-4).
+        from services.data_residency import job_data_region
+
+        region = job_data_region(
+            workspace_id, data_region, host_tenant_id=str(getattr(request.state, "tenant_id", "") or "")
         )
+        from services.body_id_ownership import assert_body_ids
+
+        assert_body_ids(request, connectors=(connector_id or "",), write=True)  # review 3, body routes
         request_obj = TransferRequest(
             source=EndpointConfig(kind="file", format=src_fmt),
             destination=EndpointConfig(
@@ -3358,7 +3389,7 @@ async def transfer_data(
             "ddl_executed": result.ddl_executed,
             "operation": result.operation,
         }
-    except (HTTPException, PayloadTooLarge):
+    except (HTTPException, PayloadTooLarge, ResidencyRefused):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -17,9 +17,22 @@ import time
 import uuid
 from typing import Any
 
+from services.workspace_filter import bound_allows, current_workspace_stamp
+
 _LOCK = threading.Lock()
-_LATEST: dict[str, dict[str, Any]] = {}
+# Latest run per (owning workspace, plan id). The workspace is part of the key
+# so a caller who names another workspace's plan id starts (and polls) a run of
+# their own that fails "not found", and can neither read nor displace the
+# owner's run (audit H-1).
+_LATEST: dict[tuple[str, str], dict[str, Any]] = {}
 _BY_RUN: dict[str, dict[str, Any]] = {}
+
+
+def _owning_workspace(plan: Any) -> str:
+    """The plan's workspace when the caller can see it, else the caller's own."""
+    if plan is not None:
+        return str(plan.workspace_id or "")
+    return current_workspace_stamp(for_write=False)
 
 
 def start_plan_preflight_job(
@@ -39,8 +52,10 @@ def start_plan_preflight_job(
         except (TypeError, ValueError):
             rows = 0
     run_id = f"pf_{uuid.uuid4().hex[:12]}"
+    key = (_owning_workspace(plan), plan_id)
     job: dict[str, Any] = {
         "plan_id": plan_id,
+        "workspace_id": key[0],
         "run_id": run_id,
         "status": "running",
         "started_at": time.time(),
@@ -51,7 +66,7 @@ def start_plan_preflight_job(
         "result": None,
     }
     with _LOCK:
-        _LATEST[plan_id] = job
+        _LATEST[key] = job
         _BY_RUN[run_id] = job
     # 202 is the accept snapshot. The worker may finish before the handler
     # returns — GET /preflight is the live view; do not race status here.
@@ -65,14 +80,14 @@ def start_plan_preflight_job(
                 shape_recipe=shape_recipe,
             )
             with _LOCK:
-                if _LATEST.get(plan_id) is not job:
+                if _LATEST.get(key) is not job:
                     return
                 job["status"] = "complete"
                 job["result"] = result
                 job["finished_at"] = time.time()
         except Exception as exc:
             with _LOCK:
-                if _LATEST.get(plan_id) is not job:
+                if _LATEST.get(key) is not job:
                     return
                 job["status"] = "failed"
                 job["error"] = str(exc) or exc.__class__.__name__
@@ -88,9 +103,19 @@ def start_plan_preflight_job(
 
 
 def get_plan_preflight_job(plan_id: str, run_id: str = "") -> dict[str, Any] | None:
+    """The latest (or the named) Validate run of a plan in the caller's scope.
+
+    A run id is not a bearer handle: it is served only under its own plan and
+    only to a caller whose tenant scope covers the run's workspace.
+    """
+    from services.transfer_plan_store import get_plan
+
+    key = (_owning_workspace(get_plan(plan_id)), plan_id)
     with _LOCK:
-        job = _BY_RUN.get(run_id) if run_id else _LATEST.get(plan_id)
-        if job is None:
+        job = _BY_RUN.get(run_id) if run_id else _LATEST.get(key)
+        if job is None or job["plan_id"] != plan_id:
+            return None
+        if not bound_allows(job.get("workspace_id")):
             return None
         return job_public_view(job)
 
@@ -128,8 +153,19 @@ def report_plan_preflight_progress(
 ) -> None:
     """Heartbeat for Studio polling — never invents a verdict."""
     with _LOCK:
-        job = _LATEST.get(plan_id)
-        if job is None or job.get("status") != "running":
+        # The worker thread carries the starter's tenant scope (copied
+        # context), so the heartbeat lands on that caller's run of this plan.
+        job = next(
+            (
+                j
+                for (_ws, pid), j in _LATEST.items()
+                if pid == plan_id
+                and j.get("status") == "running"
+                and bound_allows(j.get("workspace_id"))
+            ),
+            None,
+        )
+        if job is None:
             return
         if rows_scanned is not None:
             job["rows_scanned"] = int(rows_scanned)

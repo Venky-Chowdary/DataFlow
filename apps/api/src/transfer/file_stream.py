@@ -1150,6 +1150,7 @@ def _stash_file_reconcile_sample(
     watermark: str | None,
     cursor_pk_source: str,
     pk_target_cols: list[str],
+    cursor_type: str = "",
 ) -> None:
     """Stash a bounded sample so append/incremental Gate-8 can key-align.
 
@@ -1159,7 +1160,7 @@ def _stash_file_reconcile_sample(
     """
     if dest_summary.get("reconcile_sample") or not sample_rows:
         return
-    from services.sync_cursor import records_after_watermark
+    from services.sync_cursor import cursor_value_coercer, records_after_watermark
 
     filtered_sample = sample_rows
     if source_filter:
@@ -1170,6 +1171,7 @@ def _stash_file_reconcile_sample(
             cursor_source_col,
             watermark,
             primary_key=cursor_pk_source,
+            coerce=cursor_value_coercer(cursor_type),
         )[0]
     dest_summary["reconcile_sample"] = (filtered_sample or [])[:50]
     if (
@@ -1229,14 +1231,17 @@ def fingerprint_parsed_file(
 
         full_iter = iter_keep_last(full_iter, list(keep_last_key))
     if incremental and cursor_source_col:
-        from services.sync_cursor import records_after_watermark
+        from services.sync_cursor import cursor_value_coercer, records_after_watermark
 
+        # The same reading of a cell as the write's bound (review H-1).
+        coerce = cursor_value_coercer(column_types.get(cursor_source_col))
         full_iter = (
             records_after_watermark(
                 list(batch or []),
                 cursor_source_col,
                 watermark,
                 primary_key=cursor_pk_source,
+                coerce=coerce,
             )[0]
             for batch in full_iter
         )
@@ -2180,6 +2185,7 @@ def stream_file_to_database(
                 watermark=watermark,
                 cursor_pk_source=cursor_pk_source,
                 pk_target_cols=[pk_for_copy] if pk_for_copy else [],
+                cursor_type=column_types.get(cursor_source_col, ""),
             )
         # Same digest-basis stamp as the write loop — the copy path's write
         # pass fingerprinted on this basis and Gate-8 must read back on it.
@@ -2196,6 +2202,21 @@ def stream_file_to_database(
         dest_summary["in_file_dedupe"] = "keep_last"
 
     if incremental and cursor_source_col:
+        from services.sync_cursor import cursor_value_coercer
+        from services.value_serializer import present_cell_text
+
+        # The watermark keeps the cell as its column's type reads it (a COPY's
+        # comes from the parsed staging rows), so the bound compares that same
+        # value, and the high mark is taken on it (review H-1).
+        cursor_coerce = cursor_value_coercer(column_types.get(cursor_source_col))
+
+        def _mark_cell(rec: dict, col: str) -> str:
+            text = str(rec.get(col, ""))
+            if cursor_coerce is not None and col == cursor_source_col:
+                cell = present_cell_text(rec.get(col))
+                return cursor_coerce(cell) if cell is not None else text
+            return text
+
         def _bounded_batches(batches):
             nonlocal running_cursor
             for raw in batches:
@@ -2204,6 +2225,8 @@ def stream_file_to_database(
                     cursor_source_col,
                     watermark,
                     primary_key=cursor_pk_source,
+                    coerce=cursor_coerce,
+                    text_calendar_refusal=True,
                 )
                 if unbounded:
                     # A row with no cursor value cannot be proven new or already
@@ -2223,7 +2246,7 @@ def stream_file_to_database(
                 ]
                 batch_mark = max_cursor_value(
                     [
-                        [str(r.get(c, "")) for c in cursor_headers]
+                        [_mark_cell(r, c) for c in cursor_headers]
                         for r in delta
                     ],
                     cursor_headers,
@@ -3408,6 +3431,7 @@ def stream_file_to_database(
         watermark=watermark,
         cursor_pk_source=cursor_pk_source,
         pk_target_cols=list(pk_target_cols or []),
+        cursor_type=column_types.get(cursor_source_col, ""),
     )
     # Reader-side population for Gate-8. Never invent from written + held_out —
     # that circularly balances short reads and hides silent under-delivery. On a

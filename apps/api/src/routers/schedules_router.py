@@ -791,6 +791,9 @@ async def create_pipeline_schedule(
         assert_resource_workspace(request, str(payload.get("workspace_id") or ""), write=True)
     for key in ("dest_schema", "dest_database"):
         payload[key] = str(payload.get(key) or "").strip()
+    from services.body_id_ownership import assert_schedule_body_ids
+
+    assert_schedule_body_ids(request, payload)  # before the key probe reads any catalog
     warnings: list[str] = []
     # The key probe may read the source catalog (bounded 8 s): off the event loop.
     await asyncio.to_thread(_assert_upsert_key, payload)
@@ -840,6 +843,9 @@ async def patch_pipeline_schedule(
             data[key] = str(data[key] or "").strip()
     if not data:
         return ScheduleResponse.from_schedule(existing)
+    from services.body_id_ownership import assert_schedule_body_ids
+
+    assert_schedule_body_ids(request, data)  # review 3, body routes
     if {"sync_mode", "primary_key", "stream_contracts", "source_table", "source_connector_id"} & set(data):
         await asyncio.to_thread(_assert_upsert_key, {**existing.to_dict(), **data})
     warnings: list[str] = []

@@ -831,9 +831,11 @@ def _sqlite_table_exists(path: str, table: str) -> bool:
     """True when ``table`` is already in this file. Never creates the file."""
     from pathlib import Path
 
+    from connectors.sqlite_common import sqlite_readonly_uri
+
     if not path or path == ":memory:" or not Path(path).is_file():
         return False
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=8)
+    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True, timeout=8)
     try:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",

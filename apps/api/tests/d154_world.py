@@ -196,9 +196,14 @@ def seed(*, tag: str, ws_a: str, a_email: str, memory: Any, data_dir: Any = None
             import sqlite3
 
             # The service data directory is off-limits to connectors; its
-            # ``sqlite`` volume sub-directory is where connector files belong.
-            (data_dir / "sqlite").mkdir(parents=True, exist_ok=True)
-            db_path = data_dir / "sqlite" / f"{marker}.sqlite"
+            # ``sqlite`` volume sub-directory is where connector files belong,
+            # in the owning workspace's area (review 3, H3).
+            from services.embedded_volume import volume_workspace_dir
+
+            folder = data_dir.resolve() / "sqlite"
+            folder = volume_workspace_dir(folder, ws) if ws else folder
+            folder.mkdir(parents=True, exist_ok=True)
+            db_path = folder / f"{marker}.sqlite"
             with sqlite3.connect(db_path) as db:
                 db.execute(f"CREATE TABLE {marker}_tbl (id INTEGER, note TEXT)")
                 db.executemany(

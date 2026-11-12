@@ -312,13 +312,17 @@ def request_incremental_snapshot(
     primary_key: str | list[str] | None = None,
     chunk_size: int = 1000,
     row_filter: Any = None,
-    workspace_id: str = "",
+    workspace_id: str | None = None,
 ) -> SnapshotSignal:
     """Enqueue an incremental snapshot for ``table`` on ``source_key``.
 
     ``row_filter`` limits the backfill to matching rows (validated here so a bad
     filter is a 400 at request time, not a failed signal mid-stream).
+    ``workspace_id`` defaults to the running job's: a signal a CDC run queues
+    for itself (gap recovery, a signal table) is claimable by that job only.
     """
+    if workspace_id is None:
+        workspace_id = _running_job_workspace()
     from services.cdc_snapshot_filter import describe_snapshot_filter, normalize_snapshot_filter
 
     spec = normalize_snapshot_filter(row_filter)
@@ -342,7 +346,23 @@ def request_incremental_snapshot(
     return saved
 
 
-def list_signals(source_key: str = "", *, status: str = "") -> list[SnapshotSignal]:
+def _running_job_workspace() -> str:
+    """The workspace of the tracked job running in this context (``""`` = none)."""
+    from services.egress_guard import current_egress_workspace
+    from services.export_object_store import bound_job_workspace
+
+    return str(bound_job_workspace() or current_egress_workspace() or "").strip()
+
+
+def _workspace_query(workspace_id: str) -> dict[str, Any]:
+    ws = str(workspace_id or "").strip()
+    return {"workspace_id": ws} if ws else {"workspace_id": {"$in": ["", None]}}
+
+
+def list_signals(
+    source_key: str = "", *, status: str = "", workspace_id: str | None = None
+) -> list[SnapshotSignal]:
+    """Signals, newest first; ``workspace_id`` (when given) keeps one workspace's."""
     coll = _signals_coll()
     if coll is not None:
         try:
@@ -351,6 +371,8 @@ def list_signals(source_key: str = "", *, status: str = "") -> list[SnapshotSign
                 query["source_key"] = source_key
             if status:
                 query["status"] = status
+            if workspace_id is not None:
+                query.update(_workspace_query(workspace_id))
             docs = list(coll.find(query).sort("created_at", -1).limit(500))
             return [_doc_to_signal(d) for d in docs]
         except Exception as exc:
@@ -362,21 +384,29 @@ def list_signals(source_key: str = "", *, status: str = "") -> list[SnapshotSign
         out = [s for s in out if s.source_key == source_key]
     if status:
         out = [s for s in out if s.status == status]
+    if workspace_id is not None:
+        out = [s for s in out if s.workspace_id == str(workspace_id or "").strip()]
     return sorted(out, key=lambda s: s.created_at, reverse=True)
 
 
-def claim_next_signal(source_key: str, table: str = "") -> SnapshotSignal | None:
+def claim_next_signal(
+    source_key: str, table: str = "", *, workspace_id: str | None = None
+) -> SnapshotSignal | None:
     """Atomically claim the next signal for this source.
 
     Prefers an in-progress (``running``) signal so chunked snapshots resume,
     then the oldest ``pending`` signal. Optional ``table`` filters the claim.
+    Only signals of the claiming job's workspace (``workspace_id``, default the
+    running job's) are claimed: a signal another workspace queued on this
+    source never re-snapshots it (security review round 2, M2).
     """
+    ws = _running_job_workspace() if workspace_id is None else str(workspace_id or "").strip()
     coll = _signals_coll()
     if coll is not None:
         try:
             from pymongo import ReturnDocument
 
-            base: dict[str, Any] = {"source_key": source_key}
+            base: dict[str, Any] = {"source_key": source_key, **_workspace_query(ws)}
             if table:
                 base["table"] = table
             # Resume running
@@ -406,6 +436,8 @@ def claim_next_signal(source_key: str, table: str = "") -> SnapshotSignal | None
         for i, r in enumerate(rows):
             if r.get("source_key") != source_key or r.get("status") != "running":
                 continue
+            if str(r.get("workspace_id") or "").strip() != ws:
+                continue
             if table and r.get("table") and r.get("table") != table:
                 continue
             r["updated_at"] = time.time()
@@ -415,6 +447,8 @@ def claim_next_signal(source_key: str, table: str = "") -> SnapshotSignal | None
         # 2) Claim pending
         for i, r in enumerate(rows):
             if r.get("source_key") != source_key or r.get("status") != "pending":
+                continue
+            if str(r.get("workspace_id") or "").strip() != ws:
                 continue
             if table and r.get("table") and r.get("table") != table:
                 continue

@@ -1,0 +1,1106 @@
+{
+  "_about": [
+    "How every route that takes a resource id is scoped to a tenant: the ONE registry for",
+    "id-addressed routes (tests/test_tenancy_route_scoping.py; the old matrix's id loop is gone).",
+    "One entry per 'METHOD path' of tests/fixtures/rbac_route_permissions.json that has a path parameter.",
+    "scope=workspace: the id names a resource owned by one workspace. The suite seeds one in",
+    "  workspace A and calls the route as B's administrator, as B's API key and (unless a GET) as a",
+    "  viewer of A who edits B with no workspace header: 404/403, nothing of A's in the body, and A's",
+    "  resource unchanged. Owner control: A's own administrator must get a different answer, or",
+    "  'owner_control_reason' says why that cannot be shown. 'viewer_may_call' (with a reason) lets a",
+    "  viewer of the owning workspace call a route that changes nothing.",
+    "scope=platform: deployment-wide configuration, account or workspace lifecycle administration.",
+    "  The same callers (none a platform administrator) are refused and nothing changes.",
+    "scope=exempt: the parameter is not a tenant-owned resource; 'reason' says why."
+  ],
+  "_body_routes_about": "body_routes: mutating routes that take a resource id in the request BODY (no path parameter). Each needs a case in tests/test_tenancy_route_scoping.py::_BODY_ROUTE_BODIES: B is refused for A's ids and A's administrator is served (owner control).",
+  "routes": {
+    "DELETE /api/v1/auth/sessions/{jti}": {
+      "scope": "exempt",
+      "reason": "Account-scoped: revokes only the caller's own session; another account's jti is a 404 (tests/test_cross_workspace_resource_matrix.py)."
+    },
+    "GET /api/v1/auth/sso/{sso_type}/callback": {
+      "scope": "exempt",
+      "reason": "Public sign-in protocol endpoint; {sso_type} names a protocol (saml/oidc), not an owned resource."
+    },
+    "POST /api/v1/auth/sso/{sso_type}/callback": {
+      "scope": "exempt",
+      "reason": "Public sign-in protocol endpoint; {sso_type} names a protocol (saml/oidc), not an owned resource."
+    },
+    "GET /api/v1/auth/sso/{sso_type}/start": {
+      "scope": "exempt",
+      "reason": "Public sign-in protocol endpoint; {sso_type} names a protocol (saml/oidc), not an owned resource."
+    },
+    "GET /api/v1/catalog/connectors/{connector_id}": {
+      "scope": "exempt",
+      "reason": "Public global connector catalog metadata, not a saved workspace connector."
+    },
+    "POST /api/v1/cdc/mapping-reviews/{review_id}/acknowledge": {
+      "scope": "workspace",
+      "resource": "mapping_review"
+    },
+    "GET /api/v1/cdc/snapshots/{signal_id}": {
+      "scope": "workspace",
+      "resource": "cdc_signal"
+    },
+    "POST /api/v1/cdc/snapshots/{signal_id}/cancel": {
+      "scope": "workspace",
+      "resource": "cdc_signal"
+    },
+    "GET /api/v1/connectors/jobs/{job_id}": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "PATCH /api/v1/connectors/jobs/{job_id}": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/cancel": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/connectors/jobs/{job_id}/quarantine": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/quarantine/export": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/quarantine/replay": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/rerun": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/resume": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/retry": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/connectors/jobs/{job_id}/stream": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/connectors/jobs/{job_id}/sync": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "DELETE /api/v1/connectors/saved/{connector_id}": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
+    "GET /api/v1/connectors/saved/{connector_id}": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
+    "PATCH /api/v1/connectors/saved/{connector_id}": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
+    "PUT /api/v1/connectors/saved/{connector_id}": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
+    "POST /api/v1/connectors/saved/{connector_id}/region-verification": {
+      "scope": "platform",
+      "resource": "saved_connector",
+      "reason": "Where a connector's data lands is the operator's statement for data residency (security review H1): platform administrators only, never a workspace role."
+    },
+    "POST /api/v1/connectors/saved/{connector_id}/rotate-secrets": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
+    "POST /api/v1/connectors/saved/{connector_id}/test": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
+    "POST /api/v1/connectors/uploads/{file_id}/profile": {
+      "scope": "workspace",
+      "resource": "upload"
+    },
+    "DELETE /api/v1/connectors/{connector_id}": {
+      "scope": "workspace",
+      "resource": "legacy_connector"
+    },
+    "GET /api/v1/connectors/{connector_id}": {
+      "scope": "workspace",
+      "resource": "legacy_connector"
+    },
+    "GET /api/v1/contracts/{contract_id}": {
+      "scope": "workspace",
+      "resource": "contract"
+    },
+    "GET /api/v1/contracts/{contract_id}/breaker": {
+      "scope": "workspace",
+      "resource": "contract"
+    },
+    "POST /api/v1/contracts/{contract_id}/breaker/reset": {
+      "scope": "workspace",
+      "resource": "contract"
+    },
+    "POST /api/v1/contracts/{contract_id}/deprecate": {
+      "scope": "workspace",
+      "resource": "contract"
+    },
+    "GET /api/v1/contracts/{contract_id}/export": {
+      "scope": "workspace",
+      "resource": "contract"
+    },
+    "GET /api/v1/contracts/{contract_id}/history": {
+      "scope": "workspace",
+      "resource": "contract"
+    },
+    "POST /api/v1/contracts/{contract_id}/sign": {
+      "scope": "workspace",
+      "resource": "contract"
+    },
+    "GET /api/v1/exit/rehearsals/{rehearsal_id}": {
+      "scope": "workspace",
+      "resource": "exit_rehearsal"
+    },
+    "GET /api/v1/exit/rehearsals/{rehearsal_id}/evidence": {
+      "scope": "workspace",
+      "resource": "exit_rehearsal"
+    },
+    "POST /api/v1/exit/rehearsals/{rehearsal_id}/signoff": {
+      "scope": "workspace",
+      "resource": "exit_rehearsal"
+    },
+    "DELETE /api/v1/exit/systems/{system_id}": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "GET /api/v1/exit/systems/{system_id}": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "PATCH /api/v1/exit/systems/{system_id}": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "DELETE /api/v1/exit/systems/{system_id}/pii-acknowledgement": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "POST /api/v1/exit/systems/{system_id}/pii-acknowledgement": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "GET /api/v1/exit/systems/{system_id}/rehearsals": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "POST /api/v1/exit/systems/{system_id}/rehearsals": {
+      "scope": "workspace",
+      "resource": "exit_system"
+    },
+    "POST /api/v1/iam/api-keys/{key_id}/rotate": {
+      "scope": "workspace",
+      "resource": "api_key"
+    },
+    "DELETE /api/v1/iam/service-accounts/{key_id}": {
+      "scope": "workspace",
+      "resource": "api_key"
+    },
+    "GET /api/v1/jobs/{job_id}": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/jobs/{job_id}/export/download": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/jobs/{job_id}/parity-report": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/jobs/{job_id}/parity-report/explain": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/jobs/{job_id}/parity-report/export": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/approve": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/dismiss": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/jobs/{job_id}/parity-report/signoff": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/jobs/{job_id}/reversibility": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "DELETE /api/v1/journals/{journal_id}": {
+      "scope": "workspace",
+      "resource": "journal"
+    },
+    "GET /api/v1/journals/{journal_id}": {
+      "scope": "workspace",
+      "resource": "journal"
+    },
+    "POST /api/v1/journals/{journal_id}/open": {
+      "scope": "workspace",
+      "resource": "journal"
+    },
+    "GET /api/v1/preflight/runs/{run_id}": {
+      "scope": "workspace",
+      "resource": "preflight_run"
+    },
+    "GET /api/v1/repair/proposals/{proposal_id}": {
+      "scope": "workspace",
+      "resource": "proposal"
+    },
+    "POST /api/v1/repair/proposals/{proposal_id}/decide": {
+      "scope": "workspace",
+      "resource": "proposal"
+    },
+    "DELETE /api/v1/resource-acls/{grant_id}": {
+      "scope": "workspace",
+      "resource": "acl_grant"
+    },
+    "DELETE /api/v1/schedules/{schedule_id}": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "GET /api/v1/schedules/{schedule_id}": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "PATCH /api/v1/schedules/{schedule_id}": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "PUT /api/v1/schedules/{schedule_id}": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "POST /api/v1/schedules/{schedule_id}/accept-source-schema": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "GET /api/v1/schedules/{schedule_id}/approval": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "POST /api/v1/schedules/{schedule_id}/approvals/{approval_id}/approve": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "POST /api/v1/schedules/{schedule_id}/approvals/{approval_id}/reject": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "DELETE /api/v1/schedules/{schedule_id}/authorization": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "POST /api/v1/schedules/{schedule_id}/authorization": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "POST /api/v1/schedules/{schedule_id}/catch-up": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "GET /api/v1/schedules/{schedule_id}/export": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "GET /api/v1/schedules/{schedule_id}/history": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "GET /api/v1/schedules/{schedule_id}/notifications": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "POST /api/v1/schedules/{schedule_id}/recover": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "POST /api/v1/schedules/{schedule_id}/run": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "POST /api/v1/schedules/{schedule_id}/sync": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "POST /api/v1/schedules/{schedule_id}/transform-recipe/upgrade": {
+      "scope": "workspace",
+      "resource": "schedule"
+    },
+    "DELETE /api/v1/scim/v2/Groups/{group_id}": {
+      "scope": "exempt",
+      "reason": "Deployment-level identity provisioning behind the SCIM bearer token (scim.provision), not a user session; covered by tests/test_scim_conformance.py."
+    },
+    "GET /api/v1/scim/v2/Groups/{group_id}": {
+      "scope": "exempt",
+      "reason": "Deployment-level identity provisioning behind the SCIM bearer token (scim.provision), not a user session; covered by tests/test_scim_conformance.py."
+    },
+    "PATCH /api/v1/scim/v2/Groups/{group_id}": {
+      "scope": "exempt",
+      "reason": "Deployment-level identity provisioning behind the SCIM bearer token (scim.provision), not a user session; covered by tests/test_scim_conformance.py."
+    },
+    "PUT /api/v1/scim/v2/Groups/{group_id}": {
+      "scope": "exempt",
+      "reason": "Deployment-level identity provisioning behind the SCIM bearer token (scim.provision), not a user session; covered by tests/test_scim_conformance.py."
+    },
+    "DELETE /api/v1/scim/v2/Users/{user_id}": {
+      "scope": "exempt",
+      "reason": "Deployment-level identity provisioning behind the SCIM bearer token (scim.provision), not a user session; covered by tests/test_scim_conformance.py."
+    },
+    "GET /api/v1/scim/v2/Users/{user_id}": {
+      "scope": "exempt",
+      "reason": "Deployment-level identity provisioning behind the SCIM bearer token (scim.provision), not a user session; covered by tests/test_scim_conformance.py."
+    },
+    "PATCH /api/v1/scim/v2/Users/{user_id}": {
+      "scope": "exempt",
+      "reason": "Deployment-level identity provisioning behind the SCIM bearer token (scim.provision), not a user session; covered by tests/test_scim_conformance.py."
+    },
+    "PUT /api/v1/scim/v2/Users/{user_id}": {
+      "scope": "exempt",
+      "reason": "Deployment-level identity provisioning behind the SCIM bearer token (scim.provision), not a user session; covered by tests/test_scim_conformance.py."
+    },
+    "DELETE /api/v1/team/sandbox-workspaces/{workspace_id}": {
+      "scope": "platform",
+      "resource": "workspace",
+      "reason": "Workspace lifecycle is a platform administrator's (require_platform_admin): no workspace role, not even the workspace's own admin, renames, deletes or recovers a workspace."
+    },
+    "DELETE /api/v1/team/users/{email}": {
+      "scope": "platform",
+      "resource": "account",
+      "reason": "Account administration is a platform administrator's: a workspace admin of another workspace is refused."
+    },
+    "PATCH /api/v1/team/users/{email}": {
+      "scope": "platform",
+      "resource": "account",
+      "reason": "Account administration is a platform administrator's: a workspace admin of another workspace is refused."
+    },
+    "POST /api/v1/team/users/{email}/password": {
+      "scope": "platform",
+      "resource": "account",
+      "reason": "Account administration is a platform administrator's: a workspace admin of another workspace is refused."
+    },
+    "POST /api/v1/team/users/{email}/platform-role": {
+      "scope": "platform",
+      "resource": "account",
+      "reason": "Account administration is a platform administrator's: a workspace admin of another workspace is refused."
+    },
+    "POST /api/v1/team/users/{email}/reset-password": {
+      "scope": "platform",
+      "resource": "account",
+      "reason": "Account administration is a platform administrator's: a workspace admin of another workspace is refused."
+    },
+    "DELETE /api/v1/team/workspaces/{workspace_id}": {
+      "scope": "platform",
+      "resource": "workspace",
+      "reason": "Workspace lifecycle is a platform administrator's (require_platform_admin): no workspace role, not even the workspace's own admin, renames, deletes or recovers a workspace."
+    },
+    "PATCH /api/v1/team/workspaces/{workspace_id}": {
+      "scope": "platform",
+      "resource": "workspace",
+      "reason": "Workspace lifecycle is a platform administrator's (require_platform_admin): no workspace role, not even the workspace's own admin, renames, deletes or recovers a workspace."
+    },
+    "POST /api/v1/team/workspaces/{workspace_id}/break-glass/restore-admin": {
+      "scope": "platform",
+      "resource": "workspace",
+      "reason": "Workspace lifecycle is a platform administrator's (require_platform_admin): no workspace role, not even the workspace's own admin, renames, deletes or recovers a workspace."
+    },
+    "GET /api/v1/team/workspaces/{workspace_id}/invites": {
+      "scope": "workspace",
+      "resource": "workspace"
+    },
+    "POST /api/v1/team/workspaces/{workspace_id}/invites": {
+      "scope": "workspace",
+      "resource": "workspace"
+    },
+    "DELETE /api/v1/team/workspaces/{workspace_id}/invites/{invite_id}": {
+      "scope": "workspace",
+      "resource": "workspace"
+    },
+    "POST /api/v1/team/workspaces/{workspace_id}/invites/{invite_id}/resend": {
+      "scope": "workspace",
+      "resource": "workspace"
+    },
+    "GET /api/v1/team/workspaces/{workspace_id}/members": {
+      "scope": "workspace",
+      "resource": "workspace"
+    },
+    "POST /api/v1/team/workspaces/{workspace_id}/members": {
+      "scope": "workspace",
+      "resource": "workspace"
+    },
+    "DELETE /api/v1/team/workspaces/{workspace_id}/members/{email}": {
+      "scope": "workspace",
+      "resource": "workspace"
+    },
+    "PATCH /api/v1/team/workspaces/{workspace_id}/members/{email}": {
+      "scope": "workspace",
+      "resource": "workspace"
+    },
+    "GET /api/v1/transfer/download/{filename}": {
+      "scope": "workspace",
+      "resource": "export"
+    },
+    "GET /api/v1/transfer/plans/{plan_id}": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "PATCH /api/v1/transfer/plans/{plan_id}": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "POST /api/v1/transfer/plans/{plan_id}/approve": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "POST /api/v1/transfer/plans/{plan_id}/map": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "POST /api/v1/transfer/plans/{plan_id}/mappings": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "GET /api/v1/transfer/plans/{plan_id}/preflight": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "POST /api/v1/transfer/plans/{plan_id}/preflight": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "GET /api/v1/transfer/plans/{plan_id}/reversibility": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "GET /api/v1/transfer/plans/{plan_id}/run-payload": {
+      "scope": "workspace",
+      "resource": "plan"
+    },
+    "GET /api/v1/transfer/{job_id}/cdc/snapshots": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/transfer/{job_id}/cdc/snapshots": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/transfer/{job_id}/cdc/snapshots/{signal_id}/cancel": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/transfer/{job_id}/certificate": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/transfer/{job_id}/explanation": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/transfer/{job_id}/mapping-proof": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/transfer/{job_id}/proof-pack": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/transfer/{job_id}/rollback/execute": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "POST /api/v1/transform-library/templates/{key}/clone": {
+      "scope": "exempt",
+      "reason": "{key} names a built-in template of the global catalog; the clone lands in the caller's own workspace."
+    },
+    "DELETE /api/v1/transform-library/{recipe_id}": {
+      "scope": "workspace",
+      "resource": "recipe"
+    },
+    "GET /api/v1/transform-library/{recipe_id}": {
+      "scope": "workspace",
+      "resource": "recipe"
+    },
+    "PATCH /api/v1/transform-library/{recipe_id}": {
+      "scope": "workspace",
+      "resource": "recipe"
+    },
+    "POST /api/v1/transform-library/{recipe_id}/compile": {
+      "scope": "workspace",
+      "resource": "recipe"
+    },
+    "POST /api/v1/transform-library/{recipe_id}/preview": {
+      "scope": "workspace",
+      "resource": "recipe"
+    },
+    "POST /api/v1/transform-library/{recipe_id}/upgrade-preview": {
+      "scope": "workspace",
+      "resource": "recipe"
+    },
+    "GET /api/v1/transform-library/{recipe_id}/versions": {
+      "scope": "workspace",
+      "resource": "recipe"
+    },
+    "GET /api/v1/transform-library/{recipe_id}/where-used": {
+      "scope": "workspace",
+      "resource": "recipe"
+    },
+    "DELETE /api/v1/transforms/{project_id}": {
+      "scope": "workspace",
+      "resource": "transform_project"
+    },
+    "GET /api/v1/transforms/{project_id}": {
+      "scope": "workspace",
+      "resource": "transform_project"
+    },
+    "PATCH /api/v1/transforms/{project_id}": {
+      "scope": "workspace",
+      "resource": "transform_project"
+    },
+    "GET /api/v1/transforms/{project_id}/export/dbt": {
+      "scope": "workspace",
+      "resource": "transform_project"
+    },
+    "POST /api/v1/transforms/{project_id}/run": {
+      "scope": "workspace",
+      "resource": "transform_project"
+    },
+    "PATCH /api/v1/workspace/ai-providers/{provider}": {
+      "scope": "platform",
+      "resource": "ai_provider",
+      "reason": "AI provider keys are deployment-wide configuration: platform administrators only."
+    },
+    "DELETE /api/v1/workspace/ai-providers/{provider}/key": {
+      "scope": "platform",
+      "resource": "ai_provider",
+      "reason": "AI provider keys are deployment-wide configuration: platform administrators only."
+    },
+    "POST /api/v1/workspace/ai-providers/{provider}/test": {
+      "scope": "platform",
+      "resource": "ai_provider",
+      "reason": "AI provider keys are deployment-wide configuration: platform administrators only."
+    },
+    "DELETE /api/v1/workspace/api-keys/{key_id}": {
+      "scope": "workspace",
+      "resource": "api_key"
+    },
+    "GET /api/v1/workspace/benchmark/runs/{run_id}": {
+      "scope": "workspace",
+      "resource": "benchmark_run"
+    },
+    "DELETE /api/v1/workspace/notifications/{channel_id}": {
+      "scope": "workspace",
+      "resource": "notification_channel"
+    },
+    "PATCH /api/v1/workspace/notifications/{channel_id}": {
+      "scope": "workspace",
+      "resource": "notification_channel"
+    },
+    "GET /api/v1/workspace/notifications/{channel_id}/deliveries": {
+      "scope": "workspace",
+      "resource": "notification_channel"
+    },
+    "POST /api/v1/workspace/notifications/{channel_id}/signing-secret/rotate": {
+      "scope": "workspace",
+      "resource": "notification_channel"
+    },
+    "POST /api/v1/workspace/notifications/{channel_id}/test": {
+      "scope": "workspace",
+      "resource": "notification_channel"
+    },
+    "PATCH /api/v1/workspace/sso/{sso_type}": {
+      "scope": "platform",
+      "resource": "sso_config",
+      "reason": "The SSO provider is one per deployment: platform administrators only."
+    },
+    "POST /api/v1/workspace/sso/{sso_type}/test": {
+      "scope": "exempt",
+      "reason": "Read-only validation of the deployment's SSO settings, which every workspace administrator can already read (GET /workspace/sso, secrets masked); it changes nothing and dials nothing. The write (PATCH) is platform-administrator only."
+    },
+    "POST /api/v1/workspace/tenant/byok-keys/{key_id}/rotate": {
+      "scope": "workspace",
+      "resource": "byok_key"
+    },
+    "DELETE /api/v1/workspace/tenant/{tenant_id}": {
+      "scope": "workspace",
+      "resource": "tenant"
+    },
+    "PATCH /api/v1/workspace/tenant/{tenant_id}": {
+      "scope": "workspace",
+      "resource": "tenant"
+    },
+    "POST /api/v1/workspace/tenant/{tenant_id}/custom-domain/verify": {
+      "scope": "workspace",
+      "resource": "tenant"
+    },
+    "GET /api/v1/workspace/workspaces/{workspace_id}": {
+      "scope": "workspace",
+      "resource": "workspace"
+    },
+    "DELETE /auth/sessions/{jti}": {
+      "scope": "exempt",
+      "reason": "Account-scoped: revokes only the caller's own session; another account's jti is a 404 (tests/test_cross_workspace_resource_matrix.py)."
+    },
+    "GET /auth/sso/{sso_type}/callback": {
+      "scope": "exempt",
+      "reason": "Public sign-in protocol endpoint; {sso_type} names a protocol (saml/oidc), not an owned resource."
+    },
+    "POST /auth/sso/{sso_type}/callback": {
+      "scope": "exempt",
+      "reason": "Public sign-in protocol endpoint; {sso_type} names a protocol (saml/oidc), not an owned resource."
+    },
+    "GET /auth/sso/{sso_type}/start": {
+      "scope": "exempt",
+      "reason": "Public sign-in protocol endpoint; {sso_type} names a protocol (saml/oidc), not an owned resource."
+    }
+  },
+  "body_routes": {
+    "POST /api/v1/cdc/snapshots": {
+      "scope": "workspace",
+      "resource": "job",
+      "body_ids": [
+        "connector_id",
+        "job_id",
+        "source_key"
+      ],
+      "reason": "Queues a CDC snapshot signal on a source named in the body: the key must resolve from a connector or job the caller can write, and the signal belongs to that workspace (security review round 2, M2)."
+    },
+    "POST /api/v1/cdc/signals/execute-snapshot": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "source_key",
+        "connector_id",
+        "job_id"
+      ],
+      "reason": "Runs a CDC snapshot of a source named in the body; the connector must be one the caller can write.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422,
+        500
+      ]
+    },
+    "POST /api/v1/connectors/transfer": {
+      "scope": "none",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "A multipart form with a file upload: its destination connector is checked by assert_body_ids before the job is created (review 3, test_review3_lows); the JSON harness here cannot send a form."
+    },
+    "POST /api/v1/contracts/test": {
+      "scope": "workspace",
+      "resource": "contract",
+      "body_ids": [
+        "contract_id"
+      ],
+      "reason": "Tests rows against a contract named in the body.",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/fidelity/check": {
+      "scope": "workspace",
+      "resource": "schedule",
+      "body_ids": [
+        "schedule_id"
+      ],
+      "reason": "Checks a schedule's fidelity; the schedule must be the caller's.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/ops/cdc-captures/cleanup": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Drops CDC capture objects of a connector named in the body.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422,
+        502
+      ]
+    },
+    "POST /api/v1/preflight/explain": {
+      "scope": "workspace",
+      "resource": "preflight_run",
+      "body_ids": [
+        "run_id"
+      ],
+      "reason": "Explains a stored preflight run; another workspace's run answers like a missing one (review 3).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/preflight/run": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id",
+        "source_connector_id",
+        "source_file_id"
+      ],
+      "reason": "Validates against connectors and an upload named in the body.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/query/execute": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Reads through a connector named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/query/schema": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Reads through a connector named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/query/schemas": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id"
+      ],
+      "reason": "Reads through a connector named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/query/export": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "connector_id",
+        "destination_connector_id"
+      ],
+      "reason": "Reads through one connector and may write through another, both named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/repair/propose/preflight": {
+      "scope": "workspace",
+      "resource": "job",
+      "body_ids": [
+        "job_id"
+      ],
+      "reason": "Stores a repair proposal for a job named in the body (review 3, Low).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/repair/propose/quarantine": {
+      "scope": "workspace",
+      "resource": "job",
+      "body_ids": [
+        "job_id"
+      ],
+      "reason": "Stores a repair proposal for a job named in the body (review 3, Low).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/resource-acls": {
+      "scope": "workspace",
+      "resource": "job",
+      "body_ids": [
+        "resource_id"
+      ],
+      "reason": "A grant names a resource of the granting workspace (review 3, Low).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/schedules/": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "source_connector_id",
+        "dest_connector_id",
+        "contract_id",
+        "transform_recipe_id",
+        "replay_schedule_id"
+      ],
+      "reason": "A schedule stores the connectors, contract and recipe named in its body.",
+      "owner_status": [
+        200,
+        201,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/schedules/admin/orphans/reconcile": {
+      "scope": "workspace",
+      "resource": "schedule",
+      "body_ids": [
+        "schedule_ids"
+      ],
+      "reason": "Platform administrators only: a workspace administrator (A's included) is refused, so there is no workspace owner control.",
+      "owner_control": false
+    },
+    "POST /api/v1/transfer/execute": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "source.connector_id",
+        "destination.connector_id"
+      ],
+      "reason": "Runs a transfer between connectors named in the body (nested endpoints).",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/execute#contract_id": {
+      "scope": "workspace",
+      "resource": "contract",
+      "body_ids": [
+        "contract_id"
+      ],
+      "reason": "Binds a contract named in the body; another workspace's answers like a missing one (review 3, Low).",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/execute#plan_id": {
+      "scope": "workspace",
+      "resource": "plan",
+      "body_ids": [
+        "plan_id"
+      ],
+      "reason": "Runs a stored plan named in the body.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/execute#transform_recipe_id": {
+      "scope": "workspace",
+      "resource": "recipe",
+      "body_ids": [
+        "transform_recipe_id"
+      ],
+      "reason": "Applies a stored transform recipe named in the body.",
+      "owner_status": [
+        200,
+        400,
+        409,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/map": {
+      "scope": "workspace",
+      "resource": "job",
+      "body_ids": [
+        "job_id"
+      ],
+      "reason": "Maps columns for a job named in the body.",
+      "owner_status": [
+        200,
+        400,
+        422
+      ]
+    },
+    "POST /api/v1/transfer/plans": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "source.connector_id",
+        "destination.connector_id"
+      ],
+      "reason": "A plan stores its endpoints' connector ids (review 3, Low).",
+      "owner_status": [
+        200
+      ]
+    },
+    "POST /api/v1/transforms/": {
+      "scope": "workspace",
+      "resource": "saved_connector",
+      "body_ids": [
+        "destination_connector_id",
+        "contract_id"
+      ],
+      "reason": "A transformation project stores its destination connector and contract (review 3, Low).",
+      "owner_status": [
+        201,
+        422
+      ]
+    },
+    "POST /api/v1/workspace/tenant": {
+      "scope": "workspace",
+      "resource": "byok_key",
+      "body_ids": [
+        "byok_key_id"
+      ],
+      "reason": "A tenant's BYOK key must be one of its own workspace's keys (review 3, Low); A's administrator names A's key for A's tenant.",
+      "owner_control": false
+    },
+    "POST /api/v1/auth/email/change/confirm": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/auth/password/forgot": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/auth/resend": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/auth/signup": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/auth/verify-email": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id",
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/email/change/confirm": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/password/forgot": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/resend": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/signup": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /auth/verify-email": {
+      "scope": "none",
+      "body_ids": [
+        "challenge_id",
+        "device_id"
+      ],
+      "reason": "Sign-in challenge and device ids belong to an identity flow, not a workspace resource; they are bound to the account and expire (auth suites)."
+    },
+    "POST /api/v1/invites/accept": {
+      "scope": "none",
+      "body_ids": [
+        "device_id"
+      ],
+      "reason": "A device id of the accepting browser, not a workspace resource."
+    },
+    "POST /api/v1/copilot/confirm": {
+      "scope": "none",
+      "body_ids": [
+        "ack_id"
+      ],
+      "reason": "A Pilot acknowledgement is bound to the actor and conversation that staged it (test_copilot_confirm_route)."
+    },
+    "POST /api/v1/connectors/": {
+      "scope": "none",
+      "body_ids": [
+        "group_id"
+      ],
+      "reason": "group_id is a Kafka consumer-group name stored with the connector, not a Datawrap resource id."
+    },
+    "POST /api/v1/connectors/saved": {
+      "scope": "none",
+      "body_ids": [
+        "group_id"
+      ],
+      "reason": "group_id is a Kafka consumer-group name stored with the connector, not a Datawrap resource id."
+    },
+    "POST /api/v1/transfer/run": {
+      "scope": "none",
+      "body_ids": [
+        "dest_connector_id",
+        "source_connector_id",
+        "plan_id",
+        "transform_recipe_id",
+        "source_file_id",
+        "contract_id"
+      ],
+      "reason": "A multipart form route: its connector ids are checked read/write by the route (test_connector_route_authz) and its contract by assert_body_ids (review 3, Low); the JSON harness here cannot send a form."
+    }
+  }
+}

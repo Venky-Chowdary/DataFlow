@@ -18,10 +18,20 @@ from .stream_row_accounting import (
 from . import stream as _stream
 
 
-def _boundary_rows_already_landed(run, headers: list[str], rows: list[list[str]]) -> set[int]:
-    """Indices of re-read tie-group rows the destination already holds."""
+def _boundary_rows_already_landed(
+    run, headers: list[str], rows: list[list[str]], *, verify: bool = False
+) -> set[int]:
+    """Indices of re-read rows the destination already holds.
+
+    The tie group at the watermark, or — when the run's commit-safe window
+    re-reads behind it — every row up to the stored watermark.
+    """
     cfg = run.cfg
     cur = run.cur
+    if getattr(cfg, "replay_through", ""):
+        from .stream_commit_window import replay_rows_already_landed
+
+        return replay_rows_already_landed(run, headers, rows, verify=verify)
     from services.sync_cursor import requires_upsert
     if not (cfg._tie_dedupe and rows):
         return set()

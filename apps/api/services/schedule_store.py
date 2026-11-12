@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import threading
 import uuid
@@ -20,6 +19,7 @@ from functools import partial
 from typing import Any, Callable, Mapping, Sequence
 
 from services.atomic_file import write_json_atomic
+from services.brand_env import getenv_brand
 from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
 from services.ops_events import emit_event
@@ -1072,6 +1072,30 @@ def schedule_overdue_seconds(
     return max(0, int((current - due).total_seconds()))
 
 
+def schedule_store_unreadable() -> str:
+    """Why the configured schedule store cannot be read right now, or "".
+
+    Read-side only: the engine and the scheduler keep their file fallback. A
+    caller that reports on the workspace (Pilot) must not state the fallback's
+    rows - or an empty list - as the workspace's pipelines when Mongo is the
+    configured store and does not answer, or when the file does not parse.
+    """
+    try:
+        svc = get_mongodb_service()
+    except Exception:  # noqa: BLE001 - an unopenable store is the answer itself
+        return "the pipeline store did not answer"
+    if type(svc).__name__ != "MemoryMongoDBService" and getattr(svc, "client", None) is None:
+        return "the pipeline store did not answer"
+    if _mongo_backend() is None and STORE_PATH.exists():
+        try:
+            raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "the pipeline file could not be read"
+        if not isinstance(raw, dict) or not isinstance(raw.get("schedules", []), list):
+            return "the pipeline file could not be read"
+    return ""
+
+
 def list_schedules(workspace_filter: WorkspaceFilter | None = None) -> list[PipelineSchedule]:
     """Newest first. ``workspace_filter`` is the caller's tenant scope; ``None``
     is system scope (the scheduler, CDC workers)."""
@@ -1617,8 +1641,10 @@ def create_schedule(
     ``warnings`` collects what the caller must be told but that does not refuse
     the save (draft saved disabled; source table unverifiable).
     """
+    from services.connector_request_limits import refuse_control_characters
     from services.transfer_policy_values import canonicalize_policy_fields
 
+    refuse_control_characters("Pipeline name", data.get("name"))
     # QA r12 bugs 6/7: refuse an unknown validation_mode / schema_policy at the
     # store every route shares (REST, MCP create_schedule, GitOps apply).
     data = canonicalize_policy_fields(data)
@@ -2018,8 +2044,11 @@ def update_schedule(
     source catalog first (QA SC5) — outside the lock, so a slow source cannot
     stall every other schedule write.
     """
+    from services.connector_request_limits import refuse_control_characters
     from services.transfer_policy_values import canonicalize_policy_fields
 
+    if "name" in data:
+        refuse_control_characters("Pipeline name", data.get("name"))
     data = canonicalize_policy_fields(data)
     current = get_schedule(schedule_id)
     if current is not None:
@@ -2426,7 +2455,7 @@ def _unbound_claim_grace() -> timedelta:
     configurable rather than the 4h lookup-failure ceiling it used to inherit.
     """
     try:
-        seconds = int(os.getenv("DATAFLOW_SCHEDULE_UNBOUND_CLAIM_GRACE_SEC", "900"))
+        seconds = int(getenv_brand("DATAFLOW_SCHEDULE_UNBOUND_CLAIM_GRACE_SEC", "900"))
     except ValueError:
         seconds = 900
     return timedelta(seconds=max(60, seconds))

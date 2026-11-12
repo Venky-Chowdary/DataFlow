@@ -31,6 +31,7 @@ from services.audit_chain_link import (
     position_id,
     workspace_key,
 )
+from services.brand_env import getenv_brand
 from services.log_redaction import (
     is_redactable_value,
     is_sensitive_key,
@@ -42,7 +43,7 @@ from services.value_serializer import json_default
 from services.workspace_filter import WorkspaceFilter
 
 STORE_PATH = data_dir() / "audit_events.jsonl"
-MAX_EVENTS = int(os.getenv("DATAFLOW_AUDIT_MAX_EVENTS", "5000"))
+MAX_EVENTS = int(getenv_brand("DATAFLOW_AUDIT_MAX_EVENTS", "5000"))
 _APPEND_LOCK = threading.RLock()
 _LAST_RETENTION_PURGE = 0.0
 _RETENTION_PURGE_INTERVAL_SEC = 60 * 60
@@ -886,11 +887,11 @@ def _record_retention_checkpoint(
 
 
 def _legal_hold_enabled() -> bool:
-    return os.getenv("DATAFLOW_AUDIT_LEGAL_HOLD", "").strip() == "1"
+    return getenv_brand("DATAFLOW_AUDIT_LEGAL_HOLD", "").strip() == "1"
 
 
 def _retention_days() -> int | None:
-    raw = os.getenv("DATAFLOW_AUDIT_RETENTION_DAYS")
+    raw = getenv_brand("DATAFLOW_AUDIT_RETENTION_DAYS")
     value = (raw or "").strip()
     if not value or value.lower() == "off":
         return None

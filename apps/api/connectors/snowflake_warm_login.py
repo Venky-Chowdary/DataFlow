@@ -23,11 +23,12 @@ its catalog is a per-test file.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from collections.abc import Callable, Hashable
 from typing import Any
+
+from services.brand_env import getenv_brand
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ _stats = {"parked": 0, "taken": 0, "expired": 0}
 
 
 def idle_seconds() -> float:
-    raw = os.environ.get("DATAFLOW_SNOWFLAKE_WARM_LOGIN_SECONDS", "")
+    raw = getenv_brand("DATAFLOW_SNOWFLAKE_WARM_LOGIN_SECONDS", "")
     try:
         value = float(raw) if raw.strip() else DEFAULT_IDLE_SECONDS
     except ValueError:
@@ -52,7 +53,7 @@ def enabled(local_emulator: bool) -> bool:
     if idle_seconds() <= 0:
         return False
     if local_emulator:
-        return os.environ.get("DATAFLOW_SNOWFLAKE_WARM_LOGIN_EMULATOR", "") == "1"
+        return getenv_brand("DATAFLOW_SNOWFLAKE_WARM_LOGIN_EMULATOR", "") == "1"
     return True
 
 

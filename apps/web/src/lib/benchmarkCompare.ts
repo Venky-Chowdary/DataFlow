@@ -14,7 +14,9 @@ export function compareThroughput(datawrapRps: number, otherRps: number): { verd
   const theirs = Math.max(Number(otherRps) || 0, 0);
   if (!ours || !theirs) return { verdict: "unknown", label: "No measurement" };
   const ratio = ours / theirs;
-  if (Math.abs(ratio - 1) <= SIMILAR_BAND) return { verdict: "similar", label: "About the same" };
+  // Within SIMILAR_BAND either way (faster side over slower side), as the API's
+  // comparison() does: a competitor 1.103x faster is not "about the same".
+  if (Math.max(ratio, 1 / ratio) <= 1 + SIMILAR_BAND) return { verdict: "similar", label: "About the same" };
   return ratio > 1
     ? { verdict: "faster", label: `Datawrap ${ratio.toFixed(1)}× faster` }
     : { verdict: "slower", label: `Datawrap ${(1 / ratio).toFixed(1)}× slower` };

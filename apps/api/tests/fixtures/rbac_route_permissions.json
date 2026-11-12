@@ -280,6 +280,7 @@
   "POST /api/v1/connectors/jobs/{job_id}/retry": "connector.write",
   "POST /api/v1/connectors/jobs/{job_id}/sync": "connector.write",
   "POST /api/v1/connectors/saved": "connector.write",
+  "POST /api/v1/connectors/saved/{connector_id}/region-verification": "connector.write",
   "POST /api/v1/connectors/saved/{connector_id}/rotate-secrets": "connector.write",
   "POST /api/v1/connectors/saved/{connector_id}/test": "connector.write",
   "POST /api/v1/connectors/test": "connector.write",

@@ -77,6 +77,13 @@ from .adapters import (
 )
 from .connector_capabilities import resolve_driver_type, source_read_driver
 from .job_quarantine import align_reported_rejects, rebase_batch_rejects
+from .stream_commit_window import (
+    bind_commit_window,
+    copy_declined_for_replay,
+    persist_batch_watermark,
+    persist_copy_watermark,
+    persist_final_watermark,
+)
 from .stream_row_accounting import (
     _raw_page_rows,
     stamp_incremental_no_op,
@@ -444,7 +451,6 @@ def _stream_database_transfer_impl(
         resolve_incremental_read_scope,
         resolve_sync_contract,
         seed_sdk_contract_defaults,
-        set_watermark,
         source_bounds_cursor_reads,
     )
 
@@ -619,8 +625,9 @@ def _stream_database_transfer_impl(
                 destination=run.cfg.destination,
                 destination_config=run.cfg.dest_cfg,
             )
+            _scope = bind_commit_window(run, _scope, _src_rich_catalog, contract, _tbl)
             pre_copy_cursor_key = _scope.cursor_key
-            pre_copy_watermark = _scope.watermark
+            pre_copy_watermark = _scope.read_watermark if run.cfg.replay_through else _scope.watermark
             from services.sync_cursor import reconcile_cursor_tiebreak
 
             run.cfg.cursor_pk_source = reconcile_cursor_tiebreak(_scope, run.cfg.cursor_pk_source)
@@ -780,6 +787,7 @@ def _stream_database_transfer_impl(
                 or run.cfg.fk_orphan_guard is not None
                 or bool(risk_contract_columns)
                 or keyless_merge_target
+                or copy_declined_for_replay(run.cfg)
             ) else _try_copy_fast_path(
                 source=run.cfg.source,
                 destination=run.cfg.destination,
@@ -849,25 +857,17 @@ def _stream_database_transfer_impl(
 
             stamp_watermark_origin(
                 run.tally.dest_summary, cursor_key=pre_copy_cursor_key,
-                cursor_column=run.cfg.cursor_source_col, before=pre_copy_watermark,
+                cursor_column=run.cfg.cursor_source_col, before=run.cfg.route_watermark,
             )
             wm = str(run.tally.dest_summary.get("incremental_watermark") or "").strip()
             if int(rows_copied or 0) == 0:
                 stamp_incremental_no_op(run.tally.dest_summary)
-                run.tally.dest_summary["watermark"] = pre_copy_watermark
+                persist_copy_watermark(run, pre_copy_cursor_key, None, run.cfg.route_watermark)
+                run.tally.dest_summary["watermark"] = run.cfg.route_watermark
             elif wm and pre_copy_cursor_key:
-                set_watermark(
-                    pre_copy_cursor_key,
-                    wm,
-                    metadata={
-                        "job_id": run.cfg.job_id,
-                        "sync_mode": run.cfg.effective_sync,
-                        "cursor_column": run.cfg.cursor_source_col,
-                        # The column a composite watermark is decodable on (QA ACC-02).
-                        "tiebreak_column": run.cfg.cursor_pk_source,
-                        "cursor_type": str((run.cfg.schema or {}).get(run.cfg.cursor_source_col) or ""),
-                    },
-                )
+                # Never behind the stored mark; carries the commit-order bound
+                # this run read under, and the D110 undo restore point.
+                wm = persist_copy_watermark(run, pre_copy_cursor_key, wm, run.cfg.route_watermark) or wm
                 run.tally.dest_summary["watermark"] = wm
                 # D188 — COPY seeds ``cursor >= watermark`` (D60/D98) and its
                 # high-water mark is the staging MAX: the same window contract
@@ -878,18 +878,9 @@ def _stream_database_transfer_impl(
                     run.tally.dest_summary,
                     cursor=run.cfg.cursor_source_col,
                     pk=run.cfg.cursor_pk_source or "",
-                    seed=pre_copy_watermark,
+                    seed=run.cfg.route_watermark if run.cfg.replay_through else pre_copy_watermark,
                     seed_inclusive=True,
                     high=wm,
-                )
-                # D110 — if verification removes this run's batch, the route
-                # watermark must roll back to this pre-run value.
-                run.tally.dest_summary.setdefault(
-                    "watermark_restore_point",
-                    {
-                        "cursor_key": pre_copy_cursor_key,
-                        "watermark": pre_copy_watermark,
-                    },
                 )
             run.tally.dest_summary["cursor_key"] = pre_copy_cursor_key
             if pre_copy_watermark not in (None, "") and run.cfg.cursor_source_col:
@@ -993,6 +984,10 @@ def _stream_database_transfer_impl(
             source=run.cfg.source if is_callable_source(run.cfg.source) or is_callable_source(run.cfg.src_cfg) else run.cfg.src_cfg,
             destination=run.cfg.destination,
             destination_config=run.cfg.dest_cfg,
+        )
+        scope = bind_commit_window(
+            run, scope, _src_rich_catalog, contract,
+            "" if is_callable_source(run.cfg.source) or is_callable_source(run.cfg.src_cfg) else run.cfg.table,
         )
         cursor_key = scope.cursor_key
         run.cfg.watermark = scope.read_watermark
@@ -2050,16 +2045,19 @@ def _stream_database_transfer_impl(
     # against a destination holding the whole job's rows read as a checksum
     # mismatch on a correct load. The first pass records the seed it started
     # from ("" = the route had no watermark) and every resume reuses it.
-    window_seed_bookmark = incremental_seed_bookmark
+    # A commit-safe window re-reads behind the stored mark; Gate-8's window
+    # stays the cursor window past it — recovered rows are judged by count and
+    # by the out-of-window drift measure, never by widening the window (D188).
+    window_seed_bookmark = run.cfg.route_watermark if run.cfg.replay_through else incremental_seed_bookmark
     window_seed_inclusive = seeded_from_watermark
-    job_start_watermark = run.cfg.watermark
+    job_start_watermark = run.cfg.route_watermark if run.cfg.replay_through else run.cfg.watermark
     if run.cfg.incremental and run.cfg.cursor_source_col:
         if resumed_pass and checkpoint.incremental_seed is not None:
             job_start_watermark = checkpoint.incremental_seed or None
             window_seed_bookmark = job_start_watermark
             window_seed_inclusive = job_start_watermark is not None
         elif not resumed_pass:
-            checkpoint.incremental_seed = str(run.cfg.watermark or "")
+            checkpoint.incremental_seed = str(job_start_watermark or "")
     # D124/D60/D98 — every read seeded from the watermark re-reads its whole
     # tie group, whichever branch pages the source. Peers an earlier run
     # already delivered are dropped against the destination's pre-run rows at
@@ -2069,7 +2067,7 @@ def _stream_database_transfer_impl(
     # unkeyed append matches full-row content: an upsert still rewrites a peer
     # whose content changed, and a quiet poll stays a no-op, so its covered-
     # content proof still runs. The verify re-read drops the same rows.
-    run.cfg._tie_dedupe = seeded_from_watermark
+    run.cfg._tie_dedupe = seeded_from_watermark or bool(run.cfg.replay_through)
     run.cur._boundary_fps_state: dict[str, Any] = {
         "fps": None,
         "match_cols": [],
@@ -2574,26 +2572,9 @@ def _stream_database_transfer_impl(
         # route watermark still reflects committed rows, never behind them.
         if run.cfg.incremental and running_cursor and cursor_key:
             try:
-                set_watermark(
-                    cursor_key,
-                    running_cursor,
-                    metadata={
-                        "job_id": run.cfg.job_id,
-                        "sync_mode": run.cfg.effective_sync,
-                        # A watermark is a value of one column; record which one
-                        # so a later run on a different cursor cannot inherit it.
-                        "cursor_column": run.cfg.cursor_source_col,
-                        # The column a composite watermark is decodable on (QA ACC-02).
-                        "tiebreak_column": run.cfg.cursor_pk_source,
-                        "cursor_type": str((run.cfg.schema or {}).get(run.cfg.cursor_source_col) or ""),
-                    },
-                )
-                # D110 — batch undo restores the watermark to this pre-run
-                # value when it removes the rows this advance stood for.
-                run.tally.dest_summary.setdefault(
-                    "watermark_restore_point",
-                    {"cursor_key": cursor_key, "watermark": job_start_watermark},
-                )
+                # Never behind the stored mark (a re-read window pages below
+                # it); also stamps the D110 batch-undo restore point.
+                persist_batch_watermark(run, cursor_key, running_cursor, job_start_watermark)
             except Exception as wm_exc:
                 raise RuntimeError(
                     "Cursor watermark persist failed after committed batch — "
@@ -2848,6 +2829,7 @@ def _stream_database_transfer_impl(
             run.tally.dest_summary["delivery_semantics"] = "at_least_once_idempotent_apply"
             run.tally.dest_summary["resume_write_mode"] = run.cfg.write_mode
         run.tally.dest_summary["watermark"] = run.cfg.watermark
+        persist_final_watermark(run, cursor_key, None, job_start_watermark)
         from services.incremental_drift import stamp_watermark_origin
 
         stamp_watermark_origin(
@@ -2934,27 +2916,9 @@ def _stream_database_transfer_impl(
             return int(written_n or 0), run.cfg.ddl_log, run.tally.dest_summary, run.cfg.columns
         raise ValueError("Source table is empty")
 
-    if run.cfg.incremental and running_cursor and cursor_key and running_cursor != run.cfg.watermark:
-        set_watermark(
-            cursor_key,
-            running_cursor,
-            metadata={
-                "job_id": run.cfg.job_id,
-                "sync_mode": run.cfg.effective_sync,
-                # A watermark is a value of one column; record which one so a
-                # later run on a different cursor cannot inherit it.
-                "cursor_column": run.cfg.cursor_source_col,
-                # The column a composite watermark is decodable on (QA ACC-02).
-                "tiebreak_column": run.cfg.cursor_pk_source,
-                "cursor_type": str((run.cfg.schema or {}).get(run.cfg.cursor_source_col) or ""),
-            },
-        )
-        # D110 — batch undo restores the watermark to this pre-run value
-        # when it removes the rows this advance stood for.
-        run.tally.dest_summary.setdefault(
-            "watermark_restore_point",
-            {"cursor_key": cursor_key, "watermark": job_start_watermark},
-        )
+    # The run's high mark, the commit-order bound it read under, and the D110
+    # restore point — stored together now that the write pass is at rest.
+    persist_final_watermark(run, cursor_key, running_cursor, job_start_watermark)
 
     # Phase F1 — write-pass fingerprints hash the same remapped rows just written.
     # Warehouse full refresh auto-re-reads, including same-engine
@@ -3235,7 +3199,7 @@ def _stream_database_transfer_impl(
                         # The write pass dropped these tie peers as already at the
                         # destination (judged against its pre-run rows, cached):
                         # the digest covers what was written, not re-delivered.
-                        _landed = _boundary_rows_already_landed(run, batch.headers, digest_rows)
+                        _landed = _boundary_rows_already_landed(run, batch.headers, digest_rows, verify=True)
                         if _landed:
                             digest_rows = [
                                 r for i, r in enumerate(digest_rows) if i not in _landed

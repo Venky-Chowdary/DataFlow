@@ -12,6 +12,7 @@ refused rather than silently turned into a replace.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -68,7 +69,11 @@ def land_export_bytes(
     (``services.export_object_store``): one object per job, so an append run
     stores this run's rows as its own object and never rewrites another's.
     """
-    from services.export_object_store import exports_use_object_store, store_job_export
+    from services.export_object_store import (
+        exports_use_object_store,
+        job_export_workspace,
+        store_job_export,
+    )
     from services.export_paths import generated_export_path, resolve_export_path
     from services.local_file_policy import local_destination_refusal
     from services.sync_cursor import is_append_sync, resolve_effective_sync_mode
@@ -84,16 +89,27 @@ def land_export_bytes(
     ext = os.path.splitext(export_name)[1].lstrip(".") or fmt or "json"
     configured = str(getattr(destination, "output_path", "") or "").strip()
     appending, rows_before = False, None
+    legacy_note = ""
+    # The export lands in the folder of the job's workspace (audit H-2): two
+    # workspaces naming the same ``output_path`` never share a file.
+    workspace_id = job_export_workspace(job_id)
     if configured:
-        target = resolve_export_path(configured, default_ext=ext)
+        target = resolve_export_path(configured, default_ext=ext, workspace_id=workspace_id)
         export_path = str(target)
         target.parent.mkdir(parents=True, exist_ok=True)
-        appending = is_append_sync(
-            resolve_effective_sync_mode(sync_mode)
-        ) and os.path.exists(export_path)
         from services.exit_job_guard import sealed_export_name
 
-        if sealed_export_name(target.name):
+        sealed = sealed_export_name(target.name)
+        append_mode = is_append_sync(resolve_effective_sync_mode(sync_mode))
+        if append_mode and not sealed and not os.path.exists(export_path):
+            # Review M3: the file this export has been appending to may still be
+            # in the flat folder from before workspace folders. Continue it when
+            # this workspace provably owns it; otherwise say a new file started.
+            from services.export_migration import adopt_flat_export
+
+            legacy_note = adopt_flat_export(target, workspace_id)
+        appending = append_mode and os.path.exists(export_path)
+        if sealed:
             # A rehearsal's extract is sealed by its SHA-256: created once, never appended to or replaced.
             try:
                 with open(export_path, "xb") as fh:
@@ -114,7 +130,7 @@ def land_export_bytes(
         name = target.name
     else:
         name = f"export_{job_id}.{ext}"
-        export_path = str(generated_export_path(name))
+        export_path = str(generated_export_path(name, workspace_id=workspace_id))
         with open(export_path, "wb") as fh:
             fh.write(export_bytes)
     from pathlib import Path
@@ -135,6 +151,9 @@ def land_export_bytes(
 
         # The file's records before this run appended: the run's own rows are the delta (review 4, H-3).
         landed[PRECOUNT_KEY] = rows_before
+    if legacy_note:
+        logging.getLogger(__name__).warning("Export %s for job %s: %s", name, job_id, legacy_note)
+        landed["legacy_flat_export"] = legacy_note
     return landed
 
 
@@ -147,8 +166,6 @@ def existing_record_count(fmt: str, path: str) -> int | None:
             return sum(1 for _ in _iter_artifact_records(fh, name=os.path.basename(path),
                                                          fmt=normalize_export_format(fmt), written_here=True))
     except Exception:  # noqa: BLE001 - an uncounted file leaves the append unproven, never proven
-        import logging
-
         logging.getLogger(__name__).info("existing export %s could not be counted", os.path.basename(path),
                                          exc_info=True)
         return None

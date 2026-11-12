@@ -129,6 +129,11 @@ jobs:
 
   # Data Pilot answer floors: local engine only, no network LLM. The provider
   # eval skips here (no key) — run it by hand with DATAFLOW_PILOT_EVAL_PROVIDER.
+  # The test_pilot_truth_* files are the ground-truth suite: each case seeds
+  # real jobs / pipelines / connectors / uploads (tests/helpers/pilot_truth.py),
+  # asks Pilot, and requires the numbers and ids in the answer to equal what
+  # the stores say — plus outage honesty, abstention, workspace isolation,
+  # error masking and AI egress. All of it runs offline.
   pilot-answer-quality:
     runs-on: ubuntu-latest
     steps:
@@ -164,6 +169,31 @@ jobs:
             tests/test_pilot_tool_permissions.py \
             tests/test_rag_grounded_answers.py \
             tests/test_rag_multi_subject_answers.py \
+            tests/test_pilot_truth_jobs.py \
+            tests/test_pilot_truth_totals.py \
+            tests/test_pilot_truth_outage.py \
+            tests/test_pilot_truth_abstention.py \
+            tests/test_pilot_truth_isolation.py \
+            tests/test_pilot_truth_datasets.py \
+            tests/test_pilot_truth_result_store.py \
+            tests/test_pilot_truth_errors.py \
+            tests/test_pilot_truth_egress.py \
+            tests/test_pilot_truth_windows.py \
+            tests/test_pilot_truth_status.py \
+            tests/test_pilot_truth_pipelines.py \
+            tests/test_pilot_truth_narration.py \
+            tests/test_pilot_truth_followups.py \
+            tests/test_pilot_truth_injection.py \
+            tests/test_pilot_truth_latency.py \
+            tests/test_pilot_truth_lows.py \
+            tests/test_pilot_truth_qualifiers.py \
+            tests/test_pilot_truth_dst.py \
+            tests/test_pilot_truth_dates.py \
+            tests/test_pilot_truth_intersection.py \
+            tests/test_pilot_truth_compound.py \
+            tests/test_pilot_truth_memory.py \
+            tests/test_pilot_truth_lows2.py \
+            tests/test_pilot_truth_mutants.py \
             -q --tb=short -rs
 
   # Property 2 — no-config transfer must never be blocked by additive/DDL gates.

@@ -11,7 +11,7 @@ import json
 import logging
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from collections.abc import Mapping
 from typing import Any
@@ -289,6 +289,12 @@ class SyncContract:
     #: snapshot reader filter on it and skip rows the log had captured.
     poll_cursor_field: str = ""
     poll_cursor_semantics: str = ""
+    #: Fallback commit-safe re-read window (services.commit_safe_window): None
+    #: = product default, 0 = declared off.
+    cursor_overlap_seconds: int | None = None
+    cursor_overlap_values: int | None = None
+    #: Run the full key census every N runs of this route (0 = off).
+    key_census_every: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SyncContract:
@@ -318,12 +324,35 @@ class SyncContract:
             cursor_lookback_days=_contract_lookback_days(data),
             poll_cursor_field=str(data.get("poll_cursor_field") or "").strip(),
             poll_cursor_semantics=str(data.get("poll_cursor_semantics") or "").strip().lower(),
+            cursor_overlap_seconds=_contract_optional_int(data, "cursor_overlap_seconds"),
+            cursor_overlap_values=_contract_optional_int(data, "cursor_overlap_values"),
+            key_census_every=_contract_optional_int(data, "key_census_every") or 0,
         )
+
+    def overlap_declaration(self) -> dict[str, int]:
+        """The declared re-read window keys, absent when left to the default."""
+        out: dict[str, int] = {}
+        if self.cursor_overlap_seconds is not None:
+            out["cursor_overlap_seconds"] = self.cursor_overlap_seconds
+        if self.cursor_overlap_values is not None:
+            out["cursor_overlap_values"] = self.cursor_overlap_values
+        return out
 
     def primary_key_columns(self) -> list[str]:
         """Return PK columns; supports ``id`` or ``order_id,line_id`` / ``primary_keys``."""
         raw = (self.primary_key or "").replace(";", ",")
         return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _contract_optional_int(data: dict[str, Any], key: str) -> int | None:
+    """A declared non-negative integer, or None when absent/invalid."""
+    raw = data.get(key)
+    if raw is None or isinstance(raw, bool) or str(raw).strip() == "":
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 def _contract_lookback_days(data: dict[str, Any]) -> int:
@@ -618,6 +647,20 @@ class IncrementalReadScope:
     #: Declared business-date re-read window in days (0 = none). Only
     #: ``business_date`` cursors may declare one — see evaluate_cursor_semantics.
     lookback_days: int = 0
+    #: Declared type the stored watermark was measured on ("" when unrecorded).
+    watermark_cursor_type: str = ""
+    #: Commit-order bound stored with the watermark (``{}`` when none).
+    commit_horizon: Mapping[str, Any] = field(default_factory=dict)
+    #: Runs of this route since its last key census (services.incremental_census).
+    runs_since_key_census: int = 0
+    #: Last every-row confirmation of a text cursor's shape (``{}`` when none).
+    text_shape_check: Mapping[str, Any] = field(default_factory=dict)
+    #: Source keys this route quarantined (services.incremental_census).
+    quarantined_keys: list = field(default_factory=list)
+    quarantined_keys_complete: bool = True
+    #: This run's commit-safe window (services.commit_safe_window), attached by
+    #: a read path that de-duplicates re-read rows. None = read from the mark.
+    commit_safe: Any = None
 
     @property
     def read_watermark(self) -> str | None:
@@ -625,7 +668,10 @@ class IncrementalReadScope:
 
         The stored mark never moves — only the read seed does. An unparseable
         watermark refuses rather than silently skipping the declared window.
+        A commit-safe window that re-reads behind the mark supplies the seed.
         """
+        if self.commit_safe is not None and getattr(self.commit_safe, "replays", False):
+            return self.commit_safe.seed
         if not self.lookback_days or self.watermark in (None, ""):
             return self.watermark
         text = str(self.watermark)
@@ -740,6 +786,12 @@ def resolve_incremental_read_scope(
         watermark_cursor_column=str(metadata.get("cursor_column") or ""),
         watermark_tiebreak_column=stored_tiebreak,
         lookback_days=contract.cursor_lookback_days if contract else 0,
+        watermark_cursor_type=str(metadata.get("cursor_type") or ""),
+        commit_horizon=dict(metadata.get("commit_horizon") or {}),
+        runs_since_key_census=int(metadata.get("runs_since_key_census") or 0),
+        text_shape_check=dict(metadata.get("text_shape_check") or {}),
+        quarantined_keys=list(metadata.get("quarantined_keys") or []),
+        quarantined_keys_complete=bool(metadata.get("quarantined_keys_complete", True)),
     )
 
 
@@ -1176,19 +1228,64 @@ def source_bounds_cursor_reads(source_type: str) -> bool:
     return (source_type or "").strip().lower() in CURSOR_PUSHDOWN_SOURCES
 
 
+def cursor_value_coercer(cursor_type: Any, *, date_locale: str | None = None) -> Any:
+    """How a file or document route reads a cursor cell for its bound, or None.
+
+    A file arrives as text, and its write path parses a date or date-time
+    column under the file's date order (``12/30/2025`` → ``2025-12-30``). That
+    parsed value is what the watermark keeps, so the bound has to compare the
+    same value (review H-1): the raw text ranks as text, above every date, and
+    every earlier row was appended again on each run. The column's declared or
+    inferred type decides, never the value's look. Only file and document
+    routes use this; a SQL source's values are classified by themselves.
+
+    ``None`` when the type is not temporal (the cell's text is its value). A
+    cell that does not parse keeps its text for the write path, but its
+    ``parse`` (``None`` for such a cell) lets the bound refuse it rather than
+    compare it as text, which ranks above every date (review 3, Medium).
+    ``date_locale`` defaults to the active one, read once here so a worker
+    thread compares under the same order.
+    """
+    from services.type_system import normalize_logical_type
+
+    logical = normalize_logical_type(str(cursor_type)) if str(cursor_type or "").strip() else ""
+    if logical not in ("date", "datetime"):
+        return None
+    from services.transform_engine import _active_date_locale, _parse_date, _parse_datetime
+
+    locale = _active_date_locale(date_locale or "")
+
+    def parse(text: str) -> str | None:
+        if logical == "date":
+            parsed = _parse_date(text, date_locale=locale)
+            if parsed is not None:
+                return parsed
+        return _parse_datetime(text, date_locale=locale)
+
+    def coerce(text: str) -> str:
+        return parse(text) or text
+
+    coerce.parse = parse  # type: ignore[attr-defined]
+    coerce.logical = logical  # type: ignore[attr-defined]
+    return coerce
+
+
 def row_after_watermark(
     rec: Any,
     cursor_column: str,
     watermark: str | None,
     *,
     primary_key: str = "",
+    coerce: Any = None,
 ) -> bool | None:
     """True if ``rec`` is past ``watermark``, False if already landed, None if unreadable.
 
     One predicate for the batch bound, the collision probe, and the
     population-fit walk. A missing cursor value is unreadable — callers that
     write must refuse; callers that only judge keep the row so it cannot
-    silently leave the batch.
+    silently leave the batch. ``coerce`` (:func:`cursor_value_coercer`) reads
+    the cell as the value its watermark keeps; a cell it cannot parse is
+    unreadable too, never compared as text.
     """
     col = (cursor_column or "").strip()
     if not col:
@@ -1198,7 +1295,10 @@ def row_after_watermark(
     text = present_cell_text(raw)
     if text is None:
         return None
-    candidate = text
+    parse = getattr(coerce, "parse", None)
+    candidate = parse(text) if parse is not None else coerce(text) if coerce is not None else text
+    if candidate is None:
+        return None
     if pk and pk != col:
         candidate = encode_keyset_bookmark(
             [candidate, present_cell_text(rec.get(pk) if isinstance(rec, dict) else None) or ""]
@@ -1270,6 +1370,8 @@ def records_after_watermark(
     watermark: str | None,
     *,
     primary_key: str = "",
+    coerce: Any = None,
+    text_calendar_refusal: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     """Bound already-parsed records to the delta past ``watermark``.
 
@@ -1283,23 +1385,98 @@ def records_after_watermark(
     bounded by the same typed comparator (and the same composite tie-break) the
     database reader uses. Returns ``(delta, unbounded)`` where ``unbounded``
     counts records that carry no cursor value: those cannot be proven new or
-    old, and the caller must refuse rather than guess.
+    old, and the caller must refuse rather than guess. ``coerce``
+    (:func:`cursor_value_coercer`) reads each cell as its column's type, the
+    value the watermark of a file route keeps.
+
+    ``text_calendar_refusal``: the route keeps this cursor as text (no
+    ``coerce``), so a day/month or month/day date in it sorts by its leading
+    digits, not in time — '01/15/2026' before '12/31/2025' — and a later row
+    would be skipped. Such a value is refused, as a SQL text cursor of that
+    shape is, rather than compared on an order that is not time order.
     """
     col = (cursor_column or "").strip()
     if not col:
         return list(records), 0
+    if text_calendar_refusal and coerce is None:
+        _refuse_calendar_text(records, col)
+        _refuse_non_temporal_cells(records, col, watermark)
     delta: list[dict[str, Any]] = []
     unbounded = 0
+    unparsed = 0
     for rec in records:
         verdict = row_after_watermark(
-            rec, cursor_column, watermark, primary_key=primary_key
+            rec, cursor_column, watermark, primary_key=primary_key, coerce=coerce
         )
         if verdict is None:
-            unbounded += 1
+            if present_cell_text(rec.get(col) if isinstance(rec, dict) else None) is None:
+                unbounded += 1
+            else:
+                unparsed += 1
             continue
         if verdict:
             delta.append(rec)
+    if unparsed:
+        _refuse_unparsed_cells(col, unparsed, getattr(coerce, "logical", "date"))
     return delta, unbounded
+
+
+def _refuse_non_temporal_cells(
+    records: list[dict[str, Any]], column: str, watermark: str | None
+) -> None:
+    """A text-kept file cursor that holds dates: refuse its cells that are not.
+
+    The column's other cells (or its stored watermark) order as dates; a cell
+    like a placeholder does not, ranks above every date as text, and became
+    the watermark (review 3, Medium).
+    """
+    from services.cursor_order import is_temporal_value
+
+    texts = [present_cell_text(rec.get(column)) if isinstance(rec, dict) else None for rec in records]
+    texts = [t for t in texts if t is not None]
+    seed = None
+    if watermark not in (None, ""):
+        seed = split_cursor_bookmark(str(watermark), has_tiebreak=_is_composite(str(watermark)))[0]
+    if not (any(is_temporal_value(t) for t in texts) or is_temporal_value(seed)):
+        return
+    odd = sum(1 for t in texts if not is_temporal_value(t))
+    if odd:
+        _refuse_unparsed_cells(column, odd, "date")
+
+
+def _refuse_unparsed_cells(column: str, count: int, logical: str) -> None:
+    """Refuse cells of a date cursor that cannot be read as dates (review 3, Medium).
+
+    Compared as text such a cell ranks above every date and became the
+    watermark, so every later run wrote nothing and reported success. The
+    message names the column and the count, never the values.
+    """
+    kind = "date-time" if logical == "datetime" else "date"
+    raise ValueError(
+        f"Cursor '{column}' holds {kind}s, but {count:,} cell(s) in it cannot be read "
+        f"as a {kind} under the file's date order: compared as text they would rank "
+        "above every date and become the watermark, so later rows would be skipped "
+        "without an error. Set the file's date order (for example date_locale=DMY or "
+        "MDY) when its dates are written day/month or month/day, or clean those cells "
+        "at the source, or run this sync as a full refresh."
+    )
+
+
+def _refuse_calendar_text(records: list[dict[str, Any]], column: str) -> None:
+    from services.cursor_order import is_calendar_text_value
+
+    for rec in records:
+        text = present_cell_text(rec.get(column)) if isinstance(rec, dict) else None
+        if text is not None and is_calendar_text_value(text):
+            raise ValueError(
+                f"Cursor '{column}' is kept as text, but it holds dates written day/month "
+                f"or month/day ('{text.strip()}'): as text they sort by their leading day "
+                "or month, not by date, so an incremental read past the watermark would "
+                "skip rows without an error. Set the file's date order (for example "
+                "date_locale=DMY or MDY) so the column is read as a date, declare it as a "
+                "date or timestamp, use an ISO-8601 (YYYY-MM-DD) cursor, or run this sync "
+                "as a full refresh."
+            )
 
 
 def max_cursor_value(
@@ -1338,15 +1515,11 @@ def max_cursor_value(
                 values.append(text)
         if not values:
             return None
-        from connectors.cursor_bind import cursor_instant_key
+        # One total order (services.cursor_order): the mark does not depend on
+        # the order the rows arrived in.
+        from services.cursor_order import max_value
 
-        instants = [cursor_instant_key(v) for v in values]
-        if all(k is not None for k in instants):
-            return values[max(range(len(values)), key=lambda i: instants[i])]
-        from services.cdc_engine import infer_watermark_type, max_watermark
-
-        wm_type = infer_watermark_type(values)
-        return max_watermark(values, wm_type)
+        return max_value(values)
 
     best: str | None = None
     for row in rows:
@@ -1652,8 +1825,9 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
     """Compare two cursor values using the same typed watermark logic.
 
     Returns -1 if a < b, 0 if equal, 1 if a > b.  None is treated as less
-    than any value. Composite watermarks compare lexicographically, and a
-    watermark written before the canonical separator existed still compares.
+    than any value. Composite watermarks compare on the cursor part, then the
+    tie-break, and a watermark written before the canonical separator existed
+    still compares. Offset-bearing timestamps compare by instant, exactly.
     """
     if a is None and b is None:
         return 0
@@ -1661,28 +1835,27 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
         return -1
     if b is None:
         return 1
+    from services.cursor_order import compare_values
+
     sa, sb = str(a), str(b)
-    if _is_composite(sa) and _is_composite(sb):
-        a_cur, a_pk = split_cursor_bookmark(sa, has_tiebreak=True)
-        b_cur, b_pk = split_cursor_bookmark(sb, has_tiebreak=True)
-        base = compare_cursor_values(a_cur, b_cur)
-        if base != 0:
-            return base
-        # The tie-break is a key, typed like the cursor: comparing it as text
-        # ranks pk 999 above pk 2000, so a batch's high mark stopped at the
-        # lexically largest key and the next run re-read every key above it.
-        return compare_cursor_values(a_pk, b_pk)
-    # Offset-bearing timestamps compare by instant, exactly (no float epoch,
-    # no format the generic datetime parser happens to reject).
-    from connectors.cursor_bind import cursor_instant_key
-
-    ka, kb = cursor_instant_key(sa), cursor_instant_key(sb)
-    if ka is not None and kb is not None:
-        return (ka > kb) - (ka < kb)
-    from services.cdc_engine import compare_watermarks, infer_watermark_type
-
-    wm_type = infer_watermark_type([sa, sb])
-    return compare_watermarks(sa, sb, wm_type)
+    ca, cb = _is_composite(sa), _is_composite(sb)
+    if not (ca or cb):
+        # A total order: each value's class is decided by the value alone
+        # (audit M4 — inferring it from the pair made 2 < 10 < 1a < 2).
+        return compare_values(sa, sb)
+    a_cur, a_pk = split_cursor_bookmark(sa, has_tiebreak=ca)
+    b_cur, b_pk = split_cursor_bookmark(sb, has_tiebreak=cb)
+    base = compare_values(a_cur, b_cur)
+    if base != 0:
+        return base
+    if ca != cb:
+        # Same cursor value: the bookmark that names a tie-break is further on
+        # than the one that cannot say which peer row was last applied.
+        return 1 if ca else -1
+    # The tie-break is a key, typed like the cursor: comparing it as text
+    # ranks pk 999 above pk 2000, so a batch's high mark stopped at the
+    # lexically largest key and the next run re-read every key above it.
+    return compare_values(a_pk, b_pk)
 
 
 def requires_incremental(sync_mode: str) -> bool:

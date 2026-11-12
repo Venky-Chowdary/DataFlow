@@ -2,12 +2,18 @@
 
 ``DATAFLOW_AUDIT_ANCHOR_PROVIDER`` picks the backend:
 
-* ``stub`` (default) — a local JSONL receipt only. It is **not** write-once, so
-  every receipt says ``status: not_anchored``.
+* ``stub`` (default; ``local`` is an alias) — a local JSONL receipt only. It is
+  **not** write-once, so every receipt says ``status: not_anchored``.
 * ``s3`` — S3 Object Lock in compliance mode (:mod:`services.audit_anchor_s3`).
   A receipt reads ``anchored`` only after the object, its retention and its
   digest were read back; any failure reads ``failed`` with the reason. It
   never falls back to the stub.
+
+A receipt always names the store that really holds it (audit M-16). Any other
+requested provider (``tsa`` …) is not implemented: the receipt is written to
+the local stub store, is labelled ``stub``, carries ``requested_provider`` and
+says plainly that the requested provider is not implemented; its status is
+``failed`` because the anchor the operator asked for did not happen.
 
 Every receipt is also appended to the local index (``audit_tip_anchors.jsonl``)
 so the audit page can list them; the bucket, not the index, is the authority,
@@ -56,8 +62,25 @@ def _store_path() -> Path:
     return Path(env) if env else ANCHOR_STORE
 
 
+#: The local append-only store; ``stub`` is its long-standing label.
+LOCAL_PROVIDER = "stub"
+S3_PROVIDER = "s3"
+_LOCAL_ALIASES = frozenset({"", "stub", "local"})
+
+
+def requested_anchor_provider() -> str:
+    """What ``AUDIT_ANCHOR_PROVIDER`` asks for (``s3``, ``tsa`` …), whether or not it is implemented."""
+    return (getenv_brand("AUDIT_ANCHOR_PROVIDER", LOCAL_PROVIDER) or LOCAL_PROVIDER).strip().lower()
+
+
 def anchor_provider() -> str:
-    return (getenv_brand("AUDIT_ANCHOR_PROVIDER", "stub") or "stub").strip().lower()
+    """The provider that actually stores receipts: ``s3`` when requested, else the local store.
+
+    A receipt must not carry the name of a provider that did not store it
+    (audit M-16): a requested provider this build does not implement is never
+    used as the label of a local write.
+    """
+    return S3_PROVIDER if requested_anchor_provider() == S3_PROVIDER else LOCAL_PROVIDER
 
 
 def _min_interval() -> float:
@@ -85,8 +108,10 @@ def anchor_digest(digest: str, *, kind: str, subject: str = "", event_time: str 
 
     Returns the AnchorReceipt (contract 2), or ``None`` for an empty digest. With
     the stub the receipt is ``not_anchored``; with S3 it is ``anchored`` or
-    ``failed`` (never assumed). A receipt is returned even when the local index
-    could not be written, so the caller still knows what happened.
+    ``failed`` (never assumed); with a provider this build does not implement it
+    is ``failed``, labelled with the local store that holds it. A receipt is
+    returned even when the local index could not be written, so the caller
+    still knows what happened.
     """
     value = (digest or "").strip()
     if not value:
@@ -105,13 +130,23 @@ def anchor_digest(digest: str, *, kind: str, subject: str = "", event_time: str 
                        reason=result["reason"], honesty=S3_HONESTY)
         if result["status"] != "anchored":
             logger.error("Audit anchor not confirmed (%s): %s", kind, result["reason"])
-    elif provider in {"stub", "local", ""}:
+    elif (requested := requested_anchor_provider()) in _LOCAL_ALIASES:
         receipt.update(status="not_anchored", reason="the local stub is not a write-once store",
                        honesty=STUB_HONESTY)
     else:
-        receipt.update(status="failed", reason=f"unknown anchor provider {provider!r}",
-                       honesty="Not anchored: the configured provider is not supported.")
+        # Say what was asked for and that it did not happen; never label the
+        # local write with the requested provider's name (audit M-16).
+        receipt.update(
+            status="failed", requested_provider=requested,
+            reason=f"requested anchor provider {requested!r} is not implemented in this build",
+            honesty=(f"Requested anchor provider '{requested}' is not implemented in this build: "
+                     "this receipt was written to the local stub store on this node. "
+                     "It is not S3 Object Lock / RFC-3161 TSA and is not an external anchor."),
+        )
+        logger.warning("AUDIT_ANCHOR_PROVIDER=%s is not implemented; %s anchored to the local stub store",
+                       requested, kind)
     receipt["anchored"] = receipt["status"] == "anchored"
+    receipt["externally_anchored"] = receipt["anchored"]
     _append(receipt)
     return receipt
 
@@ -193,6 +228,7 @@ def find_bucket_receipt(digest: str, *, kind: str, around: Any = None) -> dict[s
         return None
     return {"id": None, "provider": "s3", "kind": kind, "subject": None, "digest": digest, "tip_hash": digest,
             "anchored_at": None, "event_time": None, "status": "anchored", "anchored": True,
+            "externally_anchored": True,
             "location": location, "retention": None, "reason": None, "honesty": S3_HONESTY}
 
 

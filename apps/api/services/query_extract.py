@@ -24,11 +24,13 @@ import tempfile
 from types import SimpleNamespace
 from typing import Any
 
+from services.brand_env import getenv_brand
+
 logger = logging.getLogger(__name__)
 
 _EXTRACT_PAGE = 1000
-_EXTRACT_MAX_ROWS = int(os.environ.get("DATAFLOW_QUERY_EXTRACT_MAX_ROWS", "50000"))
-_EXTRACT_MAX_OBJECTS = int(os.environ.get("DATAFLOW_QUERY_EXTRACT_MAX_OBJECTS", "25"))
+_EXTRACT_MAX_ROWS = int(getenv_brand("DATAFLOW_QUERY_EXTRACT_MAX_ROWS", "50000"))
+_EXTRACT_MAX_OBJECTS = int(getenv_brand("DATAFLOW_QUERY_EXTRACT_MAX_OBJECTS", "25"))
 
 # Connector families with a `read_object` adapter the transfer engine already
 # uses — the query extract reuses exactly those readers.
