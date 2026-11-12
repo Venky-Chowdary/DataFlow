@@ -3602,6 +3602,7 @@ def _maybe_attach_verification_ladder(
             resolve_driver_type(source_endpoint.format),
             _cat_cfg,
             str(source_endpoint.table or _cat_cfg.get("table") or ""),
+            source=source_endpoint,  # a query / procedure never marks (review 2 F2)
         )
         carried_types = _marked != dest_types
         dest_types = _marked

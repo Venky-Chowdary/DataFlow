@@ -1630,7 +1630,7 @@ def _stream_database_transfer_impl(
             run.cfg.digest_dest_types, run.cfg.dest_type, run.cfg.dest_cfg, table=str(run.cfg.dest_table)
         )
         run.cfg.digest_dest_types = mark_typed_source_text_carriers(
-            run.cfg.digest_dest_types, run.cfg.mappings, run.cfg.src_read_type, run.cfg.src_cfg, str(run.cfg.table or "")
+            run.cfg.digest_dest_types, run.cfg.mappings, run.cfg.src_read_type, run.cfg.src_cfg, str(run.cfg.table or ""), source=run.cfg.source
         )
     except Exception as exc:
         logger.warning(

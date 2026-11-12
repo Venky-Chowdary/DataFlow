@@ -128,20 +128,27 @@ def mark_typed_source_text_carriers(
     source_db_type: str,
     source_cfg: dict[str, Any],
     source_table: str,
+    *,
+    source: Any = None,
 ) -> dict[str, str]:
     """``basis`` with each text column a typed source column lands in marked.
 
-    See ``fingerprint_rules.mark_typed_text_carriers``. Only a typed database
-    source has a catalog to ask; the catalog is not read when no column of the
-    basis is a text column.
+    See ``fingerprint_rules.mark_typed_text_carriers``. Only a plain table read
+    of a typed database source has a catalog to ask: a query or procedure
+    (``source`` endpoint or ``source_cfg``) has no catalog column behind its
+    output — the table its FROM names is not what it projects (review 2 F2).
+    The catalog is not read when no column of the basis is a text column.
     """
     from services.fingerprint_rules import is_text_family, mark_typed_text_carriers
+    from services.procedure_source import is_callable_source
     from services.shape_apply import is_typed_value_source
 
     out = dict(basis or {})
     if not any(is_text_family(str(v or "")) for v in out.values()):
         return out
-    if not is_typed_value_source(source_db_type):
+    if not is_typed_value_source(source_db_type) or not str(source_table or "").strip():
+        return out
+    if is_callable_source(source) or is_callable_source(source_cfg):
         return out
     return mark_typed_text_carriers(
         out,
