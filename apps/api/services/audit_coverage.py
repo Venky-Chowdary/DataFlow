@@ -38,6 +38,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "auth.sso_enforced.break_glass": "A platform administrator signed in with a password although a workspace of theirs requires single sign-on.",
     "system.security_settings.snapshot": "Effective security settings at API startup.",
     "control_store.imported": "A control-plane store file was imported into the shared store.",
+    "control_store.local_file_conflict": "A node's control-plane store file differs from the shared store and was not imported (shared state stays authoritative).",
     "acl.grant.create": "A resource ACL grant was created.",
     "acl.grant.revoke": "A resource ACL grant was revoked.",
     "schedule.definition.create": "A schedule definition was created.",

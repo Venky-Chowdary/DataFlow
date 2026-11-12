@@ -62,19 +62,11 @@ def _file_save(data: dict[str, Any]) -> None:
     STORE_PATH.write_text(json.dumps(dict(data), indent=2), encoding="utf-8")
 
 
-def _merge_absent_keys(shared: Any, local: Any) -> dict[str, Any]:
-    out = dict(shared) if isinstance(shared, dict) else {}
-    for key, value in (local.items() if isinstance(local, dict) else ()):
-        out.setdefault(key, value)
-    return out
-
-
 _DOC = SharedDoc(
     "shape_drafts",
     file_load=lambda: _file_load(),
     file_save=lambda data: _file_save(data),
     file_path=lambda: STORE_PATH,
-    merge=_merge_absent_keys,
 )
 
 

@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.platform_config import data_dir
-from services.shared_doc_store import SharedDoc, merge_records_by_id
+from services.shared_doc_store import SharedDoc
 from services.value_serializer import json_default
 from services.secret_vault import decrypt_secret, encrypt_secret
 
@@ -87,7 +87,6 @@ _DOC = SharedDoc(
     file_save=lambda data: _file_save(data),
     file_path=lambda: STORE_PATH,
     empty=lambda: {"keys": []},
-    merge=merge_records_by_id("keys"),
 )
 
 

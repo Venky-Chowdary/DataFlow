@@ -21,7 +21,7 @@ from typing import Any
 
 from services.byok_key_manager import is_ip_allowed
 from services.platform_config import data_dir
-from services.shared_doc_store import SharedDoc, merge_records_by_id
+from services.shared_doc_store import SharedDoc
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,6 @@ _DOC = SharedDoc(
     file_save=lambda data: _file_save(data),
     file_path=lambda: STORE_PATH,
     empty=lambda: {"tenants": []},
-    merge=merge_records_by_id("tenants"),
 )
 
 

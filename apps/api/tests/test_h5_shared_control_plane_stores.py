@@ -243,13 +243,20 @@ def test_existing_tenant_file_is_imported_once_and_never_deleted(tmp_path, monke
     assert tenant_store.STORE_PATH.read_bytes() == file_bytes
 
 
-def test_second_pods_file_adds_only_records_the_shared_store_lacks(tmp_path, monkeypatch):
+def test_second_pods_file_is_recorded_as_conflicting_never_merged(tmp_path, monkeypatch):
+    """Ops review High 2: once the shared store has records, a node's file is not merged in.
+
+    Merging added back every record the shared copy lacked, including ones
+    revoked or deleted through the shared store. The second file is now
+    recorded in the store's status as conflicting local data instead.
+    """
     monkeypatch.setenv("DATAFLOW_CONTROL_STORE_BACKEND", "file")
     monkeypatch.delenv("DATAWRAP_CONTROL_STORE_BACKEND", raising=False)
     _on_pod(monkeypatch, tmp_path / "pod-a")
     a = tenant_store.create_tenant("ws-a", "A")
     _on_pod(monkeypatch, tmp_path / "pod-b")
-    b = tenant_store.create_tenant("ws-b", "B")
+    tenant_store.create_tenant("ws-b", "B")
+    pod_b_file = tenant_store.STORE_PATH.read_bytes()
     monkeypatch.delenv("DATAFLOW_CONTROL_STORE_BACKEND")
 
     install_shared_store(monkeypatch)
@@ -257,11 +264,14 @@ def test_second_pods_file_adds_only_records_the_shared_store_lacks(tmp_path, mon
     assert [t.id for t in tenant_store.list_tenants()] == [a.id]
     tenant_store.update_tenant(a.id, sso_enforced=True)
     _on_pod(monkeypatch, tmp_path / "pod-b")
-    assert {t.id for t in tenant_store.list_tenants()} == {a.id, b.id}
+    assert [t.id for t in tenant_store.list_tenants()] == [a.id]
     assert tenant_store.get_tenant(a.id).sso_enforced is True
+    conflicts = tenant_store._DOC.status()["local_file_conflicts"]
+    assert [c["path"] for c in conflicts] == [str(tenant_store.STORE_PATH)]
+    assert tenant_store.STORE_PATH.read_bytes() == pod_b_file, "the conflicting file is left as it is"
 
 
-def test_log_import_is_idempotent_and_merges_two_pods(tmp_path, monkeypatch):
+def test_log_import_is_idempotent_and_a_second_pods_file_is_not_merged(tmp_path, monkeypatch):
     db = install_shared_store(monkeypatch)
     path_a, path_b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
     path_a.write_text('{"id": "1", "n": 1}\n{"id": "2", "n": 2}\n')
@@ -278,7 +288,8 @@ def test_log_import_is_idempotent_and_merges_two_pods(tmp_path, monkeypatch):
 
     current["path"] = path_b
     log.backend()
-    assert sorted(r["id"] for r in log.records(coll)) == ["1", "2", "3"]
+    assert sorted(r["id"] for r in log.records(coll)) == ["1", "2"], "a later file is never merged (High 2)"
+    assert [c["path"] for c in log.status()["local_file_conflicts"]] == [str(path_b)]
     log.append(coll, {"id": "4", "n": 4})
     assert log.records(coll)[-1]["id"] == "4"
     assert log.update(coll, "4", lambda rec: {**rec, "n": 40})["n"] == 40

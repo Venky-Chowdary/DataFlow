@@ -18,9 +18,12 @@ Backend choice (``DATAFLOW_CONTROL_STORE_BACKEND`` / ``DATAWRAP_…``):
 unset      ``mongo`` when ``MULTI_REPLICA=1`` or a control-plane database is
            part of this deployment, else ``file``.
 
-The first time a process reaches the shared store it imports the local file
-(once per file content, recorded in the shared document). The file is never
-deleted or rewritten afterwards.
+The first process to reach an empty shared store imports its local file. Once
+the shared store holds a store's records, a local file is never imported or
+merged again: one that differs (another node's file, or one an old build
+wrote during a rollback) is logged once and recorded in the store's status as
+conflicting local data, and the shared state stays authoritative (ops review
+High 2). The file is never deleted or rewritten.
 """
 
 from __future__ import annotations
@@ -162,30 +165,77 @@ def _file_digest(path: Path) -> tuple[str, bytes] | None:
     return hashlib.sha256(raw).hexdigest(), raw
 
 
-def _audit_import(store: str, path: Path, details: dict[str, Any]) -> None:
-    logger.warning("control-plane store %s: imported %s into the shared store (%s)", store, path, details)
+def _audit_import(store: str, path: Path, details: dict[str, Any], *, conflict: bool = False) -> None:
     try:
         from services.audit_coverage import record_security_event
 
-        record_security_event(
-            "control_store.imported",
-            outcome="succeeded",
-            resource=store,
-            actor="system",
-            details={"source": str(path), **details},
-        )
-    except Exception:  # noqa: BLE001 - the import already happened; the log line above records it
-        logger.debug("control_store.imported audit event not written", exc_info=True)
+        fields = {"resource": store, "actor": "system", "details": {"source": str(path), **details}}
+        if conflict:
+            record_security_event("control_store.local_file_conflict", outcome="skipped", **fields)
+        else:
+            record_security_event("control_store.imported", outcome="succeeded", **fields)
+    except Exception:  # noqa: BLE001 - what happened is already in the log line the caller wrote
+        logger.debug("control-store audit event not written", exc_info=True)
+
+
+def _node_name() -> str:
+    import socket
+
+    return socket.gethostname()
+
+
+CONFLICT_KIND = "local_file_conflict"
+
+
+def _record_conflict(docs: Any, store: str, path: Path, digest: str) -> dict[str, Any]:
+    """Record ``path`` as conflicting local data in the store's status (once per content).
+
+    The file is never merged: the shared store already holds this store's
+    records, and the file was changed after that (by another node before the
+    upgrade, or by an old build during a rollback). Merging it would bring
+    back records revoked or deleted in the shared store (ops review High 2).
+    """
+    entry = {
+        "_id": f"{CONFLICT_KIND}:{store}:{digest}",
+        "kind": CONFLICT_KIND,
+        "store": store,
+        "path": str(path),
+        "sha256": digest,
+        "node": _node_name(),
+        "at": _now(),
+    }
+    try:
+        docs.insert_one(entry)
+    except Exception as exc:
+        if _is_duplicate(exc):
+            return {"action": "conflict_already_recorded", "sha256": digest}
+        raise
+    report = {"action": "conflicting_local_data_not_imported", "sha256": digest}
+    logger.warning(
+        "control-plane store %s: %s (sha256 %s) holds conflicting local data. The shared store "
+        "already has this store's records, so the file was not imported and is not merged; "
+        "the shared store stays authoritative. See the operator notes on upgrades and rollback.",
+        store, path, digest,
+    )
+    _audit_import(store, path, report, conflict=True)
+    return report
+
+
+def _status_conflicts(docs: Any, store: str) -> list[dict[str, Any]]:
+    rows = docs.find({"kind": CONFLICT_KIND, "store": store})
+    return sorted(
+        ({k: row.get(k) for k in ("path", "sha256", "node", "at")} for row in rows),
+        key=lambda row: (row.get("at") or 0, row.get("sha256") or ""),
+    )
 
 
 class SharedDoc:
     """One store's JSON document: file on a single node, compare-and-swap in MongoDB.
 
     ``file_load`` / ``file_save`` are the store's existing file functions, so a
-    single-node install reads and writes exactly what it did before.
-    ``merge(shared, local)`` folds a second replica's file into a document a
-    first replica already imported; without it the later file is recorded as
-    skipped and logged.
+    single-node install reads and writes exactly what it did before. The file
+    is imported only while the shared store has nothing for this store yet; a
+    file that differs later is conflicting local data (:func:`_record_conflict`).
     """
 
     kind = "doc"
@@ -198,14 +248,12 @@ class SharedDoc:
         file_save: Callable[[Any], None],
         file_path: Callable[[], Path],
         empty: Callable[[], Any] = dict,
-        merge: Callable[[Any, Any], Any] | None = None,
     ) -> None:
         self.name = name
         self._file_load = file_load
         self._file_save = file_save
         self._file_path = file_path
         self._empty = empty
-        self._merge = merge
         self._lock = threading.RLock()
         self._cache: tuple[float, int, str] | None = None
         self._imported: set[str] = set()
@@ -308,6 +356,12 @@ class SharedDoc:
 
     # -- one-time import ----------------------------------------------
     def _import_local_file(self, coll: Any) -> dict[str, Any] | None:
+        """Import this node's file, only while the shared store has no document yet.
+
+        Returns what happened, None when there was nothing to do. The file is
+        marked as handled only after a definite outcome, so a failed attempt
+        is retried by the next call.
+        """
         path = self._file_path()
         stamp = _file_stamp(path)
         if stamp is None or stamp in self._seen_stamps:
@@ -321,44 +375,47 @@ class SharedDoc:
             self._seen_stamps.add(stamp)
             return None
         report: dict[str, Any] | None = None
-        for _ in range(_MAX_ATTEMPTS):
+        settled = False
+        for _ in range(3):
             doc = coll.find_one({"_id": self.name})
             if doc and digest in (doc.get("import_sources") or []):
+                settled = True
                 break
-            local = self._file_load()
-            if not doc:
-                try:
-                    coll.insert_one(
-                        {"_id": self.name, "rev": 1, "body": _dumps(local), "updated_at": _now(),
-                         "import_sources": [digest]}
-                    )
-                except Exception as exc:
-                    if _is_duplicate(exc):
-                        continue
-                    raise
-                report = {"action": "imported", "sha256": digest}
+            if doc:
+                report = _record_conflict(coll, self.name, path, digest)
+                settled = True
                 break
-            rev = int(doc.get("rev") or 0)
-            if self._merge is None:
-                update: dict[str, Any] = {"$addToSet": {"import_sources": digest}}
-                report = {"action": "skipped_shared_store_already_has_data", "sha256": digest}
-            else:
-                merged = self._merge(json.loads(str(doc.get("body") or "{}")), local)
-                update = {
-                    "$set": {"body": _dumps(merged), "rev": rev + 1, "updated_at": _now()},
-                    "$addToSet": {"import_sources": digest},
-                }
-                report = {"action": "merged", "sha256": digest}
-            result = coll.update_one({"_id": self.name, "rev": rev}, update)
-            if getattr(result, "matched_count", 0):
-                break
-            report = None
-        self._imported.add(key)
-        self._seen_stamps.add(stamp)
-        self._cache = None
-        if report is not None:
+            try:
+                coll.insert_one(
+                    {"_id": self.name, "rev": 1, "body": _dumps(self._file_load()), "updated_at": _now(),
+                     "import_sources": [digest]}
+                )
+            except Exception as exc:
+                if _is_duplicate(exc):
+                    continue  # another replica created it first: decide again on what it holds
+                raise
+            report = {"action": "imported", "sha256": digest}
+            logger.warning("control-plane store %s: imported %s into the shared store (%s)", self.name, path, report)
             _audit_import(self.name, path, report)
-        return report
+            settled = True
+            break
+        if settled:
+            self._imported.add(key)
+            self._seen_stamps.add(stamp)
+        self._cache = None
+        return report if report and report["action"] != "conflict_already_recorded" else None
+
+    def status(self) -> dict[str, Any]:
+        """Backend, imported file digests and conflicting local files of this store."""
+        coll = _collection(DOCS_COLLECTION)
+        if coll is None:
+            return {"backend": "file", "import_sources": [], "local_file_conflicts": []}
+        doc = coll.find_one({"_id": self.name}) or {}
+        return {
+            "backend": "mongo",
+            "import_sources": list(doc.get("import_sources") or []),
+            "local_file_conflicts": _status_conflicts(coll, self.name),
+        }
 
     def import_local_file(self) -> dict[str, Any] | None:
         """Import this node's file now. Returns what happened, None when nothing to do."""
@@ -366,27 +423,6 @@ class SharedDoc:
         if coll is None:
             return None
         return self._import_local_file(coll)
-
-
-def merge_records_by_id(list_key: str, id_key: str = "id") -> Callable[[Any, Any], Any]:
-    """Merge for ``{list_key: [records]}`` documents: add local records the shared copy lacks.
-
-    A record both sides hold keeps the shared copy — it may have been edited
-    through the shared store since the file was written.
-    """
-
-    def merge(shared: Any, local: Any) -> Any:
-        out = dict(shared) if isinstance(shared, dict) else {}
-        rows = [r for r in (out.get(list_key) or []) if isinstance(r, dict)]
-        seen = {str(r.get(id_key)) for r in rows}
-        for row in (local.get(list_key) if isinstance(local, dict) else None) or []:
-            if isinstance(row, dict) and str(row.get(id_key)) not in seen:
-                rows.append(row)
-                seen.add(str(row.get(id_key)))
-        out[list_key] = rows
-        return out
-
-    return merge
 
 
 class SharedLog:
@@ -490,6 +526,13 @@ class SharedLog:
 
     # -- one-time import ----------------------------------------------
     def _import_local_file(self, coll: Any) -> dict[str, Any] | None:
+        """Import this node's log file, only while the shared log has no records yet.
+
+        A store-level claim (``import:<store>`` in ``control_plane_docs``)
+        names the one file that is imported. A crashed import resumes for
+        that file (record ids are deterministic, so nothing is inserted
+        twice); any other file, or a changed one, is conflicting local data.
+        """
         path = self._file_path()
         stamp = _file_stamp(path)
         if stamp is None or stamp in self._seen_stamps:
@@ -502,45 +545,84 @@ class SharedLog:
         if key in self._imported:
             self._seen_stamps.add(stamp)
             return None
-        marker_id = f"import:{self.name}:{digest}"
         docs = coll.database[DOCS_COLLECTION]
+        claim_id = f"import:{self.name}"
         report: dict[str, Any] | None = None
-        if not docs.find_one({"_id": marker_id}):
-            inserted = 0
-            base = time.time_ns() - 10**12  # imported lines sort before anything appended live
-            seen: dict[str, int] = {}
-            for index, line in enumerate(raw.decode("utf-8", errors="replace").splitlines()):
-                line = line.strip()
-                if not line:
-                    continue
+        settled = False
+        for _ in range(3):
+            claim = docs.find_one({"_id": claim_id})
+            if claim is None:
+                # Records without a claim: live appends, or an import by an
+                # earlier build (one marker per file digest).
+                if docs.find_one({"_id": f"import:{self.name}:{digest}"}):
+                    settled = True
+                    break
+                if coll.find_one({"store": self.name}):
+                    report = _record_conflict(docs, self.name, path, digest)
+                    settled = True
+                    break
                 try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                # The id is the line itself (and which repeat of it), so a second
-                # replica importing the same file, or a crashed import run again,
-                # inserts nothing twice.
-                seen[line] = seen.get(line, 0) + 1
-                doc_id = hashlib.sha256(f"{self.name}|{seen[line]}|{line}".encode()).hexdigest()
-                try:
-                    coll.insert_one(self._doc(record, doc_id=doc_id, seq=base + index))
-                    inserted += 1
+                    docs.insert_one({"_id": claim_id, "kind": "import", "store": self.name, "sha256": digest,
+                                     "state": "importing", "at": _now()})
                 except Exception as exc:
-                    if not _is_duplicate(exc):
-                        raise
+                    if _is_duplicate(exc):
+                        continue
+                    raise
+                claim = {"sha256": digest, "state": "importing"}
+            if claim.get("sha256") != digest:
+                report = _record_conflict(docs, self.name, path, digest)
+                settled = True
+                break
+            if claim.get("state") != "done":
+                inserted = self._insert_lines(coll, raw)
+                docs.update_one({"_id": claim_id}, {"$set": {"state": "done", "records": inserted, "at": _now()}})
+                report = {"action": "imported", "sha256": digest, "records": inserted}
+                logger.warning("control-plane store %s: imported %s into the shared store (%s)", self.name, path, report)
+                _audit_import(self.name, path, report)
+            settled = True
+            break
+        if settled:
+            self._imported.add(key)
+            self._seen_stamps.add(stamp)
+        return report if report and report["action"] != "conflict_already_recorded" else None
+
+    def _insert_lines(self, coll: Any, raw: bytes) -> int:
+        inserted = 0
+        base = time.time_ns() - 10**12  # imported lines sort before anything appended live
+        seen: dict[str, int] = {}
+        for index, line in enumerate(raw.decode("utf-8", errors="replace").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
             try:
-                docs.insert_one({"_id": marker_id, "store": self.name, "records": inserted, "at": _now()})
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            # The id is the line itself (and which repeat of it), so a crashed
+            # import run again inserts nothing twice.
+            seen[line] = seen.get(line, 0) + 1
+            doc_id = hashlib.sha256(f"{self.name}|{seen[line]}|{line}".encode()).hexdigest()
+            try:
+                coll.insert_one(self._doc(record, doc_id=doc_id, seq=base + index))
+                inserted += 1
             except Exception as exc:
                 if not _is_duplicate(exc):
                     raise
-            report = {"action": "imported", "sha256": digest, "records": inserted}
-        self._imported.add(key)
-        self._seen_stamps.add(stamp)
-        if report is not None:
-            _audit_import(self.name, path, report)
-        return report
+        return inserted
+
+    def status(self) -> dict[str, Any]:
+        coll = _collection(RECORDS_COLLECTION)
+        if coll is None:
+            return {"backend": "file", "import_sources": [], "local_file_conflicts": []}
+        docs = coll.database[DOCS_COLLECTION]
+        claim = docs.find_one({"_id": f"import:{self.name}"}) or {}
+        return {
+            "backend": "mongo",
+            "import_sources": [claim["sha256"]] if claim.get("sha256") else [],
+            "local_file_conflicts": _status_conflicts(docs, self.name),
+        }
 
     def import_local_file(self) -> dict[str, Any] | None:
         coll = _collection(RECORDS_COLLECTION)
@@ -552,6 +634,11 @@ class SharedLog:
 def registered_stores() -> dict[str, Any]:
     """Every SharedDoc / SharedLog constructed so far, by store name."""
     return dict(_REGISTERED)
+
+
+def store_status() -> dict[str, dict[str, Any]]:
+    """Per store: backend, imported file digests and conflicting local files (never merged)."""
+    return {name: store.status() for name, store in sorted(_REGISTERED.items())}
 
 
 _STORE_MODULES = (

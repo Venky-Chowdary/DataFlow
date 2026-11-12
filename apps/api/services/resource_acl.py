@@ -22,7 +22,7 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.platform_config import data_dir
-from services.shared_doc_store import SharedDoc, merge_records_by_id, tracked
+from services.shared_doc_store import SharedDoc, tracked
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -101,7 +101,6 @@ _DOC = SharedDoc(
     file_save=_file_save,
     file_path=_store_path,
     empty=lambda: {"grants": []},
-    merge=merge_records_by_id("grants"),
 )
 
 
