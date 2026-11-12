@@ -7,6 +7,8 @@ here so a 99999 port or a multi-megabyte host never reaches a socket.
 
 from __future__ import annotations
 
+import re
+
 PORTLESS_TYPES = frozenset({
     "sqlite",
     "duckdb",
@@ -88,6 +90,28 @@ def _length_error(label: str, value: object, maximum: int, *, required: bool = F
     return ""
 
 
+#: C0 / C1 controls and the Unicode line / paragraph separators. A name with one
+#: in it renders as a line break or an invisible mark wherever it is shown, and
+#: a line break is how a name forged a bullet in Pilot's answers (review 2, H2).
+_CONTROL_CHARACTERS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def control_character_error(label: str, value: object) -> str:
+    """A refusal when ``value`` holds a control character, else ""."""
+    if value is not None and _CONTROL_CHARACTERS.search(str(value)):
+        return f"{label} must not contain control characters (line breaks, tabs or other invisible characters)."
+    return ""
+
+
+def refuse_control_characters(label: str, value: object) -> None:
+    """Raise a 422 for a name with a control character, on every path that saves one."""
+    error = control_character_error(label, value)
+    if error:
+        from services.api_errors import ApiError
+
+        raise ApiError(422, "NAME_HAS_CONTROL_CHARACTERS", error)
+
+
 def connector_request_errors(
     *,
     name: object = "",
@@ -103,6 +127,7 @@ def connector_request_errors(
     """First bound that fails, or empty when the draft may be probed."""
     checks = (
         _length_error("Name", name, NAME_MAX, required=require_name),
+        control_character_error("Name", name),
         _length_error("Type", db_type, TYPE_MAX),
         _length_error("Host", host, HOST_MAX),
         _length_error(

@@ -59,6 +59,12 @@ os.environ.setdefault(
 
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+# Pilot's dataset tests read the sample files in tests/fixtures. The product
+# lists only the deployment's upload directory (the image ships this folder,
+# and it is nobody's data), so the suite adds it explicitly.
+os.environ.setdefault(
+    "DATAFLOW_PILOT_DATASET_DIRS", os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+)
 # Engine fixtures stage file sources under pytest's tmp_path.
 os.environ.setdefault("DATAFLOW_SOURCE_PATH_ROOTS", tempfile.gettempdir())
 # Local proof dials Postgres and MySQL on loopback. Production deploy does

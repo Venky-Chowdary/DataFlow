@@ -10,9 +10,10 @@ grounded, never a new source of product facts.
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from pathlib import Path
+
+from services.brand_env import getenv_brand_bool
 
 from .claims import invented_claims
 from .checkpoint import FirstPartyCheckpoint, default_artifact_path, load_checkpoint
@@ -422,27 +423,18 @@ _SUBJECT_FAMILIES: tuple[frozenset[str], ...] = (
 )
 
 
-def _env_on(name: str, default: bool = True) -> bool:
-    raw = (os.environ.get(name) or "").strip().lower()
-    if not raw:
-        return default
-    if raw in {"0", "false", "off", "no"}:
-        return False
-    if raw in {"1", "true", "on", "yes"}:
-        return True
-    return default
-
-
+# The three switches read DATAWRAP_FP_* first and DATAFLOW_FP_* as the fallback,
+# with the one flag parser every other dial uses (services.brand_env).
 def rewrite_enabled() -> bool:
-    return _env_on("DATAFLOW_FP_REWRITE", default=True)
+    return getenv_brand_bool("FP_REWRITE", default=True)
 
 
 def narrate_enabled() -> bool:
-    return _env_on("DATAFLOW_FP_NARRATE", default=True)
+    return getenv_brand_bool("FP_NARRATE", default=True)
 
 
 def lm_enabled() -> bool:
-    return _env_on("DATAFLOW_FP_LM", default=True)
+    return getenv_brand_bool("FP_LM", default=True)
 
 
 @lru_cache(maxsize=1)

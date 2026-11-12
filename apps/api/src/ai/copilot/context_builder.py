@@ -46,6 +46,48 @@ def reset_context_cooldowns() -> None:
     """Forget which sources are cooling off, so the next turn redials them."""
     with _cooldown_lock:
         _cooling.clear()
+        _recent.clear()
+
+
+#: The preamble's ledger reads are reused for this long. Without it every turn,
+#: "hi" included, ran a whole-collection aggregate (review M6). Answers that
+#: state job numbers read the ledger themselves (``list_jobs``).
+CONTEXT_REUSE_S = 15.0
+#: At most this many reads are held; expired ones are dropped first (review 2,
+#: low: one entry per actor and source was kept for the life of the process).
+MAX_REUSED_READS = 256
+_recent: dict[tuple[str, str], tuple[float, Any]] = {}
+
+
+def _remember_read_locked(key: tuple[str, str], value: Any) -> None:
+    now = time.monotonic()
+    _recent[key] = (now, value)
+    if len(_recent) <= MAX_REUSED_READS:
+        return
+    for stale in [k for k, (at, _v) in _recent.items() if now - at >= CONTEXT_REUSE_S]:
+        _recent.pop(stale, None)
+    while len(_recent) > MAX_REUSED_READS:
+        _recent.pop(min(_recent, key=lambda k: _recent[k][0]), None)
+
+
+def _reused(source: str, read: Callable[[], Any]) -> Callable[[], Any]:
+    """``read`` memoised per source and caller scope for :data:`CONTEXT_REUSE_S`."""
+    from services.workspace_filter import current_actor, current_workspace_filter, current_workspace_stamp
+
+    key = (source, f"{current_workspace_filter()!r}|{current_workspace_stamp(for_write=False)}|{current_actor()}")
+
+    def cached() -> Any:
+        now = time.monotonic()
+        with _cooldown_lock:
+            hit = _recent.get(key)
+        if hit and now - hit[0] < CONTEXT_REUSE_S:
+            return hit[1]
+        value = read()
+        with _cooldown_lock:
+            _remember_read_locked(key, value)
+        return value
+
+    return cached
 
 
 def _gather(
@@ -86,6 +128,43 @@ def _gather(
     return gathered, degraded
 
 
+def workspace_counts(ctx: dict | None) -> dict[str, int | None]:
+    """Connector and job totals a sentence may state, or None where unread.
+
+    ``jobs`` is the counted history, never the length of the recent-jobs page;
+    a source listed in ``context_degraded`` has no number at all.
+    """
+    ctx = ctx or {}
+    degraded = set(ctx.get("context_degraded") or ())
+    connectors = ctx.get("connectors")
+    if "job_counts" in ctx:
+        counts = ctx.get("job_counts") or {}
+    else:
+        # A context assembled by hand (not by ``build``) carries only its own
+        # job rows; they are that caller's whole truth, so they are the count.
+        recent = [j for j in (ctx.get("recent_jobs") or []) if isinstance(j, dict)]
+        counts = {
+            "total": len(recent),
+            "failed": sum(1 for j in recent if str(j.get("status") or "").lower() in {"failed", "error"}),
+        }
+    jobs_unread = bool({"recent_jobs", "job_counts"} & degraded) or "total" not in counts
+    return {
+        "connectors": None if "connectors" in degraded or not isinstance(connectors, list) else len(connectors),
+        "jobs": None if jobs_unread else int(counts.get("total") or 0),
+        "failed_jobs": None if jobs_unread else int(counts.get("failed") or 0),
+    }
+
+
+def _jobs_line(ctx: dict, degraded: set[str]) -> str:
+    total = workspace_counts(ctx)["jobs"]
+    if total is None:
+        return "- recent transfer jobs: could not be read this turn — say so, do not report zero"
+    return (
+        f"- {total} transfer jobs in this workspace "
+        f"(the {len(ctx.get('recent_jobs') or [])} most recent are listed below)"
+    )
+
+
 class PilotContextBuilder:
     """Assembles everything the agent needs to answer any data question."""
 
@@ -111,7 +190,10 @@ class PilotContextBuilder:
         rag_on = (getenv_brand("PILOT_RAG") or "").lower() in {"1", "true", "on", "yes"}
         reads: dict[str, tuple[Callable[[], Any], Any]] = {
             "connectors": (self._read_connectors, []),
-            "recent_jobs": (self._read_jobs, []),
+            "recent_jobs": (_reused("recent_jobs", self._read_jobs), []),
+            # The whole-history census: ``recent_jobs`` is a page of 8 and its
+            # length was being stated as the number of jobs (audit H3).
+            "job_counts": (_reused("job_counts", self._read_job_counts), {}),
             "transfer_capabilities": (self._read_capabilities, {}),
         }
         if rag_on and message.strip():
@@ -143,6 +225,7 @@ class PilotContextBuilder:
             "training_schema_profiles": self._training_profile_count(),
             "connectors": connectors,
             "recent_jobs": jobs,
+            "job_counts": gathered.get("job_counts") or {},
             "transfer_capabilities": {
                 "live_count": len(capabilities.get("live_combinations", [])),
                 "operations": capabilities.get("operations", []),
@@ -169,10 +252,10 @@ class PilotContextBuilder:
 
         parts = [
             "## Platform State",
-            f"- {ctx['dataset_count']} datasets indexed (uploads + fixtures + transfers)",
+            f"- {ctx['dataset_count']} datasets indexed (this workspace's uploads + built-in industry templates)",
             f"- {ctx.get('training_schema_profiles', 620)}+ connector schema profiles in training knowledge",
             _count("connectors", "saved connectors", f"{len(ctx['connectors'])} saved connectors"),
-            _count("recent_jobs", "recent transfer jobs", f"{len(ctx['recent_jobs'])} recent transfer jobs"),
+            _jobs_line(ctx, degraded),
             _count(
                 "transfer_capabilities",
                 "live transfer routes",
@@ -196,7 +279,10 @@ class PilotContextBuilder:
                 parts.append(f"Validation status: **{s['validation_status']}**")
             if s.get("route"):
                 parts.append(f"Route: {s['route']}")
-            for b in (s.get("blockers") or [])[:4]:
+            from .pilot_egress import blockers_for_model
+
+            # Blockers quote the failing cells: withheld under metadata-only.
+            for b in blockers_for_model((s.get("blockers") or [])[:4]):
                 parts.append(f"- Blocker: {b}")
             parts.append("")
             parts.append(
@@ -277,6 +363,19 @@ class PilotContextBuilder:
                 limit=8, workspace_filter=current_workspace_filter()
             )
         ]
+
+    def _read_job_counts(self) -> dict:
+        """Total, failed and needs-attention over the whole scoped history."""
+        from services.workspace_filter import current_workspace_filter
+
+        from ...services.mongodb_service import get_mongodb_service
+
+        counts = get_mongodb_service().count_jobs(workspace_filter=current_workspace_filter())
+        return {
+            "total": int(counts.get("total") or 0),
+            "failed": int((counts.get("by_status") or {}).get("failed") or 0),
+            "attention": int(counts.get("attention") or 0),
+        }
 
     def _read_capabilities(self) -> dict:
         from ...transfer.registry import get_capabilities

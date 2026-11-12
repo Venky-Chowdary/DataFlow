@@ -20,6 +20,7 @@ from typing import Any
 from services.sync_cursor import (
     IncrementalReadScope,
     compare_cursor_values,
+    cursor_value_coercer,
     max_cursor_value,
     records_after_watermark,
     resolve_incremental_read_scope,
@@ -38,20 +39,49 @@ class BatchIncrementalBound:
     #: ``False`` for a snapshot-comparing mode (SCD2): the cursor still moves,
     #: but the read is not narrowed. See :func:`bind_batch_incremental`.
     narrows_read: bool = True
+    #: A file or document source: its cells are text the write path parses by
+    #: column type, so the bound reads them the same way (review H-1). A
+    #: database's values compare as they are.
+    reads_cells_by_type: bool = False
+    #: The request's date order ("" = settled from the read, as the write does).
+    date_locale: str = ""
 
     @property
     def active(self) -> bool:
         return bool(self.scope.cursor_column and self.scope.cursor_key)
 
-    def bound(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """The rows past the watermark; raises when a row cannot be judged."""
+    def bound(
+        self, records: list[dict[str, Any]], column_types: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """The rows past the watermark; raises when a row cannot be judged.
+
+        ``column_types``: the source's declared or inferred column types.
+        """
         if not self.active:
             return records
+        cursor = self.scope.cursor_column
+        coerce = None
+        if self.reads_cells_by_type:
+            # The write path settles the date order on this same read later, so
+            # the bound settles it the same way first (review 3, Medium).
+            from services.transform_engine import (
+                _active_date_locale,
+                canonical_date_locale,
+                infer_date_locale,
+            )
+
+            columns = list(records[0].keys()) if records and isinstance(records[0], dict) else []
+            order = _active_date_locale(self.date_locale) or canonical_date_locale(
+                infer_date_locale(records, columns)
+            )
+            coerce = cursor_value_coercer((column_types or {}).get(cursor), date_locale=order)
         delta, unbounded = records_after_watermark(
             records,
-            self.scope.cursor_column,
+            cursor,
             self.scope.read_watermark,
             primary_key=self.scope.primary_key,
+            coerce=coerce,
+            text_calendar_refusal=self.reads_cells_by_type,
         )
         if unbounded:
             # A row with no cursor value can be proven neither new nor already
@@ -64,7 +94,13 @@ class BatchIncrementalBound:
             )
         headers = [c for c in (self.scope.cursor_column, self.scope.primary_key) if c]
         mark = max_cursor_value(
-            [[str(r.get(c, "")) for c in headers] for r in delta],
+            [
+                [
+                    _mark_text(r.get(c, ""), coerce if c == cursor else None)
+                    for c in headers
+                ]
+                for r in delta
+            ],
             headers,
             self.scope.cursor_column,
             self.scope.primary_key or None,
@@ -83,6 +119,15 @@ class BatchIncrementalBound:
         if job_id:
             metadata["job_id"] = job_id
         set_watermark(self.scope.cursor_key, self.high_mark, metadata=metadata)
+
+
+def _mark_text(value: Any, coerce: Any) -> str:
+    from services.value_serializer import present_cell_text
+
+    text = present_cell_text(value)
+    if coerce is not None and text is not None:
+        return coerce(text)
+    return str(value)
 
 
 def _dest_identity(destination: Any) -> tuple[str, str, str]:
@@ -108,7 +153,7 @@ def _dest_identity(destination: Any) -> tuple[str, str, str]:
 def bind_transfer_request(request: Any, source_format: str) -> BatchIncrementalBound:
     """Cursor bound for the buffered path, resolved exactly as streaming does."""
     dest_type, dest_database, dest_object = _dest_identity(request.destination)
-    return bind_batch_incremental(
+    bound = bind_batch_incremental(
         sync_mode=str(getattr(request, "sync_mode", "") or ""),
         stream_contracts=list(getattr(request, "stream_contracts", None) or []),
         source_type=(source_format or "").lower(),
@@ -124,6 +169,9 @@ def bind_transfer_request(request: Any, source_format: str) -> BatchIncrementalB
         source=request.source,
         destination=request.destination,
     )
+    bound.reads_cells_by_type = str(getattr(request.source, "kind", "") or "").lower() != "database"
+    bound.date_locale = str(getattr(request, "date_locale", "") or "")
+    return bound
 
 
 def bind_batch_incremental(

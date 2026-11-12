@@ -245,7 +245,16 @@ def _match(doc: dict, filt: dict) -> bool:
     return True
 
 
-def test_two_api_processes_share_one_ack():
+def _no_secrets_key(monkeypatch) -> None:
+    for brand in ("DATAFLOW", "DATAWRAP"):
+        for name in ("SECRETS_KEY", "AUTH_SECRET"):
+            monkeypatch.delenv(f"{brand}_{name}", raising=False)
+
+
+def test_two_api_processes_share_one_ack(monkeypatch):
+    # A staged approval holding a secret is sealed in the shared collection,
+    # which needs a deployment key (the public default is no key).
+    monkeypatch.setenv("DATAFLOW_SECRETS_KEY", "topology-test-deployment-key-0123456789abcdef")
     from src.ai.copilot.ack_ledger import MongoAckLedger
 
     coll = _AckColl()
@@ -268,6 +277,27 @@ def test_two_api_processes_share_one_ack():
     peeked = second.peek(ack_id)
     assert peeked is not None
     assert "password" not in peeked["preview"] or peeked["preview"].get("password") == "***"
+
+
+def test_without_a_deployment_key_a_secret_is_never_staged_in_the_shared_ack_store(monkeypatch):
+    """No key (or only the public default): a staged secret cannot be sealed, so
+    it is refused rather than written in clear to a collection every API
+    process reads; an approval with no secret is still shared."""
+    _no_secrets_key(monkeypatch)
+    from src.ai.copilot.ack_ledger import MongoAckLedger
+
+    coll = _AckColl()
+    first = MongoAckLedger(collection=coll, ttl_sec=120)
+    second = MongoAckLedger(collection=coll, ttl_sec=120)
+    import pytest
+
+    with pytest.raises(RuntimeError, match="secret vault is unavailable"):
+        first.put(kind="start_transfer", payload={"path": "/data/rows.csv", "password": "secret"})
+    assert coll.docs == {}, "a refused approval must leave nothing in the shared store"
+
+    ack_id = first.put(kind="start_transfer", payload={"path": "/data/rows.csv"})
+    payload, err = second.claim(ack_id, actor="api-b")
+    assert err == "" and payload is not None and payload["path"] == "/data/rows.csv"
 
 
 def test_blob_root_is_readable_from_another_upload_dir(tmp_path, monkeypatch):

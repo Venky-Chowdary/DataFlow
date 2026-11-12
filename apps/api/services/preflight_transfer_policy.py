@@ -4,10 +4,34 @@ from __future__ import annotations
 
 import logging
 from preflight.models import GateStatus
-from services.preflight_cursor_gate import build_sync_contract_gate
+from services.preflight_cursor_gate import build_sync_contract_gate, source_commit_facts
 from typing import Any
 
 logger = logging.getLogger("services.preflight_service")
+
+
+def _gate_or_unchecked(gate_id: str, label: str, build: Any) -> Any:
+    """``build()``, or an honest gate when it raised (review M-2).
+
+    One gate's probe failing must not turn Validate into an error that hides
+    every other gate's verdict. The gate says what could not be checked and
+    why; Execute still runs its own checks.
+    """
+    try:
+        return build()
+    except Exception as exc:  # noqa: BLE001 — reported as this gate's result
+        logger.warning("preflight gate %s could not be checked", gate_id, exc_info=True)
+        return {
+            "id": gate_id,
+            "status": GateStatus.WARN.value,
+            "severity": "warn",
+            "message": (
+                f"{label} could not be checked: {type(exc).__name__}. Execute runs its own "
+                "check before anything is written."
+            ),
+            "duration_ms": 0,
+            "details": {"error": f"{type(exc).__name__}: {exc}"[:300], "unchecked": True},
+        }
 
 
 def run_transfer_policy_gates(
@@ -81,21 +105,26 @@ def run_transfer_policy_gates(
     kind = (source_kind or "file").strip().lower()
     gates: list[dict[str, Any]] = []
     gates.append(
-        build_sync_contract_gate(
-            contracts,
-            sync=sync,
-            validation=validation,
-            dest=dest,
-            src=src,
-            kind=kind,
-            source_columns=source_columns,
-            pass_status=GateStatus.PASS.value,
-            block_status=GateStatus.BLOCK.value,
-            source_read_mode=source_read_mode,
-            read_scope=read_scope,
-            catalog_primary_key_columns=catalog_primary_key_columns,
-            mappings=mappings,
-            source_table=source_table,
+        _gate_or_unchecked(
+            "g9_sync_contract",
+            "The sync contract (cursor and commit-safe window)",
+            lambda: build_sync_contract_gate(
+                contracts,
+                sync=sync,
+                validation=validation,
+                dest=dest,
+                src=src,
+                kind=kind,
+                source_columns=source_columns,
+                pass_status=GateStatus.PASS.value,
+                block_status=GateStatus.BLOCK.value,
+                source_read_mode=source_read_mode,
+                read_scope=read_scope,
+                catalog_primary_key_columns=catalog_primary_key_columns,
+                mappings=mappings,
+                source_table=source_table,
+                source_facts=source_commit_facts(src, source_config, source_table, sync),
+            ),
         )
     )
 
@@ -317,15 +346,19 @@ def run_transfer_policy_gates(
     from services.cdc_exactly_once import (
         preflight_delivery_gate, route_declares_log_position, route_has_cdc_pk)
 
-    eos_gate = preflight_delivery_gate(
-        sync_mode=sync,
-        dest_type=dest,
-        source_type=src,
-        delivery_guarantee=delivery_guarantee,
-        has_primary_key=route_has_cdc_pk(contracts),
-        allow_append_only=allow_append_only,
-        callable_source=(source_read_mode or "").strip().lower() in {"procedure", "query"},
-        has_lsn_column=route_declares_log_position(contracts),
+    eos_gate = _gate_or_unchecked(
+        "g16_cdc_delivery",
+        "The delivery guarantee",
+        lambda: preflight_delivery_gate(
+            sync_mode=sync,
+            dest_type=dest,
+            source_type=src,
+            delivery_guarantee=delivery_guarantee,
+            has_primary_key=route_has_cdc_pk(contracts),
+            allow_append_only=allow_append_only,
+            callable_source=(source_read_mode or "").strip().lower() in {"procedure", "query"},
+            has_lsn_column=route_declares_log_position(contracts),
+        ),
     )
     if eos_gate:
         gates.append(eos_gate)
@@ -334,37 +367,45 @@ def run_transfer_policy_gates(
 
     snap_wm = getattr(read_scope, "watermark", None) if read_scope is not None else None
     snap_key = str(getattr(read_scope, "cursor_key", "") or "") if read_scope is not None else ""
-    slot_probe = None
-    if sync == "cdc":
-        from services.cdc_slot_resume import probe_postgres_slot_for_preflight
 
-        slot_probe = probe_postgres_slot_for_preflight(
-            source_config,
-            source_type=src,
+    def _snapshot_gate() -> Any:
+        slot_probe = None
+        if sync == "cdc":
+            from services.cdc_slot_resume import probe_postgres_slot_for_preflight
+
+            slot_probe = probe_postgres_slot_for_preflight(
+                source_config,
+                source_type=src,
+                watermark=snap_wm,
+                table=source_table,
+                cursor_key=snap_key,
+            )
+        return build_snapshot_mode_preflight_gate(
+            sync_mode=sync,
+            stream_contracts=contracts,
             watermark=snap_wm,
-            table=source_table,
+            retention=slot_probe,
             cursor_key=snap_key,
         )
-    snap_gate = build_snapshot_mode_preflight_gate(
-        sync_mode=sync,
-        stream_contracts=contracts,
-        watermark=snap_wm,
-        retention=slot_probe,
-        cursor_key=snap_key,
-    )
+
+    snap_gate = _gate_or_unchecked("g18_cdc_snapshot_mode", "The CDC snapshot mode", _snapshot_gate)
     if snap_gate:
         gates.append(snap_gate)
         from services.cdc_snapshot_sweep import build_snapshot_leftover_preflight_gate
 
-        leftover_gate = build_snapshot_leftover_preflight_gate(
-            snapshot_gate=snap_gate,
-            stream_contracts=contracts,
-            source_endpoint=source_endpoint,
-            destination_endpoint=destination_endpoint,
-            source_config=source_config,
-            mappings=mappings,
-            dest_type=str(dest or ""),
-            catalog_primary_key_columns=catalog_primary_key_columns,
+        leftover_gate = _gate_or_unchecked(
+            "g18b_cdc_snapshot_leftover",
+            "The CDC snapshot leftover sweep",
+            lambda: build_snapshot_leftover_preflight_gate(
+                snapshot_gate=snap_gate,
+                stream_contracts=contracts,
+                source_endpoint=source_endpoint,
+                destination_endpoint=destination_endpoint,
+                source_config=source_config,
+                mappings=mappings,
+                dest_type=str(dest or ""),
+                catalog_primary_key_columns=catalog_primary_key_columns,
+            ),
         )
         if leftover_gate:
             gates.append(leftover_gate)
@@ -373,16 +414,19 @@ def run_transfer_policy_gates(
 
     postgresish = is_postgres_log_source(src_key)
     if sync == "cdc" and (kind not in {"file", "cloud"} or postgresish):
-        gates.extend(
-            _ps._cdc_log_capture_gates(
+        log_gates = _gate_or_unchecked(
+            "g9c_cdc_log_capture",
+            "CDC log capture",
+            lambda: _ps._cdc_log_capture_gates(
                 contracts,
                 source_type=product or src,
                 source_config=source_config,
                 source_table=source_table,
                 catalog_primary_key_columns=catalog_primary_key_columns,
                 mappings=mappings,
-            )
+            ),
         )
+        gates.extend([log_gates] if isinstance(log_gates, dict) else log_gates)
 
     cap = max(0, int(row_limit or 0))
     priority = str(priority_column or "").strip()
@@ -416,11 +460,15 @@ def run_transfer_policy_gates(
     redis_gate = redis_ttl_policy_gate(dest, src)
     if redis_gate:
         gates.append(redis_gate)
-    procedure_gate = stream_procedure_policy_gate(
-        contracts,
-        sync_mode=sync,
-        source_endpoint=source_endpoint,
-        destination_endpoint=destination_endpoint,
+    procedure_gate = _gate_or_unchecked(
+        "g23_stream_procedures",
+        "The stream procedure policy",
+        lambda: stream_procedure_policy_gate(
+            contracts,
+            sync_mode=sync,
+            source_endpoint=source_endpoint,
+            destination_endpoint=destination_endpoint,
+        ),
     )
     if procedure_gate:
         gates.append(procedure_gate)

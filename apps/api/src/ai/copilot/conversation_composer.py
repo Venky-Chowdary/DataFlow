@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .agent import CopilotResponse
+from .md_safe import md_text
 from .dialogue_acts import (
     DialogueAct,
     last_assistant_text,
@@ -23,22 +24,34 @@ from .dialogue_acts import (
 )
 
 
-def compose_greeting(ctx: dict[str, Any] | None = None) -> str:
-    ctx = ctx or {}
-    connectors = ctx.get("connectors") or []
-    jobs = ctx.get("recent_jobs") or []
-    n_conn = len(connectors) if isinstance(connectors, list) else 0
-    n_jobs = len(jobs) if isinstance(jobs, list) else 0
-    failed = 0
-    if isinstance(jobs, list):
-        failed = sum(
-            1
-            for j in jobs
-            if isinstance(j, dict)
-            and str(j.get("status") or "").lower() in {"failed", "error"}
-        )
+def _count_phrase(ctx: dict[str, Any] | None) -> str:
+    """"**2** connector(s) and **18** job(s)" from counted totals; "" when there is nothing to state.
 
-    if n_conn == 0 and n_jobs == 0:
+    A store that could not be read contributes "I could not read your … just
+    now" instead of a zero (audit C3, H3).
+    """
+    from .context_builder import workspace_counts
+
+    counts = workspace_counts(ctx)
+    n_conn, n_jobs = counts["connectors"], counts["jobs"]
+    if not n_conn and not n_jobs and None not in (n_conn, n_jobs):
+        return ""
+    conn = "could not read your connectors just now" if n_conn is None else f"**{n_conn}** connector(s)"
+    jobs = "could not read your jobs just now" if n_jobs is None else f"**{n_jobs}** job(s)"
+    if n_conn is None and n_jobs is None:
+        return "I could not read your connectors or jobs just now"
+    if n_conn is None:
+        return f"I {conn}, and can see {jobs}"
+    if n_jobs is None:
+        return f"I can see {conn}, and {jobs}"
+    return f"I can see {conn} and {jobs}"
+
+
+def compose_greeting(ctx: dict[str, Any] | None = None) -> str:
+    from .context_builder import workspace_counts
+
+    seen = _count_phrase(ctx)
+    if not seen:
         return (
             "I'm **Datawrap Pilot**, your workspace assistant. I read your "
             "live workspace — connectors, tables, jobs, pipelines, and Validate "
@@ -48,10 +61,8 @@ def compose_greeting(ctx: dict[str, Any] | None = None) -> str:
             "or name a table and a saved connector."
         )
 
-    lead = (
-        f"I'm **Datawrap Pilot**, your workspace assistant. Right now I can "
-        f"see **{n_conn}** saved connector(s) and **{n_jobs}** recent job(s)"
-    )
+    lead = f"I'm **Datawrap Pilot**, your workspace assistant. Right now {seen}"
+    failed = workspace_counts(ctx)["failed_jobs"]
     if failed:
         lead += f" — **{failed}** of those jobs failed and need a look"
     lead += "."
@@ -62,6 +73,12 @@ def compose_greeting(ctx: dict[str, Any] | None = None) -> str:
         "warehouse facts. Try *what's going on in my workspace?* "
         "or *summarize my pipelines*."
     )
+
+
+def _briefing_line(label: str, body: str, source: str, store: str, unreadable: set[str]) -> str:
+    if source in unreadable:
+        return f"• {label} — I could not read the {store} just now, so I have no count to give."
+    return f"• {label} — {body}."
 
 
 def _contracts_line(total: int, unsigned: int, facts: dict[str, Any]) -> str:
@@ -110,7 +127,17 @@ def compose_briefing(facts: dict[str, Any]) -> str:
     n_ct = int(facts.get("contract_count") or 0)
     unsigned = int(facts.get("contracts_unsigned") or 0)
 
-    lines = ["Here's the workspace as it stands — counts are from live stores, not a demo."]
+    # A section whose store raised is reported as unread: a zero there would be
+    # a claim about the workspace that nothing read supports (audit C3).
+    unreadable = {str(u) for u in (facts.get("unreadable") or [])}
+
+    if unreadable:
+        lines = [
+            "I could not read every store, so this is only part of the workspace — "
+            "the sections marked unread below may hold failures."
+        ]
+    else:
+        lines = ["Here's the workspace as it stands — counts are from live stores, not a demo."]
     conn_bit = f"**{n_conn}** connector(s)"
     if n_conn:
         conn_bit += f" ({passed} last-test passed"
@@ -121,18 +148,23 @@ def compose_briefing(facts: dict[str, Any]) -> str:
         conn_bit += ")"
     names = [n for n in (facts.get("connector_names") or []) if n]
     if names:
-        conn_bit += ": " + ", ".join(f"**{n}**" for n in names[:6])
+        conn_bit += ": " + ", ".join(f"**{md_text(n)}**" for n in names[:6])
         if n_conn > 6:
             conn_bit += f", and {n_conn - 6} more"
-    lines.append(f"• Connections — {conn_bit}.")
+    lines.append(_briefing_line("Connections", conn_bit, "connectors", "connector store", unreadable))
 
-    job_bit = f"**{n_jobs}** recent job(s)"
+    # The whole history, in the Jobs page's classes — not a page of recent rows.
+    job_bit = f"**{n_jobs}** job(s)"
     if n_jobs:
-        job_bit += f" ({ok_j} ok, {fail_j} failed, {run_j} running)"
+        job_bit += f" ({ok_j} completed, {fail_j} failed, {run_j} in flight"
+        needs = int(facts.get("jobs_attention") or 0)
+        if needs:
+            job_bit += f", {needs} need attention"
+        job_bit += ")"
     latest = str(facts.get("latest_failed_job") or "").strip()
     if latest:
         job_bit += f". Latest failure: {latest}"
-    lines.append(f"• Transfers — {job_bit}.")
+    lines.append(_briefing_line("Transfers", job_bit, "jobs", "job ledger", unreadable))
 
     sched_bit = f"**{n_sched}** pipeline(s), **{en}** enabled"
     if parked:
@@ -142,10 +174,12 @@ def compose_briefing(facts: dict[str, Any]) -> str:
         sched_bit += f". Next due: {nxt}"
     parked_names = [n for n in (facts.get("parked_names") or []) if n]
     if parked_names:
-        sched_bit += " — waiting: " + ", ".join(f"**{n}**" for n in parked_names[:4])
-    lines.append(f"• Pipelines — {sched_bit}.")
+        sched_bit += " — waiting: " + ", ".join(f"**{md_text(n)}**" for n in parked_names[:4])
+    lines.append(_briefing_line("Pipelines", sched_bit, "pipelines", "schedule store", unreadable))
 
-    if n_ct:
+    if "contracts" in unreadable:
+        lines.append(_briefing_line("Contracts", "", "contracts", "contract store", unreadable))
+    elif n_ct:
         lines.append(_contracts_line(n_ct, unsigned, facts))
 
     attention = [str(a) for a in (facts.get("attention") or []) if a]
@@ -153,6 +187,11 @@ def compose_briefing(facts: dict[str, Any]) -> str:
         lines.append(
             "What needs you: " + "; ".join(attention) + ". "
             "Ask me about a failed job or a parked pipeline and I'll open the finding."
+        )
+    elif unreadable:
+        lines.append(
+            "I can't say nothing needs you: the section(s) above I could not read may "
+            "hold a failure. Ask again in a moment."
         )
     else:
         lines.append(
@@ -237,7 +276,7 @@ def compose_trouble_intake(
     ]
     names = [str(n) for n in (ctx.get("connector_names") or []) if n][:3]
     if names:
-        shown = ", ".join(f"**{n}**" for n in names)
+        shown = ", ".join(f"**{md_text(n)}**" for n in names)
         lines.append(f"Saved connectors: {shown}.")
     lines.append("Or say *give me a workspace briefing* and I'll start from what needs you.")
     return "\n".join(lines)
@@ -308,15 +347,10 @@ def compose_calendar(ctx: dict[str, Any] | None = None, message: str = "") -> st
     if fact:
         return fact
     spoken = now.strftime("%A, %d %B %Y")
-    ctx = ctx or {}
-    n_conn = len(ctx.get("connectors") or [])
-    n_jobs = len(ctx.get("recent_jobs") or [])
+    seen = _count_phrase(ctx)
     offer = " I can brief the workspace, check a pipeline, or open a failed job."
-    if n_conn or n_jobs:
-        offer = (
-            f" I can see **{n_conn}** connector(s) and **{n_jobs}** recent "
-            "job(s) if you want the sitrep instead."
-        )
+    if seen:
+        offer = f" {seen} if you want the sitrep instead."
     return (
         f"Today is **{spoken}** (UTC). I am not a personal calendar — "
         f"I keep your Datawrap workspace.{offer}"
@@ -601,15 +635,8 @@ def compose_general(message: str, ctx: dict[str, Any] | None = None) -> str:
     from .unsupported_question import unsupported_question_output
 
     base = str((unsupported_question_output(message) or {}).get("answer") or "").strip()
-    ctx = ctx or {}
-    n_conn = len(ctx.get("connectors") or [])
-    n_jobs = len(ctx.get("recent_jobs") or [])
-    live = ""
-    if n_conn or n_jobs:
-        live = (
-            f" I can see **{n_conn}** connector(s) and **{n_jobs}** recent "
-            "job(s) in this workspace if you want to switch to that."
-        )
+    seen = _count_phrase(ctx)
+    live = f" {seen} in this workspace if you want to switch to that." if seen else ""
     return (
         f"{base}\n\n"
         "Local Pilot answers anything I can prove from your connectors, jobs, "
@@ -628,6 +655,8 @@ _SKIP_SUMMARY_LINE = (
     "Optional cloud polish",
     "Local Datawrap Pilot still answered",
     "_On your last ask",
+    "As of ",
+    "_This restates",
 )
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _STEP_HEADING = re.compile(
@@ -721,7 +750,11 @@ def _summary_sentences(text: str, *, max_sentences: int) -> list[str]:
             if not piece or any(piece.startswith(p) for p in _SKIP_SUMMARY_LINE):
                 continue
             if piece.endswith(":"):
-                continue
+                # "**2** of the **5** job(s) started today failed:" is the
+                # answer's lead, not a heading: it is what a summary keeps.
+                if not re.search(r"\d", piece):
+                    continue
+                piece = piece[:-1].rstrip() + "."
             if _STEP_HEADING.match(piece) and len(piece.split()) <= 10:
                 continue
             if re.match(r"^G\d+\b", piece):
@@ -910,6 +943,14 @@ def compose_history_turn(
     asked = last_user_text(history)
     if asked and act in {"summarize_last", "explain_simpler"} and asked not in answer:
         answer = f"_On your last ask — “{_clip(asked, 80)}” —_\n\n{answer}"
+    if act in {"summarize_last", "explain_simpler"}:
+        # Nothing was read for this turn: say so, and when the earlier answer was true.
+        stamp = re.search(r"^As of ([^\n]+?)\.?$", _last_substantive_answer(history) or last or "", re.M)
+        when = f" (as of {stamp.group(1)})" if stamp else ""
+        answer += (
+            f"\n\n_This restates my earlier answer{when}; I have not re-read your stores — "
+            "ask again for current numbers._"
+        )
     return CopilotResponse(
         answer=answer,
         intent=intent,
@@ -983,3 +1024,42 @@ def compose_transform_capability_response(*, followup: bool = False) -> CopilotR
         reasoning="Transform capability — real starter templates, Confirm-gated create",
         suggested_prompts=[f"Create the {t['name']} transform" for t in templates[:3]],
     )
+
+
+def compose_dataset_list(output: dict[str, Any]) -> str:
+    """The workspace's uploads by file name, counted apart from built-in templates.
+
+    Every stored upload is named ``<file id>_<name>`` on disk, and the old
+    listing dropped such names as index shards — so the owner never saw their
+    own upload, and the count was the templates' (review H6).
+    """
+    from .tools import looks_like_index_dump_name
+
+    datasets = [d for d in output.get("datasets") or [] if isinstance(d, dict) and d.get("name")]
+    uploads = [d for d in datasets if d.get("origin") == "upload"]
+    templates = [
+        d for d in datasets
+        if d.get("origin") != "upload" and not looks_like_index_dump_name(str(d.get("name")))
+    ]
+
+    def line(d: dict[str, Any]) -> str:
+        rows = f", {d['row_count']:,} rows" if d.get("row_count") else ""
+        from .md_safe import md_text
+
+        return f"• **{md_text(d.get('display_name') or d.get('name'))}** — {d.get('column_count', 0)} columns{rows}"
+
+    lines: list[str] = []
+    if output.get("uploads_unread"):
+        lines.append(
+            "I could not read your uploads just now — the upload directory is not there — "
+            "so I can't tell you which files you have uploaded."
+        )
+    elif uploads:
+        lines.append(f"You have **{len(uploads)}** uploaded dataset(s):")
+        lines += [line(d) for d in uploads[:8]]
+    else:
+        lines.append("You have **0** uploaded datasets in this workspace.")
+    if templates:
+        lines.append(f"Plus **{len(templates)}** built-in template dataset(s):")
+        lines += [line(d) for d in templates[:4]]
+    return "\n".join(lines)
