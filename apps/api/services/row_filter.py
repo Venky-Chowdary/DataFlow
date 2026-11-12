@@ -8,6 +8,7 @@ comparison falls back to string equality/case-sensitive containment.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -55,6 +56,26 @@ FILTER_SHAPE_HELP = (
     'a predicate {"column": <name>, "op": <operator>, "value": <value>} or a '
     'composition {"and": [...]} / {"or": [...]} of predicates'
 )
+
+
+def filter_spec_from_json(text: str | None) -> dict[str, Any]:
+    """A form field's filter: blank is no filter, anything else a JSON filter object.
+
+    ValueError when the text is not JSON, or is JSON but not a filter this
+    module can evaluate (a list, a string, ``{"sql": ...}``). Reading such a
+    field as "no filter" landed every row under a declared filter and reported
+    the run verified. The parsed object is returned as sent; it is valid.
+    """
+    if not str(text or "").strip():
+        return {}
+    try:
+        parsed = json.loads(str(text))
+    except ValueError as exc:
+        raise ValueError(
+            f"not valid JSON ({exc.msg}). Send {FILTER_SHAPE_HELP}."
+        ) from exc
+    canonical_filter_spec(parsed)
+    return parsed
 
 
 def canonical_filter_spec(spec: dict[str, Any] | None) -> dict[str, Any]:
