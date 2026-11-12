@@ -141,7 +141,8 @@ def _blank(text: str, span: tuple[int, int]) -> str:
 
 def account_for_words(rest: str) -> WordAccount:
     """Read ``rest`` (a jobs question with its window and verification removed)."""
-    text = rest or ""
+    # A possessive is not a word of its own: "today's" once searched for "s".
+    text = re.sub(r"['’]s\b", "  ", rest or "")
     unhandled: list[tuple[int, str]] = []
     names: list[tuple[int, str]] = []
     found: dict[str, str] = {}
@@ -191,7 +192,9 @@ def account_for_words(rest: str) -> WordAccount:
         before = _previous(tokens, first_index)
         after = tokens[run[-1][2] + 1][1] if run[-1][2] + 1 < len(tokens) else ""
         nameable = before in _NAME_PREPS or bool(_SUBJECT_RE.fullmatch(after))
-        if nameable and not any(w.lower() in _NEVER_NAMES or w.isdigit() for w in words):
+        if nameable and not any(
+            w.lower() in _NEVER_NAMES or len(w) < 2 or re.fullmatch(r"[\d.\-/:]+", w) for w in words
+        ):
             names.append((start, span))
         else:
             unhandled.append((start, span))

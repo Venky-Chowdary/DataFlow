@@ -176,12 +176,22 @@ def named_job_exists(name: str, scope: str = "workspace") -> bool:
 def _has_named_job(needle: str, workspace_id: str | None) -> bool:
     """Whether a job in scope has ``needle`` in its source or destination name."""
     jobs, _counts, _source = list_transfer_jobs(limit=100, workspace_id=workspace_id, search=needle)
-    want = needle.casefold()
-    return any(
-        want in str(job.get(key) or "").casefold()
-        for job in jobs
-        for key in ("source", "destination", "source_table", "dest_table")
-    )
+    want = _name_words(needle)
+    if not want:
+        return False
+    for job in jobs:
+        for key in ("source", "destination", "source_table", "dest_table"):
+            have = _name_words(str(job.get(key) or ""))
+            # Whole words of a name: "orders" names "orders_wh", "ord" names nothing.
+            if any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1)):
+                return True
+    return False
+
+
+def _name_words(text: str) -> list[str]:
+    import re
+
+    return [w for w in re.split(r"[^0-9a-z]+", text.casefold()) if w]
 
 
 #: The tool definition advertised to MCP clients and the model.

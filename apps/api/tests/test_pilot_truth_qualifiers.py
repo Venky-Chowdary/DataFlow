@@ -109,6 +109,9 @@ REFUSED = [
     ("how many incremental jobs failed", "incremental"),
     ("how many slow jobs completed", "slow"),
     ("how many jobs failed from orders to invoices", "orders"),
+    # A one-letter word, and a word that is only part of a name, name nothing.
+    ("how many x jobs failed", "x"),
+    ("how many ord jobs failed", "ord"),
 ]
 
 
@@ -130,6 +133,9 @@ ANSWERED = [
     ("can you tell me how many failed jobs there are", {"status": "failed"}),
     ("hey, how many jobs failed in total?", {"status": "failed"}),
     ("number of failed transfers", {"status": "failed"}),
+    # A possessive is not a name: "today's" once searched jobs for "s".
+    ("today's failed jobs?", {"status": "failed"}),
+    ("how many of today's jobs failed", {"status": "failed"}),
 ]
 
 
@@ -138,6 +144,7 @@ def test_everyday_counting_questions_are_still_answered(ledger, question, filter
     response = pt.ask(ledger, question)
     truth = int(pt.mongo().count_job_matches(**filters) or 0)
     assert pt.bold_ints(response.answer)[:1] == [truth], response.answer
+    assert "matching" not in response.answer, f"a filter nobody asked for: {response.answer!r}"
     assert pt.grounded(response)
 
 
