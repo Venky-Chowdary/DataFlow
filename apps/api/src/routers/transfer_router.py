@@ -135,8 +135,13 @@ def _residency_check(request, endpoint, workspace_id: str):
     whose region cannot be established is refused too. The engine repeats the
     check where every job is created (``services.data_residency``).
     """
-    from services.data_residency import residency_refusal
+    from services.data_residency import addressing_refusal_for, residency_refusal
 
+    # A connection option or extra not on the family's allowlist: 422 naming it
+    # (review round 3, H1/H2).
+    keyed = addressing_refusal_for(workspace_id, endpoint, host_tenant_id=_host_tenant_id(request))
+    if keyed:
+        raise HTTPException(status_code=422, detail=keyed)
     refusal = residency_refusal(workspace_id, endpoint, host_tenant_id=_host_tenant_id(request))
     if refusal:
         raise HTTPException(status_code=403, detail=refusal)

@@ -1064,7 +1064,7 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
 
 def _export_residency_check(request: Request, body: QueryExportRequest, workspace_id: str) -> None:
     """403 when the export's destination is outside the workspace's data region."""
-    from services.data_residency import residency_refusal
+    from services.data_residency import addressing_refusal_for, residency_refusal
     from src.transfer.models import EndpointConfig
 
     destination_id = (body.destination_connector_id or "").strip()
@@ -1072,6 +1072,10 @@ def _export_residency_check(request: Request, body: QueryExportRequest, workspac
         dest = EndpointConfig(kind="database", connector_id=destination_id)
     else:
         dest = EndpointConfig(kind="file_export", format=body.format, output_path=body.output_path)
+    tenant = str(getattr(request.state, "tenant_id", "") or "")
+    keyed = addressing_refusal_for(workspace_id, dest, host_tenant_id=tenant)
+    if keyed:
+        raise HTTPException(status_code=422, detail=keyed)
     refusal = residency_refusal(
         workspace_id, dest, host_tenant_id=str(getattr(request.state, "tenant_id", "") or "")
     )

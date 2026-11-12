@@ -85,6 +85,7 @@ __all__ = [
     "enforce_request_residency",
     "enforced_region",
     "job_data_region",
+    "addressing_refusal_for",
     "residency_refusal",
 ]
 
@@ -428,7 +429,12 @@ def _addresses(endpoint: Any) -> tuple[list[str], bool]:
         name = _hostname(dialled)
         unreadable = unreadable or name is None
         hosts.extend([name] if name else [])
-    return hosts, unreadable
+    # Every allowlisted address key of the family, judged the way its driver
+    # resolves it (review round 3, H1/H2: services.residency_addressing).
+    from services.residency_addressing import address_hosts
+
+    keyed, refused, _bucket = address_hosts(endpoint)
+    return hosts + keyed, unreadable or refused
 
 
 def _region_before_cloud(labels: list[str]) -> str:
@@ -617,6 +623,11 @@ def _judged(endpoint: Any, workspace_id: str | None) -> DestinationRegion:
         return _deployment_region()
     if _driver(fmt) in _AWS_NATIVE:
         return _aws_native_region(endpoint, workspace_id)
+    from services.residency_addressing import address_hosts
+
+    if address_hosts(endpoint)[2]:
+        # Data lands in a bucket no address places (an Iceberg warehouse).
+        return _verified_region(endpoint, workspace_id)
     hosts, unreadable = _addresses(endpoint)
     if _driver(fmt) == "snowflake":
         hosts = [_snowflake_host(host) for host in hosts]
@@ -661,6 +672,39 @@ def destination_region(endpoint: Any, *, workspace_id: str | None = None) -> Des
     return _judged(_resolved(endpoint, workspace_id), workspace_id)
 
 
+def addressing_refusal_for(
+    workspace_id: str | None, endpoint: Any, *, host_tenant_id: str = ""
+) -> str | None:
+    """In a fenced workspace: a connection option, extra or override key not on
+    the destination family's allowlist (``services.residency_addressing``), or
+    ``None``. The routes answer it with a 422 naming the key."""
+    if not enforced_region(workspace_id, host_tenant_id=host_tenant_id):
+        return None
+    if _norm(getattr(endpoint, "kind", "")) in _LOCAL_KINDS:
+        return None
+    from services.residency_addressing import addressing_refusal
+
+    refusal = addressing_refusal(endpoint)  # the request: its fields and its extra overrides
+    if refusal:
+        return refusal
+    saved = None
+    connector_id = str(getattr(endpoint, "connector_id", "") or "").strip()
+    if connector_id:
+        try:
+            from services.connector_store import get_connector
+
+            saved = get_connector(connector_id, workspace_id=str(workspace_id or "") or None)
+        except Exception:  # noqa: BLE001 - an unreadable store is judged by the resolved endpoint
+            saved = None
+    if saved is not None:
+        refusal = addressing_refusal(saved, extras=True)
+        if refusal:
+            return refusal
+    # The endpoint as the driver will be given it (its URL / DSN keys only:
+    # a resolved endpoint's extra also holds the engine's own fields).
+    return addressing_refusal(_resolved(endpoint, workspace_id), extras=False)
+
+
 def residency_refusal(
     workspace_id: str | None, endpoint: Any, *, host_tenant_id: str = ""
 ) -> str | None:
@@ -668,6 +712,9 @@ def residency_refusal(
     allowed = enforced_region(workspace_id, host_tenant_id=host_tenant_id)
     if not allowed:
         return None
+    keyed = addressing_refusal_for(workspace_id, endpoint, host_tenant_id=host_tenant_id)
+    if keyed:
+        return keyed
     if allowed == _CONFLICTING_REGIONS:
         return (
             "Data residency violation: this deployment's tenant records with no workspace name "
