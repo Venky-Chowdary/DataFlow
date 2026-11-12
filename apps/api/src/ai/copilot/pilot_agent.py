@@ -7,6 +7,7 @@ Answers any data question and performs work in the app when asked.
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import re
@@ -57,6 +58,20 @@ _LLM_TURN_TIMEOUT_S = 20
 # Tools whose result is a screen change the client performs; their acknowledgement
 # is not prose to narrate.
 _NAVIGATION_TOOLS = frozenset({"navigate", "open_job", "open_schedule", "start_transfer_studio"})
+#: Deterministic count / status reads. Until a full answer verifier exists their
+#: grounded draft is the answer: a narrator rewrote "3 failed" as "13" (review H5).
+_UNNARRATED_TOOLS = frozenset({
+    "list_jobs", "get_job", "list_schedules", "get_schedule", "brief_workspace",
+    "list_connectors", "search_connectors", "list_datasets", "list_contracts",
+    "explain_parity", "get_preflight_run", "list_connector_objects", "list_cdc_captures",
+    "rank_connector_tables",
+})
+_NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w])")
+
+
+def _numbers(text: str) -> collections.Counter:
+    """Every number a text states, as a multiset ("1,250" == "1250")."""
+    return collections.Counter(m.replace(",", "") for m in _NUMBER.findall(text or ""))
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-llm")
 # Bounds on what a provider model may do inside one native tool loop.
 _NATIVE_MAX_TOOL_CALLS = 8
@@ -2135,6 +2150,10 @@ class DataPilotAgent:
         ) and not local.pending_actions:
             return local
 
+        # A count or status answer is the store's numbers: it is not rewritten.
+        if any(t.get("success") and t.get("name") in _UNNARRATED_TOOLS for t in tools):
+            return local
+
         # A draft built from cell values is not narrated under metadata-only:
         # the rewrite could not keep the rows without the rows being sent.
         if not narration_allowed(local.answer, tools):
@@ -2205,6 +2224,9 @@ Draft answer:
                 "%s narration dropped the draft's evidence — keeping the local answer",
                 method,
             )
+            return local
+        if _numbers(local.answer) != _numbers(polished):
+            logger.warning("%s narration changed the draft's numbers — keeping the local answer", method)
             return local
         if contradicts_draft(local.answer, polished):
             logger.warning(

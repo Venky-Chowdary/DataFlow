@@ -21,6 +21,10 @@ ROWS_PAYLOAD = json.dumps(
 )
 
 
+#: A turn that is still narrated: count and status answers are not (review H5).
+NARRATED = "what columns are in customers on CRM SQLite"
+
+
 class _StubNarrator:
     name = "openai"
 
@@ -76,10 +80,11 @@ def test_rows_in_the_transcript_are_withheld_from_a_later_narration(hybrid):
         {"role": "assistant", "content": first.answer},
     ]
     hybrid.prompts.clear()
-    second = pt.ask(agent, "how many connectors do I have", history=history, pilot_session_id="egress")
+    # A schema answer is narrated; count answers are not narrated at all (review H5).
+    second = pt.ask(agent, NARRATED, history=history, pilot_session_id="egress")
 
     assert second.answer
-    assert hybrid.prompts, "the connectors answer carries no cells, so it is narrated"
+    assert hybrid.prompts, "the schema answer carries no cells, so it is narrated"
     assert _leaked(hybrid.prompts) == []
 
 
@@ -254,8 +259,8 @@ def test_value_lines_in_the_transcript_are_withheld_and_the_manifest_says_so(wir
 
     for i in range(3):
         pt.seed_job("completed", minutes_ago=10 + i)
-    pt.ask(pt.agent(), "how many jobs do I have", history=VALUE_HISTORY)
-    assert wire.sent, "the count answer carries no cells, so it is narrated"
+    pt.ask(pt.agent(), NARRATED, history=VALUE_HISTORY)
+    assert wire.sent, "the schema answer carries no cells, so it is narrated"
     assert _free_leaked(wire.sent, VALUE_HISTORY_CELLS) == []
     manifest = last_manifest()
     assert manifest["cells_withheld"] is True and manifest["cell_values_included"] is False
@@ -267,7 +272,7 @@ def test_client_blockers_are_withheld_from_the_system_prompt(wire):
     for i in range(3):
         pt.seed_job("completed", minutes_ago=10 + i)
     blockers = [f"Row 12: email '{pt.pii_email(1)}' is not unique", f"ssn {pt.pii_ssn(1)} fails pattern"]
-    pt.ask(pt.agent(), "how many jobs do I have", blockers=blockers, columns=["id", "email"],
+    pt.ask(pt.agent(), NARRATED, blockers=blockers, columns=["id", "email"],
            name="customers", row_count=7)
     assert wire.sent
     assert _free_leaked(wire.sent, [pt.pii_email(1), pt.pii_ssn(1)]) == []
@@ -325,12 +330,12 @@ def test_manifest_records_free_text_as_included_when_cells_are_allowed(wire, mon
     from services.ai_egress import last_manifest
 
     monkeypatch.setenv("DATAFLOW_AI_METADATA_ONLY", "false")
-    pt.seed_job("failed", minutes_ago=1, error=JOB_ERROR, source_name="customers")
-    pt.ask(pt.agent(), "why did my last job fail")
-    assert _free_leaked(wire.sent), "cells allowed: the error is narrated"
+    # Job answers are not narrated (review H5): the error text rides in the blockers.
+    pt.ask(pt.agent(), NARRATED, blockers=[JOB_ERROR], columns=["id", "email"], name="customers", row_count=7)
+    assert _free_leaked(wire.sent), "cells allowed: the blocker text is sent"
     assert last_manifest()["cell_values_included"] is True
 
     wire.sent.clear()
-    pt.ask(pt.agent(), "how many jobs do I have", history=VALUE_HISTORY)
+    pt.ask(pt.agent(), NARRATED, history=VALUE_HISTORY)
     assert _free_leaked(wire.sent, VALUE_HISTORY_CELLS)
     assert last_manifest()["cell_values_included"] is True
