@@ -25,34 +25,50 @@ import pytest
 
 import tests.r4_route_harness as h
 
-SPIN_SECONDS = 6.0
+SPIN_SECONDS = 8.0
+# The real pipeline has stretches with no stop check (one answer, one ingest
+# batch). The headline spin ignores the stop event this long, so only a run
+# on its own daemon thread lets shutdown return before it ends; the loop's
+# default executor would make ``asyncio.Runner.close()`` wait it out.
+DEAF_SECONDS = 4.0
 
 
 class _SpinAgent:
-    """Stands in for the training agent: a CPU spin that honours the stop event."""
+    """Stands in for the training agent: a CPU spin that honours the stop
+    event once its first ``deaf_seconds`` are over."""
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, deaf_seconds: float = 0.0) -> None:
         self.seconds = seconds
+        self.deaf_seconds = deaf_seconds
         self.started = threading.Event()
         self.exited = threading.Event()
         self.saw_stop = False
+        self.spins = 0
+        self.calls: list[tuple] = []
+        self.stop_event: threading.Event | None = None
         self.thread: threading.Thread | None = None
 
     def run_full_training(self, include_embedding_tune=False, force=False, stop_event=None):
         self.thread = threading.current_thread()
+        self.stop_event = stop_event
+        self.calls.append((include_embedding_tune, force))
         self.started.set()
-        deadline = time.monotonic() + self.seconds
-        spins = 0
+        t0 = time.monotonic()
+        deadline = t0 + self.seconds
         try:
             while time.monotonic() < deadline:
-                if stop_event is not None and stop_event.is_set():
+                listening = time.monotonic() - t0 >= self.deaf_seconds
+                if listening and stop_event is not None and stop_event.is_set():
                     self.saw_stop = True
                     break
                 for _ in range(20_000):  # hold the GIL like real synthesis does
-                    spins += 1
+                    self.spins += 1
         finally:
             self.exited.set()
-        return SimpleNamespace(id="spin", status="stopped" if self.saw_stop else "completed", metrics={})
+        return SimpleNamespace(
+            id="spin", status="stopped" if self.saw_stop else "completed",
+            metrics={"spins": self.spins}, errors=[],
+        )
 
 
 class _FastStartAsyncio:
@@ -75,7 +91,7 @@ def test_app_shutdown_does_not_wait_for_a_running_training_run(tmp_path, monkeyp
     import src.ai.training.training_agent as training_agent
     import src.ai.training.training_scheduler as training_scheduler
 
-    agent = _SpinAgent(SPIN_SECONDS)
+    agent = _SpinAgent(SPIN_SECONDS, deaf_seconds=DEAF_SECONDS)
     monkeypatch.setattr(training_agent, "get_training_agent", lambda: agent)
     monkeypatch.setattr(training_scheduler, "asyncio", _FastStartAsyncio())
     monkeypatch.setattr(training_scheduler, "TRAINING_INITIAL_DELAY_SECONDS", 0.1, raising=False)
@@ -96,14 +112,18 @@ def test_app_shutdown_does_not_wait_for_a_running_training_run(tmp_path, monkeyp
         print(f"TestClient.__exit__ took {exit_seconds:.2f}s with a training run in flight")
 
         assert exit_seconds < 2.0, (
-            f"TestClient.__exit__ took {exit_seconds:.1f}s: shutdown waited for the "
-            f"{SPIN_SECONDS:.0f}s training run instead of stopping it"
+            f"TestClient.__exit__ took {exit_seconds:.1f}s: shutdown waited for a "
+            f"training run that ignores the stop event for {DEAF_SECONDS:.0f}s"
         )
-        assert agent.exited.wait(2.0), "training thread kept running after shutdown"
+        # The runtime's own thread: a default-executor worker made under
+        # TestClient's daemon portal thread is a daemon too, so the flag
+        # alone cannot tell them apart.
+        assert agent.thread is not None and agent.thread.name == "datawrap-training", (
+            f"training ran on {agent.thread!r}, not the runtime's datawrap-training thread"
+        )
+        assert agent.thread.daemon
+        assert agent.exited.wait(DEAF_SECONDS + 2.0), "training thread kept running after shutdown"
         assert agent.saw_stop, "training run never observed the stop request"
-        assert agent.thread is not None and agent.thread.daemon, (
-            "training must run on a daemon thread, not the loop's default executor"
-        )
         agent.thread.join(2.0)
         assert not agent.thread.is_alive()
     finally:
