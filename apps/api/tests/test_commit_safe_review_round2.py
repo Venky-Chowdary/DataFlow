@@ -218,3 +218,168 @@ def test_excel_date_cursor_second_run_writes_only_new_rows(isolated, tmp_path, c
     with sqlite3.connect(dst) as conn:
         landed = [r[0] for r in conn.execute("SELECT id FROM orders ORDER BY id")]
     assert written == [2, 2] and landed == [1, 2, 3, 4], (written, landed)
+
+
+# --------------------------------------------------------------------------
+# Live PostgreSQL helpers
+# --------------------------------------------------------------------------
+
+SCHEMA = "df_csw_round2"
+
+
+def _connect(autocommit: bool = True):
+    import psycopg2
+
+    from tests.helpers.live_env import pg_creds
+
+    c = pg_creds()
+    conn = psycopg2.connect(
+        host=c["host"], port=c["port"], user=c["username"],
+        password=c["password"], dbname=c["database"],
+    )
+    conn.autocommit = autocommit
+    return conn
+
+
+def _sql(statement: str, fetch: bool = False):
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(statement)
+            return cur.fetchall() if fetch else None
+    finally:
+        conn.close()
+
+
+def _endpoint(table: str) -> EndpointConfig:
+    from tests.helpers.live_env import pg_creds
+
+    c = pg_creds()
+    return EndpointConfig(
+        kind="database", format="postgresql", host=c["host"], port=int(c["port"]),
+        database=c["database"], schema=SCHEMA, table=table,
+        username=c["username"], password=c["password"],
+    )
+
+
+def _pg_cfg() -> dict:
+    from tests.helpers.live_env import pg_creds
+
+    c = pg_creds()
+    return {"host": c["host"], "port": int(c["port"]), "database": c["database"],
+            "username": c["username"], "password": c["password"], "schema": SCHEMA}
+
+
+@pytest.fixture()
+def pg():
+    from tests.helpers.live_env import pg_up
+
+    if not pg_up():
+        pytest.skip("live PostgreSQL not reachable")
+    _sql(f'DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE')
+    _sql(f'CREATE SCHEMA "{SCHEMA}"')
+    yield SCHEMA
+    _sql(f'DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE')
+
+
+def _run(fake, src: str, dst: str, *, cursor: str, mode: str = "incremental_append",
+         pk: str = "", skip_preflight: bool = True, **extra):
+    contract = {"name": src, "cursor_field": cursor, "sync_mode": mode, "selected": True, **extra}
+    if pk:
+        contract["primary_key"] = pk
+    request = TransferRequest(
+        source=_endpoint(src), destination=_endpoint(dst), sync_mode=mode,
+        stream_contracts=[contract], skip_preflight=skip_preflight, validation_mode="strict",
+    )
+    job_id = "r2p" + uuid.uuid4().hex[:16]
+    fake.update_job_status(job_id, "pending", transfer_request={})
+    return UniversalTransferEngine().execute_tracked(request, job_id)
+
+
+def _window(result) -> dict:
+    return (result.destination_summary or {}).get("commit_safe_window") or {}
+
+
+def _missing(src: str, dst: str) -> list:
+    return _sql(
+        f'SELECT s.id FROM "{SCHEMA}".{src} s LEFT JOIN "{SCHEMA}".{dst} d ON d.id = s.id '
+        "WHERE d.id IS NULL ORDER BY 1",
+        fetch=True,
+    )
+
+
+# --------------------------------------------------------------------------
+# M-1 — the wall-clock text rule refuses only a mixed separator
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["2026-01-01 10:00:00.13", "2026-01-01 10:00:01.3", "2026-01-01 10:00:00.013"],
+        ["2026-01-01", "2026-01-01 10:00:00", "2026-01-02"],
+        ["2026-01-01 10:00", "2026-01-01 10:00:30", "2026-01-01 10:01"],
+        ["2026-01-01T10:00", "2026-01-01T10:00:30.5", "2026-01-02"],
+    ],
+    ids=["trimmed-fractions", "date-beside-date-time", "minutes-beside-seconds", "T-prefix-layouts"],
+)
+def test_wallclock_text_in_prefix_layouts_is_orderable(values):
+    """Text order equals time order for these: a shorter layout is a prefix
+    of the longer one and sorts first, and fraction digits compare left to
+    right whatever their width."""
+    from services.cursor_order import order_key, text_cursor_shape
+
+    shape = text_cursor_shape(values)
+    assert shape.orderable, shape
+    assert sorted(values) == sorted(values, key=order_key)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["2026-01-01T10:00:00", "2026-01-01 11:00:00"],
+        ["2026-01-01T10:00", "2026-01-01 10:00:30.5"],
+    ],
+)
+def test_wallclock_text_with_mixed_separators_is_refused(values):
+    from services.cursor_order import SHAPE_MIXED_LAYOUTS, text_cursor_refusal, text_cursor_shape
+
+    shape = text_cursor_shape(values)
+    assert shape.kind == SHAPE_MIXED_LAYOUTS, shape
+    assert "'T' or a space" in text_cursor_refusal("c", shape)
+    # SQLite reads both separators as one: the same values are orderable there.
+    assert text_cursor_shape(values, separator_normalized=True).orderable
+
+
+def test_trimmed_fraction_text_cursor_loads_on_live_postgresql(isolated, pg):
+    """The reviewer's Q4: a text column filled from ``timestamp::text``
+    (PostgreSQL trims trailing fraction zeros). No row is misordered as text,
+    and all 400 rows load; the route used to be refused as "more than one
+    layout"."""
+    _sql(f'CREATE TABLE "{SCHEMA}".tf (id int PRIMARY KEY, ts timestamp NOT NULL, c text NOT NULL)')
+    _sql(
+        f"""INSERT INTO "{SCHEMA}".tf SELECT g, timestamp '2026-01-01 10:00:00' + g * interval '0.013 s', ''
+        FROM generate_series(1, 400) g"""
+    )
+    _sql(f'UPDATE "{SCHEMA}".tf SET c = ts::text')
+    misordered = _sql(
+        f'SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY c COLLATE "C") a, '
+        f'row_number() OVER (ORDER BY ts) b FROM "{SCHEMA}".tf) q WHERE a <> b',
+        fetch=True,
+    )[0][0]
+    assert misordered == 0
+    result = _run(isolated, "tf", "tf_out", cursor="c")
+    assert result.success, result.error
+    assert result.records_transferred == 400
+    assert _missing("tf", "tf_out") == []
+
+
+def test_mixed_separator_text_cursor_is_refused_on_live_postgresql(isolated, pg):
+    _sql(f'CREATE TABLE "{SCHEMA}".ms (id int PRIMARY KEY, c text NOT NULL)')
+    _sql(
+        f"""INSERT INTO "{SCHEMA}".ms VALUES (1, '2026-01-01T10:00:00'), (2, '2026-01-01 11:00:00'),
+        (3, '2026-01-01T12:00:00')"""
+    )
+    result = _run(isolated, "ms", "ms_out", cursor="c")
+    assert not result.success
+    assert "'T' or a space" in str(result.error)

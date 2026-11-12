@@ -260,10 +260,8 @@ def test_text_cursor_mixed_offsets_row_not_skipped(tmp_path, isolated, skip_pref
         (["12/31/2023", "01/01/2024"], "day"),
         (["31.12.2023", "01.01.2024"], "day"),
         (["31-12-2023 10:00", "01-01-2024 09:00"], "day"),
-        (["2024-01-05 10:00:00", "2024-01-05T09:00:00"], "layout"),
-        (["2024-01-05 10:00:00.5", "2024-01-05 10:00:00.25"], "layout"),
-        (["2024-01-05 10:00:00.5", "2024-01-05 10:00:01.250", "2024-01-05 10:00:02"], "layout"),
-        (["2024-01-05", "2024-01-05 10:00:00"], "layout"),
+        (["2024-01-05 10:00:00", "2024-01-05T09:00:00"], "'T' or a space"),
+        (["2024-01-05", "2024-01-05 10:00:00.5", "2024-01-05T11:00"], "'T' or a space"),
     ],
 )
 def test_wall_clock_text_outside_one_iso_layout_is_refused(values, word):
@@ -278,9 +276,9 @@ def test_a_source_that_normalises_the_separator_accepts_both_iso_forms():
     values = ["2025-01-01T00:01:00", "2025-01-01 03:21:00"]
     shape = co.text_cursor_shape(values, separator_normalized=True)
     assert shape.kind == co.SHAPE_WALLCLOCK and shape.orderable
-    assert co.like_pattern_for(shape, values[0], any_separator=True) == "____-__-_____:__:__"
-    # Two fraction widths still differ as text, whatever the separator.
-    assert not co.text_cursor_shape(
+    assert "____-__-_____:__:__" in co.wallclock_like_patterns(shape, values, any_separator=True)
+    # Fraction widths compare digit by digit: text order is time order (review M-1).
+    assert co.text_cursor_shape(
         ["2025-01-01T00:01:00.5", "2025-01-01 03:21:00.25"], separator_normalized=True
     ).orderable
 
@@ -299,9 +297,12 @@ def test_codes_that_are_not_calendar_dates_stay_plain_text():
         (["2024-01-05", "2024-01-06"], "____-__-__"),
         # isoformat() drops a zero fraction: the bare second sorts first, as in time.
         (["2024-01-05 10:00:00", "2024-01-05 10:00:00.123456"], "____-__-__ __:__:__.______"),
+        # Prefix layouts and any fraction width (review M-1).
+        (["2024-01-05 10:00:00.5", "2024-01-05 10:00:01.250"], "____-__-__ __:__:__._"),
+        (["2024-01-05", "2024-01-05 10:00"], "____-__-__ __:__"),
     ],
 )
 def test_one_iso_wall_clock_layout_is_orderable_and_confirmed_on_every_row(values, pattern):
     shape = co.text_cursor_shape(values)
     assert shape.kind == co.SHAPE_WALLCLOCK and shape.orderable, shape
-    assert co.wallclock_like_patterns(shape, values)[-1] == pattern
+    assert pattern in co.wallclock_like_patterns(shape, values)

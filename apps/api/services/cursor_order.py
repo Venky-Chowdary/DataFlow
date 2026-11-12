@@ -170,8 +170,8 @@ SHAPE_MIXED = "mixed"
 SHAPE_EMPTY = "empty"
 #: Dates written day/month or month/day: text order is not time order.
 SHAPE_CALENDAR_TEXT = "non_iso_date_text"
-#: ISO wall-clock text in more than one layout (separator, fraction width, or
-#: date-only beside date-time): text order is not time order across layouts.
+#: ISO wall-clock text with a 'T' between date and time in some values and a
+#: space in others: text order is not time order across the two.
 SHAPE_MIXED_LAYOUTS = "wallclock_text_mixed_layouts"
 
 #: Shapes for which the engine's text order is this module's order.
@@ -196,39 +196,38 @@ class TextCursorShape:
         return self.kind in ORDERABLE_TEXT_SHAPES
 
 
-def _layout_of(text: str, any_separator: bool = False) -> str:
-    """The layout of a value: every digit replaced by ``_``, separators kept.
-
-    ``any_separator``: the date/time separator (position 10) matches either
-    'T' or a space.
-    """
-    layout = re.sub(r"[0-9]", "_", text)
-    if any_separator and len(layout) > 10 and layout[10] in "T ":
-        layout = layout[:10] + "_" + layout[11:]
-    return layout
+def _separator_of(text: str) -> str:
+    """The character between an ISO date and its time ('T' or ' '), or ``""``."""
+    return text[10] if len(text) > 10 and text[10] in "T " else ""
 
 
-def _split_fraction(layout: str) -> tuple[str, int]:
-    """``(layout without its fraction, fraction width)`` of a wall-clock layout."""
-    if len(layout) > 19 and layout[19] == ".":
-        return layout[:19], len(layout) - 20
-    return layout, 0
+#: Fraction widths a wall-clock ``LIKE`` confirmation allows (up to Oracle's 9).
+_MAX_FRACTION_DIGITS = 9
 
 
 def wallclock_like_patterns(
     shape: TextCursorShape, values: Iterable[str], *, any_separator: bool = False
 ) -> tuple[str, ...]:
-    """``LIKE`` patterns one wall-clock layout allows: its base, and with its fraction width."""
+    """``LIKE`` patterns of every wall-clock layout one separator allows.
+
+    A date, then optionally the separator and ``HH:MM``, ``:SS`` and a
+    fraction of any width: each is a prefix of the next, so text order is
+    time order across them (review M-1). ``any_separator``: the source reads
+    'T' and a space as one (SQLite).
+    """
     if shape.kind != SHAPE_WALLCLOCK:
         return ()
-    base, width = "", 0
-    for value in values:
-        b, w = _split_fraction(_layout_of(str(value), any_separator))
-        base, width = b, max(width, w)
-    if not base:
-        return ()
-    escaped = base.replace("\\", "\\\\").replace("%", "\\%")
-    return (escaped,) + ((escaped + "." + "_" * width,) if width else ())
+    seps = {_separator_of(str(v)) for v in values} - {""}
+    sep = "_" if any_separator else (next(iter(seps)) if len(seps) == 1 else "")
+    date = "____-__-__"
+    if not sep:
+        # Dates only so far: a row with a time is fetched and judged again.
+        return (date,)
+    clock = date + sep + "__:__"
+    second = clock + ":__"
+    return (date, clock, second) + tuple(
+        second + "." + "_" * width for width in range(1, _MAX_FRACTION_DIGITS + 1)
+    )
 
 
 def _offset_of(text: str) -> str:
@@ -282,22 +281,21 @@ def text_cursor_shape(values: Iterable[Any], *, separator_normalized: bool = Fal
 
     aware = [t for t in texts if cursor_instant_key(t) is not None]
     if not aware:
-        # One ISO layout only: 'T' sorts after ' ', a longer fraction after a
-        # shorter one, and a date-only value before the date-times of its day,
-        # so two layouts interleave differently as text than in time.
-        # A value without a fraction beside one fraction width is safe: it is
-        # a prefix of the same second and sorts first, and fraction digits
-        # compare left to right (Python's isoformat drops a zero fraction).
-        bases: dict[str, str] = {}
-        widths: dict[int, str] = {}
-        for t in texts:
-            base, width = _split_fraction(_layout_of(t, separator_normalized))
-            bases.setdefault(base, t)
-            widths.setdefault(width, t)
-        if len(bases) > 1 or len(set(widths) - {0}) > 1:
-            pair = list(bases.values())[:2] if len(bases) > 1 else [
-                widths[w] for w in sorted(set(widths) - {0})[:2]
-            ]
+        # Only the separator between date and time can misorder ISO wall
+        # clocks as text: 'T' sorts after ' ', so the two interleave
+        # differently than in time. A date beside date-times, minutes beside
+        # seconds, and fractions of any width (PostgreSQL's ``timestamp::text``
+        # trims trailing zeros) are each a prefix of the longer layout, which
+        # sorts first and is not later in time, and digits compare left to
+        # right (review M-1).
+        by_separator: dict[str, str] = {}
+        if not separator_normalized:
+            for t in texts:
+                sep = _separator_of(t)
+                if sep:
+                    by_separator.setdefault(sep, t)
+        if len(by_separator) > 1:
+            pair = list(by_separator.values())
             return TextCursorShape(SHAPE_MIXED_LAYOUTS, low=min(pair), high=max(pair))
         return TextCursorShape(SHAPE_WALLCLOCK)
     offsets = {_offset_of(t) for t in aware}
@@ -335,12 +333,11 @@ def text_cursor_refusal(column: str, shape: TextCursorShape) -> str:
         )
     if shape.kind == SHAPE_MIXED_LAYOUTS:
         return (
-            f"{lead}, but it holds date-times in more than one layout ('{shape.low}' and "
-            f"'{shape.high}'): a 'T' or a space between date and time, fractions of "
-            "different widths, or a date beside date-times sort differently as text than "
-            "in time, so an incremental read past the watermark would skip rows without "
-            "an error. Only one ISO layout (one separator, one fraction width) keeps text "
-            "order in time order." + remedy
+            f"{lead}, but it holds date-times written with a 'T' or a space between date "
+            f"and time ('{shape.low}' and '{shape.high}'): the two sort differently as "
+            "text than in time, so an incremental read past the watermark would skip rows "
+            "without an error. ISO date-times with one separator keep text order in time "
+            "order." + remedy
         )
     if shape.kind == SHAPE_MIXED_OFFSETS:
         return (
@@ -438,9 +435,6 @@ def like_pattern_for(shape: TextCursorShape, example: str, *, any_separator: boo
     width = len(example)
     if shape.kind == SHAPE_PADDED_NUMBER and width:
         return "_" * width
-    if shape.kind == SHAPE_WALLCLOCK and width:
-        patterns = wallclock_like_patterns(shape, [example], any_separator=any_separator)
-        return patterns[-1] if patterns else ""
     if shape.kind == SHAPE_INSTANT and width > len(shape.offset):
         suffix = shape.offset.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         return "_" * (width - len(shape.offset)) + suffix
