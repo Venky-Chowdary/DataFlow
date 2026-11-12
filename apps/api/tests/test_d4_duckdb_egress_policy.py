@@ -34,13 +34,31 @@ def test_network_engine_still_refused():
     assert metadata_endpoint_refusal("127.0.0.1", allowlist=())
 
 
-def test_probe_passes_type_to_egress_check():
-    import inspect
-
+def test_probe_passes_type_to_egress_check(monkeypatch):
+    """The probe tells the egress check which engine it runs, so a file
+    engine's host label is not refused (D4). Since PR 410 review L-E3 the
+    driver the probe runs wins over a ``type`` carried in the cfg; with no
+    driver given, the cfg's type is still used. Behavioural, not a source
+    grep: the check is stubbed to record what it was told and stop the probe.
+    """
+    import services.egress_guard as egress_guard
     from src.transfer import connector_registry
 
-    source = inspect.getsource(connector_registry._run_probe_impl)
-    assert 'db_type=str(cfg.get("type")' in source
+    seen: list[str] = []
+
+    def record(*_values, db_type="", **_kw):
+        seen.append(db_type)
+        return "stop here"
+
+    monkeypatch.setattr(egress_guard, "metadata_endpoint_refusal", record)
+
+    ok, msg = connector_registry._run_probe_impl("duckdb", {"host": "localhost"})
+    assert (ok, msg) == (False, "stop here")
+    connector_registry._run_probe_impl("", {"host": "localhost", "type": "sqlite"})
+    connector_registry._run_probe_impl(
+        "postgresql", {"host": "localhost", "type": "duckdb"}
+    )
+    assert seen == ["duckdb", "sqlite", "postgresql"]
 
 
 def test_create_and_update_pass_type():

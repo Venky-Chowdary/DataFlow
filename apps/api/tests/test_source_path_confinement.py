@@ -112,3 +112,21 @@ def test_missing_file_under_uploads_falls_back_to_content(uploads):
 def test_operator_declared_root_is_honored(uploads, outside, monkeypatch):
     monkeypatch.setenv("DATAFLOW_SOURCE_PATH_ROOTS", str(outside.parent))
     assert prepare_stream_content(source_path=str(outside)) == str(outside.resolve())
+
+
+def test_repo_test_fixtures_are_not_a_transfer_source(monkeypatch):
+    """PR 410 took ``tests/fixtures`` out of the feeder's default upload dirs.
+
+    ``dataset_roots()`` is built from those dirs, so the transfer sandbox
+    narrowed with it: repo test data is not a customer upload. A test that
+    reads a fixture declares the root (``DATAWRAP_SOURCE_PATH_ROOTS``), as
+    ``test_scale_transfer`` does.
+    """
+    monkeypatch.delenv("DATAFLOW_SOURCE_PATH_ROOTS", raising=False)
+    monkeypatch.delenv("DATAWRAP_SOURCE_PATH_ROOTS", raising=False)
+    fixtures = Path(dataset_file.__file__).resolve().parents[1] / "tests" / "fixtures"
+    assert fixtures.resolve() not in [r.resolve() for r in dataset_file.dataset_roots()]
+    with pytest.raises(ValueError, match="outside the upload directory"):
+        confine_source_path(fixtures / "scale_100k.csv")
+    monkeypatch.setenv("DATAWRAP_SOURCE_PATH_ROOTS", str(fixtures))
+    assert confine_source_path(fixtures / "scale_100k.csv") == (fixtures / "scale_100k.csv").resolve()
