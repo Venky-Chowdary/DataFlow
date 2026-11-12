@@ -25,7 +25,53 @@ from typing import Any, Callable
 
 CENSUS_KEY = "incremental_key_census"
 RUNS_SINCE_KEY = "runs_since_key_census"
+#: Source keys this route quarantined, kept with its watermark (review M6):
+#: missing at the destination by design, so the census does not report them.
+ROUTE_QUARANTINE_KEY = "quarantined_keys"
+ROUTE_QUARANTINE_COMPLETE_KEY = "quarantined_keys_complete"
+ROUTE_QUARANTINE_MAX = 10_000
 _SAMPLE = 5
+
+
+def _census_key_text(parts: Any) -> str:
+    """One key as the census spells it: the value, or the parts joined by U+001F."""
+    values = [str(p) for p in (parts if isinstance(parts, (list, tuple)) else [parts])]
+    return values[0] if len(values) == 1 else "\x1f".join(values)
+
+
+def route_quarantined_keys(
+    previous: Any, dest_summary: Any, key_cols: list[str]
+) -> tuple[list[list[str]], bool]:
+    """``(keys, complete)``: the route's quarantined keys with this run's added.
+
+    Bounded at :data:`ROUTE_QUARANTINE_MAX`; past it the record is marked
+    incomplete and the census says keys beyond it may be reported.
+    """
+    from src.transfer.reconcile_step import _rejected_key
+
+    keys: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    complete = True
+
+    def add(parts: Any) -> None:
+        nonlocal complete
+        key = tuple(str(p) for p in (parts if isinstance(parts, (list, tuple)) else [parts]))
+        if not key or key in seen:
+            return
+        if len(keys) >= ROUTE_QUARANTINE_MAX:
+            complete = False
+            return
+        seen.add(key)
+        keys.append(list(key))
+
+    for parts in previous or []:
+        add(parts)
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    for detail in summary.get("rejected_details") or []:
+        found = _rejected_key(detail, key_cols) if isinstance(detail, dict) and key_cols else None
+        if found:
+            add(found)
+    return keys, complete
 
 
 def census_schedule(every: int, runs_since: Any) -> tuple[bool, int]:
@@ -139,12 +185,14 @@ def apply_incremental_census(
     request = summary.get(CENSUS_KEY)
     if not isinstance(request, dict) or not request.get("due") or source_endpoint is None:
         return recon
+    from services.commit_safe_window import cursor_part
     from services.incremental_drift import DRIFT_KEY
-    from services.sync_cursor import get_watermark
+    from services.sync_cursor import get_watermark_record
 
     cursor_column = str(request.get("cursor_column") or "")
     cursor_key = str(summary.get("incremental_cursor_key") or summary.get("cursor_key") or "")
-    watermark = get_watermark(cursor_key) if cursor_key else None
+    watermark, metadata = get_watermark_record(cursor_key) if cursor_key else (None, {})
+    metadata = dict(metadata or {})
     out = dict(recon)
     census: dict[str, Any] = {"ran": False, "every": request.get("every"), "watermark": watermark}
     if watermark in (None, ""):
@@ -156,7 +204,7 @@ def apply_incremental_census(
         endpoint=endpoint,
         dest_summary=summary,
         mappings=mappings,
-        source_cursor_bound=(cursor_column, _behind(str(watermark))),
+        source_cursor_bound=(cursor_column, _behind(str(watermark)), cursor_part(watermark)),
     )
     if reason is not None:
         # An unrun census is said, not passed off as a clean one.
@@ -166,6 +214,18 @@ def apply_incremental_census(
         warnings.append("Key census requested for this run did not run: " + reason)
         out["warnings"] = warnings
         return out
+    # Keys the route quarantined are missing at the destination by design.
+    key_cols = [str(c) for c in summary.get("primary_key_columns") or summary.get("conflict_columns") or []]
+    quarantined, complete = route_quarantined_keys(
+        metadata.get(ROUTE_QUARANTINE_KEY), summary, key_cols
+    )
+    held_out = {_census_key_text(k) for k in quarantined}
+    before = len(missing)
+    missing = [k for k in missing if str(k) not in held_out]
+    census["quarantined_excluded"] = before - len(missing)
+    if not (complete and metadata.get(ROUTE_QUARANTINE_COMPLETE_KEY, True)):
+        census["quarantine_record_complete"] = False
+    census["source_bound"] = str(summary.get("incremental_key_census_bound") or "")
     census.update(
         ran=True,
         missing_behind_watermark=len(missing),

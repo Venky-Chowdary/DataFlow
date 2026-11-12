@@ -4974,6 +4974,32 @@ def _oracle_stored_columns(
     return match_stored_names(stored, key_cols), match_stored_names(stored, cols)
 
 
+#: Census readers whose source query takes the watermark bound as a bind
+#: parameter. The others read the whole source and filter it here, and say so.
+_CENSUS_BOUND_PARAMS = {"postgresql": "%s", "mysql": "%s", "sqlite": "?", "duckdb": "?"}
+
+
+def census_bound_clause(engine: str, quoted_cursor: str, upper: str) -> tuple[str, tuple] | None:
+    """``(" WHERE cursor <= ?", params)`` bounding a census source read, or None.
+
+    The bound is the watermark's cursor value; the exact keep-filter still runs
+    on every row read, so this only narrows what is read. SQLite compares an
+    ISO date-time through the same separator-normalising operand the read uses.
+    """
+    mark = _CENSUS_BOUND_PARAMS.get(str(engine or "").lower())
+    if mark is None or upper in (None, ""):
+        return None
+    if engine == "sqlite":
+        from services.copy_incremental import (
+            sqlite_cursor_operand,
+            sqlite_normalize_cursor_watermark,
+        )
+
+        value = sqlite_normalize_cursor_watermark(str(upper))
+        return " WHERE " + sqlite_cursor_operand(quoted_cursor, str(upper)) + " <= " + mark, (value,)
+    return " WHERE " + quoted_cursor + " <= " + mark, (str(upper),)
+
+
 def _generic_key_census(
     *,
     source_endpoint: Any,
@@ -5067,8 +5093,10 @@ def _generic_key_census(
     # watermark: ``(source cursor column, keep(cell))`` bounds the source side.
     bound_idx: int | None = None
     bound_keep = None
+    bound_col, bound_upper = "", ""
     if source_cursor_bound is not None:
-        _bound_col, bound_keep = source_cursor_bound
+        _bound_col, bound_keep, *_upper = source_cursor_bound
+        bound_col, bound_upper = str(_bound_col), str(_upper[0]) if _upper else ""
         _src_selected = [c.lower() for c in [*src_pks, *src_cols]]
         if str(_bound_col).lower() not in _src_selected:
             return [], [], [], (
@@ -5135,9 +5163,30 @@ def _generic_key_census(
                         [_qi(k, q) for k in key_cols] + [_qi(c, q) for c in cols]
                     )
                     stmt = f"SELECT {sel} FROM {ref_table}"  # nosec B608
+                params: tuple = ()
+                if side == 0 and bound_col and bound_upper:
+                    # Review M6: the watermark bound runs in the source query
+                    # where the reader takes one; otherwise the evidence says
+                    # the whole source was read.
+                    clause = (
+                        None if e2 == "snowflake"
+                        else census_bound_clause(e2, _qi(bound_col, q), bound_upper)
+                    )
+                    if clause is not None:
+                        stmt, params = stmt + clause[0], clause[1]
+                        summary["incremental_key_census_bound"] = "source_sql"
+                    else:
+                        summary["incremental_key_census_bound"] = (
+                            f"client_side: the {e2} census reader takes no bound, so the "
+                            "whole source table was read and filtered to the rows at or "
+                            "behind the watermark here"
+                        )
                 try:
                     cur = conn.cursor()
-                    cur.execute(stmt)
+                    if params:
+                        cur.execute(stmt, params)
+                    else:
+                        cur.execute(stmt)
                     while True:
                         chunk = cur.fetchmany(5000)
                         if not chunk:

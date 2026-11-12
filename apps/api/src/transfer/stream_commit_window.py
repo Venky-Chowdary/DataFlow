@@ -124,6 +124,10 @@ def bind_commit_window(run: Any, scope: Any, catalog: tuple | None, contract: An
     """Plan this run's window once and return the scope that reads through it."""
     cfg = run.cfg
     cfg.route_watermark = scope.watermark
+    cfg.route_quarantine_previous = (
+        list(getattr(scope, "quarantined_keys", None) or []),
+        bool(getattr(scope, "quarantined_keys_complete", True)),
+    )
     if table and not getattr(cfg, "text_cursor_judged", False):
         cfg.text_cursor_judged = True
         refuse_unorderable_text_cursor(cfg, scope, catalog, table)
@@ -326,6 +330,22 @@ def copy_declined_for_replay(cfg: Any) -> bool:
 # --------------------------------------------------------------------------
 
 
+def _note_route_quarantine(run: Any) -> None:
+    """Carry the route's quarantined keys, with this run's, into its metadata."""
+    from services.incremental_census import route_quarantined_keys
+
+    cfg = run.cfg
+    previous, was_complete = getattr(cfg, "route_quarantine_previous", None) or ([], True)
+    summary = getattr(run.tally, "dest_summary", None)
+    if not previous and not (isinstance(summary, dict) and summary.get("rejected_details")):
+        cfg.route_quarantine = None
+        return
+    keys, complete = route_quarantined_keys(
+        previous, summary, list(cfg.pk_target_cols or cfg.pk_source_cols or [])
+    )
+    cfg.route_quarantine = (keys, complete and was_complete)
+
+
 def _metadata(cfg: Any, horizon: dict[str, Any] | None) -> dict[str, Any]:
     meta: dict[str, Any] = {
         "job_id": cfg.job_id,
@@ -341,6 +361,14 @@ def _metadata(cfg: Any, horizon: dict[str, Any] | None) -> dict[str, Any]:
         meta[HORIZON_KEY] = dict(horizon)
     if getattr(cfg, "text_shape_check", None):
         meta["text_shape_check"] = dict(cfg.text_shape_check)
+    quarantine = getattr(cfg, "route_quarantine", None)
+    if quarantine:
+        from services.incremental_census import (
+            ROUTE_QUARANTINE_COMPLETE_KEY,
+            ROUTE_QUARANTINE_KEY,
+        )
+
+        meta[ROUTE_QUARANTINE_KEY], meta[ROUTE_QUARANTINE_COMPLETE_KEY] = quarantine
     every, _due, counter = getattr(cfg, "census_plan", None) or (0, False, 0)
     if every:
         meta["runs_since_key_census"] = counter
@@ -395,6 +423,7 @@ def persist_batch_watermark(run: Any, cursor_key: str, running_cursor: Any, befo
     """
     from services.sync_cursor import set_watermark
 
+    _note_route_quarantine(run)
     cfg = run.cfg
     window = getattr(cfg, "commit_window", None)
     # A first read has no earlier bound: its own (captured before it read
@@ -412,6 +441,7 @@ def persist_final_watermark(run: Any, cursor_key: str, running_cursor: Any, befo
     """Store the run's high mark and, with it, the bound the run read under."""
     from services.sync_cursor import set_watermark
 
+    _note_route_quarantine(run)
     cfg = run.cfg
     window = getattr(cfg, "commit_window", None)
     stamp_window_evidence(run)
@@ -436,6 +466,7 @@ def persist_copy_watermark(run: Any, cursor_key: str, high: str | None, before: 
     """The COPY fast path's watermark write; returns the value now stored."""
     from services.sync_cursor import set_watermark
 
+    _note_route_quarantine(run)
     cfg = run.cfg
     window = getattr(cfg, "commit_window", None)
     stamp_window_evidence(run)

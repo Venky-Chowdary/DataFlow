@@ -998,3 +998,115 @@ def test_unwindowed_route_evidence_names_the_route_and_skips_windowed_runs():
     stamp_unwindowed_route(full, route="batch path")
     assert "commit_safe_window" not in full
 
+
+# --------------------------------------------------------------------------
+# M6 — the key census: quarantined keys, and the bound pushed into the source
+# --------------------------------------------------------------------------
+
+
+def test_census_does_not_report_keys_the_route_quarantined(tmp_path, monkeypatch):
+    """A route that quarantines rows would fail its census every N runs: the
+    quarantined source keys are missing at the destination by design."""
+    import services.sync_cursor as sc
+    from services.incremental_census import apply_incremental_census
+
+    monkeypatch.setattr(sc, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+    sc.set_watermark("route-k", "20", metadata={"quarantined_keys": [["500"]]})
+    summary = {
+        "incremental_cursor_key": "route-k",
+        "primary_key_columns": ["id"],
+        "rejected_details": [{"source_pk": "501", "error": "bad value"}],
+        "incremental_key_census": {"due": True, "every": 1, "cursor_column": "seq"},
+    }
+
+    def census(**_kw):
+        return [], ["500", "501", "502"], [], None
+
+    out = apply_incremental_census(
+        {"passed": True, "message": "ok"}, source_endpoint=object(), endpoint=object(),
+        dest_summary=summary, mappings=[], key_census=census,
+    )
+    report = out["incremental_key_census"]
+    assert report["missing_behind_watermark"] == 1 and report["missing_keys"] == ["502"], report
+    assert report["quarantined_excluded"] == 2, report
+    clean = apply_incremental_census(
+        {"passed": True, "message": "ok"}, source_endpoint=object(), endpoint=object(),
+        dest_summary=summary, mappings=[], key_census=lambda **_kw: ([], ["500", "501"], [], None),
+    )
+    assert clean.get("passed") is True and clean["incremental_key_census"]["missing_behind_watermark"] == 0
+
+
+def test_route_quarantine_record_accumulates_and_stays_bounded():
+    from services.incremental_census import ROUTE_QUARANTINE_MAX, route_quarantined_keys
+
+    keys, complete = route_quarantined_keys(
+        [["500"]], {"rejected_details": [{"source_pk": "501"}, {"source_pk": "500"}]}, ["id"]
+    )
+    assert keys == [["500"], ["501"]] and complete
+    many = [{"source_pk": str(i)} for i in range(ROUTE_QUARANTINE_MAX + 5)]
+    keys, complete = route_quarantined_keys([], {"rejected_details": many}, ["id"])
+    assert len(keys) == ROUTE_QUARANTINE_MAX and not complete
+
+
+def test_census_bound_is_pushed_into_the_source_sql(isolated, tmp_path, monkeypatch):
+    import sqlite3
+
+    import src.transfer.reconcile_step as rs
+    from tests.test_incremental_commit_safe_window import _sqlite_exec, _sqlite_run
+
+    seen: list[str] = []
+    real = rs._culprit_census_conn
+
+    class _Cursor:
+        def __init__(self, cur):
+            self._cur = cur
+
+        def execute(self, stmt, *params):
+            seen.append(str(stmt))
+            return self._cur.execute(stmt, *params)
+
+        def __getattr__(self, name):
+            return getattr(self._cur, name)
+
+    class _Conn:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def cursor(self):
+            return _Cursor(self._conn.cursor())
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    def spy(fmt, cfg):
+        found = real(fmt, cfg)
+        return None if found is None else (found[0], _Conn(found[1]))
+
+    monkeypatch.setattr(rs, "_culprit_census_conn", spy)
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    _sqlite_exec(src, "CREATE TABLE t (id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, v TEXT)")
+    _sqlite_exec(src, "INSERT INTO t VALUES (?, ?, ?)", [(i, i, f"v{i}") for i in range(1, 21)])
+    assert _sqlite_run(isolated, src, dst, key_census_every=1).success
+    _sqlite_exec(src, "INSERT INTO t VALUES (500, 5, 'behind')")
+    _sqlite_exec(src, "INSERT INTO t VALUES (21, 21, 'new')")
+    seen.clear()
+    second = _sqlite_run(isolated, src, dst, key_census_every=1)
+    census = (second.reconciliation or {}).get("incremental_key_census") or {}
+    assert census.get("missing_keys") == ["500"], census
+    assert census.get("source_bound") == "source_sql", census
+    source_reads = [s for s in seen if '"t"' in s or " t" in s]
+    assert any("WHERE" in s.upper() and "<=" in s for s in source_reads), seen
+    with sqlite3.connect(src) as conn:
+        assert conn.execute("SELECT count(*) FROM t").fetchone()[0] == 22
+
+
+def test_census_says_when_a_reader_cannot_take_the_bound():
+    from src.transfer.reconcile_step import census_bound_clause
+
+    assert census_bound_clause("snowflake", '"seq"', "20") is None
+    assert census_bound_clause("oracle", '"SEQ"', "20") is None
+    pg = census_bound_clause("postgresql", '"seq"', "20")
+    assert pg == (' WHERE "seq" <= %s', ("20",))
+    lite = census_bound_clause("sqlite", '"ts"', "2026-01-01T10:00:00")
+    assert lite is not None and lite[1] == ("2026-01-01 10:00:00",)

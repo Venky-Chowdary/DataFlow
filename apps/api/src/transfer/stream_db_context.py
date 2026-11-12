@@ -82,6 +82,9 @@ class RunConfig:
     #: Record of the text cursor's last every-row shape confirmation.
     text_shape_check: Any = None
     text_shape_check_changed: bool = False
+    #: The route's quarantined keys: as stored, and with this run's added.
+    route_quarantine_previous: Any = None
+    route_quarantine: Any = None
     backfill_new_fields: Any = None
     batch_quality_enabled: Any = None
     drift_detector: Any = None
