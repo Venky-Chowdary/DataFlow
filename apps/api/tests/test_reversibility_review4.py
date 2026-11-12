@@ -55,7 +55,8 @@ def test_h1_an_honest_csv_file_is_enforced_on_every_row_and_the_copy_says_why_it
                                                                                        or ""])
     enforcement = ds.get("reversibility_enforcement") or {}
     assert enforcement.get("enforced") is True
-    assert [c["rows_checked"] for c in enforcement["columns"]] == [400]
+    checked = {c["column"]: c["rows_checked"] for c in enforcement["columns"]}
+    assert checked.get("v") == 400 and set(checked.values()) == {400}, checked  # id too, once M-2 casts it from text
 
 
 def test_h1_backstop_a_run_that_wrote_rows_its_enforced_column_never_checked_fails(tmp_path, fake, monkeypatch):  # noqa: F811
@@ -150,3 +151,86 @@ def test_m1_the_violation_never_claims_it_blocked_a_partial_write_when_rows_were
     assert kept == 20_000
     assert "blocks partial write" not in message, message
     assert "20000 row(s) were already written and were not removed" in message
+
+
+# ------------------------------------- M-2: a file source's inferred type is a cast from text
+
+@pytest.mark.parametrize("target, raw, converted, dest_db, changed", [
+    ("INTEGER", "007", 7, "sqlite", True),
+    ("INTEGER", "1e3", None, "sqlite", True),
+    ("INTEGER", "7", 7, "sqlite", False),
+    ("DATE", "2024-1-5", "2024-1-5", "postgresql", True),  # the writer left the text as it was
+    ("DATE", "2024-01-05", __import__("datetime").date(2024, 1, 5), "postgresql", False),
+    ("REAL", "0.1000", __import__("decimal").Decimal("0.1000"), "sqlite", True),
+    ("REAL", "0.1", 0.1, "sqlite", False),
+    ("TIMESTAMP", "2024-01-05 10:00:00", __import__("datetime").datetime(2024, 1, 5, 10), "postgresql", False),
+])
+def test_m2_the_writer_cast_check_compares_the_destination_rendering(target, raw, converted, dest_db, changed):
+    from services.reversibility_enforce import changes
+
+    rule = {"code": "cast", "target_type": target, "dest_db": dest_db}
+    assert changes(rule, raw, converted) is changed
+
+
+@pytest.mark.parametrize("target, values, dest_db, status", [
+    ("INTEGER", ["7", "007"], "sqlite", "does_not_fit"),
+    ("REAL", ["0.1", "0.1000"], "sqlite", "does_not_fit"),
+    ("DATE", ["2024-01-05", "2024-1-5"], "postgresql", "does_not_fit"),
+    ("TIMESTAMP", ["2024-01-05 10:00:00", "2024-01-05 10:00:00.5"], "postgresql", "fits"),
+    ("INTEGER", ["7", "-3", "0"], "sqlite", "fits"),
+])
+def test_m2_the_gate_and_the_writer_agree_on_a_cast_from_text(target, values, dest_db, status):
+    from services.reversibility import classify_mapping
+    from services.reversibility_enforce import changes
+
+    entry = classify_mapping({"source": "v", "target": "v"}, source_type="TEXT", target_type=target,
+                             dest_db=dest_db, observed=values)
+    assert entry["reason_code"] == "cast" and entry["check"]["status"] == status, entry
+    rule = {"code": "cast", "target_type": target, "dest_db": dest_db}
+    assert any(changes(rule, v, v) for v in values) is (status == "does_not_fit")
+
+
+def _ints(last: str, n: int = 400) -> bytes:
+    return ("\n".join(["id,v"] + [f"{i},{i}" for i in range(1, n)] + [f"{n},{last}"]) + "\n").encode()
+
+
+@pytest.mark.parametrize("last", ["007", "1e3"])
+def test_m2_a_csv_value_past_the_sample_the_inferred_integer_would_change_fails_the_run(tmp_path, fake, last):  # noqa: F811
+    dst = tmp_path / "d.sqlite"
+    res = _run(fake, _csv_request(dst, _ints(last)))
+    assert res.success is False, (res.destination_summary or {}).get("reversibility_enforcement")
+    assert "t.v would change under" in str(res.error), res.error
+    assert last not in str(res.error).split("would change under")[1]
+    rows = _q(dst, "SELECT name FROM sqlite_master WHERE name='t'") and _q(dst, "SELECT count(*) FROM t")
+    assert not rows or rows[0][0] == 0, rows
+
+
+def test_m2_an_honest_csv_is_enforced_as_a_cast_from_text_on_every_row(tmp_path, fake):  # noqa: F811
+    dst = tmp_path / "d.sqlite"
+    res = _run(fake, _csv_request(dst, _ints("400")))
+    assert res.success is True, res.error
+    columns = {c["column"]: c["rows_checked"] for c in res.destination_summary["reversibility_enforcement"]["columns"]}
+    assert columns.get("v") == 400, columns
+    assert _q(dst, "SELECT v FROM t WHERE id = 400") == [(400,)]
+
+
+@pytest.mark.parametrize("transform, target, value, dest_db, status", [
+    ("datetime", "TIMESTAMP", "2024-01-05 10:00:00", "postgresql", "fits"),
+    ("datetime", "TIMESTAMP", "2024-01-05T10:00:00", "postgresql", "does_not_fit"),
+    ("date", "DATE", "2024-01-05", "sqlite", "fits"),
+    ("integer", "INTEGER", "007", "sqlite", "does_not_fit"),
+])
+def test_m2_a_type_transform_from_text_is_checked_by_the_destination_rendering(transform, target, value, dest_db,
+                                                                                 status):
+    from services.reversibility import classify_mapping
+    from services.reversibility_enforce import changes
+
+    entry = classify_mapping({"source": "v", "target": "v", "transform": transform}, source_type="TEXT",
+                             target_type=target, dest_db=dest_db, observed=[value])
+    assert entry["check"]["status"] == status, entry
+    rule = {"code": entry["reason_code"], "transform": transform, "target_type": target, "dest_db": dest_db}
+    from services.transform_engine import apply_transform
+
+    converted, _err = apply_transform(value, transform)
+    assert changes(rule, value, converted) is (status == "does_not_fit")
+

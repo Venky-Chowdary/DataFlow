@@ -239,6 +239,31 @@ def check_values(values: Iterable[Any], transform: str) -> dict[str, Any]:
     return {"status": status, "rows_checked": checked, "rows_not_fitting": failing}
 
 
+def check_cast_values(values: Iterable[Any], ttype: str, dest_db: str, cast: str | None) -> dict[str, Any] | None:
+    """The cast rule's check: the destination renders each value as its exact text (review 4, M-2).
+
+    The writer asks the same rule (:func:`services.reversibility_enforce.changes`),
+    so the gate and the writer agree. A type with no rendering rule keeps the
+    engine transform's round trip (``cast``); ``None`` when there is neither.
+    """
+    from services.reversibility_render import rendered_family
+
+    if rendered_family(ttype) is None:
+        return check_values(values, cast) if cast else None
+    from services.reversibility_render import cast_changes
+
+    checked = failing = 0
+    for value in values:
+        text = strict_text(value)
+        if text is None:
+            continue  # a cast keeps NULL
+        checked += 1
+        if cast_changes(text, None, ttype, dest_db, has_converted=False):
+            failing += 1
+    status = "not_checked" if not checked else ("does_not_fit" if failing else "fits")
+    return {"status": status, "rows_checked": checked, "rows_not_fitting": failing}
+
+
 _WIDTH = re.compile(r"\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)")
 
 
@@ -379,12 +404,17 @@ def classify_mapping(
             return _entry(source, target, stype, ttype, [], INVERTIBLE, "type_preserving_bind")
         tcode = next((c for c in ("replace", "default", "assume_timezone") if transform.startswith(c)),
                      "normalize")
-        check = _covered(check_values(values, transform), covers_population, enforce)
+        from services.reversibility_render import renders_rule
+
+        # A transform that only casts text into the target's type is checked by how the destination
+        # renders the value, as the writer checks it (review 4, M-2).
+        check = _covered(check_cast_values(values, ttype, dest_db, transform) if slog in TEXT and renders_rule(
+            transform, ttype) else check_values(values, transform), covers_population, enforce)
         return _entry(source, target, stype, ttype, transforms, CONDITIONAL, tcode, check, transform=transform)
     if kind == CONDITIONAL:
         side = "source" if not slog else "destination"
         cast = _CAST_FOR.get(tlog)
-        check = check_values(values, cast) if (code == "cast" and cast) else None
+        check = (check_cast_values(values, ttype, dest_db, cast) if code == "cast" else None)
         if code in TYPE_CHECKED:
             check = check_type_values(code, values, ttype, strict_text)
         # No value rule (an undeclared type, a cast with no engine parse): nothing to enforce row by row.

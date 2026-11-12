@@ -53,13 +53,13 @@ def _job_id() -> str:
 
 
 def stamp(mapping: Any, *, table: str, column: str, code: str, transform: str = "", target_type: str = "",
-          job_id: str | None = None) -> bool:
+          job_id: str | None = None, dest_db: str = "") -> bool:
     """Mark ``mapping`` (the dict the writer will read) as enforced; ``False`` when it cannot be marked."""
     if not isinstance(mapping, dict):
         return False
     job = _job_id() if job_id is None else job_id
     mapping[STAMP] = {"job_id": job, "table": table, "column": column, "code": code,
-                      "transform": transform, "target_type": target_type}
+                      "transform": transform, "target_type": target_type, "dest_db": dest_db}
     with _LOCK:
         _ROWS.setdefault((job, table, column), 0)
         while len(_ROWS) > _MAX_TRACKED:
@@ -89,6 +89,18 @@ def changes(rule: Mapping[str, Any], raw: Any, converted: Any, error: str | None
         return True  # a value the writer cannot convert does not land: that is a change
     if _is_null(raw):
         return not _is_null(converted)  # NULL filled in (``default:``)
+    if isinstance(raw, str) and rule.get("code") in {"cast", "normalize"}:
+        # A cast from text (or a transform that only casts into the target's type): what the destination
+        # renders, not the Python conversion, decides; the gate's sample check asks the same rule (review 4,
+        # M-2).
+        from services.reversibility_render import cast_changes, renders_rule
+
+        target = str(rule.get("target_type") or "")
+        if renders_rule(str(rule.get("transform") or ""), target):
+            verdict = cast_changes(raw, None if _is_null(converted) else converted, target,
+                                   str(rule.get("dest_db") or ""))
+            if verdict is not None:
+                return verdict
     if type(raw) is str and type(converted) is str:
         if raw != converted:  # the common case, without the generic text rendering
             return True

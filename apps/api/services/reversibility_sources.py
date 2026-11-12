@@ -115,6 +115,32 @@ def _file_export_view(dst: Any, mappings: list[Any], source_types: Mapping[str, 
     return rows, out
 
 
+#: File formats whose column types are inferred from the values (text), not declared by the file.
+_INFERRED_TYPE_FORMATS = frozenset({"csv", "tsv", "txt", "psv", "dat", "fwf", "fixed_width", "json", "jsonl",
+                                    "ndjson", "xml", "yaml", "yml"})
+
+
+def _as_read_from_text(src: Any, column_types: Mapping[str, str] | None,
+                       mappings: list[Any]) -> tuple[dict[str, str], list[Any]]:
+    """(source types, mappings) as g24 must read a file source whose types were inferred (review 4, M-2).
+
+    A CSV column inferred as INTEGER from its first rows is still text: ``007``
+    or ``1e3`` past the sample lands as another value. So each inferred type is
+    a cast from text (a conditional column, enforced while writing). The
+    mappings are copies: the writer's own dicts are stamped, never these.
+    """
+    from services.reversibility_types import TEXT, logical
+
+    types = dict(column_types or {})
+    kind = str((src.get("kind") if isinstance(src, Mapping) else getattr(src, "kind", "")) or "").lower()
+    if kind != "file" or _engine(src) not in _INFERRED_TYPE_FORMATS:
+        return types, mappings
+    as_text = {c: (t if logical(t) in TEXT or not str(t or "").strip() else "TEXT") for c, t in types.items()}
+    view = [{**m, "source_type": "TEXT"} if isinstance(m, Mapping) and m.get("source_type")
+            and logical(str(m["source_type"])) not in TEXT else m for m in mappings]
+    return as_text, view
+
+
 def _catalog_keys_of_endpoint(endpoint: Any) -> list[str]:
     """The source catalog's primary key (the key rows are matched back on when no contract names one)."""
     if endpoint is None or str(getattr(endpoint, "kind", "") or "") != "database":
@@ -366,7 +392,8 @@ def _request_tables(
                                           lambda: _catalog_keys_of_endpoint(src))
     if not several:
         keys = _key_columns(contracts) or _catalog_keys_of_endpoint(src)
-    rows, target_types = _file_export_view(dst, primary_maps, dict(column_types or {}), dest_types)
+    column_types, primary_view = _as_read_from_text(src, column_types, primary_maps)
+    rows, target_types = _file_export_view(dst, primary_view, dict(column_types or {}), dest_types)
     tables = [analyze_table(
         table=(names[0] if several else _table(dst, src)),
         mappings=rows,
@@ -443,7 +470,7 @@ def request_report(
                                       population_rows=population_rows, enforce=enforce, live=live)
     if stamp_writers:
         for table, dicts in writers:
-            _stamp_enforced(table, dicts)
+            _stamp_enforced(table, dicts, dest_db=_engine(getattr(request, "destination", None)))
     report = build_report(tables, scope="job", subject_id=str(getattr(request, "job_id", "") or ""),
                           require=True, data_rows=len(rows), data_source="preflight_sample",
                           population_rows=population_rows)
@@ -452,7 +479,7 @@ def request_report(
     return report
 
 
-def _stamp_enforced(table: dict[str, Any], dicts: list[Any] | None) -> None:
+def _stamp_enforced(table: dict[str, Any], dicts: list[Any] | None, *, dest_db: str = "") -> None:
     """Mark each enforced conditional column of ``table`` on the mapping dict the writer reads."""
     from services.reversibility import enforced
     from services.reversibility_enforce import stamp
@@ -464,7 +491,7 @@ def _stamp_enforced(table: dict[str, Any], dicts: list[Any] | None) -> None:
         mapping = by_source.get(str(column.get("source") or "").lower())
         stamp(mapping, table=table["name"], column=str(column.get("source") or column.get("target") or ""),
               code=str(column.get("reason_code") or ""), transform=", ".join(column.get("transforms") or []),
-              target_type=str(column.get("target_type") or ""))
+              target_type=str(column.get("target_type") or ""), dest_db=dest_db)
 
 
 def preflight_gate(report: Mapping[str, Any]) -> dict[str, Any]:
