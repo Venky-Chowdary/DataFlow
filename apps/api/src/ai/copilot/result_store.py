@@ -58,8 +58,8 @@ class PilotResultStore:
         self._entries: dict[str, dict[str, Any]] = {}
         self._latest_by_session: dict[str, str] = {}
         self._latest_global: str | None = None
-        # result_id -> ciphertext of its rows, so a persist does not re-seal every entry.
-        self._seal_cache: dict[str, str] = {}
+        # result_id -> ciphertext of its rows and meta, so a persist does not re-seal.
+        self._seal_cache: dict[str, tuple[str, str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -85,7 +85,12 @@ class PilotResultStore:
                 rows = unseal(doc.get("rows_sealed"))
                 if not isinstance(rows, list):
                     continue  # sealed under a key this process does not hold
-                doc = {k: v for k, v in doc.items() if k != "rows_sealed"} | {"rows": rows}
+                meta = unseal(doc.get("meta_sealed")) if "meta_sealed" in doc else {}
+                doc = {k: v for k, v in doc.items() if k not in ("rows_sealed", "meta_sealed")} | {
+                    "rows": rows,
+                    # Query text names literals: never read back from clear text.
+                    "meta": meta if isinstance(meta, dict) else {},
+                }
             elif doc.get("rows"):
                 continue  # a pre-seal plaintext spill is not read back in
             key = str(rid)
@@ -137,16 +142,22 @@ class PilotResultStore:
 
         None when the vault cannot seal: that entry stays in this process only.
         """
-        token = self._seal_cache.get(rid)
-        if token is None:
-            token = seal(doc.get("rows") or [])
-            if token is None:
+        tokens = self._seal_cache.get(rid)
+        if tokens is None:
+            # The query text and filters (``meta``) carry literals too (review M7).
+            rows_token, meta_token = seal(doc.get("rows") or []), seal(doc.get("meta") or {})
+            if rows_token is None or meta_token is None:
                 return None
-            self._seal_cache[rid] = token
-        return {k: v for k, v in doc.items() if k != "rows"} | {"rows_sealed": token}
+            tokens = self._seal_cache[rid] = (rows_token, meta_token)
+        return {k: v for k, v in doc.items() if k not in ("rows", "meta")} | {
+            "rows_sealed": tokens[0],
+            "meta_sealed": tokens[1],
+        }
 
-    def _gc_locked(self) -> None:
+    def _gc_locked(self) -> bool:
+        """Drop expired and over-cap entries; True when anything was dropped."""
         now = _now()
+        before = len(self._entries)
         dead = [k for k, v in self._entries.items() if float(v.get("expires_at") or 0) <= now]
         for k in dead:
             self._entries.pop(k, None)
@@ -165,6 +176,12 @@ class PilotResultStore:
             )
             for rid, _ in ordered[: len(self._entries) - _MAX_ENTRIES]:
                 self._entries.pop(rid, None)
+        return len(self._entries) != before
+
+    def _gc_and_purge_locked(self) -> None:
+        """GC, and take what expired off disk now rather than at the next write."""
+        if self._gc_locked():
+            self._persist()
 
     def put(
         self,
@@ -216,7 +233,7 @@ class PilotResultStore:
         if not rid:
             return None
         with self._lock:
-            self._gc_locked()
+            self._gc_and_purge_locked()
             doc = self._entries.get(rid)
             if not doc:
                 self._reload_disk_locked()
@@ -244,7 +261,7 @@ class PilotResultStore:
         if not sid:
             return None
         with self._lock:
-            self._gc_locked()
+            self._gc_and_purge_locked()
             rid = self._latest_by_session.get(sid)
             if not rid:
                 self._reload_disk_locked()

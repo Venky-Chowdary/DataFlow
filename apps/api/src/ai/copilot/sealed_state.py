@@ -19,7 +19,12 @@ import logging
 from typing import Any
 
 from services.value_serializer import json_default
-from services.workspace_filter import bound_allows, current_actor, current_workspace_stamp
+from services.workspace_filter import (
+    bound_allows,
+    current_actor,
+    current_workspace_filter,
+    current_workspace_stamp,
+)
 
 _log = logging.getLogger(__name__)
 _PREFIX = "pilot:v1:"
@@ -88,4 +93,9 @@ def readable_by_caller(doc: dict[str, Any], *, same_actor: bool) -> bool:
     if not same_actor:
         return True
     owner, caller = str(doc.get("actor") or ""), current_actor() or ""
-    return not owner or not caller or owner == caller
+    if owner and caller:
+        return owner == caller
+    # Fail closed when either side has no actor (review M7). Only a process
+    # with no bound identity at all (auth off, a script) reads a record that
+    # nobody's identity could have stamped.
+    return not owner and not caller and current_workspace_filter() is None

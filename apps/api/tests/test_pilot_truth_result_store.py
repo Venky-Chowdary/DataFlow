@@ -8,6 +8,7 @@ plaintext in ``pilot_acks.json`` and could be confirmed from another workspace.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -291,3 +292,56 @@ def test_without_a_local_key_pilot_state_stays_in_memory(stores, monkeypatch):
     monkeypatch.delenv("DATAFLOW_SECRETS_KEY", raising=False)
     monkeypatch.delenv("DATAWRAP_SECRETS_KEY", raising=False)
     assert sealed_state.seal({"rows": [{"salary": SALARY}]}) is None
+
+
+# ---- review M7: SQL text sealed, actor check closed, expired rows purged -----
+
+
+def test_query_text_with_literals_is_not_plaintext_on_disk(alices_result, stores):
+    from src.ai.copilot.result_store import PilotResultStore
+    from src.ai.copilot.tools import get_pilot_tools
+
+    with acting_as("ws-A", "alice@a.example"):
+        result = get_pilot_tools().execute(
+            "run_query",
+            {"connector_name": "A Payroll DB", "query": "select name from salaries where salary > 181999",
+             "session_id": "alice@a.example|s1"},
+        )
+    assert result.success, result.error
+    path = Path(stores) / "pilot_results.json"
+    assert "181999" not in path.read_text(encoding="utf-8"), "the query's literal is in plaintext on disk"
+    with acting_as("ws-A", "alice@a.example"):
+        doc = PilotResultStore(path=path).get(result.output["result_id"])
+    assert doc and "181999" in json.dumps(doc.get("meta") or {}), "the sealed query text survives a restart"
+
+
+def test_a_record_with_no_actor_is_not_readable_by_a_bound_actor(stores):
+    from src.ai.copilot.result_store import get_result_store
+
+    with acting_as("ws-A", ""):
+        rid = get_result_store().put(rows=[{"salary": SALARY}], columns=["salary"])
+    with acting_as("ws-A", "bob@a.example"):
+        assert get_result_store().get(rid) is None
+
+
+def test_a_caller_with_no_actor_cannot_read_an_actors_record(alices_result):
+    from src.ai.copilot.result_store import get_result_store
+
+    with acting_as("ws-A", ""):
+        assert get_result_store().get(alices_result) is None
+
+
+def test_expired_rows_are_purged_from_disk_on_read(stores, monkeypatch):
+    from src.ai.copilot import result_store
+
+    store = result_store.get_result_store()
+    with acting_as("ws-A", "alice@a.example"):
+        old = store.put(rows=[{"salary": SALARY}], columns=["salary"], ttl_sec=60)
+        live = store.put(rows=[{"salary": "1"}], columns=["salary"], ttl_sec=3600)
+    path = Path(stores) / "pilot_results.json"
+    assert old in path.read_text(encoding="utf-8")
+    real = result_store._now
+    monkeypatch.setattr(result_store, "_now", lambda: real() + 600)
+    with acting_as("ws-A", "alice@a.example"):
+        assert store.get(live) is not None
+    assert old not in path.read_text(encoding="utf-8"), "an expired sealed entry stayed on disk after a read"
