@@ -498,9 +498,53 @@ def declared_overlap(contract: Mapping[str, Any] | None) -> tuple[int, int]:
     )
 
 
-def commit_safety_strategy(source_type: str) -> str:
-    """The strategy a source engine supports, before the route is considered."""
+#: PostgreSQL-compatible products the run reads with the PostgreSQL driver
+#: whose row ``xmin`` is not proven to be PostgreSQL's transaction id in commit
+#: order: they take the re-read window, never the snapshot horizon.
+XMIN_UNPROVEN_PRODUCTS = {
+    "cockroachdb": "CockroachDB",
+    "cockroach": "CockroachDB",
+    "yugabytedb": "YugabyteDB",
+    "yugabyte": "YugabyteDB",
+}
+
+
+def _read_driver(source: str) -> str:
+    """The driver a run of this product reads with (the product itself when unknown)."""
+    try:
+        from src.transfer.connector_capabilities import resolve_driver_type, source_read_driver
+
+        return str(source_read_driver(resolve_driver_type(source)) or source).strip().lower()
+    except Exception:  # noqa: BLE001 — an unmapped id is judged as itself
+        return source
+
+
+def product_strategy_note(source_type: str) -> str:
+    """What runs for a product read with another product's driver, or ``""``."""
     src = (source_type or "").strip().lower()
+    if src in XMIN_UNPROVEN_PRODUCTS:
+        return (
+            f"{XMIN_UNPROVEN_PRODUCTS[src]} is read with the PostgreSQL driver, but its rows' "
+            "xmin is not proven to be PostgreSQL's transaction id in commit order, so the "
+            "route takes the re-read window instead of the snapshot horizon"
+        )
+    if src and src not in _OVERLAP_SOURCES and _read_driver(src) == "generic_sql":
+        return f"'{src}' is read with the generic SQL driver, which applies the re-read window"
+    return ""
+
+
+def commit_safety_strategy(source_type: str) -> str:
+    """The strategy a source supports, judged by the driver its run reads with.
+
+    Preflight passes the product id and the run its read driver; both land on
+    the same strategy (review Low): PostgreSQL's snapshot horizon only where the
+    PostgreSQL driver reads and ``xmin`` is PostgreSQL's.
+    """
+    src = (source_type or "").strip().lower()
+    if src in XMIN_UNPROVEN_PRODUCTS:
+        return STRATEGY_OVERLAP
+    if not (src in _SNAPSHOT_HORIZON_SOURCES or src in _SERIALIZED_WRITER_SOURCES or src in _OVERLAP_SOURCES):
+        src = _read_driver(src)
     if src in _SNAPSHOT_HORIZON_SOURCES:
         return STRATEGY_PG
     if src in _SERIALIZED_WRITER_SOURCES:
@@ -568,7 +612,7 @@ def plan_commit_safe_window(
             "itself: commit order is write order",
         )
 
-    fallback = ""
+    fallback = product_strategy_note(source_type) if strategy == STRATEGY_OVERLAP else ""
     probe_error = ""
     if strategy == STRATEGY_PG and relation_kind is not None and relation_kind not in _TABLE_RELKINDS:
         fallback = not_a_table_note(relation_kind)
@@ -1306,7 +1350,8 @@ def static_commit_safety(
     strategy = commit_safety_strategy(source_type)
     seconds, values = declared_overlap(contract)
     overlap: dict[str, Any] = {}
-    lead = ""
+    note = product_strategy_note(source_type)
+    lead = note[0].upper() + note[1:] + ". " if note else ""
     if strategy == STRATEGY_PG and relation_kind is not None and relation_kind not in _TABLE_RELKINDS:
         note = not_a_table_note(relation_kind)
         lead = note[0].upper() + note[1:] + ". "

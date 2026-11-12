@@ -770,3 +770,50 @@ def test_snowflake_timestamp_ntz_cursor_takes_the_overlap_window_it_is_promised(
     assert claim["guarantee"] == csw.GUARANTEE_WITHIN_WINDOW, claim
     assert claim["overlap"] == {"unit": "seconds", "size": csw.DEFAULT_OVERLAP_SECONDS}
     assert csw.probe_floor_unit("Date32") == "days"
+
+
+# Low: one judgement of a product, by the driver its run uses
+
+
+@pytest.mark.parametrize(
+    "product,strategy",
+    [
+        ("postgresql", "pg_snapshot_xmin"),
+        ("timescaledb", "pg_snapshot_xmin"),
+        ("neon", "pg_snapshot_xmin"),
+        ("cockroachdb", "overlap_reread"),
+        ("yugabytedb", "overlap_reread"),
+        ("citus", "overlap_reread"),
+        ("greenplum", "overlap_reread"),
+        ("tidb", "overlap_reread"),
+        ("duckdb", "overlap_reread"),
+        ("sqlite", "serialized_writer"),
+    ],
+)
+def test_preflight_and_run_judge_a_product_by_the_driver_the_run_uses(product, strategy):
+    """Preflight is given the product id; the run reads with that product's
+    driver. Both judge the same: PostgreSQL's snapshot horizon only where the
+    driver is PostgreSQL and ``xmin`` is PostgreSQL's (not CockroachDB, not
+    YugabyteDB), the generic re-read window where the generic driver runs."""
+    from types import SimpleNamespace
+
+    from services import commit_safe_window as csw
+    from src.transfer.stream import _stream_source_read_driver
+    from src.transfer.stream_commit_window import route_commit_safety_source
+
+    cfg = SimpleNamespace(
+        source=SimpleNamespace(format=product), src_read_type=_stream_source_read_driver(product)
+    )
+    assert csw.commit_safety_strategy(product) == strategy
+    assert csw.commit_safety_strategy(route_commit_safety_source(cfg)) == strategy
+
+
+@pytest.mark.parametrize("product,word", [("citus", "generic SQL"), ("yugabytedb", "xmin")])
+def test_product_statement_says_what_runs(product, word):
+    from services import commit_safe_window as csw
+
+    claim = csw.static_commit_safety(
+        source_type=product, sync_mode="incremental_append", cursor_column="id",
+        cursor_type="bigint", has_identity=True,
+    )
+    assert claim["strategy"] == csw.STRATEGY_OVERLAP and word in claim["statement"], claim

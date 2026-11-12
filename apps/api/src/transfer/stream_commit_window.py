@@ -193,6 +193,26 @@ def refuse_unorderable_text_cursor(cfg: Any, scope: Any, catalog: tuple | None, 
         raise ValueError(reason)
 
 
+def route_commit_safety_source(cfg: Any) -> str:
+    """The source id this run's window is judged by: the product, where it is
+    judged as the driver the run reads with, else that driver (review Low).
+
+    A PostgreSQL-compatible product whose ``xmin`` is not PostgreSQL's
+    (CockroachDB, YugabyteDB) keeps its id, so it takes the re-read window as
+    preflight said, though the PostgreSQL driver reads it.
+    """
+    from services.commit_safe_window import XMIN_UNPROVEN_PRODUCTS
+
+    driver = str(getattr(cfg, "src_read_type", "") or "")
+    product = str(getattr(getattr(cfg, "source", None), "format", "") or "").strip().lower()
+    if product and (
+        product in XMIN_UNPROVEN_PRODUCTS
+        or commit_safety_strategy(product) == commit_safety_strategy(driver)
+    ):
+        return product
+    return driver
+
+
 def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str) -> CommitSafeWindow | None:
     cursor_type = _cursor_type(cfg, scope, (catalog or ({},))[0])
     identity = route_replay_identity(cfg, catalog)
@@ -200,7 +220,8 @@ def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str
     cfg.replay_key, cfg.replay_key_complete = route_replay_key(cfg, catalog)
     src_cfg = cfg.src_cfg
     schema = str(src_cfg.get("schema") or "public")
-    strategy = commit_safety_strategy(cfg.src_read_type)
+    source = route_commit_safety_source(cfg)
+    strategy = commit_safety_strategy(source)
     is_pg = strategy == STRATEGY_PG
     from services.type_system import destination_is_file_export
 
@@ -219,7 +240,7 @@ def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str
             if strategy == STRATEGY_SERIAL
             else None
         ),
-        source_type=cfg.src_read_type,
+        source_type=source,
         sync_mode=cfg.effective_sync,
         cursor_column=cfg.cursor_source_col,
         cursor_type=cursor_type,
