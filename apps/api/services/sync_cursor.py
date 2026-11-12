@@ -1382,15 +1382,11 @@ def max_cursor_value(
                 values.append(text)
         if not values:
             return None
-        from connectors.cursor_bind import cursor_instant_key
+        # One total order (services.cursor_order): the mark does not depend on
+        # the order the rows arrived in.
+        from services.cursor_order import max_value
 
-        instants = [cursor_instant_key(v) for v in values]
-        if all(k is not None for k in instants):
-            return values[max(range(len(values)), key=lambda i: instants[i])]
-        from services.cdc_engine import infer_watermark_type, max_watermark
-
-        wm_type = infer_watermark_type(values)
-        return max_watermark(values, wm_type)
+        return max_value(values)
 
     best: str | None = None
     for row in rows:
@@ -1696,8 +1692,9 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
     """Compare two cursor values using the same typed watermark logic.
 
     Returns -1 if a < b, 0 if equal, 1 if a > b.  None is treated as less
-    than any value. Composite watermarks compare lexicographically, and a
-    watermark written before the canonical separator existed still compares.
+    than any value. Composite watermarks compare on the cursor part, then the
+    tie-break, and a watermark written before the canonical separator existed
+    still compares. Offset-bearing timestamps compare by instant, exactly.
     """
     if a is None and b is None:
         return 0
@@ -1705,28 +1702,27 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
         return -1
     if b is None:
         return 1
+    from services.cursor_order import compare_values
+
     sa, sb = str(a), str(b)
-    if _is_composite(sa) and _is_composite(sb):
-        a_cur, a_pk = split_cursor_bookmark(sa, has_tiebreak=True)
-        b_cur, b_pk = split_cursor_bookmark(sb, has_tiebreak=True)
-        base = compare_cursor_values(a_cur, b_cur)
-        if base != 0:
-            return base
-        # The tie-break is a key, typed like the cursor: comparing it as text
-        # ranks pk 999 above pk 2000, so a batch's high mark stopped at the
-        # lexically largest key and the next run re-read every key above it.
-        return compare_cursor_values(a_pk, b_pk)
-    # Offset-bearing timestamps compare by instant, exactly (no float epoch,
-    # no format the generic datetime parser happens to reject).
-    from connectors.cursor_bind import cursor_instant_key
-
-    ka, kb = cursor_instant_key(sa), cursor_instant_key(sb)
-    if ka is not None and kb is not None:
-        return (ka > kb) - (ka < kb)
-    from services.cdc_engine import compare_watermarks, infer_watermark_type
-
-    wm_type = infer_watermark_type([sa, sb])
-    return compare_watermarks(sa, sb, wm_type)
+    ca, cb = _is_composite(sa), _is_composite(sb)
+    if not (ca or cb):
+        # A total order: each value's class is decided by the value alone
+        # (audit M4 — inferring it from the pair made 2 < 10 < 1a < 2).
+        return compare_values(sa, sb)
+    a_cur, a_pk = split_cursor_bookmark(sa, has_tiebreak=ca)
+    b_cur, b_pk = split_cursor_bookmark(sb, has_tiebreak=cb)
+    base = compare_values(a_cur, b_cur)
+    if base != 0:
+        return base
+    if ca != cb:
+        # Same cursor value: the bookmark that names a tie-break is further on
+        # than the one that cannot say which peer row was last applied.
+        return 1 if ca else -1
+    # The tie-break is a key, typed like the cursor: comparing it as text
+    # ranks pk 999 above pk 2000, so a batch's high mark stopped at the
+    # lexically largest key and the next run re-read every key above it.
+    return compare_values(a_pk, b_pk)
 
 
 def requires_incremental(sync_mode: str) -> bool:

@@ -130,12 +130,12 @@ def compare_watermarks(a: str, b: str, wm_type: WatermarkType) -> int:
         ai, bi = integer_wire_value(a), integer_wire_value(b)
         if ai is not None and bi is not None:
             return (ai > bi) - (ai < bi)
-        return (a > b) - (a < b)
+        return _total_order(a, b)
     if wm_type == WatermarkType.FLOAT:
         fa, fb = _parse_float(a), _parse_float(b)
         if fa is not None and fb is not None:
             return (fa > fb) - (fa < fb)
-        return (a > b) - (a < b)
+        return _total_order(a, b)
     if wm_type == WatermarkType.DATETIME:
         from connectors.cursor_bind import cursor_instant_key
 
@@ -146,8 +146,20 @@ def compare_watermarks(a: str, b: str, wm_type: WatermarkType) -> int:
         da, db = _parse_datetime_key(a), _parse_datetime_key(b)
         if da is not None and db is not None:
             return (da > db) - (da < db)
-        return (a > b) - (a < b)
+        return _total_order(a, b)
     return (a > b) - (a < b)
+
+
+def _total_order(a: str, b: str) -> int:
+    """A value the declared watermark type cannot read, compared without a cycle.
+
+    Falling back to string order for just the pairs that failed to parse made
+    the comparator non-transitive within one type (audit M4): ``2 < 10`` as
+    integers while ``10 < 1a < 2`` as strings.
+    """
+    from services.cursor_order import compare_values
+
+    return compare_values(a, b)
 
 
 def max_watermark(values: list[str], wm_type: WatermarkType) -> str | None:
