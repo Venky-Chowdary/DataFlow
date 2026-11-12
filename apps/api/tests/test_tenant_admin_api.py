@@ -229,10 +229,15 @@ def test_tenant_is_amended_and_removed_by_its_workspace_admin(admin):
     ws_id = _workspace(admin, "Beta")
     lead = _signed_in(admin, email="lead@example.com", workspace_id=ws_id, workspace_role="admin")
 
-    created = lead.post(
+    # The data region is the platform administrator's (security review round 2,
+    # M1): a workspace admin who names one is refused, and the rest of the
+    # tenant record stays theirs.
+    refused = lead.post(
         "/api/v1/workspace/tenant",
         json={"workspace_id": ws_id, "name": "Beta", "data_region": "eu-west-1"},
     )
+    assert refused.status_code == 403, refused.text
+    created = lead.post("/api/v1/workspace/tenant", json={"workspace_id": ws_id, "name": "Beta"})
     assert created.status_code == 200, created.text
     tenant_id = created.json()["id"]
 

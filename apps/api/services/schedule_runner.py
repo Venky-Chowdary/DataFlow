@@ -1958,6 +1958,15 @@ def _dispatch_transfer(
             refusal = local_destination_refusal(destination) if destination is not None else None
             if refusal:
                 raise ValueError(refusal)
+        # Audit H-4: a destination outside the workspace's data region holds the
+        # schedule on that reason, before a job exists (the engine refuses too).
+        from services.data_residency import residency_refusal
+
+        out_of_region = residency_refusal(
+            str(getattr(request, "workspace_id", "") or ""), getattr(request, "destination", None)
+        )
+        if out_of_region:
+            raise ValueError(out_of_region)
         authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
         emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)

@@ -251,6 +251,13 @@ def _uploads(workspace_id: str, dry_run: bool) -> int:
     return delete_workspace_uploads(workspace_id, dry_run=dry_run)
 
 
+def _exports(workspace_id: str, dry_run: bool) -> int:
+    """The workspace's export folder (``exports/_workspaces/<id>/``, review M3)."""
+    from services.export_migration import remove_workspace_exports
+
+    return remove_workspace_exports(workspace_id, dry_run=dry_run)
+
+
 def _scim(workspace_id: str, dry_run: bool) -> int:
     from services.scim_store import forget_workspace
 
@@ -386,6 +393,7 @@ def _cascade(workspace_id: str, *, actor: str, dry_run: bool) -> dict[str, Any]:
     for name, store_step in (
         ("quarantine_rows_removed", _dlq),
         ("uploads_removed", _uploads),
+        ("export_files_removed", _exports),
         ("transforms_removed", _transforms),
         ("tenants_removed", _tenants),
         ("channels_removed", _channels),

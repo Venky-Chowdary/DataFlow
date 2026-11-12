@@ -86,6 +86,10 @@ def upsert_resource_acl(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     ws = _require_admin_or_workspace_write(request, workspace_id)
+    from services.body_id_ownership import assert_resource_in_workspace
+
+    # A grant names a resource of the granting workspace (review 3, Low).
+    assert_resource_in_workspace(body.resource_type, body.resource_id.strip(), ws)
     try:
         grant = upsert_grant(
             tenant_id=ws,

@@ -30,15 +30,25 @@ from ..rag.query_analysis import (
     classify_ask,
     is_cdc_delivery_question,
 )
+from .job_ledger import LIST_JOBS_TOOL
 from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
 from .parity_tools import PARITY_TOOL_DEFINITIONS
-from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
+from .tool_deadline import (
+    DEADLINE_TOOLS,
+    LEDGER_DEADLINE_TOOLS,
+    QUERY_DEADLINE_TOOLS,
+    run_ledger_read,
+    run_with_deadline,
+)
+from .tool_errors import safe_tool_error, unhandled_tool_error
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
 from .unsupported_question import (
     asks_a_commercial_question,
+    asks_unreadable_live_metric,
     commercial_question_output,
+    live_metric_output,
     is_answerable_subject,
     unsupported_question_output,
 )
@@ -69,9 +79,18 @@ def _tool_executed(
     Carries the tool name, a bounded reason and the error class only — never
     the prompt, the arguments, the output, or the error text.
     """
+    # Job / run free text quotes cells (a driver error prints the row): every
+    # outbound model call this turn must account for it (review C1).
+    from .pilot_egress import note_tool_result
+
+    note_tool_result(result.name, result.success, result.output)
     if result.success:
         outcome, level = "succeeded", None
     else:
+        # The one place every failed dispatch passes: nothing a caller is shown
+        # (chat answer, tools_used summary, MCP result) carries a credential.
+        if isinstance(result.error, str):
+            result.error = safe_tool_error(result.error)
         outcome = "failed"
         # An unhandled exception is a defect (ERROR); a refused or rejected call
         # is an expected outcome the operator can act on (WARNING).
@@ -161,7 +180,7 @@ _WORKSPACE_PROP: dict[str, dict] = {
 TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "list_datasets",
-        "description": "List every dataset available — uploads, fixtures, and transfer history.",
+        "description": "List the datasets available — this workspace's uploaded files and the built-in industry templates.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -365,37 +384,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": ["template_key"],
         },
     },
-    {
-        "name": "list_jobs",
-        "description": (
-            "List recent transfer jobs with status, IDs, and record counts. "
-            "``total`` is the whole history for ``scope`` (default ``workspace``, "
-            "the same population as brief_workspace). Pass ``scope=all`` only when "
-            "you explicitly need every workspace."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "Max jobs to return. Integer from 1 to 100. Negative and unbounded limits are refused.",
-                    "default": 10,
-                    "minimum": 1,
-                    "maximum": 100,
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["workspace", "all", "unassigned"],
-                    "default": "workspace",
-                    "description": (
-                        "workspace = this workspace; all = every workspace; "
-                        "unassigned = legacy jobs with no workspace (platform admins)"
-                    ),
-                },
-            },
-            "required": [],
-        },
-    },
+    LIST_JOBS_TOOL,
     {
         "name": "get_job",
         "description": (
@@ -1061,12 +1050,16 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "list_schedules",
         "description": (
             "List pipeline schedules (Pipelines page) with cadence, next run, last status, "
-            "and bound contract / breaker when one is set."
+            "and bound contract / breaker when one is set. ``total``, ``enabled_count``, "
+            "``paused_count``, ``parked_count``, ``failed_last_count`` and ``next_due`` (the "
+            "soonest run) are over every pipeline; ``schedules`` is one page (``truncated``). "
+            "``state`` filters the page: parked = open approval, failed = last run failed."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "default": 20},
+                "state": {"type": "string", "enum": ["", "enabled", "paused", "parked", "failed"]},
             },
             "required": [],
         },
@@ -2007,6 +2000,18 @@ class DataPilotTools:
                 reason="permission_denied",
                 role=role,
             )
+        from services.connector_access import caller_workspace_id
+        from services.egress_guard import egress_workspace
+        from services.workspace_filter import current_workspace_stamp
+
+        # Every tool runs as the caller's workspace for the egress policy and
+        # the S3 bucket-region guard (review round 3, H4).
+        workspace = current_workspace_stamp(for_write=False) or caller_workspace_id()
+
+        def _in_workspace(**kwargs: Any) -> ToolResult:
+            with egress_workspace(workspace):
+                return handler(**kwargs)
+
         try:
             bound, bind_error = _bind_tool_arguments(name, handler, args)
             if bind_error:
@@ -2022,13 +2027,19 @@ class DataPilotTools:
                 # -32001 timeout.
                 result = run_with_deadline(
                     name,
-                    lambda: handler(**bound),
+                    lambda: _in_workspace(**bound),
                     lambda message: ToolResult(
                         name=name, success=False, output=None, error=message
                     ),
                 )
+            elif name in LEDGER_DEADLINE_TOOLS:
+                result = run_ledger_read(
+                    name,
+                    lambda: handler(**bound),
+                    lambda message: ToolResult(name=name, success=False, output=None, error=message),
+                )
             else:
-                result = handler(**bound)
+                result = _in_workspace(**bound)
         except TypeError as e:
             return _tool_executed(
                 ToolResult(
@@ -2044,7 +2055,7 @@ class DataPilotTools:
             )
         except Exception as e:
             return _tool_executed(
-                ToolResult(name=name, success=False, output=None, error=str(e)),
+                ToolResult(name=name, success=False, output=None, error=unhandled_tool_error(name, e)),
                 started,
                 reason="exception",
                 error=e,
@@ -2053,6 +2064,8 @@ class DataPilotTools:
         return _tool_executed(result, started, role=role)
 
     def _list_datasets(self) -> ToolResult:
+        # Checked before the listing: resolving the upload directory creates it.
+        uploads_unread = _upload_dir_missing()
         datasets = self.analyst.list_datasets()
         # QA DS03: the tool result is what the client shows — a full
         # `columns: [...]` dump per dataset reads as a raw metadata blob.
@@ -2066,11 +2079,19 @@ class DataPilotTools:
                 "column_preview": cols[:8],
                 "column_count": ds.get("column_count") or len(cols),
             })
-        return ToolResult(
-            name="list_datasets",
-            success=True,
-            output={"datasets": shaped, "count": len(shaped)},
-        )
+        uploads = [d for d in shaped if d.get("origin") == "upload"]
+        output = {
+            "datasets": shaped,
+            "count": len(shaped),
+            # The workspace's own uploads and the built-in templates are
+            # different things to an operator: counted apart (review H6).
+            "upload_count": len(uploads),
+            "template_count": len(shaped) - len(uploads),
+        }
+        if uploads_unread:
+            # No upload directory: uploads were not read, not "none".
+            output.update(uploads_unread=True, degraded=True)
+        return ToolResult(name="list_datasets", success=True, output=output)
 
     def _analyze_dataset(self, dataset_name: str = "") -> ToolResult:
         schema = self.analyst.resolve_dataset(dataset_name)
@@ -2619,56 +2640,32 @@ class DataPilotTools:
             )
         return ToolResult(name="confirm_action", success=True, output=body)
 
-    def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
-        from services.workspace_filter import UNASSIGNED_WORKSPACE
+    def _list_jobs(
+        self,
+        limit: int = 10,
+        scope: str = "workspace",
+        status: str = "",
+        window: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        verification: str = "",
+        name: str = "",
+        search: str = "",
+        source_type: str = "",
+        destination_type: str = "",
+        sync_mode: str = "",
+    ) -> ToolResult:
+        from .job_ledger import read_job_ledger
 
-        from .job_reads import (
-            job_list_workspace_scope,
-            list_transfer_jobs,
-            workspace_scope_unresolved,
+        output, refusal = read_job_ledger(
+            limit=limit, scope=scope, status=status, window=window,
+            date_from=date_from, date_to=date_to, verification=verification,
+            name=name, search=search, source_type=source_type,
+            destination_type=destination_type, sync_mode=sync_mode,
         )
-
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 100:
-            return ToolResult(
-                name="list_jobs",
-                success=False,
-                output=None,
-                error="limit must be an integer from 1 to 100.",
-            )
-        try:
-            workspace_id = job_list_workspace_scope(scope)
-        except ValueError as exc:
-            return ToolResult(name="list_jobs", success=False, output=None, error=str(exc))
-        if workspace_id == "" and workspace_scope_unresolved():
-            return ToolResult(
-                name="list_jobs",
-                success=False,
-                output=None,
-                error=(
-                    "This key can read every workspace and is not acting in one. "
-                    "Send X-Workspace-Id to list one workspace's jobs, or pass "
-                    "scope=all for every workspace."
-                ),
-            )
-        summary, counts, source = list_transfer_jobs(limit=limit, workspace_id=workspace_id)
-        # "How many jobs?" must be answered from the whole history for this scope.
-        # The page we read here is only the window we can show.
-        return ToolResult(
-            name="list_jobs",
-            success=True,
-            output={
-                "jobs": summary,
-                "count": len(summary),
-                "total": int(counts.get("total") or 0),
-                "status_counts": counts.get("by_status") or {},
-                "store": source,
-                "scope": (
-                    "all" if workspace_id is None
-                    else "unassigned" if workspace_id == UNASSIGNED_WORKSPACE
-                    else "workspace"
-                ),
-            },
-        )
+        if refusal:
+            return ToolResult(name="list_jobs", success=False, output=None, error=refusal)
+        return ToolResult(name="list_jobs", success=True, output=output)
 
     @staticmethod
     def _offers_bad_data_fix(job: dict, quarantine: list, stored_rejected: int) -> bool:
@@ -2825,8 +2822,9 @@ class DataPilotTools:
                 "progress_pct": job.get("progress_pct"),
                 "reconcile_pct": job.get("reconcile_pct"),
                 "message": job.get("message"),
-                "error": operator_failure_text(job.get("error"), failure_reason),
+                "error": safe_tool_error(operator_failure_text(job.get("error"), failure_reason)) or None,
                 "created_at": job_timestamp_iso(job.get("created_at")),
+                "started_at": job_timestamp_iso(job.get("started_at")),
                 "updated_at": job_timestamp_iso(job.get("updated_at")),
                 "completed_at": job_timestamp_iso(job.get("completed_at")),
                 "governance": job_governance(job),
@@ -3169,11 +3167,18 @@ class DataPilotTools:
 
         facts = collect_workspace_briefing(workspace_id=workspace_id or "")
         attention = [str(a) for a in (facts.get("attention") or []) if a]
+        unreadable = [str(u) for u in (facts.get("unreadable") or [])]
         return ToolResult(
             name="brief_workspace",
             success=True,
             output={
                 "facts": facts,
+                # Which stores could not be read; ``unread`` when none of the
+                # three workspace stores answered, so nothing here is evidence.
+                "degraded": bool(unreadable),
+                "unreadable": unreadable,
+                "unread": {"connectors", "jobs", "pipelines"} <= set(unreadable),
+                "as_of": facts.get("as_of"),
                 "connector_count": facts.get("connector_count", 0),
                 "job_count": facts.get("job_count", 0),
                 "schedule_count": facts.get("schedule_count", 0),
@@ -3201,6 +3206,8 @@ class DataPilotTools:
                 success=True,
                 output=commercial_question_output(query),
             )
+        if asks_unreadable_live_metric(query):
+            return ToolResult(name="explain_product", success=True, output=live_metric_output(query))
 
         # Direct high-value FAQ snippets (beat generic intent templates).
         direct: list[tuple[re.Pattern[str], str, str]] = [
@@ -3953,7 +3960,11 @@ class DataPilotTools:
 
     def _resolve_schedule(self, schedule_id: str = "", name: str = ""):
         """Resolve schedule by id or name. Returns (schedule|None, clarification|None)."""
-        from services.schedule_store import get_schedule, list_schedules
+        from services.schedule_store import get_schedule, list_schedules, schedule_store_unreadable
+
+        down = schedule_store_unreadable()
+        if down:
+            return None, f"I could not read your pipelines just now — {down}. Try again shortly."
 
         sid = (schedule_id or "").strip()
         if sid:
@@ -4040,12 +4051,22 @@ class DataPilotTools:
             )
         return row
 
-    def _list_schedules(self, limit: int = 20) -> ToolResult:
-        from services.schedule_store import list_schedules
+    def _list_schedules(self, limit: int = 20, state: str = "") -> ToolResult:
+        from services.schedule_store import list_schedules, schedule_store_unreadable
 
-        visible = list_schedules(current_workspace_filter())
-        rows = [self._schedule_summary(s) for s in visible[: max(1, min(int(limit or 20), 100))]]
-        return ToolResult(name="list_schedules", success=True, output={"schedules": rows, "count": len(rows)})
+        from .schedule_questions import schedules_output, unread_schedules_output
+
+        down = schedule_store_unreadable()
+        if down:
+            # The store would answer from its local fallback: no count is stated.
+            return ToolResult(name="list_schedules", success=True, output=unread_schedules_output(down))
+        # A store that raises is an unhandled tool error: masked, with a reference.
+        output, refusal = schedules_output(
+            list_schedules(current_workspace_filter()), self._schedule_summary, limit, state
+        )
+        if refusal:
+            return ToolResult(name="list_schedules", success=False, output=None, error=refusal)
+        return ToolResult(name="list_schedules", success=True, output=output)
 
     def _get_schedule(self, schedule_id: str = "", name: str = "") -> ToolResult:
         sched, clarify = self._resolve_schedule(schedule_id, name)
@@ -9158,9 +9179,38 @@ def _collapse_underspecified(
     return keep
 
 
+def _upload_dir_missing() -> bool:
+    """True when the uploads cannot be read: the volume is gone, or came back empty.
+
+    A missing directory is a lost mount. But a startup ``mkdir`` recreates a
+    lost volume empty, so the directory existing proves nothing (review 2,
+    M2): when the upload registry records uploads in it and not one of their
+    files is there, the uploads were not read — it is not "0 uploads".
+    """
+    from pathlib import Path
+
+    from services.brand_env import getenv_brand
+    from services.platform_config import upload_dir
+
+    raw = getenv_brand("UPLOAD_DIR", "").strip()
+    try:
+        root = Path(raw) if raw else upload_dir()
+        if not root.is_dir():
+            return True
+    except OSError:
+        return True
+    from services.file_parser import recorded_upload_files
+
+    recorded, present = recorded_upload_files(root)
+    return recorded > 0 and present == 0
+
+
 def format_tool_results_for_llm(results: list[ToolResult]) -> str:
+    """Tool results as one prompt block — each payload as a model may see it."""
+    from .pilot_egress import tool_results_for_model
+
     parts = []
-    for r in results:
+    for r in tool_results_for_model(results):
         if r.success:
             parts.append(f"Tool `{r.name}` result:\n{json.dumps(r.output, indent=2, default=json_default)[:4000]}")
         else:

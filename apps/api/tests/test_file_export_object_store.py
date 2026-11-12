@@ -260,7 +260,9 @@ def test_self_hosted_keeps_the_exports_folder_even_with_a_bucket(tmp_path, fake_
     ds = result.destination_summary
     assert "storage" not in ds and "object_key" not in ds
     assert ds["download_url"] == "/api/v1/transfer/download/self.csv"
-    assert (tmp_path / "exports" / "self.csv").exists()
+    # In the job's workspace folder (audit H-2), not the shared flat folder.
+    assert (tmp_path / "exports" / "_workspaces" / "ws-acme" / "self.csv").exists()
+    assert not (tmp_path / "exports" / "self.csv").exists()
     assert "export_object" not in result.reconciliation
     assert _keys(s3) == []
 

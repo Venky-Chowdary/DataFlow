@@ -16,6 +16,12 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from services.validation_assistant import explain_validation
+from services.workspace_filter import (
+    bound_allows,
+    current_workspace_filter,
+    current_workspace_stamp,
+    norm_workspace_id,
+)
 
 _LOCK = threading.RLock()
 
@@ -65,9 +71,75 @@ class RepairProposal:
     decided_at: float = 0.0
     decided_by: str = ""
     apply_result: dict[str, Any] = field(default_factory=dict)
+    # The workspace of the proposal's job (see :func:`_workspace_for_new`).
+    # ``""`` is unscoped: only a caller whose tenant scope includes unassigned
+    # rows (a platform administrator, or a deployment without isolation).
+    workspace_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# ── tenancy (audit H-3) ──────────────────────────────────────────────────────
+#
+# A proposal belongs to the workspace of its job. Reads and decisions apply the
+# caller's bound tenant scope, exactly as the job store's readers do, so another
+# workspace's proposal does not exist to this caller. Nothing bound (workers, a
+# background re-sync settling a Parity Studio fix) is system scope.
+
+
+def _jobs_by_id(job_ids: list[str]) -> dict[str, dict[str, Any]] | None:
+    """The stored jobs, read in system scope; ``None`` when the store cannot answer."""
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        return get_mongodb_service().get_jobs([j for j in job_ids if j])
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return None
+
+
+def _workspace_for_new(job_id: str) -> str:
+    """The workspace a new proposal belongs to.
+
+    Its job's, when the caller can see that job. A job id the caller cannot see
+    is treated exactly like one that does not exist: the proposal lands in the
+    caller's own workspace, never in the job owner's review queue.
+    """
+    job = (_jobs_by_id([job_id]) or {}).get(job_id) if job_id else None
+    if job is not None:
+        owner = norm_workspace_id(job.get("workspace_id"))
+        if bound_allows(owner):
+            return owner
+    return current_workspace_stamp()
+
+
+def _adopt_legacy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Give rows stored before the field existed their job's workspace.
+
+    Returns the rows it stamped (the caller persists them, so each is resolved
+    once). A row whose job cannot be found, or whose job has no workspace yet,
+    stays without the field and reads as unscoped: visible to a platform
+    administrator only while isolation is on. It is stamped on a later read,
+    once its job has a workspace (security review: an unassigned job used to
+    pin the row to ``""`` for good).
+    """
+    legacy = [r for r in rows if "workspace_id" not in r and r.get("job_id")]
+    if not legacy:
+        return []
+    jobs = _jobs_by_id([str(r["job_id"]) for r in legacy]) or {}
+    adopted = []
+    for row in legacy:
+        job = jobs.get(str(row["job_id"]))
+        owner = norm_workspace_id(job.get("workspace_id")) if job is not None else ""
+        if owner:
+            row["workspace_id"] = owner
+            adopted.append(row)
+    return adopted
+
+
+def _in_scope(row: dict[str, Any]) -> bool:
+    return bound_allows(row.get("workspace_id"))
 
 
 def _audit(event: str, payload: dict[str, Any]) -> None:
@@ -85,28 +157,72 @@ def _audit(event: str, payload: dict[str, Any]) -> None:
             f.write(json.dumps(row, default=str) + "\n")
 
 
+def _row_from_doc(doc: dict[str, Any]) -> dict[str, Any]:
+    row = dict(doc)
+    row.pop("_id", None)
+    if not row.get("id") and doc.get("_id") is not None:
+        row["id"] = str(doc["_id"])
+    return row
+
+
+def _adopt_legacy_docs(coll: Any) -> None:
+    """Mongo twin of the file path's legacy adoption (so scoped queries match)."""
+    docs = list(coll.find({"workspace_id": {"$exists": False}, "job_id": {"$nin": ["", None]}}).limit(500))
+    for row in _adopt_legacy_rows(docs):
+        coll.update_one({"_id": row["_id"]}, {"$set": {"workspace_id": row["workspace_id"]}})
+
+
 def _load_proposals() -> list[dict[str, Any]]:
+    """Every stored proposal (system scope); readers filter with :func:`_in_scope`."""
     coll = _proposals_coll()
     if coll is not None:
         try:
+            _adopt_legacy_docs(coll)
             docs = list(coll.find().sort("created_at", -1).limit(200))
-            out: list[dict[str, Any]] = []
-            for d in docs:
-                row = dict(d)
-                row.pop("_id", None)
-                if not row.get("id") and d.get("_id") is not None:
-                    row["id"] = str(d["_id"])
-                out.append(row)
-            return out
+            return [_row_from_doc(d) for d in docs]
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if not os.path.isfile(_proposals_path()):
         return []
     try:
         with open(_proposals_path(), encoding="utf-8") as f:
-            return list(json.load(f).get("proposals") or [])
+            rows = list(json.load(f).get("proposals") or [])
     except Exception:
         return []
+    if _adopt_legacy_rows(rows):
+        _write_proposals_file(rows)
+    return rows
+
+
+#: Proposals kept per workspace in the file store (the MongoDB store pages by
+#: workspace in its query).
+_MAX_PROPOSALS_PER_WORKSPACE = 200
+
+
+def _capped_per_workspace(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The newest ``_MAX_PROPOSALS_PER_WORKSPACE`` rows of each workspace, in stored order.
+
+    Security review M1: one cap over the whole file let a workspace that
+    created 200 proposals push every other workspace's out of the store. Rows
+    with no workspace (legacy, unassigned) are capped as their own group.
+    """
+    seen: dict[Any, int] = {}
+    keep: list[dict[str, Any]] = []
+    for row in reversed(rows):
+        owner = row.get("workspace_id") if "workspace_id" in row else None
+        seen[owner] = seen.get(owner, 0) + 1
+        if seen[owner] <= _MAX_PROPOSALS_PER_WORKSPACE:
+            keep.append(row)
+    keep.reverse()
+    return keep
+
+
+def _write_proposals_file(rows: list[dict[str, Any]]) -> None:
+    os.makedirs(_data_dir(), exist_ok=True)
+    tmp = _proposals_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"proposals": _capped_per_workspace(rows)}, f, indent=2, default=str)
+    os.replace(tmp, _proposals_path())
 
 
 def _save_proposals(rows: list[dict[str, Any]]) -> None:
@@ -121,11 +237,7 @@ def _save_proposals(rows: list[dict[str, Any]]) -> None:
             doc["_id"] = pid
             coll.replace_one({"_id": pid}, doc, upsert=True)
         return
-    os.makedirs(_data_dir(), exist_ok=True)
-    tmp = _proposals_path() + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"proposals": rows[-200:]}, f, indent=2, default=str)
-    os.replace(tmp, _proposals_path())
+    _write_proposals_file(rows)
 
 
 def _upsert_proposal(proposal: RepairProposal) -> None:
@@ -181,6 +293,7 @@ def propose_from_preflight(
         id=f"repair_{uuid.uuid4().hex[:12]}",
         job_id=job_id,
         source="preflight",
+        workspace_id=_workspace_for_new(job_id),
         confidence=conf,
         auto_applicable=auto,
         summary=str(explained.get("narrative") or explained.get("summary") or "Repair proposed"),
@@ -246,6 +359,7 @@ def propose_from_quarantine(
         id=f"repair_{uuid.uuid4().hex[:12]}",
         job_id=job_id,
         source="quarantine",
+        workspace_id=_workspace_for_new(job_id),
         confidence="medium" if actions else "low",
         auto_applicable=False,  # quarantine always needs human approve
         summary=f"{len(actions)} repair action(s) from {len(rejected_details or [])} quarantined detail(s)",
@@ -273,51 +387,62 @@ def _proposal_from_row(r: dict[str, Any]) -> RepairProposal:
         decided_at=float(r.get("decided_at") or 0),
         decided_by=str(r.get("decided_by") or ""),
         apply_result=dict(r.get("apply_result") or {}),
+        workspace_id=norm_workspace_id(r.get("workspace_id")),
     )
 
 
-def get_proposal(proposal_id: str) -> RepairProposal | None:
+def _stored_row(proposal_id: str) -> dict[str, Any] | None:
+    """The stored row in system scope (legacy rows adopted); callers scope it."""
     coll = _proposals_coll()
     if coll is not None:
         try:
             doc = coll.find_one({"_id": proposal_id}) or coll.find_one({"id": proposal_id})
             if doc:
-                row = dict(doc)
-                row.pop("_id", None)
+                for adopted in _adopt_legacy_rows([doc]):
+                    coll.update_one(
+                        {"_id": adopted["_id"]}, {"$set": {"workspace_id": adopted["workspace_id"]}}
+                    )
+                row = _row_from_doc(doc)
                 row.setdefault("id", proposal_id)
-                return _proposal_from_row(row)
+                return row
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _LOCK:
         for r in _load_proposals():
             if r.get("id") == proposal_id:
-                return _proposal_from_row(r)
+                return r
     return None
 
 
+def get_proposal(proposal_id: str) -> RepairProposal | None:
+    """A proposal of the caller's tenant scope; another workspace's does not exist."""
+    row = _stored_row(proposal_id)
+    if row is None or not _in_scope(row):
+        return None
+    return _proposal_from_row(row)
+
+
 def list_proposals(*, job_id: str = "", status: str = "") -> list[RepairProposal]:
+    """The caller's tenant scope's proposals, newest first."""
     coll = _proposals_coll()
     if coll is not None:
         try:
-            query: dict[str, Any] = {}
+            _adopt_legacy_docs(coll)
+            scope = current_workspace_filter()
+            # The workspace predicate is part of the query, so the 200-row page
+            # is this caller's newest 200, not the deployment's.
+            query: dict[str, Any] = dict(scope.mongo_query()) if scope is not None else {}
             if job_id:
                 query["job_id"] = job_id
             if status:
                 query["status"] = status
             docs = list(coll.find(query).sort("created_at", -1).limit(200))
-            out = []
-            for d in docs:
-                row = dict(d)
-                row.pop("_id", None)
-                if not row.get("id") and d.get("_id") is not None:
-                    row["id"] = str(d["_id"])
-                out.append(_proposal_from_row(row))
-            return out
+            return [_proposal_from_row(row) for row in map(_row_from_doc, docs) if _in_scope(row)]
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _LOCK:
         rows = _load_proposals()
-    out = [_proposal_from_row(r) for r in rows]
+    out = [_proposal_from_row(r) for r in rows if _in_scope(r)]
     if job_id:
         out = [p for p in out if p.job_id == job_id]
     if status:
@@ -408,13 +533,18 @@ def parity_proposal_id(job_id: str, fix_id: str) -> str:
 def propose_from_parity(*, job_id: str, fix: dict[str, Any]) -> RepairProposal:
     """Register a Parity Studio fix as a repair proposal (idempotent per job and fix)."""
     pid = parity_proposal_id(job_id, str(fix.get("id") or ""))
-    existing = get_proposal(pid)
-    if existing is not None:
-        return existing
+    stored = _stored_row(pid)
+    if stored is not None:
+        if not _in_scope(stored):
+            # The id is derived from the job: registering it again from outside
+            # the job's workspace must not replace the owner's record.
+            raise KeyError(f"Unknown job: {job_id}")
+        return _proposal_from_row(stored)
     proposal = RepairProposal(
         id=pid,
         job_id=job_id,
         source=PARITY_SOURCE,
+        workspace_id=_workspace_for_new(job_id),
         confidence="high",  # chosen by deterministic rules from the parity evidence
         auto_applicable=False,  # Parity Studio applies nothing without a person's approval
         summary=str(fix.get("title") or "Parity Studio fix"),

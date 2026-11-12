@@ -3,6 +3,12 @@
 Follow-ups ("analyze that", "filter where email is null") resolve against
 real stored rows — never invented fixtures. Single-process TTL store with
 optional file spill so short API restarts do not wipe open chat refs.
+
+A reference is not a credential. Each result is stamped with the workspace and
+actor that produced it and is readable only by that actor in a workspace that
+may read it; to anyone else it does not exist. The spill file holds the rows
+sealed by the connector-secret vault (``sealed_state``) — never in plaintext —
+and a deployment whose vault cannot seal keeps them in memory only (audit H5).
 """
 
 from __future__ import annotations
@@ -16,6 +22,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from .sealed_state import owner_stamp, readable_by_caller, seal, unseal
 
 _log = logging.getLogger(__name__)
 
@@ -50,6 +58,8 @@ class PilotResultStore:
         self._entries: dict[str, dict[str, Any]] = {}
         self._latest_by_session: dict[str, str] = {}
         self._latest_global: str | None = None
+        # result_id -> ciphertext of its rows and meta, so a persist does not re-seal.
+        self._seal_cache: dict[str, tuple[str, str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -61,6 +71,13 @@ class PilotResultStore:
             _log.warning("pilot result store load failed: %s", exc)
             return
         self._merge_payload_locked(raw)
+        entries = raw.get("entries") if isinstance(raw, dict) else None
+        if isinstance(entries, dict) and any(
+            isinstance(doc, dict) and "rows" in doc for doc in entries.values()
+        ):
+            # A spill written before sealing holds rows in clear: rewrite it now
+            # (sealed, or without them) rather than at the next write (review).
+            self._persist()
 
     def _merge_payload_locked(self, raw: dict[str, Any]) -> None:
         """Fold a disk snapshot in. A row already in memory stays if it is newer."""
@@ -71,6 +88,18 @@ class PilotResultStore:
                 continue
             if float(doc.get("expires_at") or 0) <= now:
                 continue
+            if "rows_sealed" in doc:
+                rows = unseal(doc.get("rows_sealed"))
+                if not isinstance(rows, list):
+                    continue  # sealed under a key this process does not hold
+                meta = unseal(doc.get("meta_sealed")) if "meta_sealed" in doc else {}
+                doc = {k: v for k, v in doc.items() if k not in ("rows_sealed", "meta_sealed")} | {
+                    "rows": rows,
+                    # Query text names literals: never read back from clear text.
+                    "meta": meta if isinstance(meta, dict) else {},
+                }
+            elif doc.get("rows"):
+                continue  # a pre-seal plaintext spill is not read back in
             key = str(rid)
             current = self._entries.get(key)
             if current is not None and float(current.get("created_at") or 0) > float(
@@ -98,24 +127,70 @@ class PilotResultStore:
             self._merge_payload_locked(raw)
 
     def _persist(self) -> None:
+        from .spill_lock import read_spill, spill_lock
+
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "entries": self._entries,
-                "latest_by_session": self._latest_by_session,
-                "latest_global": self._latest_global,
-            }
-            tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
-            tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
-            tmp.replace(self.path)
+            with spill_lock(self.path):
+                entries = {
+                    rid: spilled
+                    for rid, doc in self._entries.items()
+                    if (spilled := self._sealed_doc(rid, doc)) is not None
+                }
+                # Another worker's results on the same file are kept, not
+                # overwritten by this worker's view (review 2, low).
+                disk = read_spill(self.path)
+                now = _now()
+                for rid, stored in (disk.get("entries") or {}).items():
+                    if (
+                        rid not in entries and rid not in self._entries and isinstance(stored, dict)
+                        and "rows" not in stored and float(stored.get("expires_at") or 0) > now
+                    ):
+                        entries[rid] = stored
+                if len(entries) > _MAX_ENTRIES:
+                    keep = sorted(entries, key=lambda r: float(entries[r].get("created_at") or 0))
+                    for rid in keep[: len(entries) - _MAX_ENTRIES]:
+                        entries.pop(rid, None)
+                latest = {
+                    sid: rid for sid, rid in (disk.get("latest_by_session") or {}).items() if rid in entries
+                } | self._latest_by_session
+                payload = {
+                    "entries": entries,
+                    "latest_by_session": latest,
+                    "latest_global": self._latest_global or disk.get("latest_global"),
+                }
+                tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+                tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
+                tmp.replace(self.path)
         except OSError as exc:
             _log.warning("pilot result store persist failed: %s", exc)
 
-    def _gc_locked(self) -> None:
+    def _sealed_doc(self, rid: str, doc: dict[str, Any]) -> dict[str, Any] | None:
+        """The on-disk form of one entry: metadata in clear, rows sealed.
+
+        None when the vault cannot seal: that entry stays in this process only.
+        """
+        tokens = self._seal_cache.get(rid)
+        if tokens is None:
+            # The query text and filters (``meta``) carry literals too (review M7).
+            rows_token, meta_token = seal(doc.get("rows") or []), seal(doc.get("meta") or {})
+            if rows_token is None or meta_token is None:
+                return None
+            tokens = self._seal_cache[rid] = (rows_token, meta_token)
+        return {k: v for k, v in doc.items() if k not in ("rows", "meta")} | {
+            "rows_sealed": tokens[0],
+            "meta_sealed": tokens[1],
+        }
+
+    def _gc_locked(self) -> bool:
+        """Drop expired and over-cap entries; True when anything was dropped."""
         now = _now()
+        before = len(self._entries)
         dead = [k for k, v in self._entries.items() if float(v.get("expires_at") or 0) <= now]
         for k in dead:
             self._entries.pop(k, None)
+        for k in [k for k in self._seal_cache if k not in self._entries]:
+            self._seal_cache.pop(k, None)
         self._latest_by_session = {
             k: v for k, v in self._latest_by_session.items() if v in self._entries
         }
@@ -129,6 +204,12 @@ class PilotResultStore:
             )
             for rid, _ in ordered[: len(self._entries) - _MAX_ENTRIES]:
                 self._entries.pop(rid, None)
+        return len(self._entries) != before
+
+    def _gc_and_purge_locked(self) -> None:
+        """GC, and take what expired off disk now rather than at the next write."""
+        if self._gc_locked():
+            self._persist()
 
     def put(
         self,
@@ -155,6 +236,9 @@ class PilotResultStore:
             "expires_at": now + ttl,
             "source": source or (meta or {}).get("source") or "",
             "session_id": (session_id or "").strip(),
+            # Who may read this back: the staging actor, in a workspace that
+            # may read the staging workspace.
+            **owner_stamp(),
             "columns": cols,
             "column_schema": column_schema or {},
             "row_count": len(capped),
@@ -177,7 +261,7 @@ class PilotResultStore:
         if not rid:
             return None
         with self._lock:
-            self._gc_locked()
+            self._gc_and_purge_locked()
             doc = self._entries.get(rid)
             if not doc:
                 self._reload_disk_locked()
@@ -188,6 +272,9 @@ class PilotResultStore:
                 self._entries.pop(rid, None)
                 self._persist()
                 return None
+            if not readable_by_caller(doc, same_actor=True):
+                # Another workspace's or another actor's result does not exist here.
+                return None
             return dict(doc)
 
     def resolve(
@@ -195,14 +282,14 @@ class PilotResultStore:
         result_id: str = "",
         session_id: str = "",
     ) -> dict[str, Any] | None:
-        """An explicit result_id is the credential. Latest-without-id stays on this session."""
+        """The result named by ``result_id``, or this session's latest — if the caller owns it."""
         sid = (session_id or "").strip()
         if (result_id or "").strip():
             return self.get(result_id)
         if not sid:
             return None
         with self._lock:
-            self._gc_locked()
+            self._gc_and_purge_locked()
             rid = self._latest_by_session.get(sid)
             if not rid:
                 self._reload_disk_locked()
@@ -210,7 +297,11 @@ class PilotResultStore:
             if not rid:
                 return None
             doc = self._entries.get(rid)
-            if doc and float(doc.get("expires_at") or 0) > _now():
+            if (
+                doc
+                and float(doc.get("expires_at") or 0) > _now()
+                and readable_by_caller(doc, same_actor=True)
+            ):
                 return dict(doc)
         return None
 
@@ -220,7 +311,7 @@ class PilotResultStore:
         if rid:
             return (
                 f"Stored result '{rid}' is not in the store. "
-                "It expires after one hour, or the id is wrong. "
+                "It expires after one hour, belongs to another session, or the id is wrong. "
                 "Sample the table or run the query again."
             )
         return (

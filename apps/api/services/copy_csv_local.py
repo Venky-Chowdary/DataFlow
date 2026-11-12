@@ -738,6 +738,13 @@ def _write_mapped_csv(
     unbounded = 0
     pending: list[dict[str, str | None]] = []
     sqlite_dest = (dest_db or "").strip().lower() == "sqlite"
+    # The watermark is read back from the staged (parsed) rows, so the bound
+    # reads each cursor cell as its declared type too (review H-1).
+    cursor_coerce = None
+    if incremental and cursor_column in source_cols:
+        from services.sync_cursor import cursor_value_coercer
+
+        cursor_coerce = cursor_value_coercer(carriers[source_cols.index(cursor_column)])
 
     # Per-column cell memos: bind/copy-safe/csv-cell are pure functions of the
     # cell and its column's carrier — repeated values (statuses, currencies,
@@ -821,6 +828,8 @@ def _write_mapped_csv(
                         cursor_column,
                         watermark,
                         primary_key=pk_column,
+                        coerce=cursor_coerce,
+                        text_calendar_refusal=True,
                     )
                     unbounded += n
                     count += _flush(delta, writer)
@@ -836,6 +845,8 @@ def _write_mapped_csv(
                 cursor_column,
                 watermark,
                 primary_key=pk_column,
+                coerce=cursor_coerce,
+                text_calendar_refusal=True,
             )
             unbounded += n
             count += _flush(delta, writer)

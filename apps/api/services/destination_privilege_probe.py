@@ -1625,7 +1625,9 @@ def _probe_sqlite(
         if table:
             try:
                 import sqlite3
-                con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+                from connectors.sqlite_common import sqlite_readonly_uri
+                con = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
                 try:
                     row = con.execute(
                         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
