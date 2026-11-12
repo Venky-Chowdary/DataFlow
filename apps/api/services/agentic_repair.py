@@ -118,8 +118,11 @@ def _adopt_legacy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Give rows stored before the field existed their job's workspace.
 
     Returns the rows it stamped (the caller persists them, so each is resolved
-    once). A row whose job cannot be found stays without the field and reads as
-    unscoped: visible to a platform administrator only while isolation is on.
+    once). A row whose job cannot be found, or whose job has no workspace yet,
+    stays without the field and reads as unscoped: visible to a platform
+    administrator only while isolation is on. It is stamped on a later read,
+    once its job has a workspace (security review: an unassigned job used to
+    pin the row to ``""`` for good).
     """
     legacy = [r for r in rows if "workspace_id" not in r and r.get("job_id")]
     if not legacy:
@@ -128,8 +131,9 @@ def _adopt_legacy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     adopted = []
     for row in legacy:
         job = jobs.get(str(row["job_id"]))
-        if job is not None:
-            row["workspace_id"] = norm_workspace_id(job.get("workspace_id"))
+        owner = norm_workspace_id(job.get("workspace_id")) if job is not None else ""
+        if owner:
+            row["workspace_id"] = owner
             adopted.append(row)
     return adopted
 
