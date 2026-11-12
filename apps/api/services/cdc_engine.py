@@ -127,15 +127,9 @@ def compare_watermarks(a: str, b: str, wm_type: WatermarkType) -> int:
     if wm_type == WatermarkType.INTEGER:
         from services.transform_engine import integer_wire_value
 
-        ai, bi = integer_wire_value(a), integer_wire_value(b)
-        if ai is not None and bi is not None:
-            return (ai > bi) - (ai < bi)
-        return _total_order(a, b)
+        return _declared_order(a, b, integer_wire_value)
     if wm_type == WatermarkType.FLOAT:
-        fa, fb = _parse_float(a), _parse_float(b)
-        if fa is not None and fb is not None:
-            return (fa > fb) - (fa < fb)
-        return _total_order(a, b)
+        return _declared_order(a, b, _parse_float)
     if wm_type == WatermarkType.DATETIME:
         from connectors.cursor_bind import cursor_instant_key
 
@@ -148,6 +142,24 @@ def compare_watermarks(a: str, b: str, wm_type: WatermarkType) -> int:
             return (da > db) - (da < db)
         return _total_order(a, b)
     return (a > b) - (a < b)
+
+
+def _declared_order(a: str, b: str, parse: Any) -> int:
+    """Order of a numeric watermark type: the declared parser's reading first.
+
+    A value the declared type reads is that number; one it refuses (an
+    ambiguous ``1.234`` under auto grouping, ``1,234``) ranks above every
+    number as text, and such values order as text among themselves. One key
+    per value, so the order stays total — and a refused value is never given
+    a numeric reading the declared type would not make.
+    """
+
+    def key(value: str) -> tuple[int, Any]:
+        parsed = parse(value)
+        return (0, parsed) if parsed is not None else (1, str(value))
+
+    ka, kb = key(a), key(b)
+    return (ka > kb) - (ka < kb)
 
 
 def _total_order(a: str, b: str) -> int:

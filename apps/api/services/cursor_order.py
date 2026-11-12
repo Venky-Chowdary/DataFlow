@@ -34,12 +34,17 @@ from typing import Any, Iterable
 # does not.
 _EMPTY, _NUMBER, _TEMPORAL, _TEXT = -1, 0, 1, 2
 
-_INT_RE = re.compile(r"^[+-]?\d+$")
+#: A wire number: an optional sign, ASCII digits, an optional "." fraction and
+#: an optional exponent. Nothing locale-shaped (grouping, a decimal comma, a
+#: currency sign, a boolean word) is a number: the order of a value never
+#: depends on the request that happens to compare it (review M1).
+_NUMBER_RE = re.compile(r"^[+-]?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$")
 _NAIVE_ISO_RE = re.compile(
-    r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$"
+    r"^([0-9]{4})-([0-9]{2})-([0-9]{2})"
+    r"(?:[T ]([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]+))?)?)?$"
 )
 _OFFSET_RE = re.compile(r"(Z|z|[+-]\d{2}(?::?\d{2})?)$")
-_CALENDAR_HINT_RE = re.compile(r"\d.*[/\-:.].*\d")
+_DIGITS_RE = re.compile(r"^[0-9]+$")
 
 
 def _naive_key(text: str) -> tuple[datetime, Decimal] | None:
@@ -60,31 +65,23 @@ def _naive_key(text: str) -> tuple[datetime, Decimal] | None:
     return moment, Decimal("0." + digits) if digits else Decimal(0)
 
 
-def _calendar_key(text: str) -> tuple[datetime, Decimal] | None:
-    """Unambiguous non-ISO calendars (``31/12/2024``) through the write-path parser."""
-    if len(text) > 40 or not _CALENDAR_HINT_RE.search(text):
-        return None
-    from services.transform_engine import apply_transform
-
-    parsed, err = apply_transform(text, "datetime")
-    if parsed is None or err:
-        return None
-    try:
-        moment = datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    whole = moment.replace(microsecond=0)
-    return whole.astimezone(timezone.utc), Decimal(moment.microsecond) / Decimal(1_000_000)
-
-
 @lru_cache(maxsize=8192)
 def _order_key(text: str) -> tuple[int, Any]:
+    """Class and key of one value — read from the value alone.
+
+    No locale, contextvar or write-path parser is consulted: numbers are wire
+    numbers, temporals are ISO-8601 forms, everything else is text.
+    """
     if not text:
         return _EMPTY, ""
-    if _INT_RE.match(text):
-        return _NUMBER, Decimal(int(text))
+    if _NUMBER_RE.match(text):
+        try:
+            number = Decimal(text)
+        except ArithmeticError:
+            number = None
+        if number is not None and number.is_finite():
+            return _NUMBER, number
+        return _TEXT, text
     from connectors.cursor_bind import cursor_instant_key
 
     instant = cursor_instant_key(text)
@@ -93,22 +90,6 @@ def _order_key(text: str) -> tuple[int, Any]:
     naive = _naive_key(text)
     if naive is not None:
         return _TEMPORAL, naive
-    from services.transform_engine import decimal_wire_value, integer_wire_value
-
-    whole = integer_wire_value(text)
-    if whole is not None:
-        return _NUMBER, Decimal(whole)
-    number = decimal_wire_value(text)
-    if number is not None:
-        try:
-            number = Decimal(number)
-        except ArithmeticError:
-            number = None
-        if number is not None and number.is_finite():
-            return _NUMBER, number
-    calendar = _calendar_key(text)
-    if calendar is not None:
-        return _TEMPORAL, calendar
     return _TEXT, text
 
 
@@ -214,7 +195,7 @@ def text_cursor_shape(values: Iterable[Any]) -> TextCursorShape:
         (ordered[0], ordered[-1]),
     )
     if rank == _NUMBER:
-        if all(t.isdigit() for t in texts) and len({len(t) for t in texts}) == 1:
+        if all(_DIGITS_RE.match(t) for t in texts) and len({len(t) for t in texts}) == 1:
             # One width of plain digits: text order is numeric order. A single
             # value proves no width, so it is accepted on what it shows.
             return TextCursorShape(SHAPE_PADDED_NUMBER)
