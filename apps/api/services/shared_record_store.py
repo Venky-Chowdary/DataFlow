@@ -85,6 +85,8 @@ MAX_RECORD_BYTES = 1024 * 1024
 MAX_CACHED_QUERIES = 4096
 #: Records updated per round trip by the one-time backfill of claims and lookup tags.
 BACKFILL_BATCH = 500
+#: Bumped when a store's claims or lookup tags change, so stored records get them again.
+FIELDS_VERSION = 2
 #: One record as stored: (partition, body, unique claims, lookup tags).
 Row = tuple[str, str, list[str], list[str]]
 DUPLICATE_KIND = "duplicate_record"
@@ -516,7 +518,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
 
         Claims go to the earliest record (by insertion); a later duplicate is reported.
         """
-        marker = f"index_fields:{self.name}"
+        marker = f"index_fields:v{FIELDS_VERSION}:{self.name}"
         if (self._unique is None and self._tags is None) or docs.find_one({"_id": marker}) is not None:
             self._backfilled = self._where(coll)
             return

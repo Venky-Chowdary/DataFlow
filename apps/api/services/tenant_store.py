@@ -93,9 +93,16 @@ def _file_save(data: dict[str, Any]) -> None:
 
 
 def _unique_claims(record: dict[str, Any]) -> list[str]:
-    """What no two tenants may share across replicas: the workspace (ops review round 2, High 1)."""
+    """What no two tenants may share across replicas: the workspace, and the custom domain.
+
+    Ops review round 2, High 1 and Medium 9. A tenant with no workspace is
+    never routed by its domain (:func:`get_tenant_by_domain`), so it claims none.
+    """
     workspace = str(record.get("workspace_id") or "").strip()
-    return [f"workspace:{workspace}"] if workspace else []
+    if not workspace:
+        return []
+    domain = _normalize_domain(str(record.get("custom_domain") or ""))
+    return [f"workspace:{workspace}"] + ([f"domain:{domain}"] if domain else [])
 
 
 def _lookup_tags(record: dict[str, Any]) -> list[str]:
