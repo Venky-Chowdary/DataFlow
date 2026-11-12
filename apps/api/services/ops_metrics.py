@@ -713,14 +713,22 @@ def _quoted_series_labels(key: str) -> str:
     return _labels(**dict(part.split("=", 1) for part in key.split(",") if "=" in part))
 
 
-def prometheus_text(*, deployment_wide: bool = True) -> str:
+def prometheus_text(*, deployment_wide: bool = True, workspace_filter: WorkspaceFilter | None = None) -> str:
     """Render Prometheus exposition format (text/plain; version=0.0.4).
 
     ``deployment_wide`` adds the per-route HTTP series and the job-store
     gauges: every tenant's traffic and jobs, for platform administrators only
-    (``src.metrics_app.metrics_response`` decides). Reads the job store
-    (cached for a few seconds): call it off the event loop.
+    (``src.metrics_app.metrics_response`` decides). Otherwise the per-pipeline
+    series (labelled by schedule, stream and job) are kept only for pipelines
+    whose proven workspace ``workspace_filter`` allows (none without one; ops
+    review round 2, Medium 8). Reads the job store (cached for a few seconds):
+    call it off the event loop.
     """
+    scope = None if deployment_wide else (workspace_filter or WorkspaceFilter.nothing())
+
+    def shown(labels: str) -> bool:
+        return scope is None or _pipeline_in_freshness_scope(labels, _series_parts(labels), scope)
+
     lines: list[str] = [
         "# HELP dataflow_jobs_total Total transfer jobs finalized",
         "# TYPE dataflow_jobs_total counter",
@@ -734,11 +742,12 @@ def prometheus_text(*, deployment_wide: bool = True) -> str:
             lines.append(f"{name} {value}")
         for name, value in sorted(_gauges.items()):
             lines.append(f"{name} {value}")
-        for name, series in sorted(_labeled_gauges.items()):
-            for labels, value in sorted(series.items()):
-                lines.append(f"{name}{{{_quoted_series_labels(labels)}}} {value}")
-        for name, series in sorted(_labeled_counters.items()):
-            for labels, value in sorted(series.items()):
+        labeled = [(name, dict(series)) for table in (_labeled_gauges, _labeled_counters)
+                   for name, series in sorted(table.items())]
+    # Ownership of an unstamped sample may need a schedule or job read: outside the lock.
+    for name, series in labeled:
+        for labels, value in sorted(series.items()):
+            if shown(labels):
                 lines.append(f"{name}{{{_quoted_series_labels(labels)}}} {value}")
     if deployment_wide:
         lines += _http_lines()

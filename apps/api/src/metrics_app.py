@@ -45,13 +45,22 @@ def _platform_admin(request: Any) -> bool:
     return bool(tenant_scope(request).unrestricted)
 
 
+def _caller_filter(request: Any) -> Any:
+    """The workspaces whose pipelines a scoped scrape may show (none when unknown; never unscoped rows)."""
+    from services.workspace_access import tenant_scope
+
+    strict = getattr(tenant_scope(request), "strict_filter", None)
+    return strict() if callable(strict) else None
+
+
 async def metrics_response(request: Any) -> PlainTextResponse:
     """The exposition body. Built off the event loop: it reads the job store."""
     from services.ops_metrics import prometheus_text
 
     deployment_wide = await run_in_threadpool(_platform_admin, request)
+    scope = None if deployment_wide else await run_in_threadpool(_caller_filter, request)
     return PlainTextResponse(
-        content=await run_in_threadpool(prometheus_text, deployment_wide=deployment_wide),
+        content=await run_in_threadpool(prometheus_text, deployment_wide=deployment_wide, workspace_filter=scope),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
