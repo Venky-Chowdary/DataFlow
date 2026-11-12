@@ -90,7 +90,19 @@ def land_export_bytes(
         appending = is_append_sync(
             resolve_effective_sync_mode(sync_mode)
         ) and os.path.exists(export_path)
-        if appending:
+        from services.exit_job_guard import sealed_export_name
+
+        if sealed_export_name(target.name):
+            # A rehearsal's extract is sealed by its SHA-256: created once, never appended to or replaced.
+            try:
+                with open(export_path, "xb") as fh:
+                    fh.write(export_bytes)
+            except FileExistsError as exc:
+                raise ValueError(
+                    f"{target.name} is the sealed extract of an exit rehearsal and is never overwritten. "
+                    "Start a new rehearsal instead."
+                ) from exc
+        elif appending:
             payload = append_payload(fmt or "csv", export_path, export_bytes)
             with open(export_path, "ab") as fh:
                 fh.write(payload)

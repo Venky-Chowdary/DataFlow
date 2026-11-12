@@ -348,6 +348,14 @@ def _start_resync(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: 
     from src.transfer.engine import get_transfer_engine
 
     fix_id = fix["id"]
+    from services.exit_job_guard import refusal as rehearsal_extract_refusal
+
+    refused = rehearsal_extract_refusal(job, "re-synced")
+    if refused:
+        # An exit rehearsal's extract is repaired by a new rehearsal, never by a child of the old job.
+        _repair_decision(job_id, fix, approve=True, actor=actor,
+                         apply_fn=lambda _a: {"applied": False, "error": refused})
+        return settle_fix(job_id, fix_id, ok=False, result=refused)
     try:
         req = _resync_request(job, job_id, fix, actor)
         child_id = get_transfer_engine()._create_pending_job(req)

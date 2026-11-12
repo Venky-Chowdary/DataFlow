@@ -920,6 +920,7 @@ async def retry_transfer_job(
             raise HTTPException(status_code=404, detail="Job not found")
         if not _can_mutate_job(request, job):
             raise HTTPException(status_code=403, detail="Workspace write access required")
+        _refuse_rehearsal_extract(job, "retried")
 
         payload = job.get("transfer_request")
         if not payload:
@@ -1092,6 +1093,15 @@ async def retry_transfer_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _refuse_rehearsal_extract(job: dict[str, Any], verb: str) -> None:
+    """409 for a job that is an exit rehearsal's extract: it is re-done by a new rehearsal, never by a job route."""
+    from services.exit_job_guard import refusal
+
+    refused = refusal(job, verb)
+    if refused:
+        raise HTTPException(status_code=409, detail=refused)
+
+
 @router.post("/jobs/{job_id}/rerun")
 async def rerun_transfer_job(
     job_id: str,
@@ -1122,6 +1132,7 @@ async def rerun_transfer_job(
             raise HTTPException(status_code=404, detail="Job not found")
         if not _can_mutate_job(request, job):
             raise HTTPException(status_code=403, detail="Workspace write access required")
+        _refuse_rehearsal_extract(job, "re-run")
 
         payload = job.get("transfer_request")
         if not payload:
@@ -1332,6 +1343,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             raise HTTPException(status_code=404, detail="Job not found")
         if not _can_mutate_job(request, job):
             raise HTTPException(status_code=403, detail="Workspace write access required")
+        _refuse_rehearsal_extract(job, "resumed")
 
         payload = job.get("transfer_request")
         if not payload:
@@ -2274,6 +2286,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         raise HTTPException(status_code=404, detail="Job not found")
     if not _can_mutate_job(request, job):
         raise HTTPException(status_code=403, detail="Workspace write access required")
+    _refuse_rehearsal_extract(job, "replayed from quarantine")
 
     from services.quarantine_dlq import replay_parent_not_committed
 
