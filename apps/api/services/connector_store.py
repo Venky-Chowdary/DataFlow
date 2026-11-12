@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - non-POSIX platform
 from services.platform_config import data_dir
 from services.log_redaction import REDACTED
 from services.secret_config import mask_secrets_in_text
-from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
+from services.secret_vault import decrypt_for_workspace, decrypt_secret, encrypt_secret, tenant_id_from_workspace
 from services.workspace_filter import bound_allows, bound_workspace_filter, current_workspace_filter
 
 _CONNECTOR_SECRET_KEYS = (
@@ -402,7 +402,6 @@ class SavedConnector:
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, secrets_encrypted: bool = True) -> SavedConnector:
         workspace_id = data.get("workspace_id", "") or ""
-        tenant_id = tenant_id_from_workspace(workspace_id)
 
         def _secret(key: str) -> str:
             raw = str(data.get(key, "") or "")
@@ -411,7 +410,7 @@ class SavedConnector:
             # error on a connector that had just been created (R8-004).
             if not secrets_encrypted:
                 return raw
-            return decrypt_secret(raw, tenant_id=tenant_id)
+            return decrypt_for_workspace(raw, workspace_id)
 
         password = _secret("password")
         conn_str = _secret("connection_string")
@@ -743,10 +742,16 @@ def _materialize_docs(docs: Any) -> list[SavedConnector]:
     never zero the whole saved-connector list (prod census defect — two
     corrupt trial docs made brief_workspace + /connectors/saved return []
     while the raw store held 66)."""
+    from services.control_plane_store import ControlPlaneUnavailable
+
     out: list[SavedConnector] = []
     for doc in docs:
         try:
             out.append(_doc_to_connector(doc))
+        except ControlPlaneUnavailable:
+            # A BYOK record during a control-plane outage is not unreadable: the
+            # list is a 503 (retry), never a shorter list or "re-save required".
+            raise
         except Exception as exc:
             logger.warning(
                 "saved connector doc %s unreadable (%s) — listing degraded entry",
@@ -760,10 +765,14 @@ def _materialize_docs(docs: Any) -> list[SavedConnector]:
 
 
 def _load_all() -> list[SavedConnector]:
+    from services.control_plane_store import ControlPlaneUnavailable
+
     if _use_mongo():
         try:
             coll = _mongo_collection()
             return _materialize_docs(coll.find())
+        except ControlPlaneUnavailable:
+            raise
         except Exception as exc:
             logger.warning("MongoDB connector load failed, falling back to file: %s", exc)
 
@@ -966,10 +975,14 @@ def list_connectors(role: str | None = None, workspace_id: str | None = None) ->
     scripts) this is system scope; inside a request a caller that forgot to
     pass a filter still cannot read another workspace's credentials (D154).
     """
+    from services.control_plane_store import ControlPlaneUnavailable
+
     workspace_id = _workspace_scope(workspace_id)
     if _use_mongo():
         try:
             return _visible_connectors(_list_mongo(role, workspace_id))
+        except ControlPlaneUnavailable:
+            raise  # the file is not this deployment's connector list
         except Exception as exc:
             logger.warning("MongoDB list_connectors failed, falling back to file: %s", exc)
     return _visible_connectors(_list_file(role, workspace_id))

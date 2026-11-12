@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.platform_config import data_dir
+from services.shared_record_store import SharedRecordSet
 from services.value_serializer import json_default
 from services.secret_vault import decrypt_secret, encrypt_secret
 
@@ -45,7 +46,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_raw() -> dict[str, Any]:
+def _load_raw(**scope: Any) -> dict[str, Any]:
+    """Key records from the shared control-plane store when one is configured.
+
+    A secret wrapped with a tenant key on one replica must unwrap on every
+    other replica and on the workers (H-5). ``scope`` narrows the database
+    read; a file store returns every key, so callers still filter.
+    """
+    data = _DOC.load(**scope)
+    if not isinstance(data.get("keys"), list):
+        data["keys"] = []
+    return data
+
+
+def _save(data: dict[str, Any]) -> None:
+    _DOC.save(data)
+
+
+def _file_load() -> dict[str, Any]:
     if not STORE_PATH.exists():
         return {"keys": []}
     try:
@@ -57,11 +75,29 @@ def _load_raw() -> dict[str, Any]:
         return {"keys": []}
 
 
-def _save(data: dict[str, Any]) -> None:
+def _file_save(data: dict[str, Any]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = STORE_PATH.with_suffix(STORE_PATH.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
     tmp.replace(STORE_PATH)
+
+
+def _unique_claims(record: dict[str, Any]) -> list[str]:
+    """One active key per tenant, across replicas (ops review round 2, High 1 and High 4)."""
+    tenant = str(record.get("tenant_id") or "")
+    return [f"active:{tenant}"] if tenant and record.get("status", "active") == "active" else []
+
+
+_DOC = SharedRecordSet(
+    "byok_keys",
+    file_load=lambda: _file_load(),
+    file_save=lambda data: _file_save(data),
+    file_path=lambda: STORE_PATH,
+    empty=lambda: {"keys": []},
+    list_key="keys",
+    partition_key="tenant_id",
+    unique=_unique_claims,
+)
 
 
 @dataclass
@@ -185,6 +221,7 @@ def _validate_key_material(key_material: str | bytes | None, provider: str) -> b
     return raw
 
 
+@_DOC.retrying
 def create_key(
     tenant_id: str,
     label: str,
@@ -196,6 +233,11 @@ def create_key(
     For ``local`` a random 256-bit key is generated.  For ``wrapped`` the caller
     supplies the raw key as base64 text or bytes.  For cloud KMS providers only
     the key reference (ARN/URL) is stored; data-key encryption is delegated.
+
+    A tenant has one active key: the key that was active is retired
+    (``rotated``, it still decrypts) in the same write that adds the new one,
+    so no reader ever sees the tenant without an active key (ops review
+    round 2, High 4).
     """
     provider = (provider or "local").lower().strip()
     allowed = {"local", "wrapped", "aws_kms", "azure_keyvault", "gcp_kms"}
@@ -218,7 +260,11 @@ def create_key(
         key_reference=reference,
         status="active",
     )
-    data = _load_raw()
+    data = _load_raw(part=tenant_id)
+    for raw in data.get("keys", []):
+        if isinstance(raw, dict) and raw.get("tenant_id") == tenant_id and raw.get("status") == "active":
+            raw["status"] = "rotated"
+            raw["updated_at"] = _now()
     data["keys"].append(key.to_dict())
     _save(data)
     logger.info("Created BYOK key %s for tenant %s (provider=%s)", key.id, tenant_id, provider)
@@ -226,7 +272,7 @@ def create_key(
 
 
 def list_keys(tenant_id: str | None = None) -> list[BYOKKey]:
-    data = _load_raw()
+    data = _load_raw(part=tenant_id) if tenant_id is not None else _load_raw()
     keys = [BYOKKey.from_dict(k) for k in data.get("keys", []) if isinstance(k, dict)]
     if tenant_id is not None:
         keys = [k for k in keys if k.tenant_id == tenant_id]
@@ -234,21 +280,44 @@ def list_keys(tenant_id: str | None = None) -> list[BYOKKey]:
 
 
 def get_key(key_id: str) -> BYOKKey | None:
-    for k in list_keys():
-        if k.id == key_id:
-            return k
+    if not key_id:
+        return None
+    for raw in _load_raw(keys=[key_id]).get("keys", []):
+        if isinstance(raw, dict) and raw.get("id") == key_id:
+            return BYOKKey.from_dict(raw)
     return None
 
 
 def get_active_key_for_tenant(tenant_id: str) -> BYOKKey | None:
-    for k in list_keys(tenant_id):
-        if k.status == "active":
-            return k
-    return None
+    keys = list_keys(tenant_id)
+    active = next((k for k in keys if k.status == "active"), None)
+    if active is None and keys:
+        # Keys but none active: read once more from the database. A cached
+        # read, or a read that crossed a rotation's commit, must not decide
+        # that this BYOK tenant has no key.
+        data = _DOC.load(fresh=True, part=tenant_id)
+        fresh = [BYOKKey.from_dict(k) for k in data.get("keys") or [] if isinstance(k, dict)]
+        active = next((k for k in sorted(fresh, key=lambda k: k.created_at, reverse=True)
+                       if k.tenant_id == tenant_id and k.status == "active"), None)
+    return active
 
 
+def tenant_uses_byok(tenant_id: str) -> bool:
+    """Whether the tenant's secrets belong under its own key: it has key records, or its tenant names one.
+
+    Such a tenant with no active key is refused, never given the platform key.
+    """
+    if list_keys(tenant_id):
+        return True
+    from services.tenant_store import get_tenant
+
+    tenant = get_tenant(tenant_id)
+    return bool(tenant and tenant.byok_key_id)
+
+
+@_DOC.retrying
 def delete_key(key_id: str) -> bool:
-    data = _load_raw()
+    data = _load_raw(keys=[key_id])
     before = len(data.get("keys", []))
     data["keys"] = [k for k in data.get("keys", []) if isinstance(k, dict) and k.get("id") != key_id]
     if len(data["keys"]) == before:
@@ -258,18 +327,8 @@ def delete_key(key_id: str) -> bool:
 
 
 def rotate_key(tenant_id: str, label: str | None = None, provider: str = "local") -> BYOKKey:
-    """Mark existing active keys as rotated and create a new active key."""
-    data = _load_raw()
-    changed = False
-    for raw in data.get("keys", []):
-        if isinstance(raw, dict) and raw.get("tenant_id") == tenant_id and raw.get("status") == "active":
-            raw["status"] = "rotated"
-            raw["updated_at"] = _now()
-            changed = True
-    if changed:
-        _save(data)
-    new_label = label or "Rotated key"
-    return create_key(tenant_id=tenant_id, label=new_label, provider=provider)
+    """Create a new active key; the active one is retired in the same write (see :func:`create_key`)."""
+    return create_key(tenant_id=tenant_id, label=label or "Rotated key", provider=provider)
 
 
 def _resolve_key(
@@ -360,11 +419,20 @@ def _aws_kms_decrypt_dek(encrypted_dek: bytes, context: str) -> bytes:
         raise RuntimeError(f"AWS KMS Decrypt failed: {exc}") from exc
 
 
-def tenant_encrypt(tenant_id: str, plaintext: str, key_id: str | None = None, purpose: str = "data") -> str:
-    """Encrypt ``plaintext`` with the tenant's BYOK-derived key."""
+def tenant_encrypt(
+    tenant_id: str, plaintext: str, key_id: str | None = None, purpose: str = "data", *, key: BYOKKey | None = None,
+) -> str:
+    """Encrypt ``plaintext`` with the tenant's BYOK-derived key.
+
+    ``key``: the active key the caller already resolved, used as is (no second
+    lookup that a concurrent rotation could make fail).
+    """
     if not _cryptography_available():
         raise RuntimeError("BYOK encryption requires the cryptography package")
-    key = _resolve_key(tenant_id, key_id)
+    if key is None:
+        key = _resolve_key(tenant_id, key_id)
+    elif key.tenant_id != tenant_id:
+        raise ValueError("BYOK key does not belong to tenant")
     context = f"dataflow:{tenant_id}:{purpose}"
     if key.provider == "aws_kms":
         dek, enc_dek = _aws_kms_generate_dek(key.key_reference, context)

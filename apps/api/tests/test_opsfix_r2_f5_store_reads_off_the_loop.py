@@ -1,0 +1,189 @@
+"""Ops review round 2, High 5: control-plane reads must not run on the event loop.
+
+The API serves every request on one event loop. Tenant, BYOK, notification,
+ACL, preflight-run and audit-anchor reads are synchronous database calls (up
+to the 1 s control-plane bound each, plus a retry budget that sleeps), and
+several ``async`` routes and the auth middleware's MFA gate made them on the
+loop, so one slow read stalled ``/health`` and every other request. Those
+routes now run on the thread pool (plain ``def`` handlers) or hand the store
+call to it.
+"""
+
+from __future__ import annotations
+
+import ast
+import asyncio
+import time
+from pathlib import Path
+
+import httpx
+import pytest
+
+API = Path(__file__).resolve().parents[1]
+STORE_MODULES = {
+    "tenant_store", "resource_acl", "byok_key_manager", "notification_store", "shape_draft_store",
+    "preflight_run_store", "cdc_mapping_review", "mcp_invocation_log", "audit_anchor",
+    "session_policy", "sso_enforcement", "ip_allowlist_policy", "mfa_enforcement",
+}
+OFFLOAD = {"to_thread", "run_in_threadpool", "run_in_executor", "run_sync"}
+#: Startup work, before the API serves anything.
+ALLOWED = {("main", "lifespan")}
+BLOCK_SECONDS = 0.4
+
+
+def _tree(path: Path) -> ast.Module | None:
+    try:
+        return ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return None
+
+
+def _imports(tree: ast.Module) -> dict[str, tuple[str, str | None]]:
+    out: dict[str, tuple[str, str | None]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                out[alias.asname or alias.name] = (node.module.split(".")[-1], alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                out[alias.asname or alias.name.split(".")[-1]] = (alias.name.split(".")[-1], None)
+    return out
+
+
+def _target(call: ast.Call, imports: dict[str, tuple[str, str | None]]) -> tuple[str, str] | None:
+    func = call.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        module = (imports.get(func.value.id) or (func.value.id, None))[0]
+        return module, func.attr
+    if isinstance(func, ast.Name) and func.id in imports:
+        module, name = imports[func.id]
+        return module, name or func.id
+    return None
+
+
+def _store_reads_on_the_loop() -> list[str]:
+    """Async defs that call a store function directly, or a sync helper that does, without offloading it."""
+    store_funcs = set()
+    for module in STORE_MODULES:
+        tree = _tree(API / "services" / f"{module}.py")
+        for node in tree.body if tree else []:
+            if isinstance(node, ast.FunctionDef):
+                store_funcs.add((module, node.name))
+    files = [p for p in list((API / "src").rglob("*.py")) + list((API / "services").rglob("*.py"))]
+    trees = {p: _tree(p) for p in files}
+    helpers: set[tuple[str, str]] = set()
+    for path, tree in trees.items():
+        if tree is None:
+            continue
+        imports = _imports(tree)
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef) and any(
+                isinstance(c, ast.Call) and _target(c, imports) in store_funcs for c in ast.walk(fn)
+            ):
+                helpers.add((path.stem, fn.name))
+    hits = []
+    for path, tree in trees.items():
+        if tree is None:
+            continue
+        imports = _imports(tree)
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.AsyncFunctionDef) or (path.stem, fn.name) in ALLOWED:
+                continue
+            offloaded = {
+                id(node)
+                for call in ast.walk(fn)
+                if isinstance(call, ast.Call) and getattr(call.func, "attr", getattr(call.func, "id", "")) in OFFLOAD
+                for node in ast.walk(call)
+            }
+            nested = {id(n) for d in ast.walk(fn) if isinstance(d, ast.FunctionDef) for n in ast.walk(d)}
+            for call in ast.walk(fn):
+                if not isinstance(call, ast.Call) or id(call) in offloaded or id(call) in nested:
+                    continue
+                target = _target(call, imports)
+                local = (path.stem, call.func.id) if isinstance(call.func, ast.Name) else None
+                if target in store_funcs or target in helpers or local in helpers:
+                    hits.append(f"{path.relative_to(API)}:{call.lineno} async {fn.name}() -> {ast.unparse(call.func)}")
+    return sorted(set(hits))
+
+
+def test_no_async_route_or_middleware_reads_a_control_plane_store_on_the_loop():
+    assert _store_reads_on_the_loop() == []
+
+
+@pytest.fixture
+def blocking_stores(monkeypatch):
+    """Every control-plane read blocks its thread, like a slow database."""
+    from services.shared_doc_store import SharedLog
+    from services.shared_record_store import SharedRecordSet
+
+    calls = {"n": 0, "blocking": False}
+    real_load, real_backend = SharedRecordSet.load, SharedLog.backend
+
+    def slow_load(self, *args, **kwargs):
+        if calls["blocking"]:
+            calls["n"] += 1
+            time.sleep(BLOCK_SECONDS)
+        return real_load(self, *args, **kwargs)
+
+    def slow_backend(self, *args, **kwargs):
+        if calls["blocking"]:
+            calls["n"] += 1
+            time.sleep(BLOCK_SECONDS)
+        return real_backend(self, *args, **kwargs)
+
+    monkeypatch.setattr(SharedRecordSet, "load", slow_load)
+    monkeypatch.setattr(SharedLog, "backend", slow_backend)
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+    return calls
+
+
+ROUTES = [
+    ("GET", "/api/v1/workspace/tenants", None),
+    ("GET", "/api/v1/workspace/tenant", None),
+    ("POST", "/api/v1/workspace/tenant", {"workspace_id": "ws-loop", "name": "Loop"}),
+    ("GET", "/api/v1/workspace/tenant/byok-keys", None),
+    ("GET", "/api/v1/workspace/notifications", None),
+    ("GET", "/api/v1/workspace/security/posture", None),
+    ("GET", "/api/v1/preflight/runs", None),
+    ("GET", "/api/v1/preflight/runs/pf_missing", None),
+    ("GET", "/api/v1/audit/tip", None),
+]
+
+
+def test_health_and_the_loop_stay_responsive_while_store_routes_wait_on_the_database(blocking_stores):
+    from src.main import app
+
+    async def scenario() -> tuple[float, float, list[int]]:
+        lags: list[float] = []
+
+        async def ticker() -> None:
+            while True:
+                started = time.perf_counter()
+                await asyncio.sleep(0.01)
+                lags.append(time.perf_counter() - started - 0.01)
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1", timeout=60) as client:
+            # Warm up (first-request imports and schema builds are not the finding), then block the store.
+            for method, path, body in ROUTES:
+                await client.request(method, path, json=body)
+            blocking_stores["blocking"] = True
+            tick = asyncio.create_task(ticker())
+            await asyncio.sleep(0.05)
+            lags.clear()
+            calls = [client.request(m, p, json=b) for m, p, b in ROUTES]
+            routes = asyncio.gather(*calls)
+            await asyncio.sleep(0.05)
+            started = time.perf_counter()
+            health = await client.get("/health")
+            health_seconds = time.perf_counter() - started
+            assert health.status_code == 200
+            responses = await routes
+            tick.cancel()
+        return max(lags), health_seconds, [r.status_code for r in responses]
+
+    max_lag, health_seconds, statuses = asyncio.run(scenario())
+    assert blocking_stores["n"] >= len(ROUTES), "every route reached the (blocking) store"
+    assert all(code < 500 for code in statuses), statuses
+    assert health_seconds < BLOCK_SECONDS, f"/health waited {health_seconds:.2f}s behind store reads"
+    assert max_lag < BLOCK_SECONDS / 2, f"the event loop stalled {max_lag:.2f}s"

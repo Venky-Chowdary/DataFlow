@@ -3,12 +3,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 import hmac
 
+from services.control_plane_store import ControlPlaneUnavailable
 from services.platform_config import docs_enabled
 from services.tenant_bind import principal_allowed_for_tenant
 
@@ -218,7 +220,14 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
         # Same statuses as the cookie path (review 5): disabled and banned.
         if stored and stored.get("status") in ("disabled", "banned"):
             return "disabled_user"
-        if _session_idled_out(token, email):
+        try:
+            idled_out = _session_idled_out(token, email)
+        except ControlPlaneUnavailable:
+            # The workspace idle policy is unreadable: neither allowed nor
+            # touched (touching would restart the idle clock). 503.
+            logger.warning("session idle policy unreadable; request refused with 503")
+            return "auth_store_unavailable"
+        if idled_out:
             return "session_idle_timeout"
         _heal_rekey_if_pending(stored, email)
         user = lookup_user(email)
@@ -295,6 +304,11 @@ def _mfa_detached(request: Request, token: str) -> bool:
     return not getattr(request.state, "user", None)
 
 
+def _attach_public_identity(request: Request, token: str) -> bool:
+    """A public route attaches the bearer's identity unless the MFA policy holds it."""
+    return _attach_user_reason(request, token) is None and not _mfa_detached(request, token)
+
+
 def _attach_user(request: Request, token: str) -> bool:
     return _attach_user_reason(request, token) is None
 
@@ -353,7 +367,12 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     from services.auth_state import get_auth_state
     from services.session_policy import enforce_idle
 
-    if not enforce_idle(email=email, last_seen_at=doc.get("last_seen_at") or doc.get("created_at")):
+    try:
+        may_continue = enforce_idle(email=email, last_seen_at=doc.get("last_seen_at") or doc.get("created_at"))
+    except ControlPlaneUnavailable:
+        logger.warning("session idle policy unreadable; request refused with 503")
+        return "auth_store_unavailable"
+    if not may_continue:
         get_auth_state().revoke_session(doc["jti"])
         return "session_idle_timeout"
     request.state.cookie_session_jti = doc["jti"]
@@ -427,7 +446,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # setting, and a stale copy means the middleware and the auth service
             # disagree about whether the request needs a token.
             if not _auth_service.auth_required():
-                if token and _attach_user_reason(request, token) is None:
+                if token and await run_in_threadpool(_attach_user_reason, request, token) is None:
                     from services import audit_coverage
 
                     principal_context = audit_coverage
@@ -458,11 +477,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 # Public routes still attach identity when a Bearer token is present
                 # (MCP tools/call uses this; discovery works without a token).
                 # A session held by the workspace MFA policy is anonymous here.
-                if (
-                    token
-                    and _attach_user_reason(request, token) is None
-                    and not _mfa_detached(request, token)
-                ):
+                if token and await run_in_threadpool(_attach_public_identity, request, token):
                     from services import audit_coverage
 
                     principal_context = audit_coverage
@@ -482,12 +497,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     return limited
                 return await call_next(request)
 
+            # Attaching the identity reads the user, session and session-policy
+            # stores (tenant settings live in the shared control-plane database,
+            # H-5): run it on the thread pool, never on the event loop.
             reason_code = (
                 "missing_credentials"
                 if not (token or cookie_doc)
-                else _attach_user_reason(request, token)
+                else await run_in_threadpool(_attach_user_reason, request, token)
                 if token
-                else _attach_cookie_user(request, cookie_doc)
+                else await run_in_threadpool(_attach_cookie_user, request, cookie_doc)
             )
             if reason_code == "csrf_failed":
                 return JSONResponse(
@@ -556,7 +574,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # Workspace "require MFA": a held session reaches enrolment only.
             from services.mfa_enforcement import gate as mfa_gate
 
-            held = mfa_gate(request, token=token, cookie_doc=cookie_doc if not token else None)
+            # It reads the tenant store (one lookup per membership): off the event loop.
+            held = await run_in_threadpool(
+                mfa_gate, request, token=token, cookie_doc=cookie_doc if not token else None
+            )
             if held is not None:
                 return held
 

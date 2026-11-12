@@ -402,9 +402,17 @@ def start_orphan_sweeper(*, interval_seconds: float | None = None) -> bool:
     return True
 
 
-def stop_orphan_sweeper() -> None:
+def stop_orphan_sweeper(timeout: float = 5.0) -> None:
+    """Stop the sweeper and wait for its thread, so no pass runs after this returns.
+
+    A pass already in a database call can outlive ``timeout``; the thread is a
+    daemon and exits at its next check of the stop flag.
+    """
     global _sweeper_stop, _sweeper_thread
+    thread = _sweeper_thread
     if _sweeper_stop is not None:
         _sweeper_stop.set()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout)
     _sweeper_stop = None
     _sweeper_thread = None

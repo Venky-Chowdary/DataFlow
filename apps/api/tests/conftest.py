@@ -77,6 +77,12 @@ if not os.environ.get("DATAFLOW_UPLOAD_DIR") and not os.environ.get("DATAWRAP_UP
     atexit.register(shutil.rmtree, _suite_upload_dir, ignore_errors=True)
 
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
+# Tenant settings, BYOK keys, ACLs and the other control-plane stores move to
+# the shared database whenever one is connected (audit H-5). Tests isolate
+# those stores per test through their files, including the worlds that run
+# users and jobs on a live MongoDB, so the suite pins the file backend; the
+# shared backend is exercised by tests/test_h5_shared_control_plane_stores.py.
+os.environ.setdefault("DATAFLOW_CONTROL_STORE_BACKEND", "file")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 # Pilot's dataset tests read the sample files in tests/fixtures. The product
 # lists only the deployment's upload directory (the image ships this folder,
