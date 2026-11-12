@@ -553,12 +553,15 @@ class AuditAccessMiddleware(BaseHTTPMiddleware):
     """Record sensitive-route metadata after the handler response is available."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        from starlette.concurrency import run_in_threadpool
+
+        # The audit append can seal the chain tip in the shared anchor store: off the event loop.
         try:
             response = await call_next(request)
         except Exception:
-            self._record(request, status=500)
+            await run_in_threadpool(self._record, request, status=500)
             raise
-        self._record(request, status=response.status_code)
+        await run_in_threadpool(self._record, request, status=response.status_code)
         return response
 
     @staticmethod

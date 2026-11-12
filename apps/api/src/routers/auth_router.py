@@ -917,7 +917,7 @@ async def logout(request: Request):
 
 
 @router.post("/login")
-async def login(body: LoginRequest, request: Request):
+def login(body: LoginRequest, request: Request):
     from services.auth_rate_limit import (
         check_login_rate_limit,
         record_login_failure,
@@ -1092,7 +1092,7 @@ def _landing_workspace(request: Request, user: Any, email: str, named_workspace_
 
 
 @router.get("/me")
-async def me(request: Request):
+def me(request: Request):
     """Who the API decided you are, and what it will let you do here.
 
     The client used to infer authority from the platform label it stashed at

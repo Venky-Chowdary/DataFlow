@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from services.threadpool_handler import off_event_loop
 from services.brand_env import getenv_brand
 from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
@@ -1922,7 +1923,8 @@ async def run_universal_transfer(
 
 
 @router.get("/{job_id}/explanation")
-async def get_transfer_explanation(job_id: str, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def get_transfer_explanation(job_id: str, request: Request):
     """Return the human-readable pipeline explanation for a transfer job."""
     from ..services.mongodb_service import get_mongodb_service
 
@@ -1948,7 +1950,8 @@ async def get_transfer_explanation(job_id: str, request: Request):
 
 
 @router.get("/{job_id}/mapping-proof")
-async def get_transfer_mapping_proof(job_id: str, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def get_transfer_mapping_proof(job_id: str, request: Request):
     """Return persisted per-mapping evidence for Theater / Jobs deep-link."""
     from services.mapping_proof import mapping_proof_or_build
 
@@ -2003,7 +2006,8 @@ async def get_transfer_mapping_proof(job_id: str, request: Request):
 
 
 @router.get("/{job_id}/proof-pack")
-async def get_transfer_proof_pack(job_id: str, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def get_transfer_proof_pack(job_id: str, request: Request):
     """Export a signed Gate-8 + mapping proof pack (HMAC + content SHA-256).
 
     Engineering diligence artifact — not an auditor SOC2 / HIPAA letter.
@@ -2055,7 +2059,8 @@ async def verify_transfer_proof_pack(body: Any = Body(...)):
 
 
 @router.get("/{job_id}/certificate")
-async def get_migration_certificate(job_id: str, request: Request, format: str = "json"):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def get_migration_certificate(job_id: str, request: Request, format: str = "json"):
     """Per-run Migration Certificate: row accounting, quarantine, verdict, signature.
 
     ``format=markdown`` returns the operator-facing page, ``format=pdf`` the
@@ -2141,7 +2146,8 @@ class RollbackExecuteBody(BaseModel):
 
 
 @router.post("/{job_id}/rollback/execute")
-async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: Request):
     """Execute a signed rollback plan — DISCARD_STAGING only.
 
     Warehouse restore / population undo are never executed here (fail closed).
@@ -2281,7 +2287,8 @@ class JobCdcSnapshotBody(BaseModel):
 
 
 @router.get("/{job_id}/cdc/snapshots")
-async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""):
     """List incremental snapshot signals for this job's CDC source fingerprint."""
     from services.cdc_job_snapshots import (
         list_signals_for_job,
@@ -2327,7 +2334,8 @@ async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""
 
 
 @router.post("/{job_id}/cdc/snapshots")
-async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, request: Request):
     """Enqueue a Debezium-style incremental snapshot using the job's source_key."""
     from services.cdc_job_snapshots import request_snapshot_for_job
 
@@ -2363,7 +2371,8 @@ async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, reques
 
 
 @router.post("/{job_id}/cdc/snapshots/{signal_id}/cancel")
-async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request):
+@off_event_loop  # the job ACL check reads the shared control-plane store
+def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request):
     """Cancel a pending/running incremental snapshot signal for this job."""
     from services.cdc_incremental_snapshot import cancel_signal, get_signal
     from services.cdc_job_snapshots import resolve_job_cdc_snapshot_context

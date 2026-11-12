@@ -725,9 +725,12 @@ async def _add_timing_header_response(request: Request, call_next):
     named_admin = False
     if request.method != "GET" and path.startswith("/api/v1/"):
         try:
+            from starlette.concurrency import run_in_threadpool
+
             from services.admin_audit import record_unhandled_admin_change
 
-            named_admin = record_unhandled_admin_change(request, response.status_code)
+            # An audit append can seal the chain tip in the shared anchor store: off the event loop.
+            named_admin = await run_in_threadpool(record_unhandled_admin_change, request, response.status_code)
         except Exception as exc:
             logging.getLogger(__name__).warning("Admin audit suppressed: %s", exc, exc_info=exc)
     if (
@@ -752,7 +755,10 @@ async def _add_timing_header_response(request: Request, call_next):
                 details["correlation_id_rejected"] = True
             if getattr(request.state, "workspace_header_rejected", False):
                 details["workspace_header_rejected"] = True
-            append_audit_event(
+            from starlette.concurrency import run_in_threadpool
+
+            await run_in_threadpool(
+                append_audit_event,
                 action=f"http.{request.method.lower()}",
                 resource=path,
                 actor=actor,

@@ -561,7 +561,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # Workspace "require MFA": a held session reaches enrolment only.
             from services.mfa_enforcement import gate as mfa_gate
 
-            held = mfa_gate(request, token=token, cookie_doc=cookie_doc if not token else None)
+            # It reads the tenant store (one lookup per membership): off the event loop.
+            held = await run_in_threadpool(
+                mfa_gate, request, token=token, cookie_doc=cookie_doc if not token else None
+            )
             if held is not None:
                 return held
 
