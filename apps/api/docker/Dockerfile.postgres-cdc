@@ -1,11 +1,13 @@
 # Postgres with pgvector + logical decoding for CDC CI/integration.
 # GitHub Actions service containers cannot override CMD, so CI builds this image
 # (or docker-compose uses an equivalent ``command:``) before running live CDC ITs.
-FROM public.ecr.aws/docker/library/postgres:16
-
-# pgvector is required for vector-store integration tests; install from PGDG.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends postgresql-16-pgvector \
-    && rm -rf /var/lib/apt/lists/*
+#
+# pgvector is required for vector-store integration tests. The official pgvector
+# image ships PostgreSQL 16 with a matching pgvector build, pinned. Installing
+# postgresql-16-pgvector from PGDG on top of the floating postgres:16 image broke
+# when PGDG published a pgvector that needs a newer server than the image had
+# ("postgresql-16-pgvector : Depends: postgresql-16 (> 16.16) but 16.15 is to be
+# installed").
+FROM docker.io/pgvector/pgvector:0.8.1-pg16
 
 CMD ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=16", "-c", "max_wal_senders=16", "-c", "max_slot_wal_keep_size=1GB"]

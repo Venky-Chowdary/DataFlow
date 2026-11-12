@@ -180,8 +180,10 @@ start_postgres_cdc() {
   # public.ecr.aws killed api-and-web/cdc-sqlserver before tests ran.
   # Pull through pull_image first (backoff + docker.io fallback), tag to the
   # FROM ref so the build resolves it from the local daemon.
-  local base="public.ecr.aws/docker/library/postgres:16" pulled wal
-  pulled=$(pull_image "$base" "docker.io/library/postgres:16")
+  # The pinned pgvector image (Dockerfile.postgres-cdc) has no second
+  # registry; pull_image still retries it with backoff before the build.
+  local base="docker.io/pgvector/pgvector:0.8.1-pg16" pulled wal
+  pulled=$(pull_image "$base" "$base")
   [ "$pulled" = "$base" ] || docker tag "$pulled" "$base"
   docker build -t dataflow-postgres-cdc:ci \
     -f apps/api/docker/Dockerfile.postgres-cdc apps/api/docker
