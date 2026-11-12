@@ -24,7 +24,9 @@ inferred from a location) is ``LocalUriPyArrowFileIO``, which refuses that
 (``services.platform_gcp_azure_credentials``), and so is the one a catalog
 builds from its own properties (a SQL catalog's metadata file).
 
-A FileIO's properties, the REST server's ``/v1/config`` answer and the
+A FileIO's properties, the REST server's ``/v1/config`` answer, each part of a
+table response (metadata properties, config, every storage credential, checked
+separately so a blank in one cannot hide a class another names) and the
 metadata a commit returns are also refused when a property names a class
 Datawrap does not ship (``services.iceberg_class_properties``), whatever that
 setting says; ``load_catalog`` checks the connector's own settings.
@@ -39,6 +41,9 @@ from services.iceberg_class_properties import (
     COMMIT,
     FILE_IO,
     SERVER_CONFIG,
+    STORAGE_CREDENTIAL,
+    TABLE_CONFIG,
+    TABLE_METADATA,
     check_class_properties,
 )
 from services.platform_aws_credentials import iceberg_credentials_refusal, s3_fileio_refusal
@@ -73,6 +78,20 @@ def file_io_properties(properties: Any) -> dict[str, Any]:
     return merged
 
 
+def check_table_response(table_response: Any) -> None:
+    """Each source of a REST table response, separately (follow-up review 2, H2).
+
+    pyiceberg hands the FileIO ``{**metadata.properties, **config,
+    **credential config}``, so a blank in the config or a storage credential
+    hid a class the metadata names from the merged check, while the table keeps
+    the raw metadata and ``Table.location_provider()`` imports that class.
+    """
+    check_class_properties(table_response.metadata.properties, TABLE_METADATA)
+    check_class_properties(table_response.config, TABLE_CONFIG)
+    for credential in getattr(table_response, "storage_credentials", None) or ():
+        check_class_properties(credential.config, STORAGE_CREDENTIAL)
+
+
 def guarded_file_io(properties: Any, location: str | None = None) -> Any:
     from pyiceberg.io import load_file_io
 
@@ -105,9 +124,20 @@ def guarded_catalog(base: type) -> type:
 
         def commit_table(self, *args: Any, **kwargs: Any) -> Any:
             response = super().commit_table(*args, **kwargs)
-            # The next write loads the location provider from these properties.
+            # The next write loads the location provider from these properties
+            # (the raw metadata: a commit response carries no config to merge).
             check_class_properties(response.metadata.properties, COMMIT)
             return response
+
+        if hasattr(base, "_response_to_table"):  # REST: load, create, register, refresh
+
+            def _response_to_table(self, identifier: Any, table_response: Any) -> Any:
+                check_table_response(table_response)
+                return super()._response_to_table(identifier, table_response)
+
+            def _response_to_staged_table(self, identifier: Any, table_response: Any) -> Any:
+                check_table_response(table_response)
+                return super()._response_to_staged_table(identifier, table_response)
 
     Guarded.__name__ = Guarded.__qualname__ = f"Keyed{base.__name__}"
     return Guarded

@@ -226,12 +226,13 @@ def test_a_rest_servers_config_cannot_pick_a_host_credential_auth_manager(
 @pytest.mark.parametrize("auth", _AMBIENT)
 def test_a_tables_config_cannot_carry_a_host_credential_auth_manager(mode, lookups, server, auth):
     from connectors.iceberg_catalog import load_table
-    from services.iceberg_class_properties import FILE_IO
+    from services.iceberg_class_properties import TABLE_CONFIG
 
     server.table_config.update({**_KEYS, "auth": auth})
     with pytest.raises(ValueError) as caught:
         load_table(_rest_endpoint())
-    _refused(str(caught.value), FILE_IO, auth)
+    # Refused on the table response itself, before the FileIO merge (follow-up review 2, H2).
+    _refused(str(caught.value), TABLE_CONFIG, auth)
     _no_platform_credential(lookups, server)
 
 

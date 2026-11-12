@@ -8,8 +8,8 @@ auth manager (``auth`` = ``{"type": "custom", "impl": ...}``, or any
 ``type`` pyiceberg has not registered). A tenant runs its own REST catalog
 server, so those properties can come from the connector's settings, from the
 server's ``/v1/config`` defaults and overrides, from a table's load response
-(its config, metadata properties and storage credentials) and from the
-metadata a commit returns. pyiceberg 0.12's S3 signer (``s3.signer``) is
+(its config, metadata properties and storage credentials, each checked on its
+own: follow-up review 2, H2) and from the metadata a commit returns. pyiceberg 0.12's S3 signer (``s3.signer``) is
 looked up in a fixed registry, not imported.
 
 ``py-io-impl`` may name only a FileIO in :data:`ALLOWED_FILE_IO`. Any other
@@ -52,6 +52,9 @@ SETTINGS = "in this connector's Iceberg settings"
 SERVER_CONFIG = "in the REST catalog server's configuration"
 FILE_IO = "in an Iceberg FileIO's properties (the connector's settings, or a table's configuration from its catalog)"
 COMMIT = "in the table metadata the catalog returned for a commit"
+TABLE_METADATA = "in the table metadata the catalog returned"
+TABLE_CONFIG = "in the table configuration the catalog returned"
+STORAGE_CREDENTIAL = "in a storage credential the catalog returned with a table"
 
 _ICEBERG_TYPES = frozenset({"iceberg", "apache_iceberg"})
 
