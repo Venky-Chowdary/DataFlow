@@ -239,12 +239,14 @@ def dial_pymysql(
 
     from connectors.mysql_conn import _install_local_infile_guard
     from connectors.mysql_options import MySQLOptionRefused, dial_option_refusal
+    from connectors.tls_file_options import check_dial
 
     refusal = dial_option_refusal(kwargs, local_infile_ok=local_infile_ok)
     if refusal:
         raise MySQLOptionRefused(refusal)
     _install_local_infile_guard()
     args = connect_kwargs_for(kwargs, plan)
+    check_dial(args)  # the plan's CA / client certificate: never a file on this host
     note = ""
     try:
         conn = pymysql.connect(**args)
@@ -286,9 +288,12 @@ def resolved_kwargs_for_external_dial(base: dict[str, Any], plan: TlsPlan, host:
     """
     from connectors.mysql_options import MySQLOptionRefused, dial_option_refusal
 
+    from connectors.tls_file_options import check_dial
+
     refusal = dial_option_refusal(base, local_infile_ok=False)
     if refusal:
         raise MySQLOptionRefused(refusal)
+    check_dial(connect_kwargs_for(base, plan))  # never a TLS file on this host
     if plan.mode != TLS_DISABLED:
         return connect_kwargs_for(base, plan)
     import pymysql

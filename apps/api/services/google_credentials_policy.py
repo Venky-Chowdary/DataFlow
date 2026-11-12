@@ -29,9 +29,7 @@ messages name the setting and never the path.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from services.platform_gcp_azure_credentials import FLAG, platform_gcp_azure_credentials_allowed
@@ -68,21 +66,9 @@ def key_file_allowed(path: str) -> bool:
     """A key file inside an area a connector may open, or the operator opted in."""
     if platform_gcp_azure_credentials_allowed():
         return True
-    from services.brand_env import getenv_brand_str
-    from services.export_paths import connector_may_open_export_path, exports_dir
-    from services.local_file_policy import connector_may_open_upload_path, is_within
-    from services.platform_config import upload_dir_path
+    from services.tenant_host_files import host_file_allowed
 
-    try:
-        resolved = Path(path).expanduser().resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        return False
-    if is_within(resolved, upload_dir_path().expanduser().resolve(strict=False)):
-        return connector_may_open_upload_path(resolved)
-    if is_within(resolved, exports_dir(create=False).expanduser().resolve(strict=False)):
-        return connector_may_open_export_path(resolved)
-    roots = [raw.strip() for raw in getenv_brand_str("SOURCE_PATH_ROOTS", "").split(os.pathsep) if raw.strip()]
-    return any(is_within(resolved, Path(root).expanduser().resolve(strict=False)) for root in roots)
+    return host_file_allowed(path)
 
 
 def key_file_refusal(path: str, what: str) -> str:

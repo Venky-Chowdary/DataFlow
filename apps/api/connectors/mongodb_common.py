@@ -29,6 +29,10 @@ def guarded_mongo_client(conn_str: str, *, workspace_id: str = "", **options: An
     assert_connector_dial_allowed(
         str(conn_str or ""), workspace_id=workspace_id, point="mongo_client"
     )
+    from connectors.tls_file_options import check_dial
+
+    # tlsCAFile / tlsCertificateKeyFile: never a file on this host (follow-up review 2).
+    check_dial(options, str(conn_str or ""))
     return MongoClient(conn_str, **options)
 
 

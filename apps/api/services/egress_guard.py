@@ -786,6 +786,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
 
     from connectors.mysql_options import connector_option_refusal
+    from connectors.tls_file_options import connector_refusal as tls_files_refusal
     from services.google_credentials_policy import google_connector_refusal
 
     platform_credentials = (
@@ -799,6 +800,8 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         )
         # BigQuery / GCS: never the host's Google identity or key files (follow-up review 2, BQ).
         or google_connector_refusal(data)
+        # No TLS certificate / key / wallet file on this host (follow-up review 2, TLS files).
+        or tls_files_refusal(data)
     )
     if platform_credentials:
         return platform_credentials
