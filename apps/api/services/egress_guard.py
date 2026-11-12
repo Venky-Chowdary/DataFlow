@@ -35,7 +35,7 @@ import socket
 import threading
 import urllib.parse
 from contextlib import contextmanager
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from services.brand_env import getenv_brand
 from services.would_apply_audit import audit_would_apply
@@ -116,6 +116,12 @@ DEFAULT_SOCKET = "/<default local socket>"
 #: What the guard judges for an authority that yields no host once decoded (encoded twice).
 UNREADABLE_HOST = "<unreadable host>"
 _SOCKET_PHRASE = "local socket"
+#: MySQL / MariaDB ``unix_socket`` (URL query key, connector field, ``extra``):
+#: PyMySQL opens that socket on this host instead of dialling the URL's host.
+_SOCKET_KEYS = frozenset({"unix_socket"})
+_KEYWORD_SOCKET = re.compile(r"(?i)(?:^|[;\s])unix_socket\s*=\s*([^\s;]+)")
+#: What the guard judges for a socket named by a relative path.
+LOCAL_SOCKET = "/<local socket>"
 _UNREADABLE_PHRASE = "unreadable host"
 
 _PIN_LOCK = threading.RLock()
@@ -323,6 +329,35 @@ def classify_host(
 def is_socket_target(host: str) -> bool:
     """A Unix-socket path (``/run/postgresql``, libpq's ``@abstract``), not a host name."""
     return str(host or "").startswith(("/", "@"))
+
+
+def _socket_host(value: str) -> str:
+    """A socket path as the guard judges it: the path, or :data:`LOCAL_SOCKET` for a relative one."""
+    return value if is_socket_target(value) else LOCAL_SOCKET
+
+
+def _dials_mysql_sockets(db_type: str) -> bool:
+    if not str(db_type or "").strip():
+        return False
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    return str(resolve_driver_type(str(db_type).strip()) or "").lower() == "mysql"
+
+
+def mysql_socket_values(data: Any) -> list[str]:
+    """A MySQL-family connector's ``unix_socket`` field and ``extra.unix_socket``, as
+    ``unix_socket=`` keyword values the guard judges as a local socket (follow-up review 1).
+
+    Judged at save. At the dial only a URL's ``?unix_socket=`` reaches PyMySQL
+    (through SQLAlchemy), and :func:`_query_hosts` judges it there."""
+    def get(source: Any, key: str) -> Any:
+        return source.get(key) if isinstance(source, Mapping) else getattr(source, key, None)
+
+    if not _dials_mysql_sockets(str(get(data, "type") or get(data, "format") or "")):
+        return []
+    extra = get(data, "extra")
+    values = (get(data, "unix_socket"), extra.get("unix_socket") if isinstance(extra, Mapping) else None)
+    return [f"unix_socket={text}" for text in (str(v or "").strip() for v in values) if text]
 
 
 def _refusal_text(host: str, phrase: str) -> str:
@@ -741,13 +776,16 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     if platform_credentials:
         return platform_credentials
     values = [str(data.get(key) or "") for key in _SAVE_TARGET_KEYS]
+    sockets = mysql_socket_values(data)
     workspace_id = str(data.get("workspace_id") or "")
     db_type = str(data.get("type") or "")
     # The endpoint an S3/DynamoDB client dials (``host`` + ``port`` may be it).
     aws_endpoint = aws_sdk_endpoint(data, db_type)
-    if existing is not None and values == [
+    unchanged = existing is not None and values == [
         str(getattr(existing, key, "") or "") for key in _SAVE_TARGET_KEYS
-    ]:
+    ] and sockets == mysql_socket_values(existing)
+    values += sockets
+    if unchanged:
         for host, phrase in iter_refusals(
             *values, workspace_id=workspace_id, db_type=db_type, aws_endpoint=aws_endpoint
         ):
@@ -882,6 +920,8 @@ def _query_hosts(text: str) -> list[str]:
             if name in ("host", "hostaddr") and not any(parts):
                 hosts.append(DEFAULT_SOCKET)
             hosts.extend(part for part in parts if part)
+        elif name in _SOCKET_KEYS and value.strip():
+            hosts.append(_socket_host(value.strip()))
     return hosts
 
 
@@ -933,6 +973,7 @@ def _hosts_from_values(*values: str, socket_values: bool = False) -> list[str]:
                 # do not DNS the URL string (IDNA: label empty or too long).
                 continue
         found.extend(_KEYWORD_HOST.findall(text))
+        found.extend(_socket_host(value) for value in _KEYWORD_SOCKET.findall(text))
         found.extend(_EMBEDDED_IPV4.findall(text))
         found.extend(_EMBEDDED_METADATA_NAME.findall(text))
         found.extend(_EMBEDDED_V6_META.findall(text))
