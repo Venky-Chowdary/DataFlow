@@ -28,7 +28,22 @@ _CORPUS = [
     "2024-01-01", "2024-01-01T09:00:00Z", "2024-01-01T05:30:00-04:00",
     "2024-01-01T09:00:00", "2024-01-01T09:00:00.123456", "2026-01-01T16:15:00+05:30",
     "abc", "ABC", "a-b", "z", "Z_9", "1/2", ". ",
+    # PR 407 review: every way a value reaches a class, and the look-alikes
+    # that must stay text (Unicode digits, NaN/Infinity, locale-shaped numbers,
+    # day/month dates), plus surrounding whitespace.
+    "١٢", "٣", "１２", " 7", "7 ", " 2024-01-01 ", "\t10",
+    "NaN", "nan", "Infinity", "-Infinity", "inf",
+    "true", "t", "$1,000", "1,000", "1,5", "1_000", "12e4", "0x10",
+    "01/02/2024", "02/01/2024", "13/01/2024", "12/31/2024", "31.12.2024",
 ]
+
+#: Composite bookmarks ``cursor\x1ftie-break`` beside plain values, for the
+#: exhaustive check of the comparator the watermark store uses.
+_BOOKMARKS = [
+    head + KEYSET_SEP + tail
+    for head in ("5", "10", "2024-01-01", "abc", "01/02/2024")
+    for tail in ("", "2", "10", "1a")
+] + ["5", "10", "2024-01-01", "abc", "1a", ""]
 
 
 def test_the_audit_cycle_is_gone():
@@ -159,3 +174,25 @@ def test_only_wire_numbers_and_iso_temporals_leave_the_text_class():
         "31.12.2024", "10:00:00", "1.2.3",
     ):
         assert order_key(value)[0] == text, value
+
+
+def test_look_alikes_rank_as_text_and_whitespace_does_not_change_a_value():
+    text = 2
+    for value in ("١٢", "１２", "NaN", "Infinity", "true", "$1,000", "1,5", "1_000",
+                  "0x10", "01/02/2024", "13/01/2024", "12/31/2024", "31.12.2024"):
+        assert order_key(value)[0] == text, value
+    assert compare_values(" 7", "7") == 0 and compare_values("7 ", "7") == 0
+    assert compare_values(" 2024-01-01 ", "2024-01-01") == 0
+
+
+def test_bookmark_compare_is_a_total_order_with_composites():
+    for a, b in itertools.product(_BOOKMARKS, repeat=2):
+        assert compare_cursor_values(a, b) == -compare_cursor_values(b, a), (a, b)
+    for a, b, c in itertools.product(_BOOKMARKS, repeat=3):
+        ab, bc, ac = (
+            compare_cursor_values(a, b), compare_cursor_values(b, c), compare_cursor_values(a, c)
+        )
+        if ab <= 0 and bc <= 0:
+            assert ac <= 0, (a, b, c)
+        if ab >= 0 and bc >= 0:
+            assert ac >= 0, (a, b, c)
