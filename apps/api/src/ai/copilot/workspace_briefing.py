@@ -168,13 +168,17 @@ def _job_line(job: dict[str, Any]) -> str:
     jid = str(job.get("id") or job.get("job_id") or "")[:12]
     src = job.get("source") or (job.get("route") or {}).get("source_table") or "?"
     dst = job.get("destination") or (job.get("route") or {}).get("dest_table") or "?"
-    return f"`{jid}` {src} → {dst}"
+    from .md_safe import md_code, md_text
+
+    return f"{md_code(jid)} {md_text(src)} → {md_text(dst)}"
 
 
 def _schedule_line(sched: dict[str, Any]) -> str:
     name = sched.get("name") or "pipeline"
     nxt = sched.get("next_run_at") or "—"
-    return f"**{name}** next `{nxt}`"
+    from .md_safe import md_code, md_text
+
+    return f"**{md_text(name)}** next {md_code(nxt)}"
 
 
 # The loaders below raise on failure on purpose: ``_read`` owns the fallback and

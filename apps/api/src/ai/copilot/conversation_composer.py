@@ -1037,7 +1037,9 @@ def compose_dataset_list(output: dict[str, Any]) -> str:
 
     def line(d: dict[str, Any]) -> str:
         rows = f", {d['row_count']:,} rows" if d.get("row_count") else ""
-        return f"• **{d.get('display_name') or d.get('name')}** — {d.get('column_count', 0)} columns{rows}"
+        from .md_safe import md_text
+
+        return f"• **{md_text(d.get('display_name') or d.get('name'))}** — {d.get('column_count', 0)} columns{rows}"
 
     lines: list[str] = []
     if output.get("uploads_unread"):

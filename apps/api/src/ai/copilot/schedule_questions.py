@@ -14,6 +14,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from .md_safe import md_code, md_text
+
 _ENABLED_RE = re.compile(r"\b(?:enabled|active|running|on)\b", re.I)
 _PAUSED_RE = re.compile(r"\b(?:paused|disabled|inactive|off|stopped|not\s+enabled|not\s+active)\b", re.I)
 _SUBJECT_RE = re.compile(r"\b(?:pipelines?|schedules?|recurring\s+syncs?)\b", re.I)
@@ -160,7 +162,7 @@ def schedule_list_lead(output: dict[str, Any]) -> str:
         lead += f" The {state} ones:" if rows else f" None are {state}."
     nxt = output.get("next_due") or {}
     if state == "enabled" and nxt.get("at"):
-        lead = lead.rstrip(":") + f". Next due: **{nxt.get('name')}** at `{nxt.get('at')}`."
+        lead = lead.rstrip(":") + f". Next due: **{md_text(nxt.get('name'))}** at {md_code(nxt.get('at'))}."
     return lead
 
 
@@ -172,19 +174,19 @@ def health_lead(output: dict[str, Any]) -> str:
     parked = int(output.get("parked_count") or 0)
     failed = int(output.get("failed_last_count") or 0)
     if parked:
-        names = ", ".join(f"**{n}**" for n in output.get("parked_names") or [] if n)
+        names = ", ".join(f"**{md_text(n)}**" for n in output.get("parked_names") or [] if n)
         lead += (
             f" **{parked}** parked on approval" + (f" ({names})" if names else "")
             + " — they will not tick until someone approves."
         )
     if failed:
-        names = ", ".join(f"**{n}**" for n in output.get("failed_last_names") or [] if n)
+        names = ", ".join(f"**{md_text(n)}**" for n in output.get("failed_last_names") or [] if n)
         lead += f" **{failed}** failed their last run" + (f" ({names})" if names else "") + "."
     if not enabled:
         lead += " None are enabled, so they will not fire."
     nxt = output.get("next_due") or {}
     if nxt.get("at"):
-        lead += f" Next due: **{nxt.get('name')}** at {nxt.get('at')}."
+        lead += f" Next due: **{md_text(nxt.get('name'))}** at {md_text(nxt.get('at'))}."
     return lead
 
 
@@ -219,11 +221,11 @@ def render_schedule_list(
         for s in rows[:8]:
             bind = bind_phrase(s)
             lines.append(
-                f"• **{s.get('name')}** · {s.get('interval')}"
-                f"{' · cron ' + s['cron'] if s.get('cron') else ''}"
+                f"• **{md_text(s.get('name'))}** · {md_text(s.get('interval'))}"
+                f"{' · cron ' + md_text(s['cron']) if s.get('cron') else ''}"
                 + paused_marker(s)
                 + (f" · {bind}" if bind else "")
-                + f" · next `{s.get('next_run_at') or '—'}`"
+                + f" · next {md_code(s.get('next_run_at') or '—')}"
                 + f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
             )
         note = schedule_list_note(output, min(len(rows), 8))
@@ -249,7 +251,7 @@ def asks_next_run(message: str) -> bool:
 
 def next_run_lead(schedule: dict[str, Any]) -> str:
     """"**X** runs next at …" from the pipeline's own record, or why it has none."""
-    name = schedule.get("name") or "This pipeline"
+    name = md_text(schedule.get("name") or "This pipeline")
     if schedule.get("needs_approval"):
         return f"**{name}** is parked on an approval, so it has no next run until that is decided."
     if schedule.get("enabled") is False:
@@ -258,7 +260,7 @@ def next_run_lead(schedule: dict[str, Any]) -> str:
     if not nxt:
         return f"**{name}** is enabled but has no next run recorded."
     zone = str(schedule.get("timezone") or "UTC")
-    return f"**{name}** runs next at `{nxt}` (cadence evaluated in {zone})."
+    return f"**{name}** runs next at {md_code(nxt)} (cadence evaluated in {md_text(zone)})."
 
 
 def _named_schedule(message: str) -> str:

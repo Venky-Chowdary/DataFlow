@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from services.job_list_filters import RUNNING_STATUSES, status_values
 
+from .md_safe import md_code, md_text
 from .job_questions import LAST_JOB_RE, JobAsk, asked_status, parse_job_ask
 
 #: Failed on the Jobs page is exactly the ``failed`` status.
@@ -51,9 +52,9 @@ def _in_class(job: dict, statuses: tuple[str, ...]) -> bool:
 def _bullet(job: dict) -> str:
     verdict = " — verification failed" if job.get("verification_passed") is False else ""
     return (
-        f"• `{job.get('id', '?')}` · {job.get('source', '?')} -> "
-        f"{job.get('destination', '?')}: "
-        f"**{job.get('status')}**{verdict} ({job.get('records', 0):,} records)"
+        f"• {md_code(job.get('id', '?'))} · {md_text(job.get('source', '?'))} -> "
+        f"{md_text(job.get('destination', '?'))}: "
+        f"**{md_text(job.get('status'))}**{verdict} ({job.get('records', 0):,} records)"
     )
 
 
@@ -165,35 +166,35 @@ def _rows_moved(output: dict, census: dict, scope: str) -> str:
 def _last_job(jobs: list[dict], ask: JobAsk | None, status: str, census: dict) -> str:
     latest = jobs[0]
     state = str(latest.get("status") or "?")
-    route = f"{latest.get('source', '?')} → {latest.get('destination', '?')}"
+    route = f"{md_text(latest.get('source', '?'))} → {md_text(latest.get('destination', '?'))}"
     records = f"{int(latest.get('records') or 0):,} records"
     if ask and ask.metric == "duration":
         took = job_duration_line(latest)
         if took:
-            return f"Your last transfer job `{latest.get('id', '?')}` (**{state.upper()}**, {route}) {took}."
+            return f"Your last transfer job {md_code(latest.get('id', '?'))} (**{md_text(state.upper())}**, {route}) {took}."
         return (
-            f"Your last transfer job `{latest.get('id', '?')}` is **{state.upper()}** and has no "
+            f"Your last transfer job {md_code(latest.get('id', '?'))} is **{md_text(state.upper())}** and has no "
             "completion time recorded, so I can't state how long it took."
         )
     if status == "failed" and state not in FAILED_STATUSES:
         failed = _count(census["status_counts"], tuple(FAILED_STATUSES))
         line = (
-            f"Your last transfer job `{latest.get('id', '?')}` did not fail — it is "
-            f"**{state.upper()}** ({route}, {records})."
+            f"Your last transfer job {md_code(latest.get('id', '?'))} did not fail — it is "
+            f"**{md_text(state.upper())}** ({route}, {records})."
         )
         if failed:
             line += f" **{failed:,}** job(s) have failed overall; ask *show me my failed jobs* to list them."
         return line
     lines = [
-        f"Your last transfer job `{latest.get('id', '?')}` is "
-        f"**{state.upper()}** — {route} ({records})."
+        f"Your last transfer job {md_code(latest.get('id', '?'))} is "
+        f"**{md_text(state.upper())}** — {route} ({records})."
     ]
     if latest.get("verification_passed") is False:
         # A completed status is not a clean bill: say what the Jobs page flags.
         lines.append("Its Gate-8 verification **failed** — open the job's Trust Report before relying on it.")
     err = str(latest.get("error") or "").strip()
     if err:
-        lines.append(f"Error: {err}")
+        lines.append(f"Error: {md_text(err)}")
     rest = jobs[1:_SHOW_LIMIT]
     if rest:
         lines.append("Earlier jobs:")

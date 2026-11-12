@@ -3263,9 +3263,11 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     rendered.silent.add(id(tr))
             elif tr.name == "get_job" and tr.success:
                 job = tr.output or {}
+                from .md_safe import md_text
+
                 lines = [
-                    f"Job **`{job.get('id')}`** — **{job.get('status', '?').upper()}** · "
-                    f"{job.get('source', '?')} → {job.get('destination', '?')}.",
+                    f"Job **`{job.get('id')}`** — **{md_text(str(job.get('status', '?')).upper())}** · "
+                    f"{md_text(job.get('source', '?'))} → {md_text(job.get('destination', '?'))}.",
                     f"Rows processed: {(job.get('records_processed') or 0):,} · "
                     f"rejected: {job.get('rejected_rows') or 0} · "
                     f"coerced NULL: {job.get('coerced_null_rows') or 0}.",
@@ -3294,7 +3296,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         f"({live.get('column_count')} cols): {preview}"
                     )
                 if job.get("error"):
-                    lines.append(f"Error: {job['error']}")
+                    lines.append(f"Error: {md_text(job['error'])}")
                 for rem in (job.get("suggested_remediations") or [])[:4]:
                     lines.append(f"• Suggested: **{rem.get('label')}** (`{rem.get('kind')}`)")
                 parts.append("\n".join(lines))
