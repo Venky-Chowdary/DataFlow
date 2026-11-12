@@ -174,3 +174,99 @@ def test_rows_only_partly_checked_are_never_said_to_be_more_than_were_found():
     partly = _plan(csw.LateRows(count=5, min_cursor="3", undelivered=0, checked=3, rule="horizon"))
     assert "only 3 of them" in partly.reason, partly.reason
 
+
+# --------------------------------------------------------------------------
+# Finding 2 — a date cell the file's date order cannot read is refused, never
+# compared as text (text ranks above every date and became the watermark)
+# --------------------------------------------------------------------------
+
+
+def _file_run(fake, tmp_path, fmt: str, cells: list[str]):
+    import json
+    import sqlite3
+
+    from services import sync_cursor as sc
+
+    src = tmp_path / f"orders.{fmt}"
+    if fmt == "jsonl":
+        src.write_text("".join(json.dumps({"id": i, "d": d, "v": "r"}) + "\n" for i, d in enumerate(cells, 1)))
+    else:
+        src.write_text("id,d,v\n" + "".join(f"{i},{d},r\n" for i, d in enumerate(cells, 1)))
+    dst = tmp_path / "dest.sqlite"
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format=fmt), source_filename=src.name,
+        source_path=str(src), source_content=src.read_bytes(),
+        destination=EndpointConfig(kind="database", format="sqlite", database=str(dst), table="orders"),
+        mappings=[{"source": k, "target": k, "confidence": 1.0} for k in ("id", "d", "v")],
+        sync_mode="incremental_append", validation_mode="strict", skip_preflight=True,
+        stream_contracts=[{"name": "orders", "sync_mode": "incremental_append", "primary_key": "id",
+                           "cursor_field": "d", "selected": True, "cursor_semantics": "insert_only"}],
+    )
+    job_id = "r3f" + uuid.uuid4().hex[:16]
+    fake.update_job_status(job_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(request, job_id)
+    landed: list = []
+    if dst.exists():
+        with sqlite3.connect(dst) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'orders'").fetchone():
+                landed = [r[0] for r in conn.execute("SELECT id FROM orders ORDER BY id")]
+    stored = sc.STORE_PATH.read_text() if sc.STORE_PATH.exists() else ""
+    return result, landed, stored
+
+
+@pytest.mark.parametrize(
+    "fmt,cells,placeholder",
+    [
+        ("csv-copy", ["2025-12-30", "2025-12-31", "2025-12-29", "2025-12-28", "N/A"], "N/A"),
+        ("csv-row", ["2025-12-30", "2025-12-31", "2025-12-29", "2025-12-28", "N/A"], "N/A"),
+        ("jsonl", ["2025-12-30T10:00:00Z", "2025-12-31T10:00:00Z", "2025-12-29T10:00:00Z",
+                   "2025-12-28T10:00:00Z", "N/A"], "N/A"),
+    ],
+)
+def test_an_unparsed_date_cell_is_refused_before_any_write(
+    isolated, tmp_path, monkeypatch, fmt, cells, placeholder
+):
+    """An ISO-dated file with one 'N/A' cell used to store 'N/A' as the
+    watermark (text ranks above every date), and every later run wrote 0 rows
+    with success. The run is refused before any write, naming the column and
+    how many cells did not parse — never their values."""
+    if fmt == "csv-row":
+        monkeypatch.setenv("DATAFLOW_CSV_LOCAL_COPY", "0")
+    result, landed, stored = _file_run(isolated, tmp_path, fmt.split("-")[0], cells)
+    assert not result.success
+    error = str(result.error or "")
+    assert "'d'" in error and "1 cell" in error, error
+    assert "date order" in error, error
+    assert placeholder not in error, error
+    assert landed == []
+    assert placeholder not in stored and "watermark" not in stored, stored
+
+
+def test_an_ambiguous_declared_date_under_auto_order_is_refused_not_kept_as_text():
+    """A date column under the Auto date order: '04/03/2026' is April 3rd or
+    March 4th, so it does not parse. It used to be compared as text and kept as
+    the high mark, above every later ISO date."""
+    from services.batch_incremental import BatchIncrementalBound
+    from services.sync_cursor import (
+        IncrementalReadScope,
+        cursor_value_coercer,
+        records_after_watermark,
+    )
+
+    records = [{"id": "3", "d": "03/03/2026"}, {"id": "4", "d": "04/03/2026"}]
+    coerce = cursor_value_coercer("date")
+    with pytest.raises(ValueError) as raised:
+        records_after_watermark(records, "d", "2026-03-01\x1f2", primary_key="id", coerce=coerce)
+    message = str(raised.value)
+    assert "'d'" in message and "1 cell" in message and "date order" in message, message
+    assert "04/03/2026" not in message, message
+    bound = BatchIncrementalBound(
+        scope=IncrementalReadScope(
+            cursor_column="d", cursor_key="k", watermark=None, primary_key="id",
+        ),
+        reads_cells_by_type=True,
+    )
+    with pytest.raises(ValueError, match="date order"):
+        bound.bound(records, {"d": "date"})
+    assert bound.high_mark is None
+

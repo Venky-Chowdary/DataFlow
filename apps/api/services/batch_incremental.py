@@ -43,6 +43,8 @@ class BatchIncrementalBound:
     #: column type, so the bound reads them the same way (review H-1). A
     #: database's values compare as they are.
     reads_cells_by_type: bool = False
+    #: The request's date order ("" = settled from the read, as the write does).
+    date_locale: str = ""
 
     @property
     def active(self) -> bool:
@@ -58,11 +60,21 @@ class BatchIncrementalBound:
         if not self.active:
             return records
         cursor = self.scope.cursor_column
-        coerce = (
-            cursor_value_coercer((column_types or {}).get(cursor))
-            if self.reads_cells_by_type
-            else None
-        )
+        coerce = None
+        if self.reads_cells_by_type:
+            # The write path settles the date order on this same read later, so
+            # the bound settles it the same way first (review 3, Medium).
+            from services.transform_engine import (
+                _active_date_locale,
+                canonical_date_locale,
+                infer_date_locale,
+            )
+
+            columns = list(records[0].keys()) if records and isinstance(records[0], dict) else []
+            order = _active_date_locale(self.date_locale) or canonical_date_locale(
+                infer_date_locale(records, columns)
+            )
+            coerce = cursor_value_coercer((column_types or {}).get(cursor), date_locale=order)
         delta, unbounded = records_after_watermark(
             records,
             cursor,
@@ -158,6 +170,7 @@ def bind_transfer_request(request: Any, source_format: str) -> BatchIncrementalB
         destination=request.destination,
     )
     bound.reads_cells_by_type = str(getattr(request.source, "kind", "") or "").lower() != "database"
+    bound.date_locale = str(getattr(request, "date_locale", "") or "")
     return bound
 
 

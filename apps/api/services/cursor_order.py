@@ -73,6 +73,12 @@ def is_calendar_text_value(text: Any) -> bool:
     return bool(value) and order_key(value)[0] == _TEXT and _is_calendar_text(value)
 
 
+def is_temporal_value(text: Any) -> bool:
+    """True when one value orders as a date or date-time, by its own class."""
+    value = str(text if text is not None else "").strip()
+    return bool(value) and order_key(value)[0] == _TEMPORAL
+
+
 def _naive_key(text: str) -> tuple[datetime, Decimal] | None:
     """A wall-clock ISO date or date-time, read as UTC so it shares the
     temporal class with offset-bearing text (one key per value)."""

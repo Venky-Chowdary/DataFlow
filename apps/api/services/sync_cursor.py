@@ -1240,9 +1240,11 @@ def cursor_value_coercer(cursor_type: Any, *, date_locale: str | None = None) ->
     routes use this; a SQL source's values are classified by themselves.
 
     ``None`` when the type is not temporal (the cell's text is its value). A
-    cell that does not parse keeps its text: it stays in the delta, and the
-    write path judges it. ``date_locale`` defaults to the active one, read
-    once here so a worker thread compares under the same order.
+    cell that does not parse keeps its text for the write path, but its
+    ``parse`` (``None`` for such a cell) lets the bound refuse it rather than
+    compare it as text, which ranks above every date (review 3, Medium).
+    ``date_locale`` defaults to the active one, read once here so a worker
+    thread compares under the same order.
     """
     from services.type_system import normalize_logical_type
 
@@ -1253,13 +1255,18 @@ def cursor_value_coercer(cursor_type: Any, *, date_locale: str | None = None) ->
 
     locale = _active_date_locale(date_locale or "")
 
-    def coerce(text: str) -> str:
+    def parse(text: str) -> str | None:
         if logical == "date":
             parsed = _parse_date(text, date_locale=locale)
             if parsed is not None:
                 return parsed
-        return _parse_datetime(text, date_locale=locale) or text
+        return _parse_datetime(text, date_locale=locale)
 
+    def coerce(text: str) -> str:
+        return parse(text) or text
+
+    coerce.parse = parse  # type: ignore[attr-defined]
+    coerce.logical = logical  # type: ignore[attr-defined]
     return coerce
 
 
@@ -1277,7 +1284,8 @@ def row_after_watermark(
     population-fit walk. A missing cursor value is unreadable — callers that
     write must refuse; callers that only judge keep the row so it cannot
     silently leave the batch. ``coerce`` (:func:`cursor_value_coercer`) reads
-    the cell as the value its watermark keeps.
+    the cell as the value its watermark keeps; a cell it cannot parse is
+    unreadable too, never compared as text.
     """
     col = (cursor_column or "").strip()
     if not col:
@@ -1287,7 +1295,10 @@ def row_after_watermark(
     text = present_cell_text(raw)
     if text is None:
         return None
-    candidate = coerce(text) if coerce is not None else text
+    parse = getattr(coerce, "parse", None)
+    candidate = parse(text) if parse is not None else coerce(text) if coerce is not None else text
+    if candidate is None:
+        return None
     if pk and pk != col:
         candidate = encode_keyset_bookmark(
             [candidate, present_cell_text(rec.get(pk) if isinstance(rec, dict) else None) or ""]
@@ -1389,18 +1400,66 @@ def records_after_watermark(
         return list(records), 0
     if text_calendar_refusal and coerce is None:
         _refuse_calendar_text(records, col)
+        _refuse_non_temporal_cells(records, col, watermark)
     delta: list[dict[str, Any]] = []
     unbounded = 0
+    unparsed = 0
     for rec in records:
         verdict = row_after_watermark(
             rec, cursor_column, watermark, primary_key=primary_key, coerce=coerce
         )
         if verdict is None:
-            unbounded += 1
+            if present_cell_text(rec.get(col) if isinstance(rec, dict) else None) is None:
+                unbounded += 1
+            else:
+                unparsed += 1
             continue
         if verdict:
             delta.append(rec)
+    if unparsed:
+        _refuse_unparsed_cells(col, unparsed, getattr(coerce, "logical", "date"))
     return delta, unbounded
+
+
+def _refuse_non_temporal_cells(
+    records: list[dict[str, Any]], column: str, watermark: str | None
+) -> None:
+    """A text-kept file cursor that holds dates: refuse its cells that are not.
+
+    The column's other cells (or its stored watermark) order as dates; a cell
+    like a placeholder does not, ranks above every date as text, and became
+    the watermark (review 3, Medium).
+    """
+    from services.cursor_order import is_temporal_value
+
+    texts = [present_cell_text(rec.get(column)) if isinstance(rec, dict) else None for rec in records]
+    texts = [t for t in texts if t is not None]
+    seed = None
+    if watermark not in (None, ""):
+        seed = split_cursor_bookmark(str(watermark), has_tiebreak=_is_composite(str(watermark)))[0]
+    if not (any(is_temporal_value(t) for t in texts) or is_temporal_value(seed)):
+        return
+    odd = sum(1 for t in texts if not is_temporal_value(t))
+    if odd:
+        _refuse_unparsed_cells(column, odd, "date")
+
+
+def _refuse_unparsed_cells(column: str, count: int, logical: str) -> None:
+    """Refuse cells of a date cursor that cannot be read as dates (review 3, Medium).
+
+    Compared as text such a cell ranks above every date and became the
+    watermark, so every later run wrote nothing and reported success. The
+    message names the column and the count, never the values.
+    """
+    kind = "date-time" if logical == "datetime" else "date"
+    raise ValueError(
+        f"Cursor '{column}' holds {kind}s, but {count:,} cell(s) in it cannot be read "
+        f"as a {kind} under the file's date order: compared as text they would rank "
+        "above every date and become the watermark, so later rows would be skipped "
+        "without an error. Set the file's date order (for example date_locale=DMY or "
+        "MDY) when its dates are written day/month or month/day, or clean those cells "
+        "at the source, or run this sync as a full refresh."
+    )
 
 
 def _refuse_calendar_text(records: list[dict[str, Any]], column: str) -> None:
