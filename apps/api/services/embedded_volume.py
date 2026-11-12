@@ -269,10 +269,11 @@ def migrate_flat_volume_files_at_startup() -> dict[str, Any]:
     return summary
 
 
-def _refused(label: str, why: str) -> ValueError:
+def _refused(label: str, why: str, own: Path | None = None) -> ValueError:
+    where = f" ({own})" if own is not None else ""
     return ValueError(
         f"{label} path is {why} of the shared {label} volume and cannot be opened by this "
-        "workspace's connector; use a file in this workspace's own area"
+        f"workspace's connector; use a file in this workspace's own area{where}"
     )
 
 
@@ -299,7 +300,7 @@ def volume_open_path(resolved: Path, volume_dir: Path, *, kind: str, label: str)
     if _is_within(own, resolved):
         return resolved
     if in_container:
-        raise _refused(label, "in another workspace's area")
+        raise _refused(label, "in another workspace's area", own)
     home = own.joinpath(*relative.split("/")) if relative else own
     if home.exists() or not resolved.exists():
         # Moved home already, or a new file: created in this workspace's area.
@@ -307,4 +308,4 @@ def volume_open_path(resolved: Path, volume_dir: Path, *, kind: str, label: str)
         return home
     if _owner(relative, _claims(kind, volume_dir)) == workspace and _move(volume_dir, relative, workspace) == "moved":
         return home
-    raise _refused(label, "a file with no provable owner in the flat part")
+    raise _refused(label, "a file with no provable owner in the flat part", own)

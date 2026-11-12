@@ -179,8 +179,12 @@ def test_query_route_refuses_a_package_qualified_call(tenancy_world):  # noqa: F
     """Through POST /query/execute, with a real saved connector."""
     from services.connector_store import create_connector
 
-    (tenancy_world.data_dir / "sqlite").mkdir()
-    db = tenancy_world.data_dir / "sqlite" / "q.sqlite"
+    from services.embedded_volume import volume_workspace_dir
+
+    # A's own area of the sqlite volume (review 3, H3).
+    folder = volume_workspace_dir(tenancy_world.data_dir.resolve() / "sqlite", tenancy_world.workspace_a)
+    folder.mkdir(parents=True)
+    db = folder / "q.sqlite"
     with sqlite3.connect(str(db)) as conn:
         conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
         conn.execute("INSERT INTO t VALUES (1, 'a')")
