@@ -56,6 +56,8 @@ INTERVAL_FOLD = ("holds an interval the driver reads as a plain duration (months
 JSONB_SCALE = ("holds a JSON number whose scale the driver drops (trailing zeros are read away), so the extract "
                "cannot hold its exact spelling and the column is not provable")
 JSONB_OTHER = "holds a JSON document the driver reads as another value, so the column is not provable"
+JSONB_PRECISION = ("holds a JSON number a double cannot hold exactly; the driver reads it rounded, so the extract "
+                   "cannot hold its value and the column is not provable")
 
 
 def _upper(ddl: str) -> str:
@@ -164,9 +166,26 @@ def _jsonb_fold(text: str, value: Any) -> str | None:
 
     if dump(server) == dump(value):
         return None
-    # The same document by value: what the driver dropped is a number's spelling (its scale).
-    by_value = json.dumps(server, sort_keys=True, default=float) == json.dumps(value, sort_keys=True, default=float)
-    return JSONB_SCALE if by_value else JSONB_OTHER
+
+    def exact(doc: Any) -> str:  # every number by its exact value, whatever its scale (1.50 is 1.5)
+        def walk(v: Any) -> Any:
+            if isinstance(v, dict):
+                return {str(k): walk(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple)):
+                return [walk(x) for x in v]
+            if v is None or isinstance(v, (bool, str)):
+                return v
+            try:
+                return {"\u0000n": format(Decimal(_number(v)).normalize(), "f")}
+            except (InvalidOperation, ValueError):
+                return {"\u0000n": _number(v)}
+        return json.dumps(walk(doc), sort_keys=True, ensure_ascii=False)
+
+    if exact(server) == exact(value):
+        return JSONB_SCALE  # the same values: what the driver dropped is a number's spelling (its scale)
+    # A number the driver rounded to a double (0.30000000000000001 reads 0.3), not a different document.
+    by_double = json.dumps(server, sort_keys=True, default=float) == json.dumps(value, sort_keys=True, default=float)
+    return JSONB_PRECISION if by_double else JSONB_OTHER
 
 
 _ARRAY_DIMS = re.compile(r"^((?:\[-?\d+:-?\d+\])+)=")

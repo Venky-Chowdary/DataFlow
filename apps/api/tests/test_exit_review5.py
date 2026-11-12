@@ -163,3 +163,23 @@ def test_h3_a_sqlite_column_holding_more_than_one_storage_class_is_named_not_pro
         assert "v holds values of more than one SQLite storage class" in tables[name]["reason"], tables[name]
     for name in shapes.keys() - SQLITE_MIXED.keys():
         assert tables[name]["status"] == "proven", (name, tables[name]["status"], tables[name]["reason"])
+
+
+# ------------------------------------- Lows: reasons that name the true cause
+
+def test_low_a_jsonb_number_a_double_cannot_hold_reads_the_fold_reason_not_a_control_total():
+    from services.exit_completeness import judge_table
+    from services.exit_value_fidelity import JSONB, driver_fold
+
+    assert "a double cannot hold exactly" in driver_fold(JSONB, "JSONB", "0.30000000000000001", 0.3)
+    assert "scale the driver drops" in driver_fold(JSONB, "JSONB", "[1.0, 1.00]", [1.0, 1.0])
+    types = {"id": "BIGINT", "jb": "JSONB"}
+    src = profile_rows([{"id": 1, "jb": 0.3, "\u0000s": "0.30000000000000001"}, {"id": 2, "jb": 2, "\u0000s": "2"}],
+                       list(types), ["id"], None, types=types, engine="postgresql", server_text={"jb": "\u0000s"})
+    ext = profile_rows([{"id": 1, "jb": 0.30000000000000004}, {"id": 2, "jb": 2}], list(types), ["id"],
+                       sorted(src.totals), types=types, engine="postgresql")
+    out = judge_table(name="t", source=src, extract=ext, key_columns=["id"], seal_ok=True,
+                      parity={"check": "full_checksum", "verdict": "proven", "unexplained": 0}, not_measured=[])
+    assert out["status"] == "not_proven", out
+    assert "jb holds a JSON number a double cannot hold exactly" in out["reason"], out["reason"]
+    assert "Control totals" not in out["reason"] and "source changed" not in out["reason"], out["reason"]
