@@ -19,6 +19,17 @@ describe("compareThroughput", () => {
     assert.equal(compareThroughput(1000, 1050).label, "About the same");
     assert.equal(compareThroughput(0, 4000).verdict, "unknown");
   });
+  it("uses the same 10% band on both sides, like the API's comparison()", () => {
+    // 4,000 rows/s is 1.103x our 3,626.7: slower, not "about the same".
+    assert.equal(compareThroughput(3626.7, 4000).verdict, "slower");
+    assert.equal(compareThroughput(4000, 3626.7).verdict, "faster");
+    for (const [ours, theirs] of [[1000, 1100], [1100, 1000], [1000, 1099], [1099, 1000]]) {
+      assert.equal(compareThroughput(ours, theirs).verdict, "similar", `${ours} vs ${theirs}`);
+    }
+    for (const [ours, theirs] of [[1000, 1101], [1101, 1000], [1000, 1110], [1110, 1000]]) {
+      assert.notEqual(compareThroughput(ours, theirs).verdict, "similar", `${ours} vs ${theirs}`);
+    }
+  });
 });
 
 describe("Scale page claims", () => {
