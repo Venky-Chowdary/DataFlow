@@ -96,3 +96,46 @@ def test_the_scheduler_retries_a_refused_connection_on_a_403_port():
     )
     assert decision["retry"] is True, decision
     assert decision["failure_class"]["kind"] == TRANSIENT
+
+
+# Review L2: compact status shapes the bare code matched and the port-safe
+# pattern must keep matching (Google/Elasticsearch compact JSON, ``status:403``,
+# ``HTTP/403``, ``HTTP-429``, ``403-forbidden``, ``E403``).
+@pytest.mark.parametrize("message", [
+    '{"error":{"code":403,"message":"The caller does not have permission",'
+    '"status":"PERMISSION_DENIED"}}',
+    'HTTP status:403 body={"message":"forbidden"}',
+    "status:403",
+    "returned HTTP/403",
+    "error 403-forbidden from gateway",
+    "E403 forbidden",
+])
+def test_a_compact_403_is_still_a_credential_refusal(message):
+    got = classify_failure(error=message)
+    assert got.kind == DETERMINISTIC, (message, got)
+    assert "Credentials" in got.corrective_action
+
+
+@pytest.mark.parametrize("message", [
+    '{"error":{"root_cause":[],"type":"es_rejected_execution_exception"},"status":429}',
+    "got status:429 from upstream",
+    "status:429",
+    "received HTTP-429 from api",
+])
+def test_a_compact_429_is_still_rate_limiting(message):
+    assert classify_failure(error=message).kind == TRANSIENT, message
+
+
+# A port that IS the code, or starts with it after "host:", is still a port:
+# each message says nothing else, so it stays unclassified.
+@pytest.mark.parametrize("message", [
+    'connection to server at "10.0.0.5", port 403 failed: '
+    "expected authentication request from server, but received x",
+    'connection to server at "10.0.0.5", port 429 failed: '
+    "expected authentication request from server, but received x",
+    "upstream host:4290 answered with an unexpected payload",
+    "upstream host:4031 answered with an unexpected payload",
+])
+def test_a_port_is_not_a_status_even_when_it_is_the_code(message):
+    got = classify_failure(error=message)
+    assert got.kind == UNKNOWN, (message, got)

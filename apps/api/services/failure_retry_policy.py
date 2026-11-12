@@ -43,8 +43,20 @@ def _http_status(code: str) -> str:
     A bare ``403`` matched ``port 40312 failed: Connection refused``, so a
     refused connection on about one ephemeral port in 180 parked as a
     credential refusal instead of being retried (the r5 schedule e2e flake).
+
+    Not a status: digits inside a number or name (``wh_4031``, ``40312``), a
+    dotted address or path (``10.0.0.7``, ``/v1/403x``), a hyphenated name
+    (``db-403.internal``), or after ``port ``. A colon is not excluded: compact
+    JSON and logs write ``"code":403`` and ``status:429``, and a port of
+    exactly 403 or 429 is near-impossible (``host:4290`` is still excluded by
+    the digit after it). ``HTTP/403``, ``HTTP-429`` and ``E403`` are statuses
+    by their prefix, and ``403-forbidden`` by the word after it. Matched
+    against lower-cased text.
     """
-    return rf"(?<![\w.:/-])(?<!port ){code}(?![\w-]|\.\d)"
+    return (
+        rf"(?:(?<![\w./-])(?<!port )|(?<=\bhttp[/-])|(?<=\be))"
+        rf"{code}(?!\w|-\d|\.\d)"
+    )
 
 
 # Deterministic refusals the engine states in words. Each is owned by a gate or
