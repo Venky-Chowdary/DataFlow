@@ -186,10 +186,13 @@ def boto3_client(service: str, cfg: dict[str, Any]):
     if endpoint_url:
         from services.egress_guard import assert_connector_dial_allowed
 
+        # ``db_type=service``: the guard skips a region label in ``host``
+        # (``us-east-1``), which this client signs with and never dials.
         assert_connector_dial_allowed(
             endpoint_url,
             str(cfg.get("host") or ""),
             workspace_id=str(cfg.get("workspace_id") or ""),
+            db_type=service,
         )
         kwargs["endpoint_url"] = endpoint_url
     # MinIO and other custom endpoints require path-style addressing.

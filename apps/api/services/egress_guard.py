@@ -512,6 +512,32 @@ FILE_ENGINE_TYPES = frozenset({
 })
 
 
+# AWS SDK connectors keep the signing region in ``host`` (ConnectorModal saves
+# ``us-east-1``). The SDK dials ``endpoint_url`` or the region's AWS endpoint,
+# never the label, so the label is not resolved: each lookup cost ~10 s on a
+# stalled CI resolver and timed out a 3 s test (run 43151557376). Only an exact
+# region spelling is skipped; ``minio`` or any name with a dot is still resolved.
+AWS_REGION_HOST_TYPES = frozenset({
+    "s3",
+    "amazon_s3",
+    "aws_s3",
+    "s3_compatible",
+    "dynamodb",
+    "amazon_dynamodb",
+    "aws_dynamodb",
+    "kinesis",
+})
+_AWS_REGION_LABEL = re.compile(
+    r"^(?:us|eu|ap|sa|ca|me|af|il|mx|cn)(?:-gov|-iso[a-z]?)?-[a-z]+-\d{1,2}$"
+)
+
+
+def is_aws_region_label(host: str, db_type: str) -> bool:
+    """True when ``host`` is the region of an AWS SDK connector, not a dial target."""
+    kind = (db_type or "").strip().lower()
+    return kind in AWS_REGION_HOST_TYPES and bool(_AWS_REGION_LABEL.match(host or ""))
+
+
 def iter_refusals(
     *values: str,
     allowlist: Sequence[str] | None = None,
@@ -526,11 +552,14 @@ def iter_refusals(
     and fail-closes, which is what stops a rebind onto a metadata address.
     Pass ``allowlist=()`` to ignore the workspace list and the process env.
     ``db_type`` of a file engine exempts the host fields entirely — those
-    engines never open a socket.
+    engines never open a socket. For an AWS SDK ``db_type`` the region label
+    is skipped (:func:`is_aws_region_label`).
     """
     if (db_type or "").strip().lower() in FILE_ENGINE_TYPES:
         return
     for host in _hosts_from_values(*values):
+        if is_aws_region_label(host, db_type):
+            continue
         phrase = classify_host(
             host,
             allowlist=allowlist,
