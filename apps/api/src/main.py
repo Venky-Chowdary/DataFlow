@@ -124,6 +124,10 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    # Review (low): a flag set differently under DATAWRAP_ and DATAFLOW_ is named, never its values.
+    from services.brand_env import warn_brand_flag_conflicts
+
+    warn_brand_flag_conflicts(logger)
     try:
         # Saved IP allowlists with no proxy hop count: say so once at boot.
         from services.ip_allowlist_policy import warn_if_hop_count_unset
