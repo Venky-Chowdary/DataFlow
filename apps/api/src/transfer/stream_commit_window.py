@@ -207,32 +207,24 @@ def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str
 
 
 def _probe_undelivered(cfg: Any, schema: str, table: str, **kw: Any) -> Any:
-    """Rows committed behind the watermark that the destination does not hold.
+    """Rows changed or committed behind the watermark that the destination lacks.
 
     The source reports every row behind the watermark written since the stored
     bound — late commits, and rows merely edited in place. The second kind is
     already at the destination under the same cursor value and the same whole
-    key, and re-reading from it would re-read everything after it on every run
-    that follows an edit. So the reported rows are looked up at the destination
-    by key and only the ones it lacks set the re-read seed. Unchecked (too
-    many, the destination unreadable, or no whole unique key to prove a row
-    delivered) they all count, which is the safe side.
+    key, and re-reading from it would re-read everything after it. So the
+    reported rows are checked at the destination page by page, in cursor
+    order, and the first one it lacks seeds the re-read. Unchecked (the
+    destination unreadable, or no whole unique key to prove a row delivered)
+    they all count, which is the safe side.
     """
     key = tuple(getattr(cfg, "replay_key", ()) or ())
     complete = bool(getattr(cfg, "replay_key_complete", False))
-    late = probe_pg_late_rows(
+    return probe_pg_late_rows(
         cfg.src_cfg, schema=schema, table=table, cursor_column=cfg.cursor_source_col,
-        identity_columns=key if complete else (), **kw,
-    )
-    if not late.count or len(late.candidates) != late.count:
-        return late
-    try:
-        missing = _not_at_destination(cfg, table, key, list(late.candidates))
-    except Exception as exc:  # noqa: BLE001 — unchecked rows all count
-        logger.warning("commit-safe window: destination lookup skipped: %s", exc)
-        return late
-    return dataclasses.replace(
-        late, undelivered=len(missing), min_cursor=missing[0][0] if missing else None
+        identity_columns=key if complete else (),
+        undelivered=(lambda page: _not_at_destination(cfg, table, key, page)) if complete else None,
+        **kw,
     )
 
 

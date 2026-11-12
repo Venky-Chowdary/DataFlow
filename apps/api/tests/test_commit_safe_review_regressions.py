@@ -473,3 +473,130 @@ def test_a_failed_window_plan_is_a_gate8_warning(isolated, pg, monkeypatch):
     assert "RuntimeError" in str(evidence.get("probe_error")), evidence
     warnings = " ".join((first.reconciliation or {}).get("warnings") or [])
     assert "RuntimeError" in warnings, first.reconciliation
+
+
+# --------------------------------------------------------------------------
+# H3 — rows that are not late commits must not trigger a re-read
+# --------------------------------------------------------------------------
+
+
+def test_late_row_rule_narrows_only_on_a_complete_subtransaction_free_snapshot():
+    full = {"xmin": "100", "xmax": "110", "xip": ["100", "104"], "xip_complete": True,
+            "open_subxacts": 0}
+    assert csw.late_row_rule(full) == ("in_progress", 110, (100, 104))
+    # An open subtransaction at capture: its xid is never in xip, so only the
+    # horizon is safe.
+    assert csw.late_row_rule({**full, "open_subxacts": 1}) == ("horizon", 100, ())
+    assert csw.late_row_rule({**full, "open_subxacts": None}) == ("horizon", 100, ())
+    # The in-progress list was too large to store.
+    assert csw.late_row_rule({**full, "xip": [], "xip_complete": False}) == ("horizon", 100, ())
+    # A bound stored before this change carries no list.
+    assert csw.late_row_rule({"xmin": "100", "xmax": "110"}) == ("horizon", 100, ())
+
+
+def test_re_read_evidence_is_worded_neutrally():
+    window = csw.plan_commit_safe_window(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="id",
+        cursor_type="BIGINT", stored_watermark="13",
+        metadata={"commit_horizon": {"strategy": csw.STRATEGY_PG, "xmin": "900"}},
+        can_replay=True, contract={},
+        capture_bound=lambda: {"strategy": csw.STRATEGY_PG, "xmin": "950", "xmax": "955"},
+        probe_late=lambda **_: csw.LateRows(count=3, min_cursor="11", undelivered=1, checked=3),
+    )
+    assert window.replays and window.seed == "11"
+    assert "changed or committed behind the watermark" in window.reason
+    assert "not finished at the last read" not in window.reason
+    assert window.evidence()["late_rows_checked"] == 3
+
+
+def _wide_table(n: int) -> None:
+    _sql(f"CREATE TABLE {SCHEMA}.ev (id bigserial PRIMARY KEY, v text)")
+    _sql(f"INSERT INTO {SCHEMA}.ev (v) SELECT 'r' || g FROM generate_series(1, {n}) g")
+    _sql(f"ANALYZE {SCHEMA}.ev")
+
+
+def test_many_in_place_updates_do_not_re_read_the_table(isolated, pg):
+    """More in-place updates than the old 5,000-candidate cap: every candidate
+    was then counted undelivered and the run re-read the whole table."""
+    _wide_table(12_000)
+    dst = "upd_" + uuid.uuid4().hex[:6]
+    kw = dict(cursor="id", mode="incremental_append")
+    assert _run(isolated, "ev", dst, **kw).success
+    _sql(f"UPDATE {SCHEMA}.ev SET v = v || '!' WHERE id <= 6000")
+    _sql(f"INSERT INTO {SCHEMA}.ev (v) VALUES ('new')")
+    second = _run(isolated, "ev", dst, **kw)
+    assert second.success, second.error
+    assert int(second.records_transferred) == 1
+    evidence = _window(second)
+    assert int(evidence.get("late_rows_detected") or 0) == 6000, evidence
+    assert evidence.get("late_rows_undelivered") == 0, evidence
+    assert evidence.get("replay_seed") is None and "rows_replayed" not in evidence, evidence
+    assert "changed or committed behind the watermark" in str(evidence.get("reason"))
+    total = _sql(f"SELECT count(*), count(DISTINCT id) FROM {SCHEMA}.{dst}", fetch=True)[0]
+    assert total == (12_001, 12_001)
+
+
+def test_idle_writer_on_another_table_does_not_grow_the_re_read(isolated, pg):
+    """An idle-in-transaction session holding an xid pins the snapshot xmin.
+    Judged against xmin alone, every row delivered since it opened was reported
+    again each run — 2,999 → 5,999 → 8,999 — and re-read past the cap."""
+    _wide_table(1_000)
+    _sql(f"CREATE TABLE {SCHEMA}.other (x int)")
+    dst = "idle_" + uuid.uuid4().hex[:6]
+    kw = dict(cursor="id", mode="incremental_append")
+    assert _run(isolated, "ev", dst, **kw).success
+    idle = _connect(autocommit=False)
+    try:
+        idle.cursor().execute(f"INSERT INTO {SCHEMA}.other VALUES (1)")  # holds an xid
+        judged = []
+        for _ in range(4):
+            _sql(f"INSERT INTO {SCHEMA}.ev (v) SELECT 'n' || g FROM generate_series(1, 2000) g")
+            result = _run(isolated, "ev", dst, **kw)
+            assert result.success, result.error
+            assert int(result.records_transferred) == 2000
+            evidence = _window(result)
+            # Never a re-read: rows delivered since the idle writer opened are
+            # either not reported (judged on the in-progress list) or reported
+            # and found at the destination (the horizon rule, when a session on
+            # this shared server holds a savepoint at capture).
+            assert evidence.get("replay_seed") is None, evidence
+            assert "rows_replayed" not in evidence, evidence
+            judged.append((evidence.get("late_row_rule"), int(evidence.get("late_rows_detected") or 0)))
+        assert all(n == 0 for rule, n in judged if rule == "in_progress"), judged
+        assert any(rule == "in_progress" for rule, _n in judged), judged
+    finally:
+        idle.rollback()
+        idle.close()
+    total = _sql(f"SELECT count(*), count(DISTINCT id) FROM {SCHEMA}.{dst}", fetch=True)[0]
+    assert total == (9_000, 9_000)
+
+
+def test_idle_writer_does_not_hide_a_real_late_commit(isolated, pg):
+    """The narrowed rule still finds the race the window exists for."""
+    _wide_table(10)
+    _sql(f"CREATE TABLE {SCHEMA}.other (x int)")
+    dst = "idlerace_" + uuid.uuid4().hex[:6]
+    kw = dict(cursor="id", mode="incremental_append")
+    idle = _connect(autocommit=False)
+    try:
+        idle.cursor().execute(f"INSERT INTO {SCHEMA}.other VALUES (1)")
+        assert _run(isolated, "ev", dst, **kw).success
+        slow = _connect(autocommit=False)
+        try:
+            slow.cursor().execute(f"INSERT INTO {SCHEMA}.ev (v) VALUES ('SLOW')")
+            _sql(f"INSERT INTO {SCHEMA}.ev (v) VALUES ('fast1'), ('fast2')")
+            assert _run(isolated, "ev", dst, **kw).success
+            slow.commit()
+        finally:
+            slow.close()
+        third = _run(isolated, "ev", dst, **kw)
+        assert third.success, third.error
+        assert int(_window(third).get("rows_recovered") or 0) == 1, _window(third)
+    finally:
+        idle.rollback()
+        idle.close()
+    missing = _sql(
+        f"SELECT s.id FROM {SCHEMA}.ev s LEFT JOIN {SCHEMA}.{dst} d ON d.id = s.id "
+        "WHERE d.id IS NULL", fetch=True,
+    )
+    assert missing == []

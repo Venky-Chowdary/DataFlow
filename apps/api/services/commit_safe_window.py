@@ -76,8 +76,15 @@ PG_LOOKBACK_SECONDS = 86_400
 PG_LOOKBACK_VALUES = 1_000_000
 #: At or below this estimated row count the PostgreSQL probe has no floor.
 PG_UNBOUNDED_PROBE_ROWS = 1_000_000
-#: Up to this many reported rows are checked against the destination by key.
-PG_CANDIDATE_ROWS = 5_000
+#: Rows behind the watermark are checked against the destination in pages of
+#: this many, in cursor order, until the first one it lacks (no overall cap).
+PG_CHECK_PAGE_ROWS = 1_000
+#: The snapshot's in-progress list is stored with the bound up to this many
+#: transaction ids; a longer list is not stored and the horizon rule applies.
+PG_XIP_MAX = 512
+#: Every probe connection runs under this statement timeout (milliseconds).
+PROBE_TIMEOUT_ENV = "DATAFLOW_COMMIT_SAFE_PROBE_TIMEOUT_MS"
+DEFAULT_PROBE_TIMEOUT_MS = 5_000
 
 OVERLAP_SECONDS_ENV = "DATAFLOW_CURSOR_OVERLAP_SECONDS"
 OVERLAP_VALUES_ENV = "DATAFLOW_CURSOR_OVERLAP_VALUES"
@@ -169,7 +176,12 @@ class LateRows:
     #: cursor first — complete only when it holds ``count`` entries.
     candidates: tuple[tuple[str, tuple[str, ...]], ...] = ()
     #: How many of them the destination does not hold yet (None = not checked).
+    #: Checking stops at the first one it lacks, so this counts that page.
     undelivered: int | None = None
+    #: How many were checked against the destination (None = not checked).
+    checked: int | None = None
+    #: ``in_progress`` (judged on the stored in-progress list) or ``horizon``.
+    rule: str = ""
 
 
 @dataclass(frozen=True)
@@ -189,6 +201,10 @@ class CommitSafeWindow:
     late_rows_detected: int | None = None
     #: Of those, the rows the destination did not hold (None = not checked).
     late_rows_undelivered: int | None = None
+    #: How many were checked against the destination before the first gap.
+    late_rows_checked: int | None = None
+    #: How rows behind the watermark were judged (:func:`late_row_rule`).
+    late_row_rule: str = ""
     overlap: dict[str, Any] = field(default_factory=dict)
     guarantee: str = GUARANTEE_NONE
     reason: str = ""
@@ -227,6 +243,10 @@ class CommitSafeWindow:
             out["late_rows_detected"] = int(self.late_rows_detected)
         if self.late_rows_undelivered is not None:
             out["late_rows_undelivered"] = int(self.late_rows_undelivered)
+        if self.late_rows_checked is not None:
+            out["late_rows_checked"] = int(self.late_rows_checked)
+        if self.late_row_rule:
+            out["late_row_rule"] = self.late_row_rule
         if self.probe_error:
             out["probe_error"] = self.probe_error
         if rows_replayed is not None:
@@ -605,7 +625,8 @@ def _plan_pg(
         )
     try:
         late = probe_late(
-            since_xmin=str(previous["xmin"]), below=cursor_part(stored), cursor_type=cursor_type
+            since_xmin=str(previous["xmin"]), below=cursor_part(stored), cursor_type=cursor_type,
+            bound=previous,
         )
     except Exception as exc:  # noqa: BLE001 — unprobed is said, and probed again next run
         logger.warning("commit-safe window: late-commit probe failed: %s", exc)
@@ -626,55 +647,73 @@ def _plan_pg(
         if late.floor
         else ""
     )
+    if previous.get("xip_truncated"):
+        floor_note += (
+            " (the snapshot's in-progress list was too long to store, so rows are "
+            "judged against its horizon)"
+        )
+    judged = dict(
+        late_rows_detected=int(late.count),
+        late_rows_checked=late.checked,
+        late_row_rule=late.rule,
+    )
+    changed = (
+        f"{int(late.count):,} row(s) changed or committed behind the watermark since "
+        "the last read"
+    )
     if late.count and late.undelivered == 0:
-        # Changed behind the watermark, and every one of those row versions is
-        # already at the destination: rows edited in place without moving the
-        # cursor. That is out-of-window drift (D188), not a late commit —
-        # nothing to re-read, and the bound moves on.
+        # Every one of those row versions is already at the destination: rows
+        # edited in place without moving the cursor, or delivered by the read
+        # that saw them. Out-of-window drift (D188), not a gap — nothing to
+        # re-read, and the bound moves on.
         return CommitSafeWindow(
             **base,
-            late_rows_detected=int(late.count),
+            **judged,
             late_rows_undelivered=0,
             guarantee=GUARANTEE_WITHIN_WINDOW if late.floor else GUARANTEE_COMMIT_SAFE,
             reason=(
-                f"{int(late.count):,} row(s) behind the watermark changed since the last "
-                "read and the destination already holds each of them at that cursor "
-                "value: edited in place, not committed late — nothing to re-read"
-                + floor_note
+                f"{changed}, and the destination already holds each of them at that "
+                "cursor value (edited in place, or already delivered) — nothing to "
+                "re-read" + floor_note
             ),
             census_recommended=bool(late.floor),
         )
     if not late.count:
         return CommitSafeWindow(
             **base,
-            late_rows_detected=0,
+            **judged,
             guarantee=GUARANTEE_WITHIN_WINDOW if late.floor else GUARANTEE_COMMIT_SAFE,
-            reason="no row was committed behind the watermark since the last read" + floor_note,
+            reason="no row changed or was committed behind the watermark since the last "
+            "read" + floor_note,
             census_recommended=bool(late.floor),
         )
     if not can_replay or late.min_cursor in (None, ""):
         return CommitSafeWindow(
             **{**base, "bound": previous},
-            late_rows_detected=int(late.count),
+            **judged,
             guarantee=GUARANTEE_NONE,
             reason=(
-                f"{int(late.count):,} row(s) may have been committed behind the watermark "
-                f"since the last read, and {_UNGUARDED_REASON.split(':', 1)[0]}: this route "
+                f"{changed}, and {_UNGUARDED_REASON.split(':', 1)[0]}: this route "
                 "appends without a key, so they cannot be re-read without duplicating "
                 "rows already delivered. Run the key census, or give the stream a key."
             ),
             census_recommended=True,
         )
+    where = (
+        f"the destination lacks the one at cursor {late.min_cursor}, the first gap in "
+        "cursor order"
+        if late.undelivered
+        else "they could not be checked against the destination"
+    )
     return CommitSafeWindow(
         **{**base, "seed": ReplaySeed(str(late.min_cursor), cursor_part(stored))},
+        **judged,
         replay_through=cursor_part(stored),
-        late_rows_detected=int(late.count),
         late_rows_undelivered=late.undelivered,
         guarantee=GUARANTEE_WITHIN_WINDOW if late.floor else GUARANTEE_COMMIT_SAFE,
         reason=(
-            f"{int(late.count):,} row(s) behind the watermark were written by transactions "
-            "not finished at the last read; this run re-reads from the lowest of them "
-            "and collapses re-reads on the row identity" + floor_note
+            f"{changed}; {where}, so this run re-reads from there and collapses "
+            "re-reads on the row identity" + floor_note
         ),
         census_recommended=bool(late.floor),
     )
@@ -685,24 +724,78 @@ def _plan_pg(
 # --------------------------------------------------------------------------
 
 
+def probe_timeout_ms() -> int:
+    """Statement timeout of every commit-safe probe connection (``0`` = none)."""
+    return _env_int(PROBE_TIMEOUT_ENV, DEFAULT_PROBE_TIMEOUT_MS)
+
+
 def _pg_connect(src_cfg: Mapping[str, Any]) -> Any:
+    """An autocommit probe connection whose statements are bounded in time.
+
+    A probe that runs out of time raises; the caller records it as a probe
+    failure, which the run states ("not guaranteed this run") and Gate-8
+    carries as a warning — never a silent pass.
+    """
     from connectors.postgresql_conn import get_connection
 
-    return get_connection(
+    conn = get_connection(
         host=str(src_cfg.get("host") or ""),
         port=int(src_cfg.get("port") or 5432),
         database=str(src_cfg.get("database") or ""),
-        username=str(src_cfg.get("username") or ""),
+        username=str(src_cfg.get("username") or src_cfg.get("user") or ""),
         password=str(src_cfg.get("password") or ""),
         connection_string=str(src_cfg.get("connection_string") or ""),
         ssl=bool(src_cfg.get("ssl", False)),
     )
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('statement_timeout', %s, false)", (str(probe_timeout_ms()),))
+    except Exception:
+        conn.close()
+        raise
+    return conn
 
 
 _PG_SNAPSHOT_SQL = (
-    "SELECT txid_snapshot_xmin(txid_current_snapshot())::text, "
-    "txid_snapshot_xmax(txid_current_snapshot())::text"
+    "SELECT txid_snapshot_xmin(s)::text, txid_snapshot_xmax(s)::text, "
+    "ARRAY(SELECT x::text FROM txid_snapshot_xip(s) AS x LIMIT %s) "
+    "FROM (SELECT txid_current_snapshot() AS s) AS q"
 )
+#: Subtransactions open under the snapshot's in-progress transactions, read
+#: right after it. A subtransaction's xid is never in the in-progress list.
+#: Matched on the backend's 32-bit xid; the matched count shows whether every
+#: listed transaction is still running in a backend (a prepared or finished
+#: one is not, and the count could miss its subtransactions).
+_PG_SUBXACT_SQL = (
+    "SELECT count(DISTINCT a.backend_xid::text), coalesce(sum(st.subxact_count), 0)::bigint, "
+    "coalesce(bool_or(st.subxact_overflowed), false) "
+    "FROM pg_stat_get_backend_idset() AS b "
+    "CROSS JOIN LATERAL pg_stat_get_backend_subxact(b) AS st "
+    "JOIN pg_catalog.pg_stat_activity AS a ON a.pid = pg_stat_get_backend_pid(b) "
+    "WHERE a.backend_xid::text::bigint = ANY(%s::bigint[])"
+)
+def late_row_rule(bound: Mapping[str, Any]) -> tuple[str, int, tuple[int, ...]]:
+    """How the next run judges rows behind the watermark against ``bound``.
+
+    ``("in_progress", xmax, xip)``: a row is new since the bound when its writer
+    was in progress at capture (in ``xip``) or started after it (at or above
+    ``xmax``). Every other id below ``xmax`` had finished, so its rows were
+    visible to the read. Used only when the stored list is complete and no
+    subtransaction was open at capture — a subtransaction's id is never listed.
+
+    ``("horizon", xmin, ())``: every row written at or above the oldest
+    in-progress id (the safe superset).
+    """
+    xmin = int(str(bound.get("xmin") or 0))
+    xmax = str(bound.get("xmax") or "")
+    if (
+        bound.get("xip_complete") is True
+        and bound.get("open_subxacts") == 0
+        and xmax.isdigit()
+    ):
+        return "in_progress", int(xmax), tuple(int(x) for x in bound.get("xip") or ())
+    return "horizon", xmin, ()
 
 
 def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
@@ -716,11 +809,14 @@ def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — the route then states it is unguarded
         logger.warning("commit-safe window: source connect failed: %s", exc)
         return {"error": f"{type(exc).__name__}: {exc}"[:300]}
+    open_subxacts: int | None = None
     try:
-        conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute(_PG_SNAPSHOT_SQL)
+            cur.execute(_PG_SNAPSHOT_SQL, (PG_XIP_MAX + 1,))
             row = cur.fetchone()
+            xip = [str(x) for x in (row[2] if row else None) or []]
+            if row and row[0] and len(xip) <= PG_XIP_MAX:
+                open_subxacts = _open_subxacts(cur, xip)
     except Exception as exc:  # noqa: BLE001
         logger.warning("commit-safe window: snapshot horizon unreadable: %s", exc)
         return {"error": f"{type(exc).__name__}: {exc}"[:300]}
@@ -731,12 +827,43 @@ def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
             logger.debug("commit-safe window: close skipped", exc_info=True)
     if not row or not row[0]:
         return {}
-    return {
+    bound: dict[str, Any] = {
         "strategy": STRATEGY_PG,
         "xmin": str(row[0]),
         "xmax": str(row[1] or ""),
         "captured_at": datetime.now(timezone.utc).isoformat(),
     }
+    if len(xip) <= PG_XIP_MAX:
+        bound.update(xip=xip, xip_complete=True, open_subxacts=open_subxacts)
+    else:
+        # Too long to store: the next run judges rows against the horizon,
+        # and its evidence says so.
+        bound.update(xip_complete=False, xip_truncated=True)
+    return bound
+
+
+def _open_subxacts(cur: Any, xip: list[str]) -> int | None:
+    """Subtransactions open under the snapshot's in-progress transactions, or None.
+
+    Read after the snapshot. A subtransaction is counted while its top-level
+    transaction runs, so the count covers the snapshot's only when every listed
+    transaction is still found running in a backend; otherwise (finished,
+    prepared, or not visible to this role) the answer is None and the horizon
+    rule applies. Needs PostgreSQL 16 (``pg_stat_get_backend_subxact``); on an
+    older server the answer is None as well.
+    """
+    wanted = sorted({int(x) % 4294967296 for x in xip})
+    if not wanted:
+        return 0
+    try:
+        cur.execute(_PG_SUBXACT_SQL, (wanted,))
+        matched, count, overflowed = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 — unknown, so the horizon rule applies
+        logger.info("commit-safe window: open subtransactions unreadable: %s", exc)
+        return None
+    if int(matched or 0) != len(wanted):
+        return None
+    return int(count or 0) + (1 if overflowed else 0)
 
 
 def pg_relation_kind(src_cfg: Mapping[str, Any], schema: str, table: str) -> str:
@@ -783,13 +910,22 @@ def probe_pg_late_rows(
     below: str,
     cursor_type: Any = None,
     identity_columns: Sequence[str] = (),
+    bound: Mapping[str, Any] | None = None,
+    undelivered: Callable[[list[tuple[str, tuple[str, ...]]]], list[Any]] | None = None,
 ) -> LateRows:
-    """Rows behind ``below`` written at or above the stored snapshot horizon.
+    """Rows behind ``below`` that changed or were committed since the stored bound.
 
-    A row's ``xmin`` is a 32-bit id; it is widened against the snapshot's own
-    64-bit ``xmax`` (every stored row was written before it). A frozen row whose
-    old id aliases into the range is a false positive only: it is re-read and
-    collapses on the row identity.
+    ``bound`` is the stored snapshot (:func:`late_row_rule` decides how it is
+    read; without one, ``since_xmin`` is the horizon). A row's ``xmin`` is a
+    32-bit id; it is widened against the snapshot's own 64-bit ``xmax`` (every
+    stored row was written before it). A frozen row whose old id aliases into
+    the range is a false positive only: it is checked and, if delivered, kept.
+
+    With ``identity_columns`` (a whole unique key) and ``undelivered`` (which of
+    a page of ``(cursor, key)`` rows the destination lacks, in order), the rows
+    are checked page by page in cursor order until the first one the
+    destination lacks: its cursor is ``min_cursor``. Every page is bounded and
+    runs under the probe connection's statement timeout.
 
     On a large table the probe is floored at the PostgreSQL look-back window so
     it stays an index range scan; a probe that cannot be floored on such a table
@@ -799,9 +935,12 @@ def probe_pg_late_rows(
 
     from connectors.postgresql_reader import _cell
 
+    rule, edge, xip = late_row_rule(dict(bound or {}) or {"xmin": since_xmin})
     conn = _pg_connect(src_cfg)
+    checked: int | None = None
+    missing: int | None = None
+    first_gap: str | None = None
     try:
-        conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT c.reltuples::bigint FROM pg_catalog.pg_class c "
@@ -825,43 +964,71 @@ def probe_pg_late_rows(
                         schema, table, est_rows,
                     )
             ident = sql.Identifier(cursor_column)
+            rel = sql.SQL("{s}.{t}").format(
+                s=sql.Identifier(schema or "public"), t=sql.Identifier(table)
+            )
             conds = [sql.SQL("t.{c} < %s").format(c=ident)]
             params: list[Any] = [below]
             if floor:
                 conds.append(sql.SQL("t.{c} >= %s").format(c=ident))
                 params.append(floor)
-            conds.append(
-                sql.SQL("(snap.m - ((snap.m - t.xmin::text::bigint) & 4294967295)) >= %s")
+            widened = sql.SQL("(snap.m - ((snap.m - t.xmin::text::bigint) & 4294967295))")
+            if rule == "in_progress":
+                # Written by a transaction that started after the capture, or
+                # was still running at it.
+                conds.append(
+                    sql.SQL("(") + widened + sql.SQL(" >= %s OR ") + widened
+                    + sql.SQL(" = ANY(%s::bigint[]))")
+                )
+                params.extend([edge, list(xip)])
+            else:
+                conds.append(widened + sql.SQL(" >= %s"))
+                params.append(edge)
+            snap = sql.SQL("WITH snap AS (SELECT txid_snapshot_xmax(txid_current_snapshot()) AS m) ")
+            where = sql.SQL(" AND ").join(conds)
+            cur.execute(
+                snap
+                + sql.SQL("SELECT min(t.{c}), count(*) FROM {r} t, snap WHERE ").format(c=ident, r=rel)
+                + where,
+                params,
             )
-            query = sql.SQL(
-                "WITH snap AS (SELECT txid_snapshot_xmax(txid_current_snapshot()) AS m) "
-                "SELECT min(t.{c}), count(*) FROM {s}.{t} t, snap WHERE "
-            ).format(
-                c=ident, s=sql.Identifier(schema or "public"), t=sql.Identifier(table)
-            ) + sql.SQL(" AND ").join(conds)
-            cur.execute(query, [*params, int(since_xmin)])
             row = cur.fetchone()
-            candidates: list[tuple[str, str]] = []
             key_cols = [str(k) for k in identity_columns or () if k]
-            if key_cols and row and 0 < int(row[1] or 0) <= PG_CANDIDATE_ROWS:
-                # Few enough to name: the caller checks which of them the
-                # destination lacks, so a row edited in place is not re-read.
-                # The whole key: rows of a composite key can share the cursor
-                # value and any one key column.
-                listing = sql.SQL(
-                    "WITH snap AS (SELECT txid_snapshot_xmax(txid_current_snapshot()) AS m) "
-                    "SELECT t.{c}, {k} FROM {s}.{t} t, snap WHERE "
-                ).format(
-                    c=ident,
-                    k=sql.SQL(", ").join(
-                        sql.SQL("t.{}").format(sql.Identifier(k)) for k in key_cols
-                    ),
-                    s=sql.Identifier(schema or "public"), t=sql.Identifier(table),
-                ) + sql.SQL(" AND ").join(conds) + sql.SQL(" ORDER BY 1 LIMIT %s")
-                cur.execute(listing, [*params, int(since_xmin), PG_CANDIDATE_ROWS + 1])
-                candidates = [
-                    (_cell(r[0]), tuple(_cell(v) for v in r[1:])) for r in cur.fetchall()
-                ]
+            if key_cols and undelivered is not None and row and int(row[1] or 0) > 0:
+                order = [ident, *(sql.Identifier(k) for k in key_cols)]
+                cols = sql.SQL(", ").join(sql.SQL("t.{}").format(o) for o in order)
+                after = sql.SQL("({}) > ({})").format(
+                    cols, sql.SQL(", ").join(sql.Placeholder() for _ in order)
+                )
+                checked, last = 0, None
+                try:
+                    while True:
+                        page_where = where if last is None else where + sql.SQL(" AND ") + after
+                        cur.execute(
+                            snap
+                            + sql.SQL("SELECT {cols} FROM {r} t, snap WHERE ").format(cols=cols, r=rel)
+                            + page_where
+                            + sql.SQL(" ORDER BY {cols} LIMIT %s").format(cols=cols),
+                            [*params, *(last or ()), PG_CHECK_PAGE_ROWS],
+                        )
+                        rows = cur.fetchall()
+                        page = [(_cell(r[0]), tuple(_cell(v) for v in r[1:])) for r in rows]
+                        if not page:
+                            missing = 0
+                            break
+                        lacking = undelivered(page)
+                        checked += len(page)
+                        if lacking:
+                            # The first gap in cursor order seeds the re-read.
+                            missing, first_gap = len(lacking), str(lacking[0][0])
+                            break
+                        if len(page) < PG_CHECK_PAGE_ROWS:
+                            missing = 0
+                            break
+                        last = rows[-1]
+                except Exception as exc:  # noqa: BLE001 — unchecked rows all count
+                    logger.warning("commit-safe window: destination check stopped: %s", exc)
+                    missing, first_gap = None, None
     finally:
         try:
             conn.close()
@@ -869,7 +1036,14 @@ def probe_pg_late_rows(
             logger.debug("commit-safe window: close skipped", exc_info=True)
     count = int(row[1] or 0) if row else 0
     low = _cell(row[0]) if row and row[0] is not None else None
-    return LateRows(count=count, min_cursor=low, floor=floor, candidates=tuple(candidates))
+    if missing == 0:
+        low = None
+    elif missing:
+        low = first_gap
+    return LateRows(
+        count=count, min_cursor=low, floor=floor, undelivered=missing,
+        checked=checked if missing is not None else None, rule=rule,
+    )
 
 
 def static_commit_safety(
