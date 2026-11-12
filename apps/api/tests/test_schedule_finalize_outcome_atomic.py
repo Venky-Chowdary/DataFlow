@@ -1103,6 +1103,7 @@ def test_a_contended_claim_does_not_stop_the_beat(store, runner, monkeypatch, ca
     store.update_schedule(b.id, {"next_run_at": (_now() - timedelta(minutes=5)).isoformat()})
     _jobs_ended(store, monkeypatch, "job-a", "job-c")
     seen = _beat_stubs(runner, monkeypatch)
+    real_once, real_save = store._mark_schedule_run_once, store._save_all
     attempts = _contend(store, monkeypatch, a.id)
 
     with caplog.at_level("INFO"):
@@ -1118,6 +1119,15 @@ def test_a_contended_claim_does_not_stop_the_beat(store, runner, monkeypatch, ca
     deferred = [r for r in caplog.records
                 if getattr(r, "event", None) == "schedule.run.finalize_deferred"]
     assert [getattr(r, "schedule_id", None) for r in deferred] == [a.id]
+    # The contention ends: the next beat records schedule A's run, once.
+    if store._mongo_backend() is None:
+        monkeypatch.setattr(store, "_mark_schedule_run_once", real_once)
+    else:
+        monkeypatch.setattr(store, "_save_all", real_save)
+    runner._run_due_schedules()
+    final = store.get_schedule(a.id)
+    assert final.running is False and final.run_count == 1
+    assert runner.notified.count(("job-a", "completed")) == 1
 
 
 def test_a_contended_claim_does_not_stop_the_startup_reclaim(store, runner, monkeypatch, caplog):
@@ -1312,3 +1322,21 @@ def test_a_retry_finalized_again_after_a_lost_write_is_reported_once(
     assert parked.retry_attempt == 1 and parked.running is False
     events = [getattr(r, "event", None) for r in caplog.records]
     assert events.count("schedule.run.retry") == 1, events
+
+
+@mongo_only
+def test_a_late_outcome_on_a_schedule_deleted_meanwhile_records_nothing(store, runner, monkeypatch):
+    """The late path's write finds the schedule gone: no schedule, nothing recorded."""
+    before = _next_run_claimed(store, runner, "late-gone", COMPLETED, approve=False)
+    outcome = store.RunOutcome(lambda after: {"approval_request": {
+        "id": "apr_gone", "status": "open", "code": "RUN_REFUSED", "job_id": "jE1",
+        "occurrences": 1}})
+    state = _write_inside_finalize(store, monkeypatch, lambda: store.delete_schedule(before.id))
+
+    result = store.mark_schedule_run(before.id, "jE1", status="failed",
+                                     run_entry={"job_id": "jE1", "status": "failed"},
+                                     outcome=outcome)
+
+    assert not state["pending"], "the delete never landed inside the finalize"
+    assert result is None and outcome.late is True and outcome.recorded is False
+    assert store.get_schedule(before.id) is None
