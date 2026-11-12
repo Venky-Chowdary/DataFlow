@@ -29,6 +29,14 @@ _OTHER_SUBJECT_RE = re.compile(
     r"datasets?|gates?|preflight|validat\w+)\b",
     re.I,
 )
+_EXACT_STATUSES = (
+    (re.compile(r"\bcomplete(?:d)?[\s_]+with[\s_]+errors?\b", re.I), "completed_with_errors"),
+    (re.compile(r"\bcomplete(?:d)?[\s_]+with[\s_]+warnings?\b", re.I), "completed_with_warnings"),
+    (re.compile(r"\bcomplete(?:d)?[\s_]+with[\s_]+quarantine\b", re.I), "completed_with_quarantine"),
+    (re.compile(r"\bpartial(?:ly)?\b", re.I), "partial"),
+    (re.compile(r"\bpaused\b", re.I), "paused"),
+    (re.compile(r"\bretrying\b", re.I), "retrying"),
+)
 #: A question that asks the ledger for a count or a list.
 _LEDGER_ASK_RE = re.compile(r"\b(?:how\s+many|which|list|show|count|number\s+of|any|did|status)\b", re.I)
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -92,6 +100,8 @@ class JobAsk:
     unapplied: str = ""
     #: ``time`` when ``unapplied`` is a time phrase, else ``filter``.
     unapplied_kind: str = ""
+    #: The Gate-8 verdict asked for: the store's ``verification`` filter.
+    verification: str = ""
 
     def tool_args(self) -> dict[str, Any]:
         """Arguments that make ``list_jobs`` filter and count server-side."""
@@ -105,6 +115,8 @@ class JobAsk:
         # status the question assumed it has.
         if not self.last and not self.metric and self.status in ("failed", "running", "completed", "attention"):
             args["status"] = self.status
+        if self.verification and not self.last and not self.metric:
+            args["verification"] = self.verification
         return args
 
 
@@ -117,9 +129,10 @@ def parse_job_ask(message: str) -> JobAsk | None:
         return None
     rows_moved = bool(_ROWS_MOVED_RE.search(text))
     about_jobs = bool(_JOBS_SUBJECT_RE.search(text))
-    if _OTHER_SUBJECT_RE.search(text) and not rows_moved:
-        return None
     reading = read_filters(text)
+    # "failed gate 8" names a gate, but asks the ledger for a verdict.
+    if _OTHER_SUBJECT_RE.search(reading.rest if reading.verification else text) and not rows_moved:
+        return None
     window = reading.window
     if rows_moved:
         metric = "rows_moved" if (window or about_jobs) else ""
@@ -137,18 +150,19 @@ def parse_job_ask(message: str) -> JobAsk | None:
         metric = "duration"
     else:
         metric = ""
-    status = "" if metric else asked_status(text)
+    verification = reading.verification
+    status = "" if (metric or verification) else asked_status(text)
     unapplied, kind = reading.unapplied, reading.kind
     if unapplied and not (status or metric or last or _LEDGER_ASK_RE.search(text)):
         # "if I run the same CDC change twice is it safe" is not a ledger read.
         return None
-    if not unapplied and not last and (status or metric or window):
+    if not unapplied and not last and (status or metric or window or verification):
         # "failed jobs on Local Postgres", "did not fail": a connector filter
         # and a negated count are not computed.
         unapplied, kind = narrowing_in(text), "filter"
-    if not (status or window or metric or unapplied):
+    if not (status or window or metric or unapplied or verification):
         return None
-    return JobAsk(status=status, metric=metric, last=last, window=window,
+    return JobAsk(status=status, metric=metric, last=last, window=window, verification=verification,
                   unapplied=unapplied, unapplied_kind=kind if unapplied else "")
 
 
@@ -158,6 +172,10 @@ def asked_status(message: str) -> str:
 
     if _ATTENTION_RE.search(message or ""):
         return "attention"
+    # A stored status named exactly is counted exactly, not as its class.
+    for pattern, exact in _EXACT_STATUSES:
+        if pattern.search(message or ""):
+            return exact
     status = job_status_asked(message or "")
     if not status and re.search(r"\b(?:fail\w*|errors?|errored|broken)\b", message or "", re.I):
         return "failed"

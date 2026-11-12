@@ -82,6 +82,21 @@ _TIME_TOKEN = re.compile(
     re.I,
 )
 
+#: Gate-8 verification verdicts the ledger filters by (``verification``).
+_VERIFY_OBJECT = r"(?:the\s+|their\s+|its\s+)?(?:gate[\s-]*8|g8|verification|reconciliation|parity(?:\s+check)?)"
+_VERIFICATION = (
+    ("failed", re.compile(
+        rf"\b(?:fail(?:ed|ing|s)?)\s+{_VERIFY_OBJECT}\b"
+        r"|\b(?:gate[\s-]*8|g8|verification|reconciliation|parity(?:\s+check)?)\s+(?:has\s+|have\s+|was\s+)?failed\b",
+        re.I,
+    )),
+    ("passed", re.compile(
+        rf"\b(?:pass(?:ed|es)?)\s+{_VERIFY_OBJECT}\b"
+        r"|\b(?:gate[\s-]*8|g8|verification|reconciliation|parity(?:\s+check)?)\s+(?:has\s+|have\s+|was\s+)?passed\b",
+        re.I,
+    )),
+)
+
 #: Qualifiers the job ledger read does not apply: connector types, sync modes,
 #: verification, negation. Each is refused by name until a filter applies it.
 _QUALIFIERS = (
@@ -95,6 +110,12 @@ _QUALIFIERS = (
     re.compile(
         r"\b(?:cdc|change\s+data\s+capture|incremental|full[\s_-]*refresh\w*|upserts?|"
         r"append(?:[\s_-]only)?|overwrite|snapshots?)\b",
+        re.I,
+    ),
+    # States that are not a stored status: refused, never read as a near one.
+    re.compile(
+        r"\b(?:stuck|hung|hanging|killed|timed[\s-]*out|time[\s-]*outs?|aborted|crashed|"
+        r"unsuccessful|skipped)\b",
         re.I,
     ),
     re.compile(r"\b(?:verif\w*|gate[\s-]*8|g8|parity|reconcil\w*|trust\s+report)\b", re.I),
@@ -118,6 +139,10 @@ class FilterReading:
     unapplied: str = ""
     #: ``time`` for a time phrase, ``filter`` for any other qualifier.
     kind: str = ""
+    #: The Gate-8 verdict asked for (``failed`` / ``passed``), applied.
+    verification: str = ""
+    #: The question with every applied phrase removed.
+    rest: str = ""
 
 
 def _blank(text: str, start: int, end: int) -> str:
@@ -158,6 +183,11 @@ def read_filters(message: str) -> FilterReading:
             windows.append(window)
         text = _blank(text, *match.span())
 
+    verdicts: list[str] = []
+    for verdict, pattern in _VERIFICATION:
+        for match in list(pattern.finditer(text)):
+            verdicts.append(verdict)
+            text = _blank(text, *match.span())
     for match in list(_RANGE.finditer(text)):
         take(match, {"date_from": match.group(1), "date_to": match.group(2)})
     for match in list(_SINCE_ISO.finditer(text)):
@@ -188,7 +218,11 @@ def read_filters(message: str) -> FilterReading:
         found = pattern.search(text)
         if found:
             return FilterReading(window={}, unapplied=found.group(0), kind="filter")
-    return FilterReading(window=windows[0] if windows else {}, unapplied="")
+    if len(set(verdicts)) > 1:
+        return FilterReading(window={}, unapplied="passed and failed verification", kind="filter")
+    return FilterReading(
+        window=windows[0] if windows else {}, verification=verdicts[0] if verdicts else "", rest=text
+    )
 
 
 def narrowing_in(message: str) -> str:

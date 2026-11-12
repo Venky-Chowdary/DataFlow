@@ -248,6 +248,24 @@ def _status_answer(status: str, output: dict, census: dict, scope: str, windowed
     return _finish(lines, output)
 
 
+def _verification_answer(verdict: str, output: dict, census: dict, scope: str, windowed: bool) -> str:
+    """Jobs whose recorded Gate-8 verdict is ``verdict``: the store's own filter count."""
+    jobs = output.get("jobs") or []
+    total = int(census["total"])
+    population = f"the **{total:,}** job(s) started{scope}" if windowed else f"your **{total:,}** job(s)"
+    counted = int(output.get("filtered_total") or 0)
+    phrase = f"{verdict} Gate-8 verification"
+    if not counted:
+        return _finish([f"None of {population} {phrase}."], output)
+    lines = [f"**{counted:,}** of {population} {phrase}:"]
+    show = jobs[:_SHOW_LIMIT]
+    lines += [_bullet(j) for j in show]
+    note = _window_note(len(show), counted)
+    if note:
+        lines.append(note)
+    return _finish(lines, output)
+
+
 def _window_answer(output: dict, census: dict, scope: str) -> str:
     jobs = output.get("jobs") or []
     total = int(census["total"])
@@ -331,6 +349,8 @@ def narrate_jobs(output: dict, message: str | None) -> str:
             "I can state how long one job took — ask about your last job, or give me a job id. "
             "I don't have a duration summary across jobs."
         )
+    if ask and ask.verification and not ask.last:
+        return _verification_answer(ask.verification, output, census, scope, bool(window))
     unfiltered_page = (output.get("filter") or {}).get("status", "all") == "all"
     if LAST_JOB_RE.search(message or "") and jobs and unfiltered_page:
         # The newest row of the ledger is the last job only when no status filter cut the page.
