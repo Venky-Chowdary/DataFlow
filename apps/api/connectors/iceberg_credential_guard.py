@@ -24,6 +24,9 @@ inferred from a location) is ``LocalUriPyArrowFileIO``, which refuses that
 (``services.platform_gcp_azure_credentials``), and so is the one a catalog
 builds from its own properties (a SQL catalog's metadata file).
 
+The REST server's ``/v1/config`` may not set ``ssl`` (the session's client
+certificate and verification) or change ``uri`` (follow-up review 2, M1).
+
 A FileIO's properties, the REST server's ``/v1/config`` answer, each part of a
 table response (metadata properties, config, every storage credential, checked
 separately so a blank in one cannot hide a class another names) and the
@@ -78,6 +81,37 @@ def file_io_properties(properties: Any) -> dict[str, Any]:
     return merged
 
 
+def _same_uri(left: Any, right: Any) -> bool:
+    return str(left or "").strip().rstrip("/") == str(right or "").strip().rstrip("/")
+
+
+def check_server_session_properties(own: dict[str, Any], merged: dict[str, Any]) -> None:
+    """The REST server may not set the session's TLS or move the catalog (follow-up review 2, M1).
+
+    ``RestCatalog._create_session`` runs after ``_fetch_config`` and reads
+    ``ssl``: ``ssl.client.cert`` / ``key`` become the client certificate (a
+    path on the API host) and ``ssl.cabundle`` the verification setting
+    (``false`` turns it off). ``overrides.uri`` sends every later request to
+    another host. The connector's settings never forward ``ssl`` (only
+    ``rest.*``, the token / credential and storage properties), so any ``ssl``
+    after the merge came from the server.
+    """
+    for key in merged:
+        if str(key).strip().lower() == "ssl" and (key not in own or merged[key] != own[key]):
+            raise ValueError(_server_session_message(key, "set this connection's TLS settings"))
+    if "uri" in merged and not _same_uri(merged.get("uri"), own.get("uri")):
+        raise ValueError(_server_session_message("uri", "move this catalog to another address"))
+
+
+def _server_session_message(key: Any, does: str) -> str:
+    shown = "".join(ch for ch in str(key) if ch.isprintable())[:40]
+    return (
+        f"Iceberg property {shown} {SERVER_CONFIG} would {does} (a client certificate or CA "
+        "file on this server, certificate verification, or the catalog's URI). Datawrap does not "
+        "accept those from a catalog server. Remove it from the server's defaults and overrides."
+    )
+
+
 def check_table_response(table_response: Any) -> None:
     """Each source of a REST table response, separately (follow-up review 2, H2).
 
@@ -111,8 +145,11 @@ def guarded_catalog(base: type) -> type:
             self.properties.update(file_io_properties(self.properties))
 
         def _fetch_config(self) -> None:  # REST: the server's defaults and overrides
+            own = dict(self.properties)
             super()._fetch_config()
             check_class_properties(self.properties, SERVER_CONFIG)
+            # Before _create_session reads them (follow-up review 2, M1).
+            check_server_session_properties(own, self.properties)
 
         def _init_sigv4(self, session: Any) -> None:  # REST: after the server's overrides
             check_catalog_properties("rest", {**self.properties, "rest.sigv4-enabled": "true"})
