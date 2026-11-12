@@ -67,13 +67,15 @@ def test_polish_falls_back_to_ollama(monkeypatch):
     monkeypatch.setattr(prov, "DataTransferOllamaProvider", lambda: _Ollama())
 
     agent = DataPilotAgent()
-    # A schema answer: count and status answers are not narrated (review H5).
+    # A documentation answer: count and status answers are not narrated (review
+    # H5), and since review 2 (H1) no tool-derived answer is, schema included.
     local = CopilotResponse(
         answer="Table customers has columns id and email.",
-        intent="schema",
+        intent="product",
         confidence=0.9,
         method="pilot_local_engine",
-        tools_used=[{"name": "introspect_connector_schema", "success": True, "summary": "customers"}],
+        sources=[{"title": "Schema basics", "href": "/help/schema"}],
+        tools_used=[{"name": "explain_product", "success": True, "summary": "ok"}],
     )
     out = agent._polish_with_llm("what columns are in customers", [], local, "system")
     assert out.method == "ollama_polish"

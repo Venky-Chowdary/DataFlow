@@ -347,6 +347,11 @@ def compound_answer(message: str | None) -> str | None:
     "how many jobs failed and how many pipelines are paused" was answered for
     the jobs half only, as if that were the whole answer (review M2).
     """
+    from .job_questions import is_concept_question
+
+    if is_concept_question(message or ""):
+        # "what is the difference between jobs and pipelines" is one question.
+        return None
     same = _same_subject_statuses(message or "")
     if same:
         return same

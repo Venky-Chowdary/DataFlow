@@ -24,7 +24,8 @@ LAST_JOB_RE = re.compile(
     r"|\bstatus of (?:my\s+|the\s+)?(?:last\s+|latest\s+)?(?:transfer|job|run)\b",
     re.I,
 )
-_JOBS_SUBJECT_RE = re.compile(r"\b(?:jobs?|runs?|transfers?|syncs?)\b", re.I)
+#: "sync mode" names a setting, not the syncs that ran.
+_JOBS_SUBJECT_RE = re.compile(r"\b(?:jobs?|runs?|transfers?|syncs?(?!\s+modes?\b))\b", re.I)
 _OTHER_SUBJECT_RE = re.compile(
     r"\b(?:pipelines?|schedules?|recurring\s+syncs?|connectors?|connections?|contracts?|"
     r"datasets?|gates?|preflight|validat\w+)\b",
@@ -238,6 +239,12 @@ def asked_status(message: str) -> str:
     if not status and re.search(r"\b(?:fail\w*|errors?|errored|broken)\b", message or "", re.I):
         return "failed"
     return status
+
+
+def is_concept_question(message: str) -> bool:
+    """A how-to or documentation question about jobs in general, not a ledger read."""
+    text = message or ""
+    return bool(_HOW_TO_RE.search(text) or _CONCEPT_RE.search(text))
 
 
 def job_statuses_named(message: str) -> list[str]:
