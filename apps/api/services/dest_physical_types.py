@@ -28,20 +28,10 @@ _DEFAULT_PORTS = {
 }
 
 
-def physical_column_types(
-    db_type: str,
-    cfg: dict[str, Any],
-    *,
-    table: str,
-    columns: list[str] | None = None,
-) -> dict[str, str]:
-    """Catalog column types for ``table``, keyed by the catalog's own spelling.
-
-    Returns ``{}`` when the catalog cannot answer — callers keep the declared
-    types rather than comparing against a guess.
-    """
+def _catalog_columns(db_type: str, cfg: dict[str, Any], *, table: str) -> list[dict[str, Any]]:
+    """The introspected column records of ``table``; ``[]`` when the catalog cannot answer."""
     if not table or not db_type:
-        return {}
+        return []
     try:
         from connectors.generic_sql import connection_options
         from services.dialect_profiles import schema_from_cfg
@@ -70,24 +60,94 @@ def physical_column_types(
         )
     except Exception as exc:
         logger.warning("physical dest type probe failed: %s", exc, exc_info=exc)
-        return {}
+        return []
     if not info.get("ok"):
-        return {}
+        return []
+    # Name-only lists (strings) have no DDL. Crash here left Oracle
+    # dest-exists hanging inside the thin transport after AttributeError.
+    return [c for c in info.get("columns") or [] if isinstance(c, dict)]
+
+
+def _typed_by_name(
+    records: list[dict[str, Any]], columns: list[str] | None, pick
+) -> dict[str, str]:
     wanted = {str(c).lower() for c in (columns or []) if c}
     out: dict[str, str] = {}
-    for col in info.get("columns") or []:
-        # Name-only lists (strings) have no DDL. Crash here left Oracle
-        # dest-exists hanging inside the thin transport after AttributeError.
-        if not isinstance(col, dict):
-            continue
+    for col in records:
         name = str(col.get("name") or "")
-        ddl = str(col.get("inferred_type") or "")
+        ddl = str(pick(col) or "")
         if not name or not ddl:
             continue
         if wanted and name.lower() not in wanted:
             continue
         out[name] = ddl
     return out
+
+
+def physical_column_types(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    table: str,
+    columns: list[str] | None = None,
+) -> dict[str, str]:
+    """Catalog column types for ``table``, keyed by the catalog's own spelling.
+
+    Returns ``{}`` when the catalog cannot answer — callers keep the declared
+    types rather than comparing against a guess.
+    """
+    return _typed_by_name(
+        _catalog_columns(db_type, cfg, table=table), columns, lambda c: c.get("inferred_type")
+    )
+
+
+def catalog_declared_types(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    table: str,
+    columns: list[str] | None = None,
+) -> dict[str, str]:
+    """The type each column of ``table`` is declared with in the catalog.
+
+    Never a type refined from sampled values: introspection reads a ``text``
+    column of ``'true'`` / ``'false'`` as BOOLEAN, which is what the values look
+    like, not what the column holds. ``{}`` when the catalog cannot answer.
+    """
+    return _typed_by_name(
+        _catalog_columns(db_type, cfg, table=table),
+        columns,
+        lambda c: c.get("data_type")
+        or ("" if c.get("sample_refined") else c.get("inferred_type")),
+    )
+
+
+def mark_typed_source_text_carriers(
+    basis: dict[str, str],
+    mappings: list[dict[str, Any]] | None,
+    source_db_type: str,
+    source_cfg: dict[str, Any],
+    source_table: str,
+) -> dict[str, str]:
+    """``basis`` with each text column a typed source column lands in marked.
+
+    See ``fingerprint_rules.mark_typed_text_carriers``. Only a typed database
+    source has a catalog to ask; the catalog is not read when no column of the
+    basis is a text column.
+    """
+    from services.fingerprint_rules import is_text_family, mark_typed_text_carriers
+    from services.shape_apply import is_typed_value_source
+
+    out = dict(basis or {})
+    if not any(is_text_family(str(v or "")) for v in out.values()):
+        return out
+    if not is_typed_value_source(source_db_type):
+        return out
+    return mark_typed_text_carriers(
+        out,
+        mappings,
+        catalog_declared_types(source_db_type, source_cfg or {}, table=source_table),
+    )
 
 
 def refresh_mapping_target_types(

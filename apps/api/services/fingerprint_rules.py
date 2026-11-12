@@ -22,7 +22,11 @@ Intended equality per declared destination type (version 2)
   engine's temporal carrier (it has no temporal storage class), so the two
   separator spellings of one instant are equal there, and only there. A typed
   value headed for a character column is compared as the wire text the writer
-  binds for it (``cell_to_string``).
+  binds for it (``cell_to_string``). One carrier rule depends on the source:
+  a character column whose source column is declared a boolean is fingerprinted
+  under ``<type> CARRYING SOURCE_BOOLEAN`` (:func:`mark_typed_text_carriers`), where a
+  bool equals the ``'1'`` / ``'true'`` (``'0'`` / ``'false'``) a writer stores
+  for it; text that was text stays exact.
 * **Exact numbers** (NUMERIC / DECIMAL / NUMBER, with or without a scale, and
   integers): by numeric value, every significant digit kept. Trailing
   fractional zeros are not significant (``1.50`` equals ``1.5`` — the engine's
@@ -171,6 +175,65 @@ def nonfinite_token(value: Any) -> str | None:
     if isinstance(value, str) and len(value) <= 12:
         return _NONFINITE_SPELLINGS.get(value.strip().lower())
     return None
+
+
+#: A character column carrying a typed source boolean (see the module notes).
+CARRIES_BOOLEAN: Final[str] = "SOURCE_BOOLEAN"
+_CARRIED_KINDS: Final[dict[str, str]] = {"boolean": CARRIES_BOOLEAN}
+_CARRYING_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<physical>.*\S)\s+CARRYING\s+(?P<kind>[A-Z_]+)$"
+)
+#: Text a writer stores for a typed boolean bound into a character column.
+BOOL_STORED_TEXT: Final[dict[str, str]] = {"1": "1", "true": "1", "0": "0", "false": "0"}
+
+
+def carrying(physical: str, kind: str) -> str:
+    """The fingerprint type of a character column carrying a typed source ``kind``."""
+    return f"{physical} CARRYING {kind}"
+
+
+def split_carried(ddl_type: str) -> tuple[str, str]:
+    """``(physical type, carried kind)``; the kind is ``''`` for any other type."""
+    text = str(ddl_type or "")
+    if "CARRYING" not in text:
+        return text, ""
+    match = _CARRYING_RE.match(text.strip())
+    if not match or match.group("kind") not in _CARRIED_KINDS.values():
+        return text, ""
+    return match.group("physical"), match.group("kind")
+
+
+def mark_typed_text_carriers(
+    basis: dict[str, str],
+    mappings: list[dict[str, Any]] | None,
+    source_catalog: dict[str, str] | None,
+) -> dict[str, str]:
+    """Mark each character column whose source column is declared a typed boolean.
+
+    ``basis`` is the per-column type both Gate-8 sides fingerprint under.
+    ``source_catalog`` is the source table's catalog-declared types
+    (``services.dest_physical_types.catalog_declared_types``). A mapping's
+    ``source_type`` cannot decide this: it is refined from sampled values, so a
+    text column holding ``'true'`` reads as BOOLEAN there.
+    """
+    from services.type_system import normalize_logical_type
+
+    declared = {str(k).lower(): str(v or "") for k, v in (source_catalog or {}).items()}
+    out = dict(basis)
+    if not declared:
+        return out
+    for mapping in mappings or []:
+        if not isinstance(mapping, dict):
+            continue
+        target = str(mapping.get("target") or "")
+        ddl = str(out.get(target) or "")
+        if not ddl or not is_text_family(ddl):
+            continue
+        source_ddl = declared.get(str(mapping.get("source") or "").lower(), "")
+        kind = _CARRIED_KINDS.get(normalize_logical_type(source_ddl)) if source_ddl else None
+        if kind:
+            out[target] = carrying(ddl, kind)
+    return out
 
 
 def text_cell(text: str) -> str:

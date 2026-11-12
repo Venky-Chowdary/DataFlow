@@ -62,6 +62,8 @@ from services.transform_engine import (
 from services.type_system import instant_date_carrier, normalize_logical_type
 from services.expected_rows import expected_destination_rows, held_out_rows
 from services.fingerprint_rules import (
+    BOOL_STORED_TEXT as _BOOL_STORED_TEXT,
+    CARRIES_BOOLEAN,
     FINGERPRINT_VERSION,
     NAN as _NAN_TOKEN,
     NULL_TOKEN,
@@ -70,7 +72,9 @@ from services.fingerprint_rules import (
     memo_key as _fp_memo_key,
     nonfinite_token as _nonfinite_token,
     row_label as _fp_row_label,
+    carrying as _carrying,
     row_part as _fp_row_part,
+    split_carried as _split_carried,
     text_cell as _text_cell,
 )
 from services.value_serializer import (
@@ -686,6 +690,9 @@ def _canonical_fingerprint_ddl(engine: str, ddl: str) -> str:
     """
     if not ddl:
         return ""
+    physical_ddl, carried = _split_carried(ddl)
+    if carried:
+        return _carrying(_canonical_fingerprint_ddl(engine, physical_ddl), carried)
     try:
         from services.decision_kernel.types import materialize_dest_ddl
 
@@ -3274,7 +3281,10 @@ def fingerprint_for_reconcile(
     Source samples and destination read-back must share this path so Mongo
     ``\"true\"`` / MySQL ``0`` / Postgres ``False`` compare as equal.
     """
+    # A carried kind steers normalize_cell only; the bind sees the physical type.
+    ddl_type, _carried = _split_carried(ddl_type)
     ddl_type = instant_date_carrier(engine, ddl_type)
+    _fp_ddl = _carrying(ddl_type, _carried) if _carried else ddl_type
     wire: Any = value
     absent_field = is_missing_sentinel(value)
     if absent_field:
@@ -3324,7 +3334,7 @@ def fingerprint_for_reconcile(
         # so the source side is fingerprinted as the document it IS, not as
         # what the bind made of it. Replaying the bind on both sides hid a
         # write that turned ``1.10`` into ``1.1`` behind a matching checksum.
-        return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
+        return normalize_cell(wire, ddl_type=_fp_ddl, engine=engine)
     if tname and tname not in {"", "none", "identity", "passthrough"}:
         cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
         if absent_field:
@@ -3392,7 +3402,7 @@ def fingerprint_for_reconcile(
         # declared narrowing (Snowflake TIMESTAMP → MySQL DATETIME) reports as
         # a whole-column checksum mismatch with no column named.
         wire = quantize_instant_for_carrier(wire, ddl_type=ddl_type, engine=engine)
-    return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
+    return normalize_cell(wire, ddl_type=_fp_ddl, engine=engine)
 
 
 def operator_cell_text(fingerprint: str) -> str:
@@ -3485,8 +3495,11 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # Oracle write-location: '' is stored/read as NULL — equate before other paths.
     if destination_empty_string_is_null(engine) and isinstance(value, str) and value == "":
         return _NULL_SENTINEL
+    ddl_type, _carried = _split_carried(ddl_type)
     _text_declared = bool(ddl_type) and _is_text_family(ddl_type)
-    if isinstance(value, bool) and not _text_declared:
+    if isinstance(value, bool) and (not _text_declared or _carried == CARRIES_BOOLEAN):
+        # A text column carrying a typed source bool: the writer stored '1' or
+        # 'true' for it (review 1 H1); the text side folds the same four tokens.
         return "1" if value else "0"
     # PostgreSQL json/jsonb and a JSON-as-text column store a number with its
     # scale; there ``1.10`` -> ``1.1`` is a changed value Gate-8 must see (D192).
@@ -3682,6 +3695,8 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             dt = _parse_date(text)
             if dt:
                 return f"{dt}T00:00:00"
+        if _carried == CARRIES_BOOLEAN and text.lower() in _BOOL_STORED_TEXT:
+            return _BOOL_STORED_TEXT[text.lower()]
         return _text_cell(text)
     # Boolean and empty fast paths.
     if not text:
