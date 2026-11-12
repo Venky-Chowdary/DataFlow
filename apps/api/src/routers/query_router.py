@@ -891,6 +891,23 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
     )
 
 
+def _export_residency_check(request: Request, body: QueryExportRequest, workspace_id: str) -> None:
+    """403 when the export's destination is outside the workspace's data region."""
+    from services.data_residency import residency_refusal
+    from src.transfer.models import EndpointConfig
+
+    destination_id = (body.destination_connector_id or "").strip()
+    if destination_id:
+        dest = EndpointConfig(kind="database", connector_id=destination_id)
+    else:
+        dest = EndpointConfig(kind="file_export", format=body.format, output_path=body.output_path)
+    refusal = residency_refusal(
+        workspace_id, dest, host_tenant_id=str(getattr(request.state, "tenant_id", "") or "")
+    )
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+
+
 @router.post("/export", response_model=QueryExportResult)
 async def query_export(
     body: QueryExportRequest,
@@ -904,6 +921,10 @@ async def query_export(
     connector = connector_store.get_connector(body.connector_id, workspace_id=workspace_id)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
+    # Security review H2: an export writes the workspace's rows without a job,
+    # so nothing else would ask where they land. Both branches (a connector, a
+    # file on this deployment) are judged before the query is read.
+    _export_residency_check(request, body, str(connector.workspace_id or "") or workspace_id)
 
     if body.full_population and not (body.destination_connector_id or "").strip():
         return _export_full_population_file(connector, body, workspace_id=workspace_id)

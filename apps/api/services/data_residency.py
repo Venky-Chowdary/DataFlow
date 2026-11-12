@@ -50,11 +50,21 @@ verified one. A region-shaped label anywhere else in a hostname
 A destination whose region none of these establishes is **refused** while a
 region is enforced: an unknown location is not an in-region one.
 
-**Where.** :func:`enforce_request_residency` runs in
-``src.transfer.job_submission.create_pending_job``, the one place every job is
-created (REST, schedules, sync-now, retries, MCP, the Pilot), after saved
-connectors are resolved. The REST routes call :func:`residency_refusal` first
-so they can answer 403 before anything is queued.
+**Where** (security review H2/H3).
+
+* Every tracked run: ``src.transfer.job_scope.start_refusal``, called at the
+  top of the engine's ``execute_tracked`` on the resolved request. A job is
+  created once and run many times (resume, retry, a worker claim, the orphan
+  sweep); each run is judged on the address it dials now.
+* Job creation: :func:`enforce_request_residency` in
+  ``src.transfer.job_submission.create_pending_job`` (REST, schedules,
+  sync-now, retries, MCP, the Pilot), so nothing out of region is queued.
+* The REST routes call :func:`residency_refusal` first so they answer 403
+  before anything is queued; ``POST /query/export`` (which writes without a
+  job) calls it for its connector and its local-file destination alike.
+
+A tenant record that belongs to no workspace fences every workspace that has
+no record of its own, on every one of these paths.
 """
 
 from __future__ import annotations
@@ -92,6 +102,9 @@ class DestinationRegion:
 
 
 _UNKNOWN = DestinationRegion("", "")
+#: ``enforced_region`` when tenant records with no workspace name different
+#: regions: a fence is configured, and no destination is provably inside it.
+_CONFLICTING_REGIONS = "(conflicting tenant regions)"
 
 # us-east-1, eu-central-2, ap-southeast-3, us-gov-west-1, cn-north-1 …
 _AWS_REGION = re.compile(
@@ -123,9 +136,11 @@ _PROVIDER_SUFFIXES: tuple[tuple[str, str], ...] = (
 )
 #: Drivers the AWS helpers dial (``connectors.aws_common``).
 _AWS_NATIVE = frozenset({"s3", "dynamodb"})
-#: Destinations written on this deployment's own disk.
+#: Destinations written on this deployment's own disk (with
+#: ``local_file_policy.local_disk_destination``, which knows a local DuckDB or
+#: Iceberg warehouse from a remote one).
 _LOCAL_KINDS = frozenset({"file_export", "file"})
-_LOCAL_FORMATS = frozenset({"sqlite", "sqlite3", "duckdb"})
+_LOCAL_FORMATS = frozenset({"sqlite", "sqlite3"})
 #: Engines that open a network connection to ``host``. For these a loopback
 #: host is this deployment. For every other destination (a cloud or SaaS API,
 #: an account locator) ``host`` is not dialled, and endpoint resolution fills
@@ -162,7 +177,7 @@ def enforced_region(workspace_id: str | None, *, host_tenant_id: str = "") -> st
     (``TenantMiddleware``); it speaks for a request whose workspace has no
     tenant record of its own (a single-tenant deployment on its own domain).
     """
-    from services.tenant_store import default_region, get_tenant, get_tenant_for_workspace
+    from services.tenant_store import default_region, get_tenant, get_tenant_for_workspace, list_tenants
 
     tenant = get_tenant_for_workspace(str(workspace_id or "").strip())
     if tenant is None and host_tenant_id:
@@ -174,6 +189,17 @@ def enforced_region(workspace_id: str | None, *, host_tenant_id: str = "") -> st
     configured = _norm(tenant.data_region) if tenant is not None else ""
     if configured:
         return configured
+    if tenant is None:
+        # Security review H3: a tenant record that belongs to no workspace (a
+        # single-tenant deployment set up before tenants were workspace-scoped)
+        # speaks for every workspace that has no record of its own. Only a
+        # route knows a request's host tenant; the engine, a schedule and a
+        # worker do not, and must reach the same answer.
+        unscoped = sorted({_norm(t.data_region) for t in list_tenants() if not t.workspace_id} - {""})
+        if len(unscoped) == 1:
+            return unscoped[0]
+        if unscoped:
+            return _CONFLICTING_REGIONS
     return _norm(default_region()) if _strict() else ""
 
 
@@ -183,7 +209,10 @@ def job_data_region(workspace_id: str | None, requested: str = "", *, host_tenan
     The workspace's enforced region when there is one; the caller's tag (a
     label only) otherwise, defaulting to ``us-east-1`` as before.
     """
-    return enforced_region(workspace_id, host_tenant_id=host_tenant_id) or _norm(requested) or "us-east-1"
+    enforced = enforced_region(workspace_id, host_tenant_id=host_tenant_id)
+    if enforced and enforced != _CONFLICTING_REGIONS:
+        return enforced
+    return _norm(requested) or "us-east-1"
 
 
 # --------------------------------------------------------------------------- addresses
@@ -466,9 +495,17 @@ def _aws_native_region(endpoint: Any, workspace_id: str | None) -> DestinationRe
     return DestinationRegion(proven, "its endpoint address")
 
 
+def _on_this_deployments_disk(endpoint: Any, fmt: str) -> bool:
+    if _norm(getattr(endpoint, "kind", "")) in _LOCAL_KINDS or fmt in _LOCAL_FORMATS:
+        return True
+    from services.local_file_policy import local_disk_destination
+
+    return local_disk_destination(endpoint) is not None
+
+
 def _judged(endpoint: Any, workspace_id: str | None) -> DestinationRegion:
     fmt = _norm(getattr(endpoint, "format", ""))
-    if _norm(getattr(endpoint, "kind", "")) in _LOCAL_KINDS or fmt in _LOCAL_FORMATS:
+    if _on_this_deployments_disk(endpoint, fmt):
         return _deployment_region()
     if _driver(fmt) in _AWS_NATIVE:
         return _aws_native_region(endpoint, workspace_id)
@@ -523,6 +560,12 @@ def residency_refusal(
     allowed = enforced_region(workspace_id, host_tenant_id=host_tenant_id)
     if not allowed:
         return None
+    if allowed == _CONFLICTING_REGIONS:
+        return (
+            "Data residency violation: this deployment's tenant records with no workspace name "
+            "more than one region, so no destination can be shown to be in the right one. "
+            "Assign each tenant record to its workspace."
+        )
     where = destination_region(endpoint, workspace_id=workspace_id)
     label = str(getattr(endpoint, "format", "") or getattr(endpoint, "kind", "") or "this").strip()
     if not where.region:

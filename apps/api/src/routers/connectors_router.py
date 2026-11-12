@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pymongo.errors import PyMongoError
 from services.runtime_estimate import estimate_for_job_doc
-from services.data_residency import ResidencyRefused
+from services.data_residency import ResidencyRefused, enforce_request_residency
 from services.workspace_access import (
     assert_resource_workspace,
     resolve_write_workspace,
@@ -1342,6 +1342,10 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             )
         xfer_req_probe = transfer_request_from_dict(payload)
         _refresh_saved_connectors(xfer_req_probe)
+        # Review H3: resume reuses the job, so job creation's residency check
+        # never sees the connector as it is now. Answer 403 here; the engine
+        # refuses the run itself as well (job_scope.start_refusal).
+        enforce_request_residency(xfer_req_probe)
         from services.transfer_file_staging import (
             file_source_bytes_available,
             hydrate_file_source,
@@ -1443,7 +1447,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             "warnings": safety.get("warnings") or [],
             "honesty": safety.get("honesty"),
         }
-    except HTTPException:
+    except (HTTPException, ResidencyRefused):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
