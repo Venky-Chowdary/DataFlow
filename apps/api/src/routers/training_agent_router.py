@@ -4,7 +4,7 @@ Datawrap — Dedicated Training Agent API
 Separate from Copilot chat — manages continuous model training on universal data.
 """
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/training-agent", tags=["Training Agent"])
@@ -35,26 +35,34 @@ async def training_agent_status():
 
 
 @router.post("/run", response_model=TrainResponse)
-async def run_training(request: TrainRequest, background_tasks: BackgroundTasks):
-    """Trigger a full training run from universal data."""
-    from ..ai.training.training_agent import get_training_agent
+async def run_training(request: TrainRequest, http_request: Request):
+    """Trigger a full training run from universal data.
 
-    def _run():
-        get_training_agent().run_full_training(
-            include_embedding_tune=request.include_embedding_tune,
-            force=request.force,
-        )
+    Runs on the app's training runtime thread; API shutdown stops it.
+    """
+    from ..ai.training.training_runtime import app_training_runtime
+    from ..ai.training.training_scheduler import start_admin_training
 
-    background_tasks.add_task(_run)
+    start_admin_training(
+        app_training_runtime(http_request.app),
+        include_embedding_tune=request.include_embedding_tune,
+        force=request.force,
+    )
     return TrainResponse(run_id="scheduled", status="running", metrics={"message": "Training started in background"})
 
 
 @router.post("/run/sync", response_model=TrainResponse)
-async def run_training_sync(request: TrainRequest):
-    """Run training synchronously (for admin/debug)."""
+async def run_training_sync(request: TrainRequest, http_request: Request):
+    """Run training and wait for it (for admin/debug).
+
+    The run is on the training runtime's thread, never the event loop.
+    """
     try:
-        from ..ai.training.training_agent import get_training_agent
-        run = get_training_agent().run_full_training(
+        from ..ai.training.training_runtime import app_training_runtime
+        from ..ai.training.training_scheduler import run_admin_training
+
+        run = await run_admin_training(
+            app_training_runtime(http_request.app),
             include_embedding_tune=request.include_embedding_tune,
             force=request.force,
         )
