@@ -3355,6 +3355,21 @@ def _rejected_key(detail: dict[str, Any], key_cols: list[str]) -> tuple[str, ...
     return None
 
 
+def _only_rows_recovered_behind_watermark(
+    report: dict[str, Any], dest_summary: dict[str, Any] | None
+) -> bool:
+    """True when every row this run wrote was recovered behind the watermark.
+
+    Such rows are outside the cursor window the ladder grades (D188 keeps
+    recovered rows out of it), so the window holds no row this run wrote.
+    """
+    window = (dest_summary or {}).get("commit_safe_window")
+    if not isinstance(window, dict):
+        return False
+    recovered = int(window.get("rows_recovered") or 0)
+    return recovered > 0 and _as_count(report.get("source_rows")) <= recovered
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -3408,6 +3423,12 @@ def _maybe_attach_verification_ladder(
         return report_
 
     dest_type = resolve_driver_type(endpoint.format)
+    if _only_rows_recovered_behind_watermark(report, dest_summary):
+        # A commit-safe re-read whose only writes are rows recovered behind the
+        # stored watermark: the cursor window holds none of them, so there is
+        # no in-window batch to grade — digesting nothing is not a failed
+        # proof. Gate-8's count and digests own the verdict, as for a quiet poll.
+        return _return(report, "only_rows_recovered_behind_the_watermark")
 
     # Oversized same-engine SQL routes: the in-memory ladder below declines, but
     # the engine can still profile every column at full scale. Purely additive —
@@ -4966,12 +4987,39 @@ def _oracle_stored_columns(
     return match_stored_names(stored, key_cols), match_stored_names(stored, cols)
 
 
+#: Census readers whose source query takes the watermark bound as a bind
+#: parameter. The others read the whole source and filter it here, and say so.
+_CENSUS_BOUND_PARAMS = {"postgresql": "%s", "mysql": "%s", "sqlite": "?", "duckdb": "?"}
+
+
+def census_bound_clause(engine: str, quoted_cursor: str, upper: str) -> tuple[str, tuple] | None:
+    """``(" WHERE cursor <= ?", params)`` bounding a census source read, or None.
+
+    The bound is the watermark's cursor value; the exact keep-filter still runs
+    on every row read, so this only narrows what is read. SQLite compares an
+    ISO date-time through the same separator-normalising operand the read uses.
+    """
+    mark = _CENSUS_BOUND_PARAMS.get(str(engine or "").lower())
+    if mark is None or upper in (None, ""):
+        return None
+    if engine == "sqlite":
+        from services.copy_incremental import (
+            sqlite_cursor_operand,
+            sqlite_normalize_cursor_watermark,
+        )
+
+        value = sqlite_normalize_cursor_watermark(str(upper))
+        return " WHERE " + sqlite_cursor_operand(quoted_cursor, str(upper)) + " <= " + mark, (value,)
+    return " WHERE " + quoted_cursor + " <= " + mark, (str(upper),)
+
+
 def _generic_key_census(
     *,
     source_endpoint: Any,
     endpoint: Any,
     dest_summary: dict[str, Any] | None,
     mappings: list[dict[str, Any]] | None,
+    source_cursor_bound: tuple[str, Any] | None = None,
 ) -> tuple[list[Any], list[Any], list[Any], str | None]:
     """Cross-engine key census: (changed, missing, extra, unavailable_reason).
 
@@ -5054,6 +5102,21 @@ def _generic_key_census(
             "the recorded column mappings do not pair source and target "
             "columns for the census join"
         )
+    # R1b — an incremental census joins only the source rows at or behind the
+    # watermark: ``(source cursor column, keep(cell))`` bounds the source side.
+    bound_idx: int | None = None
+    bound_keep = None
+    bound_col, bound_upper = "", ""
+    if source_cursor_bound is not None:
+        _bound_col, bound_keep, *_upper = source_cursor_bound
+        bound_col, bound_upper = str(_bound_col), str(_upper[0]) if _upper else ""
+        _src_selected = [c.lower() for c in [*src_pks, *src_cols]]
+        if str(_bound_col).lower() not in _src_selected:
+            return [], [], [], (
+                f"the cursor column '{_bound_col}' is not among the mapped columns, "
+                "so the census cannot be bounded to rows behind the watermark"
+            )
+        bound_idx = _src_selected.index(str(_bound_col).lower())
     try:
         from services.reconciliation import normalize_cell
         from .connector_capabilities import resolve_driver_type
@@ -5113,9 +5176,30 @@ def _generic_key_census(
                         [_qi(k, q) for k in key_cols] + [_qi(c, q) for c in cols]
                     )
                     stmt = f"SELECT {sel} FROM {ref_table}"  # nosec B608
+                params: tuple = ()
+                if side == 0 and bound_col and bound_upper:
+                    # Review M6: the watermark bound runs in the source query
+                    # where the reader takes one; otherwise the evidence says
+                    # the whole source was read.
+                    clause = (
+                        None if e2 == "snowflake"
+                        else census_bound_clause(e2, _qi(bound_col, q), bound_upper)
+                    )
+                    if clause is not None:
+                        stmt, params = stmt + clause[0], clause[1]
+                        summary["incremental_key_census_bound"] = "source_sql"
+                    else:
+                        summary["incremental_key_census_bound"] = (
+                            f"client_side: the {e2} census reader takes no bound, so the "
+                            "whole source table was read and filtered to the rows at or "
+                            "behind the watermark here"
+                        )
                 try:
                     cur = conn.cursor()
-                    cur.execute(stmt)
+                    if params:
+                        cur.execute(stmt, params)
+                    else:
+                        cur.execute(stmt)
                     while True:
                         chunk = cur.fetchmany(5000)
                         if not chunk:
@@ -5136,6 +5220,9 @@ def _generic_key_census(
                                     ).hexdigest(),
                                 )
                                 for r in chunk
+                                if side
+                                or bound_idx is None
+                                or bound_keep(r[bound_idx])
                             ),
                         )
                     db.commit()
@@ -8946,6 +9033,12 @@ def run_reconciliation(
     once per call — no early-return path inside the impl may skip them.
     """
     started = time.monotonic()
+    # Review M4: an incremental run on a path that applies no commit-safe
+    # window (batch, file source, file export, SDK) states "not guaranteed" in
+    # its own evidence, preflight or not.
+    from services.commit_safe_routes import stamp_reconciled_route
+
+    stamp_reconciled_route(dest_summary, source_endpoint=source_endpoint, endpoint=endpoint)
     try:
         recon = _run_reconciliation_with_rules(
             endpoint=endpoint,
@@ -9253,6 +9346,15 @@ def run_reconciliation(
                         f"{recon['message']} "
                         f"({recon['culprit_keys_unavailable_reason']})"
                     )
+    # R1b — a run that is due the periodic key census joins every source key
+    # at or behind the watermark to the destination; a missing one is drift
+    # and the run is not green.
+    from services.incremental_census import apply_incremental_census
+
+    recon = apply_incremental_census(
+        recon, source_endpoint=source_endpoint, endpoint=endpoint,
+        dest_summary=dest_summary, mappings=mappings, key_census=_generic_key_census,
+    )
     # D188 — message rewrites above rebuild the text from its head; the
     # out-of-window drift sentence is a finding and must stay in it.
     from services.incremental_drift import DRIFT_KEY, drift_sentence

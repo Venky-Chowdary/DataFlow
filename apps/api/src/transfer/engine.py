@@ -1723,7 +1723,7 @@ class UniversalTransferEngine:
                 from services.batch_incremental import bind_transfer_request
 
                 incremental_bound = bind_transfer_request(request, src_fmt)
-                records = incremental_bound.bound(records)
+                records = incremental_bound.bound(records, schema)
             except ValueError as cursor_refusal:
                 mongo.update_job_status(
                     job_id, "failed", error=str(cursor_refusal), phase="failed"
