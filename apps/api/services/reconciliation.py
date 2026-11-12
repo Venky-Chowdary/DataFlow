@@ -3526,13 +3526,16 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         from connectors.sqlserver_tick import tick_of
 
         tick = tick_of(value)
-        if value.tzinfo is not None:
+        aware = value.tzinfo is not None
+        if aware:
             value = value.astimezone(timezone.utc).replace(tzinfo=None)
         # Canonical form is UTC wall-clock without a Z marker so TIMESTAMPTZ
         # sources match NTZ sinks that stored the same UTC components, while
         # offset-aware values still differ from a different naive wall clock.
         # A DATETIME2(7) seventh digit is compared too.
-        return _wall_clock_text(value, tick)
+        wall = _wall_clock_text(value, tick)
+        # A text column carrying an instant keeps aware apart from naive text (review 2 F1).
+        return wall + "Z" if (aware and _carried == CARRIES_INSTANT) else wall
     if isinstance(value, _date):
         return _datetime.combine(value, _time.min).strftime("%Y-%m-%dT%H:%M:%S")
     if isinstance(value, _time):
@@ -3696,13 +3699,18 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             # same instant there — and in a text column whose source column
             # is a typed datetime, which writers spell either way (H2). A
             # date alone is not how a writer spells a datetime: it stays text.
-            date_only = _carried == CARRIES_INSTANT and ":" not in text
-            dtm = None if date_only else _parse_datetime(text)
+            # Carried, an aware instant keeps a marker and naive text stays wall
+            # clock, and only the bare spelling folds: '12:00:00-05:00', '12:00Z'
+            # and '12:00:00\n' are not naive 12:00 (review 2 F1).
+            carried = _carried == CARRIES_INSTANT
+            date_only = carried and ":" not in text
+            unfolded = date_only or (carried and text != text.strip())
+            dtm = None if unfolded else _parse_datetime(text)
             if dtm:
                 return _checksum_datetime_utc_wall(
-                    dtm if isinstance(dtm, str) else str(dtm), original=text
+                    dtm if isinstance(dtm, str) else str(dtm), original=text, mark_aware=carried
                 )
-            dt = None if date_only else _parse_date(text)
+            dt = None if unfolded else _parse_date(text)
             if dt:
                 return f"{dt}T00:00:00"
         if _carried == CARRIES_BOOLEAN and text.lower() in _BOOL_STORED_TEXT:
@@ -3767,12 +3775,16 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     return _text_cell(text)
 
 
-def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -> str:
+def _checksum_datetime_utc_wall(
+    iso_text: str, *, original: str | None = None, mark_aware: bool = False
+) -> str:
     """Canonical UTC wall-clock for checksum equality (no Z marker).
 
     Aware/offset/Z strings fold to UTC components. Naive wall-clock strings
     stay as-is. That equates TIMESTAMPTZ→DATETIME UTC storage without equating
-    ``12:00+05:30`` (06:30 UTC) to naive ``12:00``.
+    ``12:00+05:30`` (06:30 UTC) to naive ``12:00``. ``mark_aware`` keeps a ``Z``
+    on an aware value, so it never equals a naive wall clock (a text column
+    carrying a source instant, review 2 F1).
     """
     text = (iso_text or "").strip()
     if not text:
@@ -3792,7 +3804,8 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
     try:
         iso = text[:-1] + "+00:00" if text.endswith("Z") else text
         obj = _datetime.fromisoformat(iso)
-        if obj.tzinfo is not None or aware_or_epoch:
+        aware = obj.tzinfo is not None or aware_or_epoch
+        if aware:
             if obj.tzinfo is None:
                 obj = obj.replace(tzinfo=timezone.utc)
             else:
@@ -3801,8 +3814,11 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
         from connectors.sqlserver_tick import tick_from_text
 
         # fromisoformat keeps six digits; DATETIME2(7) text spells a seventh.
-        return _wall_clock_text(obj, tick_from_text(iso))
+        wall = _wall_clock_text(obj, tick_from_text(iso))
+        return wall + "Z" if (aware and mark_aware) else wall
     except ValueError:
+        if mark_aware:
+            return text  # not an instant this parser reads: compared as spelled
         # Fall back: strip invented trailing Z from transform parser.
         if text.endswith("Z") and not aware_or_epoch:
             return text[:-1]
