@@ -7,8 +7,10 @@ value as the exact text it was given: ``007`` lands in an INTEGER as ``7``,
 per-value check both ask :func:`cast_changes`, so they agree.
 
 Rendered here: integers, floating point (single precision where the engine
-stores it), dates, zoneless timestamps and times without an offset, in the
-destination engine's own output format. A type not rendered here (decimal,
+stores it; MySQL shows a ``FLOAT`` to six significant digits and a
+``FLOAT(M,D)`` to ``D`` decimals), dates, zoneless timestamps and times without
+an offset (a fraction finer than the declared precision is rounded away), in
+the destination engine's own output format, the engine named by its family. A type not rendered here (decimal,
 boolean, an offset-keeping type, ...) answers ``None`` and keeps the gate's
 transform round trip.
 """
@@ -24,7 +26,10 @@ from typing import Any
 
 _PG = frozenset({"postgresql"})
 #: (engine family, declared base) pairs stored as a single-precision float.
-_FLOAT4 = {("postgresql", "REAL"), ("postgresql", "FLOAT4"), ("mysql", "FLOAT"), ("sqlserver", "REAL")}
+_FLOAT4 = {("postgresql", "REAL"), ("postgresql", "FLOAT4"), ("mysql", "FLOAT"), ("mysql", "FLOAT32"),
+           ("sqlserver", "REAL")}
+#: Engines that print an integral float without ".0".
+_BARE_INTEGRAL = frozenset({"postgresql", "mysql", "sqlserver"})
 _REFUSED = object()
 
 
@@ -42,18 +47,38 @@ def _float4_text(value: float) -> str:
     return repr(single)
 
 
-def _float_text(value: float, ddl: str, engine: str) -> str:
+def _float_text(value: float, ddl: str, engine: str) -> Any:
     if math.isnan(value):
         return "NaN"
     if math.isinf(value):
         return "Infinity" if value > 0 else "-Infinity"
-    if (engine, _base(ddl)) in _FLOAT4:
-        text = _float4_text(value)
-    else:
-        text = float.__repr__(value)
-    if engine in _PG | {"mysql"} and text.endswith(".0"):
+    single = (engine, _base(ddl)) in _FLOAT4
+    stored = struct.unpack("f", struct.pack("f", value))[0] if single else value
+    scale = re.search(r"\(\s*\d+\s*,\s*(\d+)\s*\)", str(ddl or "")) if engine == "mysql" else None
+    if scale:
+        return f"{stored:.{int(scale.group(1))}f}"  # MySQL FLOAT(M,D) / DOUBLE(M,D) shows D decimals
+    if single and engine == "mysql":
+        # MySQL sends a FLOAT to six significant digits (16777216 reads as 16777200); an exponent form is
+        # refused rather than guessed (review 5, M-3).
+        text = f"{stored:.6g}"
+        return _REFUSED if "e" in text else text
+    text = _float4_text(value) if single else float.__repr__(value)
+    if engine in _BARE_INTEGRAL and text.endswith(".0"):
         text = text[:-2]  # these engines print an integral float without ".0"
     return text
+
+
+def _keeps_fraction(value: datetime | time, ddl: str, engine: str) -> bool:
+    """Whether the declared type keeps ``value``'s fraction (``TIMESTAMP(0)`` rounds ``.5`` away; review 5, M-3)."""
+    if not value.microsecond or not engine:
+        return True
+    if engine == "sqlserver" and _base(ddl) == "DATETIME":
+        # A legacy DATETIME keeps 1/300 s: only .xx0 / .xx3 / .xx7 milliseconds read back as given.
+        return value.microsecond % 1000 == 0 and value.microsecond // 1000 % 10 in {0, 3, 7}
+    from services.type_system import destination_temporal_fractional_digits
+
+    digits = destination_temporal_fractional_digits(ddl, dest_db=engine)
+    return digits is None or digits >= 6 or value.microsecond % 10 ** (6 - digits) == 0
 
 
 def _clock(value: datetime | time, engine: str) -> str:
@@ -81,6 +106,9 @@ def render_value(value: Any, family: str, ddl: str, engine: str) -> Any:
         return _REFUSED
     if family == "date" and isinstance(value, date) and not isinstance(value, datetime):
         return value.isoformat()
+    if family in {"datetime", "time"} and isinstance(value, (datetime, time)) \
+            and not _keeps_fraction(value, ddl, engine):
+        return _REFUSED
     if family == "datetime" and isinstance(value, datetime) and value.tzinfo is None:
         return f"{value.year:04d}-{value.month:02d}-{value.day:02d} {_clock(value, engine)}"
     if family == "time" and isinstance(value, time) and value.tzinfo is None:

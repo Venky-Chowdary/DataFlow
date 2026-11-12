@@ -60,3 +60,58 @@ def test_c1_the_rehearsal_reads_the_source_engine_through_the_family_resolver():
                and n.name in {"verify_table", "_declared_types"}):
         text = ast.unparse(fn)
         assert "family_or_kind" in text, fn.name
+
+
+# ------------------------------------- C-2: the driver folds, classified on what introspection reports
+
+#: (engine, the catalog's own spelling): introspection hands back a logical carrier (MySQL ``float`` reads
+#: as ``FLOAT32``, SQL Server ``datetime2(7)`` as ``TIMESTAMP_NTZ(7)``); each must still be named.
+FOLDING_CATALOG = [
+    ("mysql", "float"), ("mysql", "float(7,3)"), ("mariadb", "float"),
+    ("sqlserver", "datetime2(7)"), ("sqlserver", "datetimeoffset(7)"), ("sqlserver", "time(7)"),
+    ("sqlserver", "sql_variant"), ("azure_sql_database", "datetime2(7)"),
+    ("oracle", "TIMESTAMP(6) WITH TIME ZONE"), ("oracle", "TIMESTAMP(6) WITH LOCAL TIME ZONE"),
+    ("oracle", "TIMESTAMP(9)"), ("oracle", "INTERVAL DAY(2) TO SECOND(6)"), ("oracle", "INTERVAL YEAR(2) TO MONTH"),
+    ("amazon_rds_oracle", "TIMESTAMP(6) WITH TIME ZONE"),
+]
+#: Catalog spellings whose driver reads one-to-one: never named.
+EXACT_CATALOG = [
+    ("mysql", "double"), ("mysql", "datetime(6)"), ("mysql", "decimal(10,2)"), ("mysql", "time"),
+    ("sqlserver", "datetime2(6)"), ("sqlserver", "datetime"), ("sqlserver", "time(6)"),
+    ("sqlserver", "datetimeoffset(6)"), ("sqlserver", "float"), ("sqlserver", "decimal(12,2)"),
+    ("oracle", "TIMESTAMP(6)"), ("oracle", "DATE"), ("oracle", "NUMBER(10,2)"), ("oracle", "BINARY_DOUBLE"),
+    ("postgresql", "real"), ("postgresql", "timestamp(6) without time zone"),
+]
+
+
+@pytest.mark.parametrize("engine, physical", FOLDING_CATALOG)
+def test_c2_a_folding_type_is_named_as_introspection_reports_it(engine, physical):
+    from services.schema_introspect import catalog_read_back
+
+    reported = catalog_read_back(engine, physical)
+    types = {"id": "BIGINT", "c": reported}
+    src = profile_rows([{"id": 1, "c": None}], list(types), ["id"], None, types=types, engine=engine)
+    assert "not provable" in src.uncompared.get("c", ""), (engine, physical, reported, src.uncompared)
+
+
+@pytest.mark.parametrize("engine, physical", EXACT_CATALOG)
+def test_c2_a_one_to_one_type_is_not_named_as_introspection_reports_it(engine, physical):
+    from services.schema_introspect import catalog_read_back
+
+    reported = catalog_read_back(engine, physical)
+    types = {"id": "BIGINT", "c": reported}
+    src = profile_rows([{"id": 1, "c": None}], list(types), ["id"], None, types=types, engine=engine)
+    assert "c" not in src.uncompared, (engine, physical, reported, src.uncompared)
+
+
+def test_c2_the_mapper_outputs_themselves_are_named():
+    """The three introspection mappers' own outputs, fed straight in (no DDL spelling anywhere)."""
+    from services.exit_value_fidelity import adapter_fold
+    from services.schema_introspect import _mysql_to_logical
+    from services.schema_introspect_enterprise import _oracle_to_logical, _sqlserver_to_logical
+
+    assert "single-precision FLOAT" in (adapter_fold(_mysql_to_logical("float"), "mysql") or "")
+    assert "DATETIME2(7)" in (adapter_fold(_sqlserver_to_logical("datetime2(7)"), "sqlserver") or "")
+    assert "DATETIMEOFFSET(7)" in (adapter_fold(_sqlserver_to_logical("datetimeoffset(7)"), "sqlserver") or "")
+    assert "TIME ZONE" in (adapter_fold(_oracle_to_logical("TIMESTAMP(6) WITH LOCAL TIME ZONE"), "oracle") or "")
+    assert adapter_fold(_sqlserver_to_logical("datetime"), "sqlserver") is None

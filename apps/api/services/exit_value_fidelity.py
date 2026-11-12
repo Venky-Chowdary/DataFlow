@@ -365,29 +365,55 @@ def _precision(up: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+#: SQL Server temporal carriers that keep 100 ns ticks by default (as declared, and as introspection reports them).
+_MSSQL_TICKS = {"TIME": "TIME", "DATETIME2": "DATETIME2", "DATETIMEOFFSET": "DATETIMEOFFSET",
+                "TIMESTAMP_NTZ": "DATETIME2", "TIMESTAMP_TZ": "DATETIMEOFFSET"}
+
+
+def _single_float(up: str, base: str) -> bool:
+    """A MySQL single-precision float: ``FLOAT`` / ``FLOAT(p<=24)`` / ``FLOAT(M,D)`` declared, ``FLOAT32`` read back."""
+    if base in {"FLOAT32", "FLOAT4"}:
+        return True
+    return base == "FLOAT" and (_precision(up) is None or _precision(up) <= 24)
+
+
 def adapter_fold(ddl: str, engine: str) -> str | None:
-    """Why a declared type cannot be proven on this engine (its driver can read two values as one), else ``None``."""
+    """Why a declared type cannot be proven on this engine (its driver can read two values as one), else ``None``.
+
+    Classified on the logical family and the declared precision, so the DDL
+    spelling (``DATETIME2(7)``) and what introspection reports for it
+    (``TIMESTAMP_NTZ(7)``, MySQL ``FLOAT32``, Oracle ``TIMESTAMP_LTZ(6)``)
+    answer alike (review 5, C-2).
+    """
+    from services.type_system import datetime_timezone_polarity
+
     eng = family_or_kind(engine)
     up = _upper(ddl)
     base = re.sub(r"\(.*$", "", up).strip()
+    family = _family(ddl)
     if eng == SQLSERVER:
-        if base in {"TIME", "DATETIME2", "DATETIMEOFFSET"} and (_precision(up) is None or _precision(up) > 6):
-            return (f"is {base}({_precision(up) or 7}), which keeps 100-nanosecond ticks the driver reads to the "
+        shown = _MSSQL_TICKS.get(base)
+        # A bare TIMESTAMP_NTZ is what introspection reports for a legacy DATETIME (1/300 s): one-to-one.
+        default = None if base == "TIMESTAMP_NTZ" else 7
+        digits = _precision(up) if _precision(up) is not None else default
+        if shown and family in {"time", "datetime"} and digits is not None and digits > 6:
+            return (f"is {shown}({digits}), which keeps 100-nanosecond ticks the driver reads to the "
                     "microsecond, so two values that differ in the seventh digit read alike and it is not provable")
         if base == "SQL_VARIANT":
             return ("is SQL_VARIANT: the driver reads each value as whatever Python type its base type maps to, so "
                     "its exact value and type are not provable")
     if eng == ORACLE:
-        if "TIME ZONE" in up and base.startswith("TIMESTAMP"):
-            return ("is a TIMESTAMP WITH TIME ZONE: the driver hands back the wall clock without the offset or "
-                    "region it was stored with, so it is not provable")
+        if family == "datetime" and base.startswith("TIMESTAMP") \
+                and datetime_timezone_polarity(ddl, dest_db=ORACLE) in {"tz", "ltz"}:
+            return ("is a TIMESTAMP WITH (LOCAL) TIME ZONE: the driver hands back the wall clock without the offset "
+                    "or region it was stored with, so it is not provable")
         if base.startswith("TIMESTAMP") and (_precision(up) or 6) > 6:
             return ("keeps fractional seconds past the microsecond the driver reads, so two values that differ "
                     "there read alike and it is not provable")
         if base.startswith("INTERVAL"):
             return ("is an INTERVAL: the driver reads it as a plain duration (months and fractional seconds past "
                     "the microsecond are not kept), so it is not provable")
-    if eng == MYSQL and base == "FLOAT" and (_precision(up) is None or _precision(up) <= 24):
+    if eng == MYSQL and family == "float" and _single_float(up, base):
         return ("is a single-precision FLOAT: the server sends it rounded to its display digits, so two stored "
                 "values can read alike and it is not provable")
     return None
