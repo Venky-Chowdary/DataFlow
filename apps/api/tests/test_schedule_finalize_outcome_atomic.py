@@ -909,3 +909,56 @@ def test_drift_preflight_parked_is_not_counted_again_by_the_run(store, runner, c
     assert final.run_count == 1
     events = [getattr(r, "event", None) for r in caplog.records]
     assert "approval.requested" not in events
+
+
+# --- A parked retry is not a later run (review round 2, M-A) -------------------
+
+
+def _retry_parked(store, runner, name: str):
+    """jR1 failed transiently and its retry is parked: no other run exists."""
+    runner.jobs["jR1"] = TRANSIENT
+    sched, _run = _claimed(store, name, "jR1", max_retries=2, retry_backoff_seconds=600)
+    runner._finalize_run(sched.id, "jR1", 0, _now())
+    parked = store.get_schedule(sched.id)
+    assert parked.retry_at and parked.retry_attempt == 1 and parked.run_count == 0
+    assert parked.running is False and runner.notified == []
+    return parked
+
+
+def test_a_success_reported_after_its_retry_was_parked_is_recorded(store, runner):
+    """L3c: the worker-lost settle failed jR1, then the worker finished it.
+
+    No later run exists, only jR1's own parked retry: the success is recorded,
+    the retry is disarmed (it would land the rows a second time) and the run is
+    announced once, as completed.
+    """
+    parked = _retry_parked(store, runner, "retry-flip")
+
+    runner.jobs["jR1"] = COMPLETED
+    runner._finalize_run(parked.id, "jR1", 0, _now())
+
+    final = store.get_schedule(parked.id)
+    assert final.retry_at is None and final.retry_attempt == 0
+    assert final.run_count == 1 and final.last_job_id == "jR1"
+    assert final.last_status == "completed" and final.running is False
+    assert runner.notified == [("jR1", "completed")]
+
+
+def test_a_success_reported_after_its_retry_ran_leaves_the_retry_alone(store, runner):
+    """The retry jR2 ran and was recorded since: that is a later run."""
+    from services import schedule_run_lifecycle as life
+
+    parked = _retry_parked(store, runner, "retry-ran")
+    run_id = life.begin_run(parked.id, trigger=life.TRIGGER_RETRY, attempt=1)
+    assert store.mark_schedule_running(parked.id, "beat-b", "jR2") is not None
+    life.mark_running(parked.id, run_id, "jR2")
+    runner.jobs["jR2"] = COMPLETED
+    runner._finalize_run(parked.id, "jR2", 1, _now())
+    before = store.get_schedule(parked.id)
+    assert before.run_count == 1 and before.last_job_id == "jR2" and not before.running
+
+    runner.jobs["jR1"] = COMPLETED
+    runner._finalize_run(parked.id, "jR1", 0, _now())
+
+    after = store.get_schedule(parked.id)
+    assert _newer_run(after) == _newer_run(before)

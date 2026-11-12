@@ -2911,6 +2911,24 @@ def _run_already_recorded(s: PipelineSchedule, job_id: str, status: str | None) 
     return s.last_job_id == job_id and not s.running and ok == is_completed(s.last_status)
 
 
+def _run_after(s: PipelineSchedule, job_id: str) -> bool:
+    """True when the history holds a run that started after ``job_id``'s run.
+
+    Evidence of a later run once the claim is free again. A retry that
+    ``schedule_retry`` parked finishes this job's record without a newer one:
+    that is not a later run, and the job's changed verdict is recorded in full
+    (a success disarms the retry, which would land the rows a second time).
+    Skip records are not runs.
+    """
+    from services.schedule_run_lifecycle import SKIPPED
+
+    history = list(s.run_history or [])
+    mine = [i for i, row in enumerate(history) if str(row.get("job_id") or "") == job_id]
+    return bool(mine) and any(
+        str(row.get("status") or "") != SKIPPED for row in history[mine[-1] + 1:]
+    )
+
+
 def _late_outcome_fields(s: PipelineSchedule, extra: dict[str, Any]) -> dict[str, Any]:
     """What a late finalizer may store once a later run has claimed the schedule.
 
@@ -3013,6 +3031,7 @@ def _mark_schedule_run_once(
             and not recorded_before
             and not (s.running and str(s.running_job_id or "") == job_id)
             and run_finished(s, job_id)
+            and (s.running or _run_after(s, job_id))
         )
         if (recorded_before or later_run) and outcome is None:
             return s
