@@ -88,7 +88,10 @@ def _path_refused(value: Any) -> bool:
         return False
     from services.tenant_host_files import host_file_allowed
 
-    return not host_file_allowed(text)
+    # ODBC Driver 18 opens ``file:<path>`` up to the first ``,`` (``,password:...``
+    # follows): judge that too, or ``..`` in the suffix climbs back (follow-up review 3, L2).
+    head = text.split(",", 1)[0].strip()
+    return not host_file_allowed(text) or bool(head and not host_file_allowed(head))
 
 
 def _option_refusal(key: Any, value: Any, where: str) -> str:
