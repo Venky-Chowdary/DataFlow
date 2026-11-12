@@ -1909,6 +1909,17 @@ def try_copy_local_csv(
     """
     if not csv_local_copy_enabled():
         return None
+    from services.reversibility_enforce import enforced_columns
+
+    held_to = enforced_columns(mappings)
+    if held_to:
+        # A run that must be reversible checks these columns value by value as it
+        # writes; COPY never surfaces a value to check (review 4, H-1).
+        from services.copy_fast_path import note_copy_decline
+
+        note_copy_decline("reversibility is required: " + ", ".join(held_to[:6])
+                          + " must be checked row by row while writing")
+        return None
     if (dest_cfg or {}).get("vector_layout") == "table":
         return None  # pgvector typed table: the row path embeds each row (D209)
     if not identity_file_copy_route(file_type, dest_type):

@@ -476,6 +476,8 @@ def fail_closed_on_silent_loss(
 
     Returns a failed ``TransferResult`` or ``None`` when the ledger is honest
     (balanced, or dest unmeasured). Owner: ``services.row_conservation``.
+    A run that must be reversible whose enforced column was checked on fewer
+    rows than were written fails here too, before success (review 4, H-1).
     """
     from services.row_conservation import (
         PopulationConservationError,
@@ -483,6 +485,9 @@ def fail_closed_on_silent_loss(
     )
     from src.transfer.models import TransferResult
 
+    unchecked = _enforcement_shortfall(job_id, request, dest_summary, recon, rows_written, operation)
+    if unchecked is not None:
+        return unchecked
     try:
         ledger = assert_population_conservation_closed(
             {
@@ -526,6 +531,34 @@ def fail_closed_on_silent_loss(
     dest_summary["row_accounting"] = ledger.to_dict()
     recon["row_accounting"] = ledger.to_dict()
     return None
+
+
+def _enforcement_shortfall(job_id: str, request: Any, dest_summary: dict[str, Any], recon: dict[str, Any],
+                           rows_written: int, operation: str) -> Any | None:
+    """A failed ``TransferResult`` when an enforced column was checked on fewer rows than were written."""
+    from services.reversibility_enforce import SUMMARY_KEY, ReversibilityViolation, shortfall_of, summary
+
+    if not getattr(request, "require_reversibility", False):
+        return None
+    found = summary(job_id, forget=False)
+    note = shortfall_of(found, rows_written) if found is not None else None
+    if note is None:
+        return None
+    summary(job_id)  # the run ends here: its tally is recorded below, never as enforced
+    from src.transfer.engine import get_mongodb_service  # lazy: the engine's own store accessor
+    from src.transfer.engine_finish import _settle_backup_after_error
+    from src.transfer.models import TransferResult
+
+    logger.error("Job %s: %s", job_id, note)
+    restored = _settle_backup_after_error(request.destination, ReversibilityViolation(note))
+    dest_summary[SUMMARY_KEY] = {**found, "enforced": False, "reason": note}
+    message = note + (" The previous destination table was restored." if restored else "")
+    get_mongodb_service().update_job_status(
+        job_id, "failed", error=message, phase="failed", progress_pct=99, message=message,
+        reconciliation=recon, destination_summary=dest_summary,
+    )
+    return TransferResult(success=False, error=message, operation=operation, job_id=job_id,
+                          records_transferred=rows_written, destination_summary=dest_summary, reconciliation=recon)
 
 
 def _attach_job_rollback_plan(

@@ -108,7 +108,12 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
     from services.reversibility_enforce import record_on_success
 
     record_before_success_status()
-    record_on_success(job_id, fields)  # a reversible run: which conditional columns were checked on every row
+    # A reversible run: which conditional columns were checked on every row. One checked on fewer rows
+    # than were written is never reported as enforced: the job fails with that reason (review 4, H-1).
+    shortfall = record_on_success(job_id, fields)
+    if shortfall:
+        status = "failed"
+        fields.update(error=shortfall, message=shortfall, phase="failed")
     written = mongo.update_job_status(job_id, status, **fields)
     if written is not False:
         return written

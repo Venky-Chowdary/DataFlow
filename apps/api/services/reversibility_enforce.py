@@ -157,13 +157,43 @@ def summary(job_id: str, *, forget: bool = True) -> dict[str, Any] | None:
     return {"enforced": True, "columns": sorted(rows, key=lambda r: (r["table"], r["column"]))}
 
 
-def record_on_success(job_id: str, fields: dict[str, Any]) -> None:
-    """Keep the run's enforcement tally on its destination summary (read by the job's reversibility report)."""
+def _shortfall_note(columns: Sequence[Mapping[str, Any]], rows_written: int) -> str | None:
+    short = [c for c in columns if int(c.get("rows_checked") or 0) < rows_written]
+    if not short:
+        return None
+    named = "; ".join(f"{c['table']}.{c['column']}" if c.get("table") else str(c["column"]) for c in short[:6])
+    least = min(int(c.get("rows_checked") or 0) for c in short)
+    return (f"Reversibility is required and {named} was checked on only {least:,} of {rows_written:,} written "
+            "row(s): a bulk path wrote the rest without the per-value check, so the run is failed rather than "
+            "reported as enforced. Run it again; if it repeats, report it.")
+
+
+def record_on_success(job_id: str, fields: dict[str, Any]) -> str | None:
+    """Keep the run's enforcement tally on its destination summary (read by the job's reversibility report).
+
+    Returns why the run must fail instead when an enforced column was checked
+    on fewer rows than it wrote: the tally is then recorded with
+    ``enforced: false`` and that reason, never as enforced.
+    """
     found = summary(job_id)
     if found is None:
-        return
+        return None
+    note = shortfall_of(found, fields.get("records_processed"))
+    if note:
+        found = {**found, "enforced": False, "reason": note}
     dest = fields.get("destination_summary")
     if isinstance(dest, dict):
         dest[SUMMARY_KEY] = found
     else:
         fields["destination_summary"] = {SUMMARY_KEY: found}
+    return note
+
+
+def shortfall_of(found: Mapping[str, Any], rows_written: Any) -> str | None:
+    """Why a run's tally (:func:`summary`) cannot be called enforced: an enforced column checked on fewer
+    rows than were written (the fail-closed backstop behind every bulk path's decline, review 4, H-1)."""
+    try:
+        written = int(rows_written or 0)
+    except (TypeError, ValueError):
+        return None
+    return _shortfall_note(list(found.get("columns") or []), written) if written > 0 else None
