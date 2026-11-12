@@ -132,6 +132,12 @@ def test_dropping_one_signature_of_a_hybrid_pair_is_detected(keys):
     relabelled = [dict(s, alg="Ed25519") for s in signatures]
     assert verifier.check_signature_set(_bound(signer), relabelled, message=verifier.pae(PAYLOAD, body),
                                         keys=trusted, role="statement")[0] == "failed"
+    # Even with no trusted key at hand, an algorithm other than the bound one is a failure,
+    # not something left "not checked".
+    assert verifier.check_signature_set(_bound(signer), relabelled, message=verifier.pae(PAYLOAD, body),
+                                        keys=verifier.KeySet(), role="statement")[0] == "failed"
+    assert verifier.check_signature_set(_bound(signer), signatures, message=verifier.pae(PAYLOAD, body),
+                                        keys=verifier.KeySet(), role="statement")[0] == "not_checked"
     shorter = {"signer_key_ids": signer.key_ids[:1], "signer_algs": signer.algs[:1]}
     assert verifier.check_signature_set(shorter, signatures, message=verifier.pae(PAYLOAD, body), keys=trusted,
                                         role="statement")[0] == "failed"  # a signature from an unlisted key
