@@ -62,6 +62,7 @@ Version history
 from __future__ import annotations
 
 import re
+from datetime import datetime, time
 from decimal import Decimal
 from functools import lru_cache
 from typing import Any, Final
@@ -298,13 +299,18 @@ def iter_row_parts(fingerprint: str):
 def memo_key(value: Any, ddl: str) -> tuple[Any, ...]:
     """Per-scan memo key that never aliases two values that fingerprint apart.
 
-    ``Decimal('1.0') == Decimal('1.00')`` and ``0.0 == -0.0`` hash alike, yet a
-    text carrier renders them differently; keyed on the value alone the second
-    one met took the first one's fingerprint, so the digest followed scan order.
+    ``Decimal('1.0') == Decimal('1.00')``, ``0.0 == -0.0`` and two offsets of
+    one instant hash alike, yet a text carrier renders them differently; keyed
+    on the value alone the second one met took the first one's fingerprint, so
+    the digest followed scan order.
     """
     kind = type(value)
     if kind is Decimal:
         return (kind, str(value), ddl)
     if kind is float and value == 0.0:
         return (kind, repr(value), ddl)
+    if isinstance(value, (datetime, time)) and value.tzinfo is not None:
+        # ``12:00+00:00 == 13:00+01:00`` (one instant), but a text column
+        # stores each offset's own spelling (review 1 M4).
+        return (kind, value, value.utcoffset(), ddl)
     return (kind, value, ddl)
