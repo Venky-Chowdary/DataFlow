@@ -2605,7 +2605,9 @@ def _iceberg_object_store_cfg(
         else:
             cfg.pop("username", None)
             cfg.pop("password", None)
-            cfg["use_default_aws_credentials"] = True
+            from connectors.aws_common import PLATFORM_DEFAULT_CREDENTIALS
+
+            cfg["use_default_aws_credentials"] = PLATFORM_DEFAULT_CREDENTIALS
             logger.warning(
                 "Iceberg S3 COUNT using default credential chain (missing_credentials)"
             )

@@ -680,6 +680,11 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     loopback host, flag or no flag: only metadata and link-local still are. A
     new or changed target is audited, or refused under the enforce flag.
     """
+    from connectors.aws_common import default_credentials_refusal
+
+    platform_credentials = default_credentials_refusal(data)
+    if platform_credentials:
+        return platform_credentials
     values = [str(data.get(key) or "") for key in _SAVE_TARGET_KEYS]
     workspace_id = str(data.get("workspace_id") or "")
     db_type = str(data.get("type") or "")
