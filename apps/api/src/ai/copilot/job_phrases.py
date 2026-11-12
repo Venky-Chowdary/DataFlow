@@ -69,7 +69,8 @@ _WEEKDAYS = r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?
 #: A time-like word left over after the applied phrases were removed.
 _TIME_TOKEN = re.compile(
     r"(?:\b(?:in|over|during|for|within|since|before|after|until|till|on|by|from|at|between|of)\s+)?"
-    r"(?:\b(?:the|this|that|last|past|previous|next|coming|few|several|couple\s+of|a)\s+)*"
+    r"(?:\b(?:the|this|that|last|past|previous|next|coming|few|several|couple\s+of|a|"
+    + "|".join(w for w in _NUMBER_WORDS if " " not in w) + r")\s+)*"
     r"(?:\b\d+\s+)?"
     r"(?:\b(?:today|tonight|tomorrow|yesterday|hours?|hrs?|minutes?|mins?|days?|weeks?|"
     r"weekends?|months?|years?|quarters?|fortnights?|mornings?|afternoons?|evenings?|nights?|"
@@ -78,7 +79,7 @@ _TIME_TOKEN = re.compile(
     r"|\bmay\s+\d{1,2}\b|\b(?:in|on|since)\s+may\b"
     r"|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}(?:st|nd|rd|th)\b"
     r"|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b|\b(?:19|20)\d{2}\b|\b\d+\s*[hdwm]\b)"
-    r"(?:\s+(?:ago|before|after|earlier|later))?",
+    r"(?:\s+\d{1,2}(?:st|nd|rd|th)?\b)?(?:\s+(?:ago|before|after|earlier|later))?",
     re.I,
 )
 
