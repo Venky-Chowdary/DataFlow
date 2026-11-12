@@ -383,3 +383,78 @@ def test_mixed_separator_text_cursor_is_refused_on_live_postgresql(isolated, pg)
     result = _run(isolated, "ms", "ms_out", cursor="c")
     assert not result.success
     assert "'T' or a space" in str(result.error)
+
+
+# --------------------------------------------------------------------------
+# M-2 — a relation probe that cannot connect is "unreadable", not a crash
+# --------------------------------------------------------------------------
+
+_UNREACHABLE = {"host": "127.0.0.1", "port": 1, "database": "x", "username": "u", "password": "p"}
+
+
+def _refuse_connect(*_a, **_kw):
+    raise ConnectionError("probe connection refused")
+
+
+def test_relation_facts_probe_that_cannot_connect_is_unreadable(monkeypatch):
+    from services import commit_safe_window as csw
+    from services.preflight_cursor_gate import source_commit_facts
+
+    monkeypatch.setattr(csw, "_pg_connect", _refuse_connect)
+    assert csw.pg_relation_facts(_UNREACHABLE, "public", "t") == ("", None)
+    # Run-time path: the kind is "" (planned as "not confirmed a table"), never an IndexError.
+    assert csw.pg_relation_kind(_UNREACHABLE, "public", "t") == ""
+    # Preflight path: the facts are read, not raised.
+    facts = source_commit_facts("postgresql", _UNREACHABLE, "t", "incremental_append")
+    assert facts("id") == {"relation_kind": "", "relation_rows": None}
+    claim = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="id",
+        cursor_type="bigint", has_identity=True, **facts("id"),
+    )
+    assert claim["guarantee"] != csw.GUARANTEE_COMMIT_SAFE
+    assert "could not be confirmed to be a table" in claim["statement"]
+
+
+def test_run_whose_relation_probe_cannot_connect_takes_the_overlap_window(isolated, pg, monkeypatch):
+    from services import commit_safe_window as csw
+    from src.transfer import stream_commit_window as scw
+
+    _sql(f'CREATE TABLE "{SCHEMA}".rk (id bigint PRIMARY KEY, v text)')
+    _sql(f'INSERT INTO "{SCHEMA}".rk SELECT g, \'v\' FROM generate_series(1, 5) g')
+    real_kind = scw.pg_relation_kind
+
+    def kind_with_refused_connect(*args):
+        # The real probe, with only its own connection refused.
+        with monkeypatch.context() as inner:
+            inner.setattr(csw, "_pg_connect", _refuse_connect)
+            return real_kind(*args)
+
+    monkeypatch.setattr(scw, "pg_relation_kind", kind_with_refused_connect)
+    result = _run(isolated, "rk", "rk_out", cursor="id")
+    assert result.success, result.error
+    window = _window(result)
+    assert window.get("strategy") == csw.STRATEGY_OVERLAP, window
+    assert "kind could not be read" in str(window.get("probe_error")), window
+    assert "IndexError" not in str(window.get("probe_error"))
+
+
+def test_a_policy_gate_that_raises_is_an_honest_gate_not_a_preflight_error(monkeypatch):
+    import services.preflight_transfer_policy as policy
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("relation probe exploded")
+
+    monkeypatch.setattr(policy, "source_commit_facts", _boom)
+    gates = policy.run_transfer_policy_gates(
+        sync_mode="incremental_append", source_type="postgresql", source_kind="database",
+        dest_type="postgresql", source_table="t",
+        stream_contracts=[{"name": "t", "cursor_field": "id", "sync_mode": "incremental_append",
+                           "primary_key": "id", "selected": True}],
+        source_config={"type": "postgresql", "host": "db.example", "database": "x"},
+    )
+    errored = [g for g in gates if "could not be checked" in str(g.get("message"))]
+    assert errored, [g.get("id") for g in gates]
+    assert errored[0]["status"] == "warn"
+    assert "RuntimeError" in str(errored[0].get("details"))
+    # Every other gate still ran.
+    assert any(g.get("id") == "g10_schema_policy" for g in gates)

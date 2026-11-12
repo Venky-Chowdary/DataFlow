@@ -945,7 +945,7 @@ def pg_relation_facts(
         conn = _pg_connect(src_cfg)
     except Exception as exc:  # noqa: BLE001 — planned as "not a table", and said
         logger.warning("commit-safe window: relation kind unreadable: %s", exc)
-        return ""
+        return "", None
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
