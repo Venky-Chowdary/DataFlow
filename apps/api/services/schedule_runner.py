@@ -39,10 +39,40 @@ class ScheduleStartError(Exception):
     trigger must not collapse every refusal into "check connectors".
     """
 
-    def __init__(self, message: str, *, http_status: int = 400, code: str = ""):
+    def __init__(
+        self, message: str, *, http_status: int = 400, code: str = "", retry_after: int = 0
+    ):
         super().__init__(message)
         self.http_status = int(http_status)
         self.code = str(code or "")
+        #: Seconds after which the same Run now can succeed (``Retry-After``).
+        self.retry_after = max(0, int(retry_after or 0))
+
+    @property
+    def headers(self) -> dict[str, str] | None:
+        """The HTTP headers the refusal carries (``Retry-After`` when a wait helps)."""
+        return {"Retry-After": str(self.retry_after)} if self.retry_after else None
+
+
+#: Seconds a Run now refused with ``run_still_recording`` is told to wait: the
+#: write that records the previous run lost to other writers of the schedule,
+#: and the next attempt (Run now again, or the beat) records it.
+_RUN_STILL_RECORDING_RETRY_AFTER = 5
+
+
+def _finalize_deferred(schedule_id: str, job_id: str, exc: BaseException) -> None:
+    """A finished run whose record kept losing to other writers is left for later.
+
+    The store wrote nothing (``ScheduleWriteContended``) and the claim still
+    names the job, so the next beat — or the next Run now — records it. One
+    schedule's contended write must not stop the others (review round 2, L-B).
+    """
+    logger.warning(
+        "Schedule %s: the finished run of job %s was not recorded yet (%s); the next beat retries",
+        schedule_id, job_id, exc,
+    )
+    emit_event(logger, "schedule.run.finalize_deferred", outcome="held",
+               reason_code="write_contended", schedule_id=schedule_id, job_id=job_id)
 
 
 def _manual_start_failure_detail(sched: Any) -> str:
@@ -2276,13 +2306,34 @@ def _start_schedule_run(
         # in flight is not: the two lookups can disagree for one beat, and
         # finalizing that beat let Run now start a second writer (R14-001).
         if _job_dispatch_state(held) == "terminal" and _job_is_live(held) is not True:
+            from services.schedule_store import ScheduleWriteContended
+
             started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
-            _finalize_run(
-                schedule_id,
-                held,
-                sched.retry_attempt if sched.retry_at else 0,
-                started,
-            )
+            try:
+                _finalize_run(
+                    schedule_id,
+                    held,
+                    sched.retry_attempt if sched.retry_at else 0,
+                    started,
+                )
+            except ScheduleWriteContended as exc:
+                # Nothing was written and the claim still names the finished
+                # job: this run cannot start yet, and nothing about it failed.
+                _finalize_deferred(schedule_id, held, exc)
+                detail = (
+                    f"The previous run of this schedule (job {held}) has finished and is "
+                    "still being recorded. Try again in a few seconds."
+                )
+                if manual:
+                    raise ScheduleStartError(
+                        detail, http_status=409, code="run_still_recording",
+                        retry_after=_RUN_STILL_RECORDING_RETRY_AFTER,
+                    ) from exc
+                life.finish_run(
+                    schedule_id, life.current_run_id(schedule_id), life.SKIPPED,
+                    reason=detail, reason_code="run_still_recording",
+                )
+                return None
             sched = get_schedule(schedule_id) or sched
 
     # Concurrency guard: refuse to start when this schedule or another writer
@@ -2408,6 +2459,7 @@ def _finalize_finished_schedule_claims() -> None:
     that a run was still in progress.
     """
     from services.schedule_store import (
+        ScheduleWriteContended,
         _is_running_stale,
         _job_is_live,
         _load_all,
@@ -2432,12 +2484,15 @@ def _finalize_finished_schedule_claims() -> None:
         if _job_is_live(sched.running_job_id) is not False:
             continue
         started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
-        _finalize_run(
-            sched.id,
-            sched.running_job_id,
-            sched.retry_attempt if sched.retry_at else 0,
-            started,
-        )
+        try:
+            _finalize_run(
+                sched.id,
+                sched.running_job_id,
+                sched.retry_attempt if sched.retry_at else 0,
+                started,
+            )
+        except ScheduleWriteContended as exc:
+            _finalize_deferred(sched.id, sched.running_job_id, exc)
 
 
 def _run_due_schedules() -> int:
@@ -2538,13 +2593,21 @@ def _clear_stale_running_schedules() -> None:
                 from services.schedule_store import _job_dispatch_state, get_schedule
 
                 if _job_dispatch_state(s.running_job_id) == "terminal":
+                    from services.schedule_store import ScheduleWriteContended
+
                     started = _parse_ts(s.running_started_at) or datetime.now(timezone.utc)
-                    _finalize_run(
-                        s.id,
-                        s.running_job_id,
-                        s.retry_attempt if s.retry_at else 0,
-                        started,
-                    )
+                    try:
+                        _finalize_run(
+                            s.id,
+                            s.running_job_id,
+                            s.retry_attempt if s.retry_at else 0,
+                            started,
+                        )
+                    except ScheduleWriteContended as exc:
+                        # The claim stays: releasing it as stale below would
+                        # drop the finished run unrecorded. The beat records it.
+                        _finalize_deferred(s.id, s.running_job_id, exc)
+                        continue
                     fresh = get_schedule(s.id)
                     if fresh is not None:
                         schedules[i] = fresh

@@ -962,3 +962,179 @@ def test_a_success_reported_after_its_retry_ran_leaves_the_retry_alone(store, ru
 
     after = store.get_schedule(parked.id)
     assert _newer_run(after) == _newer_run(before)
+
+
+# --- A finalize write that keeps losing (review round 2, L-B) -------------------
+
+
+def _contend(store, monkeypatch, schedule_id: str) -> list[int]:
+    """Every attempt to record ``schedule_id``'s run loses to a peer write.
+
+    On Mongo a peer really writes the schedule before each guarded save; the
+    file store has no peer, so each attempt is told its decision went stale.
+    Either way the store gives up with ``ScheduleWriteContended``.
+    """
+    attempts: list[int] = []
+    if store._mongo_backend() is not None:
+        coll = store._mongo_backend().get_database()["pipeline_schedules"]
+        real_save = store._save_all
+
+        def save(schedules, **kwargs):
+            guard = kwargs.get("guard")
+            if guard is not None and guard.schedule_id == schedule_id:
+                attempts.append(1)
+                coll.update_one({"_id": schedule_id},
+                                {"$set": {"enabled_note": f"peer {len(attempts)}"},
+                                 "$inc": {"version": 1}})
+            return real_save(schedules, **kwargs)
+
+        monkeypatch.setattr(store, "_save_all", save)
+        return attempts
+    real_once = store._mark_schedule_run_once
+
+    def once(sid, *args, **kwargs):
+        if sid == schedule_id:
+            attempts.append(1)
+            raise store._OutcomeStale()
+        return real_once(sid, *args, **kwargs)
+
+    monkeypatch.setattr(store, "_mark_schedule_run_once", once)
+    return attempts
+
+
+def _finished_but_held(store, runner, monkeypatch, name: str, job_id: str):
+    """``job_id`` ended, its callback never ran: the claim still names it."""
+    sched, _run = _claimed(store, name, job_id)
+    runner.jobs[job_id] = COMPLETED
+    return sched
+
+
+def _jobs_ended(store, monkeypatch, *job_ids: str) -> None:
+    ended = set(job_ids)
+    monkeypatch.setattr(store, "_job_dispatch_state",
+                        lambda jid: "terminal" if jid in ended else "running")
+    monkeypatch.setattr(store, "_job_is_live", lambda jid: jid not in ended)
+
+
+def _start_stubs(monkeypatch) -> None:
+    import services.request_principal as principal
+    import services.schedule_approvals as approvals
+
+    monkeypatch.setattr(principal, "assert_bound_principal_may_use_endpoints",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(approvals, "release_create_new_dest_exists_false_refuse",
+                        lambda *a, **k: None)
+
+
+def test_run_now_on_a_run_still_being_recorded_is_a_conflict(store, runner, monkeypatch):
+    """Run now finalizes the finished job first; a contended write is a 409, not a 500."""
+    sched = _finished_but_held(store, runner, monkeypatch, "rn-contended", "job-held")
+    _jobs_ended(store, monkeypatch, "job-held")
+    _start_stubs(monkeypatch)
+    attempts = _contend(store, monkeypatch, sched.id)
+
+    with pytest.raises(runner.ScheduleStartError) as raised:
+        runner._run_schedule(sched.id, manual=True, triggered_by="operator@x")
+
+    assert attempts, "the held claim was never finalized"
+    assert raised.value.http_status == 409 and raised.value.code == "run_still_recording"
+    assert raised.value.retry_after > 0
+    held = store.get_schedule(sched.id)
+    assert held.running is True and held.running_job_id == "job-held" and held.run_count == 0
+    # No run row says this Run now failed: it never started. The attempt is a
+    # skip with its reason, the way every other refused Run now is recorded.
+    rows = [(r.get("trigger"), r.get("job_id"), r.get("status")) for r in held.run_history]
+    assert rows == [("cadence", "job-held", "running"), ("manual", "", "skipped")], rows
+    assert held.run_history[-1]["reason_code"] == "run_still_recording"
+    assert runner.notified == []
+
+
+def test_a_cadence_start_on_a_run_still_being_recorded_is_a_skip(store, runner, monkeypatch):
+    """A stale claim can be due again: the beat's start skips, it does not raise."""
+    sched = _finished_but_held(store, runner, monkeypatch, "cad-contended", "job-held")
+    _jobs_ended(store, monkeypatch, "job-held")
+    _start_stubs(monkeypatch)
+    attempts = _contend(store, monkeypatch, sched.id)
+
+    assert runner._run_schedule(sched.id) is None
+
+    assert attempts, "the held claim was never finalized"
+    held = store.get_schedule(sched.id)
+    assert held.running is True and held.running_job_id == "job-held" and held.run_count == 0
+    rows = [(r.get("trigger"), r.get("job_id"), r.get("status")) for r in held.run_history]
+    assert rows == [("cadence", "job-held", "running"), ("cadence", "", "skipped")], rows
+    assert held.run_history[-1]["reason_code"] == "run_still_recording"
+    assert runner.notified == []
+
+
+def _beat_stubs(runner, monkeypatch) -> dict[str, list]:
+    """The beat's neighbours, recorded: every step after the claims must still run."""
+    import services.cdc_capture_inventory as inventory
+    import services.cdc_capture_release as releases
+    import services.schedule_approvals as approvals
+
+    seen: dict[str, list] = {"dispatched": [], "swept": [], "released": []}
+    monkeypatch.setattr(runner.module, "_acquire_scheduler_lock", lambda: True)
+    monkeypatch.setattr(runner.module, "_release_scheduler_lock", lambda: None)
+    monkeypatch.setattr(runner.module, "_release_superseded_queued_claims", lambda: None)
+    monkeypatch.setattr(runner.module, "_sweep_orphan_runs",
+                        lambda: seen["swept"].append(1))
+    monkeypatch.setattr(runner.module, "_run_schedule",
+                        lambda sid, **k: seen["dispatched"].append(sid) or None)
+    monkeypatch.setattr(approvals, "release_same_declaration_source_drift",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(approvals, "release_create_new_dest_exists_false_refuse",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(releases, "retry_pending_capture_releases",
+                        lambda *a, **k: seen["released"].append(1))
+    monkeypatch.setattr(inventory, "start_source_gone_sweep", lambda *a, **k: None)
+    return seen
+
+
+def test_a_contended_claim_does_not_stop_the_beat(store, runner, monkeypatch, caplog):
+    """One schedule's lost write is deferred; every other step of the beat runs."""
+    a = _finished_but_held(store, runner, monkeypatch, "beat-a", "job-a")
+    c = _finished_but_held(store, runner, monkeypatch, "beat-c", "job-c")
+    b = store.create_schedule({
+        "name": "beat-b", "source_connector_id": "src", "source_table": "orders",
+        "dest_connector_id": "dst", "dest_table": "orders_beat_b", "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}], "max_retries": 0,
+    })
+    store.update_schedule(b.id, {"next_run_at": (_now() - timedelta(minutes=5)).isoformat()})
+    _jobs_ended(store, monkeypatch, "job-a", "job-c")
+    seen = _beat_stubs(runner, monkeypatch)
+    attempts = _contend(store, monkeypatch, a.id)
+
+    with caplog.at_level("INFO"):
+        runner._run_due_schedules()
+
+    assert attempts, "schedule A's run was never finalized"
+    held = store.get_schedule(a.id)
+    assert held.running is True and held.running_job_id == "job-a" and held.run_count == 0
+    done = store.get_schedule(c.id)
+    assert done.running is False and done.run_count == 1
+    assert seen["swept"] and seen["released"], seen
+    assert b.id in seen["dispatched"], seen
+    deferred = [r for r in caplog.records
+                if getattr(r, "event", None) == "schedule.run.finalize_deferred"]
+    assert [getattr(r, "schedule_id", None) for r in deferred] == [a.id]
+
+
+def test_a_contended_claim_does_not_stop_the_startup_reclaim(store, runner, monkeypatch, caplog):
+    a = _finished_but_held(store, runner, monkeypatch, "boot-a", "job-a")
+    c = _finished_but_held(store, runner, monkeypatch, "boot-c", "job-c")
+    _jobs_ended(store, monkeypatch, "job-a", "job-c")
+    monkeypatch.setattr(runner.module, "_sweep_orphan_runs", lambda: None)
+    attempts = _contend(store, monkeypatch, a.id)
+
+    with caplog.at_level("INFO"):
+        runner._clear_stale_running_schedules()
+
+    assert attempts, "schedule A's run was never finalized"
+    held = store.get_schedule(a.id)
+    assert held.running is True and held.running_job_id == "job-a" and held.run_count == 0
+    done = store.get_schedule(c.id)
+    assert done.running is False and done.run_count == 1
+    deferred = [r for r in caplog.records
+                if getattr(r, "event", None) == "schedule.run.finalize_deferred"]
+    assert [getattr(r, "schedule_id", None) for r in deferred] == [a.id]
