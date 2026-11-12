@@ -96,6 +96,15 @@ def _file_save(data: dict[str, Any]) -> None:
 # Grants live in the shared control-plane store when one is configured: a
 # replica with no local grants file would otherwise treat a restricted
 # resource as unrestricted (H-5).
+def _unique_claims(record: dict[str, Any]) -> list[str]:
+    """One grant per principal and resource, across replicas (ops review round 2, High 1)."""
+    principal = str(record.get("principal") or "").strip().lower()
+    if not principal:
+        return []
+    who = [str(record.get(k) or "") for k in ("tenant_id", "resource_type", "resource_id")] + [principal]
+    return ["grant:" + json.dumps(who, separators=(",", ":"))]
+
+
 _DOC = SharedRecordSet(
     "resource_acls",
     file_load=_file_load,
@@ -104,6 +113,7 @@ _DOC = SharedRecordSet(
     empty=lambda: {"grants": []},
     list_key="grants",
     partition_key="tenant_id",
+    unique=_unique_claims,
 )
 
 

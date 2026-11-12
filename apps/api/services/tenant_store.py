@@ -90,6 +90,12 @@ def _file_save(data: dict[str, Any]) -> None:
     tmp.replace(STORE_PATH)
 
 
+def _unique_claims(record: dict[str, Any]) -> list[str]:
+    """What no two tenants may share across replicas: the workspace (ops review round 2, High 1)."""
+    workspace = str(record.get("workspace_id") or "").strip()
+    return [f"workspace:{workspace}"] if workspace else []
+
+
 _DOC = SharedRecordSet(
     "tenant_settings",
     file_load=lambda: _file_load(),
@@ -98,6 +104,7 @@ _DOC = SharedRecordSet(
     empty=lambda: {"tenants": []},
     list_key="tenants",
     partition_key="workspace_id",
+    unique=_unique_claims,
 )
 
 

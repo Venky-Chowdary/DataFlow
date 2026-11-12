@@ -87,6 +87,20 @@ class SharedDocConflict(RuntimeError):
     """Another writer changed the document between this caller's read and write."""
 
 
+class UniqueConflict(SharedDocConflict):
+    """Another record already holds one of this record's unique claims.
+
+    For example a second tenant for a workspace, or a second grant for one
+    principal on one resource (ops review round 2, High 1). ``retrying`` reads
+    again so the caller's own check sees the winner; a claim still lost after
+    :data:`UNIQUE_ATTEMPTS` tries is a 409 ``concurrent_update``.
+    """
+
+
+#: How often a read-modify-write that lost a unique claim is run again.
+UNIQUE_ATTEMPTS = 3
+
+
 class TrackedDict(dict):
     """A loaded document that remembers the revision it was read at."""
 
@@ -372,14 +386,16 @@ class SharedDoc:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             self._scope.depth = getattr(self._scope, "depth", 0) + 1
             deadline = time.monotonic() + RETRY_BUDGET_SECONDS
+            claims_lost = 0
             try:
                 for attempt in range(_MAX_ATTEMPTS):
                     try:
                         with self._lock:
                             return fn(*args, **kwargs)
-                    except SharedDocConflict:
+                    except SharedDocConflict as exc:
                         left = deadline - time.monotonic()
-                        if attempt == _MAX_ATTEMPTS - 1 or left <= 0:
+                        claims_lost += isinstance(exc, UniqueConflict)
+                        if attempt == _MAX_ATTEMPTS - 1 or left <= 0 or claims_lost >= UNIQUE_ATTEMPTS:
                             raise
                         time.sleep(min(_backoff(attempt), left))
             finally:

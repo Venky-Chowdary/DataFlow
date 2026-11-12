@@ -27,8 +27,17 @@ def _check_size(doc: dict[str, Any], *, update: bool) -> None:
     raise DocumentTooLarge(f"BSON document too large ({size} bytes)")
 
 
+def _values(have: Any) -> list[Any]:
+    """What a filter compares against: an array field matches on any element (multikey)."""
+    return list(have) if isinstance(have, list) else [have]
+
+
 def _matches(doc: dict[str, Any], flt: dict[str, Any]) -> bool:
     for key, want in flt.items():
+        if key == "$or":
+            if not any(_matches(doc, sub) for sub in want):
+                return False
+            continue
         have = doc.get(key)
         if isinstance(want, dict) and any(k.startswith("$") for k in want):
             for op, arg in want.items():
@@ -36,11 +45,25 @@ def _matches(doc: dict[str, Any], flt: dict[str, Any]) -> bool:
                     return False
                 if op == "$lt" and not (have is not None and have < arg):
                     return False
+                if op == "$gt" and not (have is not None and have > arg):
+                    return False
+                if op == "$gte" and not (have is not None and have >= arg):
+                    return False
                 if op == "$exists" and (key in doc) != bool(arg):
                     return False
-        elif have != want:
+                if op == "$in" and not any(v in arg for v in _values(have)):
+                    return False
+                if op == "$ne" and arg in _values(have):
+                    return False
+        elif want not in _values(have) and have != want:
             return False
     return True
+
+
+def _duplicate(index: str, pattern: dict[str, int]) -> DuplicateKeyError:
+    return DuplicateKeyError(
+        f"E11000 duplicate key error index: {index}", 11000, {"keyPattern": pattern, "index": index}
+    )
 
 
 class _Result:
@@ -79,11 +102,41 @@ class FakeCollection:
         self._lock = threading.Lock()
         self._auto = 0
         self.calls = 0
+        self.examined = 0
+        #: Unique indexes: (name, field names, partial filter), enforced like MongoDB's.
+        self._unique: list[tuple[str, list[str], dict[str, Any]]] = []
 
-    def create_index(self, *_a: Any, **_k: Any) -> None:
-        return None
+    def create_index(self, keys: Any, **kwargs: Any) -> str:
+        fields = [k for k, _d in keys] if not isinstance(keys, str) else [keys]
+        name = kwargs.get("name") or "_".join(f"{k}_1" for k in fields)
+        if kwargs.get("unique") and not any(n == name for n, _f, _p in self._unique):
+            self._unique.append((name, fields, dict(kwargs.get("partialFilterExpression") or {})))
+        return name
 
-    def find_one(self, flt: dict[str, Any]) -> dict[str, Any] | None:
+    def index_information(self) -> dict[str, Any]:
+        return {name: {"key": [(f, 1) for f in fields], "unique": True, "partialFilterExpression": part}
+                for name, fields, part in self._unique}
+
+    def _check_unique(self, doc: dict[str, Any]) -> None:
+        """Raise DuplicateKeyError when ``doc`` collides with another document on a unique index."""
+        for name, fields, partial in self._unique:
+            if not _matches(doc, partial):
+                continue
+            mine = self._index_keys(doc, fields)
+            for other in self._docs.values():
+                if other["_id"] == doc["_id"] or not _matches(other, partial):
+                    continue
+                if mine & self._index_keys(other, fields):
+                    raise _duplicate(name, {f: 1 for f in fields})
+
+    @staticmethod
+    def _index_keys(doc: dict[str, Any], fields: list[str]) -> set[tuple[Any, ...]]:
+        keys: set[tuple[Any, ...]] = {()}
+        for f in fields:
+            keys = {k + (v,) for k in keys for v in _values(doc.get(f))}
+        return keys
+
+    def find_one(self, flt: dict[str, Any], *_args: Any, **_kwargs: Any) -> dict[str, Any] | None:
         self.calls += 1
         with self._lock:
             for doc in self._docs.values():
@@ -91,16 +144,17 @@ class FakeCollection:
                     return copy.deepcopy(doc)
         return None
 
-    def find(self, flt: dict[str, Any] | None = None) -> _Cursor:
+    def find(self, flt: dict[str, Any] | None = None, projection: Any = None, **_kwargs: Any) -> _Cursor:
         self.calls += 1
         with self._lock:
+            self.examined += len(self._docs)
             return _Cursor([copy.deepcopy(d) for d in self._docs.values() if _matches(d, flt or {})])
 
     def count_documents(self, flt: dict[str, Any]) -> int:
         with self._lock:
             return sum(1 for d in self._docs.values() if _matches(d, flt))
 
-    def insert_one(self, doc: dict[str, Any]) -> _Result:
+    def insert_one(self, doc: dict[str, Any], **_kwargs: Any) -> _Result:
         self.calls += 1
         with self._lock:
             doc = copy.deepcopy(doc)
@@ -108,12 +162,13 @@ class FakeCollection:
                 self._auto += 1
                 doc["_id"] = f"auto-{self._auto:012d}"
             if doc["_id"] in self._docs:
-                raise DuplicateKeyError(f"duplicate _id {doc['_id']!r}")
+                raise _duplicate("_id_", {"_id": 1})
             _check_size(doc, update=False)
+            self._check_unique(doc)
             self._docs[doc["_id"]] = doc
         return _Result(upserted_id=doc["_id"])
 
-    def update_one(self, flt: dict[str, Any], update: dict[str, Any], upsert: bool = False) -> _Result:
+    def update_one(self, flt: dict[str, Any], update: dict[str, Any], upsert: bool = False, **_kwargs: Any) -> _Result:
         self.calls += 1
         with self._lock:
             found = next((d for d in self._docs.values() if _matches(d, flt)), None)
@@ -124,7 +179,7 @@ class FakeCollection:
                 found = {k: v for k, v in flt.items() if not isinstance(v, dict)}
                 created = found["_id"]
                 if created in self._docs:  # the filter missed on another field: a duplicate _id
-                    raise DuplicateKeyError(f"duplicate _id {created!r}")
+                    raise _duplicate("_id_", {"_id": 1})
             target = copy.deepcopy(found)
             if created is not None:
                 for key, value in (update.get("$setOnInsert") or {}).items():
@@ -140,10 +195,11 @@ class FakeCollection:
                 if value not in target[key]:
                     target[key].append(value)
             _check_size(target, update=True)
+            self._check_unique(target)
             self._docs[target["_id"]] = target
             return _Result(0 if created else 1, created)
 
-    def delete_one(self, flt: dict[str, Any]) -> _Result:
+    def delete_one(self, flt: dict[str, Any], **_kwargs: Any) -> _Result:
         self.calls += 1
         with self._lock:
             for key, doc in self._docs.items():
