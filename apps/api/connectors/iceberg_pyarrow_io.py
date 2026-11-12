@@ -28,6 +28,7 @@ from it is refused (the guarded catalog sets :data:`LOCAL_FILES` to
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -73,8 +74,13 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
 
     def _check_local(self, location: Any) -> None:
         raw = getattr(location, "location", location)  # delete() takes a file object too
-        scheme, _netloc, path = self.parse_location(str(raw), self.properties)
+        scheme, netloc, path = self.parse_location(str(raw), self.properties)
         if scheme == "file":
+            # ``file://app.env`` is netloc + path, a RELATIVE path pyarrow opens in the
+            # process's working directory, which the jail would anchor at its root
+            # instead (follow-up review 3, M1): judge exactly what pyarrow opens.
+            if netloc or not os.path.isabs(path):
+                _refuse(_NOT_ABSOLUTE)
             _refuse(local_location_refusal(self.properties, path))
 
     def new_input(self, location: str) -> Any:
@@ -107,6 +113,12 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
 
         _refuse(azure_fileio_refusal(self.properties))
         return super()._initialize_azure_fs()
+
+
+_NOT_ABSOLUTE = (
+    "This Iceberg table named a local file with a host part or a relative path (file://name); "
+    "Datawrap opens only absolute paths inside the Iceberg warehouse folder."
+)
 
 
 def _refuse(refusal: str) -> None:
