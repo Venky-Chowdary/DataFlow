@@ -604,23 +604,6 @@ def pg_test_cfg(port: int | None = None) -> dict:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _platform_drivers_imported_as_at_app_startup():
-    """Import the bundled connector drivers once, as the app's start-up does.
-
-    ``/api/v1/health`` reports driver availability by importing each driver.
-    The served app has done that before its first request (lifespan,
-    ``ensure_platform_drivers``); a test that drives the app without the
-    lifespan paid for whatever was still unimported inside its own latency
-    budget, so D321's "the API answers within a second" depended on which
-    files ran before it in the shard. Read-only: nothing is installed.
-    """
-    from services.driver_bootstrap import driver_status
-
-    driver_status()
-    yield
-
-
-@pytest.fixture(scope="session", autouse=True)
 def _drop_leaked_pg_replication_slots():
     """CDC tests create logical replication slots on the local PG and do not
     always drop them — 20 leaked ``df_dataflow_mt_*``/``s_probe`` slots once
