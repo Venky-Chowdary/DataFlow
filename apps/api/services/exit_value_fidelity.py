@@ -25,7 +25,9 @@ duration and a jsonb number without its scale).
   in ``TIMESTAMP(7..9)``, an offset or region in ``TIMESTAMP WITH TIME ZONE``
   (the driver hands back a naive datetime) and months in intervals; MySQL's
   single-precision ``FLOAT`` is sent rounded to its display digits. SQLite's
-  driver hands back each stored value in its own storage class, one-to-one.
+  driver hands back each value in its own storage class, but an extract spells
+  the text ``'1'`` and the integer ``1`` alike, so a column holding more than
+  one storage class is named too (``exit_completeness.mixed_storage_classes``).
 
 No reason repeats a value: each names the column and the kind of fold.
 """

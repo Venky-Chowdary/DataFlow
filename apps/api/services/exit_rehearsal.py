@@ -695,6 +695,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
     from services.exit_completeness import (
         json_null_documents,
         judge_table,
+        mixed_storage_classes,
         profile_extract,
         profile_rows,
         resolve_keys,
@@ -750,6 +751,8 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         finally:
             close()
         source.uncompared.update(unproven)
+        for column, why in mixed_storage_classes(endpoint, columns, engine).items():
+            source.uncompared.setdefault(column, why)  # SQLite: '1' next to 1 extracts alike (review 5, H-3)
         for column, count in json_null_documents(endpoint, types, engine).items():
             gaps.append(f"{column} holds {count} JSON null document(s), which the extract cannot tell from "
                         "SQL NULL, so its values were not compared exactly")

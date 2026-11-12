@@ -439,6 +439,41 @@ def json_null_documents(endpoint: Any, types: dict[str, str], engine: str) -> di
     return {c: int(n or 0) for c, n in zip(columns, row or []) if int(n or 0) > 0}
 
 
+_MIXED_CLASSES = ("holds values of more than one SQLite storage class ({classes}): the extract writes them alike "
+                  "(the text '1' and the integer 1 both as 1), so its values are not provable")
+
+
+def mixed_storage_classes(endpoint: Any, columns: list[str], engine: str) -> dict[str, str]:
+    """{column: why it is not provable} for SQLite columns holding more than one storage class (review 5, H-3).
+
+    SQLite stores each value in its own storage class whatever the column
+    declares, and its driver hands each back as it is stored, but an extract
+    cell or JSON value spells the text ``'1'`` and the integer ``1`` alike.
+    Such a column is named, never proven (one ``typeof`` scan of the table).
+    ``integer`` and ``real`` are one class here, a number: a ``NUMERIC(12,2)``
+    column stores ``5.00`` as the integer 5 and ``1.25`` as a real, and the
+    extract keeps each as a number (compared by value under its declared type).
+    """
+    if family_or_kind(engine) != "sqlite" or not columns:
+        return {}
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from connectors.sql_identifiers import quote_table_ref
+    from src.transfer.adapters import resolve_connector_config
+
+    db = get_sqlalchemy_engine({**dict(resolve_connector_config(endpoint)), "type": "sqlite"})
+    quote = db.dialect.identifier_preparer.quote_identifier
+    table = quote_table_ref(endpoint.table, getattr(endpoint, "schema", None) or None, dialect="sqlite")
+    classes = ", ".join(f"group_concat(DISTINCT CASE WHEN {quote(c)} IS NOT NULL THEN typeof({quote(c)}) END)"
+                        for c in columns)
+    with db.connect() as conn:
+        row = conn.execute(sa.text(f"SELECT {classes} FROM {table}")).fetchone()  # nosec B608 - quoted names
+    found = {c: sorted(set(str(v).split(","))) for c, v in zip(columns, row or []) if v}
+    return {c: _MIXED_CLASSES.format(classes=", ".join(k)) for c, k in found.items()
+            if len({"number" if x in {"integer", "real"} else x for x in k}) > 1}
+
+
 def catalog_json_columns(endpoint: Any) -> set[str] | None:
     """The columns the source catalog itself declares as its native ``json`` (``None``: catalog unread).
 

@@ -5,13 +5,19 @@
   ``amazon_rds_mysql``, ``mariadb``) is the same engine on the wire, so every
   engine-specific rule (the driver folds, the exact tokens, the server-text
   read) answers exactly as it does for the canonical name.
+* C-2: the driver folds are classified on what introspection reports.
+* H-3: a SQLite column holding more than one storage class (``'1'`` next to
+  ``1``) is named as not provable: the extract writes both alike.
 """
 
 from __future__ import annotations
 
+from tests.exit_background_guard import _no_exit_background_work_outlives_a_test  # noqa: F401
+
 import pytest
 
 from services.exit_completeness import digest_plan, profile_rows, server_text_columns
+from tests.test_exit_rehearsal_e2e import _run, world  # noqa: F401
 
 ALIASES = {
     "postgresql": ["postgres", "supabase", "neon", "amazon_rds_postgresql", "alloydb"],
@@ -115,3 +121,45 @@ def test_c2_the_mapper_outputs_themselves_are_named():
     assert "DATETIMEOFFSET(7)" in (adapter_fold(_sqlserver_to_logical("datetimeoffset(7)"), "sqlserver") or "")
     assert "TIME ZONE" in (adapter_fold(_oracle_to_logical("TIMESTAMP(6) WITH LOCAL TIME ZONE"), "oracle") or "")
     assert adapter_fold(_sqlserver_to_logical("datetime"), "sqlserver") is None
+
+
+# ------------------------------------- H-3: SQLite storage classes
+
+#: table -> (columns, rows): a column holding more than one storage class is named, never proven.
+SQLITE_MIXED = {
+    "untyped": ("id INTEGER PRIMARY KEY, v", [(1, 1), (2, "1")]),
+    "untyped_n": ("id INTEGER PRIMARY KEY, v", [(1, "7"), (2, 7.0), (3, None)]),
+}
+#: One storage class per column (NULL is no class): still proven.
+SQLITE_ONE_CLASS = {
+    "untyped_int": ("id INTEGER PRIMARY KEY, v", [(1, 1), (2, 2), (3, None)]),
+    "num_any": ("id INTEGER PRIMARY KEY, v ANY", [(1, 1), (2, "1")]),  # NUMERIC affinity stores '1' as 1
+    # integer and real are one class (a number): NUMERIC(12,2) stores 5.00 as 5 and 1.25 as a real.
+    "numeric": ("id INTEGER PRIMARY KEY, v NUMERIC(12,2)", [(1, "5.00"), (2, "1.25"), (3, None)]),
+    "txt": ("id INTEGER PRIMARY KEY, v TEXT", [(1, "007"), (2, "1e3"), (3, None)]),
+}
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "csv"])
+def test_h3_a_sqlite_column_holding_more_than_one_storage_class_is_named_not_provable(world, fmt):  # noqa: F811
+    import sqlite3
+
+    from services.exit_inventory import declare
+
+    # A CSV cell cannot keep TEXT '007' (the extract's read-back refuses it): one-class text is checked in JSONL.
+    shapes = {**SQLITE_MIXED, **{k: v for k, v in SQLITE_ONE_CLASS.items() if fmt == "jsonl" or k != "txt"}}
+    conn = sqlite3.connect(str(world["src"]))
+    with conn:
+        for name, (ddl, rows) in shapes.items():
+            conn.execute(f"CREATE TABLE {name} ({ddl})")  # nosec B608 - test table
+            conn.executemany(f"INSERT INTO {name} VALUES (?, ?)", rows)  # nosec B608
+    conn.close()
+    system = declare({"name": f"review 5 {fmt}", "source": {"connector_id": "c1"}, "extract_format": fmt,
+                      "tables": [{"name": t} for t in shapes], "exit_window_hours": 24},
+                     workspace_id="ws1", actor="owner@example.com")
+    tables = {t["name"]: t for t in _run(system)["tables"]}
+    for name in SQLITE_MIXED:
+        assert tables[name]["status"] == "not_proven", (name, tables[name]["status"], tables[name]["reason"])
+        assert "v holds values of more than one SQLite storage class" in tables[name]["reason"], tables[name]
+    for name in shapes.keys() - SQLITE_MIXED.keys():
+        assert tables[name]["status"] == "proven", (name, tables[name]["status"], tables[name]["reason"])
