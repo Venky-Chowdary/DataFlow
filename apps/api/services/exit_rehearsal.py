@@ -290,8 +290,16 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
         "required_roles": list(system.get("required_roles") or default_roles()),
         "tables": tables, "approvals": [], "signed": None, "_verify": None,
     })
+    taken = rehearsal.get("pii_acknowledgement") or None
+    if taken is None:
+        from services.exit_pii import note_lapse
+
+        note_lapse(system)  # an acknowledgement of an earlier definition is recorded as lapsed, for good
     audit("exit.rehearsal.started", system=system, actor=actor,
-          details={"rehearsal_id": rid, "trigger": trigger, "tables": len(tables)})
+          details={"rehearsal_id": rid, "trigger": trigger, "tables": len(tables),
+                   # Whether this run's extracts carry a PII acknowledgement, and whose.
+                   "pii_acknowledged": bool(taken), "pii_acknowledged_by": (taken or {}).get("actor"),
+                   "pii_acknowledged_at": (taken or {}).get("at")})
     engine = get_transfer_engine()
     launches: list[tuple[int, Any, str]] = []
     for index, table in enumerate(tables):
@@ -613,8 +621,48 @@ def _not_extracted(job: dict[str, Any], job_id: str) -> dict[str, str]:
 
     found = held_by_pii_gate(job)
     if found is not None:
-        return {"status": NEEDS_PII_REVIEW, "reason": held_reason(found, job_id)}
+        lapsed = (job.get("exit_pii_acknowledgement") or {}).get("lapsed")
+        reason = held_reason(found, job_id)
+        if lapsed:
+            reason = (f"The extract job {job_id} started after {lapsed}, so the PII gate held it. "
+                      + reason.split(": ", 1)[-1])
+        return {"status": NEEDS_PII_REVIEW, "reason": reason, "pii_held": _held_columns(found)}
     return {"status": "failed", "reason": _failed_reason(job, job_id)}
+
+
+def _held_columns(found: dict[str, list[str]]) -> list[dict[str, Any]]:
+    return [{"column": col, "categories": sorted({str(c) for c in cats or []})} for col, cats in sorted(found.items())]
+
+
+def _acknowledgement_gap(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any],
+                         job_id: str) -> dict[str, Any] | None:
+    """{status, reason, pii_held} when a completed extract's PII acknowledgement does not stand at settle.
+
+    The extract ran as an acknowledged transfer. It is proven only if that
+    acknowledgement still holds now (not withdrawn, not lapsed: review 3, M1)
+    and covers every column and category the gate found in this table (M2).
+    """
+    from services.exit_pii import NEEDS_PII_REVIEW, acknowledgement_lapsed, beyond_acknowledged, sensitive_fields
+
+    found = sensitive_fields(job)
+    request = job.get("transfer_request") if isinstance(job.get("transfer_request"), dict) else {}
+    if not found or not request.get("compliance_acknowledged"):
+        return None
+    action = ("A person acknowledges PII for this system again (who and why are audited and kept in the "
+              "evidence), then rehearses it again.")
+    lapsed = acknowledgement_lapsed(doc)
+    if lapsed:
+        return {"status": NEEDS_PII_REVIEW, "pii_held": _held_columns(found),
+                "reason": (f"The extract job {job_id} ran under a PII acknowledgement that no longer stands "
+                           f"({lapsed}), so what it wrote is not sealed as proven. {action}")}
+    extra = beyond_acknowledged(found, (doc.get("pii_acknowledgement") or {}).get("covers"), str(table["name"]))
+    if extra:
+        cols = "; ".join(f"{c} ({', '.join(cats)})" if cats else c for c, cats in list(sorted(extra.items()))[:10])
+        return {"status": NEEDS_PII_REVIEW, "pii_held": _held_columns(found),
+                "reason": (f"The extract job {job_id} found PII beyond what was acknowledged: {cols}"
+                           + (f" (+{len(extra) - 10} more)" if len(extra) > 10 else "")
+                           + f". What it wrote is not sealed as proven. {action}")}
+    return None
 
 
 def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> dict[str, str]:
@@ -648,6 +696,9 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
     out["extract_seconds"] = ds.get("elapsed_seconds")
     if str(job.get("status") or "").lower() != "completed":
         return {**out, **_not_extracted(job, job_id)}
+    gap = _acknowledgement_gap(doc, table, job, job_id)
+    if gap is not None:
+        return {**out, **gap}  # no part: an extract whose acknowledgement does not stand is not sealed
     part, local_path = _part(table["name"], ds)
     if part is None:
         return {**out, "status": "failed", "reason": "The extract job recorded no stored part."}
@@ -874,7 +925,8 @@ def trend(doc: dict[str, Any]) -> dict[str, Any]:
     sized = [p for p in points if p["rows"]]
     growth = (round(100.0 * (sized[-1]["rows"] - sized[-2]["rows"]) / sized[-2]["rows"], 2)
               if len(sized) >= 2 else None)
-    timed = [p for p in sized if p["measured_seconds"] is not None]
+    # Only proven runs measured an exit: a failed or partial run's clock and rows project nothing.
+    timed = [p for p in sized if p["measured_seconds"] is not None and p["verdict"] == "proven"]
     projection = None
     if len(timed) >= 2:
         latest, previous = timed[-1], timed[-2]
@@ -894,6 +946,8 @@ _UNMEASURED_TABLE: dict[str, Any] = {
     "row_set": {"source_sha256": None, "extract_sha256": None, "match": None},
     "control_totals": [], "differences": [], "extract_seconds": None, "part": None,
     "value_parity": {"method": None, "parity_verdict": None, "unexplained": None, "report": None},
+    # The columns (and categories) the PII gate named for a table that reads needs_pii_review.
+    "pii_held": [],
 }
 
 
@@ -918,11 +972,23 @@ def public(doc: dict[str, Any]) -> dict[str, Any]:
                                 "verify_seconds": None, "window_seconds": int(doc.get("window_seconds") or 0),
                                 "fits_window": None, "margin_pct": None,
                                 "statement": "Not measured yet: the rehearsal is still running."})
+    out["current"], out["stale_reason"] = _currency(doc)
     out["timeline"] = timeline(doc)
     out["trend"] = trend(doc)
     out["signoff"] = signoff_block(doc)
     out["evidence"] = evidence_block(doc)
     return out
+
+
+def _currency(doc: dict[str, Any]) -> tuple[bool | None, str | None]:
+    """(current, stale_reason): whether the system still has the definition this rehearsal ran against."""
+    system = exit_store.get(SYSTEMS, str(doc.get("system_id") or ""))
+    if not system:
+        return None, "The system was removed; this rehearsal is kept as evidence of what it was."
+    if doc.get("definition_sha256") and doc.get("definition_sha256") == definition_sha256(system):
+        return True, None
+    return False, ("The system's source connection, tables, keys, window or extract format changed since this "
+                   "rehearsal; it no longer proves the system as it is defined now. Rehearse it again.")
 
 
 # ------------------------------------------------------------ scheduler beat

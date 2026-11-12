@@ -117,6 +117,7 @@ def test_gap1_a_changed_definition_needs_a_new_acknowledgement_and_it_can_be_wit
     from services.exit_pii import withdraw
 
     system = _system(name="People", tables=[{"name": "people"}])
+    assert _run(system)["verdict"] == "needs_pii_review"  # the hold the acknowledgement is of (review 3, M2)
     _ack(system["id"])
     update(system["id"], {"tables": [{"name": "people"}, {"name": "events"}]}, actor="owner@example.com",
            expected_version=None)
@@ -132,6 +133,7 @@ def test_gap1_the_acknowledgement_routes_need_job_manage_and_workspace_write(ent
     db = ent.tmp / "sqlite" / "pii.sqlite"
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE people (id INTEGER PRIMARY KEY, ssn TEXT)")
+    conn.execute("INSERT INTO people VALUES (1, '078-05-1120')")
     conn.commit()
     conn.close()
     ws, other = ent.workspace("Exit PII"), ent.workspace("Exit PII elsewhere")
@@ -147,10 +149,23 @@ def test_gap1_the_acknowledgement_routes_need_job_manage_and_workspace_write(ent
     assert viewer.post(path, json=body).status_code == 403
     assert stranger.post(path, json=body).status_code == 404
     assert editor.post(path, json={"reason": "ok"}).status_code == 422
+    # Review 3, M2: nothing is held yet, so there is nothing to acknowledge (never a blank cheque).
+    early = editor.post(path, json=body)
+    assert early.status_code == 422 and "nothing to acknowledge" in early.json()["detail"]
+    started = editor.post(f"/api/v1/exit/systems/{sid}/rehearsals").json()
+    from services import exit_rehearsal
+
+    assert exit_rehearsal.join_background(120)
+    held = editor.get(f"/api/v1/exit/rehearsals/{started['id']}").json()
+    assert held["verdict"] == "needs_pii_review", held["verdict_reason"]
+    assert held["tables"][0]["pii_held"] and held["tables"][0]["pii_held"][0]["column"] == "ssn"
+    hold = editor.get(f"/api/v1/exit/systems/{sid}").json()["pii_hold"]
+    assert hold["rehearsal_id"] == started["id"] and hold["tables"][0]["table"] == "people"
     res = editor.post(path, json=body)
     assert res.status_code == 200, res.text
     ack = res.json()["pii_acknowledgement"]
     assert ack["actor"] == "exit-pii-editor@example.com" and ack["current"] is True
+    assert [c["column"] for c in ack["covers"][0]["columns"]] == ["ssn"] and ack["covers"][0]["table"] == "people"
     assert editor.delete(path).json()["pii_acknowledgement"] is None
     actions = {e["action"] for e in ent.audit(ws)}
     assert {"exit.system.pii_acknowledged", "exit.system.pii_acknowledgement_withdrawn"} <= actions

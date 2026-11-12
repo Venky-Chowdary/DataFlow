@@ -283,8 +283,15 @@ def update(system_id: str, body: dict[str, Any], *, actor: str, expected_version
         raise ExitInvalid("Nothing to change.")
 
     def apply(doc: dict[str, Any]) -> None:
+        before = definition_sha256(doc)
         doc.update(fields)
         doc["updated_at"], doc["updated_by"] = now_iso(), actor
+        if doc.get("pii_acknowledgement") and definition_sha256(doc) != before:
+            # A PII acknowledgement is of one definition; once that changed it has lapsed for good
+            # (changing the definition back does not bring it back).
+            from services.exit_pii import lapse
+
+            doc["pii_acknowledgement"] = lapse(doc["pii_acknowledgement"])
 
     try:
         updated, _ = exit_store.update(SYSTEMS, system_id, apply, expected_version=expected_version)
@@ -341,6 +348,17 @@ def connector_fingerprint(source: dict[str, Any], workspace_id: str) -> dict[str
     return {k: v for k, v in identity.items() if k not in {"credential_digest", "table", "collection"}}
 
 
+#: A read's own memo of the definition hash (never stored): one connector lookup per system per read.
+_DEFINITION_MEMO = "_definition_sha256"
+
+
+def with_definition(system: dict[str, Any]) -> dict[str, Any]:
+    """``system`` with its definition hash computed once for this read (the board asks for it several times)."""
+    if system.get(_DEFINITION_MEMO):
+        return system
+    return {**system, _DEFINITION_MEMO: definition_sha256(system)}
+
+
 def definition_sha256(system: dict[str, Any]) -> str:
     """What a rehearsal proves about a system: its source, its tables and keys, its window and format.
 
@@ -353,6 +371,8 @@ def definition_sha256(system: dict[str, Any]) -> str:
     import hashlib
     import json
 
+    if system.get(_DEFINITION_MEMO):
+        return str(system[_DEFINITION_MEMO])
     tables = sorted(({"name": str(t.get("name") or ""), "schema": t.get("schema") or None,
                       "key_columns": [str(k) for k in t.get("key_columns") or []]}
                      for t in system.get("tables") or []), key=lambda t: (t["name"], str(t["schema"] or "")))
@@ -403,6 +423,7 @@ def rehearsal_history(system: dict[str, Any], *, limit: int = 20) -> dict[str, A
 def readiness(system: dict[str, Any], rehearsals: list[dict[str, Any]] | None = None,
               now: datetime | None = None) -> dict[str, Any]:
     """SystemReadiness (contract 3), deterministic from the stored rehearsals."""
+    system = with_definition(system)
     rows = rehearsals if rehearsals is not None else rehearsals_of(system["id"])
     current = now or datetime.now(timezone.utc)
     running = next((r for r in rows if r.get("verdict") == "running"), None)
@@ -431,11 +452,15 @@ def readiness(system: dict[str, Any], rehearsals: list[dict[str, Any]] | None = 
 
 
 def public_system(system: dict[str, Any], rehearsals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    from services.exit_pii import view
+    from services.exit_pii import pending_hold, view
 
+    system = with_definition(system)
+    rows = rehearsals if rehearsals is not None else rehearsals_of(system["id"])
     out = {k: v for k, v in system.items() if not str(k).startswith("_") and k != "schedule_last_fired_at"}
     out["pii_acknowledgement"] = view(system)
-    out["readiness"] = readiness(system, rehearsals)
+    # What the PII gate holds now (the tables, columns and categories an acknowledgement would cover).
+    out["pii_hold"] = pending_hold(system, rows)
+    out["readiness"] = readiness(system, rows)
     return out
 
 
@@ -459,6 +484,7 @@ def board(systems: list[dict[str, Any]], *, now: datetime | None = None) -> dict
     rows: list[dict[str, Any]] = []
     upcoming: list[tuple[str, str, str]] = []
     for system in systems:
+        system = with_definition(system)  # the connector behind the system is resolved once per row
         ready = readiness(system, now=current)
         last = ready["last_rehearsal"] or {}
         tables = len(system.get("tables") or [])

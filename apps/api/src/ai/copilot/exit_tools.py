@@ -115,14 +115,21 @@ def explain_exit_rehearsal(rehearsal_id: str = "", system_id: str = "") -> "Tool
     if not rehearsal:
         return _result(name, error="That rehearsal or system was not found in this workspace.")
     from services.exit_evidence import signoff_block
-    from services.exit_rehearsal import settle
+    from services.exit_rehearsal import _currency, settle
 
-    rehearsal = settle(rehearsal["id"], inline=False) or rehearsal
+    rehearsal = settle(rehearsal["id"], inline=False, start=False) or rehearsal  # a read tool starts nothing
     duration = rehearsal.get("duration") or {}
     seal = rehearsal.get("seal") or {}
+    current, stale_reason = _currency(rehearsal)
+    ack = rehearsal.get("pii_acknowledgement") if isinstance(rehearsal.get("pii_acknowledgement"), dict) else None
     return _result(name, output={
         "rehearsal_id": rehearsal["id"], "system": rehearsal.get("system_name"), "n": rehearsal.get("n"),
         "verdict": rehearsal.get("verdict"), "verdict_reason": rehearsal.get("verdict_reason"),
+        # Whether the system still has the definition this rehearsal ran against (a stale one proves the past).
+        "current": current, "stale": current is False, "stale_reason": stale_reason,
+        # Whose PII acknowledgement its extracts ran under (never the acknowledged data).
+        "pii_acknowledgement": ({"actor": ack.get("actor"), "at": ack.get("at"), "reason": ack.get("reason")}
+                                if ack else None),
         "completeness": (rehearsal.get("completeness") or {}).get("statement"),
         "tables": [
             {k: t.get(k) for k in ("name", "status", "reason", "rows_source", "rows_extracted")}

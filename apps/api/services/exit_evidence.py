@@ -39,6 +39,10 @@ def content_sha256(doc: dict[str, Any]) -> str:
         "measured_seconds": (doc.get("duration") or {}).get("measured_seconds"),
         "window_seconds": (doc.get("duration") or {}).get("window_seconds"),
     }
+    if doc.get("pii_acknowledgement"):
+        # Who acknowledged PII for these extracts, and what it covered, is part of what a signer attests.
+        # Present only when there is one, so the digest of a rehearsal without one is unchanged.
+        body["pii_acknowledgement"] = doc["pii_acknowledgement"]
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -91,7 +95,7 @@ def _pack_body(doc: dict[str, Any], approvals: list[dict[str, Any]], *, signed_a
 
     system = exit_store.get(exit_store.SYSTEMS, str(doc.get("system_id") or "")) or {}
     view = public(doc)
-    for key in ("trend", "evidence"):
+    for key in ("trend", "evidence", "current", "stale_reason"):  # computed at read time: not evidence
         view.pop(key, None)
     view["signoff"] = {**view["signoff"], "approvals": approvals, "invalidated_approvals": [],
                        "status": "signed", "blocked_reason": None, "signature": None, "signed_at": signed_at}
