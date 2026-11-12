@@ -32,6 +32,8 @@ def _run_suite(tmp_path: Path, env_overrides: dict[str, str | None]) -> tuple[Pa
     temp_root = tmp_path / "tmp"
     temp_root.mkdir()
     env = {**os.environ, "SUITE_DIR_REPORT": str(report), "TMPDIR": str(temp_root)}
+    # Not the parent's CI shard: the child's own split could drop the probe.
+    env.pop("DATAFLOW_TEST_SHARD", None)
     for key, value in env_overrides.items():
         if value is None:
             env.pop(key, None)
@@ -46,6 +48,7 @@ def _run_suite(tmp_path: Path, env_overrides: dict[str, str | None]) -> tuple[Pa
     finally:
         probe.unlink(missing_ok=True)
     assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+    assert "1 passed" in done.stdout, done.stdout[-2000:]
     leftovers = {p.name for p in temp_root.iterdir() if p.name.startswith("df-suite-data-")}
     return Path(report.read_text(encoding="utf-8")), leftovers
 
