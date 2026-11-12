@@ -162,12 +162,12 @@ class SharedRecordSet(SharedDoc):
             cached is not None
             and ttl > 0
             and not getattr(self._scope, "depth", 0)
-            and _sds._now() - cached[0] < ttl
+            and _sds._clock() - cached[0] < ttl
         ):
             items, fences = cached[1], cached[2]
         else:
             items, fences = self._read(coll)
-            self._cache = (_sds._now(), items, fences)
+            self._cache = (_sds._clock(), items, fences)
         return self._tracked(items, fences)
 
     @staticmethod

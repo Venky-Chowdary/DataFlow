@@ -44,9 +44,17 @@ RELEASE_AFTER = 7.0
 FAST = 1.0
 #: How much slower than its own no-hang baseline a route may answer during
 #: the hang, when that is more than FAST (a loaded runner is slow before the
-#: hang too). The limit never reaches the time a blocked loop takes to free.
+#: hang too).
 SLOWDOWN = 5.0
-BLOCKED = RELEASE_AFTER / 2
+#: Absolute ceiling for a route, whatever its baseline. In the second test a
+#: route that waits behind a blocked loop waits until the black hole lets go
+#: (RELEASE_AFTER, 7 s) from DEADLINE + 1.5 = 3.5 s: 3.5 s. In the first test
+#: a blocked loop wakes the 0.5 s sleep at the connector deadline at the
+#: earliest (DEADLINE, 2 s), 1.5 s late, which the event-loop bound (FAST,
+#: absolute) refuses. The slowest healthy route call seen on a loaded CI
+#: runner was 1.1 s (the first request of the process). 2 s leaves that room
+#: and is well below 3.5 s; the old RELEASE_AFTER / 2 was exactly 3.5 s.
+CEILING = 2.0
 #: The loop's default executor (MCP request threads), kept small and fixed.
 MCP_THREADS = 3
 
@@ -154,10 +162,11 @@ def _limits(baseline: dict[str, float]) -> dict[str, float]:
     started through its lifespan) and how loaded the runner was: CI saw
     ``health`` at 1.1s with the event loop on time and every other route in
     milliseconds. The same calls are therefore made once before the hang, and
-    each route is held to its own baseline. Pre-fix, the loop stays blocked
-    until the black hole lets go (RELEASE_AFTER), far above any limit here.
+    each route is held to its own baseline, and never more than CEILING.
+    Pre-fix, the loop stays blocked until the black hole lets go
+    (RELEASE_AFTER), far above any limit here.
     """
-    return {route: min(BLOCKED, max(FAST, SLOWDOWN * seconds)) for route, seconds in baseline.items()}
+    return {route: min(CEILING, max(FAST, SLOWDOWN * seconds)) for route, seconds in baseline.items()}
 
 
 def _assert_responsive(measured: dict[str, float], baseline: dict[str, float]) -> None:

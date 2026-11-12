@@ -66,6 +66,24 @@ or accept per-pod behaviour with
 replica with the HPA off needs neither. Docker Compose mounts one volume in
 every service and acknowledges this itself.
 
+## Metadata database connection
+
+`data.documentdb.engine: documentdb` (set in `values-production.yaml`) tells
+the chart it talks to Amazon DocumentDB: the connection uses `tls=true` and
+`retryWrites=false`. Left empty, the chart assumes a self-hosted MongoDB
+replica set and keeps TLS off, as earlier versions of the chart did, unless
+`data.documentdb.tls` is `true`. An upgrade therefore does not switch an
+existing non-TLS MongoDB to TLS.
+
+## Shutdown budget
+
+On SIGTERM the API waits `api.gracefulShutdownSeconds` (10) for open
+connections (job progress streams end at once and the browser reconnects),
+then stops its background work within `DATAWRAP_API_SHUTDOWN_BUDGET_SECONDS`
+(25). With `api.preStopSleepSeconds` (5) that is 40 s, inside the 45 s
+termination grace period; the chart refuses a grace period that does not
+leave 5 s of margin.
+
 ## Upgrading from a build that kept these stores in files
 
 On the first start of this build, the first process to reach an empty shared

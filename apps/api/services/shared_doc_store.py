@@ -158,7 +158,13 @@ def _dumps(data: Any) -> str:
 
 
 def _now() -> float:
+    """Wall-clock time, for timestamps stored with a document."""
     return time.time()
+
+
+def _clock() -> float:
+    """Monotonic time, for the read cache: a clock step must not stretch its window."""
+    return time.monotonic()
 
 
 def _is_duplicate(exc: Exception) -> bool:
@@ -295,7 +301,7 @@ class SharedDoc:
             cached is not None
             and ttl > 0
             and not getattr(self._scope, "depth", 0)
-            and _now() - cached[0] < ttl
+            and _clock() - cached[0] < ttl
         ):
             return tracked(json.loads(cached[2]), cached[1])
         rev, body = self._read(coll)
@@ -303,7 +309,7 @@ class SharedDoc:
             # Nothing shared yet: the store's own "empty" shape, at revision 0
             # so the first save is an insert that loses to a concurrent one.
             return tracked(self._empty(), 0)
-        self._cache = (_now(), rev, body)
+        self._cache = (_clock(), rev, body)
         return tracked(json.loads(body), rev)
 
     def _read(self, coll: Any) -> tuple[int, str | None]:
@@ -347,7 +353,7 @@ class SharedDoc:
             new_rev = expected + 1
         if hasattr(data, "rev"):
             data.rev = new_rev
-        self._cache = (_now(), new_rev, body)
+        self._cache = (_clock(), new_rev, body)
 
     def retrying(self, fn: F) -> F:
         """Run a read-modify-write function again when its write lost the swap.
@@ -613,7 +619,8 @@ class SharedLog:
 
     def _insert_lines(self, coll: Any, raw: bytes) -> int:
         inserted = 0
-        base = time.time_ns() - 10**12  # imported lines sort before anything appended live
+        # Imported lines are numbered from 0, so they sort before every record
+        # appended live (whose seq is the wall clock in ns), however old.
         seen: dict[str, int] = {}
         for index, line in enumerate(raw.decode("utf-8", errors="replace").splitlines()):
             line = line.strip()
@@ -630,7 +637,7 @@ class SharedLog:
             seen[line] = seen.get(line, 0) + 1
             doc_id = hashlib.sha256(f"{self.name}|{seen[line]}|{line}".encode()).hexdigest()
             try:
-                coll.insert_one(self._doc(record, doc_id=doc_id, seq=base + index))
+                coll.insert_one(self._doc(record, doc_id=doc_id, seq=index))
                 inserted += 1
             except Exception as exc:
                 if not _is_duplicate(exc):

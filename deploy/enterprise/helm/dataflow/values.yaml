@@ -168,13 +168,16 @@ data:
     port: 27017
     database: dataflow
     username: dataflow
-    # Amazon DocumentDB is provisioned with TLS on and does not support
-    # retryable writes. Mount the Amazon RDS CA bundle (extraVolumes below) and
-    # name it in tlsCAFile when the image's trust store does not carry it.
-    tls: true
+    # "documentdb" for Amazon DocumentDB (values-production.yaml sets it): it is
+    # provisioned with TLS on and does not support retryable writes, so the
+    # connection uses tls=true&retryWrites=false. Mount the Amazon RDS CA bundle
+    # (extraVolumes below) and name it in tlsCAFile when the image's trust
+    # store does not carry it. Empty: a self-hosted MongoDB replica set, TLS
+    # as set in `tls` (off by default, as before this setting existed).
+    engine: ""
+    tls: false
     tlsCAFile: ""
     replicaSet: rs0
-    retryWrites: false
 
 objectStore:
   s3:

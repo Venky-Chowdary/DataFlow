@@ -61,7 +61,7 @@ def pool(monkeypatch):
 
 
 def test_the_transfer_pool_is_one_of_the_shutdown_stoppers():
-    names = [name for name, _stop in background_lifecycle._stoppers()]
+    names = [name for name, *_rest in background_lifecycle._stoppers()]
     assert "transfer pool" in names
     assert names.index("transfer pool") > names.index("orphan sweeper"), "sweepers stop first"
 

@@ -193,9 +193,16 @@ def check_secrets_are_always_wired(objects: list[dict[str, Any]]) -> None:
             if "valueFrom" in entry:
                 assert entry["valueFrom"]["secretKeyRef"]["name"] == secret_refs[0]
             defined.add(entry["name"])
-        mongo = _env(container)["MONGODB_URL"]
-        assert "tls=true" in mongo and "ssl=false" not in mongo, "DocumentDB is provisioned with TLS on"
-        assert "retryWrites=false" in mongo
+    # TLS and retryable writes follow what the chart is told the database is
+    # (ops review, lows): Amazon DocumentDB (production values) is provisioned
+    # with TLS on and has no retryable writes; a self-hosted MongoDB keeps the
+    # chart's earlier TLS-off connection unless `tls` is set.
+    for component in PYTHON_COMPONENTS:
+        mongo = _env(_container(_deployments(objects)[component]))["MONGODB_URL"]
+        if "FILL_DOCDB_ENDPOINT" in mongo:
+            assert "tls=true" in mongo and "retryWrites=false" in mongo, "DocumentDB is provisioned with TLS on"
+        else:
+            assert "tls=false" in mongo and "retryWrites=false" not in mongo, "self-hosted MongoDB: TLS as configured"
 
 
 def check_pod_monitor_is_authenticated(objects: list[dict[str, Any]]) -> None:

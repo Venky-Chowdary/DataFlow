@@ -99,7 +99,7 @@ connection strings below always resolve.
 - name: DATABASE_URL
   value: "postgresql://{{ .Values.data.rds.username }}:$(POSTGRES_PASSWORD)@{{ .Values.data.rds.host }}:{{ .Values.data.rds.port }}/{{ .Values.data.rds.database }}"
 - name: MONGODB_URL
-  value: "mongodb://{{ .Values.data.documentdb.username }}:$(MONGODB_PASSWORD)@{{ .Values.data.documentdb.host }}:{{ .Values.data.documentdb.port }}/{{ .Values.data.documentdb.database }}?replicaSet={{ .Values.data.documentdb.replicaSet }}&tls={{ .Values.data.documentdb.tls }}&retryWrites={{ .Values.data.documentdb.retryWrites }}{{ if .Values.data.documentdb.tlsCAFile }}&tlsCAFile={{ .Values.data.documentdb.tlsCAFile }}{{ end }}"
+  value: "mongodb://{{ .Values.data.documentdb.username }}:$(MONGODB_PASSWORD)@{{ .Values.data.documentdb.host }}:{{ .Values.data.documentdb.port }}/{{ .Values.data.documentdb.database }}?replicaSet={{ .Values.data.documentdb.replicaSet }}{{ if eq .Values.data.documentdb.engine "documentdb" }}&tls=true&retryWrites=false{{ else if .Values.data.documentdb.tls }}&tls=true{{ else }}&tls=false{{ end }}{{ if .Values.data.documentdb.tlsCAFile }}&tlsCAFile={{ .Values.data.documentdb.tlsCAFile }}{{ end }}"
 - name: DATAFLOW_S3_BUCKET
   value: {{ .Values.objectStore.s3.bucket | quote }}
 - name: AWS_REGION
