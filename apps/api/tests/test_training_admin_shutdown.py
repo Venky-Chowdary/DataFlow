@@ -186,3 +186,33 @@ def test_sync_admin_run_runs_on_the_runtime_thread_off_the_event_loop(tmp_path, 
         assert agent.thread is not None and agent.thread.name == "datawrap-training"
         assert agent.stop_event is runtime.stop_event, "the run must carry the runtime's stop event"
     assert runtime.stop_event.is_set(), "the lifespan must stop the runtime the admin run used"
+
+
+def test_background_admin_run_is_tracked_so_shutdown_cancels_it(monkeypatch):
+    """``POST /training-agent/run`` returns at once; its task belongs to the runtime (mutant T3)."""
+    import asyncio
+
+    from src.ai.training.training_runtime import TrainingRuntime
+    from src.ai.training.training_scheduler import start_admin_training
+
+    agent = _GatedSpin()  # ignores the stop event until released
+    _use_agent(monkeypatch, agent)
+    seen: dict = {}
+
+    async def main() -> None:
+        runtime = TrainingRuntime()
+        task = start_admin_training(runtime, include_embedding_tune=False, force=True)
+        while not agent.started.is_set():
+            await asyncio.sleep(0.01)
+        await runtime.shutdown(join_seconds=0.2)
+        seen["done"], seen["cancelled"] = task.done(), task.cancelled()
+
+    try:
+        asyncio.run(main())
+    finally:
+        agent.release.set()
+        agent.exited.wait(10)
+    assert seen == {"done": True, "cancelled": True}, (
+        f"shutdown left the background admin task running: {seen}"
+    )
+    assert agent.calls == [(False, True)]

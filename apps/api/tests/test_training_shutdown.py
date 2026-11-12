@@ -382,3 +382,105 @@ def test_empty_datawrap_training_does_not_start_training(tmp_path, monkeypatch):
         assert _wait_for(lambda: getattr(app.state, "ready", False), 60), "warm-up never finished"
         started = [t.get_name() for t in app.state.training_runtime._tasks]
     assert started == [], f"training started with an empty DATAWRAP_TRAINING: {started}"
+
+
+# --- TrainingRuntime contract (PR 410 review round 2, L-T3: mutants T4, T5) ---
+
+
+def _deaf_until(gate: threading.Event, started: threading.Event, then=None):
+    """A run that ignores the stop event until ``gate`` opens."""
+
+    def run():
+        started.set()
+        gate.wait(10)
+        if isinstance(then, BaseException):
+            raise then
+        return then
+
+    return run
+
+
+def test_shutdown_waits_briefly_for_a_stopping_run_to_leave_its_thread():
+    """A run that sees the stop and needs a moment to unwind is joined, not abandoned."""
+    from src.ai.training.training_runtime import TrainingRuntime
+
+    seen: dict = {}
+
+    async def main() -> None:
+        runtime = TrainingRuntime()
+
+        def run() -> str:
+            seen["thread"] = threading.current_thread()
+            runtime.stop_event.wait(10)
+            time.sleep(0.3)  # unwinding: close files, drop temp output
+            return "stopped"
+
+        task = asyncio.ensure_future(runtime.run(run))
+        while "thread" not in seen:
+            await asyncio.sleep(0.01)
+        t0 = time.monotonic()
+        await runtime.shutdown(join_seconds=5.0)
+        seen["shutdown_seconds"] = time.monotonic() - t0
+        seen["alive_after_shutdown"] = seen["thread"].is_alive()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(main())
+    assert not seen["alive_after_shutdown"], "shutdown returned before the stopping run left its thread"
+    assert seen["shutdown_seconds"] < 5.0
+
+
+def test_shutdown_wait_for_a_deaf_run_is_bounded():
+    from src.ai.training.training_runtime import TrainingRuntime
+
+    gate, started = threading.Event(), threading.Event()
+    seen: dict = {}
+
+    async def main() -> None:
+        runtime = TrainingRuntime()
+        task = asyncio.ensure_future(runtime.run(_deaf_until(gate, started, "done")))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        t0 = time.monotonic()
+        await runtime.shutdown(join_seconds=0.3)
+        seen["shutdown_seconds"] = time.monotonic() - t0
+        seen["thread_alive"] = bool(runtime._threads)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    try:
+        asyncio.run(main())
+    finally:
+        gate.set()
+    assert seen["thread_alive"], "the deaf run cannot have left yet"
+    assert 0.25 <= seen["shutdown_seconds"] < 2.0, seen
+
+
+@pytest.mark.parametrize("outcome", ["done", RuntimeError("run failed")], ids=["result", "exception"])
+def test_a_run_that_ends_after_its_awaiting_task_was_cancelled_is_dropped_quietly(outcome):
+    """A cancelled request leaves a cancelled future; the run's late result must not be set on it."""
+    from src.ai.training.training_runtime import TrainingRuntime
+
+    gate, started = threading.Event(), threading.Event()
+    loop_errors: list[dict] = []
+
+    async def main() -> None:
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, ctx: loop_errors.append(ctx))
+        runtime = TrainingRuntime()
+        task = asyncio.ensure_future(runtime.run(_deaf_until(gate, started, outcome)))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        gate.set()  # the run now finishes and posts its outcome to the loop
+        deadline = time.monotonic() + 5
+        while runtime._threads and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        for _ in range(5):  # let the posted callback run
+            await asyncio.sleep(0.01)
+
+    try:
+        asyncio.run(main())
+    finally:
+        gate.set()
+    assert loop_errors == [], [str(ctx.get("exception") or ctx.get("message")) for ctx in loop_errors]
