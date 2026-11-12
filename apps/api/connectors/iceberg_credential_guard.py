@@ -178,6 +178,15 @@ def guarded_catalog(base: type) -> type:
             check_server_oauth_uri(own, self.properties, SERVER_CONFIG)
             check_storage_hosts(own, self.properties, SERVER_CONFIG)
 
+        if hasattr(base, "_config_headers"):  # REST: the first use of each new session
+
+            def _config_headers(self, session: Any) -> None:
+                from connectors.iceberg_rest_redirects import guard_session
+
+                # Before the OAuth2 token POST: no redirect off the catalog's origin (review 3, M2).
+                guard_session(session, self._df_own.get("uri") or self.properties.get("uri"))
+                super()._config_headers(session)
+
         def _init_sigv4(self, session: Any) -> None:  # REST: after the server's overrides
             check_catalog_properties("rest", {**self.properties, "rest.sigv4-enabled": "true"})
             super()._init_sigv4(session)
