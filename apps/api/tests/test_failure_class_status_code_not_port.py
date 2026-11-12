@@ -139,3 +139,34 @@ def test_a_compact_429_is_still_rate_limiting(message):
 def test_a_port_is_not_a_status_even_when_it_is_the_code(message):
     got = classify_failure(error=message)
     assert got.kind == UNKNOWN, (message, got)
+
+
+# Review round 2, L-F: a position, a row count, a labelled port or an id is not
+# a status either. Each message says nothing else, so it stays unclassified.
+@pytest.mark.parametrize("code", ["403", "429"])
+@pytest.mark.parametrize("template", [
+    "SQL compilation error: syntax error line 1 at position {code} unexpected 'x'.",
+    "inserted {code} rows before: something odd",
+    "port: {code} failed: something odd",
+    "port={code} something odd",
+    "row id={code} something odd",
+])
+def test_a_position_count_port_or_id_is_not_a_status(template, code):
+    message = template.format(code=code)
+    got = classify_failure(error=message)
+    assert got.kind == UNKNOWN, (message, got)
+
+
+# The digits that follow the code keep it a number (mutants the review's pass
+# found untested): a decimal, a hyphenated serial, a path segment.
+@pytest.mark.parametrize("message", [
+    "value 403.5 something odd",
+    "batch 403-1 something odd",
+    "GET /v1/403 something odd",
+    "value 429.5 something odd",
+    "batch 429-1 something odd",
+    "GET /v1/429 something odd",
+])
+def test_digits_after_the_code_or_a_path_before_it_are_not_a_status(message):
+    got = classify_failure(error=message)
+    assert got.kind == UNKNOWN, (message, got)

@@ -46,16 +46,18 @@ def _http_status(code: str) -> str:
 
     Not a status: digits inside a number or name (``wh_4031``, ``40312``), a
     dotted address or path (``10.0.0.7``, ``/v1/403x``), a hyphenated name
-    (``db-403.internal``), or after ``port ``. A colon is not excluded: compact
-    JSON and logs write ``"code":403`` and ``status:429``, and a port of
+    (``db-403.internal``), after ``port ``, ``port: ``, ``port=``, ``position ``
+    or ``id=``, or before ``rows`` (``inserted 403 rows``). A colon is not
+    excluded: compact JSON and logs write ``"code":403`` and ``status:429``, and a port of
     exactly 403 or 429 is near-impossible (``host:4290`` is still excluded by
     the digit after it). ``HTTP/403``, ``HTTP-429`` and ``E403`` are statuses
     by their prefix, and ``403-forbidden`` by the word after it. Matched
     against lower-cased text.
     """
     return (
-        rf"(?:(?<![\w./-])(?<!port )|(?<=\bhttp[/-])|(?<=\be))"
-        rf"{code}(?!\w|-\d|\.\d)"
+        rf"(?:(?<![\w./-])(?<!port )(?<!port: )(?<!port=)(?<!position )(?<!id=)"
+        rf"|(?<=\bhttp[/-])|(?<=\be))"
+        rf"{code}(?!\w|-\d|\.\d| rows?\b)"
     )
 
 
