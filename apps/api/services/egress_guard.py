@@ -786,6 +786,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
 
     from connectors.mysql_options import connector_option_refusal
+    from services.google_credentials_policy import google_connector_refusal
 
     platform_credentials = (
         default_credentials_refusal(data)
@@ -796,6 +797,8 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         or connector_option_refusal(
             data, mysql_family=_dials_mysql_sockets(str(data.get("type") or data.get("format") or ""))
         )
+        # BigQuery / GCS: never the host's Google identity or key files (follow-up review 2, BQ).
+        or google_connector_refusal(data)
     )
     if platform_credentials:
         return platform_credentials
