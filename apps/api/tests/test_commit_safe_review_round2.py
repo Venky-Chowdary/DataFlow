@@ -691,3 +691,46 @@ def test_nothing_to_re_read_only_when_every_reported_row_was_checked():
     assert "3 of them" in partly.reason or "3 of 5" in partly.reason, partly.reason
     whole = _plan(csw.LateRows(count=5, min_cursor=None, undelivered=0, checked=5, rule="horizon"))
     assert not whole.replays and "nothing to re-read" in whole.reason, whole
+
+
+# --------------------------------------------------------------------------
+# PostgreSQL < 16 — no pg_stat_get_backend_subxact: the horizon rule, said
+# --------------------------------------------------------------------------
+
+
+def test_server_without_the_subtransaction_function_uses_the_horizon_and_says_so(
+    isolated, pg, monkeypatch
+):
+    """Simulated PostgreSQL 15: the subtransaction function does not exist.
+    The bound falls back to the horizon rule and the next run's evidence
+    names why."""
+    from services import commit_safe_window as csw
+
+    monkeypatch.setattr(
+        csw, "_PG_SUBXACT_SQL",
+        csw._PG_SUBXACT_SQL.replace("pg_stat_get_backend_subxact(", "pg_stat_get_backend_subxact_absent("),
+    )
+    _sql(f'CREATE TABLE "{SCHEMA}".o16 (id bigint PRIMARY KEY, v text)')
+    _sql(f'CREATE TABLE "{SCHEMA}".other (id int)')
+    _sql(f"INSERT INTO \"{SCHEMA}\".o16 SELECT g, 'r' FROM generate_series(1, 5) g")
+    writer = _connect(autocommit=False)
+    try:
+        writer.cursor().execute(f'INSERT INTO "{SCHEMA}".other VALUES (1)')  # holds an xid
+        _sql(f'INSERT INTO "{SCHEMA}".other VALUES (2)')  # commits after it: it is listed
+        bound = csw.capture_pg_bound(_pg_cfg())
+        assert bound.get("xip") and bound.get("open_subxacts") is None, bound
+        assert bound.get("horizon_reason") == csw.SUBXACT_FUNCTION_MISSING
+        assert csw.late_row_rule(bound)[0] == "horizon"
+        first = _run(isolated, "o16", "o16_out", cursor="id")
+        assert first.success, first.error
+    finally:
+        writer.rollback()
+        writer.close()
+    _sql(f"INSERT INTO \"{SCHEMA}\".o16 VALUES (6, 'n')")
+    second = _run(isolated, "o16", "o16_out", cursor="id")
+    assert second.success, second.error
+    window = _window(second)
+    assert window.get("late_row_rule") == "horizon", window
+    assert "PostgreSQL 16" in window.get("reason", ""), window
+    assert window.get("horizon_reason") == csw.SUBXACT_FUNCTION_MISSING, window
+    assert _missing("o16", "o16_out") == []

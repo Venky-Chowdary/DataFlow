@@ -264,6 +264,8 @@ class CommitSafeWindow:
             out["late_rows_checked"] = int(self.late_rows_checked)
         if self.late_row_rule:
             out["late_row_rule"] = self.late_row_rule
+            if self.late_row_rule == "horizon" and self.previous_bound.get("horizon_reason"):
+                out["horizon_reason"] = str(self.previous_bound["horizon_reason"])
         if self.probe_error:
             out["probe_error"] = self.probe_error
         if rows_replayed is not None:
@@ -747,6 +749,11 @@ def _plan_pg(
             " (the snapshot's in-progress list was too long to store, so rows are "
             "judged against its horizon)"
         )
+    elif late.rule == "horizon" and previous.get("horizon_reason"):
+        floor_note += (
+            f" (rows are judged against the snapshot's horizon: "
+            f"{previous['horizon_reason']})"
+        )
     judged = dict(
         late_rows_detected=int(late.count),
         late_rows_checked=late.checked,
@@ -925,13 +932,14 @@ def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
         logger.warning("commit-safe window: source connect failed: %s", exc)
         return {"error": f"{type(exc).__name__}: {exc}"[:300]}
     open_subxacts: int | None = None
+    notes: list[str] = []
     try:
         with conn.cursor() as cur:
             cur.execute(_PG_SNAPSHOT_SQL, (PG_XIP_MAX + 1,))
             row = cur.fetchone()
             xip = [str(x) for x in (row[2] if row else None) or []]
             if row and row[0] and len(xip) <= PG_XIP_MAX:
-                open_subxacts = _open_subxacts(cur, xip)
+                open_subxacts = _open_subxacts(cur, xip, notes)
     except Exception as exc:  # noqa: BLE001
         logger.warning("commit-safe window: snapshot horizon unreadable: %s", exc)
         return {"error": f"{type(exc).__name__}: {exc}"[:300]}
@@ -950,6 +958,9 @@ def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
     }
     if len(xip) <= PG_XIP_MAX:
         bound.update(xip=xip, xip_complete=True, open_subxacts=open_subxacts)
+        if notes:
+            # Why the next run judges rows on the horizon, in its evidence.
+            bound["horizon_reason"] = notes[0]
     else:
         # Too long to store: the next run judges rows against the horizon,
         # and its evidence says so.
@@ -957,7 +968,19 @@ def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
     return bound
 
 
-def _open_subxacts(cur: Any, xip: list[str]) -> int | None:
+#: Evidence wording when the server cannot report open subtransactions.
+SUBXACT_FUNCTION_MISSING = (
+    "this server cannot report open subtransactions (pg_stat_get_backend_subxact "
+    "needs PostgreSQL 16 or later)"
+)
+SUBXACT_UNMATCHED = (
+    "a transaction in progress at the capture was not found running in a backend "
+    "(prepared, finished, or not visible to this role), so its open subtransactions "
+    "could not be counted"
+)
+
+
+def _open_subxacts(cur: Any, xip: list[str], notes: list[str] | None = None) -> int | None:
     """Subtransactions open under the snapshot's in-progress transactions, or None.
 
     Read after the snapshot. A subtransaction is counted while its top-level
@@ -965,8 +988,10 @@ def _open_subxacts(cur: Any, xip: list[str]) -> int | None:
     transaction is still found running in a backend; otherwise (finished,
     prepared, or not visible to this role) the answer is None and the horizon
     rule applies. Needs PostgreSQL 16 (``pg_stat_get_backend_subxact``); on an
-    older server the answer is None as well.
+    older server the answer is None as well. ``notes`` receives why the answer
+    is None, for the run's evidence.
     """
+    said = notes if notes is not None else []
     wanted = sorted({int(x) % 4294967296 for x in xip})
     if not wanted:
         return 0
@@ -975,8 +1000,17 @@ def _open_subxacts(cur: Any, xip: list[str]) -> int | None:
         matched, count, overflowed = cur.fetchone()
     except Exception as exc:  # noqa: BLE001 — unknown, so the horizon rule applies
         logger.info("commit-safe window: open subtransactions unreadable: %s", exc)
+        missing = str(getattr(exc, "pgcode", "") or "") == "42883" or (
+            "pg_stat_get_backend_subxact" in str(exc) and "does not exist" in str(exc)
+        )
+        said.append(
+            SUBXACT_FUNCTION_MISSING
+            if missing
+            else f"open subtransactions could not be read ({type(exc).__name__})"
+        )
         return None
     if int(matched or 0) != len(wanted):
+        said.append(SUBXACT_UNMATCHED)
         return None
     return int(count or 0) + (1 if overflowed else 0)
 
