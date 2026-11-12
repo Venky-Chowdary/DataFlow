@@ -249,9 +249,14 @@ horizontalPodAutoscaler:
     scaleDownStabilizationSeconds: 600
     scaleDownPeriodSeconds: 120
 
-# Prometheus Operator PodMonitor. /metrics is not public: it needs a workspace
-# API key whose role holds workspace.manage, sent as a bearer token. Store that
-# key in the pods' Secret under metrics.apiKeySecretKey.
+# Prometheus Operator PodMonitor. /metrics is not public: it needs an API key
+# whose role holds workspace.manage, sent as a bearer token. The
+# deployment-wide series (per-route HTTP traffic, job gauges) are every
+# tenant's, so they are only served to a platform administrator's key (one a
+# platform admin mints outside any workspace); a workspace key gets the
+# process counters only. Store the key in the pods' Secret under
+# metrics.apiKeySecretKey. The job gauges come from one process, the
+# scheduler.
 serviceMonitor:
   enabled: false
 

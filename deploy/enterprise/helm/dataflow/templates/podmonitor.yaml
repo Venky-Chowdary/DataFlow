@@ -15,8 +15,9 @@ spec:
         operator: In
         values: [api, worker, cdc-worker, scheduler]
   podMetricsEndpoints:
-    # /metrics is authenticated (workspace.manage). The bearer token is a
-    # workspace API key stored in the pods' Secret.
+    # /metrics is authenticated (workspace.manage). The bearer token is an
+    # API key stored in the pods' Secret; a platform administrator's key also
+    # gets the deployment-wide series (HTTP traffic, job gauges).
     - port: http
       path: /metrics
       authorization:

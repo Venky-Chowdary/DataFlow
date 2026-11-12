@@ -562,6 +562,8 @@ JOB_STATUS_LABELS: tuple[str, ...] = (
     "completed_with_quarantine", "completed_with_warnings", "failed", "cancelled",
 )
 STORE_GAUGE_TTL_SECONDS = 10.0
+#: Server-side time limit for the job-count aggregation.
+STORE_QUERY_MAX_MS = 5000
 _RUNNING_SCAN_LIMIT = 200
 _store_cache: dict[str, Any] = {"at": 0.0, "value": None}
 
@@ -589,14 +591,24 @@ def _read_store_gauges() -> dict[str, Any]:
     worker fleet the API pods run no transfers and their counters stay at
     zero. These come from the store every process shares.
     """
+    from services.control_plane_store import mongo_collection
     from services.mongodb_service import get_mongodb_service
     from services.worker_fleet import _queue_coll
 
     mongo = get_mongodb_service()
-    counts = mongo.count_jobs(workspace_filter=WorkspaceFilter.everything())
+    jobs = mongo_collection("transfer_jobs")
+    if jobs is not None:
+        # One status-only pass, bounded in time; no per-row attention $cond
+        # (ops review M9). Runs on one process only (store_gauges_owner()).
+        raw = {
+            str(row.get("_id")): int(row.get("n") or 0)
+            for row in jobs.aggregate([{"$group": {"_id": "$status", "n": {"$sum": 1}}}], maxTimeMS=STORE_QUERY_MAX_MS)
+        }
+    else:  # the in-memory job store (single process, tests)
+        raw = mongo.count_jobs(workspace_filter=WorkspaceFilter.everything()).get("by_status") or {}
     by_status: dict[str, int] = dict.fromkeys(JOB_STATUS_LABELS, 0)
     other = 0
-    for status, count in (counts.get("by_status") or {}).items():
+    for status, count in raw.items():
         if status in by_status:
             by_status[status] += int(count)
         else:
@@ -652,7 +664,22 @@ def store_gauges(*, max_age_seconds: float | None = None) -> dict[str, Any] | No
     return dict(value)
 
 
+def store_gauges_owner() -> bool:
+    """Whether this process reports the store-derived job gauges.
+
+    Exactly one process does: the one that owns the pipeline cadence (the
+    scheduler, or the API when no scheduler runs; the topology checks keep it
+    to one). Every API pod and worker counting the whole job collection on
+    every scrape was one collection scan per pod per scrape (ops review M9).
+    """
+    from services.process_role import schedule_loop_enabled
+
+    return schedule_loop_enabled()
+
+
 def _store_lines() -> list[str]:
+    if not store_gauges_owner():
+        return []
     gauges = store_gauges()
     lines = [
         "# HELP dataflow_metrics_store_up 1 when the job store answered this scrape",
@@ -686,10 +713,13 @@ def _quoted_series_labels(key: str) -> str:
     return _labels(**dict(part.split("=", 1) for part in key.split(",") if "=" in part))
 
 
-def prometheus_text() -> str:
+def prometheus_text(*, deployment_wide: bool = True) -> str:
     """Render Prometheus exposition format (text/plain; version=0.0.4).
 
-    Reads the job store (cached for a few seconds): call it off the event loop.
+    ``deployment_wide`` adds the per-route HTTP series and the job-store
+    gauges: every tenant's traffic and jobs, for platform administrators only
+    (``src.metrics_app.metrics_response`` decides). Reads the job store
+    (cached for a few seconds): call it off the event loop.
     """
     lines: list[str] = [
         "# HELP dataflow_jobs_total Total transfer jobs finalized",
@@ -710,7 +740,10 @@ def prometheus_text() -> str:
         for name, series in sorted(_labeled_counters.items()):
             for labels, value in sorted(series.items()):
                 lines.append(f"{name}{{{_quoted_series_labels(labels)}}} {value}")
-    lines += _http_lines()
-    lines += _store_lines()
+    if deployment_wide:
+        lines += _http_lines()
+        lines += _store_lines()
+    else:
+        lines.append("# Deployment-wide series (HTTP traffic, job gauges) are shown to platform administrators only.")
     lines.append("")
     return "\n".join(lines)

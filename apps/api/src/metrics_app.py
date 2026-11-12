@@ -9,8 +9,10 @@ port:
 ``/metrics``  the same exposition the API serves, behind the same chain the
               API uses: tenant resolution, authentication, the workspace IP
               allowlist and RBAC (``GET /metrics`` needs ``workspace.manage``).
-              A scraper sends a workspace API key as a bearer token, exactly
-              as it does against the API. It is never served unauthenticated.
+              A scraper sends an API key as a bearer token, exactly as it
+              does against the API. It is never served unauthenticated. The
+              deployment-wide series (HTTP traffic, job gauges) need a
+              platform administrator's key.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import logging
 import threading
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -31,12 +33,25 @@ _server: Any = None
 _thread: threading.Thread | None = None
 
 
-async def metrics_response() -> PlainTextResponse:
+def _platform_admin(request: Any) -> bool:
+    """Deployment-wide series are every tenant's: platform administrators only (ops review M9).
+
+    ``GET /metrics`` itself needs ``workspace.manage`` in some workspace. A
+    platform-admin API key (minted by a platform admin outside any
+    workspace) is what a deployment's scraper should use to collect them.
+    """
+    from services.workspace_access import tenant_scope
+
+    return bool(tenant_scope(request).unrestricted)
+
+
+async def metrics_response(request: Any) -> PlainTextResponse:
     """The exposition body. Built off the event loop: it reads the job store."""
     from services.ops_metrics import prometheus_text
 
+    deployment_wide = await run_in_threadpool(_platform_admin, request)
     return PlainTextResponse(
-        content=await run_in_threadpool(prometheus_text),
+        content=await run_in_threadpool(prometheus_text, deployment_wide=deployment_wide),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
@@ -62,8 +77,8 @@ def build_metrics_app(*, role: str, health: Any = None) -> FastAPI:
         return {"status": "ok", "role": role, **(extra or {})}
 
     @app.get("/metrics")
-    async def metrics_route() -> PlainTextResponse:
-        return await metrics_response()
+    async def metrics_route(request: Request) -> PlainTextResponse:
+        return await metrics_response(request)
 
     return app
 

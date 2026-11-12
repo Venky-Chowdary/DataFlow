@@ -902,11 +902,15 @@ async def health_ready():
 
 
 @app.get("/metrics")
-async def prometheus_metrics():
-    """Prometheus exposition format: HTTP, job-store and CDC ops metrics."""
+async def prometheus_metrics(request: Request):
+    """Prometheus exposition format: HTTP, job-store and CDC ops metrics.
+
+    The deployment-wide series (HTTP traffic, job gauges) are for platform
+    administrators only (src.metrics_app.metrics_response).
+    """
     from src.metrics_app import metrics_response
 
-    return await metrics_response()
+    return await metrics_response(request)
 
 
 @app.get("/api/v1")
