@@ -94,6 +94,17 @@ class UniversalSchema:
     path: str = ""
 
 
+def default_upload_dirs(api_root: Path | None = None) -> list[str]:
+    """Upload directories read when the caller names none.
+
+    Never a test or fixture directory: those hold repo test data (the RBAC
+    route-permission map, golden files), not customer uploads, and Pilot and
+    production training must not treat them as datasets.
+    """
+    base = api_root or Path(__file__).resolve().parents[3]  # apps/api
+    return [str(base / "uploads"), str(base / "src" / "uploads")]
+
+
 class UniversalDataFeeder:
     """Feed universal data schemas into the training pipeline."""
 

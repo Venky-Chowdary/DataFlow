@@ -70,6 +70,12 @@ os.environ.setdefault("DATAFLOW_SOURCE_PATH_ROOTS", tempfile.gettempdir())
 # Local proof dials Postgres and MySQL on loopback. Production deploy does
 # not set this. Metadata and link-local stay refused even when it is set.
 os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
+# No background Training Agent under a TestClient: the lifespan defaults it on
+# outside production, and a CPU-bound run (60 s / 120 s after startup) would
+# outlive the test, hold the GIL and slow every later test. The fallback brand
+# var, like DATAFLOW_DATA_DIR above, so a test setting either name wins.
+# Tests that need training call run_full_training directly or set it "on".
+os.environ.setdefault("DATAFLOW_TRAINING", "off")
 
 # Hermetic env: Railway markers exported by `railway run`, a linked dev
 # shell or CI agents with the CLI installed must not flip the suite into
