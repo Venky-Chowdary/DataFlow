@@ -42,3 +42,35 @@ def bind_endpoint_to_stream(
         endpoint.collection = stream_name
     if table or not by_collection:
         endpoint.table = stream_name
+
+
+def file_export_refusal(request: Any) -> str | None:
+    """Why a multi-stream run cannot go to this file export, or ``None``.
+
+    A file export is the buffered single-table route: it reads the request's
+    one source table and writes one file, so a run that selected several
+    streams exported only the first and reported success (the other streams
+    were never read; Gate-8 checked the one file against the one table). That
+    route cannot hold several streams, so the run is refused before any read
+    or write. A SQLite export is a database in a file and lands one table per
+    stream, so it is not refused.
+    """
+    from services.sync_cursor import resolve_selected_sync_contracts
+    from src.transfer.endpoint_kind import canonical_destination
+
+    destination = getattr(request, "destination", None)
+    kind, _fmt = canonical_destination(
+        str(getattr(destination, "kind", "") or ""), str(getattr(destination, "format", "") or "")
+    )
+    if kind != "file_export":
+        return None
+    selected = resolve_selected_sync_contracts(getattr(request, "stream_contracts", None))
+    if len(selected) < 2:
+        return None
+    names = ", ".join((c.name or "").strip() or "stream" for c in selected)
+    return (
+        f"A file export writes one file, and this run selects {len(selected)} streams "
+        f"({names}): only the first would be exported. Run one export per stream, or "
+        "choose a destination that keeps one object per stream (a database, a SQLite "
+        "export, or an S3 / GCS / ADLS object store)."
+    )
