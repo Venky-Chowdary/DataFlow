@@ -121,6 +121,52 @@ def declared_cells(values: Any) -> Iterator[None]:
         _declared.reset(token)
 
 
+#: Set once this turn has read free text that carries values (a job's error
+#: text, a validation blocker). Such text cannot be told apart from the cells
+#: it quotes, so a turn that read it is not narrated under metadata-only.
+_free_text: ContextVar[bool] = ContextVar("ai_egress_free_text", default=False)
+_in_turn: ContextVar[bool] = ContextVar("ai_egress_in_turn", default=False)
+#: The marker every metadata-only withholding leaves in the text it rewrote.
+#: Text Pilot withheld *before* the gate still counts as withheld here.
+_WITHHELD_MARK = re.compile(r"\[(?:rows )?withheld: metadata-only")
+
+
+def declare_free_text(values: Any) -> None:
+    """Declare free text that quotes cell values (error text, blockers).
+
+    Only inside an :func:`egress_turn`: outside one (an MCP call, a script) no
+    turn scope would ever clear it.
+    """
+    cells = _cell_strings(values)
+    if cells and _in_turn.get():
+        _declared.set(_declared.get() | cells)
+        _free_text.set(True)
+
+
+def free_text_declared() -> bool:
+    """True when this turn has read value-carrying free text."""
+    return _free_text.get()
+
+
+@contextmanager
+def egress_turn() -> Iterator[None]:
+    """One chat turn: what it declares does not outlive it.
+
+    Without this scope a value declared in one turn stayed declared for every
+    later call on the same thread, so the manifest of an unrelated turn said
+    "withheld" for text it never carried.
+    """
+    t_declared = _declared.set(frozenset())
+    t_free = _free_text.set(False)
+    t_turn = _in_turn.set(True)
+    try:
+        yield
+    finally:
+        _declared.reset(t_declared)
+        _free_text.reset(t_free)
+        _in_turn.reset(t_turn)
+
+
 def _has_declared_cell(text: str) -> bool:
     return any(cell in text for cell in _declared.get())
 
@@ -305,7 +351,11 @@ def gate_outbound_prompt(prompt: str, system: str, *, provider: str) -> Outbound
     if meta_only:
         out_prompt, stripped_p = strip_cell_sections(prompt)
         out_system, stripped_s = strip_cell_sections(system)
-        withheld = bool(had_cells or stripped_p or stripped_s)
+        # Values Pilot already replaced (tool payloads, transcript lines) are
+        # withheld too: the manifest records what was asked, not just what
+        # the gate itself had to strip.
+        prewithheld = bool(_WITHHELD_MARK.search(prompt or "") or _WITHHELD_MARK.search(system or ""))
+        withheld = bool(had_cells or stripped_p or stripped_s or prewithheld)
         if contains_cell_values(out_prompt) or contains_cell_values(out_system):
             out_prompt = (
                 "Metadata-only policy refused this prompt: residual cell values "

@@ -1329,7 +1329,11 @@ class DataPilotAgent:
         data_context: dict | None = None,
     ) -> CopilotResponse:
         """Answer one turn, honouring a length instruction the turn carried."""
-        response = self._chat(message, history, data_context)
+        from services.ai_egress import egress_turn
+
+        # What this turn declares to the egress gate ends with the turn.
+        with egress_turn():
+            response = self._chat(message, history, data_context)
         from .dialogue_acts import wants_brief_answer
 
         if response and response.answer and wants_brief_answer(message):

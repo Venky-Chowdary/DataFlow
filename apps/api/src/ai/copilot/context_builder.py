@@ -237,7 +237,10 @@ class PilotContextBuilder:
                 parts.append(f"Validation status: **{s['validation_status']}**")
             if s.get("route"):
                 parts.append(f"Route: {s['route']}")
-            for b in (s.get("blockers") or [])[:4]:
+            from .pilot_egress import blockers_for_model
+
+            # Blockers quote the failing cells: withheld under metadata-only.
+            for b in blockers_for_model((s.get("blockers") or [])[:4]):
                 parts.append(f"- Blocker: {b}")
             parts.append("")
             parts.append(

@@ -73,6 +73,11 @@ def _tool_executed(
     Carries the tool name, a bounded reason and the error class only — never
     the prompt, the arguments, the output, or the error text.
     """
+    # Job / run free text quotes cells (a driver error prints the row): every
+    # outbound model call this turn must account for it (review C1).
+    from .pilot_egress import note_tool_result
+
+    note_tool_result(result.name, result.success, result.output)
     if result.success:
         outcome, level = "succeeded", None
     else:
@@ -9123,8 +9128,11 @@ def _collapse_underspecified(
 
 
 def format_tool_results_for_llm(results: list[ToolResult]) -> str:
+    """Tool results as one prompt block — each payload as a model may see it."""
+    from .pilot_egress import tool_results_for_model
+
     parts = []
-    for r in results:
+    for r in tool_results_for_model(results):
         if r.success:
             parts.append(f"Tool `{r.name}` result:\n{json.dumps(r.output, indent=2, default=json_default)[:4000]}")
         else:

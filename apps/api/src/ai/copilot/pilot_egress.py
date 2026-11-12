@@ -13,6 +13,11 @@ each of those three channels, what a model may be handed:
 * **tool results** — a row-returning tool's payload is reduced to its
   metadata (object, columns, counts).
 
+Free text that quotes cells is cell data too (review C1): a job's ``error`` /
+``message`` (a driver error prints the row it choked on), validation blockers,
+and the value lines of earlier answers ("Error: …", list rows). It is withheld
+from every channel above and from the system prompt.
+
 With cells allowed nothing is withheld, and the cells are declared to the gate
 so the egress manifest records that they left.
 """
@@ -24,7 +29,10 @@ from typing import Any
 
 from services.ai_egress import (
     ROW_KEYS,
+    WITHHELD,
     declare_cells,
+    declare_free_text,
+    free_text_declared,
     metadata_only_enabled,
     withhold_row_values,
 )
@@ -45,10 +53,28 @@ _ROWS_WITHHELD = "[rows withheld: metadata-only]"
 #: Shorter cells ("1", "ok") are not chased through prose: they would match everywhere.
 _MIN_QUOTED_CELL = 4
 _WITHHELD_NOTE = (
-    "Cell values are withheld from the model by the metadata-only policy. The operator "
+    "[withheld: metadata-only] Cell values are withheld from the model by the metadata-only policy. The operator "
     "sees them in the app; describe the result by its columns and counts only."
 )
 
+#: Tools whose output carries job / run free text (driver errors, blockers).
+FREE_TEXT_TOOLS = frozenset({
+    "get_job", "list_jobs", "brief_workspace", "explain_parity", "get_preflight_run",
+    "list_schedules", "get_schedule", "open_job",
+})
+#: The keys that hold that free text inside those outputs.
+FREE_TEXT_KEYS = frozenset({
+    "error", "message", "error_message", "last_error", "last_message", "error_details",
+    "blockers", "failure_reason",
+})
+#: A line of an earlier answer that states a value: "Error: …", "Reason: …".
+_VALUE_LABEL = re.compile(
+    r"^(\s*(?:[-*•–]\s*)?(?:\*\*)?(?:error|errors|reason|row|message|cause|detail|details|blocker[^:]{0,40})"
+    r"(?:\*\*)?\s*:)\s*(\S.*)$",
+    re.I,
+)
+#: A list item of an earlier answer: numbered rows and bullets name values.
+_LIST_ITEM = re.compile(r"^\s*(?:\d+[.)]|[-*•–])\s+\S")
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_RULE = re.compile(r"^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
 _SAMPLE_LINE = re.compile(r"^(\s*[•*-]?\s*Sample row:)\s*(.+)$", re.I)
@@ -108,20 +134,89 @@ def withhold_rendered_rows(text: str) -> str:
     return cleaned
 
 
+def free_text_values(output: Any) -> list[str]:
+    """Every string a job / run output holds under a free-text key."""
+    found: list[str] = []
+    stack = [output]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in FREE_TEXT_KEYS:
+                    found.extend(_strings(value))
+                elif isinstance(value, (dict, list, tuple)):
+                    stack.append(value)
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return [text for text in found if text.strip()]
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in _strings(item)]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in _strings(item)]
+    return []
+
+
+def note_tool_result(name: str, success: bool, output: Any) -> None:
+    """Declare the free text a job / run tool read, so no channel sends it."""
+    if success and name in FREE_TEXT_TOOLS:
+        declare_free_text(free_text_values(output))
+
+
+def _value_lines(text: str) -> list[str]:
+    """The values stated on "Error: …"-style lines of ``text``."""
+    out = []
+    for line in (text or "").splitlines():
+        found = _VALUE_LABEL.match(line)
+        if found:
+            out.append(found.group(2).strip())
+    return out
+
+
 def narration_allowed(answer: str, tools_used: list[dict] | None) -> bool:
     """Whether this turn's draft may be sent to a narrator.
 
     Under metadata-only a draft built from cell data is not narrated at all: a
-    rewrite cannot keep the rows without the rows being sent.
+    rewrite cannot keep the rows without the rows being sent. A draft that
+    states free text (a job's error, a blocker) is cell data by the same rule.
     """
     if not metadata_only_enabled():
         declare_cells(rendered_cells(answer))
+        declare_cells(_value_lines(answer))
         return True
     used_cells = any(
         tool.get("success") and str(tool.get("name") or "") in CELL_TOOLS
         for tool in tools_used or []
     )
-    return not used_cells and not rendered_cells(answer)
+    return (
+        not used_cells
+        and not rendered_cells(answer)
+        and not _value_lines(answer)
+        and not free_text_declared()
+    )
+
+
+def _withhold_value_lines(text: str) -> str:
+    """An earlier answer with its "Error: …" lines and list items withheld."""
+    out: list[str] = []
+    for line in (text or "").splitlines():
+        label = _VALUE_LABEL.match(line)
+        if label:
+            out.append(f"{label.group(1)} {_ROWS_WITHHELD}")
+        elif _LIST_ITEM.match(line):
+            if not out or out[-1] != _ROWS_WITHHELD:
+                out.append(_ROWS_WITHHELD)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _list_items(text: str) -> list[str]:
+    return [line for line in (text or "").splitlines() if _LIST_ITEM.match(line)]
 
 
 def history_for_model(history: list[dict] | None) -> list[dict]:
@@ -129,12 +224,34 @@ def history_for_model(history: list[dict] | None) -> list[dict]:
     turns = [dict(turn) for turn in (history or []) if isinstance(turn, dict)]
     if not metadata_only_enabled():
         for turn in turns:
-            declare_cells(rendered_cells(str(turn.get("content") or "")))
+            content = str(turn.get("content") or "")
+            declare_cells(rendered_cells(content))
+            if turn.get("role") == "assistant":
+                declare_cells(_value_lines(content) + _list_items(content))
         return turns
     for turn in turns:
         if isinstance(turn.get("content"), str):
             turn["content"] = withhold_rendered_rows(turn["content"])
+            # Pilot's own earlier answers state values outside tables too.
+            if turn.get("role") == "assistant":
+                turn["content"] = _withhold_value_lines(turn["content"])
     return turns
+
+
+def blockers_for_model(blockers: list[Any] | None) -> list[str]:
+    """Validation blockers as a model may see them: they quote the failing cells."""
+    texts = [str(b) for b in (blockers or []) if str(b or "").strip()]
+    if not metadata_only_enabled():
+        declare_cells(texts)
+        return texts
+    return [WITHHELD for _ in texts]
+
+
+def tool_results_for_model(results: list[Any]) -> list[Any]:
+    """Copies of tool results with each payload reduced to what a model may see."""
+    from dataclasses import replace
+
+    return [replace(r, output=model_payload(r.name, r.output)) if r.success else r for r in results]
 
 
 def _row_values(payload: Any) -> list[Any]:
@@ -154,12 +271,32 @@ def model_payload(tool_name: str, output: Any) -> Any:
     """What a model's tool loop is handed for one successful tool result."""
     if not metadata_only_enabled():
         declare_cells(_row_values(output))
+        if tool_name in FREE_TEXT_TOOLS:
+            declare_cells(free_text_values(output))
         return output
     if tool_name in CELL_TOOLS and isinstance(output, dict):
         shown = {key: output[key] for key in _METADATA_KEYS if key in output}
         shown["withheld"] = _WITHHELD_NOTE
         return shown
+    if tool_name in FREE_TEXT_TOOLS:
+        output = _withhold_free_text(output)
     cleaned, withheld = withhold_row_values(output)
     if withheld and isinstance(cleaned, dict):
         cleaned["withheld"] = _WITHHELD_NOTE
     return cleaned
+
+
+def _withhold_free_text(node: Any) -> Any:
+    """``node`` with every non-empty free-text value replaced by the marker."""
+    if isinstance(node, dict):
+        return {
+            key: (
+                WITHHELD
+                if key in FREE_TEXT_KEYS and any(text.strip() for text in _strings(value))
+                else _withhold_free_text(value)
+            )
+            for key, value in node.items()
+        }
+    if isinstance(node, (list, tuple)):
+        return [_withhold_free_text(item) for item in node]
+    return node

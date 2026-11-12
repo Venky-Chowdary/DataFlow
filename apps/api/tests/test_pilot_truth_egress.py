@@ -165,3 +165,172 @@ def test_native_loop_tool_payload_keeps_rows_when_cells_are_allowed(hybrid, monk
         {"connector_name": "CRM SQLite", "table": "customers", "limit": 3}, {"pilot_session_id": "native2"},
     )
     assert pt.pii_email(1) in payload
+
+
+# ---- free text that carries values (review C1) -------------------------------
+#
+# A failed job's error text is written by a database driver and quotes the row
+# it choked on. Under metadata-only that is cell data: it must not reach a model
+# by any channel — the narrated draft, the transcript, the system prompt, a
+# native tool payload or the fallback prompt — and the manifest must say what
+# was withheld (metadata-only) or included (cells allowed).
+
+FREE_TEXT = ["jane.roe@corp.example", "123-45-6003", "4111-1111-1111-1111"]
+JOB_ERROR = (
+    'duplicate key value violates unique constraint "customers_email_key" DETAIL: Key '
+    '(email)=(jane.roe@corp.example) already exists. Row: {"ssn": "123-45-6003", '
+    '"card": "4111-1111-1111-1111"}'
+)
+VALUE_HISTORY = [
+    {"role": "user", "content": "why did it fail"},
+    {"role": "assistant", "content": f"Your last transfer job is **FAILED**.\nError: {JOB_ERROR}"},
+    {"role": "assistant", "content": (
+        f"Rows:\n1. id=1, email={pt.pii_email(2)}, ssn={pt.pii_ssn(1)}\n- Alice Roe / {pt.pii_email(3)}"
+    )},
+]
+VALUE_HISTORY_CELLS = FREE_TEXT + [pt.pii_email(2), pt.pii_ssn(1), pt.pii_email(3), "Alice Roe"]
+
+
+def _free_leaked(blob, cells=FREE_TEXT) -> list[str]:
+    text = blob if isinstance(blob, str) else json.dumps(blob, default=str)
+    return [cell for cell in cells if cell in text]
+
+
+@pytest.fixture
+def wire(monkeypatch, tmp_path):
+    """Hybrid engine with the real OpenAI provider class on a fake HTTP client.
+
+    What the fake client records is what would have left the box: the bytes
+    after the egress gate, not the prompt Pilot built.
+    """
+    import types
+
+    from src.ai.llm import provider
+
+    pt.reset_workspace(monkeypatch)
+    monkeypatch.setenv("DATAFLOW_PILOT_ENGINE", "hybrid")
+    monkeypatch.delenv("DATAFLOW_AI_METADATA_ONLY", raising=False)
+    monkeypatch.delenv("DATAWRAP_AI_METADATA_ONLY", raising=False)
+    sent: list[dict] = []
+
+    class _Completions:
+        def create(self, **kw):
+            sent.append(kw)
+            if kw.get("tools"):
+                raise RuntimeError("tool loop unavailable")  # forces the fallback prompt
+            msg = types.SimpleNamespace(content="(model reply that is long enough)", tool_calls=None)
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(message=msg, finish_reason="stop")], usage=None
+            )
+
+    class _Wire(provider.DataTransferOpenAIProvider):
+        def _init_client(self):
+            self._client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
+
+    monkeypatch.setattr(provider, "_provider_auth_failed", lambda name: False)
+    monkeypatch.setattr(provider, "pick_narration_provider", lambda: (_Wire(), "openai_polish"))
+    pt.seed_sqlite_connector(tmp_path)
+    return types.SimpleNamespace(sent=sent, cls=_Wire)
+
+
+@pytest.mark.parametrize("question", [
+    "what is the status of my last transfer",
+    "why did my last job fail",
+    "status of job {jid}",
+])
+def test_job_error_text_never_reaches_a_model(wire, question):
+    jid = pt.seed_job("failed", minutes_ago=1, error=JOB_ERROR, source_name="customers")
+    for i in range(3):
+        pt.seed_job("completed", minutes_ago=10 + i)
+    response = pt.ask(pt.agent(), question.format(jid=jid))
+    # The operator still reads the full error locally...
+    assert "123-45-6003" in response.answer, response.answer
+    # ...and none of it was sent to the model.
+    assert _free_leaked(wire.sent) == [], "job error text reached the provider under metadata-only"
+
+
+def test_value_lines_in_the_transcript_are_withheld_and_the_manifest_says_so(wire):
+    from services.ai_egress import last_manifest
+
+    for i in range(3):
+        pt.seed_job("completed", minutes_ago=10 + i)
+    pt.ask(pt.agent(), "how many jobs do I have", history=VALUE_HISTORY)
+    assert wire.sent, "the count answer carries no cells, so it is narrated"
+    assert _free_leaked(wire.sent, VALUE_HISTORY_CELLS) == []
+    manifest = last_manifest()
+    assert manifest["cells_withheld"] is True and manifest["cell_values_included"] is False
+
+
+def test_client_blockers_are_withheld_from_the_system_prompt(wire):
+    from services.ai_egress import last_manifest
+
+    for i in range(3):
+        pt.seed_job("completed", minutes_ago=10 + i)
+    blockers = [f"Row 12: email '{pt.pii_email(1)}' is not unique", f"ssn {pt.pii_ssn(1)} fails pattern"]
+    pt.ask(pt.agent(), "how many jobs do I have", blockers=blockers, columns=["id", "email"],
+           name="customers", row_count=7)
+    assert wire.sent
+    assert _free_leaked(wire.sent, [pt.pii_email(1), pt.pii_ssn(1)]) == []
+    assert last_manifest()["cells_withheld"] is True
+
+
+@pytest.mark.parametrize("tool,args", [("get_job", "job"), ("list_jobs", {"limit": 5, "status": "failed"})])
+@pytest.mark.parametrize("shape", ["openai", "anthropic"])
+def test_native_job_payloads_withhold_error_text(wire, tool, args, shape):
+    from services.ai_egress import last_manifest, prepare_messages
+    from src.ai.copilot.pilot_agent import PilotTurn
+
+    jid = pt.seed_job("failed", minutes_ago=1, error=JOB_ERROR, source_name="customers")
+    arguments = {"job_id": jid} if args == "job" else args
+    result, payload = pt.agent()._native_tool_call(PilotTurn(), tool, arguments, {"pilot_session_id": "nat"})
+    assert result.success and _free_leaked(result.output), "the app still gets the full error"
+    assert _free_leaked(payload) == []
+    if shape == "openai":
+        messages = [{"role": "user", "content": "q"}, {"role": "tool", "tool_call_id": "c1", "content": payload}]
+    else:
+        messages = [{"role": "user", "content": "q"},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": payload}]}]
+    gated, _system = prepare_messages(messages, "sys", provider=shape)
+    assert _free_leaked(gated) == []
+    assert last_manifest()["cells_withheld"] is True
+
+
+def test_rows_removed_before_the_gate_are_recorded_as_withheld(wire):
+    from services.ai_egress import last_manifest, prepare_messages
+    from src.ai.copilot.pilot_agent import PilotTurn
+
+    _result, payload = pt.agent()._native_tool_call(
+        PilotTurn(), "sample_connector_object",
+        {"connector_name": "CRM SQLite", "table": "customers", "limit": 3}, {"pilot_session_id": "rm"},
+    )
+    prepare_messages([{"role": "tool", "tool_call_id": "c1", "content": payload}], "", provider="openai")
+    assert last_manifest()["cells_withheld"] is True, "Pilot withheld rows but the manifest says nothing was"
+
+
+def test_fallback_prompt_withholds_job_error_text(wire, monkeypatch):
+    """The native tool loop fails, so tool results go to the model in one prompt."""
+    from services.ai_egress import last_manifest
+    from src.ai.llm import provider
+
+    monkeypatch.setattr(provider, "DataTransferOpenAIProvider", wire.cls)
+    pt.seed_job("failed", minutes_ago=1, error=JOB_ERROR, source_name="customers")
+    response = pt.agent()._openai_agent("why did my last job fail", [], "system", {"pilot_session_id": "fb"})
+    fallback = [kw for kw in wire.sent if not kw.get("tools")]
+    assert response is not None and fallback, "the fallback prompt was not sent"
+    assert _free_leaked(fallback) == []
+    assert last_manifest()["cells_withheld"] is True
+
+
+def test_manifest_records_free_text_as_included_when_cells_are_allowed(wire, monkeypatch):
+    from services.ai_egress import last_manifest
+
+    monkeypatch.setenv("DATAFLOW_AI_METADATA_ONLY", "false")
+    pt.seed_job("failed", minutes_ago=1, error=JOB_ERROR, source_name="customers")
+    pt.ask(pt.agent(), "why did my last job fail")
+    assert _free_leaked(wire.sent), "cells allowed: the error is narrated"
+    assert last_manifest()["cell_values_included"] is True
+
+    wire.sent.clear()
+    pt.ask(pt.agent(), "how many jobs do I have", history=VALUE_HISTORY)
+    assert _free_leaked(wire.sent, VALUE_HISTORY_CELLS)
+    assert last_manifest()["cell_values_included"] is True
