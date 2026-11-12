@@ -195,15 +195,28 @@ def check_dial(kwargs: Mapping[str, Any] | None = None, *texts: Any) -> None:
         raise TlsFileRefused(refusal)
 
 
+_GUARDED = "_dataflow_tls_file_guard"
+
+
 def guard_engine(engine: Any) -> None:
     """Check the arguments each new DBAPI connection of ``engine`` receives.
 
-    Registered before any dialing listener (``generic_sql``'s MySQL dial), so
-    it sees SQLAlchemy's ``cparams`` (URL query keys included) and the ODBC
-    string in ``cargs`` before a driver does.
+    Registered before any engine-level dialing listener (``generic_sql``'s
+    MySQL dial), so it sees SQLAlchemy's ``cparams`` (URL query keys included)
+    and the ODBC string in ``cargs`` before a driver does. A class-level
+    ``do_connect`` listener runs before it: the one that opens Oracle
+    connections (``statement_budget``) calls :func:`check_guarded_dial` first.
     """
     from sqlalchemy import event
 
+    setattr(engine.dialect, _GUARDED, True)
+
     @event.listens_for(engine, "do_connect")
-    def _no_host_tls_files(_dialect, _rec, cargs, cparams):  # noqa: ANN001
+    def _no_host_tls_files(dialect, _rec, cargs, cparams):  # noqa: ANN001
+        check_guarded_dial(dialect, cargs, cparams)
+
+
+def check_guarded_dial(dialect: Any, cargs: Any, cparams: Any) -> None:
+    """:func:`check_dial` for a connection of an engine :func:`guard_engine` marked."""
+    if getattr(dialect, _GUARDED, False):
         check_dial(cparams, *cargs)
