@@ -668,3 +668,119 @@ def test_preflight_refuses_a_day_month_text_cursor(pg):
     assert gate and gate["id"] == "g_cursor_order" and gate["status"] == "block", gate
     assert "day" in gate["message"], gate["message"]
 
+
+# --------------------------------------------------------------------------
+# M5 — cost: never-analysed tables, statement timeouts, the NOT LIKE scan
+# --------------------------------------------------------------------------
+
+
+def test_a_never_analysed_table_is_probed_with_the_floor(isolated, pg):
+    """reltuples is -1 until a table is first analysed (and on a partitioned
+    parent): it was read as "small" and the probe scanned without a floor."""
+    _sql(
+        f"CREATE TABLE {SCHEMA}.ev (id bigserial PRIMARY KEY, v text) "
+        "WITH (autovacuum_enabled = false)"
+    )
+    _sql(f"INSERT INTO {SCHEMA}.ev (v) SELECT 'r' || g FROM generate_series(1, 20) g")
+    assert _sql(
+        f"SELECT reltuples FROM pg_class WHERE oid = '{SCHEMA}.ev'::regclass", fetch=True
+    )[0][0] < 0
+    dst = "unan_" + uuid.uuid4().hex[:6]
+    kw = dict(cursor="id", mode="incremental_append")
+    assert _run(isolated, "ev", dst, **kw).success
+    _sql(f"INSERT INTO {SCHEMA}.ev (v) VALUES ('new')")
+    second = _run(isolated, "ev", dst, **kw)
+    assert second.success, second.error
+    evidence = _window(second)
+    assert "probe looks back to cursor" in str(evidence.get("reason")), evidence
+    assert evidence.get("guarantee") == csw.GUARANTEE_WITHIN_WINDOW, evidence
+
+
+def test_every_probe_statement_runs_under_a_timeout(pg, monkeypatch):
+    """A probe blocked by a lock (or a slow scan) gives up after the configured
+    timeout instead of holding the run; the caller records it as a failure."""
+    import threading
+    import time
+
+    import psycopg2
+
+    _sql(f"CREATE TABLE {SCHEMA}.ev (id bigserial PRIMARY KEY, v text)")
+    _sql(f"INSERT INTO {SCHEMA}.ev (v) VALUES ('a'), ('b')")
+    monkeypatch.setenv(csw.PROBE_TIMEOUT_ENV, "400")
+    holder = _connect(autocommit=False)
+    holder.cursor().execute(f"LOCK TABLE {SCHEMA}.ev IN ACCESS EXCLUSIVE MODE")
+    release = threading.Timer(6.0, holder.rollback)
+    release.start()
+    c = pg_creds()
+    src = {"host": c["host"], "port": int(c["port"]), "database": c["database"],
+           "username": c["username"], "password": c["password"]}
+    started = time.monotonic()
+    try:
+        with pytest.raises(psycopg2.errors.QueryCanceled):
+            csw.probe_pg_late_rows(
+                src, schema=SCHEMA, table="ev", cursor_column="id", since_xmin="3",
+                below="2", cursor_type="BIGINT",
+            )
+    finally:
+        release.cancel()
+        holder.rollback()
+        holder.close()
+    assert time.monotonic() - started < 4.0
+
+
+def _not_like_spy():
+    """``(statements seen, listener)`` for every NOT LIKE statement any engine runs."""
+    import sqlalchemy as sa
+
+    seen: list[str] = []
+
+    def spy(conn, cursor, statement, params, context, executemany):
+        # The cursor-shape scan, not the engine's own catalog reflection.
+        if "NOT LIKE" in statement.upper() and "sqlite_master" not in statement:
+            seen.append(statement)
+
+    sa.event.listen(sa.engine.Engine, "before_cursor_execute", spy)
+    return seen, spy
+
+
+def test_text_shape_scan_runs_on_first_run_then_on_interval(isolated, tmp_path, monkeypatch):
+    import sqlite3
+
+    import sqlalchemy as sa
+
+    from services import cursor_order
+
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    with sqlite3.connect(src) as conn:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, code TEXT NOT NULL)")
+        conn.executemany("INSERT INTO t VALUES (?, ?)", [(i, f"{i:06d}") for i in range(1, 31)])
+
+    def run():
+        contract = {"name": "t", "cursor_field": "code", "sync_mode": "incremental_append",
+                    "selected": True}
+        request = TransferRequest(
+            source=EndpointConfig(kind="database", format="sqlite", database=str(src), table="t"),
+            destination=EndpointConfig(kind="database", format="sqlite", database=str(dst), table="t"),
+            sync_mode="incremental_append", stream_contracts=[contract],
+            skip_preflight=True, validation_mode="strict",
+        )
+        job_id = "csr" + uuid.uuid4().hex[:16]
+        isolated.update_job_status(job_id, "pending", transfer_request={})
+        result = UniversalTransferEngine().execute_tracked(request, job_id)
+        assert result.success, result.error
+        return result
+
+    seen, spy = _not_like_spy()
+    try:
+        run()
+        assert len(seen) == 1, "the first run of a route confirms the shape on every row"
+        with sqlite3.connect(src) as conn:
+            conn.execute("INSERT INTO t VALUES (31, '000031')")
+        run()
+        run()
+        assert len(seen) == 1, "quiet runs reuse the confirmed shape"
+        monkeypatch.setenv(cursor_order.SHAPE_CHECK_INTERVAL_ENV, "0")
+        run()
+        assert len(seen) == 2, "a due interval confirms it again"
+    finally:
+        sa.event.remove(sa.engine.Engine, "before_cursor_execute", spy)

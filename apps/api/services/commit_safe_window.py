@@ -74,7 +74,8 @@ DEFAULT_OVERLAP_VALUES = 1000
 #: large table. The probe transfers no rows, so it can afford to look further.
 PG_LOOKBACK_SECONDS = 86_400
 PG_LOOKBACK_VALUES = 1_000_000
-#: At or below this estimated row count the PostgreSQL probe has no floor.
+#: At or below this estimated row count the PostgreSQL probe has no floor. A
+#: table whose estimate is unknown (``reltuples = -1``) is floored too.
 PG_UNBOUNDED_PROBE_ROWS = 1_000_000
 #: Rows behind the watermark are checked against the destination in pages of
 #: this many, in cursor order, until the first one it lacks (no overall cap).
@@ -951,7 +952,9 @@ def probe_pg_late_rows(
             est = cur.fetchone()
             est_rows = int(est[0]) if est and est[0] is not None else -1
             floor = ""
-            if est_rows > PG_UNBOUNDED_PROBE_ROWS:
+            # -1: never analysed, or a partitioned parent — size unknown, so
+            # treated as large (review M5): an unfloored probe could scan it all.
+            if est_rows > PG_UNBOUNDED_PROBE_ROWS or est_rows < 0:
                 floor = (
                     overlap_seed(
                         below, cursor_type, seconds=PG_LOOKBACK_SECONDS, values=PG_LOOKBACK_VALUES

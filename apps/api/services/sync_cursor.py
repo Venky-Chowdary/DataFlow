@@ -653,6 +653,8 @@ class IncrementalReadScope:
     commit_horizon: Mapping[str, Any] = field(default_factory=dict)
     #: Runs of this route since its last key census (services.incremental_census).
     runs_since_key_census: int = 0
+    #: Last every-row confirmation of a text cursor's shape (``{}`` when none).
+    text_shape_check: Mapping[str, Any] = field(default_factory=dict)
     #: This run's commit-safe window (services.commit_safe_window), attached by
     #: a read path that de-duplicates re-read rows. None = read from the mark.
     commit_safe: Any = None
@@ -784,6 +786,7 @@ def resolve_incremental_read_scope(
         watermark_cursor_type=str(metadata.get("cursor_type") or ""),
         commit_horizon=dict(metadata.get("commit_horizon") or {}),
         runs_since_key_census=int(metadata.get("runs_since_key_census") or 0),
+        text_shape_check=dict(metadata.get("text_shape_check") or {}),
     )
 
 

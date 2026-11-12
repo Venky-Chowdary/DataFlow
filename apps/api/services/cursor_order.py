@@ -357,6 +357,69 @@ def text_cursor_refusal(column: str, shape: TextCursorShape) -> str:
 # --------------------------------------------------------------------------
 
 _SAMPLE_ROWS = 200
+#: The every-row shape confirmation (``NOT LIKE``, a sequential scan) runs at
+#: preflight and on a route's first run, then again only when the table's
+#: estimated size moves by more than this fraction, or after this interval.
+SHAPE_CHECK_INTERVAL_ENV = "DATAFLOW_TEXT_CURSOR_SHAPE_CHECK_SECONDS"
+DEFAULT_SHAPE_CHECK_SECONDS = 86_400
+SHAPE_CHECK_ROW_CHANGE = 0.10
+
+
+def shape_check_due(previous: Any, rows_now: int | None, *, now: datetime | None = None) -> bool:
+    """Whether a route's every-row shape confirmation runs this time.
+
+    ``previous`` is the record :func:`probe_text_cursor` filled on the last
+    confirmation (``{}`` = never confirmed: due).
+    """
+    from services.brand_env import getenv_brand
+
+    record = previous if isinstance(previous, dict) else {}
+    try:
+        at = datetime.fromisoformat(str(record.get("at") or ""))
+    except ValueError:
+        return True
+    raw = str(getenv_brand(SHAPE_CHECK_INTERVAL_ENV, "") or "").strip()
+    try:
+        interval = max(0, int(raw)) if raw else DEFAULT_SHAPE_CHECK_SECONDS
+    except ValueError:
+        interval = DEFAULT_SHAPE_CHECK_SECONDS
+    if ((now or datetime.now(timezone.utc)) - at).total_seconds() >= interval:
+        return True
+    before = record.get("rows")
+    if rows_now is None or before is None:
+        return False
+    return abs(int(rows_now) - int(before)) > SHAPE_CHECK_ROW_CHANGE * max(int(before), 1)
+
+
+def _estimated_rows(conn: Any, dialect: str, schema: str | None, table: str) -> int | None:
+    """The engine's own row estimate for ``table`` (no scan), or None."""
+    import sqlalchemy as sa
+
+    try:
+        if dialect == "postgresql":
+            row = conn.execute(
+                sa.text(
+                    "SELECT c.reltuples::bigint FROM pg_catalog.pg_class c "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = :s AND c.relname = :t"
+                ),
+                {"s": schema or "public", "t": table},
+            ).first()
+        elif dialect in ("mysql", "mariadb"):
+            row = conn.execute(
+                sa.text(
+                    "SELECT TABLE_ROWS FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA = COALESCE(:s, DATABASE()) AND TABLE_NAME = :t"
+                ),
+                {"s": schema, "t": table},
+            ).first()
+        else:
+            return None
+    except Exception:  # noqa: BLE001 — no estimate: the interval decides
+        return None
+    if not row or row[0] is None or int(row[0]) < 0:
+        return None
+    return int(row[0])
 
 
 def like_pattern_for(shape: TextCursorShape, example: str, *, any_separator: bool = False) -> str:
@@ -384,8 +447,14 @@ def probe_text_cursor(
     column: str,
     *,
     utc_watermark: bool = False,
+    shape_check: dict[str, Any] | None = None,
 ) -> str:
     """Why this source's text cursor cannot bound an incremental read, or ``""``.
+
+    ``shape_check``: the route's record of its last every-row confirmation.
+    When given, the ``NOT LIKE`` scan runs only when :func:`shape_check_due`
+    says so, and the record is updated in place (``at``, ``rows``). Without
+    one (preflight) the scan always runs.
 
     Whether the column is ordered as text is the source's fact, not the sync's
     inferred type: its declared catalog type, or — on SQLite, where a column
@@ -454,30 +523,53 @@ def probe_text_cursor(
                 "the timestamps in UTC, use a column the source types as a timestamp, "
                 "or run this sync as a full refresh."
             )
-        # Confirm the shape on every row: rows outside the allowed pattern(s)
-        # are fetched one at a time and the shape judged again with them (a
-        # wall clock may show its fraction width only in a later row).
-        for _round in range(3):
-            patterns = (
-                wallclock_like_patterns(shape, values, any_separator=by_storage)
-                if shape.kind == SHAPE_WALLCLOCK
-                else tuple(p for p in [like_pattern_for(shape, values[0])] if p)
-            )
-            if not patterns:
+        rows_now: int | None = None
+        if shape_check is not None:
+            rows_now = _estimated_rows(conn, engine.dialect.name, ident.schema, ident.table)
+            if not shape_check_due(shape_check, rows_now):
                 return ""
-            odd = conn.execute(
-                sa.select(col)
-                .select_from(tbl)
-                .where(col.is_not(None), *(col.not_like(p, escape="\\") for p in patterns))
-                .limit(1)
-            ).first()
-            if odd is None:
-                return ""
-            values = [*values, str(odd[0]).strip()]
-            shape = text_cursor_shape(values, separator_normalized=by_storage)
-            reason = text_cursor_refusal(column, shape)
-            if reason:
-                return reason
+        reason = _confirm_every_row(conn, tbl, col, column, shape, values, by_storage)
+    if not reason and shape_check is not None:
+        # Recorded only once the scan accepted the column: a refused route is
+        # scanned again on its next run.
+        shape_check.clear()
+        shape_check.update(at=datetime.now(timezone.utc).isoformat(), rows=rows_now)
+    return reason
+
+
+def _confirm_every_row(
+    conn: Any, tbl: Any, col: Any, column: str, shape: TextCursorShape,
+    values: list[str], by_storage: bool,
+) -> str:
+    """Confirm the shape on every row with ``NOT LIKE``, or the refusal.
+
+    Rows outside the allowed pattern(s) are fetched one at a time and the
+    shape judged again with them (a wall clock may show its fraction width
+    only in a later row).
+    """
+    import sqlalchemy as sa
+
+    for _round in range(3):
+        patterns = (
+            wallclock_like_patterns(shape, values, any_separator=by_storage)
+            if shape.kind == SHAPE_WALLCLOCK
+            else tuple(p for p in [like_pattern_for(shape, values[0])] if p)
+        )
+        if not patterns:
+            return ""
+        odd = conn.execute(
+            sa.select(col)
+            .select_from(tbl)
+            .where(col.is_not(None), *(col.not_like(p, escape="\\") for p in patterns))
+            .limit(1)
+        ).first()
+        if odd is None:
+            return ""
+        values = [*values, str(odd[0]).strip()]
+        shape = text_cursor_shape(values, separator_normalized=by_storage)
+        reason = text_cursor_refusal(column, shape)
+        if reason:
+            return reason
     return ""
 
 

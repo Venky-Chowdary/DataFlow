@@ -170,10 +170,16 @@ def refuse_unorderable_text_cursor(cfg: Any, scope: Any, catalog: tuple | None, 
         src_cfg, db_type = _resolve_source_cfg("", dict(cfg.src_cfg or {}), None)
         if not src_cfg or not is_sqlish_source(db_type):
             return
+        # The every-row scan runs on the route's first run, then only when
+        # the table's size moves materially or on the interval (review M5).
+        check = dict(getattr(scope, "text_shape_check", None) or {})
         reason = probe_text_cursor(
             src_cfg, table, cfg.cursor_source_col,
             utc_watermark=declared_type_is_zone_bearing(typed),
+            shape_check=check,
         )
+        cfg.text_shape_check_changed = check != dict(getattr(scope, "text_shape_check", None) or {})
+        cfg.text_shape_check = check
     except Exception as exc:  # noqa: BLE001 — unmeasured, not refused
         logger.warning("text cursor ordering probe skipped: %s", exc)
         return
@@ -302,6 +308,8 @@ def _metadata(cfg: Any, horizon: dict[str, Any] | None) -> dict[str, Any]:
     }
     if horizon:
         meta[HORIZON_KEY] = dict(horizon)
+    if getattr(cfg, "text_shape_check", None):
+        meta["text_shape_check"] = dict(cfg.text_shape_check)
     every, _due, counter = getattr(cfg, "census_plan", None) or (0, False, 0)
     if every:
         meta["runs_since_key_census"] = counter
@@ -385,7 +393,7 @@ def persist_final_watermark(run: Any, cursor_key: str, running_cursor: Any, befo
     horizon = window.metadata().get(HORIZON_KEY) if window is not None else None
     advanced = bool(running_cursor) and running_cursor != cfg.watermark and final != stored
     counted = _census_due(run)
-    if not advanced and not counted and not (
+    if not advanced and not counted and not getattr(cfg, "text_shape_check_changed", False) and not (
         horizon and horizon != dict(window.previous_bound or {})
     ):
         return
@@ -406,7 +414,7 @@ def persist_copy_watermark(run: Any, cursor_key: str, high: str | None, before: 
         return None
     horizon = window.metadata().get(HORIZON_KEY) if window is not None else None
     counted = _census_due(run)
-    if not high and not counted and not (
+    if not high and not counted and not getattr(cfg, "text_shape_check_changed", False) and not (
         horizon and horizon != dict(window.previous_bound or {})
     ):
         return str(final)

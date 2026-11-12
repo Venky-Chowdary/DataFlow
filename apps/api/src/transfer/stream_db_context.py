@@ -79,6 +79,9 @@ class RunConfig:
     #: ``(every, due this run, counter to store)`` of the periodic key census.
     census_plan: Any = None
     text_cursor_judged: bool = False
+    #: Record of the text cursor's last every-row shape confirmation.
+    text_shape_check: Any = None
+    text_shape_check_changed: bool = False
     backfill_new_fields: Any = None
     batch_quality_enabled: Any = None
     drift_detector: Any = None
