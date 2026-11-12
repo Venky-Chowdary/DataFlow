@@ -361,19 +361,130 @@ def _url_query(text: str) -> list[tuple[str, str]]:
     return parse_qsl(query, keep_blank_values=True)
 
 
-def _dsn_pairs(text: str) -> list[tuple[str, str]] | None:
-    """``k=v;k=v`` (ODBC) or ``k=v k=v`` (libpq) pairs; ``None`` when ``text`` is neither."""
-    raw = str(text or "").strip()
-    if "://" in raw or "=" not in raw or raw.startswith("("):
-        return None
-    parts = [p for p in re.split(r";", raw) if p.strip()] if ";" in raw else raw.split()
+def _odbc_pairs(raw: str) -> list[tuple[str, str]] | None:
+    """``k=v;k={v;with;semicolons}`` pairs as the ODBC driver manager reads them.
+
+    A value in braces runs to its closing brace (``}}`` is a literal ``}``), so a
+    ``;`` inside it does not end the value. ``None`` when the text is malformed:
+    a part with no ``=``, an unterminated brace, or text after a closing brace
+    (security review 4: ``APP={a;b}`` used to hide every later key)."""
     pairs: list[tuple[str, str]] = []
-    for part in parts:
-        key, eq, value = part.partition("=")
-        if not eq:
+    i, n = 0, len(raw)
+    while i < n:
+        while i < n and raw[i] in "; \t\r\n":
+            i += 1
+        if i >= n:
+            break
+        eq = raw.find("=", i)
+        semi = raw.find(";", i)
+        if eq < 0 or (0 <= semi < eq):
             return None
-        pairs.append((key.strip(), value.strip().strip("{}")))
+        key = raw[i:eq].strip()
+        if not key or "{" in key or "}" in key:
+            return None
+        i = eq + 1
+        while i < n and raw[i] in " \t":
+            i += 1
+        if i < n and raw[i] == "{":
+            i += 1
+            value: list[str] = []
+            while True:
+                if i >= n:
+                    return None
+                if raw[i] == "}":
+                    if raw[i + 1:i + 2] == "}":
+                        value.append("}")
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                value.append(raw[i])
+                i += 1
+            while i < n and raw[i] in " \t":
+                i += 1
+            if i < n and raw[i] != ";":
+                return None
+            pairs.append((key, "".join(value)))
+        else:
+            end = raw.find(";", i)
+            end = n if end < 0 else end
+            pairs.append((key, raw[i:end].strip()))
+            i = end
     return pairs
+
+
+def _libpq_pairs(raw: str) -> list[tuple[str, str]] | None:
+    """``k=v k='v w'`` pairs as libpq reads them (single quotes, backslash escapes);
+    ``None`` when malformed."""
+    pairs: list[tuple[str, str]] = []
+    i, n = 0, len(raw)
+    while i < n:
+        while i < n and raw[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        start = i
+        while i < n and raw[i] != "=" and not raw[i].isspace():
+            i += 1
+        key = raw[start:i]
+        while i < n and raw[i].isspace():
+            i += 1
+        if not key or i >= n or raw[i] != "=":
+            return None
+        i += 1
+        while i < n and raw[i].isspace():
+            i += 1
+        value: list[str] = []
+        if i < n and raw[i] == "'":
+            i += 1
+            while True:
+                if i >= n:
+                    return None
+                if raw[i] == "\\" and i + 1 < n:
+                    value.append(raw[i + 1])
+                    i += 2
+                    continue
+                if raw[i] == "'":
+                    i += 1
+                    break
+                value.append(raw[i])
+                i += 1
+        else:
+            while i < n and not raw[i].isspace():
+                if raw[i] == "\\" and i + 1 < n:
+                    value.append(raw[i + 1])
+                    i += 2
+                    continue
+                value.append(raw[i])
+                i += 1
+        pairs.append((key, "".join(value)))
+    return pairs
+
+
+def _is_dsn(text: str) -> bool:
+    raw = str(text or "").strip()
+    return "://" not in raw and "=" in raw and not raw.startswith("(")
+
+
+def _dsn_pairs(text: str) -> list[tuple[str, str]] | None:
+    """``k=v;k=v`` (ODBC) or ``k=v k=v`` (libpq) pairs; ``None`` when ``text`` is
+    not a DSN or cannot be read as one (a caller refuses the latter)."""
+    raw = str(text or "").strip()
+    if not _is_dsn(raw):
+        return None
+    if ";" in raw:
+        pairs = _odbc_pairs(raw)
+        if pairs is not None:
+            return pairs
+    return _libpq_pairs(raw)
+
+
+def _read_dsn(text: str, where: str) -> list[tuple[str, str]]:
+    """The DSN's pairs; a DSN that cannot be read is refused, never skipped."""
+    pairs = _dsn_pairs(text)
+    if pairs is None and _is_dsn(text):
+        raise ValueError(f"the {where} value cannot be read as connection keys")
+    return pairs or []
 
 
 def _query_pairs(endpoint: Any) -> list[tuple[str, str, str]]:
@@ -388,9 +499,11 @@ def _query_pairs(endpoint: Any) -> list[tuple[str, str, str]]:
         for key, value in _url_query(text):
             found.append((name, key, value))
             if _norm_key(key) == "odbcconnect":
-                found.extend(("odbc_connect", k, v) for k, v in (_dsn_pairs(value) or []))
+                if not _is_dsn(value):
+                    raise ValueError("the odbc_connect value cannot be read as connection keys")
+                found.extend(("odbc_connect", k, v) for k, v in _read_dsn(value, "odbc_connect"))
         if name == "connection_string":
-            found.extend((name, k, v) for k, v in (_dsn_pairs(text) or []))
+            found.extend((name, k, v) for k, v in _read_dsn(text, name))
     return found
 
 
