@@ -42,8 +42,12 @@ def eu_workspace(tenancy_world, monkeypatch, tmp_path):  # noqa: F811
         monkeypatch.delenv(f"DATAFLOW_{name}", raising=False)
     world = tenancy_world
     create_tenant(workspace_id=world.workspace_a, name="Acme EU", data_region="eu-west-1")
-    (tmp_path / "sqlite").mkdir()
-    db = tmp_path / "sqlite" / "src.sqlite"
+    from services.embedded_volume import volume_workspace_dir
+
+    # The workspace's own area of the sqlite volume (review 3, H3).
+    folder = volume_workspace_dir(tmp_path.resolve() / "sqlite", world.workspace_a)
+    folder.mkdir(parents=True)
+    db = folder / "src.sqlite"
     with sqlite3.connect(str(db)) as conn:
         conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
         conn.execute("INSERT INTO t VALUES (1, 'EU-PERSONAL-DATA')")
@@ -138,9 +142,17 @@ def test_query_export_to_a_local_file_needs_the_deployment_region(eu_workspace, 
 def test_query_export_is_unaffected_for_a_workspace_with_no_region(eu_workspace, writes):
     from services.connector_store import create_connector
 
+    import shutil
+
+    from services.embedded_volume import volume_workspace_dir
+
     world = eu_workspace
+    # B's own copy in B's area: B may not open A's file (review 3, H3).
+    b_db = volume_workspace_dir(world.source_db.parent.parent.parent, world.workspace_b) / "src.sqlite"
+    b_db.parent.mkdir(parents=True)
+    shutil.copy(world.source_db, b_db)
     source_b = create_connector({
-        "name": "b-src", "type": "sqlite", "role": "source", "database": str(world.source_db),
+        "name": "b-src", "type": "sqlite", "role": "source", "database": str(b_db),
         "workspace_id": world.workspace_b,
     })
     ok = world.b.post("/api/v1/query/export", json={
