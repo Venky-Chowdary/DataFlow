@@ -7,7 +7,9 @@ its scale (``1.50`` reads as ``1.5``). The extract writer is fed the same
 folded value, so comparing the driver's value with the extract proved
 nothing. The source side now reads the server's own text (``col::text``) for
 those types: a value the driver folds is named (``not_proven``, the column and
-the reason in the table's reason). Skipped when no PostgreSQL is reachable.
+the reason in the table's reason), and a value the extract changed while the
+driver read it faithfully differs (``incomplete``). Skipped when no
+PostgreSQL is reachable.
 """
 
 from __future__ import annotations
@@ -38,6 +40,11 @@ NAMED = {
     "jbarr": ("id BIGINT PRIMARY KEY, a JSONB[]", ["1, ARRAY['{\"p\": 1.50}'::jsonb]"],
               "a holds an array element the driver reads as another value"),
 }
+#: table -> (columns, rows, the column the difference must name). The driver read the value faithfully,
+#: the extract did not keep it: never proven, the column named.
+DIFFERS = {
+    "numarr": ("id BIGINT PRIMARY KEY, a NUMERIC[]", ["1, '{1.50,2}'", "2, '{1.5,2}'"], "a"),
+}
 #: Shapes the driver reads one-to-one: still proven in both formats.
 HONEST = {
     "arr1": ("id BIGINT PRIMARY KEY, a INT[], m INT[], e INT[]",
@@ -60,6 +67,15 @@ def test_c1_a_value_the_driver_folds_is_named_never_proven(pg, fmt):
         table = tables[group]
         assert table["status"] == "not_proven" and said in table["reason"], (group, table["status"],
                                                                               table["reason"])
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "csv"])
+def test_h2_an_array_number_whose_scale_the_extract_dropped_differs(pg, fmt):
+    tables = _rehearse(pg({g: spec[:2] for g, spec in DIFFERS.items()}), fmt)
+    for group, (_ddl, _rows, column) in DIFFERS.items():
+        table = tables[group]
+        assert table["status"] == "incomplete", (group, table["status"], table["reason"])
+        assert f"column(s) {column}" in table["reason"], table["reason"]
 
 
 @pytest.mark.parametrize("fmt", ["jsonl", "csv"])

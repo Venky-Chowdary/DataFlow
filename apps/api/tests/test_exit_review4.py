@@ -1,5 +1,8 @@
-"""Review 4 of the exit rehearsal's value proof (C-1): unit level, no database needed.
+"""Review 4 of the exit rehearsal's value proof (C-1, H-2): unit level, no database needed.
 
+* An array is compared element by element by exact token: a numeric element
+  keeps its scale (``1.50`` is not ``1.5``) and a float keeps its sign
+  (``-0.0`` is not ``0.0``), in JSON Lines and in a CSV cell alike.
 * A value the driver folds is named from the server's own text (PostgreSQL).
 * On the other engines, a type whose driver can read two stored values as one
   is named as not provable unless its adapter is one-to-one.
@@ -7,6 +10,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 
 import pytest
 
@@ -22,6 +26,44 @@ def _judge(src_rows, ext_rows, types, *, engine="postgresql", server_text=None):
     ext = profile_rows(ext_rows, cols, ["id"], ["id"], types=types, engine=engine)
     return judge_table(name="t", source=src, extract=ext, key_columns=["id"], seal_ok=True, parity=PARITY,
                        not_measured=[])
+
+
+@pytest.mark.parametrize("source, extract", [
+    ([Decimal("1.50"), Decimal("2")], [1.5, 2]),
+    ([-0.0, 0.1], [0.0, 0.1]),
+    ([[Decimal("1.0")]], [[1]]),
+])
+def test_h2_an_array_element_that_lost_its_scale_or_sign_differs(source, extract):
+    types = {"id": "BIGINT", "a": "ARRAY<DECIMAL>" if isinstance(source[0], (Decimal, list)) else
+             "ARRAY<DOUBLE PRECISION>"}
+    out = _judge([{"id": 1, "a": source}], [{"id": 1, "a": extract}], types)
+    assert out["status"] == "incomplete" and "column(s) a" in out["reason"], out["reason"]
+
+
+def test_h2_an_array_element_scale_is_compared_in_a_csv_cell_too():
+    types = {"id": "BIGINT", "a": "ARRAY<DECIMAL>"}
+    cols = list(types)
+    src = profile_rows([{"id": 1, "a": [Decimal("1.50"), Decimal("2")]}], cols, ["id"], None, types=types,
+                       engine="postgresql", extract_is_delimited=True)
+    same = profile_rows([{"id": "1", "a": "[1.50,2]"}], cols, ["id"], ["id"], types=types, engine="postgresql",
+                        documents_as_text=True)
+    lost = profile_rows([{"id": "1", "a": "[1.5,2]"}], cols, ["id"], ["id"], types=types, engine="postgresql",
+                        documents_as_text=True)
+    assert src.column_digests["a"] == same.column_digests["a"]
+    assert src.column_digests["a"] != lost.column_digests["a"]
+
+
+def test_h2_an_honest_array_still_matches_its_extract():
+    types = {"id": "BIGINT", "a": "ARRAY<DECIMAL>", "f": "ARRAY<DOUBLE PRECISION>", "s": "ARRAY<VARCHAR>",
+             "d": "ARRAY<DATE>", "b": "ARRAY<BOOLEAN>"}
+    from datetime import date
+
+    src = [{"id": 1, "a": [Decimal("1.5"), Decimal("2")], "f": [-0.0, 0.1], "s": ["NULL", None, "a,b"],
+            "d": [date(2024, 1, 1)], "b": [True, False]}]
+    ext = [{"id": 1, "a": [1.5, 2], "f": [-0.0, 0.1], "s": ["NULL", None, "a,b"], "d": ["2024-01-01"],
+            "b": [True, False]}]
+    out = _judge(src, ext, types)
+    assert out["status"] == "proven", out["reason"]
 
 
 @pytest.mark.parametrize("ddl, server, driver, said", [

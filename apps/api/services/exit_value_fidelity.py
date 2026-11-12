@@ -14,6 +14,10 @@ duration and a jsonb number without its scale).
   render back to that text was folded by the driver: its column is named as
   not provable, with the reason (:func:`driver_fold`). The extract can only
   hold what the driver handed it.
+* An array is digested element by element by an exact token
+  (:func:`array_token`): a number keeps its scale and sign (``1.50`` is not
+  ``1.5``, ``-0.0`` is not ``0.0``), the rule an unconstrained numeric already
+  follows. A value the driver read faithfully and the extract changed differs.
 * **Other engines**: a declared type whose driver can read two stored values
   as one is named as not provable (:func:`adapter_fold`), unless its adapter is
   one-to-one. SQL Server keeps 100 ns in ``time`` / ``datetime2`` /
@@ -295,6 +299,61 @@ def driver_fold(kind: str, ddl: str, text: Any, value: Any) -> str | None:
     if kind == JSONB:
         return _jsonb_fold(text, value)
     return None
+
+
+# ------------------------------------------------------------ the array token
+
+
+def _temporal(elem: str) -> bool:
+    return _family(elem) in {"date", "datetime", "time"} or _scalar_kind(elem) in {TIME, TIMETZ}
+
+
+def _element_token(value: Any, temporal: bool) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [_element_token(v, temporal) for v in value]
+    if isinstance(value, bool):
+        return ["b", value]
+    if isinstance(value, (int, float, Decimal)):
+        return ["n", _number(value)]
+    if isinstance(value, dict):
+        return ["j", _json_exact(value)]
+    if isinstance(value, (datetime, date, time)):
+        return ["d", value.isoformat()]
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return ["x", bytes(value).hex()]
+    text = str(value)
+    if temporal:
+        for parse in (date.fromisoformat, time.fromisoformat, datetime.fromisoformat):
+            try:
+                return ["d", parse(text).isoformat()]
+            except ValueError:
+                continue
+    return ["s", text]
+
+
+def array_token(ddl: str, value: Any, *, from_text: bool = False) -> str | None:
+    """An array's exact token, element by element (``None`` stays SQL NULL).
+
+    ``from_text`` says the value comes from a delimited cell, where the array is
+    its JSON text; it is parsed keeping each number's own spelling.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not from_text:
+            return "t:" + value
+        from services.value_serializer import json_loads_exact
+
+        try:
+            value = json_loads_exact(value, keep_literals=True)
+        except ValueError:
+            return "t:" + value
+        if not isinstance(value, list):
+            return "t:" + json.dumps(_json_exact(value), sort_keys=True)
+    temporal = _temporal(element_ddl(ddl) or "")
+    return "a:" + json.dumps(_element_token(value, temporal), sort_keys=True, ensure_ascii=False)
 
 
 # ------------------------------------------------------- the other engines

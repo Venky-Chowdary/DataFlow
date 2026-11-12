@@ -193,7 +193,7 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
         token,
         token_kind,
     )
-    from services.exit_value_fidelity import adapter_fold, driver_fold, server_text_kind
+    from services.exit_value_fidelity import adapter_fold, array_token, driver_fold, element_ddl, server_text_kind
     from services.exit_verify_guard import tick
 
     eng = str(engine or "").strip().lower()
@@ -202,7 +202,10 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
     # are compared by an exact token of what the type stores (review 2, N5 / N8).
     tokens = {c: kind for c in columns if c not in uncompared
               and (kind := token_kind(_declared(dict(types or {}), c), eng))}
-    for col in tokens:
+    # An array is compared element by element, each number with its scale and sign (review 4, H-2).
+    arrays = {c: ddl for c in columns if c not in uncompared and c not in tokens
+              and eng in {"postgresql", "postgres"} and element_ddl(ddl := _declared(dict(types or {}), c))}
+    for col in [*tokens, *arrays]:
         typed.pop(col, None)
         exact.discard(col)
     for col in columns:
@@ -253,7 +256,8 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
                     prof.uncompared[col] = why
             yield {c: (_exact(row.get(c)) if c in exact
                        else _exact(token(tokens[c], row.get(c), from_text=documents_as_text)) if c in tokens
-                       else row.get(c)) for c in columns}
+                       else _exact(array_token(arrays[c], row.get(c), from_text=documents_as_text))
+                       if c in arrays else row.get(c)) for c in columns}
 
     full_acc = FingerprintAccumulator(keep_fingerprints=False)
     key_acc = FingerprintAccumulator(keep_fingerprints=False)
