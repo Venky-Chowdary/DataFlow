@@ -817,3 +817,28 @@ def test_product_statement_says_what_runs(product, word):
         cursor_type="bigint", has_identity=True,
     )
     assert claim["strategy"] == csw.STRATEGY_OVERLAP and word in claim["statement"], claim
+
+
+# Low: inheritance parents
+
+
+def test_inheritance_parent_is_sized_by_its_children(pg):
+    """A parent whose rows live in children (a Timescale hypertable, a legacy
+    partitioned table) has ``reltuples`` 0 itself: it is sized by its tree, so a
+    large one is probed with the floor."""
+    from services import commit_safe_window as csw
+
+    _sql(f'CREATE TABLE "{SCHEMA}".par (id bigint PRIMARY KEY, v text)')
+    _sql(f'CREATE TABLE "{SCHEMA}".kid () INHERITS ("{SCHEMA}".par)')
+    _sql(f"INSERT INTO \"{SCHEMA}\".kid SELECT g, 'x' FROM generate_series(1, 30) g")
+    _sql(f'ANALYZE "{SCHEMA}".par')
+    _sql(f'ANALYZE "{SCHEMA}".kid')
+    _sql(f"UPDATE pg_class SET reltuples = 50000000 WHERE oid = '\"{SCHEMA}\".kid'::regclass")
+    kind, rows = csw.pg_relation_facts(_pg_cfg(), SCHEMA, "par")
+    assert (kind, rows) == ("r", 50_000_000)
+    xmin = _sql("SELECT txid_snapshot_xmin(txid_current_snapshot())", fetch=True)[0][0]
+    late = csw.probe_pg_late_rows(
+        _pg_cfg(), schema=SCHEMA, table="par", cursor_column="id", since_xmin=str(xmin),
+        below="25", cursor_type="bigint",
+    )
+    assert late.floor == str(25 - csw.PG_LOOKBACK_VALUES), late

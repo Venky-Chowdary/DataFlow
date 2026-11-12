@@ -966,6 +966,27 @@ _PG_SUBXACT_SQL = (
     "JOIN pg_catalog.pg_stat_activity AS a ON a.pid = pg_stat_get_backend_pid(b) "
     "WHERE a.backend_xid::text::bigint = ANY(%s::bigint[])"
 )
+#: ``(relkind, estimated rows)`` of a relation sized by its whole inheritance
+#: tree: a parent whose rows live in children (a Timescale hypertable, a legacy
+#: partitioned table) has ``reltuples`` 0 itself (review Low). Members with
+#: storage are summed; one never analysed (``-1``), or a tree with no storage,
+#: makes the size unknown (``-1``), which the probe treats as large.
+_PG_RELATION_SIZE_SQL = (
+    "WITH RECURSIVE tree(oid) AS ("
+    " SELECT c.oid FROM pg_catalog.pg_class c"
+    " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE n.nspname = %s AND c.relname = %s"
+    " UNION SELECT i.inhrelid FROM pg_catalog.pg_inherits i JOIN tree t ON i.inhparent = t.oid)"
+    " SELECT (SELECT c.relkind::text FROM pg_catalog.pg_class c"
+    "         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+    "         WHERE n.nspname = %s AND c.relname = %s),"
+    " CASE WHEN count(*) FILTER (WHERE c.relkind <> 'p') = 0"
+    "        OR bool_or(c.relkind <> 'p' AND c.reltuples < 0) THEN -1"
+    "      ELSE sum(c.reltuples) FILTER (WHERE c.relkind <> 'p') END::bigint"
+    " FROM tree t JOIN pg_catalog.pg_class c ON c.oid = t.oid"
+)
+
+
 def late_row_rule(bound: Mapping[str, Any]) -> tuple[str, int, tuple[int, ...]]:
     """How the next run judges rows behind the watermark against ``bound``.
 
@@ -1107,12 +1128,7 @@ def pg_relation_facts(
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT c.relkind::text, c.reltuples::bigint FROM pg_catalog.pg_class c "
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-                "WHERE n.nspname = %s AND c.relname = %s",
-                (qualified or "public", bare),
-            )
+            cur.execute(_PG_RELATION_SIZE_SQL, (qualified or "public", bare) * 2)
             row = cur.fetchone()
     except Exception as exc:  # noqa: BLE001
         logger.warning("commit-safe window: relation kind unreadable: %s", exc)
@@ -1202,14 +1218,9 @@ def probe_pg_late_rows(
     first_gap: str | None = None
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT c.reltuples::bigint FROM pg_catalog.pg_class c "
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-                "WHERE n.nspname = %s AND c.relname = %s",
-                (schema or "public", table),
-            )
+            cur.execute(_PG_RELATION_SIZE_SQL, (schema or "public", table) * 2)
             est = cur.fetchone()
-            est_rows = int(est[0]) if est and est[0] is not None else -1
+            est_rows = int(est[1]) if est and est[1] is not None else -1
             floor = ""
             # -1: never analysed, or a partitioned parent — size unknown, so
             # treated as large (review M5): an unfloored probe could scan it all.
