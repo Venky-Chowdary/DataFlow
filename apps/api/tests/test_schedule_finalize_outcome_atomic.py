@@ -1237,6 +1237,87 @@ def test_a_contended_claim_does_not_stop_the_startup_reclaim(store, runner, monk
     assert [getattr(r, "schedule_id", None) for r in deferred] == [a.id]
 
 
+# --- A beat skip is recorded once, not again as "not started" (round 3, Low 2) -
+
+
+def _skips(sched) -> list[tuple]:
+    return [(r.get("reason_code"), r.get("occurrences"))
+            for r in sched.run_history if r.get("status") == "skipped"]
+
+
+def _real_starts(runner, monkeypatch) -> list[str]:
+    """The beat's neighbours stubbed, but ``_run_schedule`` and its start kept real."""
+    import services.schedule_approvals as approvals
+
+    real_run_schedule = runner.module._run_schedule
+    _beat_stubs(runner, monkeypatch)
+    monkeypatch.setattr(runner.module, "_run_schedule", real_run_schedule)
+    _start_stubs(monkeypatch)
+    monkeypatch.setattr(approvals, "release_same_declaration_source_drift",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(runner.module, "_append_replay_blocked", lambda sched: None)
+    dispatched: list[str] = []
+    monkeypatch.setattr(runner.module, "_dispatch_transfer",
+                        lambda sid, **k: dispatched.append(sid) or "job-never")
+    return dispatched
+
+
+def test_beats_on_a_run_still_being_recorded_coalesce_into_one_skip(store, runner, monkeypatch):
+    """LB5: five beats, one skip record that says so five times.
+
+    The beat's start records its ``run_still_recording`` skip; ``_run_schedule``
+    then finished the same attempt again as ``not_started``. Once the attempt's
+    pending record was folded into the earlier identical skip, that second
+    finish appended a false "paused or removed before dispatch" skip, and the
+    next beat's skip no longer coalesced: one more record every beat.
+    """
+    sched = _finished_but_held(store, runner, monkeypatch, "beat-held", "job-held")
+    store.update_schedule(sched.id,
+                          {"next_run_at": (_now() - timedelta(minutes=1)).isoformat()})
+    _jobs_ended(store, monkeypatch, "job-held")
+    dispatched = _real_starts(runner, monkeypatch)
+    attempts = _contend(store, monkeypatch, sched.id)
+
+    for _ in range(5):
+        runner._run_due_schedules()
+
+    assert attempts and dispatched == []
+    held = store.get_schedule(sched.id)
+    assert held.running is True and held.running_job_id == "job-held" and held.run_count == 0
+    assert [(r.get("job_id"), r.get("status")) for r in held.run_history] == [
+        ("job-held", "running"), ("", "skipped")], held.run_history
+    assert _skips(held) == [("run_still_recording", 5)]
+    from services import schedule_run_lifecycle as life
+
+    assert life.derive_status(held)["last_skip"]["reason_code"] == "run_still_recording"
+
+
+def test_beats_refused_by_a_live_peer_on_the_destination_coalesce_into_one_skip(
+    store, runner, monkeypatch
+):
+    """LB6: the same double finish behind the beat's ``already_running`` skip."""
+    from services import schedule_run_lifecycle as life
+
+    peer, _run = _claimed(store, "dest-peer", "job-live", shared_destination_acknowledged=True)
+    sched = store.create_schedule({
+        "name": "dest-waiter", "source_connector_id": "src", "source_table": "orders",
+        "dest_connector_id": "dst", "dest_table": peer.dest_table, "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}], "max_retries": 0,
+        "shared_destination_acknowledged": True,
+    })
+    _jobs_ended(store, monkeypatch)
+    dispatched = _real_starts(runner, monkeypatch)
+
+    for _ in range(3):
+        assert runner._run_schedule(sched.id) is None
+
+    assert dispatched == []
+    after = store.get_schedule(sched.id)
+    assert _skips(after) == [("already_running", 3)], after.run_history
+    assert len(after.run_history) == 1
+    assert life.derive_status(after)["last_skip"]["reason_code"] == "already_running"
+
+
 # --- A late outcome after the newer run finished (review round 2, L-C) --------
 
 PLAIN_FAIL = {"status": "failed", "phase": "load", "error": "something odd happened",
