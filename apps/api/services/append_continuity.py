@@ -761,10 +761,12 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
     if target is None:
         return
     _clear_accepted_reset(target)
-    # A run of this route succeeded and was verified: whatever an earlier
-    # failed append left behind is part of the state it just proved.
-    clear_unfinished_append(target)
     mode = effective_sync_mode(request)
+    if mode is not None and is_overwrite_sync(mode):
+        # Only a rebuild settles a failed append's leftover rows. Any other
+        # success (a one-row upsert) proved its own rows, not that the table
+        # no longer holds the batch the next append would write again (M1).
+        _settle_unfinished_append(target, job_id=job_id, sync_mode=mode)
     if mode is None or not (
         is_append_sync(mode) or is_overwrite_sync(mode) or requires_upsert(mode)
     ):
@@ -805,7 +807,7 @@ ACCEPTED_RESET_PREFIX = "accepted_reset:"
 #: already held some. The rows cannot be removed (no key list is the batch),
 #: so the next append would write them a second time. The marker makes that
 #: next append a refusal until the state is settled: an audited rebaseline, or
-#: any run of the route that succeeds (a full-refresh overwrite rebuilds it).
+#: a full-refresh overwrite that succeeds (it rebuilds the table; audited too).
 UNFINISHED_APPEND_PREFIX = "unfinished_append:"
 _UNFINISHED_CHECKSUM = "unfinished-append:rows_before="
 UNFINISHED_RECOVERY_HINT = (
@@ -867,6 +869,32 @@ def clear_unfinished_append(target: ContinuityTarget | None) -> dict[str, Any] |
     except Exception:  # noqa: BLE001
         logger.warning("unfinished-append marker not cleared", exc_info=True)
         return None
+
+
+def _settle_unfinished_append(target: ContinuityTarget, *, job_id: str, sync_mode: str) -> None:
+    """A verified overwrite rebuilt the table: drop the marker, audited first."""
+    pending = unfinished_append(target)
+    if not pending:
+        return
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="append_continuity.unfinished_append_settled",
+        resource=f"table:{target.table}",
+        actor="system",
+        level="info",
+        outcome="success",
+        details={
+            "db_type": target.db_type,
+            "table": target.table,
+            "unfinished_job_id": pending["job_id"],
+            "rows_committed": pending["rows_committed"],
+            "rows_before": pending["rows_before"],
+            "settled_by_job_id": str(job_id or ""),
+            "sync_mode": sync_mode,
+        },
+    )
+    clear_unfinished_append(target)
 
 
 def _unfinished_violation(
