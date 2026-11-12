@@ -198,3 +198,49 @@ def test_ladder_names_a_row_missing_on_one_side_without_none_fields():
         ["id"],
     )
     assert cell == "L4/L5 localized: row id='5' column 'name' source='a' target='b'"
+
+
+# --------------------------------------------------------------------------
+# C3 — ISO timestamps with mixed offsets in a TEXT cursor
+# --------------------------------------------------------------------------
+
+
+def _iso_source(src: Path) -> None:
+    _exec(src, "CREATE TABLE t (id INTEGER PRIMARY KEY, updated_at TEXT NOT NULL, v TEXT)")
+    _exec(
+        src, "INSERT INTO t VALUES (?, ?, ?)",
+        [(1, "2024-01-01T08:00:00Z", "a"), (2, "2024-01-01T09:00:00Z", "b")],
+    )
+
+
+@pytest.mark.parametrize("skip_preflight", [True, False], ids=["run", "preflight"])
+def test_text_cursor_mixed_offsets_row_not_skipped(tmp_path, isolated, skip_preflight, monkeypatch):
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    _iso_source(src)
+    if not skip_preflight:
+        # Only Validate may refuse in this case: the run's own guard is off.
+        import src.transfer.stream_commit_window as scw
+
+        monkeypatch.setattr(scw, "refuse_unorderable_text_cursor", lambda *a, **k: None)
+    extra = {} if skip_preflight else {
+        "cursor_semantics": "modification_timestamp", "primary_key": "id",
+    }
+    first = _run(isolated, src, dst, "updated_at", skip_preflight=skip_preflight, **extra)
+    assert first.success, first.error
+    assert _dest_ids(dst) == [1, 2]
+
+    # 09:30Z, written with another offset: below the watermark as text.
+    _exec(src, "INSERT INTO t VALUES (3, '2024-01-01T05:30:00-04:00', 'instant 09:30Z')")
+    second = _run(isolated, src, dst, "updated_at", skip_preflight=skip_preflight, **extra)
+    # The row cannot be read on a text ordering — and the run must not be green.
+    assert not second.success, "a run that skipped the 09:30Z row reported success"
+    error = second.error or ""
+    assert "updated_at" in error and "more than one UTC offset" in error, error
+    assert "2024-01-01T05:30:00-04:00" in error
+    assert _dest_ids(dst) == [1, 2]
+
+    # Same instants in one spelling: read in full.
+    _exec(src, "UPDATE t SET updated_at = '2024-01-01T09:30:00Z' WHERE id = 3")
+    third = _run(isolated, src, dst, "updated_at", skip_preflight=skip_preflight, **extra)
+    assert third.success, third.error
+    assert _dest_ids(dst) == [1, 2, 3]

@@ -8,10 +8,13 @@ arrive through a full refresh.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 from services.source_duplicate_probe import is_sqlish_source
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -209,3 +212,169 @@ def probe_null_cursor_count(
             message=f"NULL-cursor probe failed: {exc}"[:400],
             cursor_column=col,
         )
+
+
+def build_cursor_value_gates(
+    *,
+    read_scope: Any,
+    sync_mode: str,
+    validation_mode: str,
+    column_nullability: dict[str, bool] | None,
+    column_types: dict[str, str] | None,
+    source_connector_id: str,
+    source_config: dict[str, Any] | None,
+    source_table: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Preflight gates on the cursor column's *values*: ``(gate, blockers)``.
+
+    D99: an incremental run bounds the delta with ``cursor > watermark`` — and
+    ``NULL > x`` is never true, so NULL-cursor rows are absent from every delta
+    forever while the job reports verified. Warn (block under strict) with the
+    live count; a probe that cannot measure skips honestly rather than
+    fail-closing on unmeasured state.
+
+    Audit C3/H4b: a text cursor is ordered by the source as text. Numbers of
+    more than one width, or timestamps in more than one offset, sort
+    differently as text, so rows land behind the watermark and are skipped
+    while every run reports success — refused here with the reason.
+    """
+    gate: dict[str, Any] | None = None
+    blockers: list[dict[str, Any]] = []
+    try:
+        from services.sync_cursor import incremental_read_narrows
+
+        cursor = str(getattr(read_scope, "cursor_column", "") or "").strip()
+        if not cursor or not incremental_read_narrows(sync_mode):
+            return None, []
+        strict = (validation_mode or "strict").lower() == "strict"
+        ordering = _text_cursor_blockers(
+            cursor, column_types, source_connector_id, source_config, source_table
+        )
+        if ordering:
+            # Not a matter of validation strictness: on two orderings the read
+            # skips rows however the run is graded.
+            return (
+                {
+                    "id": "g_cursor_order",
+                    "status": "block",
+                    "message": ordering[0]["message"],
+                    "duration_ms": 0,
+                    "details": ordering[0]["details"],
+                },
+                ordering,
+            )
+        nullable = (column_nullability or {}).get(cursor)
+        probe = probe_null_cursor_count(
+            source_connector_id=source_connector_id,
+            source_config=source_config,
+            source_table=source_table,
+            source_collection=str((source_config or {}).get("collection") or ""),
+            cursor_column=cursor,
+        )
+        details: dict[str, Any] = {
+            "cursor_column": cursor,
+            "probe_status": probe.status,
+            "null_count": probe.null_count,
+            "column_nullable": nullable,
+        }
+        skipped = (
+            f"{probe.null_count} source row(s) carry a NULL value in the incremental "
+            f"cursor column '{cursor}' — an incremental read can never see them: they "
+            "are absent from every delta and only arrive via a full refresh."
+        )
+        if probe.ran and probe.null_count:
+            if strict:
+                blockers.append(
+                    {
+                        "id": "g_nullable_cursor",
+                        "message": skipped,
+                        "details": details,
+                        "suggested_actions": [
+                            "Fill the cursor column on the NULL rows and re-validate",
+                            "Add a COALESCE fallback cursor (e.g. created_at)",
+                            "Run as full refresh so every row is read",
+                        ],
+                    }
+                )
+            gate = {
+                "id": "g_nullable_cursor",
+                "status": "block" if strict else "warn",
+                "message": (
+                    f"{skipped} Fill the cursor column, add a COALESCE fallback "
+                    "cursor, or acknowledge the gap."
+                ),
+                "duration_ms": 0,
+                "details": details,
+            }
+        elif probe.ran:
+            gate = {
+                "id": "g_nullable_cursor",
+                "status": "warn" if nullable else "pass",
+                "message": (
+                    f"Cursor column '{cursor}' holds no NULL values"
+                    + (
+                        " (the column is nullable — a future NULL row "
+                        "would be skipped by every incremental delta)"
+                        if nullable
+                        else ""
+                    )
+                ),
+                "duration_ms": 0,
+                "details": details,
+            }
+        elif nullable:
+            gate = {
+                "id": "g_nullable_cursor",
+                "status": "warn",
+                "message": (
+                    f"Cursor column '{cursor}' is nullable — NULL "
+                    "rows would be skipped by every incremental delta "
+                    f"({probe.message})"
+                ),
+                "duration_ms": 0,
+                "details": details,
+            }
+    except Exception as exc:  # noqa: BLE001 — unmeasured, never a false pass
+        logger.warning("NULL-cursor gate probe skipped: %s", exc, exc_info=exc)
+    return gate, blockers
+
+
+def _text_cursor_blockers(
+    cursor: str,
+    column_types: dict[str, str] | None,
+    source_connector_id: str,
+    source_config: dict[str, Any] | None,
+    source_table: str,
+) -> list[dict[str, Any]]:
+    """Refuse a text cursor whose text order is not the sync's order (C3/H4b)."""
+    try:
+        from connectors.cursor_bind import declared_type_is_zone_bearing
+        from services.cursor_order import is_text_declared, probe_text_cursor
+
+        cfg, db_type = _resolve_source_cfg(source_connector_id, source_config, None)
+        if not cfg or not source_table or not is_sqlish_source(db_type):
+            return []
+        typed = str((column_types or {}).get(cursor) or "")
+        # SQLite compares stored text as text whatever the column is declared.
+        if typed and not is_text_declared(typed) and db_type != "sqlite":
+            return []
+        reason = probe_text_cursor(
+            cfg, source_table, cursor, utc_watermark=declared_type_is_zone_bearing(typed)
+        )
+    except Exception as exc:  # noqa: BLE001 — unmeasured, not refused
+        logger.warning("text cursor ordering probe skipped: %s", exc)
+        return []
+    if not reason:
+        return []
+    return [
+        {
+            "id": "g_cursor_order",
+            "message": reason,
+            "details": {"cursor_column": cursor},
+            "suggested_actions": [
+                "Use a cursor column the source types as a number or a timestamp",
+                "Store the values in one sortable form (zero-padded, one UTC offset)",
+                "Run as full refresh so every row is read",
+            ],
+        }
+    ]
