@@ -97,7 +97,7 @@ _ALLOWED = frozenset("""
 how many much number count total totals overall altogether of the a an my our your me us i we you
 show list give tell display see view get find what which are is was were be been being have has had
 did do does any there all please can could would will just only ones one those these them they it its
-that this so far now yet ever still also then and or with in at on for from to into via using
+that this so far now yet ever still also then and or but with in at on for from to into via using
 hey hi ok okay pilot datawrap workspace status state statuses current currently happened
 right moment present most recent latest newest last up
 ran started created executed launched happened occurred kicked off

@@ -1480,8 +1480,16 @@ class DataPilotAgent:
 
         # "and yesterday?" after a jobs question is that question for yesterday
         # (review M3): rewritten here so every check below reads the full ask.
-        from .job_questions import resolve_job_followup
+        from .job_questions import job_followup_conflict, resolve_job_followup
 
+        conflict = job_followup_conflict(message, history)
+        if conflict:
+            # "of those" asked for a status those jobs cannot have (review 2, H4).
+            return _with_llm_footnote(
+                CopilotResponse(answer=conflict, intent="jobs", confidence=0.3,
+                                method="pilot_local_engine", reasoning="of-those status conflict"),
+                _resolve_pilot_engine(),
+            )
         resolved = resolve_job_followup(message, history)
         if resolved:
             message, lower_msg = resolved, resolved.lower()

@@ -91,6 +91,8 @@ _ROWS_MOVED_RE = re.compile(
     re.I,
 )
 
+#: The status classes the ledger read filters by (``list_jobs`` ``status``).
+_LEDGER_STATUSES = ("failed", "running", "completed", "attention")
 #: A plan made only of these read nothing the ledger read does not replace.
 _REPLACEABLE = frozenset({"explain_product", "search_knowledge", "describe_pilot", "list_jobs"})
 
@@ -125,7 +127,7 @@ class JobAsk:
             args["limit"] = 100
         # The last job is the newest row of the unfiltered ledger, whatever
         # status the question assumed it has.
-        if not self.last and not self.metric and self.status in ("failed", "running", "completed", "attention"):
+        if not self.last and not self.metric and self.status in _LEDGER_STATUSES:
             args["status"] = self.status
         if self.verification and not self.last and not self.metric:
             args["verification"] = self.verification
@@ -176,8 +178,13 @@ def parse_job_ask(message: str) -> JobAsk | None:
     else:
         metric = ""
     verification = reading.verification
-    status = "" if (metric or verification) else asked_status(text)
+    # A status asked beside a verdict is applied with it (review 2, H4): read
+    # from the words the verdict did not use ("completed jobs failed verification").
+    status = "" if metric else asked_status(reading.rest if verification else text)
     unapplied, kind = reading.unapplied, reading.kind
+    if verification and status and status not in _LEDGER_STATUSES and not unapplied:
+        # The ledger filters a verdict with a status class, not an exact status.
+        unapplied, kind = status.replace("_", " "), "filter"
     if unapplied and not (status or metric or last or _LEDGER_ASK_RE.search(text)):
         # "if I run the same CDC change twice is it safe" is not a ledger read.
         return None
@@ -283,11 +290,38 @@ _STATUS_PHRASE = {
 
 
 def _status_phrase(ask: JobAsk) -> str:
+    status = _STATUS_PHRASE.get(ask.status, "were " + ask.status.replace("_", " ")) if ask.status else ""
     if ask.verification:
-        return f"{ask.verification} verification"
-    if ask.status:
-        return _STATUS_PHRASE.get(ask.status, "were " + ask.status.replace("_", " "))
-    return "ran"
+        verdict = f"{ask.verification} verification"
+        return f"{status} and {verdict}" if status else verdict
+    return status or "ran"
+
+
+_OF_THOSE_RE = re.compile(r"\b(?:of|among)\s+(?:those|them|these)\b", re.I)
+
+
+def job_followup_conflict(message: str, history: list[dict] | None) -> str:
+    """A refusal when "of those" asks for a status the earlier jobs cannot have, else "".
+
+    "how many of those were running?" after "how many jobs completed yesterday"
+    intersects nothing: a job has one status. It is said so, not answered with
+    the running count (review 2, H4).
+    """
+    text = (message or "").strip()
+    if not text or not _OF_THOSE_RE.search(text) or _JOBS_SUBJECT_RE.search(text):
+        return ""
+    prior = parse_job_ask(_effective_question(history, 4))
+    if prior is None or prior.unapplied or prior.last or prior.metric or not prior.status:
+        return ""
+    here = read_filters(text)
+    status = asked_status(here.rest or text) if not here.unapplied else ""
+    if not status or status == prior.status or (prior.status == "attention" and status == "failed"):
+        return ""
+    return (
+        f"I can't count “{status.replace('_', ' ')}” among those: they were jobs that "
+        f"{_status_phrase(prior)}, and a job has one status. Ask “how many jobs "
+        f"{_status_phrase(JobAsk(status=status))}” for that count."
+    )
 
 
 def resolve_job_followup(message: str, history: list[dict] | None) -> str:
@@ -335,18 +369,19 @@ def _resolve_followup(message: str, history: list[dict] | None, *, depth: int) -
     if unhandled:
         # Keep the qualifier in the question so it is refused by name.
         return f"how many jobs {_status_phrase(prior)} {read_filters(previous).window_text} {unhandled}".strip()
-    if account and account.filters():
-        words = narrowing_words(account.filters())
-        ask = JobAsk(status=status) if status else prior
-        window_text = here.window_text or read_filters(previous).window_text
-        return f"how many {words} jobs {_status_phrase(ask)} {window_text}".strip()
+    # The earlier question's filters stay: a follow-up narrows it, it does not
+    # replace it (review 2, H4). Only a sibling status ("and completed?")
+    # replaces the status it names.
+    of_those = bool(_OF_THOSE_RE.search(text))
+    narrowing = {**prior.narrowing, **(account.filters() if account else {})}
     window_text = here.window_text or read_filters(previous).window_text
     if here.verification:
-        ask = JobAsk(verification=here.verification)
+        ask = JobAsk(status=status or prior.status, verification=here.verification)
     elif status:
-        ask = JobAsk(status=status)
-    elif here.window_text:
+        ask = JobAsk(status=status, verification=prior.verification if of_those else "")
+    elif here.window_text or (account and account.filters()):
         ask = prior
     else:
         return ""
-    return f"how many jobs {_status_phrase(ask)} {window_text}".strip()
+    words = narrowing_words(narrowing)
+    return f"how many {words + ' ' if words else ''}jobs {_status_phrase(ask)} {window_text}".strip()
