@@ -1122,7 +1122,7 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             str(cfg.get("host") or ""),
             raw_url,
             str(cfg.get("endpoint_url") or ""),
-            workspace_id=str(cfg.get("workspace_id") or ""),
+            workspace_id=str(cfg.get("workspace_id") or ""), db_type=kind,
         )
     warehouse = _warehouse_creator(cfg, (cfg.get("type") or "").lower().strip())
     if warehouse is not None:

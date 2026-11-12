@@ -8,7 +8,6 @@ import asyncio
 import logging
 import os
 import threading
-from services.brand_env import getenv_brand
 import time
 from contextlib import asynccontextmanager, nullcontext
 
@@ -218,9 +217,16 @@ async def lifespan(app: FastAPI):
     except Exception as de:
         print(f"[!] Driver bootstrap warning: {de}")
 
-    training_enabled = getenv_brand("TRAINING", "off" if is_production() else "on").lower() not in (
-        "off", "0", "false",
-    )
+    from .ai.training.training_runtime import TrainingRuntime
+    from .ai.training.training_scheduler import training_enabled as _training_enabled
+
+    training_enabled = _training_enabled()
+    # Always one runtime: admin routes (/training-agent/run, /copilot/train)
+    # run on it even with background training off, and shutdown stops them.
+    # Kept local too: a second lifespan of this app replaces app.state's, and
+    # each lifespan must stop its own.
+    training = TrainingRuntime()
+    app.state.training_runtime = training
 
     # Accept traffic immediately — do not block on HuggingFace / RAG init.
     app.state.ready = False
@@ -231,28 +237,19 @@ async def lifespan(app: FastAPI):
             from .ai.knowledge.semantic_patterns import get_pattern_count
             from .ai.knowledge.synonyms import get_synonym_count
             from .ai.rag.pipeline import get_rag_pipeline
-            from .ai.training.training_scheduler import run_training_loop
+            from .ai.training.training_scheduler import run_background_training, run_training_loop
 
             pipeline = get_rag_pipeline()
             init_result = await asyncio.to_thread(pipeline.initialize)
             print(f"[+] RAG Pipeline initialized: {init_result.get('ingested', 0)} documents")
             print(f"[+] Knowledge Base: {get_pattern_count()} patterns, {get_synonym_count()} synonyms")
 
-            async def _background_training():
-                await asyncio.sleep(120)
-                try:
-                    from .ai.training.training_agent import get_training_agent
-                    training = get_training_agent()
-                    run = await asyncio.to_thread(training.run_full_training, False, False)
-                    ready = run.metrics.get("copilot_evaluation", {}).get("ready", False)
-                    examples = run.metrics.get("conversation_examples", 0)
-                    print(f"[+] Copilot Training Agent: {run.status} ({examples} examples, ready={ready})")
-                except Exception as te:
-                    print(f"[!] Copilot training warning: {te}")
-
             if training_enabled:
-                app.state.training_task = asyncio.create_task(_background_training())
-                asyncio.create_task(run_training_loop())
+                # Own daemon threads + stop event: shutdown never waits on a run.
+                app.state.training_task = training.start_task(
+                    run_background_training(training), name="training-warmup")
+                app.state.training_loop_task = training.start_task(
+                    run_training_loop(runtime=training), name="training-loop")
                 print("[+] Training Agent enabled")
             else:
                 print("[*] Training Agent disabled (DATAFLOW_TRAINING=off)")
@@ -384,13 +381,8 @@ async def lifespan(app: FastAPI):
             await warm
         except asyncio.CancelledError:
             pass
-    task = getattr(app.state, "training_task", None)
-    if task:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    # This lifespan's runtime: sets its stop event, cancels its tasks, waits <= 1 s.
+    await training.shutdown()
     try:
         from services.otel_logging import shutdown_otel_logging
 
