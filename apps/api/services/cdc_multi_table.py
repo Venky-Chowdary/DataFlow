@@ -15,6 +15,7 @@ from typing import Any, Iterator
 from services.cdc_engine import ChangeBatch
 from services.cdc_net_effect import CdcTxnEvent, coalesce_cdc_txn_events, infer_row_pk
 from services.cdc_transaction_buffer import (
+    CdcUnkeyedDelete,
     CdcTxnBufferOverflow,
     default_txn_buffer_max_events,
 )
@@ -185,7 +186,8 @@ class MultiTableTransactionBuffer:
 
     def delete(self, table: str, pk: str, *, lsn: str | None = None) -> None:
         if not pk:
-            return
+            # Never dropped (audit M3): the row would stay at the destination.
+            raise CdcUnkeyedDelete(table, lsn)
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC multi-table buffer is not open after delete")

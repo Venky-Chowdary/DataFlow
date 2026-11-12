@@ -670,11 +670,68 @@ def _mad(values: list[Any], med: Any = None) -> Any:
     return _median([abs(v - m) for v in values])
 
 
+#: Prior loads (same schema version) a route needs before a history finding
+#: may block a strict run. Below it every finding is advisory: a median and a
+#: MAD of two or three loads are not a baseline, and one prior load was enough
+#: to fail a run on "volume below 50% of prior median".
+MIN_BLOCKING_HISTORY = 8
+#: A drift smaller than this share of the historical median never blocks: on a
+#: very stable history (100.00, 100.01, 100.02) the MAD alone made a 0.2% move
+#: thirteen "standard deviations".
+_PRACTICAL_EFFECT_SHARE = Decimal("0.01")
+#: A load this many times the prior median — and twice the largest prior load —
+#: is a volume spike (a duplicated or re-sent load).
+_VOLUME_SPIKE_RATIO = 3.0
+#: A null rate that at least triples, rises two points above every prior load
+#: and is far outside binomial noise is a jump, whatever its absolute size
+#: (0.1% -> 9% moved less than the 10-point absolute cut).
+_NULL_JUMP_RATIO = 3.0
+_NULL_JUMP_MIN_RISE = 0.02
+_NULL_JUMP_Z = 3.5
+#: Two-sided 1% critical values of ``|x - median| / (1.4826 * MAD)`` when the
+#: median and MAD are estimated from ``n`` prior loads (Monte Carlo, 400,000
+#: draws per n, seed 20261111). The fixed cut of 3.5 is the large-sample value:
+#: with 8 loads it fired on 4.7% of stationary loads, with 10 on 3.3%.
+_DRIFT_CUT_1PCT: dict[int, float] = {
+    8: 5.92, 9: 5.76, 10: 4.94, 11: 4.87, 12: 4.41, 13: 4.35, 14: 4.05,
+    15: 4.04, 16: 3.82, 17: 3.78, 18: 3.67, 19: 3.65,
+}
+_DRIFT_CUT_LARGE_SAMPLE = 3.5
+
+
+def _drift_cutoff(prior_loads: int, fpr_target: float = 0.01) -> float:
+    """Robust-z a mean must exceed to count as drift, for this much history.
+
+    Calibrated for a 1% false-positive rate on stationary loads; another
+    target scales the cut by the ratio of normal quantiles (a stricter target
+    raises it).
+    """
+    n = int(prior_loads or 0)
+    if n < min(_DRIFT_CUT_1PCT):
+        cut = _DRIFT_CUT_1PCT[min(_DRIFT_CUT_1PCT)]
+    else:
+        cut = _DRIFT_CUT_1PCT.get(n, _DRIFT_CUT_LARGE_SAMPLE)
+    try:
+        target = min(max(float(fpr_target), 1e-6), 0.5)
+    except (TypeError, ValueError):
+        target = 0.01
+    if abs(target - 0.01) > 1e-12:
+        from statistics import NormalDist
+
+        normal = NormalDist()
+        cut *= normal.inv_cdf(1 - target / 2) / normal.inv_cdf(1 - 0.005)
+    return cut
+
+
 def _robust_z(value: Any, series: list[Any]) -> Decimal | None:
     """Modified z-score using MAD on write-path Decimals.
 
     None when the series is too short or a cell cannot bind. IEEE
     ``float(mean)`` invented a second magnitude on scale-20 money.
+
+    The scale has a practical-effect floor of 1% of the historical median, so
+    a move that is tiny in absolute terms is not "many deviations" just
+    because the history happened to be very stable.
     """
     bound = _rehydrate_stat(value)
     nums = [d for v in series if (d := _rehydrate_stat(v)) is not None]
@@ -684,13 +741,30 @@ def _robust_z(value: Any, series: list[Any]) -> Decimal | None:
     mad = _mad(nums, med)
     if med is None or mad is None:
         return None
-    if mad == 0:
-        # All identical historically — any material delta is noteworthy.
-        if bound == med:
-            return Decimal("0")
-        return abs(bound - med) / max(abs(med) * Decimal("0.01"), Decimal("1e-9"))
-    # 0.6745 makes MAD comparable to std for normal data.
-    return Decimal("0.6745") * (bound - med) / mad
+    if bound == med:
+        return Decimal("0")
+    # 1.4826 (= 1 / 0.6745) makes MAD comparable to std for normal data.
+    scale = max(
+        mad * Decimal("1.4826"),
+        abs(med) * _PRACTICAL_EFFECT_SHARE,
+        Decimal("1e-9"),
+    )
+    return (bound - med) / scale
+
+
+def _null_rate_jump(current: float, series: list[float], sample_rows: int) -> bool:
+    """A relative null-rate rise the absolute 10-point cut does not see."""
+    if not series or sample_rows <= 0:
+        return False
+    hist = float(_median(series) or 0.0)
+    rise = current - max(float(v) for v in series)
+    if rise < _NULL_JUMP_MIN_RISE or current < _NULL_JUMP_RATIO * hist:
+        return False
+    # Binomial noise of a rate of ``hist`` over this many rows (at least one
+    # expected NULL, so a zero history still has a spread).
+    base = max(hist, 1.0 / sample_rows)
+    spread = (base * (1.0 - min(base, 0.999)) / sample_rows) ** 0.5
+    return (current - hist) / spread >= _NULL_JUMP_Z
 
 
 def detect_anomalies(
@@ -700,14 +774,19 @@ def detect_anomalies(
     fpr_target: float = 0.01,
     prior_runs: list[dict[str, Any]] | None = None,
 ) -> list[str]:
-    """Backward-compatible anomaly messages (single baseline or rolling)."""
+    """Backward-compatible finding messages (single baseline or rolling).
+
+    Every finding, blocking or advisory: this is a list of messages, not a
+    verdict. With fewer than ``MIN_BLOCKING_HISTORY`` prior loads the report
+    itself blocks nothing (``build_load_history_report``).
+    """
     report = build_load_history_report(
         current_profile=current,
         prior_runs=prior_runs,
         fallback_baseline=historical,
         fpr_target=fpr_target,
     )
-    return list(report.get("anomalies") or [])
+    return list(report.get("anomalies") or []) + list(report.get("advisories") or [])
 
 
 def _histogram_delta(
@@ -754,8 +833,14 @@ def build_load_history_report(
     fpr_target: float = 0.01,
     compare_last_k: int = 10,
 ) -> dict[str, Any]:
-    """Structured report for Validate/Run: drift vs last K loads + novel bad patterns."""
-    _ = fpr_target  # reserved for calibrated thresholds
+    """Structured report for Validate/Run: drift vs last K loads + novel bad patterns.
+
+    ``anomalies`` is the blocking list (a strict run fails on it) and is only
+    filled when the route has ``MIN_BLOCKING_HISTORY`` comparable prior loads.
+    With less history the same findings are reported under ``advisories`` and
+    the report passes. ``fpr_target`` sets the mean-drift cut
+    (:func:`_drift_cutoff`).
+    """
     runs = list(prior_runs or [])
     # Exclude a trailing run that is identical to "current" if caller included it.
     history = runs[-compare_last_k:] if runs else []
@@ -782,11 +867,13 @@ def build_load_history_report(
             if bound is not None:
                 bucket["mean"].append(bound)
 
+    comparable_loads = 0
     for run in history:
         cols = _deserialize_profile(run.get("columns") or {})
         version = str(run.get("schema_version") or "") or _schema_version(cols)
         if version != current_version:
             continue
+        comparable_loads += 1
         _add_to_series(cols, null_comparable=run.get("null_rate_metric") == NULL_RATE_METRIC)
 
     # If no ring history, fall back to single baseline dict. Callers profile
@@ -797,8 +884,21 @@ def build_load_history_report(
         and _schema_version(fallback_baseline) == current_version
     ):
         _add_to_series(fallback_baseline, null_comparable=True)
+        comparable_loads = 1
 
-    z_cut = 3.5
+    # Each finding blocks only when the history it was judged against is long
+    # enough; otherwise it is advice. Column statistics are judged against the
+    # same-schema loads, volume and quarantine patterns against every load.
+    advisories: list[str] = []
+    column_blocking = comparable_loads >= MIN_BLOCKING_HISTORY
+
+    def _report(message: str, basis_loads: int) -> bool:
+        if basis_loads >= MIN_BLOCKING_HISTORY:
+            anomalies.append(message)
+            return True
+        advisories.append(message)
+        return False
+
     null_abs_cut = 0.10
 
     for col, cur in current_profile.items():
@@ -813,7 +913,9 @@ def build_load_history_report(
 
         if series["null_rate"]:
             hist_null = _median(series["null_rate"]) or 0.0
-            if abs(cur.null_rate - hist_null) > null_abs_cut:
+            if abs(cur.null_rate - hist_null) > null_abs_cut or _null_rate_jump(
+                cur.null_rate, series["null_rate"], cur.count
+            ):
                 msg = (
                     f"Column '{col}' null-rate shifted from {hist_null:.2%} "
                     f"(median of prior loads) to {cur.null_rate:.2%}"
@@ -825,7 +927,7 @@ def build_load_history_report(
                         "below_min_sample": True,
                     })
                 else:
-                    anomalies.append(msg)
+                    _report(msg, comparable_loads)
                     finding["signals"].append({"kind": "null_rate", "message": msg})
 
         if series["count"] and cur.count > 0 and not small_sample:
@@ -837,15 +939,18 @@ def build_load_history_report(
                         f"Column '{col}' row count dropped by {(1 - ratio) * 100:.1f}% "
                         f"({cur.count} vs prior median {int(med_count)})"
                     )
-                    anomalies.append(msg)
+                    _report(msg, comparable_loads)
                     finding["signals"].append({"kind": "count_drop", "message": msg})
 
         # Mean drift is z-normalized — its magnitude carries its own
         # confidence even on a small sample — so it is not sample-gated.
         if cur.mean is not None and series["mean"]:
             z = _robust_z(cur.mean, series["mean"])
+            z_cut = _drift_cutoff(len(series["mean"]), fpr_target)
             # Single prior observation: fall back to classic z vs that mean's std
-            # when available on the fallback baseline profile.
+            # when available on the fallback baseline profile. A different
+            # statistic (spread of rows, not of load means), judged at the
+            # large-sample cut — and advisory by construction: one load.
             if z is None and len(series["mean"]) == 1 and fallback_baseline:
                 hist_prof = fallback_baseline.get(col)
                 cur_d = _rehydrate_stat(cur.mean)
@@ -853,6 +958,7 @@ def build_load_history_report(
                 std_d = _rehydrate_stat(hist_prof.std) if hist_prof else None
                 if cur_d is not None and hist_d is not None and std_d not in (None, 0):
                     z = abs(cur_d - hist_d) / std_d
+                    z_cut = _DRIFT_CUT_LARGE_SAMPLE
             if z is not None and abs(z) > z_cut:
                 med = _median(series["mean"])
                 msg = (
@@ -864,14 +970,18 @@ def build_load_history_report(
                         f"({cur.mean:.4f} vs historical {series['mean'][0]:.4f})"
                     )
                 )
-                anomalies.append(msg)
+                _report(msg, comparable_loads)
                 finding["signals"].append({
                     "kind": "mean_drift",
                     "message": msg,
                     "robust_z": round(float(z), 2),
+                    "cutoff": round(z_cut, 2),
                 })
 
         if finding["signals"]:
+            if not column_blocking:
+                for signal in finding["signals"]:
+                    signal["advisory"] = True
             column_findings.append(finding)
 
     prior_hists = [r.get("quarantine_histogram") or {} for r in history]
@@ -881,7 +991,7 @@ def build_load_history_report(
             f"New quarantine pattern on '{item['column']}': {item['reason'] or 'error'} "
             f"(count={item['count']}; prior={item['prior_count']})"
         )
-        anomalies.append(msg)
+        _report(msg, len(history))
 
     row_counts = [float(r.get("row_count") or 0) for r in history if (r.get("row_count") or 0) > 0]
     # Volume is judged only against a load size the caller measured. A
@@ -896,12 +1006,30 @@ def build_load_history_report(
             volume_note = (
                 f"Load volume {cur_rows:,} is below 50% of prior median {int(med_rows):,}"
             )
-            anomalies.append(volume_note)
+            _report(volume_note, len(row_counts))
+        elif (
+            med_rows
+            and med_rows > 0
+            and cur_rows / med_rows > _VOLUME_SPIKE_RATIO
+            and cur_rows > 2 * max(row_counts)
+        ):
+            # Two-sided: a load many times its history is as suspicious as a
+            # short one (a duplicated or re-sent load). Bursty histories are
+            # judged against their own largest load, not only the median.
+            volume_note = (
+                f"Load volume {cur_rows:,} is {cur_rows / med_rows:.1f}x the prior "
+                f"median {int(med_rows):,} (largest prior load {int(max(row_counts)):,})"
+            )
+            _report(volume_note, len(row_counts))
 
     return {
         "prior_load_count": len(history),
+        "comparable_prior_loads": comparable_loads,
+        "min_blocking_history": MIN_BLOCKING_HISTORY,
+        "blocking": len(history) >= MIN_BLOCKING_HISTORY,
         "compare_last_k": compare_last_k,
         "anomalies": anomalies,
+        "advisories": advisories,
         "column_findings": column_findings,
         "novel_quarantine_patterns": novel_q,
         "volume_note": volume_note,

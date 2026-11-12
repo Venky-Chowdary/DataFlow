@@ -43,9 +43,12 @@ def start_refusal(request: Any) -> str | None:
       it will dial now, so a connector moved to another region after the job
       was created does not carry the earlier answer.
     * the local-disk policy for file destinations (D276).
+    * a multi-stream run into a file export, which would write only the first
+      stream (``services.multi_stream_targets.file_export_refusal``).
     """
     from services.data_residency import residency_refusal
     from services.local_file_policy import local_destination_refusal
+    from services.multi_stream_targets import file_export_refusal
 
     workspace_id = str(getattr(request, "workspace_id", "") or "")
     out_of_region = residency_refusal(workspace_id, request.destination)
@@ -55,7 +58,7 @@ def start_refusal(request: Any) -> str | None:
             workspace_id or "(none)",
         )
         return out_of_region
-    return local_destination_refusal(request.destination)
+    return local_destination_refusal(request.destination) or file_export_refusal(request)
 
 
 @contextmanager

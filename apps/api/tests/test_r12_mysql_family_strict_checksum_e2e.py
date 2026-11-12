@@ -373,14 +373,22 @@ def _skew_one_source_cell(monkeypatch, *, key: str, column: str) -> None:
     digests disagree because one side canonicalized a value differently.
     """
     import src.transfer.stream as stream
+    from services.fingerprint_rules import iter_row_parts, row_part
 
     real = stream.row_fingerprints
 
     def skewed(rows, columns=None, **kwargs):
         out = []
         for row_key, fingerprint in real(rows, columns, **kwargs):
-            if f"rfam_acc={key}" in fingerprint:
-                fingerprint = fingerprint.replace(f"{column}=", f"{column}=~", 1)
+            if row_part("rfam_acc", key) in fingerprint:
+                # Row parts are ``label=<len>:<cell>``: rebuild the one part.
+                parts = []
+                for label, part in iter_row_parts(fingerprint):
+                    if label == column:
+                        cell = part[len(label) + 1:].split(":", 1)[1]
+                        part = row_part(label, "~" + cell)
+                    parts.append(part)
+                fingerprint = "\x1f".join(parts)
             out.append((row_key, fingerprint))
         return out
 
@@ -458,12 +466,16 @@ def test_keep_is_limited_to_overwrite_and_can_be_turned_off(monkeypatch):
 
 def test_column_digests_name_only_the_differing_column():
     from services.column_digest import ColumnDigests, differing_columns
+    from services.fingerprint_rules import row_part
+
+    def _row(a: str, b: str) -> str:
+        return "\x1f".join((row_part("a", a), row_part("b", b), row_part("c", "x")))
 
     src, dst = ColumnDigests(), ColumnDigests()
     for i in range(500):
         cell = "38" if i != 321 else "38.00"  # one cell rendered differently
-        src.add(f"a={i}\x1fb={cell}\x1fc=x")
-        dst.add(f"a={i}\x1fb=38\x1fc=x")
+        src.add(_row(str(i), cell))
+        dst.add(_row(str(i), "38"))
     summary = {
         "source_column_digests": {"checksum": "s", "columns": src.snapshot()},
         "dest_column_digests": {"checksum": "t", "columns": dst.snapshot()},

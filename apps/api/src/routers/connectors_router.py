@@ -3303,15 +3303,15 @@ async def transfer_data(
         if src_fmt == "unknown":
             src_fmt = "csv"
 
-        source_filter: dict = {}
-        if source_filter_json.strip():
-            try:
-                import json as _json
-                parsed = _json.loads(source_filter_json)
-                if isinstance(parsed, dict):
-                    source_filter = parsed
-            except Exception:
-                source_filter = {}
+        from services.row_filter import filter_spec_from_json
+
+        try:
+            # Not a filter object is a 400, never "no filter" (review 1 H3).
+            source_filter = filter_spec_from_json(source_filter_json)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"source_filter_json: {exc}"
+            ) from exc
 
         # The workspace's own region wins over the caller's tag (audit H-4).
         from services.data_residency import job_data_region
