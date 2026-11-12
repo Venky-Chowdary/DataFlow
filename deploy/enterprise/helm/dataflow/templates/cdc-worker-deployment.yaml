@@ -1,4 +1,10 @@
 {{ if .Values.cdcWorker.enabled -}}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.cdcWorker.terminationGracePeriodSeconds)) }}
+{{- fail "cdcWorker.terminationGracePeriodSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.cdcWorker.drainSeconds)) }}
+{{- fail "cdcWorker.drainSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
 {{- if lt (int .Values.cdcWorker.terminationGracePeriodSeconds) (add (int .Values.cdcWorker.drainSeconds) 10) }}
 {{- fail "cdcWorker.terminationGracePeriodSeconds must be at least cdcWorker.drainSeconds + 10: the worker needs the drain period plus time to exit before SIGKILL" }}
 {{- end }}

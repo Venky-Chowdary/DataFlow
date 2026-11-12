@@ -1,4 +1,13 @@
 {{ if .Values.api.enabled -}}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.api.terminationGracePeriodSeconds)) }}
+{{- fail "api.terminationGracePeriodSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.api.preStopSleepSeconds)) }}
+{{- fail "api.preStopSleepSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.api.gracefulShutdownSeconds)) }}
+{{- fail "api.gracefulShutdownSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
 {{- /* 25: the API teardown's drain bound (the app's default WORKER_DRAIN_SECONDS). */}}
 {{- if lt (int .Values.api.terminationGracePeriodSeconds) (add (int .Values.api.preStopSleepSeconds) (int .Values.api.gracefulShutdownSeconds) 25 5) }}
 {{- fail "api.terminationGracePeriodSeconds must be at least api.preStopSleepSeconds + api.gracefulShutdownSeconds + 30: open connections, then the teardown's 25 s drain, must finish before SIGKILL" }}

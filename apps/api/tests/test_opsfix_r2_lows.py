@@ -162,3 +162,33 @@ def test_the_name_check_during_an_outage_does_not_answer_free(byok_connector):
 
     with pytest.raises(ControlPlaneUnavailable):
         byok_connector.connector_name_taken("warehouse", workspace_id="ws-byok")
+
+
+# ---------------------------------------------------------------------------
+# The chart refuses a non-numeric grace or drain value
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"api": {"gracefulShutdownSeconds": "10s"}}, "api.gracefulShutdownSeconds"),
+        ({"api": {"preStopSleepSeconds": "5s"}}, "api.preStopSleepSeconds"),
+        ({"api": {"terminationGracePeriodSeconds": "1m"}}, "api.terminationGracePeriodSeconds"),
+        ({"worker": {"drainSeconds": "25s"}}, "worker.drainSeconds"),
+        ({"cdcWorker": {"terminationGracePeriodSeconds": "60s"}}, "cdcWorker.terminationGracePeriodSeconds"),
+    ],
+)
+def test_the_chart_refuses_a_duration_string_where_it_needs_seconds(overrides, field):
+    """Helm's int turns "10s" into 0, so the grace rule passed and start-api.sh then exited 64."""
+    from tests._helm_lite import ChartFail
+    from tests.test_helm_chart_static import _lite
+
+    with pytest.raises(ChartFail, match=field.replace(".", r"\.")):
+        _lite(overrides)
+
+
+def test_the_renderer_reads_int_like_helm():
+    from tests._helm_lite import _FUNCS
+
+    assert _FUNCS["int"]("10s") == 0 and _FUNCS["int"]("10") == 10 and _FUNCS["int"](10.0) == 10

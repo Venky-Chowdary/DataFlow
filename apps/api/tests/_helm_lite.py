@@ -53,6 +53,25 @@ def _scalar(value: Any) -> str:
     return str(value)
 
 
+def _sprig_int(value: Any) -> int:
+    """Sprig's ``int`` (spf13/cast ``ToInt``): a value it cannot read is 0, never an error.
+
+    Python's ``int("10s")`` raises, so this renderer used to refuse values
+    real Helm accepts as 0 (ops review round 2, Low: chart grace value).
+    """
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(str(value or "0").strip(), 0)
+    except ValueError:
+        try:
+            return int(float(str(value)))
+        except ValueError:
+            return 0
+
+
 def _required(message: str, value: Any) -> Any:
     if value is None or value == "":
         raise ChartFail(message)
@@ -69,7 +88,9 @@ _FUNCS: dict[str, Any] = {
     "toYaml": _to_yaml,
     "nindent": lambda n, text: "\n" + _indent(n, text),
     "indent": _indent,
-    "int": lambda v: int(v or 0),
+    "int": _sprig_int,
+    "toString": _scalar,
+    "regexMatch": lambda regex, value: re.search(regex, _scalar(value)) is not None,
     "add": lambda *a: sum(int(x) for x in a),
     "lt": lambda a, b: a < b,
     "gt": lambda a, b: a > b,

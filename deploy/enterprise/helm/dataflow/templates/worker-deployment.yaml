@@ -1,4 +1,10 @@
 {{ if .Values.worker.enabled -}}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.worker.terminationGracePeriodSeconds)) }}
+{{- fail "worker.terminationGracePeriodSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
+{{- if not (regexMatch "^[0-9]+$" (toString .Values.worker.drainSeconds)) }}
+{{- fail "worker.drainSeconds must be a whole number of seconds, such as 10 (Helm reads a duration such as 10s as 0)" }}
+{{- end }}
 {{- if lt (int .Values.worker.terminationGracePeriodSeconds) (add (int .Values.worker.drainSeconds) 10) }}
 {{- fail "worker.terminationGracePeriodSeconds must be at least worker.drainSeconds + 10: the worker needs the drain period plus time to exit before SIGKILL" }}
 {{- end }}
