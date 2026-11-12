@@ -58,14 +58,34 @@ _LLM_TURN_TIMEOUT_S = 20
 # Tools whose result is a screen change the client performs; their acknowledgement
 # is not prose to narrate.
 _NAVIGATION_TOOLS = frozenset({"navigate", "open_job", "open_schedule", "start_transfer_studio"})
-#: Deterministic count / status reads. Until a full answer verifier exists their
-#: grounded draft is the answer: a narrator rewrote "3 failed" as "13" (review H5).
-_UNNARRATED_TOOLS = frozenset({
-    "list_jobs", "get_job", "list_schedules", "get_schedule", "brief_workspace",
-    "list_connectors", "search_connectors", "list_datasets", "list_contracts",
-    "explain_parity", "get_preflight_run", "list_connector_objects", "list_cdc_captures",
-    "rank_connector_tables",
-})
+#: The only answers a narrator may rewrite: documentation and knowledge answers.
+#: Until the part-2 answer verifier exists, no tool-derived answer is narrated
+#: (review 2, H1): a narrator swapped column types in a schema answer, added an
+#: invented cause to a connection test and relabelled "Maximum" as "Minimum",
+#: and every one kept the multiset of numbers the old guard compared.
+_NARRATED_TOOLS = frozenset({"explain_product", "search_knowledge"})
+
+
+class _EveryToolBut:
+    """Membership is "not one of ``allowed``": a tool added later is not narrated."""
+
+    def __init__(self, allowed: frozenset[str]):
+        self.allowed = allowed
+
+    def __contains__(self, name: object) -> bool:
+        return name not in self.allowed
+
+
+#: Tools whose answers are not narrated: counts, statuses, schema, connection
+#: tests, capabilities, plans, compare / diff / map and every cell tool.
+_UNNARRATED_TOOLS = _EveryToolBut(_NARRATED_TOOLS)
+#: A count or status question is answered by the deterministic tools only; a
+#: native tool loop never answers one (review 2, H1).
+_COUNT_OR_STATUS_RE = re.compile(
+    r"\b(?:how\s+many|how\s+much|count|number\s+of|total|status|state|health(?:y)?|"
+    r"fail\w*|running|paused|need\w*\s+(?:my\s+)?attention|succe\w*|completed?)\b",
+    re.I,
+)
 #: Listings recovery runs after a failed read; never evidence for the answer.
 _RECOVERY_LISTINGS = frozenset({"list_connectors", "list_datasets", "list_connector_objects"})
 _NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w])")
@@ -74,6 +94,29 @@ _NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\w])")
 def _numbers(text: str) -> collections.Counter:
     """Every number a text states, as a multiset ("1,250" == "1250")."""
     return collections.Counter(m.replace(",", "") for m in _NUMBER.findall(text or ""))
+
+
+_CONTEXT_WORD = re.compile(r"[A-Za-z][\w-]*")
+
+
+def _number_contexts(text: str) -> collections.Counter:
+    """Each number with the word on either side of it: ``("38", "mysql", "digits")``.
+
+    A narrator that keeps every number but moves one to another noun ("mysql
+    30 digits with scale up to 38") keeps the multiset and changes the fact; the
+    words next to each number are what tie it to its subject (review 2, H1).
+    """
+    raw = text or ""
+    out: collections.Counter = collections.Counter()
+    for match in _NUMBER.finditer(raw):
+        before = _CONTEXT_WORD.findall(raw[max(0, match.start() - 60):match.start()])
+        after = _CONTEXT_WORD.findall(raw[match.end():match.end() + 60])
+        out[(
+            match.group(0).replace(",", ""),
+            before[-1].lower() if before else "",
+            after[0].lower() if after else "",
+        )] += 1
+    return out
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-llm")
 # Bounds on what a provider model may do inside one native tool loop.
 _NATIVE_MAX_TOOL_CALLS = 8
@@ -1538,6 +1581,10 @@ class DataPilotAgent:
         # invented general-web prose after "how do I cook rice".
         if not carries_evidence(local) and float(local.confidence or 0) <= 0.25:
             return _with_llm_footnote(polished, engine)
+        # A count or status question is answered by the deterministic tools or
+        # not at all: a native tool loop's count has no verifier (review 2, H1).
+        if _COUNT_OR_STATUS_RE.search(message or ""):
+            return _with_llm_footnote(polished, engine)
 
         # Local had nothing grounded — allow a single native LLM tool loop for hard paraphrases.
         import time as _time
@@ -2168,7 +2215,8 @@ class DataPilotAgent:
         """
         tools = local.tools_used or []
         ok = sum(1 for t in tools if t.get("success"))
-        if ok == 0 and not local.pending_actions:
+        if ok == 0 or local.pending_actions:
+            # A plan or a staged action is the deterministic draft (review 2, H1).
             return local
         # Refusals and uncited prose have no evidence to restate, so a rewrite can
         # only add invention — that is how "how do I cook rice" came back narrated.
@@ -2182,8 +2230,10 @@ class DataPilotAgent:
         ) and not local.pending_actions:
             return local
 
-        # A count or status answer is the store's numbers: it is not rewritten.
-        if any(t.get("success") and t.get("name") in _UNNARRATED_TOOLS for t in tools):
+        # Only a documentation answer is narrated: every tool-derived answer
+        # (counts, statuses, schema, connection tests, plans, compares, cells)
+        # is the deterministic draft until an answer verifier exists.
+        if any(t.get("name") in _UNNARRATED_TOOLS for t in tools):
             return local
 
         # A draft built from cell values is not narrated under metadata-only:
@@ -2259,6 +2309,10 @@ Draft answer:
             return local
         if _numbers(local.answer) != _numbers(polished):
             logger.warning("%s narration changed the draft's numbers — keeping the local answer", method)
+            return local
+        if _number_contexts(local.answer) != _number_contexts(polished):
+            # Same numbers, moved to other words: the meaning changed.
+            logger.warning("%s narration moved a number to other words — keeping the local answer", method)
             return local
         if contradicts_draft(local.answer, polished):
             logger.warning(

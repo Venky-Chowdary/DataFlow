@@ -21,8 +21,9 @@ ROWS_PAYLOAD = json.dumps(
 )
 
 
-#: A turn that is still narrated: count and status answers are not (review H5).
-NARRATED = "what columns are in customers on CRM SQLite"
+#: A turn that is still narrated: count and status answers are not (review H5),
+#: and since review 2 (H1) no tool-derived answer is — only documentation.
+NARRATED = "how do I schedule a nightly sync"
 
 
 class _StubNarrator:
@@ -80,11 +81,11 @@ def test_rows_in_the_transcript_are_withheld_from_a_later_narration(hybrid):
         {"role": "assistant", "content": first.answer},
     ]
     hybrid.prompts.clear()
-    # A schema answer is narrated; count answers are not narrated at all (review H5).
+    # A documentation answer is narrated; tool-derived answers are not (review H5, review 2 H1).
     second = pt.ask(agent, NARRATED, history=history, pilot_session_id="egress")
 
     assert second.answer
-    assert hybrid.prompts, "the schema answer carries no cells, so it is narrated"
+    assert hybrid.prompts, "a documentation answer carries no cells, so it is narrated"
     assert _leaked(hybrid.prompts) == []
 
 
@@ -260,7 +261,7 @@ def test_value_lines_in_the_transcript_are_withheld_and_the_manifest_says_so(wir
     for i in range(3):
         pt.seed_job("completed", minutes_ago=10 + i)
     pt.ask(pt.agent(), NARRATED, history=VALUE_HISTORY)
-    assert wire.sent, "the schema answer carries no cells, so it is narrated"
+    assert wire.sent, "a documentation answer carries no cells, so it is narrated"
     assert _free_leaked(wire.sent, VALUE_HISTORY_CELLS) == []
     manifest = last_manifest()
     assert manifest["cells_withheld"] is True and manifest["cell_values_included"] is False
