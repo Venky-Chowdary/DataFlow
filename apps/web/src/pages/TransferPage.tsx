@@ -46,7 +46,7 @@ import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail"
 import { ContractBindField } from "../components/contracts/ContractBindField";
 import { contractBindFromPolicies } from "../lib/contractBind";
 import { destExistsPrimaryCta, shapeContractFromPreflight } from "../lib/destExistsShape";
-import { jobEndpointLabels } from "../lib/jobEvidence";
+import { jobDestinationPath, jobEndpointLabels } from "../lib/jobEvidence";
 import { launchStageState, stagePercent } from "../lib/progressRing";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
@@ -3161,7 +3161,7 @@ export function TransferPage({
       const destLabel = destKindMode === "file_export"
         ? `${exportFormat.toUpperCase()} export`
         : targetCollection
-          ? `${targetDb}.${targetCollection}`
+          ? jobDestinationPath({ destination_database: targetDb, destination_collection: targetCollection })
           : destType;
       toast({
         title: "Column analysis complete",
@@ -6782,7 +6782,9 @@ export function TransferPage({
       : null,
     {
       source: sourceLabel,
-      dest: destKindMode === "file_export" ? `${destinationLabel} export` : `${targetDb}.${targetCollection}`,
+      dest: destKindMode === "file_export"
+        ? `${destinationLabel} export`
+        : jobDestinationPath({ destination_database: targetDb, destination_collection: targetCollection }) || destinationLabel,
     },
   );
   const destLabelShort = destSelected && (destKindMode === "file_export" || Boolean(destType))
@@ -6858,7 +6860,7 @@ export function TransferPage({
     : destDriverType === "dynamodb"
       ? (targetCollection || targetDb || destinationLabel)
       : targetCollection
-        ? `${targetDb}.${targetCollection}`
+        ? jobDestinationPath({ destination_database: targetDb, destination_collection: targetCollection })
         : destinationLabel;
   const mapDestRouteSubtitle = destKindMode === "file_export"
     ? "File export destination"

@@ -34,9 +34,25 @@ describe("ParityRing", () => {
   it("closes only at 100% and says unknown when there is no figure", () => {
     assert.match(renderToStaticMarkup(<ParityRing pct={100} />), /stroke-dasharray="100 0"/);
     const unknown = renderToStaticMarkup(<ParityRing pct={null} />);
-    assert.match(unknown, /aria-label="Share of rows proven equal is unknown"/);
+    assert.match(unknown, /aria-label="Share of rows proven equal is unknown \(not compared\)"/);
     assert.match(unknown, /tone-idle/);
-    assert.match(unknown, />Unknown</);
+  });
+
+  it("without a figure: a compact dash and \"not compared\", never a sampled bound (trust-report polish)", () => {
+    for (const html of [
+      renderToStaticMarkup(<ParityRing pct={null} />),
+      // The report may call it a lower bound; with no figure there is no bound to state.
+      renderToStaticMarkup(<ParityRing pct={null} lowerBound />),
+    ]) {
+      assert.match(html, /class="df2-parity-ring-value">—</);
+      assert.match(html, /class="df2-parity-ring-caption">not compared</);
+      assert.doesNotMatch(html, />Unknown</, "a word does not fit inside the ring");
+      assert.doesNotMatch(html, /sampled bound/);
+      assert.doesNotMatch(html, /At least/);
+    }
+    // The caller can say why there is no figure when a comparison did run.
+    const undecided = renderToStaticMarkup(<ParityRing pct={null} caption="not determined" />);
+    assert.match(undecided, /class="df2-parity-ring-caption">not determined</);
   });
 });
 
