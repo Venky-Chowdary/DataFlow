@@ -326,3 +326,24 @@ def test_m2_on_a_sqlite_text_column_the_gate_agrees_with_the_text_the_writer_sto
     assert res.success is (not changed), (shape, stored, res.error)
     if res.success:
         assert _q(on, "SELECT v FROM t WHERE id = 1") == [(shape.format(d=2),)]
+
+
+# ------------------------------------------------------------------------- Lows
+
+@pytest.mark.parametrize("transform, name", [("default:TOPSECRET-4111111111111111", "default"),
+                                             ("replace:TOPSECRET-4111111111111111:x", "replace")])
+def test_low_a_g24_column_names_the_transform_never_its_literal(transform, name):
+    import json
+
+    from services.reversibility import analyze_table, build_report, classify_mapping, gate_for
+
+    entry = classify_mapping({"source": "v", "target": "v", "transform": transform}, source_type="TEXT",
+                             target_type="TEXT", dest_db="sqlite", observed=[None, "a", "TOPSECRET-x"])
+    assert f"({name})" in entry["reason"], entry["reason"]
+    table = analyze_table(table="t", mappings=[{"source": "v", "target": "v", "transform": transform,
+                                                "source_type": "TEXT", "target_type": "TEXT"}],
+                          dest_db="sqlite", sample_rows=[{"v": None}, {"v": "a"}])
+    report = build_report([table], scope="job", subject_id="j", require=True, data_rows=2,
+                          data_source="preflight_sample")
+    text = json.dumps([entry, report, gate_for(report)])
+    assert "TOPSECRET" not in text and "4111111111111111" not in text, text

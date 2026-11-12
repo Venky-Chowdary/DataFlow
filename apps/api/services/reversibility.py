@@ -380,7 +380,10 @@ def classify_mapping(
     stype = _norm(mapping.get("source_type")) or _norm(source_type)
     ttype = _norm(mapping.get("target_type")) or _norm(target_type)
     transform = _transform_of(mapping)
-    transforms = [] if transform in _IDENTITY else [transform]
+    # By name only: a transform's arguments (``default:<literal>``) are configuration that may carry a value,
+    # and no reason, report or gate text repeats them (review 5, Low).
+    named = transform.split(":", 1)[0]
+    transforms = [] if transform in _IDENTITY else [named]
     values = list(observed or [])
     if _is_omitted(mapping, transform):
         return _entry(source, None, stype, None, transforms, LOSSY, "omit")
@@ -410,7 +413,7 @@ def classify_mapping(
         # renders the value, as the writer checks it (review 4, M-2).
         check = _covered(check_cast_values(values, ttype, dest_db, transform) if slog in TEXT and renders_rule(
             transform, ttype) else check_values(values, transform), covers_population, enforce)
-        return _entry(source, target, stype, ttype, transforms, CONDITIONAL, tcode, check, transform=transform)
+        return _entry(source, target, stype, ttype, transforms, CONDITIONAL, tcode, check, transform=named)
     if kind == CONDITIONAL:
         side = "source" if not slog else "destination"
         cast = _CAST_FOR.get(tlog)
