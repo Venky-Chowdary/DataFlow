@@ -1,4 +1,24 @@
-"""Query Playground — run safe, limited queries against saved connectors."""
+"""Query Playground — run safe, limited queries against saved connectors.
+
+**What keeps a playground query read-only.** Two things, in this order:
+
+1. *The read-only session* (``_apply_read_only_session``): PostgreSQL, MySQL,
+   SQLite and Oracle run the statement in a transaction the server itself
+   refuses writes in, and local DuckDB opens with external access off. Where
+   the engine has one, this is the guard.
+2. *The statement filter* (``_is_safe_sql``): one statement, a read-only head,
+   no write keyword, and a **deny-list** of function, package and table-function
+   names with side effects outside the transaction (network calls, server
+   files, sleeps, backend control, dynamic SQL, database links). It is a
+   **backstop**: a deny-list names what is known. It is the only guard on SQL
+   Server-family engines (T-SQL has no read-only transaction) and for effects a
+   read-only transaction does not stop (dblink, ``pg_terminate_backend``, file
+   readers), so new names belong here as soon as they are known.
+
+Follow-up (security review M2, not done here): replace the deny-list with a
+per-dialect allow-list of statement shapes and functions, so an unknown name
+is refused instead of allowed.
+"""
 
 from __future__ import annotations
 
@@ -258,7 +278,10 @@ _SIDE_EFFECT_FUNCTIONS = frozenset({
     "pg_advisory_xact_lock", "pg_try_advisory_lock", "pg_try_advisory_xact_lock",
     "pg_advisory_xact_lock_shared", "pg_advisory_lock_shared",
     "pg_try_advisory_xact_lock_shared", "pg_try_advisory_lock_shared",
-    "pg_sleep", "sleep", "benchmark",
+    "pg_sleep", "pg_sleep_for", "pg_sleep_until", "sleep", "sleepeachrow", "benchmark",
+    # T-SQL runs a second statement with no ``;`` before it: ``select 1 exec('...')``
+    # reads as a call of a function named exec (security review M2).
+    "exec", "execute",
     # side-channel drivers (pg dblink, mysql locks/files, mssql xp_)
     "get_lock", "release_lock", "load_file",
     "xp_cmdshell", "xp_dirtree", "xp_fileexist", "xp_regread", "xp_regwrite",
@@ -274,13 +297,65 @@ _SIDE_EFFECT_FUNCTIONS = frozenset({
     "httpuritype", "dburitype", "xdburitype", "uritype", "bfilename",
     # bigquery federated pass-through
     "external_query",
+    # ClickHouse table functions: a URL, a server file or another server from a SELECT
+    "url", "urlcluster", "file", "filecluster", "remote", "remotesecure", "cluster",
+    "clusterallreplicas", "s3", "s3cluster", "gcs", "azureblobstorage", "hdfs", "hdfscluster",
+    "mysql", "postgresql", "mongodb", "redis", "sqlite", "jdbc", "odbc", "executable",
+    "deltalake", "hudi", "iceberg", "cosn", "oss",
+    # SQLite: load native code, read and write server files
+    "load_extension", "writefile", "readfile", "fts3_tokenizer", "edit", "fsdir", "zipfile",
+    # DuckDB (reached through a generic connector) and Databricks: environment and secrets
+    "getenv", "sniff_csv", "json_execute_serialized_sql", "duckdb_secrets", "which_secret",
+    "load_aws_credentials",
+    # pg extensions: server-side HTTP (pgsql-http)
+    "http", "http_get", "http_post", "http_put", "http_delete", "http_head", "http_patch",
     # oracle administrative packages are prefixed dbms_/utl_ below
 })
 _SIDE_EFFECT_PREFIXES = (
     "dblink", "lo_", "dbms_", "utl_", "sys_exec", "sys_eval", "sp_",
     # mssql extended procedures, pg tablefunc crosstabN, snowflake account control
     "xp_", "crosstab", "system$",
+    # pg adminpack (server files) and statistics resets
+    "pg_file_", "pg_stat_reset",
+    # DuckDB / Databricks file and URL readers: read_csv, read_text, read_files ...
+    "read_",
 )
+#: Members of the refused Oracle packages that only compute on their arguments.
+#: Allowed by exact ``package.function`` name; every other member of the same
+#: package (``dbms_lob.loadfromfile``, ``utl_raw`` is all pure but stays listed
+#: by name) is still refused (security review M2: the package rule refused
+#: ordinary LOB and RAW reads).
+_PURE_PACKAGE_FUNCTIONS = frozenset({
+    "dbms_lob.substr", "dbms_lob.getlength", "dbms_lob.instr", "dbms_lob.compare",
+    "utl_raw.cast_to_varchar2", "utl_raw.cast_to_nvarchar2", "utl_raw.cast_to_raw",
+    "utl_raw.cast_to_number", "utl_raw.cast_to_binary_integer", "utl_raw.cast_to_binary_float",
+    "utl_raw.cast_to_binary_double", "utl_raw.cast_from_number", "utl_raw.length",
+    "utl_raw.substr", "utl_raw.concat",
+    "utl_i18n.raw_to_char", "utl_i18n.string_to_raw",
+    "utl_encode.base64_encode", "utl_encode.base64_decode",
+    "utl_match.edit_distance", "utl_match.edit_distance_similarity",
+    "utl_match.jaro_winkler", "utl_match.jaro_winkler_similarity",
+})
+# Statements T-SQL accepts after a SELECT with no separator. As bare words
+# (not ``t.exec``, not a quoted identifier) they are refused anywhere.
+_STATEMENT_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_$#@.])(?:exec|execute|waitfor)(?![A-Za-z0-9_$#])", re.I
+)
+# ``U&"d\0061ta"`` / ``U&'...'``: PostgreSQL reads the escapes, this filter
+# would read the text. Refused outright; the views mask the quoted part.
+_UNICODE_ESCAPED_RE = re.compile(r"(?<![A-Za-z0-9_$#])U&__DF[IQ]\d+__", re.I)
+# Oracle database link: ``fn@link(...)``, ``table@link``. Attached to the name
+# it is a link in every dialect; after whitespace it is one unless the word
+# before is a keyword (``where a = 1 and @flag = 1``, ``select @x``, ``from @t``).
+_DBLINK_ATTACHED_RE = re.compile(r"(?:[A-Za-z0-9_$#\]]|__DF[IQ]\d+__)@(?!@)\s*(?:[A-Za-z_\[]|__DF)")
+_DBLINK_SPACED_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_$#]*|__DF[IQ]\d+__|\])\s+@(?!@)\s*(?:[A-Za-z_\[]|__DF)")
+_NOT_AN_OBJECT_NAME = frozenset({
+    "select", "and", "or", "not", "where", "on", "when", "then", "else", "by", "limit", "top",
+    "offset", "in", "like", "ilike", "between", "is", "set", "values", "having", "case", "from",
+    "join", "distinct", "all", "union", "as", "exists", "any", "some", "with", "over", "using",
+    "end", "null", "true", "false", "fetch", "first", "next", "rows", "only", "escape", "into",
+    "return", "if", "while", "percent", "div", "mod", "xor", "rlike", "regexp",
+})
 
 # A call's whole dotted name: ``utl_http.request(``, ``sys.dbms_xmlgen.getxml(``,
 # ``master..xp_cmdshell(``, and Oracle's remote form ``pkg.fn@dblink(``.
@@ -304,16 +379,31 @@ def _has_side_effect_functions(sql: str) -> bool:
     names and prefixes, and each qualifier (schema, package, type) against the
     prefixes, so a package is refused whatever member is called on it.
     """
-    from services.sql_literals import sql_call_views
+    from services.sql_literals import sql_call_views, sql_code_views
 
+    for code in sql_code_views(sql or ""):
+        if _STATEMENT_WORD_RE.search(code) or _UNICODE_ESCAPED_RE.search(code) or _names_database_link(code):
+            return True
     for scrubbed in sql_call_views(sql or ""):
         for match in _FUNC_CALL_RE.finditer(scrubbed):
-            *qualifiers, name = (part.strip().lower() for part in match.group(1).split(".") if part.strip())
+            parts = [part.strip().lower() for part in match.group(1).split(".") if part.strip()]
+            if ".".join(parts[1:] if parts[0] == "sys" else parts) in _PURE_PACKAGE_FUNCTIONS:
+                continue  # a remote one (``@link``) was refused above
+            *qualifiers, name = parts
             if _is_side_effect_name(name):
                 return True
             if any(q.startswith(_SIDE_EFFECT_PREFIXES) for q in qualifiers):
                 return True
     return False
+
+
+def _names_database_link(code: str) -> bool:
+    """True when the statement reaches through an Oracle database link (``name@link``)."""
+    if _DBLINK_ATTACHED_RE.search(code):
+        return True
+    return any(
+        match.group(1).lower() not in _NOT_AN_OBJECT_NAME for match in _DBLINK_SPACED_RE.finditer(code)
+    )
 
 
 # DuckDB reads host files and URLs from a plain SELECT: reader table
@@ -924,7 +1014,7 @@ async def query_export(
     # Security review H2: an export writes the workspace's rows without a job,
     # so nothing else would ask where they land. Both branches (a connector, a
     # file on this deployment) are judged before the query is read.
-    _export_residency_check(request, body, str(connector.workspace_id or "") or workspace_id)
+    _export_residency_check(request, body, str(getattr(connector, "workspace_id", "") or "") or workspace_id)
 
     if body.full_population and not (body.destination_connector_id or "").strip():
         return _export_full_population_file(connector, body, workspace_id=workspace_id)

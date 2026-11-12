@@ -94,6 +94,11 @@ ALLOWED = [
     "select xmlagg(xmlelement(name r, id)) from t",
     "select current_setting('server_version')",
     "select schema_name(schema_id), object_name(object_id) from sys.objects",
+]
+# Security review M2: a read through an Oracle database link runs on another
+# database with that link's credentials. These two stood in the list above;
+# ``name@link`` is refused now (tests/test_review_m2_query_filter_bypasses.py).
+REFUSED += [
     "select o.id from orders@reporting o where o.total > (select avg(total) from orders@reporting)",
     "select a.user@example.com, length(a.note) from accounts a",
 ]
