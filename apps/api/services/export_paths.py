@@ -77,11 +77,15 @@ def api_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def exports_dir() -> Path:
-    """The folder exports are confined to: ``DATAFLOW_EXPORTS_DIR``, else ``apps/api/exports``."""
+def exports_dir(*, create: bool = True) -> Path:
+    """The folder exports are confined to: ``DATAFLOW_EXPORTS_DIR``, else ``apps/api/exports``.
+
+    ``create=False`` only names it (a path check must not create the folder).
+    """
     configured = (getenv_brand("EXPORTS_DIR") or "").strip()
     path = Path(configured).expanduser() if configured else api_root() / EXPORTS_DIRNAME
-    path.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path.resolve()
 
 
