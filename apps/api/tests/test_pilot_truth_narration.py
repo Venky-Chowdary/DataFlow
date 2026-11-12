@@ -58,7 +58,8 @@ def test_count_and_status_answers_are_not_narrated(hybrid, question):
            + "\n\nThe failures were caused by an expired Snowflake credential; re-running fixes all 13.")
     response = pt.ask(pt.agent(), question)
     assert response.method != "openai_polish", response.answer
-    assert "13" not in response.answer and "Snowflake credential" not in response.answer
+    # (Job ids are hex and may contain "13": the stated numbers are what count.)
+    assert 13 not in pt.bold_ints(response.answer) and "Snowflake credential" not in response.answer
     truth = pt.job_truth()
     assert set(pt.bold_ints(response.answer)) <= {truth["total"], truth["by_status"].get("failed", 0),
                                                   truth["by_status"].get("completed", 0), 7, 3, 4}
