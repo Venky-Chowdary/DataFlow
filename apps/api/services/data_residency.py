@@ -160,6 +160,9 @@ _DSN_HOST_KEY = re.compile(
 )
 #: URL query parameters that replace or add to the authority's host (libpq ``host=``).
 _URL_HOST_PARAMS = ("host", "hostaddr", "server", "account")
+#: Drivers whose URL (in ``host`` or the connection string) ``resolve_sql_endpoint``
+#: resolves: the family it takes and its default port.
+_SQL_URL_FAMILIES = {"postgresql": ("postgresql", 5432), "pgvector": ("postgresql", 5432), "mysql": ("mysql", 3306)}
 
 
 def _norm(region: Any) -> str:
@@ -276,18 +279,34 @@ def _is_loopback(host: str) -> bool:
 
 def _url_hosts(text: str) -> list[str] | None:
     """Every host a URL names: its authority (each member of a seed list) and
-    any ``host=`` style query parameter. ``None`` when one cannot be read."""
+    any ``host=`` style query parameter. ``None`` when one cannot be read.
+
+    Read by ``urlparse`` and by the drivers' own last-``@`` parser
+    (``parse_url_authority``); a URL they read differently, or with an ``@``
+    after the authority (``//h.eu/db@52.1.2.3/db``: urlparse ends the host at
+    the first ``/``, the driver at the last ``@``), is unreadable (security
+    review round 2, H1).
+    """
     from urllib.parse import parse_qs
 
+    from connectors.url_authority import parse_url_authority
+
+    after = text.split("://", 1)[-1]
+    if "@" in after[len(re.split(r"[/?#]", after, maxsplit=1)[0]):]:
+        return None
     try:
         parsed = urlparse(text)
+        dialled = parse_url_authority(text).host
     except ValueError:
         return None
     names: list[str | None] = []
     # ``user:pw@h1:27017,h2:27017`` — every member of a seed list.
-    for part in parsed.netloc.rsplit("@", 1)[-1].split(","):
+    authority = parsed.netloc.rsplit("@", 1)[-1]
+    for part in authority.split(","):
         if part.strip():
             names.append(_hostname(part))
+    if authority and "," not in authority and _hostname(dialled) not in names:
+        return None
     for key, values in parse_qs(parsed.query).items():
         if key.lower() in _URL_HOST_PARAMS:
             for value in values:
@@ -317,8 +336,27 @@ def _field_hosts(raw: Any) -> list[str] | None:
     return [name for name in names if name is not None]
 
 
+def _sql_driver_host(endpoint: Any) -> str:
+    """The host ``resolve_sql_endpoint`` dials when ``host`` or the connection
+    string holds a PostgreSQL / MySQL URL; ``""`` otherwise (H1)."""
+    family = _SQL_URL_FAMILIES.get(_driver(_norm(getattr(endpoint, "format", ""))))
+    if family is None:
+        return ""
+    from connectors.sql_dsn import looks_like_sql_url, resolve_sql_endpoint
+
+    host = str(_value(endpoint, "host") or "")
+    dsn = str(_value(endpoint, "connection_string") or "")
+    if not (looks_like_sql_url(host, family=family[0]) or looks_like_sql_url(dsn, family=family[0])):
+        return ""
+    resolved = resolve_sql_endpoint(
+        family=family[0], host=host, port=0, connection_string=dsn, default_port=family[1]
+    )
+    return str(resolved.get("host") or "")
+
+
 def _addresses(endpoint: Any) -> tuple[list[str], bool]:
-    """``(hosts, unreadable)`` over every address field that is set."""
+    """``(hosts, unreadable)`` over every address field that is set, plus the
+    host the SQL driver's own resolver dials."""
     hosts: list[str] = []
     unreadable = False
     for name in ("host", "endpoint_url", "connection_string"):
@@ -330,6 +368,11 @@ def _addresses(endpoint: Any) -> tuple[list[str], bool]:
             unreadable = True
         else:
             hosts.extend(found)
+    dialled = _sql_driver_host(endpoint)
+    if dialled:
+        name = _hostname(dialled)
+        unreadable = unreadable or name is None
+        hosts.extend([name] if name else [])
     return hosts, unreadable
 
 
