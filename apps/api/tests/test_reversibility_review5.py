@@ -106,3 +106,95 @@ def test_m3_the_writer_check_compares_what_the_writer_converted_too():
     assert reversibility_render.cast_changes("2024-01-05", "2024-1-5", "DATE", "postgresql") is True
     assert reversibility_render.cast_changes("2024-01-05", __import__("datetime").date(2024, 1, 6), "DATE",
                                              "supabase") is True
+
+
+# ------------------------------------- H-1 / H-2: the backstop counts checked rows per table
+
+def _up(col: str) -> dict:
+    return {"source": col, "target": col, "transform": "uppercase", "confidence": 0.99,
+            "source_type": "TEXT", "target_type": "TEXT"}
+
+
+def _two_tables(tmp_path, people: int = 10, orders: int = 30):
+    from tests.test_reversibility_review3 import _exec
+
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    _exec(src, "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT)")
+    _exec(src, "INSERT INTO people VALUES (?, ?)", [(i, f"U{i}@EXAMPLE.COM") for i in range(1, people + 1)])
+    _exec(src, "CREATE TABLE orders (id INTEGER PRIMARY KEY, note TEXT)")
+    _exec(src, "INSERT INTO orders VALUES (?, ?)", [(i, f"NOTE {i}") for i in range(1, orders + 1)])
+    return src, dst
+
+
+def test_h1_an_honest_two_stream_enforced_run_succeeds_and_each_table_is_checked_on_its_own_rows(tmp_path,
+                                                                                                fake):  # noqa: F811
+    from tests.test_reversibility_review3 import _ID, _sqlite_request
+
+    src, dst = _two_tables(tmp_path)
+    contracts = [{"name": "people", "primary_key": ["id"], "selected": True, "mappings": [dict(_ID), _up("email")]},
+                 {"name": "orders", "primary_key": ["id"], "selected": True, "mappings": [dict(_ID), _up("note")]}]
+    res = _run(fake, _sqlite_request(src, dst, mappings=[], stream_contracts=contracts))
+    enforcement = (res.destination_summary or {}).get("reversibility_enforcement") or {}
+    assert res.success is True, (res.error, enforcement)
+    assert enforcement.get("enforced") is True, enforcement
+    by = {(c["table"], c["column"]): c for c in enforcement["columns"]}
+    assert by[("people", "email")]["rows_checked"] == 10 and by[("people", "email")]["rows_written"] == 10, by
+    assert by[("orders", "note")]["rows_checked"] == 30 and by[("orders", "note")]["rows_written"] == 30, by
+    assert _q(dst, "SELECT (SELECT count(*) FROM people), (SELECT count(*) FROM orders)") == [(10, 30)]
+
+
+def test_h1_h2_the_tally_is_a_count_of_rows_checked_per_table_not_the_highest_row_number():
+    from services import reversibility_enforce as enforce
+
+    people, orders = {"source": "email"}, {"source": "note"}
+    assert enforce.stamp(people, table="people", column="email", code="normalize", job_id="h2job")
+    assert enforce.stamp(orders, table="orders", column="note", code="normalize", job_id="h2job")
+    for _batch in range(3):  # a writer that never passes row_number_start: every batch starts at row 1
+        enforce.note_rows_checked([people], 1, 10_000)
+    enforce.note_rows_checked([orders], 1, 30)
+    streams = [{"name": "people", "records_processed": 30_000}, {"name": "orders", "records_processed": 30}]
+    fields = {"records_processed": 30_030, "destination_summary": {"streams": streams}}
+    assert enforce.record_on_success("h2job", fields) is None
+    found = fields["destination_summary"][enforce.SUMMARY_KEY]
+    assert found["enforced"] is True
+    assert {(c["table"], c["rows_checked"], c["rows_written"]) for c in found["columns"]} == {
+        ("people", 30_000, 30_000), ("orders", 30, 30)}
+    # One table's own shortfall still fails the run, named against that table's own written count.
+    assert enforce.stamp(people, table="people", column="email", code="normalize", job_id="h2short")
+    assert enforce.stamp(orders, table="orders", column="note", code="normalize", job_id="h2short")
+    enforce.note_rows_checked([people], 1, 10_000)
+    enforce.note_rows_checked([orders], 1, 30)
+    short = {"records_processed": 30_030, "destination_summary": {"streams": streams}}
+    note = enforce.record_on_success("h2short", short)
+    assert note and "people.email was checked on only 10,000 of 30,000 written row(s)" in note, note
+    assert "orders.note" not in note
+
+
+def test_h1_without_a_per_table_written_count_the_comparison_is_recorded_unverified_not_failed():
+    from services import reversibility_enforce as enforce
+
+    a, b = {"source": "email"}, {"source": "note"}
+    assert enforce.stamp(a, table="people", column="email", code="normalize", job_id="h1unv")
+    assert enforce.stamp(b, table="orders", column="note", code="normalize", job_id="h1unv")
+    enforce.note_rows_checked([a], 1, 10)
+    enforce.note_rows_checked([b], 1, 30)
+    fields = {"records_processed": 40, "destination_summary": {}}  # two tables, no per-stream stats
+    assert enforce.record_on_success("h1unv", fields) is None
+    found = fields["destination_summary"][enforce.SUMMARY_KEY]
+    assert found["enforced"] is True
+    assert {c["table"]: c["rows_written"] for c in found["columns"]} == {"people": None, "orders": None}
+    assert "no per-table written count" in found["unverified"], found
+
+
+def test_h1_the_verification_re_read_does_not_count_as_checked_rows():
+    """Gate-8's remap passes the same rows through the stamped mappings; only the write is counted."""
+    from connectors.writer_common import build_mapped_rows_with_details, map_rows_for_fingerprint
+    from services import reversibility_enforce as enforce
+
+    mapping = {"source": "v", "target": "v", "transform": "uppercase"}
+    assert enforce.stamp(mapping, table="t", column="v", code="normalize", job_id="h1fp")
+    kw = dict(headers=["v"], data_rows=[["A"], ["B"]], mappings=[mapping], target_cols=["v"])
+    build_mapped_rows_with_details(**kw)
+    map_rows_for_fingerprint(**kw)
+    found = enforce.summary("h1fp")
+    assert found["columns"][0]["rows_checked"] == 2, found

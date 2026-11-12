@@ -21,7 +21,7 @@ from sqlalchemy.engine import CursorResult
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.rule_compiler.apply import evaluate_contract
 from services.reversibility_enforce import STAMP as _REVERSIBILITY_STAMP
-from services.reversibility_enforce import note_rows_checked, refuse_changed_value
+from services.reversibility_enforce import note_rows_checked, refuse_changed_value, uncounted
 from services.transform_engine import apply_transform
 from services.transform_resolver import LiveDestTypes, resolve_transform
 from services.value_serializer import (
@@ -1956,24 +1956,16 @@ def map_rows_for_fingerprint(
     whenever destination types are known — typed writers quarantine DECIMAL /
     VARCHAR / BINARY / temporal overflow the same way.
     """
-    mapped, _errors, rejected = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        error_policy=error_policy,
-        dest_types=dest_types,
-        preserve_case=preserve_case,
-        dest_kind=dest_kind,
-        destination_pk_columns=destination_pk_columns,
-        empty_cells_as_null=empty_cells_as_null,
-        destination_column_nullability=destination_column_nullability,
-        stream_contracts=stream_contracts,
-        contract_primary_key=contract_primary_key,
-        row_number_start=row_number_start,
-        struct_already_materialized=struct_already_materialized,
-    )
+    with uncounted():  # Gate-8's re-read is not a write: its rows are checked, not counted (review 5, H-1)
+        mapped, _errors, rejected = build_mapped_rows_with_details(
+            headers=headers, data_rows=data_rows, mappings=mappings, target_cols=target_cols,
+            column_types=column_types, error_policy=error_policy, dest_types=dest_types,
+            preserve_case=preserve_case, dest_kind=dest_kind, destination_pk_columns=destination_pk_columns,
+            empty_cells_as_null=empty_cells_as_null,
+            destination_column_nullability=destination_column_nullability, stream_contracts=stream_contracts,
+            contract_primary_key=contract_primary_key, row_number_start=row_number_start,
+            struct_already_materialized=struct_already_materialized,
+        )
     rejected_details = list(rejected or [])
     type_map = dict(dest_types or {}) or dict(column_types or {})
     if mapped and target_cols and type_map:

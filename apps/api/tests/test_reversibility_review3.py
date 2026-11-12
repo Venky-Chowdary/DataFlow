@@ -296,7 +296,9 @@ def test_m3_an_honest_table_larger_than_the_sample_runs_and_records_what_was_che
     assert result.success, result.error
     assert _q(dst, "SELECT count(*) FROM people") == [(450,)]
     enforcement = result.destination_summary["reversibility_enforcement"]
-    assert enforcement == {"enforced": True, "columns": [{"table": "people", "column": "email", "rows_checked": 450}]}
+    # rows_written (review 5, H-1): each column is compared with its own table's written count.
+    assert enforcement == {"enforced": True, "columns": [{"table": "people", "column": "email", "rows_checked": 450,
+                                                          "rows_written": 450}]}
     stored = {"transfer_request": {"source": {"format": "sqlite", "table": "people"},
                                    "destination": {"format": "sqlite", "table": "people"}, "mappings": _UP,
                                    "column_types": {"id": "INTEGER", "email": "TEXT"},

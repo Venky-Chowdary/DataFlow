@@ -20,10 +20,13 @@ the value. With the flag off no mapping carries a stamp and none of this runs
 
 from __future__ import annotations
 
+import functools
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, TypeVar
 
 #: The mapping key Execute stamps on a conditional column it enforces while writing.
 STAMP = "reversibility_enforce"
@@ -35,6 +38,31 @@ _LOCK = threading.Lock()
 #: reports (a crashed worker) is evicted by newer ones.
 _ROWS: OrderedDict[tuple[str, str, str], int] = OrderedDict()
 _MAX_TRACKED = 20_000
+#: Set while rows are mapped a second time for something that is not their write (a pre-write scan, Gate-8's
+#: re-read): they are still checked, but not counted as written rows (review 5, H-1).
+_UNCOUNTED: ContextVar[bool] = ContextVar("reversibility_uncounted", default=False)
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+@contextmanager
+def uncounted() -> Iterator[None]:
+    """Rows mapped inside are checked as always but not added to the written-rows tally."""
+    token = _UNCOUNTED.set(True)
+    try:
+        yield
+    finally:
+        _UNCOUNTED.reset(token)
+
+
+def scan_pass(fn: _F) -> _F:
+    """A SQL writer's pre-write scan: it maps every row the write then maps again, so it is not counted."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with uncounted():
+            return fn(*args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
 
 
 #: ``services.reversibility_types.TYPE_CHECKED`` (kept in step by a test): type conditions checked per value.
@@ -87,7 +115,7 @@ def rekey(mappings: Sequence[Any] | None, job_id: str) -> None:
         with _LOCK:
             rows = _ROWS.pop(old, 0)
             new = (job_id, old[1], old[2])
-            _ROWS[new] = max(_ROWS.get(new, 0), rows)
+            _ROWS[new] = _ROWS.get(new, 0) + rows
         rule["job_id"] = job_id
 
 
@@ -180,21 +208,25 @@ def refuse_changed_value(mapping: Mapping[str, Any], raw: Any, converted: Any, e
 
 
 def note_rows_checked(mappings: Sequence[Any] | None, first_row: int, rows: int) -> None:
-    """A batch (``rows`` rows from row number ``first_row``) passed every enforced column's check.
+    """A write batch of ``rows`` rows passed every enforced column's check.
 
-    Called once per mapped batch. The same rows pass the transform stage more
-    than once (the write, then the verification's re-read), so the tally is the
-    highest row number that has passed, not a count of passes.
+    Called once per batch the writer maps for its write. The tally is a count
+    of the rows that passed, per (table, column): most non-SQL writers never
+    pass a running row number, so every batch starts at row 1 and the highest
+    row number said nothing past the first batch (review 5, H-2). The
+    pre-write scan of a SQL writer and the verification's re-read map the same
+    rows again and are not a write: they run :func:`uncounted`. ``first_row``
+    is kept for the callers' signature.
     """
-    if rows <= 0:
+    del first_row
+    if rows <= 0 or _UNCOUNTED.get():
         return
-    reached = max(1, int(first_row or 1)) - 1 + int(rows)
     for mapping in mappings or []:
         rule = mapping.get(STAMP) if isinstance(mapping, dict) else None
         if isinstance(rule, Mapping):
             key = (str(rule.get("job_id") or ""), str(rule.get("table") or ""), str(rule.get("column") or ""))
             with _LOCK:
-                _ROWS[key] = max(_ROWS.get(key, 0), reached)
+                _ROWS[key] = _ROWS.get(key, 0) + int(rows)
 
 
 def summary(job_id: str, *, forget: bool = True) -> dict[str, Any] | None:
@@ -210,43 +242,78 @@ def summary(job_id: str, *, forget: bool = True) -> dict[str, Any] | None:
     return {"enforced": True, "columns": sorted(rows, key=lambda r: (r["table"], r["column"]))}
 
 
-def _shortfall_note(columns: Sequence[Mapping[str, Any]], rows_written: int) -> str | None:
-    short = [c for c in columns if int(c.get("rows_checked") or 0) < rows_written]
+def _named(column: Mapping[str, Any]) -> str:
+    return f"{column['table']}.{column['column']}" if column.get("table") else str(column.get("column") or "")
+
+
+def _written_by_table(tables: set[str], rows_written: Any, streams: Any) -> dict[str, int | None]:
+    """Each enforced table's own written count (``None``: the run recorded none for it).
+
+    A multi-stream run records each stream's ``records_processed``; a run of one
+    table wrote ``rows_written``. The job total is never compared with one
+    table of several (review 5, H-1).
+    """
+    entries = streams.values() if isinstance(streams, Mapping) else streams if isinstance(streams, list) else []
+    per: dict[str, int] = {}
+    for entry in entries:
+        if isinstance(entry, Mapping) and str(entry.get("name") or "").strip():
+            try:
+                per[str(entry["name"]).strip().lower()] = int(entry.get("records_processed") or 0)
+            except (TypeError, ValueError):
+                continue
+    try:
+        total: int | None = int(rows_written or 0)
+    except (TypeError, ValueError):
+        total = None
+    one_table = len(tables) == 1 and len(per) <= 1
+    return {t: per.get(t.strip().lower(), total if one_table else None) if per else (total if len(tables) == 1
+                                                                                       else None)
+            for t in tables}
+
+
+def assess(found: Mapping[str, Any], rows_written: Any, streams: Any = None) -> tuple[dict[str, Any], str | None]:
+    """(the tally with each column's ``rows_written``, why the run cannot be called enforced or ``None``).
+
+    An enforced column checked on fewer rows than its own table wrote fails the
+    run (the fail-closed backstop behind every bulk path's decline, review 4,
+    H-1). Where no per-table written count exists the comparison is not made:
+    the tally says so under ``unverified`` instead of failing an honest run.
+    """
+    columns = [dict(c) for c in found.get("columns") or [] if isinstance(c, Mapping)]
+    written = _written_by_table({str(c.get("table") or "") for c in columns}, rows_written, streams)
+    for column in columns:
+        column["rows_written"] = written.get(str(column.get("table") or ""))
+    out: dict[str, Any] = {**found, "columns": columns}
+    unverified = [_named(c) for c in columns if c["rows_written"] is None]
+    if unverified:
+        out["unverified"] = (f"{', '.join(unverified[:6])}: no per-table written count was recorded for the run, "
+                             "so the rows checked were not compared with the rows written.")
+    short = [c for c in columns if c["rows_written"] is not None and int(c.get("rows_checked") or 0) < c["rows_written"]]
     if not short:
-        return None
-    named = "; ".join(f"{c['table']}.{c['column']}" if c.get("table") else str(c["column"]) for c in short[:6])
-    least = min(int(c.get("rows_checked") or 0) for c in short)
-    return (f"Reversibility is required and {named} was checked on only {least:,} of {rows_written:,} written "
-            "row(s): a bulk path wrote the rest without the per-value check, so the run is failed rather than "
-            "reported as enforced. Run it again; if it repeats, report it.")
+        return out, None
+    named = "; ".join(f"{_named(c)} was checked on only {int(c.get('rows_checked') or 0):,} of "
+                      f"{c['rows_written']:,} written row(s)" for c in short[:6])
+    note = (f"Reversibility is required and {named}: a bulk path wrote the rest without the per-value check, so "
+            "the run is failed rather than reported as enforced. Run it again; if it repeats, report it.")
+    out.update(enforced=False, reason=note)
+    return out, note
 
 
 def record_on_success(job_id: str, fields: dict[str, Any]) -> str | None:
     """Keep the run's enforcement tally on its destination summary (read by the job's reversibility report).
 
     Returns why the run must fail instead when an enforced column was checked
-    on fewer rows than it wrote: the tally is then recorded with
-    ``enforced: false`` and that reason, never as enforced.
+    on fewer rows than its table wrote (:func:`assess`): the tally is then
+    recorded with ``enforced: false`` and that reason, never as enforced.
     """
     found = summary(job_id)
     if found is None:
         return None
-    note = shortfall_of(found, fields.get("records_processed"))
-    if note:
-        found = {**found, "enforced": False, "reason": note}
     dest = fields.get("destination_summary")
+    streams = dest.get("streams") if isinstance(dest, dict) else None
+    found, note = assess(found, fields.get("records_processed"), streams)
     if isinstance(dest, dict):
         dest[SUMMARY_KEY] = found
     else:
         fields["destination_summary"] = {SUMMARY_KEY: found}
     return note
-
-
-def shortfall_of(found: Mapping[str, Any], rows_written: Any) -> str | None:
-    """Why a run's tally (:func:`summary`) cannot be called enforced: an enforced column checked on fewer
-    rows than were written (the fail-closed backstop behind every bulk path's decline, review 4, H-1)."""
-    try:
-        written = int(rows_written or 0)
-    except (TypeError, ValueError):
-        return None
-    return _shortfall_note(list(found.get("columns") or []), written) if written > 0 else None

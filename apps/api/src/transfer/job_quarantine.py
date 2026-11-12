@@ -536,12 +536,14 @@ def fail_closed_on_silent_loss(
 def _enforcement_shortfall(job_id: str, request: Any, dest_summary: dict[str, Any], recon: dict[str, Any],
                            rows_written: int, operation: str) -> Any | None:
     """A failed ``TransferResult`` when an enforced column was checked on fewer rows than were written."""
-    from services.reversibility_enforce import SUMMARY_KEY, ReversibilityViolation, shortfall_of, summary
+    from services.reversibility_enforce import SUMMARY_KEY, ReversibilityViolation, assess, summary
 
     if not getattr(request, "require_reversibility", False):
         return None
     found = summary(job_id, forget=False)
-    note = shortfall_of(found, rows_written) if found is not None else None
+    if found is None:
+        return None
+    found, note = assess(found, rows_written, dest_summary.get("streams"))  # each table against its own count
     if note is None:
         return None
     summary(job_id)  # the run ends here: its tally is recorded below, never as enforced
@@ -551,7 +553,7 @@ def _enforcement_shortfall(job_id: str, request: Any, dest_summary: dict[str, An
 
     logger.error("Job %s: %s", job_id, note)
     restored = _settle_backup_after_error(request.destination, ReversibilityViolation(note))
-    dest_summary[SUMMARY_KEY] = {**found, "enforced": False, "reason": note}
+    dest_summary[SUMMARY_KEY] = found
     message = note + (" The previous destination table was restored." if restored else "")
     get_mongodb_service().update_job_status(
         job_id, "failed", error=message, phase="failed", progress_pct=99, message=message,

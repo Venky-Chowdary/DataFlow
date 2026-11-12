@@ -84,6 +84,7 @@ from services.decision_kernel import (
 from services.dialect_profiles import denormalize_result_key
 from services.cancel_check import cancel_checkpoint
 from services.engine_pool import release_engine
+from services.reversibility_enforce import scan_pass
 from services.error_handling import TransferCancelled
 from services.identity_carry import identity_seed_step
 from services.value_serializer import cell_to_string
@@ -4863,17 +4864,14 @@ def iter_generic_sql_finished_bundles(
     )
 
 
+@scan_pass  # its rows are mapped again by the write: checked here, counted there (review 5, H-1)
 def _generic_scan_finished_bundles(**kwargs: Any) -> Any:
     from connectors.sql_write_materialize import SqlWriteAccumulator
 
     dest_db = str(kwargs.get("dest_db") or "sql")
     label = kwargs.get("dialect_label") or _generic_sql_engine_label(dest_db)
-    acc = SqlWriteAccumulator(
-        target_cols=kwargs["target_cols"],
-        dest_db_type=dest_db,
-        dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {},
-        dialect_label=label,
-    )
+    acc = SqlWriteAccumulator(target_cols=kwargs["target_cols"], dest_db_type=dest_db, dialect_label=label,
+                              dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {})
     source_row_count = 0
     for finished in iter_generic_sql_finished_bundles(**kwargs):
         acc.note_rejects(finished.rejected_details, finished.transform_errors)
