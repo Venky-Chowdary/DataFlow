@@ -202,6 +202,14 @@ def run_fenced_drift_repair(
 
     lsn = require_batch_lsn(evidence.get("committed_position"))
     request = transfer_request_from_dict(saved)
+    from services.data_residency import residency_refusal
+
+    # A job created before its workspace was fenced must not be written to
+    # after it: judged on the destination as it resolves now, before the lease,
+    # the source scan or any write (security review round 2, M4).
+    out_of_region = residency_refusal(workspace_id, request.destination)
+    if out_of_region:
+        raise PermissionError(out_of_region)
     from src.transfer.adapters import resolve_connector_config, write_destination_database
     from src.transfer.connector_capabilities import resolve_driver_type
     from services.cdc_value_digest import (
