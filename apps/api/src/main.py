@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
-from services.health_service import aggregate_health
+from services import health_service
 from services.safe_errors import public_error
 from services.upload_limits import PayloadTooLarge
 from services.procedure_source import ProcedureSourceError
@@ -213,6 +213,13 @@ async def lifespan(app: FastAPI):
     training_enabled = getenv_brand("TRAINING", "off" if is_production() else "on").lower() not in (
         "off", "0", "false",
     )
+
+    # Build the route table now, off the request path: FastAPI would
+    # otherwise do it on the event loop inside the first request (usually the
+    # first health probe), which then takes ~1s instead of milliseconds.
+    from services.route_table_warmup import warm_route_table
+
+    await asyncio.to_thread(warm_route_table, app)
 
     # Accept traffic immediately — do not block on HuggingFace / RAG init.
     app.state.ready = False
@@ -864,7 +871,11 @@ async def health_ready():
     dependency checks report healthy so Railway does not route traffic
     to a pod that cannot accept transfer jobs.
     """
-    payload = aggregate_health()
+    # Off the event loop and shared between close probes (M-8): the checks
+    # open a database connection and touch the data directory.
+    from starlette.concurrency import run_in_threadpool
+
+    payload = await run_in_threadpool(health_service.cached_health)
     pool = connector_executor.readiness()
     payload["connector_pool"] = pool
     if not pool["ok"] and payload.get("status") == "healthy":

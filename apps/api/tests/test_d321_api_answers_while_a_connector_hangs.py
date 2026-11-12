@@ -42,6 +42,11 @@ DEADLINE = 2
 RELEASE_AFTER = 7.0
 #: An answer the operator would call "the API is up".
 FAST = 1.0
+#: How much slower than its own no-hang baseline a route may answer during
+#: the hang, when that is more than FAST (a loaded runner is slow before the
+#: hang too). The limit never reaches the time a blocked loop takes to free.
+SLOWDOWN = 5.0
+BLOCKED = RELEASE_AFTER / 2
 #: The loop's default executor (MCP request threads), kept small and fixed.
 MCP_THREADS = 3
 
@@ -139,6 +144,28 @@ async def _api_latencies(client) -> dict[str, float]:
     }
 
 
+def _limits(baseline: dict[str, float]) -> dict[str, float]:
+    """Per-route latency limit during the hang.
+
+    This test proves one thing: the API keeps answering WHILE a connector
+    call hangs. It used to compare each call with an absolute second, which
+    also measured whatever the first call of a process pays once (FastAPI
+    builds its route table inside the first request when the app was not
+    started through its lifespan) and how loaded the runner was: CI saw
+    ``health`` at 1.1s with the event loop on time and every other route in
+    milliseconds. The same calls are therefore made once before the hang, and
+    each route is held to its own baseline. Pre-fix, the loop stays blocked
+    until the black hole lets go (RELEASE_AFTER), far above any limit here.
+    """
+    return {route: min(BLOCKED, max(FAST, SLOWDOWN * seconds)) for route, seconds in baseline.items()}
+
+
+def _assert_responsive(measured: dict[str, float], baseline: dict[str, float]) -> None:
+    limits = {"event_loop": FAST, **_limits(baseline)}
+    slow = {route: seconds for route, seconds in measured.items() if seconds >= limits[route]}
+    assert not slow, {"slow": slow, "measured": measured, "baseline": baseline, "limits": limits}
+
+
 def _run(main) -> object:
     async def wrapper():
         loop = asyncio.get_running_loop()
@@ -158,6 +185,7 @@ def test_api_answers_while_a_connector_test_waits_on_a_silent_host(silent_host):
     async def main():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://api", timeout=60) as client:
+            baseline = await _api_latencies(client)
             hung = asyncio.create_task(
                 client.post("/api/v1/connectors/test", json=_oracle(silent_host.port))
             )
@@ -167,10 +195,10 @@ def test_api_answers_while_a_connector_test_waits_on_a_silent_host(silent_host):
             late = time.monotonic() - issued - 0.5
             during = {"event_loop": late, **await _api_latencies(client)}
             answer = await hung
-            return during, answer
+            return baseline, during, answer
 
-    during, answer = _run(main)
-    assert max(during.values()) < FAST, during
+    baseline, during, answer = _run(main)
+    _assert_responsive(during, baseline)
     body = answer.json()
     assert body["success"] is False
     # The deadline answer names the silent endpoint.
@@ -183,6 +211,7 @@ def test_mcp_keeps_answering_while_create_connector_probes_a_silent_host(silent_
     async def main():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://api", timeout=60) as client:
+            baseline = await _api_latencies(client)
             creates = [
                 asyncio.create_task(
                     client.post(
@@ -202,10 +231,10 @@ def test_mcp_keeps_answering_while_create_connector_probes_a_silent_host(silent_
             late = time.monotonic() - issued - (DEADLINE + 1.5)
             after = {"event_loop": late, **await _api_latencies(client)}
             answers = await asyncio.gather(*creates)
-            return after, answers
+            return baseline, after, answers
 
-    after, answers = _run(main)
-    assert max(after.values()) < FAST, after
+    baseline, after, answers = _run(main)
+    _assert_responsive(after, baseline)
     for response in answers:
         result = response.json()["result"]
         assert result["isError"] is True
