@@ -1417,7 +1417,6 @@ def _maybe_upgrade_copy_reread(dest_summary: dict[str, Any], **scan_kwargs: Any)
     )
 
 
-@date_locale_scoped
 def _kept_table_carriers(
     live_dest_types: dict[str, str] | None,
     target_cols: list[str],
@@ -1452,6 +1451,7 @@ def _kept_table_carriers(
     }
 
 
+@date_locale_scoped
 def stream_file_to_database(
     content: bytes | str | os.PathLike,
     filename: str,
