@@ -150,6 +150,10 @@ def test_a_region_spelled_host_of_another_engine_is_still_resolved(lookups, db_t
 
     metadata_endpoint_refusal("us-east-1", db_type=db_type)
     assert "us-east-1" in lookups, lookups
+    # Not even with a stated SDK endpoint: only an AWS SDK type has a label.
+    lookups.clear()
+    metadata_endpoint_refusal("us-east-1", db_type=db_type, aws_endpoint="")
+    assert "us-east-1" in lookups, lookups
 
 
 @pytest.mark.parametrize("host", ["minio", "us-east-1.corp.example", "us-east-1x", "s3.us-east-1"])
@@ -258,6 +262,14 @@ def test_metadata_endpoint_refusal_checks_a_url_on_the_label(resolves, ip):
     assert metadata_endpoint_refusal("http://us-east-1:80", db_type="s3")
     assert metadata_endpoint_refusal(
         "us-east-1", "http://us-east-1:9000", db_type="s3", aws_endpoint="http://us-east-1:9000"
+    )
+    # A URL or a connection string among the values that names the label
+    # keeps it checked even when the stated SDK endpoint is another host.
+    assert metadata_endpoint_refusal(
+        "us-east-1", "http://us-east-1:9000", db_type="s3", aws_endpoint=""
+    )
+    assert metadata_endpoint_refusal(
+        "us-east-1", "host=us-east-1 port=9000", db_type="s3", aws_endpoint=""
     )
 
 
