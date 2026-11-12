@@ -544,6 +544,10 @@ def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, s
     except (TypeError, ValueError):
         incoming = 0
     if kept > incoming:
+        from services.reversibility_enforce import NOTHING_KEPT, ROWS_KEPT
+
+        # Rows were kept: a reversibility stop never claims it blocked a partial write (review 4, M-1).
+        message = message.replace(NOTHING_KEPT, ROWS_KEPT)
         note = f"{kept} row(s) were already written and were not removed."
         if note not in message:
             message = f"{message.rstrip()} {note}"

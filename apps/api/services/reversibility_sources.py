@@ -495,9 +495,18 @@ def execute_gate(request: Any, planned: tuple[Any, ...] | None) -> dict[str, Any
         column_types = dict(getattr(request, "column_types", None) or {})
     from services.reversibility import WHILE_WRITING
 
-    return preflight_gate(request_report(request, mappings, column_types, dest_types, sample_rows=sample,
+    gate = preflight_gate(request_report(request, mappings, column_types, dest_types, sample_rows=sample,
                                          population_rows=population, enforce=WHILE_WRITING, live=True,
                                          stamp_writers=True))
+    if gate.get("status") == "pass":
+        # An append or upsert commits batch by batch: its enforced columns are checked on the whole
+        # source population before anything is written (review 4, M-1).
+        from services.reversibility_prescan import prescan
+
+        found = prescan(request, mappings, column_types, dest_types, held=sample, population=population)
+        if found:
+            gate.update(status="block", message=found)
+    return gate
 
 
 def stamp_plan_requirement(request: Any, policies: Mapping[str, Any] | None) -> None:

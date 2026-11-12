@@ -107,6 +107,19 @@ def changes(rule: Mapping[str, Any], raw: Any, converted: Any, error: str | None
     return False
 
 
+def describe_rule(rule: Mapping[str, Any]) -> tuple[str, str]:
+    """(``table.column``, how it changes) of a stamped rule, for a message that never repeats a value."""
+    how = (f"its transform ({rule.get('transform')})" if rule.get("transform")
+           else f"the cast into {rule.get('target_type') or 'the destination type'}")
+    table, column = str(rule.get("table") or ""), str(rule.get("column") or "")
+    return (f"{table}.{column}" if table else column), how
+
+
+#: The phrase a violation carries; replaced when earlier batches were already committed (review 4, M-1).
+NOTHING_KEPT = "reversibility blocks partial write"
+ROWS_KEPT = "rows earlier batches committed were kept (this is a partial write)"
+
+
 def refuse_changed_value(mapping: Mapping[str, Any], raw: Any, converted: Any, error: str | None = None) -> None:
     """Raise :class:`ReversibilityViolation` when the stamped ``mapping`` would change ``raw``."""
     rule = mapping.get(STAMP)
@@ -115,15 +128,14 @@ def refuse_changed_value(mapping: Mapping[str, Any], raw: Any, converted: Any, e
     key = (str(rule.get("job_id") or ""), str(rule.get("table") or ""), str(rule.get("column") or ""))
     with _LOCK:
         checked = _ROWS.get(key, 0)
-    how = (f"its transform ({rule.get('transform')})" if rule.get("transform")
-           else f"the cast into {rule.get('target_type') or 'the destination type'}")
-    where = f"{key[1]}.{key[2]}" if key[1] else key[2]
-    raise ReversibilityViolation(
+    where, how = describe_rule(rule)
+    violation = ReversibilityViolation(
         f"Reversibility is required and {where} would change under {how}: a value in the batch after the first "
         f"{checked:,} checked row(s) does not round-trip ({rule.get('code')}). That batch was not written; "
-        "reversibility blocks partial write. Fix the value at the source, remove the transform, or turn off "
-        "require reversibility."
+        f"{NOTHING_KEPT}. Fix the value at the source, remove the transform, or turn off require reversibility."
     )
+    violation.rule = dict(rule)
+    raise violation
 
 
 def note_rows_checked(mappings: Sequence[Any] | None, first_row: int, rows: int) -> None:

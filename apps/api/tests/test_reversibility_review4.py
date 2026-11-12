@@ -94,3 +94,59 @@ def test_h1_record_on_success_never_reports_a_shortfall_as_enforced():
     ok = {"records_processed": 400, "destination_summary": {}}
     assert enforce.record_on_success("h1ok", ok) is None
     assert ok["destination_summary"][enforce.SUMMARY_KEY]["enforced"] is True
+
+
+# ------------------------------------------------- M-1: nothing written when a violation exists
+
+def _late_violation(tmp_path, n: int):
+    from tests.test_reversibility_review3 import _exec
+
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    _exec(src, "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT)")
+    rows = [(i, f"U{i}@EXAMPLE.COM") for i in range(1, n + 1)]
+    rows[-1] = (n, "late@Example.com")  # the one value the transform would change, after every batch
+    _exec(src, "INSERT INTO people VALUES (?, ?)", rows)
+    _exec(dst, "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT)")
+    _exec(dst, "INSERT INTO people VALUES (?, ?)", [(i, f"OLD{i}") for i in range(n + 1, n + 6)])
+    return src, dst
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("mode", ["full_refresh_append", "upsert"])
+def test_m1_append_and_upsert_write_nothing_when_a_value_past_every_batch_would_change(tmp_path, fake, mode):  # noqa: F811
+    from tests.test_reversibility_review3 import _UP, _sqlite_request
+
+    n = 25_000
+    src, dst = _late_violation(tmp_path, n)
+    result = _run(fake, _sqlite_request(src, dst, mappings=[dict(m) for m in _UP], sync_mode=mode))
+    text = str(result.error)
+    assert result.success is False
+    assert _q(dst, "SELECT count(*), sum(email LIKE 'OLD%') FROM people") == [(5, 5)], "a partial write was kept"
+    assert "people.email would change under its transform (upper)" in text, text
+    assert "Execute would commit nothing" in text, text
+    assert "late@" not in text and "Example.com" not in text
+
+
+def test_m1_the_violation_never_claims_it_blocked_a_partial_write_when_rows_were_kept():
+    from src.transfer.job_failure import account_blocked_write
+    from services.reversibility_enforce import ReversibilityViolation
+
+    class _Mongo:
+        def get_job(self, _job_id):
+            return {"records_processed": 20_000}
+
+    class _Blocked(Exception):
+        rows_written = 0
+
+    violation = ReversibilityViolation(
+        "Reversibility is required and people.email would change under its transform (upper): a value in the batch "
+        "after the first 20,000 checked row(s) does not round-trip (normalize). That batch was not written; "
+        "reversibility blocks partial write. Fix the value at the source, remove the transform, or turn off "
+        "require reversibility.")
+    blocked = _Blocked(str(violation))
+    kept, message = account_blocked_write(_Mongo(), "j", blocked)
+    assert kept == 20_000
+    assert "blocks partial write" not in message, message
+    assert "20000 row(s) were already written and were not removed" in message
