@@ -360,11 +360,27 @@ def url_query_pairs(text: str) -> list[tuple[str, str]]:
     SQLAlchemy's URL pattern takes everything after the first ``?`` as the
     query, a ``#`` included; ``urlparse`` would call ``#...`` a fragment and
     hide ``?a=b#&odbc_connect=...`` from this check (security review 5).
-    Reading the longer string can only add keys to judge."""
+    Reading the longer string can only add keys to judge.
+
+    SQLAlchemy starts the query after the database, so a ``?`` in the password
+    put the real keys inside the first split's first value
+    (``u:p?charset=a@h/db?unix_socket=/run/x``); the keys ``make_url`` reads are
+    judged as well (follow-up review 2, independent re-review)."""
     if "://" not in text or "?" not in text:
         return []
-    query = text.split("?", 1)[1]
-    return parse_qsl(query, keep_blank_values=True)
+    pairs = parse_qsl(text.split("?", 1)[1], keep_blank_values=True)
+    try:
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.exc import ArgumentError
+
+        query = make_url(text).query
+    except (ArgumentError, ValueError, TypeError):
+        return pairs
+    for key, value in query.items():
+        for item in value if isinstance(value, tuple) else (value,):
+            if (key, item) not in pairs:
+                pairs.append((key, item))
+    return pairs
 
 
 def _odbc_pairs(raw: str) -> list[tuple[str, str]] | None:

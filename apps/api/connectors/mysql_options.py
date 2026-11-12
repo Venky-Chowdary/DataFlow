@@ -87,16 +87,31 @@ def is_mysql_url(text: str) -> bool:
     return bool(scheme[1]) and scheme[0].split("+", 1)[0] in _MYSQL_SCHEMES
 
 
-def url_option_refusal(text: str) -> str:
-    """Why a MySQL URL's query hands PyMySQL an option it may not have, else ``""``.
+def _query_keys(raw: str) -> list[str]:
+    """The query keys SQLAlchemy hands PyMySQL.
 
-    Reads the query as SQLAlchemy does: everything after the first ``?`` (a
-    ``#`` included), split by ``parse_qsl``, each key percent-decoded once.
+    ``make_url`` starts the query after the database: a ``?``, ``#`` or ``@`` in
+    the password is not part of it (follow-up review 2, independent re-review:
+    ``u:p?charset=a@h/db?zzz=1`` passes ``zzz``, while the text after the first
+    ``?`` names ``charset``). A URL it cannot parse is read the plain way:
+    everything after the first ``?`` (a ``#`` included), each key
+    percent-decoded once.
     """
+    try:
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.exc import ArgumentError
+
+        return list(make_url(raw).query)
+    except (ArgumentError, ValueError, TypeError):
+        return [key for key, _value in parse_qsl(raw.split("?", 1)[1], keep_blank_values=True)]
+
+
+def url_option_refusal(text: str) -> str:
+    """Why a MySQL URL's query hands PyMySQL an option it may not have, else ``""``."""
     raw = str(text or "")
     if "?" not in raw:
         return ""
-    for key, _value in parse_qsl(raw.split("?", 1)[1], keep_blank_values=True):
+    for key in _query_keys(raw):
         if _norm(key) not in ALLOWED_QUERY_KEYS:
             return _message(key, "in the connection URL")
     return ""
