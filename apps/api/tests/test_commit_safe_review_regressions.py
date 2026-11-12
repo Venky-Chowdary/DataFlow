@@ -674,9 +674,12 @@ def test_preflight_refuses_a_day_month_text_cursor(pg):
 # --------------------------------------------------------------------------
 
 
-def test_a_never_analysed_table_is_probed_with_the_floor(isolated, pg):
+def test_a_never_analysed_table_is_probed_with_the_floor(isolated, pg, monkeypatch):
     """reltuples is -1 until a table is first analysed (and on a partitioned
-    parent): it was read as "small" and the probe scanned without a floor."""
+    parent): it was read as "small" and the probe scanned without a floor.
+    Such a table is sized by its heap (review 3); one whose heap could hold
+    more rows than the limit — here the limit is lowered — is floored."""
+    monkeypatch.setattr(csw, "PG_UNBOUNDED_PROBE_ROWS", 10)
     _sql(
         f"CREATE TABLE {SCHEMA}.ev (id bigserial PRIMARY KEY, v text) "
         "WITH (autovacuum_enabled = false)"
@@ -812,13 +815,17 @@ def test_large_or_unanalysed_pg_table_is_stated_within_the_look_back(rows):
     assert "1,000,000 values" in unknown["statement"], unknown
 
 
-def test_preflight_states_the_look_back_for_an_unanalysed_pg_table(pg):
+def test_preflight_states_the_look_back_for_an_unanalysed_pg_table(pg, monkeypatch):
+    """An unanalysed table whose heap could hold more rows than the limit
+    (lowered here; review 3 sizes such a table by its heap)."""
     from services.preflight_transfer_policy import run_transfer_policy_gates
 
+    monkeypatch.setattr(csw, "PG_UNBOUNDED_PROBE_ROWS", 10)
     _sql(
         f"CREATE TABLE {SCHEMA}.ev (id bigserial PRIMARY KEY, v text) "
         "WITH (autovacuum_enabled = false)"
     )
+    _sql(f"INSERT INTO {SCHEMA}.ev (v) SELECT 'r' || g FROM generate_series(1, 20) g")
     c = pg_creds()
     contract = {"name": "ev", "cursor_field": "id", "cursor_semantics": "monotonic_sequence",
                 "sync_mode": "incremental_append", "primary_key": "id"}

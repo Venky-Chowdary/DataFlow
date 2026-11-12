@@ -77,7 +77,8 @@ PG_LOOKBACK_VALUES = 1_000_000
 #: The same look-back for a DATE cursor, in its own unit (review M-3).
 PG_LOOKBACK_DAYS = max(1, PG_LOOKBACK_SECONDS // 86_400)
 #: At or below this estimated row count the PostgreSQL probe has no floor. A
-#: table whose estimate is unknown (``reltuples = -1``) is floored too.
+#: never-analysed table is sized by its heap; one whose size stays unknown is
+#: floored too.
 PG_UNBOUNDED_PROBE_ROWS = 1_000_000
 #: Rows behind the watermark are checked against the destination in pages of
 #: this many, in cursor order, until the first one it lacks (no overall cap).
@@ -971,8 +972,11 @@ _PG_SUBXACT_SQL = (
 #: ``(relkind, estimated rows)`` of a relation sized by its whole inheritance
 #: tree: a parent whose rows live in children (a Timescale hypertable, a legacy
 #: partitioned table) has ``reltuples`` 0 itself (review Low). Members with
-#: storage are summed; one never analysed (``-1``), or a tree with no storage,
-#: makes the size unknown (``-1``), which the probe treats as large.
+#: storage are summed. A table never analysed (``reltuples = -1``) is sized by
+#: its heap instead (review 3, Low): a heap tuple takes at least 28 bytes (its
+#: 24-byte header and a 4-byte line pointer), so its bytes / 28 bound its rows.
+#: When that bound exceeds the unbounded-probe limit (the last parameter), or
+#: the tree has no storage, the size is unknown (``-1``): treated as large.
 _PG_RELATION_SIZE_SQL = (
     "WITH RECURSIVE tree(oid) AS ("
     " SELECT c.oid FROM pg_catalog.pg_class c"
@@ -983,9 +987,14 @@ _PG_RELATION_SIZE_SQL = (
     "         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
     "         WHERE n.nspname = %s AND c.relname = %s),"
     " CASE WHEN count(*) FILTER (WHERE c.relkind <> 'p') = 0"
-    "        OR bool_or(c.relkind <> 'p' AND c.reltuples < 0) THEN -1"
-    "      ELSE sum(c.reltuples) FILTER (WHERE c.relkind <> 'p') END::bigint"
+    "        OR bool_or(c.relkind <> 'p' AND z.n IS NULL) THEN -1"
+    "      WHEN bool_or(c.relkind <> 'p' AND c.reltuples < 0)"
+    "        AND sum(z.n) FILTER (WHERE c.relkind <> 'p') > %s THEN -1"
+    "      ELSE sum(z.n) FILTER (WHERE c.relkind <> 'p') END::bigint"
     " FROM tree t JOIN pg_catalog.pg_class c ON c.oid = t.oid"
+    " CROSS JOIN LATERAL (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::float8"
+    "   WHEN c.relkind IN ('r', 'm', 't') THEN (pg_catalog.pg_relation_size(c.oid) / 28)::float8"
+    "   END AS n) AS z"
 )
 
 
@@ -1130,7 +1139,7 @@ def pg_relation_facts(
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute(_PG_RELATION_SIZE_SQL, (qualified or "public", bare) * 2)
+            cur.execute(_PG_RELATION_SIZE_SQL, (*(qualified or "public", bare) * 2, PG_UNBOUNDED_PROBE_ROWS))
             row = cur.fetchone()
     except Exception as exc:  # noqa: BLE001
         logger.warning("commit-safe window: relation kind unreadable: %s", exc)
@@ -1226,12 +1235,13 @@ def probe_pg_late_rows(
             # candidate set between them, the walk never matches the count,
             # and every run of a busy table re-read it from its oldest edit.
             cur.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            cur.execute(_PG_RELATION_SIZE_SQL, (schema or "public", table) * 2)
+            cur.execute(_PG_RELATION_SIZE_SQL, (*(schema or "public", table) * 2, PG_UNBOUNDED_PROBE_ROWS))
             est = cur.fetchone()
             est_rows = int(est[1]) if est and est[1] is not None else -1
             floor = ""
-            # -1: never analysed, or a partitioned parent — size unknown, so
-            # treated as large (review M5): an unfloored probe could scan it all.
+            # -1: a never-analysed heap too big to bound by its pages, or a
+            # tree with no storage — size unknown, so treated as large (review
+            # M5): an unfloored probe could scan it all.
             if est_rows > PG_UNBOUNDED_PROBE_ROWS or est_rows < 0:
                 floor = probe_floor(below, cursor_type)
                 if not floor:

@@ -270,3 +270,44 @@ def test_an_ambiguous_declared_date_under_auto_order_is_refused_not_kept_as_text
         bound.bound(records, {"d": "date"})
     assert bound.high_mark is None
 
+
+# --------------------------------------------------------------------------
+# Finding 3 — a never-analysed table is sized by its pages before it is
+# called large
+# --------------------------------------------------------------------------
+
+
+def test_small_unanalysed_table_with_a_text_cursor_still_gets_the_late_commit_check(isolated, pg):
+    """A 50-row table with autovacuum off is never analysed (reltuples = -1).
+    Its size used to be "unknown, so large", and a text cursor (no unit to
+    floor the probe by) skipped the late-commit check: a late row was lost.
+    Sized by its pages it is small, so the check runs and recovers the row."""
+    from services import commit_safe_window as csw
+
+    _sql(f'CREATE TABLE "{SCHEMA}".ua (id int PRIMARY KEY, c text NOT NULL, v text) '
+         "WITH (autovacuum_enabled = false)")
+    _sql(f"INSERT INTO \"{SCHEMA}\".ua SELECT g, lpad(g::text, 6, '0'), 'r' FROM generate_series(1, 50) g")
+    assert _sql(f"SELECT reltuples FROM pg_class WHERE oid = '\"{SCHEMA}\".ua'::regclass", fetch=True)[0][0] < 0
+    from tests.test_commit_safe_review_round2 import _pg_cfg
+
+    kind, rows = csw.pg_relation_facts({**_pg_cfg(), "schema": SCHEMA}, SCHEMA, "ua")
+    assert kind == "r" and rows is not None and 0 <= rows <= csw.PG_UNBOUNDED_PROBE_ROWS, rows
+    assert _run(isolated, "ua", "ua_out", cursor="c", pk="id").success
+    late = _connect(autocommit=False)
+    try:
+        late.cursor().execute(f"INSERT INTO \"{SCHEMA}\".ua VALUES (55, '000055', 'LATE')")
+        _sql(f"INSERT INTO \"{SCHEMA}\".ua SELECT g, lpad(g::text, 6, '0'), 'fast' FROM generate_series(60, 62) g")
+        second = _run(isolated, "ua", "ua_out", cursor="c", pk="id")
+        assert second.success, second.error
+        late.commit()
+    finally:
+        late.close()
+    third = _run(isolated, "ua", "ua_out", cursor="c", pk="id")
+    assert third.success, third.error
+    window = _window(third)
+    assert window.get("guarantee") != csw.GUARANTEE_NONE, window
+    assert window.get("replay_seed") == "000055", window
+    assert _sql(
+        f'SELECT s.id FROM "{SCHEMA}".ua s LEFT JOIN "{SCHEMA}".ua_out d ON d.id = s.id WHERE d.id IS NULL',
+        fetch=True,
+    ) == []
