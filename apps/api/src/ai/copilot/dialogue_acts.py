@@ -172,6 +172,10 @@ _SCHEDULE_HEALTH = re.compile(
     r"|(?:schedules?|pipelines?)\s+(?:not\s+working|not\s+running|broken|failing|stuck|down)"
     r"|why\s+(?:aren'?t|are\s+not|isn'?t|is\s+not|won'?t)\s+(?:my\s+|the\s+)?"
     r"(?:schedules?|pipelines?)"
+    # Review 2, M3: "what pipelines need my attention", "any pipeline problems?"
+    r"|(?:schedules?|pipelines?)\s+(?:that\s+)?(?:need\w*|requir\w*)\s+(?:my\s+|your\s+|our\s+|any\s+)?attention"
+    r"|(?:schedules?|pipelines?)\s+(?:problems?|issues?|trouble|health)"
+    r"|(?:problems?|issues?|trouble)\s+(?:with|in|on)\s+(?:my\s+|the\s+|any\s+)?(?:schedules?|pipelines?)"
     r")\b",
     re.I,
 )

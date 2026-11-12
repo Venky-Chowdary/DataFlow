@@ -231,6 +231,35 @@ def asked_status(message: str) -> str:
     return status
 
 
+def job_statuses_named(message: str) -> list[str]:
+    """Every distinct status a jobs question names, in order (verification words aside)."""
+    from .job_phrases import _VERIFICATION
+    from .workspace_intents import _STATUS_RE, _STATUS_WORDS
+
+    text = message or ""
+    for _verdict, pattern in _VERIFICATION:
+        text = pattern.sub(" ", text)
+    found: list[tuple[int, str]] = []
+
+    def take(pattern: re.Pattern[str], status: str | None = None) -> None:
+        nonlocal text
+        for match in list(pattern.finditer(text)):
+            word = re.sub(r"\s+", " ", match.group(0).lower())
+            found.append((match.start(), status or _STATUS_WORDS.get(word, "failed")))
+            text = text[:match.start()] + " " * (match.end() - match.start()) + text[match.end():]
+
+    take(_ATTENTION_RE, "attention")
+    for pattern, exact in _EXACT_STATUSES:
+        take(pattern, exact)
+    take(_STATUS_RE)
+    take(re.compile(r"\b(?:fail\w*|errors?|errored|broken)\b", re.I), "failed")
+    out: list[str] = []
+    for _pos, status in sorted(found):
+        if status not in out:
+            out.append(status)
+    return out
+
+
 def _followup_ask(message: str) -> JobAsk:
     return JobAsk(
         status=asked_status(message),

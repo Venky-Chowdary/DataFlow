@@ -327,7 +327,10 @@ def is_decline(text: str) -> bool:
 
 
 _CLAUSE_SPLIT = re.compile(
-    r"\s*(?:\?|;|,?\s+(?:and|also|plus)\s+(?=(?:how|which|what|when|list|show|are|is|did|do)\b))\s*",
+    r"\s*(?:\?|;|,?\s+(?:and|also|plus)\s+(?=(?:how|which|what|when|list|show|are|is|did|do)\b)"
+    # "show my failed jobs and my connectors": a second object is a second question.
+    r"|,?\s+(?:and|also|plus)\s+(?=(?:(?:my|the|our|all|any)\s+)?(?:\w+\s+)?"
+    r"(?:jobs?|transfers?|runs?|pipelines?|schedules?|connectors?|connections?|datasets?|uploads?)\b))\s*",
     re.I,
 )
 _CLAUSE_SUBJECTS = (
@@ -344,6 +347,9 @@ def compound_answer(message: str | None) -> str | None:
     "how many jobs failed and how many pipelines are paused" was answered for
     the jobs half only, as if that were the whole answer (review M2).
     """
+    same = _same_subject_statuses(message or "")
+    if same:
+        return same
     clauses = [c.strip() for c in _CLAUSE_SPLIT.split(message or "") if c and c.strip()]
     subjects = []
     for clause in clauses:
@@ -357,6 +363,37 @@ def compound_answer(message: str | None) -> str | None:
         "That is more than one question, and I answer one at a time so each number is read "
         f"for exactly what it asks. Ask {asks}."
     )
+
+
+def _same_subject_statuses(message: str) -> str | None:
+    """Two job statuses asked in one count ("failed and running", "completed or failed").
+
+    Answered with one of them it was half an answer, stated as the whole
+    (review 2, M3). Each status is a count of its own: asked back one at a time.
+    """
+    from .job_questions import job_statuses_named, parse_job_ask
+
+    statuses = job_statuses_named(message)
+    if len(statuses) < 2 or parse_job_ask(message) is None:
+        return None
+    from .job_phrases import read_filters
+
+    window = read_filters(message).window_text
+    asks = " and then ".join(
+        f"“how many jobs {_STATUS_ASK.get(s, 'were ' + s.replace('_', ' '))}{' ' + window if window else ''}”"
+        for s in statuses[:3]
+    )
+    named = " and ".join(s.replace("_", " ") for s in statuses[:3])
+    return (
+        f"That asks for more than one count — {named} — and I answer one count at a time, so "
+        f"each number is read for exactly what it asks. Ask {asks}."
+    )
+
+
+_STATUS_ASK = {
+    "failed": "failed", "completed": "completed", "running": "are running", "queued": "are queued",
+    "pending": "are pending", "cancelled": "were cancelled", "attention": "need attention",
+}
 
 
 def unapplied_filter_answer(message: str | None) -> str | None:
