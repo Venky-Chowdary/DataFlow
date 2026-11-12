@@ -367,12 +367,15 @@ def _proof_file_dest_batches(
     from .connector_capabilities import resolve_driver_type
 
     dest_type = resolve_driver_type(endpoint.format or "")
+    written_here = False
     if endpoint.kind != "database":
         path = str(dest_summary.get("path") or dest_summary.get("export_path") or "")
         if not path or not os.path.isfile(path):
             raise FileNotFoundError(f"written file {path or '(no path)'} is not on disk")
         opened: Any = (open(path, "rb"), None)
         name, fmt = os.path.basename(path), endpoint.format
+        # The local file this run's writer just wrote: its own dialect, never a sniffer (review 3, H2).
+        written_here = True
     elif dest_type == "sftp":
         from connectors.sftp_common import sftp_dest_path
         from services.object_streaming import open_sftp_binary
@@ -392,7 +395,7 @@ def _proof_file_dest_batches(
     stream, closer = opened
     try:
         batch: list[dict[str, Any]] = []
-        for rec in _iter_artifact_records(stream, name=name, fmt=fmt):
+        for rec in _iter_artifact_records(stream, name=name, fmt=fmt, written_here=written_here):
             batch.append(rec)
             if len(batch) >= page:
                 yield batch
@@ -8865,6 +8868,33 @@ def _cell_mismatch_text(compare: dict[str, Any]) -> str:
     )
 
 
+def _file_export_source_view(records: list[Any], mappings: list[dict], fmt: str | None) -> list[Any]:
+    """The source rows as a JSON file export can hold them.
+
+    The file writer keeps every key and writes SQL NULL as ``null``, so in a
+    JSON-typed column a SQL NULL and a JSON ``null`` are the same bytes in the
+    file. The read-back hands every ``null`` back as the JSON-null token; the
+    source's SQL NULL in such a column is given the same token here, or a
+    nullable ``jsonb`` / array column with one NULL fails a correct export.
+    """
+    if str(fmt or "").lower() not in {"json", "jsonl", "ndjson"}:
+        return list(records)
+    from connectors.writer_common import _is_document_column
+    from services.value_serializer import JSON_NULL, is_missing_sentinel, is_reader_null_cell
+
+    types = _dest_types_from_mappings(mappings)
+    document = {str(m.get("source") or "") for m in mappings
+                if m.get("source") and _is_document_column(str(m.get("target") or ""), types)}
+    if not document:
+        return list(records)
+
+    def sql_null(value: Any) -> bool:  # None or the reader's SQL NULL sentinel; an absent key stays absent
+        return is_reader_null_cell(value) and not is_missing_sentinel(value)
+
+    return [{k: (JSON_NULL if k in document and sql_null(v) else v) for k, v in rec.items()}
+            if isinstance(rec, dict) else rec for rec in records]
+
+
 def _file_export_cell_readback(
     records: Any,
     columns: list[str],
@@ -8896,12 +8926,13 @@ def _file_export_cell_readback(
             rows = list(iter_fixed_width_dicts(Path(path)))
         else:
             with open(path, "rb") as fh:
-                rows = list(_iter_artifact_records(fh, name=os.path.basename(path), fmt=fmt))
+                # The file this run just wrote: read with the writer's own dialect, never a sniffer.
+                rows = list(_iter_artifact_records(fh, name=os.path.basename(path), fmt=fmt, written_here=True))
     except (UnmeasuredArtifact, FixedWidthError, OSError, ValueError) as exc:
         return {"passed": False, "mismatches": [f"written file could not be re-read: {exc}"]}
     targets = [str(m.get("target")) for m in mapping_dicts if m.get("target")]
     return sample_compare_rows(
-        list(records),
+        _file_export_source_view(records, mapping_dicts, fmt),
         rows,
         mapping_dicts,
         target_columns=targets or None,

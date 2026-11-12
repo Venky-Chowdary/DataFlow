@@ -608,14 +608,23 @@ def _parity(job: dict[str, Any], job_id: str) -> dict[str, Any]:
             "unexplained": int((report.get("parity") or {}).get("unexplained") or 0)}
 
 
-def _failed_reason(job: dict[str, Any], job_id: str) -> str:
+def _failed_reason(job: dict[str, Any], job_id: str, schema: Any = ()) -> str:
     """Why the extract job failed, allowlisted: a child job's error quotes row values (contract 20)."""
     from services.exit_job_reasons import failed_reason
 
-    return failed_reason(job, job_id)
+    return failed_reason(job, job_id, schema=schema)
 
 
-def _not_extracted(job: dict[str, Any], job_id: str) -> dict[str, str]:
+def _table_columns(doc: dict[str, Any], table: dict[str, Any]) -> list[str]:
+    """The source table's column names (schema), to name in a failure; [] when the catalog cannot be read."""
+    try:
+        return list(_declared_types(doc, table)[0])
+    except Exception:  # noqa: BLE001 - the reason then names no column, never a value
+        logger.info("exit rehearsal: column names unread for %s", table.get("name"), exc_info=True)
+        return []
+
+
+def _not_extracted(job: dict[str, Any], job_id: str, schema: Any = ()) -> dict[str, str]:
     """{status, reason} of a table whose extract job did not complete: held by the PII gate, or failed."""
     from services.exit_pii import NEEDS_PII_REVIEW, held_by_pii_gate, held_reason
 
@@ -627,7 +636,7 @@ def _not_extracted(job: dict[str, Any], job_id: str) -> dict[str, str]:
             reason = (f"The extract job {job_id} started after {lapsed}, so the PII gate held it. "
                       + reason.split(": ", 1)[-1])
         return {"status": NEEDS_PII_REVIEW, "reason": reason, "pii_held": _held_columns(found)}
-    return {"status": "failed", "reason": _failed_reason(job, job_id)}
+    return {"status": "failed", "reason": _failed_reason(job, job_id, schema)}
 
 
 def _held_columns(found: dict[str, list[str]]) -> list[dict[str, Any]]:
@@ -665,16 +674,24 @@ def _acknowledgement_gap(doc: dict[str, Any], table: dict[str, Any], job: dict[s
     return None
 
 
-def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> dict[str, str]:
-    """The source table's declared column types (they steer the digest of both sides)."""
+def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """(the source table's declared column types, {column: why it is not compared exactly}).
+
+    The types steer the digest of both sides; a text column the engine read as
+    JSON is decided by the catalog, never by its content (review 3, M7).
+    """
+    from services.exit_completeness import catalog_declared_types
     from services.source_schema_authority import endpoint_source_column_types
 
-    return endpoint_source_column_types(_source_endpoint(doc["source"], table, doc["workspace_id"]))
+    endpoint = _source_endpoint(doc["source"], table, doc["workspace_id"])
+    types = endpoint_source_column_types(endpoint)
+    return catalog_declared_types(types, endpoint, str(getattr(endpoint, "format", "") or "").lower())
 
 
 def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     """One table's RehearsalTable (contract 4) from its finished job."""
     from services.exit_completeness import (
+        json_null_documents,
         judge_table,
         profile_extract,
         profile_rows,
@@ -695,7 +712,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
     ds = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     out["extract_seconds"] = ds.get("elapsed_seconds")
     if str(job.get("status") or "").lower() != "completed":
-        return {**out, **_not_extracted(job, job_id)}
+        return {**out, **_not_extracted(job, job_id, _table_columns(doc, table))}
     gap = _acknowledgement_gap(doc, table, job, job_id)
     if gap is not None:
         return {**out, **gap}  # no part: an extract whose acknowledgement does not stand is not sealed
@@ -715,16 +732,21 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
     try:
         endpoint = _source_endpoint(doc["source"], table, doc["workspace_id"])
         engine = str(getattr(endpoint, "format", "") or "").lower()
-        types = _declared_types(doc, table)
+        types, unproven = _declared_types(doc, table)
         columns, rows, close = source_columns_and_rows(endpoint)
         keys, missing = resolve_keys(keys, columns)
         if missing:
             gaps.append(f"the declared key column(s) {', '.join(missing)} are not columns of the table, so the "
                         "key set was not measured")
         try:
-            source = profile_rows(rows, columns, keys, None, types=types, engine=engine)
+            source = profile_rows(rows, columns, keys, None, types=types, engine=engine,
+                                  extract_is_delimited=str(doc.get("extract_format") or "").lower() in {"csv", "tsv"})
         finally:
             close()
+        source.uncompared.update(unproven)
+        for column, count in json_null_documents(endpoint, types, engine).items():
+            gaps.append(f"{column} holds {count} JSON null document(s), which the extract cannot tell from "
+                        "SQL NULL, so its values were not compared exactly")
     except Exception as exc:  # noqa: BLE001 - not measured is a named gap, never a pass
         logger.info("exit rehearsal source read-back failed for %s", table["name"], exc_info=True)
         out["_read_failed"] = True

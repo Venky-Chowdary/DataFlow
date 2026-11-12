@@ -4811,12 +4811,15 @@ def _json_null_cells_as_engine_text(records: Any) -> Any:
         yield {key: (JSON_NULL if value is None else value) for key, value in rec.items()}
 
 
-def _iter_streaming_kind(kind: str, source: Any, *, name: str, exact_numbers: bool = False) -> Any:
+def _iter_streaming_kind(kind: str, source: Any, *, name: str, exact_numbers: bool = False,
+                         written_here: bool = False) -> Any:
     """CSV/JSON/JSONL/XML/Avro records from a forward-only GET."""
     if kind in {"csv", "tsv"}:
         from services.csv_profiler import iter_csv_dicts
+        from services.export_dialect import written_dialect
 
-        yield from iter_csv_dicts(source)
+        # An export this product wrote is read with the writer's dialect, never a sniffer.
+        yield from iter_csv_dicts(source, options=written_dialect(kind) if written_here else None)
         return
     if kind == "jsonl":
         from services.file_parser import iter_jsonl_dicts
@@ -4908,8 +4911,13 @@ def _iter_artifact_records(
     name: str,
     fmt: str | None = None,
     exact_numbers: bool = False,
+    written_here: bool = False,
 ) -> Any:
     """Dest-engine records of an object-store GET. Same gzip machine as COUNT.
+
+    ``written_here`` says the artifact is an export this product wrote: a
+    delimited file is then read with the writer's own delimiter, quoting and
+    header (:mod:`services.export_dialect`) instead of sniffing them.
 
     CSV/JSON/JSONL/XML/Avro (including gzip) walk ``source`` forward-only.
     Parquet/ORC/Excel gzip stream-decompress into one rewindable image
@@ -4923,7 +4931,8 @@ def _iter_artifact_records(
     kind, handle, gz_close = _artifact_stream_open(source, name=name, fmt=fmt)
     try:
         if kind in _STREAMING_COUNT_KINDS:
-            yield from _iter_streaming_kind(kind, handle, name=name, exact_numbers=exact_numbers)
+            yield from _iter_streaming_kind(kind, handle, name=name, exact_numbers=exact_numbers,
+                                            written_here=written_here)
             return
         if kind in _BYTE_IMAGE_KINDS:
             yield from _iter_byte_image_kind(kind, handle, name=name)

@@ -604,3 +604,178 @@ def test_low_the_board_resolves_each_systems_connector_once(world, monkeypatch):
     lookups.clear()
     exit_inventory.public_system(exit_inventory.get_system(systems[0]["id"]))
     assert len(lookups) == 1, lookups
+
+
+# ------------------------- H2: exports are read back with the writer's own dialect; NULL is not empty text
+
+
+_AWKWARD = [None, "", "a;b;c;d", "x|y|z", "tab\there", 'quote "q" and, comma', "line\nbreak", " padded "]
+
+
+def _texts_table(world, name, rows):  # noqa: F811
+    conn = sqlite3.connect(str(world["src"]))
+    with conn:
+        conn.execute(f"CREATE TABLE {name} (id INTEGER PRIMARY KEY, t TEXT)")  # nosec B608 - test name
+        conn.executemany(f"INSERT INTO {name} VALUES (?, ?)", rows)  # nosec B608
+    conn.close()
+
+
+def test_h2_the_export_writer_and_its_reader_share_one_dialect(tmp_path):
+    """NULL is an empty unquoted cell, '' is quoted "", and every awkward text reads back exactly (CSV and TSV)."""
+    from services.csv_profiler import iter_csv_dicts
+    from services.export_dialect import written_dialect
+    from src.transfer.adapters_file_write import write_destination_file
+    from src.transfer.models import EndpointConfig
+
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    # The engine hands the writer SQL NULL as its wire sentinel.
+    records = [{"id": str(i), "t": SQL_NULL_SENTINEL if v is None else v} for i, v in enumerate(_AWKWARD, start=1)]
+    for fmt in ("csv", "tsv"):
+        dest = EndpointConfig(kind="file_export", format=fmt, output_path=str(tmp_path / f"out.{fmt}"))
+        content, _name, _summary = write_destination_file(dest, records=records, columns=["id", "t"],
+                                                          column_types={"id": "INTEGER", "t": "TEXT"})
+        sep = "," if fmt == "csv" else "\t"
+        lines = content.decode("utf-8").split("\r\n")
+        assert lines[0] == f"id{sep}t" and lines[1] == f"1{sep}" and lines[2] == f'2{sep}""', lines[:3]
+        back = list(iter_csv_dicts(content, options=written_dialect(fmt)))
+        assert [r["t"] for r in back] == _AWKWARD, fmt
+
+
+def test_h2_a_csv_extract_of_awkward_text_is_proven(world):  # noqa: F811
+    """'' next to NULL, text uniformly full of ; | or tabs, and a one-row table whose cell looks like JSON."""
+    import hashlib
+
+    _texts_table(world, "awkward", [(i, v) for i, v in enumerate(_AWKWARD, start=1)])
+    _texts_table(world, "semis", [(i, f"{i};b;c;d") for i in range(1, 51)])
+    _texts_table(world, "pipes", [(i, "a|b|c|d|e") for i in range(1, 51)])
+    _texts_table(world, "tabs", [(i, "a\tb\tc\td") for i in range(1, 51)])
+    _texts_table(world, "onejson", [(1, '{"a":1,"b":[1,2,3],"c":{"d":null,"e":"x"},"f":true}')])
+    names = ["awkward", "semis", "pipes", "tabs", "onejson"]
+    out = _run(_system(tables=[{"name": n} for n in names], extract_format="csv"))
+    tables = {t["name"]: t for t in out["tables"]}
+    assert out["verdict"] == "proven", [(n, t["status"], t["reason"]) for n, t in tables.items()]
+    assert tables["onejson"]["rows_extracted"] == 1 and tables["semis"]["rows_extracted"] == 50
+    awkward = next(t for t in out["seal"]["parts"] if "awkward" in t["name"])
+    path = next(p for p in (world["tmp"] / "exports").rglob("*awkward*"))
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == awkward["sha256"]
+    lines = path.read_bytes().decode("utf-8").split("\r\n")
+    assert lines[1] == "1," and lines[2] == '2,""', lines[:3]
+
+
+def test_h2_the_verifier_reads_a_one_row_csv_with_the_writers_dialect(tmp_path):
+    """The reviewer's false statement: 'The extract lacks column(s) id, jb' on a one-row JSON cell."""
+    from services.exit_completeness import profile_extract
+    from services.export_dialect import format_written_row
+
+    path = tmp_path / "one.csv"
+    cell = '{"a":1,"b":[1,2,3],"c":{"d":null,"e":"x"},"f":true}'
+    path.write_bytes(("\r\n".join([format_written_row(["id", "t"], ","), format_written_row(["1", cell], ",")])
+                      + "\r\n").encode("utf-8"))
+    part = {"name": path.name, "sha256": "", "size_bytes": 0, "storage": "local_file"}
+    prof, _digest, _size = profile_extract(part, local_path=str(path), fmt="csv", columns=["id", "t"],
+                                           key_columns=["id"], numeric=["id"], types={"id": "INTEGER", "t": "TEXT"},
+                                           engine="sqlite")
+    assert prof.rows == 1 and prof.columns == ["id", "t"]
+
+
+def test_h2_a_sql_null_in_a_document_column_reads_back_as_null_from_jsonl(tmp_path):
+    """A nullable jsonb / array column with one NULL failed its own export's read-back ('null' vs 'null')."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+    from src.transfer.reconcile_step import _file_export_cell_readback
+
+    path = tmp_path / "part.jsonl"
+    path.write_text('{"id": 1, "jb": {"a": 1}, "ia": [1, 2]}\n{"id": 2, "jb": null, "ia": null}\n', encoding="utf-8")
+    maps = [{"source": "id", "target": "id", "target_type": "BIGINT"},
+            {"source": "jb", "target": "jb", "target_type": "JSONB"},
+            {"source": "ia", "target": "ia", "target_type": "INTEGER[]"}]
+    records = [{"id": "1", "jb": '{"a": 1}', "ia": "[1, 2]"},
+               {"id": "2", "jb": SQL_NULL_SENTINEL, "ia": SQL_NULL_SENTINEL}]
+    summary = {"path": str(path), "primary_key_columns": ["id"]}
+    result = _file_export_cell_readback(records, ["id", "jb", "ia"], maps, summary, fmt="jsonl")
+    assert result["passed"] is True and result["rows_compared"] == 2, result.get("mismatches")
+    # A value that really differs still fails.
+    records[1]["jb"] = '{"a": 2}'
+    assert _file_export_cell_readback(records, ["id", "jb", "ia"], maps, summary, fmt="jsonl")["passed"] is False
+
+
+def test_h2_a_timestamp_before_year_1000_keeps_a_four_digit_year():
+    from datetime import datetime
+
+    from connectors.sql_temporal import format_wire_value
+
+    assert format_wire_value(datetime(1, 1, 1), "TIMESTAMP") == "0001-01-01 00:00:00"  # noqa: DTZ001
+    assert format_wire_value(datetime(999, 12, 31, 0, 0, 0, 500000), "TIMESTAMP") == "0999-12-31 00:00:00.5"  # noqa: DTZ001
+    assert format_wire_value(datetime(2026, 1, 2, 3, 4, 5, 120000), "TIMESTAMP") == "2026-01-02 03:04:05.12"  # noqa: DTZ001
+
+
+def test_h2_a_read_back_or_type_failure_names_the_column_never_the_value():
+    from services.exit_job_reasons import engine_finding, failed_reason
+
+    secret = "4111 1111 1111 1111"
+    job = {"status": "failed", "error": (
+        "Read-back verification failed on the written file 'exit_x.csv': row 1 column note→note: "
+        f"source='{secret}' dest='null'; row 2 column fake→ x: source='column {secret}→y' "
+        "This destination is not a SQL table, so the failed batch was not deleted.")}
+    finding = engine_finding(job, ["id", "note"])
+    assert finding == "the read-back of the file it wrote failed on column note: what was read back is not what was sent"
+    assert engine_finding(job) == "the read-back of the file it wrote did not match what was sent"
+    assert secret not in failed_reason(job, "j1", schema=["id", "note"])
+    blocked = {"status": "failed", "error": (
+        "Blocking issues detected: Lossy / fidelity collapse across type path: 2 column(s) collapse fidelity on "
+        "write (c CHAR(5) → VARCHAR, ip INET → VARCHAR) — impacts 3 gate check(s)"),
+        "error_details": {"guidance": [{"gate": "rc-fidelity-collapse-632b52e34014"}]}}
+    assert engine_finding(blocked, ["id", "c", "ip"]) == (
+        "preflight blocked it: fidelity collapse on columns c (CHAR(5) to VARCHAR), ip (INET to VARCHAR): a file "
+        "export holds that type as plain text, so the extract would not keep it exactly "
+        "(gate rc-fidelity-collapse-632b52e34014)")
+
+
+# ------------------------------------------- Lows: digest folds and a column name with a space
+
+
+def test_low_jsonb_documents_keep_each_values_json_type_in_the_digest():
+    from services.exit_value_tokens import JSON_DOCUMENT, token, token_kind
+
+    assert token_kind("JSONB", "postgresql") == JSON_DOCUMENT
+    assert token(JSON_DOCUMENT, "1") != token(JSON_DOCUMENT, 1)            # a string is not the number
+    assert token(JSON_DOCUMENT, " a ") != token(JSON_DOCUMENT, "a")
+    assert token(JSON_DOCUMENT, "true") != token(JSON_DOCUMENT, True)
+    assert token(JSON_DOCUMENT, None) is None and token(JSON_DOCUMENT, "null") is not None
+    assert token(JSON_DOCUMENT, {"b": 1, "a": [1.0, None]}) == token(JSON_DOCUMENT, {"a": [1.0, None], "b": 1})
+    # A delimited cell holds the document as text: parsed before it is spelled; a bare string is that string.
+    assert token(JSON_DOCUMENT, '{"a": [1.0, null], "b": 1}', from_text=True) == token(
+        JSON_DOCUMENT, {"b": 1, "a": [1.0, None]})
+    assert token(JSON_DOCUMENT, "str", from_text=True) == token(JSON_DOCUMENT, "str")
+
+
+def test_low_a_zoneless_timestamp_differs_from_the_same_wall_clock_with_an_offset():
+    from datetime import datetime, timedelta, timezone
+
+    from services.exit_value_tokens import NAIVE_DATETIME, token, token_kind
+
+    assert token_kind("TIMESTAMP", "postgresql") == NAIVE_DATETIME
+    assert token_kind("TIMESTAMP WITHOUT TIME ZONE", "postgresql") == NAIVE_DATETIME
+    naive = datetime(2026, 1, 1, 10, 0)  # noqa: DTZ001 - a zoneless timestamp is the point
+    assert token(NAIVE_DATETIME, naive) == token(NAIVE_DATETIME, "2026-01-01 10:00:00")
+    assert token(NAIVE_DATETIME, naive) != token(NAIVE_DATETIME, naive.replace(tzinfo=timezone(timedelta(hours=5))))
+    assert token(NAIVE_DATETIME, naive) != token(NAIVE_DATETIME, "2026-01-01T10:00:00+05:00")
+
+
+def test_low_a_column_name_with_a_space_is_read_back_as_itself(tmp_path):
+    from services.exit_completeness import source_columns_and_rows
+    from src.transfer.models import EndpointConfig
+
+    db = tmp_path / "s.sqlite"
+    conn = sqlite3.connect(str(db))
+    with conn:
+        conn.execute('CREATE TABLE prices (id INTEGER PRIMARY KEY, "unit price" NUMERIC, "select" TEXT)')
+        conn.execute("INSERT INTO prices VALUES (1, 9.5, 'x')")
+    conn.close()
+    endpoint = EndpointConfig(kind="database", format="sqlite", database=str(db), table="prices")
+    columns, rows, close = source_columns_and_rows(endpoint)
+    try:
+        assert columns == ["id", "unit price", "select"]
+        assert list(rows) == [{"id": 1, "unit price": 9.5, "select": "x"}]
+    finally:
+        close()

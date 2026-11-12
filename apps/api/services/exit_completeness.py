@@ -101,6 +101,13 @@ class Profile:
 
 
 _UNTYPED = "has no declared type, so its values could not be compared exactly"
+_JSON_NUMBER = ("holds a JSON number a double cannot hold exactly; the driver rounds it before any comparison, so "
+                "its documents cannot be compared exactly")
+_JSON_AMBIGUOUS = ("holds a top-level JSON string that a delimited cell spells like another JSON value (the string "
+                   "\"1\" is written as 1), so the extract cannot say which it was")
+_TEXT_AS_DOCUMENT = ("is text, but the engine read its content as JSON and wrote each value to the extract as a "
+                     "re-serialised document, so its exact text (key order, duplicate keys, spacing) is not in the "
+                     "extract")
 _JSON_TEXT = ("is json: the driver hands back a parsed document, so its exact text (key order, duplicate keys, "
               "number spelling) cannot be compared")
 
@@ -159,7 +166,7 @@ def _decimal(value: Any) -> Decimal | None:
 
 def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns: list[str],
                  numeric: list[str] | None, *, types: dict[str, str] | None = None,
-                 engine: str = "") -> Profile:
+                 engine: str = "", documents_as_text: bool = False, extract_is_delimited: bool = False) -> Profile:
     """Count, key-set digest, row digest and control totals in one streamed pass.
 
     ``types`` are the source's declared column types (both sides use the
@@ -167,11 +174,21 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
     engine; see the module docstring for how they steer the digest.
     ``numeric=None`` (the source side) totals every column whose every non-null
     value is a number; the extract side passes the source's numeric columns so
-    their text values are parsed as exact decimals.
+    their text values are parsed as exact decimals. ``documents_as_text`` says
+    the rows come from a delimited file, where a JSON document is a text cell;
+    ``extract_is_delimited`` (the source side) says the extract is such a file,
+    so a document the file cannot spell unambiguously is named, never compared.
     """
     from services.reconciliation_api import FingerprintAccumulator, iter_row_fingerprints
 
-    from services.exit_value_tokens import token, token_kind
+    from services.exit_value_tokens import (
+        JSON_DOCUMENT,
+        ambiguous_in_text_cell,
+        inexact_json_number,
+        parsed_document,
+        token,
+        token_kind,
+    )
     from services.exit_verify_guard import tick
 
     eng = str(engine or "").strip().lower()
@@ -184,6 +201,7 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
         typed.pop(col, None)
         exact.discard(col)
     prof = Profile(columns=list(columns), uncompared=uncompared)
+    documents = [c for c, kind in tokens.items() if kind == JSON_DOCUMENT]
     keys = [c for c in key_columns if c in columns]
     totals: dict[str, dict[str, Decimal]] = {}
 
@@ -211,8 +229,16 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
                 t = totals.setdefault(col, {"sum": Decimal(0), "min": value, "max": value})
                 t["sum"] += value
                 t["min"], t["max"] = min(t["min"], value), max(t["max"], value)
+            for col in documents:
+                raw = row.get(col)
+                if raw is not None and col not in prof.uncompared and inexact_json_number(
+                        parsed_document(raw) if documents_as_text else raw):
+                    prof.uncompared[col] = _JSON_NUMBER  # named, never called equal (the driver rounded it)
+                if extract_is_delimited and col not in prof.uncompared and ambiguous_in_text_cell(raw):
+                    prof.uncompared[col] = _JSON_AMBIGUOUS
             yield {c: (_exact(row.get(c)) if c in exact
-                       else _exact(token(tokens[c], row.get(c))) if c in tokens else row.get(c)) for c in columns}
+                       else _exact(token(tokens[c], row.get(c), from_text=documents_as_text)) if c in tokens
+                       else row.get(c)) for c in columns}
 
     full_acc = FingerprintAccumulator(keep_fingerprints=False)
     key_acc = FingerprintAccumulator(keep_fingerprints=False)
@@ -287,7 +313,8 @@ def profile_extract(part: dict[str, Any], *, local_path: str, fmt: str, columns:
     try:
         buffered = io.BufferedReader(reader, buffer_size=1 << 20)
         # JSON numbers keep the text they were written with (an unconstrained numeric's scale).
-        records = _iter_artifact_records(buffered, name=str(part.get("name") or ""), fmt=fmt, exact_numbers=True)
+        records = _iter_artifact_records(buffered, name=str(part.get("name") or ""), fmt=fmt, exact_numbers=True,
+                                         written_here=True)  # the writer's dialect, never a sniffer
         first: dict[str, Any] | None = None
         rest: Iterator[dict[str, Any]] = iter(())
         iterator = iter(records)
@@ -303,7 +330,8 @@ def profile_extract(part: dict[str, Any], *, local_path: str, fmt: str, columns:
                     yield {k: (None if isinstance(v, JsonNullToken) else v) for k, v in row.items()}
 
         rest = rows()
-        prof = profile_rows(rest, columns, key_columns, numeric, types=types, engine=engine)
+        prof = profile_rows(rest, columns, key_columns, numeric, types=types, engine=engine,
+                            documents_as_text=str(fmt or "").lower() in {"csv", "tsv"})
         prof.columns = extract_cols
         reader.drain()
     finally:
@@ -320,7 +348,6 @@ def source_columns_and_rows(endpoint: Any, *, itersize: int = 5000) -> tuple[lis
 
     from connectors.generic_sql import get_sqlalchemy_engine
     from connectors.sql_identifiers import quote_table_ref
-    from services.control_totals import _quote_col
     from services.reconciliation_api import iter_select_row_dicts
     from src.transfer.adapters import resolve_connector_config
 
@@ -328,10 +355,13 @@ def source_columns_and_rows(endpoint: Any, *, itersize: int = 5000) -> tuple[lis
     db_type = str(cfg.get("type") or endpoint.format or "").lower()
     engine = get_sqlalchemy_engine({**dict(cfg), "type": db_type})
     table = quote_table_ref(endpoint.table, getattr(endpoint, "schema", None) or None, dialect=db_type or "ansi")
+    # The names come from the table itself and are quoted by the engine's own dialect, exactly as they
+    # are: a column called "unit price" is read as that column, never rewritten to another name.
+    quote = engine.dialect.identifier_preparer.quote_identifier
     conn = engine.connect()
     try:
         columns = list(conn.execute(sa.text(f"SELECT * FROM {table} WHERE 1=0")).keys())  # nosec B608
-        select = f"SELECT {', '.join(_quote_col(db_type, c) for c in columns)} FROM {table}"  # nosec B608
+        select = f"SELECT {', '.join(quote(str(c)) for c in columns)} FROM {table}"  # nosec B608
         batches = iter_select_row_dicts(conn, sa.text(select), columns, itersize=itersize)
     except Exception:
         conn.close()
@@ -342,6 +372,90 @@ def source_columns_and_rows(endpoint: Any, *, itersize: int = 5000) -> tuple[lis
             yield from batch
 
     return columns, rows(), conn.close
+
+
+def json_null_documents(endpoint: Any, types: dict[str, str], engine: str) -> dict[str, int]:
+    """{column: count} of ``jsonb`` documents that are the JSON value ``null`` (PostgreSQL).
+
+    The driver hands a JSON ``null`` document back as ``None``, exactly like a
+    SQL NULL, and the extract writes both as ``null``: the two cannot be told
+    apart once read. The catalog can, so a column that holds any is named as
+    not provable instead of being called equal (review 3).
+    """
+    from services.exit_value_tokens import JSON_DOCUMENT, token_kind
+
+    columns = [c for c, ddl in types.items() if token_kind(ddl, engine) == JSON_DOCUMENT]
+    if not columns:
+        return {}
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from connectors.sql_identifiers import quote_table_ref
+    from src.transfer.adapters import resolve_connector_config
+
+    cfg = resolve_connector_config(endpoint)
+    db = get_sqlalchemy_engine({**dict(cfg), "type": engine})
+    quote = db.dialect.identifier_preparer.quote_identifier
+    table = quote_table_ref(endpoint.table, getattr(endpoint, "schema", None) or None, dialect=engine or "ansi")
+    counts = ", ".join(f"count(*) FILTER (WHERE jsonb_typeof({quote(c)}) = 'null')" for c in columns)
+    with db.connect() as conn:
+        row = conn.execute(sa.text(f"SELECT {counts} FROM {table}")).fetchone()  # nosec B608
+    return {c: int(n or 0) for c, n in zip(columns, row or []) if int(n or 0) > 0}
+
+
+def catalog_json_columns(endpoint: Any) -> set[str] | None:
+    """The columns the source catalog itself declares as its native ``json`` (``None``: catalog unread).
+
+    The declared types a rehearsal digests by come from the engine's
+    introspection, which also reports a ``text`` column whose content looks
+    like JSON as ``JSON``. Only the catalog says which it is (review 3, M7).
+    """
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from src.transfer.adapters import resolve_connector_config
+
+    try:
+        cfg = resolve_connector_config(endpoint)
+        db_type = str(cfg.get("type") or endpoint.format or "").lower()
+        engine = get_sqlalchemy_engine({**dict(cfg), "type": db_type})
+        columns = sa.inspect(engine).get_columns(endpoint.table, schema=getattr(endpoint, "schema", None) or None)
+    except Exception:  # noqa: BLE001 - an unread catalog leaves the column unproven, never proven
+        logger.info("exit rehearsal: catalog types unread for %s", getattr(endpoint, "table", ""), exc_info=True)
+        return None
+    return {str(c["name"]) for c in columns if type(c.get("type")).__name__.upper() == "JSON"}
+
+
+def text_read_as_json(types: dict[str, str], endpoint: Any, engine: str) -> set[str]:
+    """Columns the engine typed ``JSON`` from their content while the catalog declares them text (review 3, M7).
+
+    The "json is not provable" rule is about the native ``json`` type (the
+    driver hands back a parsed document). A ``text`` column that happens to
+    hold JSON documents is text; only the catalog says which it is, so an
+    unread catalog answers "none" and the column keeps the json rule (fail closed).
+    """
+    if engine not in {"postgresql", "postgres"}:
+        return set()
+    inferred = {c for c, ddl in types.items() if str(ddl).split("(")[0].strip().upper() == "JSON"}
+    if not inferred:
+        return set()
+    native = catalog_json_columns(endpoint)
+    if native is None:
+        return set()
+    lowered = {n.lower() for n in native}
+    return {c for c in inferred if c.lower() not in lowered}
+
+
+def catalog_declared_types(types: dict[str, str], endpoint: Any, engine: str) -> tuple[dict[str, str], dict[str, str]]:
+    """(``types``, {column: why it is not compared exactly}) for the text columns the engine read as JSON.
+
+    The engine types such a column ``JSON`` from its content and writes it to
+    the extract as a re-serialised document (CSV and JSONL alike: ``{"a": 1,
+    "a": 2}`` lands as ``{"a": 2}``), so its exact text is not in the file. Its
+    documents are still compared as documents; the column is named with that
+    reason instead of being called json (review 3, M7).
+    """
+    return types, {c: _TEXT_AS_DOCUMENT for c in sorted(text_read_as_json(types, endpoint, engine))}
 
 
 # ------------------------------------------------------------------ verdicts
@@ -467,7 +581,8 @@ def judge_table(
         diffs.append({"kind": "changed_rows", "rows": unexplained, "rows_at_least": False,
                       "detail": f"Parity Studio names {unexplained} unexplained difference(s) on the extract job."})
     method = value_method(parity, source, extract)
-    not_measured = list(not_measured) + [f"{col} {why}" for col, why in (source.uncompared if source else {}).items()]
+    unproven = {**(extract.uncompared if extract else {}), **(source.uncompared if source else {})}
+    not_measured = list(not_measured) + [f"{col} {why}" for col, why in unproven.items()]
     if diffs:
         status = "incomplete"
         reason = _sentences(d["detail"] for d in diffs[:4])
