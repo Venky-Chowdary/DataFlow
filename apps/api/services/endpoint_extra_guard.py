@@ -24,6 +24,10 @@ from typing import Any
 
 #: ``cfg`` keys that name the engine; only the endpoint (or its saved connector) sets them.
 ENGINE_TYPE_KEYS = frozenset({"type", "db_type"})
+#: ``cfg`` keys that name whose connector this is (follow-up review 1, M2): the
+#: egress checks load the allowlist of ``workspace_id``'s tenant. Only the
+#: resolution (and a saved connector) sets them; ``extra`` never does.
+IDENTITY_KEYS = frozenset({"workspace_id", "tenant_id", "connector_id"})
 
 _TTL_SEC = 3600.0
 _MAX_KEYS = 1024
@@ -50,8 +54,13 @@ def _first_report(key: Hashable) -> bool:
 
 
 def engine_extra(endpoint: Any, workspace_id: str | None = None) -> dict[str, Any]:
-    """``endpoint.extra`` without the keys that name an engine; a mismatch is audited."""
+    """``endpoint.extra`` without the keys that name an engine or an owner; a type
+    mismatch is audited. The resolved ``workspace_id``, when there is one, wins."""
     extra = dict(getattr(endpoint, "extra", None) or {})
+    for key in IDENTITY_KEYS:
+        extra.pop(key, None)
+    if workspace_id:
+        extra["workspace_id"] = str(workspace_id)
     named = {key: extra.pop(key) for key in ENGINE_TYPE_KEYS if key in extra}
     endpoint_type = str(getattr(endpoint, "format", "") or "").strip()
     real = _driver(endpoint_type)
