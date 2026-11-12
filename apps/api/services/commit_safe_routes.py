@@ -16,6 +16,7 @@ CDC poll call it.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from services.commit_safe_window import (
@@ -24,6 +25,8 @@ from services.commit_safe_window import (
     STRATEGY_NONE,
     unguarded_reason,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def unwindowed_evidence(route: str) -> dict[str, Any]:
@@ -79,7 +82,7 @@ def reconciled_route_label(source_endpoint: Any, endpoint: Any, dest_summary: An
         if get_sdk_connector(str(getattr(source_endpoint, "format", "") or "")) is not None:
             return "SDK source"
     except Exception:  # noqa: BLE001 — an unknown connector is named generically below
-        pass
+        logger.debug("commit-safe routes: SDK connector lookup failed", exc_info=True)
     summary = dest_summary if isinstance(dest_summary, dict) else {}
     return "read path" if summary.get("streaming") else "batch path"
 
