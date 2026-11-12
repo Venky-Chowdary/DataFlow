@@ -1138,3 +1138,66 @@ def test_a_contended_claim_does_not_stop_the_startup_reclaim(store, runner, monk
     deferred = [r for r in caplog.records
                 if getattr(r, "event", None) == "schedule.run.finalize_deferred"]
     assert [getattr(r, "schedule_id", None) for r in deferred] == [a.id]
+
+
+# --- A late outcome after the newer run finished (review round 2, L-C) --------
+
+PLAIN_FAIL = {"status": "failed", "phase": "load", "error": "something odd happened",
+              "records_processed": 0}
+
+
+def _two_runs_recorded(store, runner, name: str, first: dict, second: dict):
+    """jE1 then jE2 ran and were recorded; nothing holds the claim."""
+    from services import schedule_run_lifecycle as life
+
+    runner.jobs["jE1"] = first
+    sched, _run = _claimed(store, name, "jE1")
+    runner._finalize_run(sched.id, "jE1", 0, _now())
+    run_id = life.begin_run(sched.id, trigger=life.TRIGGER_CADENCE)
+    assert store.mark_schedule_running(sched.id, "beat-b", "jE2") is not None
+    life.mark_running(sched.id, run_id, "jE2")
+    runner.jobs["jE2"] = second
+    runner._finalize_run(sched.id, "jE2", 0, _now())
+    runner.notified.clear()
+    after = store.get_schedule(sched.id)
+    assert after.running is False and after.last_job_id == "jE2" and after.run_count == 2
+    return after
+
+
+def test_a_late_success_after_the_newer_run_parked_leaves_its_finding(
+    store, runner, monkeypatch
+):
+    """L3a: jE2 was refused and parked; jE1's late success does not re-arm it."""
+    import services.schedule_approvals as approvals
+
+    before = _two_runs_recorded(store, runner, "late-l3a", PLAIN_FAIL, REFUSED_BY_GATE)
+    assert before.approval_request["status"] == "open"
+    assert before.approval_request["job_id"] == "jE2"
+    closed: list[str] = []
+    monkeypatch.setattr(approvals, "close_dest_exists_park_after_success",
+                        lambda sid: closed.append(sid))
+
+    runner.jobs["jE1"] = COMPLETED
+    runner._finalize_run(before.id, "jE1", 0, _now())
+
+    after = store.get_schedule(before.id)
+    assert _newer_run(after) == _newer_run(before)
+    assert after.approval_request == before.approval_request
+    assert after.last_status == before.last_status == "needs_approval"
+    assert closed == [], "a late success released a park the newer run made"
+
+
+def test_a_late_refusal_after_the_newer_run_succeeded_parks_nothing(store, runner, caplog):
+    """L3b: jE2 completed; jE1's late refusal does not park the schedule."""
+    before = _two_runs_recorded(store, runner, "late-l3b", COMPLETED, COMPLETED)
+
+    runner.jobs["jE1"] = REFUSED_BY_GATE
+    with caplog.at_level("INFO"):
+        runner._finalize_run(before.id, "jE1", 0, _now())
+
+    after = store.get_schedule(before.id)
+    assert _newer_run(after) == _newer_run(before)
+    assert not (after.approval_request or {}).get("status"), after.approval_request
+    assert after.last_status == "completed"
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "approval.requested" not in events

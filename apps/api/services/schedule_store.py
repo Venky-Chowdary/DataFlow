@@ -2881,12 +2881,15 @@ class RunOutcome:
     finalizers can arrive for one job, and only the one that recorded it
     announces it. ``patch`` is what ``decide`` returned, less any field a late
     finalizer may not store (:func:`_late_outcome_fields`): what the caller
-    announces is what was stored.
+    announces is what was stored. ``late`` is set when a later run had claimed
+    the schedule: the caller's side effects of this outcome (closing parks
+    after a success) belong to that run.
     """
 
     decide: Callable[[PipelineSchedule], dict[str, Any] | None] | None = None
     recorded: bool = False
     patch: dict[str, Any] = field(default_factory=dict)
+    late: bool = False
 
     def fields_for(self, after: PipelineSchedule) -> dict[str, Any]:
         self.patch = dict((self.decide(after) if self.decide else None) or {})
@@ -2932,13 +2935,17 @@ def _run_after(s: PipelineSchedule, job_id: str) -> bool:
 def _late_outcome_fields(s: PipelineSchedule, extra: dict[str, Any]) -> dict[str, Any]:
     """What a late finalizer may store once a later run has claimed the schedule.
 
-    This job's finding, and — while the later run is in flight — the status of
-    the last recorded run, which is still this job's. The claim, the cadence
+    While the later run is in flight: this job's finding and the status of the
+    last recorded run, which is still this job's. Once the later run finished,
+    nothing: its own outcome stands (closing its finding re-armed the schedule
+    into the same refusal; parking on the older run's finding stopped a
+    schedule whose newest run succeeded). The claim, the cadence
     (``next_run_at``, a back-off), the retry state, the run count and the
-    history belong to the later run.
+    history always belong to the later run.
     """
-    allowed = ("approval_request", "last_status") if s.running else ("approval_request",)
-    return {k: v for k, v in extra.items() if k in allowed}
+    if not s.running:
+        return {}
+    return {k: v for k, v in extra.items() if k in ("approval_request", "last_status")}
 
 
 def mark_schedule_run(
@@ -3054,6 +3061,7 @@ def _mark_schedule_run_once(
             # again.
             extra = outcome.fields_for(s)
             if later_run:
+                outcome.late = True
                 extra = outcome.patch = _late_outcome_fields(s, extra)
             if not extra:
                 outcome.recorded = True

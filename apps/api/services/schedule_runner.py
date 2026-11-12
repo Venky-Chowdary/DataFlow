@@ -1577,7 +1577,10 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
         try:
             from services.schedule_approvals import close_dest_exists_park_after_success
 
-            close_dest_exists_park_after_success(schedule_id)
+            if not outcome.late:
+                # A late success (a newer run has claimed or finished since)
+                # never releases a park the newer run made.
+                close_dest_exists_park_after_success(schedule_id)
         except Exception:
             logger.exception(
                 "Schedule %s dest-exists park close after success skipped",
