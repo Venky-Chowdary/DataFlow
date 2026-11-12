@@ -77,3 +77,39 @@ def test_an_in_process_restart_without_a_signal_still_reopens_the_pool(pool):
     stoppers = {name: stop for name, stop, _wait in background_lifecycle._stoppers()}
     stoppers["transfer pool"](0.5)
     assert transfer_scheduler.submit("job-next", lambda: "ok").result(timeout=5) == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Telemetry flushes run inside the shutdown budget
+# ---------------------------------------------------------------------------
+
+
+def test_a_hanging_telemetry_flush_cannot_outlast_the_shutdown_budget(monkeypatch):
+    """OTel and tracing flushes ran after the budgeted joins, unbounded (collector unreachable)."""
+    import threading
+    import time
+
+    from services import otel_logging, tracing
+
+    release = threading.Event()
+    monkeypatch.setattr(tracing, "shutdown_tracing", lambda: release.wait(30))
+    monkeypatch.setattr(otel_logging, "shutdown_otel_logging", lambda: release.wait(30))
+    quick = [(name, (lambda _timeout: None), wait) for name, _stop, wait in background_lifecycle._stoppers()
+             if name != "telemetry flush"]
+    real = background_lifecycle._stoppers
+    monkeypatch.setattr(background_lifecycle, "_stoppers",
+                        lambda: quick + [s for s in real() if s[0] == "telemetry flush"])
+    assert any(name == "telemetry flush" for name, _stop, _wait in real()), "the flush is not budgeted"
+    started = time.monotonic()
+    background_lifecycle.stop_background_threads(budget_seconds=1.0)
+    took = time.monotonic() - started
+    release.set()
+    assert took < 1.5, f"teardown took {took:.1f}s with a 1 s budget"
+
+
+def test_the_lifespan_does_not_flush_telemetry_after_the_budget():
+    from pathlib import Path
+
+    teardown = Path(__file__).resolve().parents[1].joinpath("src", "main.py").read_text(encoding="utf-8")
+    teardown = teardown[teardown.index("stop_background_threads)"):teardown.index("_docs = ")]
+    assert "shutdown_tracing" not in teardown and "shutdown_otel_logging" not in teardown

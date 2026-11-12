@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Callable, Iterable
 
@@ -51,7 +52,38 @@ def _stoppers() -> list[tuple[str, Callable[[float], object], float]]:
         ("API claim loop", stop_api_claim_loop, drain + 5.0),
         ("transfer pool", drain_transfer_pool, drain),
         ("mail outbox sweeper", stop_mail_outbox_sweeper, 5.0),
+        ("telemetry flush", flush_telemetry, TELEMETRY_FLUSH_SECONDS),
     ]
+
+
+#: Longest wait for the OpenTelemetry log and trace exporters to flush.
+TELEMETRY_FLUSH_SECONDS = 3.0
+
+
+def flush_telemetry(timeout: float) -> bool:
+    """Flush and shut down the OTel log and trace providers, waiting at most ``timeout``.
+
+    An unreachable collector can block an exporter's flush well past the
+    shutdown budget; the flush runs on a daemon thread that the exiting
+    process abandons (ops review round 2, Low). True when it finished.
+    """
+    def _flush() -> None:
+        from services.otel_logging import shutdown_otel_logging
+        from services.tracing import shutdown_tracing
+
+        try:
+            shutdown_otel_logging()
+        except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
+            logger.debug("OpenTelemetry log shutdown failed: %s", exc)
+        try:
+            shutdown_tracing()
+        except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
+            logger.debug("tracing shutdown failed: %s", exc)
+
+    worker = threading.Thread(target=_flush, name="df-telemetry-flush", daemon=True)
+    worker.start()
+    worker.join(max(0.0, timeout))
+    return not worker.is_alive()
 
 
 def stop_background_threads(budget_seconds: float | None = None) -> list[str]:

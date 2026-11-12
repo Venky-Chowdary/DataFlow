@@ -404,20 +404,10 @@ async def lifespan(app: FastAPI):
 
     await cancel_background_tasks(getattr(app.state, "background_tasks", []))
     app.state.background_tasks = []
+    # The OTel log and trace flushes are the last budgeted stop (an unreachable
+    # collector cannot hold the process past the shutdown budget).
     await asyncio.to_thread(stop_background_threads)
     app.state.ready = False
-    try:
-        from services.otel_logging import shutdown_otel_logging
-
-        shutdown_otel_logging()
-    except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
-        logger.debug("OpenTelemetry log shutdown failed: %s", exc)
-    try:
-        from services.tracing import shutdown_tracing
-
-        shutdown_tracing()
-    except Exception:
-        pass
     print("[*] Datawrap API shutting down…")
     # The process exits next; an in-process restart (tests) starts clean.
     shutdown_signal.reset()
