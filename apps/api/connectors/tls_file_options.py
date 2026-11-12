@@ -114,15 +114,19 @@ def _pairs_refusal(pairs: Iterable[tuple[Any, Any]], where: str) -> str:
 
 def _query_pairs(text: str) -> Iterator[tuple[str, str]]:
     """The query as each consumer reads it: SQLAlchemy's ``make_url`` and the
-    text after the first ``?`` (PyMongo, libpq, a ``?`` in a password)."""
-    if "?" not in text:
+    text after each ``?`` (PyMongo and libpq split at different ones, and a
+    ``?`` may sit in a password)."""
+    start = text.find("?")
+    while start >= 0:
+        yield from parse_qsl(text[start + 1:], keep_blank_values=True)
+        start = text.find("?", start + 1)
+    if "://" not in text:
         return
-    yield from parse_qsl(text.split("?", 1)[1], keep_blank_values=True)
     try:
         from sqlalchemy.engine import make_url
 
         query = make_url(text).query
-    except Exception:  # noqa: BLE001 - not a SQLAlchemy URL; the split above is the reading
+    except Exception:  # noqa: BLE001 - not a SQLAlchemy URL; the other readings stand
         return
     for key, value in query.items():
         for item in value if isinstance(value, tuple) else (value,):
@@ -138,24 +142,41 @@ def _odbc_pairs(text: str) -> list[tuple[str, str]]:
     return [tuple(part.split("=", 1)) for part in text.split(";") if "=" in part]  # type: ignore[misc]
 
 
+def _libpq_pairs(text: str) -> list[tuple[str, str]]:
+    """The conninfo or URI as libpq itself reads it (multi-host, ``?`` in a password)."""
+    try:
+        from psycopg2.extensions import parse_dsn
+
+        return list(parse_dsn(text).items())
+    except Exception:  # noqa: BLE001 - libpq would refuse this text too; the other readings stand
+        return []
+
+
+def _readings(raw: str) -> Iterator[Iterable[tuple[Any, Any]]]:
+    """Every consumer's reading of ``raw``: never one chosen by a substring
+    (follow-up review 3, H1: a ``;`` or ``://`` inside a value hid the rest)."""
+    yield _libpq_pairs(raw)
+    yield [(k, v.strip("'")) for k, v in _CONNINFO.findall(raw)]
+    yield _query_pairs(raw)
+    yield _odbc_pairs(raw)
+
+
 def text_refusal(text: Any, where: str) -> str:
-    """A URL, ODBC string, libpq conninfo or Oracle descriptor naming a file outside the areas."""
+    """A URL, ODBC string, libpq conninfo or Oracle descriptor naming a file outside the areas.
+
+    Refused when ANY reading of the text (libpq, conninfo pairs, URL query,
+    ODBC pairs, descriptor) finds a file option outside the areas."""
     raw = str(text or "")
     if not raw.strip():
         return ""
     for match in _DESCRIPTOR.finditer(raw):
         if _path_refused(match.group(2)):
             return message(match.group(1), where)
-    if "://" in raw:
-        return _pairs_refusal(_query_pairs(raw), where)
-    if "?" in raw:  # an Oracle easy-connect string: host:port/service?wallet_location=...
-        refusal = _pairs_refusal(parse_qsl(raw.split("?", 1)[1], keep_blank_values=True), where)
+    for pairs in _readings(raw):
+        refusal = _pairs_refusal(pairs, where)
         if refusal:
             return refusal
-    if ";" in raw:
-        return _pairs_refusal(_odbc_pairs(raw), where)
-    pairs = [(k, v.strip("'")) for k, v in _CONNINFO.findall(raw)]
-    return _pairs_refusal(pairs, where)
+    return ""
 
 
 def mapping_refusal(source: Any, where: str) -> str:
