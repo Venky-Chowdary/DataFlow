@@ -67,6 +67,12 @@ def _is_calendar_text(text: str) -> bool:
     return (1 <= a <= 31 and 1 <= b <= 12) or (1 <= a <= 12 and 1 <= b <= 31)
 
 
+def is_calendar_text_value(text: Any) -> bool:
+    """True when one value is a day/month or month/day date: text, by its own class."""
+    value = str(text if text is not None else "").strip()
+    return bool(value) and order_key(value)[0] == _TEXT and _is_calendar_text(value)
+
+
 def _naive_key(text: str) -> tuple[datetime, Decimal] | None:
     """A wall-clock ISO date or date-time, read as UTC so it shares the
     temporal class with offset-bearing text (one key per value)."""

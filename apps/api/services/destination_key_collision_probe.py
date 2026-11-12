@@ -373,6 +373,7 @@ def rows_a_cursor_read_will_deliver(
     cursor_column: str,
     watermark: str | None,
     tiebreak_column: str = "",
+    coerce: Any = None,
 ) -> list[dict[str, Any]]:
     """Narrow a whole-table sample to the rows an incremental read will return.
 
@@ -381,6 +382,8 @@ def rows_a_cursor_read_will_deliver(
     pre-write check judges the batch that will be written rather than the table
     it is drawn from. A row whose cursor value is missing is kept: an unreadable
     value must not quietly shrink the batch a checker is looking at.
+    ``coerce`` reads a file cell as its column's type, as the write's bound
+    does (``sync_cursor.cursor_value_coercer``).
     """
     from services.keyset_pagination import KEYSET_SEP, encode_keyset_bookmark
     from services.sync_cursor import compare_cursor_values
@@ -399,6 +402,8 @@ def rows_a_cursor_read_will_deliver(
         if text is None:
             delta.append(row)
             continue
+        if coerce is not None:
+            text = coerce(text)
         if use_tiebreak:
             candidate = encode_keyset_bookmark(
                 [text, present_cell_text(row.get(tiebreak_column)) or ""]
@@ -457,6 +462,7 @@ def probe_append_key_collisions(
     incremental_watermark: str | None = None,
     incremental_tiebreak_column: str = "",
     source_key_columns: list[str] | None = None,
+    incremental_cursor_type: str = "",
 ) -> DestinationCollisionResult | None:
     """Resolve the identity key, then probe it — ``None`` when not applicable.
 
@@ -508,6 +514,7 @@ def probe_append_key_collisions(
             incremental_cursor_column=incremental_cursor_column,
             incremental_watermark=incremental_watermark,
             incremental_tiebreak_column=incremental_tiebreak_column,
+            incremental_cursor_type=incremental_cursor_type,
         )
         result.identity_basis = basis
         results.append(result)
@@ -562,6 +569,7 @@ def _probe_identity(
     incremental_cursor_column: str,
     incremental_watermark: str | None,
     incremental_tiebreak_column: str,
+    incremental_cursor_type: str = "",
 ) -> DestinationCollisionResult:
     """Probe one identity (column pairs) against the destination."""
     target_columns = [target for _source, target in pairs]
@@ -596,11 +604,14 @@ def _probe_identity(
     # Probe the rows this run will read, not the whole table. An incremental
     # append past a watermark cannot collide with keys it will never re-read,
     # and probing them refused every run after the first.
+    from services.sync_cursor import cursor_value_coercer
+
     batch_rows = rows_a_cursor_read_will_deliver(
         sample_rows,
         cursor_column=incremental_cursor_column,
         watermark=incremental_watermark,
         tiebreak_column=incremental_tiebreak_column,
+        coerce=cursor_value_coercer(incremental_cursor_type),
     )
     null_rule = _key_null_rule(basis, destination_db_type, nulls_not_distinct)
     if len(pairs) == 1:

@@ -1228,19 +1228,56 @@ def source_bounds_cursor_reads(source_type: str) -> bool:
     return (source_type or "").strip().lower() in CURSOR_PUSHDOWN_SOURCES
 
 
+def cursor_value_coercer(cursor_type: Any, *, date_locale: str | None = None) -> Any:
+    """How a file or document route reads a cursor cell for its bound, or None.
+
+    A file arrives as text, and its write path parses a date or date-time
+    column under the file's date order (``12/30/2025`` → ``2025-12-30``). That
+    parsed value is what the watermark keeps, so the bound has to compare the
+    same value (review H-1): the raw text ranks as text, above every date, and
+    every earlier row was appended again on each run. The column's declared or
+    inferred type decides, never the value's look. Only file and document
+    routes use this; a SQL source's values are classified by themselves.
+
+    ``None`` when the type is not temporal (the cell's text is its value). A
+    cell that does not parse keeps its text: it stays in the delta, and the
+    write path judges it. ``date_locale`` defaults to the active one, read
+    once here so a worker thread compares under the same order.
+    """
+    from services.type_system import normalize_logical_type
+
+    logical = normalize_logical_type(str(cursor_type)) if str(cursor_type or "").strip() else ""
+    if logical not in ("date", "datetime"):
+        return None
+    from services.transform_engine import _active_date_locale, _parse_date, _parse_datetime
+
+    locale = _active_date_locale(date_locale or "")
+
+    def coerce(text: str) -> str:
+        if logical == "date":
+            parsed = _parse_date(text, date_locale=locale)
+            if parsed is not None:
+                return parsed
+        return _parse_datetime(text, date_locale=locale) or text
+
+    return coerce
+
+
 def row_after_watermark(
     rec: Any,
     cursor_column: str,
     watermark: str | None,
     *,
     primary_key: str = "",
+    coerce: Any = None,
 ) -> bool | None:
     """True if ``rec`` is past ``watermark``, False if already landed, None if unreadable.
 
     One predicate for the batch bound, the collision probe, and the
     population-fit walk. A missing cursor value is unreadable — callers that
     write must refuse; callers that only judge keep the row so it cannot
-    silently leave the batch.
+    silently leave the batch. ``coerce`` (:func:`cursor_value_coercer`) reads
+    the cell as the value its watermark keeps.
     """
     col = (cursor_column or "").strip()
     if not col:
@@ -1250,7 +1287,7 @@ def row_after_watermark(
     text = present_cell_text(raw)
     if text is None:
         return None
-    candidate = text
+    candidate = coerce(text) if coerce is not None else text
     if pk and pk != col:
         candidate = encode_keyset_bookmark(
             [candidate, present_cell_text(rec.get(pk) if isinstance(rec, dict) else None) or ""]
@@ -1322,6 +1359,8 @@ def records_after_watermark(
     watermark: str | None,
     *,
     primary_key: str = "",
+    coerce: Any = None,
+    text_calendar_refusal: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     """Bound already-parsed records to the delta past ``watermark``.
 
@@ -1335,16 +1374,26 @@ def records_after_watermark(
     bounded by the same typed comparator (and the same composite tie-break) the
     database reader uses. Returns ``(delta, unbounded)`` where ``unbounded``
     counts records that carry no cursor value: those cannot be proven new or
-    old, and the caller must refuse rather than guess.
+    old, and the caller must refuse rather than guess. ``coerce``
+    (:func:`cursor_value_coercer`) reads each cell as its column's type, the
+    value the watermark of a file route keeps.
+
+    ``text_calendar_refusal``: the route keeps this cursor as text (no
+    ``coerce``), so a day/month or month/day date in it sorts by its leading
+    digits, not in time — '01/15/2026' before '12/31/2025' — and a later row
+    would be skipped. Such a value is refused, as a SQL text cursor of that
+    shape is, rather than compared on an order that is not time order.
     """
     col = (cursor_column or "").strip()
     if not col:
         return list(records), 0
+    if text_calendar_refusal and coerce is None:
+        _refuse_calendar_text(records, col)
     delta: list[dict[str, Any]] = []
     unbounded = 0
     for rec in records:
         verdict = row_after_watermark(
-            rec, cursor_column, watermark, primary_key=primary_key
+            rec, cursor_column, watermark, primary_key=primary_key, coerce=coerce
         )
         if verdict is None:
             unbounded += 1
@@ -1352,6 +1401,21 @@ def records_after_watermark(
         if verdict:
             delta.append(rec)
     return delta, unbounded
+
+
+def _refuse_calendar_text(records: list[dict[str, Any]], column: str) -> None:
+    from services.cursor_order import is_calendar_text_value
+
+    for rec in records:
+        text = present_cell_text(rec.get(column)) if isinstance(rec, dict) else None
+        if text is not None and is_calendar_text_value(text):
+            raise ValueError(
+                f"Cursor '{column}' is kept as text, but it holds dates written day/month "
+                f"or month/day ('{text.strip()}'): as text they sort by their leading day "
+                "or month, not by date, so an incremental read past the watermark would "
+                "skip rows without an error. Declare the column as a date or timestamp, "
+                "use an ISO-8601 (YYYY-MM-DD) cursor, or run this sync as a full refresh."
+            )
 
 
 def max_cursor_value(

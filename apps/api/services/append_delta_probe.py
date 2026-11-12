@@ -103,4 +103,9 @@ def probe_append_key_collisions_over_delta(
             rows = None
         if rows is not None:
             probe_kw["sample_rows"] = rows
+    if str(source_kind or "").lower() == "file":
+        # A file's cursor cells are read as their column's type, the value its
+        # watermark keeps (review H-1); a database's values compare as they are.
+        cursor = str(probe_kw.get("incremental_cursor_column") or "")
+        probe_kw.setdefault("incremental_cursor_type", str((column_types or {}).get(cursor) or ""))
     return (probe or probe_append_key_collisions)(**probe_kw)
