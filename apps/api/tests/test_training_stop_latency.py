@@ -184,8 +184,14 @@ def test_schemas_wider_than_the_cap_are_skipped_and_reported(tmp_path, monkeypat
 # --- the feeder never reads the repo's test fixtures ------------------------
 
 
-def test_default_upload_dirs_hold_no_test_or_fixture_directory():
+def test_default_upload_dirs_hold_no_test_or_fixture_directory(monkeypatch):
     from src.ai.training.universal_data_feeder import UniversalDataFeeder, default_upload_dirs
+
+    # The suite's conftest adds tests/fixtures for Pilot's dataset tests; a
+    # deployment sets neither of these, so neither is set here.
+    for name in ("DATAFLOW_PILOT_DATASET_DIRS", "DATAWRAP_PILOT_DATASET_DIRS",
+                 "DATAFLOW_UPLOAD_DIR", "DATAWRAP_UPLOAD_DIR"):
+        monkeypatch.delenv(name, raising=False)
 
     api_root = Path(__file__).resolve().parents[1]
     # The feeder reads the deployment's upload directory (PR 405:
