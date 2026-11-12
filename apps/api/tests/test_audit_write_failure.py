@@ -44,6 +44,7 @@ def audit_failure_app(monkeypatch, tmp_path):
         auth_sessions,
         integrations_store,
         resource_acl,
+        schedule_store,
         team_store,
         user_store,
     )
@@ -60,6 +61,8 @@ def audit_failure_app(monkeypatch, tmp_path):
     monkeypatch.setattr(team_store, "mongo_database", lambda: None)
     monkeypatch.setattr(user_store, "_store_path", lambda: tmp_path / "users.json")
     monkeypatch.setattr(user_store, "mongo_database", lambda: None)
+    monkeypatch.setattr(schedule_store, "STORE_PATH", tmp_path / "schedules.json")
+    monkeypatch.setattr(schedule_store, "_mongo_backend", lambda: None)
 
     from services import audit_coverage
     from src import main
@@ -79,6 +82,7 @@ def audit_failure_app(monkeypatch, tmp_path):
     )
     with TestClient(app) as client:
         yield {
+            "schedule_store": schedule_store,
             "client": client,
             "email": email,
             "token": token,
@@ -129,7 +133,22 @@ def _assert_chain_verifies(context) -> None:
     assert response.json()["verified"] is True
 
 
-def _create_acl_grant(context, correlation_id: str, resource_id: str):
+def _create_acl_grant(context, correlation_id: str, schedule_name: str):
+    # A grant must name a resource of the granting workspace (PR 403 review 3),
+    # so the grant targets a real schedule of this test's workspace.
+    schedule = context["schedule_store"].create_schedule(
+        {
+            "name": schedule_name,
+            "source_connector_id": "audit-source",
+            "source_table": "audit_source",
+            "dest_connector_id": "audit-dest",
+            "dest_table": "audit_dest",
+            "interval": "daily",
+            "workspace_id": context["workspace_id"],
+        }
+    )
+    resource_id = schedule.id
+    context["granted_resource_id"] = resource_id
     return context["client"].post(
         "/api/v1/resource-acls",
         headers=_headers(context, correlation_id),
@@ -177,6 +196,7 @@ def test_failed_named_write_keeps_generic_request_event(
     assert failures[0].store == "file"
     assert failures[0].correlation_id == correlation_id
     assert "AUDIT_DETAILS_SENTINEL" not in caplog.text
+    assert audit_failure_app["granted_resource_id"] not in caplog.text
     _assert_chain_verifies(audit_failure_app)
 
 
