@@ -100,6 +100,23 @@ _EMBEDDED_METADATA_NAME = re.compile(
 )
 _EMBEDDED_V6_META = re.compile(r"(?i)(?<![0-9a-f:])fd00:ec2::254(?![0-9a-f:])")
 _BRACKET_V6 = re.compile(r"\[([0-9a-fA-F:]+)\]")
+#: URL query keys whose value the driver dials as the host: libpq ``host`` /
+#: ``hostaddr`` (a comma list, replacing the authority) and the ODBC-style
+#: ``server`` / ``address`` spellings; the keys residency judges
+#: (``data_residency._URL_HOST_PARAMS``) (follow-up review 1, H1).
+_QUERY_HOST_KEYS = frozenset({
+    "host", "hostaddr", "server", "address", "addr", "data source", "network address",
+})
+#: A query value that is a whole ODBC connection string (``mssql+pyodbc:///?odbc_connect=``).
+_QUERY_CONNECT_STRING_KEYS = frozenset({"odbc_connect"})
+#: URL schemes (before ``+driver``) whose driver is libpq: no host anywhere is its default socket.
+_LIBPQ_SCHEMES = frozenset({"postgresql", "postgres", "redshift", "cockroachdb"})
+#: What the guard judges for libpq's default Unix socket (a URL that names no host).
+DEFAULT_SOCKET = "/<default local socket>"
+#: What the guard judges for an authority that yields no host once decoded (encoded twice).
+UNREADABLE_HOST = "<unreadable host>"
+_SOCKET_PHRASE = "local socket"
+_UNREADABLE_PHRASE = "unreadable host"
 
 _PIN_LOCK = threading.RLock()
 
@@ -252,6 +269,13 @@ def classify_host(
     A connector preview that cannot resolve a name is not a private hit —
     the dial rechecks and fail-closes before any socket.
     """
+    if host == UNREADABLE_HOST:
+        return _UNREADABLE_PHRASE
+    if is_socket_target(host):
+        # A Unix socket on this host: loopback, so the loopback allowlist admits it.
+        nets = _configured_networks(allowlist, workspace_id)
+        loopback = ipaddress.ip_address("127.0.0.1")
+        return None if _ip_refusal_phrase(loopback, nets) is None else _SOCKET_PHRASE
     raw = _normalize_host(host)
     if not raw:
         return "empty"
@@ -296,7 +320,17 @@ def classify_host(
     return phrase
 
 
+def is_socket_target(host: str) -> bool:
+    """A Unix-socket path (``/run/postgresql``, libpq's ``@abstract``), not a host name."""
+    return str(host or "").startswith(("/", "@"))
+
+
 def _refusal_text(host: str, phrase: str) -> str:
+    if phrase == _UNREADABLE_PHRASE:
+        return (
+            "Refused connector URL: its host cannot be read as one host name (it is "
+            "percent-encoded more than once). Write the host name plainly."
+        )
     if phrase.startswith("DNS"):
         return f"Refused connector host {host}: {phrase}."
     return (
@@ -329,6 +363,10 @@ def _real_getaddrinfo() -> Any:
 
 def _host_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Every address ``host`` is or resolves to, through the unguarded resolver."""
+    if is_socket_target(host):
+        return [ipaddress.ip_address("127.0.0.1")]  # a socket on this host
+    if host == UNREADABLE_HOST:
+        return []
     raw = _normalize_host(host)
     try:
         return [_unwrap(ipaddress.ip_address(raw))]
@@ -352,8 +390,10 @@ def _is_always_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> 
 
 
 def is_always_blocked_target(host: str) -> bool:
-    """Cloud metadata, link-local and multicast: refused at every site, flag or not."""
-    if _normalize_host(host) in _METADATA_NAMES:
+    """Cloud metadata, link-local and multicast: refused at every site, flag or not.
+
+    So is a URL whose authority cannot be read (it fails closed)."""
+    if host == UNREADABLE_HOST or _normalize_host(host) in _METADATA_NAMES:
         return True
     return any(_is_always_blocked_ip(ip) for ip in _host_addresses(host))
 
@@ -587,6 +627,15 @@ def _skipped_region_labels(
     }
 
 
+def _dials_unix_sockets(db_type: str) -> bool:
+    """libpq engines: a ``/``-prefixed ``host`` is a Unix socket on this host."""
+    if not str(db_type or "").strip():
+        return False
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    return str(resolve_driver_type(str(db_type).strip()) or "").lower() in {"postgresql", "redshift"}
+
+
 def iter_refusals(
     *values: str,
     allowlist: Sequence[str] | None = None,
@@ -609,7 +658,7 @@ def iter_refusals(
     if (db_type or "").strip().lower() in FILE_ENGINE_TYPES:
         return
     skipped = _skipped_region_labels(values, db_type, aws_endpoint)
-    for host in _hosts_from_values(*values):
+    for host in _hosts_from_values(*values, socket_values=_dials_unix_sockets(db_type)):
         if host in skipped:
             continue
         phrase = classify_host(
@@ -808,7 +857,57 @@ def _driver_authority_hosts(text: str) -> list[str]:
     return hosts
 
 
-def _hosts_from_values(*values: str) -> list[str]:
+def _query_hosts(text: str) -> list[str]:
+    """The hosts a URL's query hands the driver, read as residency reads them.
+
+    ``residency_addressing.url_query_pairs`` keeps a ``#`` inside the query as
+    SQLAlchemy does; each value is unquoted and comma-split (libpq's host
+    list). An empty ``host=`` is libpq's default socket (follow-up review 1, H1).
+    """
+    from services.residency_addressing import url_query_pairs
+
+    hosts: list[str] = []
+    for key, value in url_query_pairs(text):
+        name = key.strip().lower()
+        if name in _QUERY_CONNECT_STRING_KEYS:
+            hosts.extend(_KEYWORD_HOST.findall(value))
+        elif name in _QUERY_HOST_KEYS:
+            parts = [part.strip() for part in value.split(",")]
+            if name in ("host", "hostaddr") and not any(parts):
+                hosts.append(DEFAULT_SOCKET)
+            hosts.extend(part for part in parts if part)
+    return hosts
+
+
+def _url_hosts(text: str) -> tuple[list[str], bool]:
+    """``(hosts, file_url)`` for one URL: its authority as urlparse and the drivers
+    read it, and its query hosts. ``file_url`` is an embedded file URL
+    (``sqlite:///abs/file``) whose path is not scanned."""
+    try:
+        path = urllib.parse.urlparse(text).path or ""
+    except ValueError:
+        path = ""
+    found: list[str] = []
+    host = _authority_host(text)
+    if host:
+        found.append(host)
+    seen = {_normalize_host(name) for name in found}
+    found.extend(
+        name for name in _driver_authority_hosts(text) if _normalize_host(name) not in seen
+    )
+    query = _query_hosts(text)
+    if found and not any(_normalize_host(name) for name in found):
+        found = [UNREADABLE_HOST]  # e.g. ``%2531...``: nothing to judge fails closed
+    scheme = text.split("://", 1)[0].split("+", 1)[0].strip().lower()
+    if not found and not query and scheme in _LIBPQ_SCHEMES:
+        found = [DEFAULT_SOCKET]  # ``postgresql:///db``: libpq dials its default socket
+    file_url = not found and not query and path.startswith("/") and "://" not in path
+    return found + query, file_url
+
+
+def _hosts_from_values(*values: str, socket_values: bool = False) -> list[str]:
+    """Every host the values name. ``socket_values``: a plain ``/``-prefixed value is a
+    Unix socket the driver dials (libpq's ``host``), not a file path."""
     hosts: list[str] = []
     for raw in values:
         text = str(raw or "").strip()
@@ -818,23 +917,15 @@ def _hosts_from_values(*values: str) -> list[str]:
         if text.startswith("/") and "://" not in text:
             # A filesystem path (sqlite database=/tmp/lab.db). Not a host,
             # even when a directory name looks like an address.
+            if socket_values:
+                hosts.append(text)
             continue
         if "://" in text:
-            try:
-                path = urllib.parse.urlparse(text).path or ""
-            except ValueError:
-                path = ""
-            host = _authority_host(text)
-            if host:
-                found.append(host)
-            elif path.startswith("/") and "://" not in path:
+            found, file_url = _url_hosts(text)
+            if file_url:
                 # Embedded file URL. Do not scan the path for addresses and
                 # do not DNS the URL string (IDNA: label empty or too long).
                 continue
-            seen = {_normalize_host(name) for name in found}
-            found.extend(
-                name for name in _driver_authority_hosts(text) if _normalize_host(name) not in seen
-            )
         found.extend(_KEYWORD_HOST.findall(text))
         found.extend(_EMBEDDED_IPV4.findall(text))
         found.extend(_EMBEDDED_METADATA_NAME.findall(text))
@@ -850,6 +941,9 @@ def _hosts_from_values(*values: str) -> list[str]:
                     host = left
             found.append(host)
         for host in found:
+            if host == UNREADABLE_HOST or is_socket_target(host):
+                hosts.append(host)
+                continue
             host = _normalize_host(host)
             if host:
                 hosts.append(host)
