@@ -62,12 +62,17 @@ the cache off). A change saved on one replica, including a revoked ACL grant, a 
 IP allowlist or require-SSO, is therefore enforced by every other replica
 within 2 s, not at once. Writes always re-read the database.
 
-Each call to the control-plane database is bounded by
-`DATAWRAP_CONTROL_STORE_TIMEOUT_SECONDS` (default `1`, at most `5`). When the
-database cannot be reached, the failure is remembered for
+Each read from the control-plane database is bounded by
+`DATAWRAP_CONTROL_STORE_TIMEOUT_SECONDS` (default `1`, at most `5`). Each write
+(an update, insert, delete or transaction commit, which may retry under
+contention) is bounded by `DATAWRAP_CONTROL_STORE_WRITE_TIMEOUT_SECONDS`
+(default `3`, at most `10`). When the database cannot be reached (no server
+can be selected, a connection is refused or lost, or three calls in a row time
+out with none succeeding), the failure is remembered for
 `DATAWRAP_CONTROL_STORE_OUTAGE_SECONDS` (default `2`, at most `10`): requests
 in that window get 503 at once instead of each waiting for the timeout, and
-health probes never read these stores. `DATAWRAP_POD_LOCAL_STORES_ACK` is
+health probes never read these stores. One slow call on a database that is
+otherwise answering fails on its own and is not remembered. `DATAWRAP_POD_LOCAL_STORES_ACK` is
 explained below.
 
 ### Stores that are still files

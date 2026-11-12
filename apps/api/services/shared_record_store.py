@@ -395,7 +395,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         try:
             session.start_transaction()
             self._apply(coll, token, plan, {"session": session})
-            with deadline():
+            with deadline(write=True):
                 session.commit_transaction()
         except PyMongoError as exc:
             _abort(session)

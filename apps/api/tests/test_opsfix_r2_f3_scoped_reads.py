@@ -236,8 +236,12 @@ def test_a_slow_query_fails_that_read_without_failing_every_store(monkeypatch):
     with pytest.raises(ControlPlaneUnavailable):
         coll.find_one({"store": "shape_drafts"})
     assert control_plane_bounds.outage_retry_at() == 0.0, "one slow query made every store fail for 2 s"
-    with pytest.raises(ControlPlaneUnavailable):
-        coll.count_documents({})
+    # A database that stopped answering on open connections times out call
+    # after call with no success between: remembered after a few (PR 406 CI:
+    # one socket timeout among successes is a slow call, not an outage).
+    for _ in range(control_plane_bounds.SOCKET_TIMEOUTS_FOR_OUTAGE):
+        with pytest.raises(ControlPlaneUnavailable):
+            coll.count_documents({})
     assert control_plane_bounds.outage_retry_at() > 0.0, "an unreachable database is still remembered"
     control_plane_bounds.reset_outage_state()
 
