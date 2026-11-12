@@ -135,13 +135,28 @@ _INTEGER_TYPES = frozenset(
         "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT",
         "SERIAL", "BIGSERIAL", "SMALLSERIAL",
         "INT2", "INT4", "INT8", "INT64",
+        # DuckDB
+        "HUGEINT", "UHUGEINT", "UBIGINT", "UINTEGER", "USMALLINT", "UTINYINT",
+        # ClickHouse
+        "INT16", "INT32", "INT128", "INT256",
+        "UINT8", "UINT16", "UINT32", "UINT64", "UINT128", "UINT256",
     }
 )
 #: Exact numerics that are integers only at scale 0: ``NUMBER(10)``, ``NUMBER(10,0)``.
 _SCALED_NUMERIC_TYPES = frozenset({"NUMBER", "NUMERIC", "DECIMAL"})
 _TEMPORAL_TYPES = frozenset(
-    {"TIMESTAMP", "TIMESTAMPTZ", "DATETIME", "DATETIME2", "DATETIMEOFFSET", "SMALLDATETIME"}
+    {
+        "TIMESTAMP", "TIMESTAMPTZ", "DATETIME", "DATETIME2", "DATETIMEOFFSET", "SMALLDATETIME",
+        # Snowflake
+        "TIMESTAMP_NTZ", "TIMESTAMP_TZ", "TIMESTAMP_LTZ",
+        # DuckDB
+        "TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_NS",
+        # ClickHouse
+        "DATETIME64",
+    }
 )
+#: Wrappers that do not change a type's order (ClickHouse).
+_TYPE_WRAPPERS = ("NULLABLE", "LOWCARDINALITY")
 _INT_SCALE_RE = re.compile(r"^\(\s*\d+\s*(?:,\s*0+\s*)?\)")
 #: Calendar dates: their natural unit is a day.
 _DATE_TYPES = frozenset({"DATE", "DATE32"})
@@ -281,9 +296,19 @@ class CommitSafeWindow:
 # --------------------------------------------------------------------------
 
 
+def _declared_text(declared: Any) -> str:
+    """The declared type, upper-cased, unqualified (``pg_catalog.int8`` → ``INT8``)
+    and unwrapped (``Nullable(DateTime64(3))`` → ``DATETIME64(3)``)."""
+    text = " ".join(str(declared or "").upper().split()).replace('"', "")
+    for wrapper in _TYPE_WRAPPERS:
+        if text.startswith(wrapper + "(") and text.endswith(")"):
+            text = text[len(wrapper) + 1 : -1].strip()
+    head, paren, rest = text.partition("(")
+    return head.rsplit(".", 1)[-1].strip() + paren + rest
+
+
 def _type_base(declared: Any) -> str:
-    text = " ".join(str(declared or "").upper().split())
-    return text.split("(", 1)[0].strip()
+    return _declared_text(declared).split("(", 1)[0].strip()
 
 
 def _type_class(declared: Any) -> str:
@@ -293,7 +318,7 @@ def _type_class(declared: Any) -> str:
     """
     from services.cursor_order import is_text_declared
 
-    text = " ".join(str(declared or "").upper().split())
+    text = _declared_text(declared)
     if not text or is_text_declared(text):
         return ""
     word = re.split(r"[\s(]", text, maxsplit=1)[0]

@@ -734,3 +734,39 @@ def test_server_without_the_subtransaction_function_uses_the_horizon_and_says_so
     assert "PostgreSQL 16" in window.get("reason", ""), window
     assert window.get("horizon_reason") == csw.SUBXACT_FUNCTION_MISSING, window
     assert _missing("o16", "o16_out") == []
+
+
+# --------------------------------------------------------------------------
+# Lows
+# --------------------------------------------------------------------------
+
+# Low: engine type words
+
+
+@pytest.mark.parametrize(
+    "declared,unit",
+    [
+        ("TIMESTAMP_NTZ", "seconds"), ("TIMESTAMP_TZ(9)", "seconds"), ("TIMESTAMP_LTZ", "seconds"),
+        ("HUGEINT", "values"), ("UBIGINT", "values"), ("UINTEGER", "values"),
+        ("DateTime64(3)", "seconds"), ("DateTime64(6, 'UTC')", "seconds"), ("UInt64", "values"),
+        ("Int64", "values"), ("Nullable(DateTime64(3))", "seconds"),
+        ("pg_catalog.int8", "values"), ('"pg_catalog"."timestamptz"', "seconds"),
+        ("pg_catalog.text", ""), ("LONGTEXT", ""),
+    ],
+)
+def test_engine_type_words_get_their_distance(declared, unit):
+    from services import commit_safe_window as csw
+
+    assert csw.cursor_distance_unit(declared) == unit
+
+
+def test_snowflake_timestamp_ntz_cursor_takes_the_overlap_window_it_is_promised():
+    from services import commit_safe_window as csw
+
+    claim = csw.static_commit_safety(
+        source_type="snowflake", sync_mode="incremental_append", cursor_column="ts",
+        cursor_type="TIMESTAMP_NTZ", has_identity=True,
+    )
+    assert claim["guarantee"] == csw.GUARANTEE_WITHIN_WINDOW, claim
+    assert claim["overlap"] == {"unit": "seconds", "size": csw.DEFAULT_OVERLAP_SECONDS}
+    assert csw.probe_floor_unit("Date32") == "days"
