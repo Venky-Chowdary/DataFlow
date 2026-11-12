@@ -12,6 +12,8 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
+
+from services.brand_env import getenv_brand
 from fastapi.responses import JSONResponse, PlainTextResponse
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
