@@ -3,19 +3,42 @@
 #   docker compose -f docker-compose.prod.yml up -d --build
 
 services:
+  # A one-node replica set, like docker-compose.yml: the control-plane stores
+  # need multi-document transactions (a BYOK rotation is all-or-nothing) and
+  # CDC needs an oplog. With authentication on, a replica set needs an
+  # internal key file; one node only needs one, so it is generated at start.
+  # The healthcheck initiates the set on first start (an existing standalone
+  # volume is converted in place) and reports healthy only once the node is
+  # primary, so the services below start with transactions available.
   mongodb:
     image: mongo:7
     restart: unless-stopped
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-dataflow}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env}
+    entrypoint:
+      - bash
+      - -c
+      - |
+        set -e
+        key=/data/configdb/replica-set.key
+        if [ ! -s "$$key" ]; then head -c 756 /dev/urandom | base64 -w 0 > "$$key"; fi
+        chown mongodb:mongodb "$$key" && chmod 400 "$$key"
+        exec docker-entrypoint.sh mongod --replSet rs0 --bind_ip_all --keyFile "$$key"
     volumes:
       - mongodata:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet -u "$${MONGO_INITDB_ROOT_USERNAME}" -p "$${MONGO_INITDB_ROOT_PASSWORD}"
+          --authenticationDatabase admin --eval "try { rs.status() } catch (e) {
+          rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongodb:27017'}]}) }
+          quit(db.hello().isWritablePrimary ? 0 : 1)"
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
@@ -75,7 +98,7 @@ services:
       DATAWRAP_POD_LOCAL_STORES_ACK: transfer_plans,pilot_results
       DATAWRAP_CDC_LEASE_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       DATAWRAP_BLOB_ROOT: /data/blobs
-      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin&replicaSet=rs0
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       DATAWRAP_DATA_DIR: /data/data
       DATAWRAP_UPLOAD_DIR: /data/uploads
@@ -117,7 +140,7 @@ services:
       DATAWRAP_MULTI_REPLICA: 1
       DATAWRAP_TRAINING: off
       DATAWRAP_SEED_DEMO: 0
-      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin&replicaSet=rs0
       DATAWRAP_DATA_DIR: /data/data
       DATAWRAP_UPLOAD_DIR: /data/uploads
       DATAWRAP_VECTOR_STORE_DIR: /data/vector_store
@@ -157,7 +180,7 @@ services:
       DATAWRAP_MULTI_REPLICA: 1
       DATAWRAP_TRAINING: off
       DATAWRAP_SEED_DEMO: 0
-      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin&replicaSet=rs0
       DATAWRAP_DATA_DIR: /data/data
       DATAWRAP_UPLOAD_DIR: /data/uploads
       DATAWRAP_VECTOR_STORE_DIR: /data/vector_store
@@ -198,7 +221,7 @@ services:
       DATAWRAP_MULTI_REPLICA: 1
       DATAWRAP_TRAINING: off
       DATAWRAP_SEED_DEMO: 0
-      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin&replicaSet=rs0
       DATAWRAP_DATA_DIR: /data/data
       DATAWRAP_UPLOAD_DIR: /data/uploads
       DATAWRAP_VECTOR_STORE_DIR: /data/vector_store

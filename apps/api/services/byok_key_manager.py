@@ -419,11 +419,20 @@ def _aws_kms_decrypt_dek(encrypted_dek: bytes, context: str) -> bytes:
         raise RuntimeError(f"AWS KMS Decrypt failed: {exc}") from exc
 
 
-def tenant_encrypt(tenant_id: str, plaintext: str, key_id: str | None = None, purpose: str = "data") -> str:
-    """Encrypt ``plaintext`` with the tenant's BYOK-derived key."""
+def tenant_encrypt(
+    tenant_id: str, plaintext: str, key_id: str | None = None, purpose: str = "data", *, key: BYOKKey | None = None,
+) -> str:
+    """Encrypt ``plaintext`` with the tenant's BYOK-derived key.
+
+    ``key``: the active key the caller already resolved, used as is (no second
+    lookup that a concurrent rotation could make fail).
+    """
     if not _cryptography_available():
         raise RuntimeError("BYOK encryption requires the cryptography package")
-    key = _resolve_key(tenant_id, key_id)
+    if key is None:
+        key = _resolve_key(tenant_id, key_id)
+    elif key.tenant_id != tenant_id:
+        raise ValueError("BYOK key does not belong to tenant")
     context = f"dataflow:{tenant_id}:{purpose}"
     if key.provider == "aws_kms":
         dek, enc_dek = _aws_kms_generate_dek(key.key_reference, context)

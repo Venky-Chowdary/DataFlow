@@ -92,6 +92,18 @@ replica set and keeps TLS off, as earlier versions of the chart did, unless
 `data.documentdb.tls` is `true`. An upgrade therefore does not switch an
 existing non-TLS MongoDB to TLS.
 
+The control-plane stores need multi-document transactions, which MongoDB only
+offers on a replica set (DocumentDB and Atlas always have them): without them
+a BYOK rotation that fails part-way leaves the tenant with no active key, and
+its secret saves are refused until a key is created. A self-hosted MongoDB
+must therefore be a replica set (one node is enough), and the connection
+string must not use `directConnection=true`, which reads as a standalone
+server. `docker-compose.prod.yml` runs MongoDB as a one-node replica set
+`rs0`, like `docker-compose.yml`: the node generates its internal key file,
+initiates the set on first start (an existing standalone data volume is
+converted in place) and is healthy only once it is primary, and every
+service connects with `replicaSet=rs0`.
+
 ## Shutdown budget
 
 On SIGTERM the API waits `api.gracefulShutdownSeconds` (10) for open
