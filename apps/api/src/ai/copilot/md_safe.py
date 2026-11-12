@@ -12,17 +12,26 @@ from __future__ import annotations
 import re
 from typing import Any
 
-#: Bold/italic (*), code (`), links and images ([ ] !), HTML (< >), strikethrough
-#: (~) and the escape itself. Newlines are flattened, so no value can start a
-#: line: no bullet, heading, quote or table row. Intraword ``_`` is left alone
-#: (GFM does not emphasise it; escaping it garbled table names like orders_wh).
-_CONTROL = re.compile(r"([\\`*\[\]<>!~])")
+#: What the web client's renderer (``apps/web/src/lib/safeMarkdown.ts``)
+#: interprets inside a line is ``**bold**`` and `` `code` ``, and it never
+#: removes a backslash (review 2, H3). Escaping for GFM ("\\[", "\\*") left
+#: "dbo.\\[Order Details\\]" on screen while an escaped backtick still opened
+#: a code span. So exactly those two are neutralised, invisibly: a zero-width
+#: space between adjacent asterisks, and a backtick read as an apostrophe.
+#: Newlines are flattened, so no value can start a line: no bullet, heading,
+#: table row or fence. "](" and "![" get the same zero-width space for any
+#: client that renders links; on the web it changes nothing visible.
+_ZWSP = "\u200b"
+_ADJACENT_STARS = re.compile(r"\*(?=\*)")
+_LINK_OPENERS = re.compile(r"(?<=\])(?=\()|(?<=!)(?=\[)")
 
 
 def md_text(value: Any, limit: int = 240) -> str:
-    """``value`` as plain text: one line, markdown control characters escaped."""
-    flat = " ".join(str(value if value is not None else "").split())
-    return _CONTROL.sub(r"\\\1", flat[:limit])
+    """``value`` as plain text: one line, nothing the renderer would turn into markup."""
+    flat = " ".join(str(value if value is not None else "").split())[:limit]
+    flat = flat.replace("`", "'")
+    flat = _ADJACENT_STARS.sub("*" + _ZWSP, flat)
+    return _LINK_OPENERS.sub(_ZWSP, flat)
 
 
 def md_code(value: Any, limit: int = 120) -> str:

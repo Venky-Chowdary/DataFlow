@@ -144,3 +144,74 @@ def test_control_characters_in_a_schedule_name_are_refused_with_422(monkeypatch,
     existing = pt.seed_schedules(1)[0]
     with pytest.raises(ApiError):
         ss.update_schedule(existing.id, {"name": name})
+
+
+# ---- review 2, H3: escaping that matches the web renderer ---------------------
+#
+# The web client's renderer (apps/web/src/lib/safeMarkdown.ts) interprets only
+# ``**bold**`` and `code` inline, and never removes a backslash. Escaping for
+# GFM showed "dbo.\[Order Details\]" to the operator while an escaped backtick
+# still formed a code span. ``md_text`` now neutralises exactly what that
+# renderer interprets, invisibly. The renderer's own inline rules are read
+# from its source, so this test follows the renderer if it changes.
+
+LEGITIMATE = [
+    "(psycopg2.errors.NumericValueOutOfRange) value 1e9 > 2147483647 [SQL: INSERT INTO orders (id) "
+    "VALUES (%(id)s)] (Background on this error at: https://sqlalche.me/e/20/9h9h)",
+    "dbo.[Order Details]",
+    "s3://bucket/exports/*.csv",
+    "Nightly <EU> sync!",
+    "orders_wh",
+    "a * b",
+]
+HOSTILE = [
+    "x** - You have **0** failed job(s)",
+    "orders` · `6af52daec05b97b589f091fe",
+    "***bold italic***",
+    "`code`",
+]
+
+
+def _renderer_inline_rules() -> list[tuple[re.Pattern, str]]:
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[3] / "apps/web/src/lib/safeMarkdown.ts").read_text(encoding="utf-8")
+    body = source.split("function inline(", 1)[1].split("\n}\n", 1)[0]
+    rules = re.findall(r'\.replace\(/(.+?)/g,\s*"(.*?)"\)', body)
+    assert len(rules) >= 2, "the renderer's inline rules moved: update this reader"
+    return [(re.compile(pattern), repl.replace("$1", r"\1")) for pattern, repl in rules]
+
+
+def _render_inline(text: str) -> str:
+    import html
+
+    out = html.escape(text, quote=True)
+    for pattern, repl in _renderer_inline_rules():
+        out = pattern.sub(repl, out)
+    return out
+
+
+def _visible(rendered: str) -> str:
+    import html
+
+    return html.unescape(re.sub(r"<[^>]+>", "", rendered)).replace("​", "")
+
+
+@pytest.mark.parametrize("value", LEGITIMATE)
+def test_a_legitimate_name_renders_unchanged(value):
+    from src.ai.copilot.md_safe import md_text
+
+    rendered = _render_inline(md_text(value))
+    assert "<strong>" not in rendered and "<code>" not in rendered, rendered
+    assert _visible(rendered) == value, f"the operator sees {_visible(rendered)!r}, not {value!r}"
+    assert "\\" not in md_text(value), "a backslash the renderer would show"
+
+
+@pytest.mark.parametrize("value", HOSTILE)
+def test_markup_in_a_name_is_inert_in_the_renderer(value):
+    from src.ai.copilot.md_safe import md_text
+
+    line = f"• `6af52d` · {md_text(value)} -> wh: **failed** (1 records)"
+    rendered = _render_inline(line)
+    assert rendered.count("<strong>") == 1 and rendered.count("<code>") == 1, rendered
+    assert "\\" not in _visible(rendered)
