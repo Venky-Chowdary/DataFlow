@@ -336,7 +336,11 @@ def test_every_region_botocore_ships_is_a_region_label():
 
 @pytest.mark.parametrize(
     "host",
-    ["us-east-1\n", "us-east-1x", "us-east-100", "us-middle-1", "xx-east-1", "us-east-1.svc", "us-iso-db-1"],
+    [
+        "us-east-1\n", "us-east-1x", "us-east-100", "us-middle-1", "xx-east-1", "us-east-1.svc", "us-iso-db-1",
+        # a made-up partition infix (review round 3, mutant X6): only gov / iso[a-z] are partitions
+        "us-corp-east-1", "eu-prod-west-2",
+    ],
 )
 def test_the_region_pattern_is_exact(host):
     from services.egress_guard import is_aws_region_label
