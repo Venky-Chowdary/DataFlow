@@ -129,7 +129,8 @@ def test_a_host_derived_endpoint_is_still_resolved(lookups):
 def test_guard_skips_the_region_label_of_an_aws_connector(lookups, db_type, region):
     from services.egress_guard import metadata_endpoint_refusal
 
-    assert metadata_endpoint_refusal(region, "http://localhost:42869", db_type=db_type) == ""
+    endpoint = "http://localhost:42869"
+    assert metadata_endpoint_refusal(region, endpoint, db_type=db_type, aws_endpoint=endpoint) == ""
     assert region not in lookups, lookups
 
 
@@ -157,3 +158,175 @@ def test_only_an_exact_region_spelling_is_skipped(lookups, host):
 
     metadata_endpoint_refusal(host, db_type="s3")
     assert host in lookups, lookups
+
+
+# --- PR 410 review round 2, H-E1: the skip must never cover the dialled name -
+#
+# ``resolve_endpoint_url`` turns a dot-less host plus a service port into
+# ``http://<host>:<port>``, so the label itself can be the dial target. A
+# region-shaped single-label name (``us-east-1``, ``us-db-01``) that resolves
+# inside the cluster (k8s Service, search domain, wildcard DNS) then reached a
+# private, loopback or metadata address with the pre-dial check skipped.
+
+_TARGETS = ["169.254.169.254", "10.1.2.3", "127.0.0.1"]
+
+
+@pytest.fixture
+def resolves(monkeypatch):
+    """``answers[name] = ip`` makes ``name`` resolve there; no allowlist is set."""
+    answers: dict[str, str] = {}
+
+    def fake(host, port=None, *args, **kwargs):
+        name = host.decode() if isinstance(host, bytes) else str(host)
+        key = name.lower().rstrip(".")
+        if key in answers:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (answers[key], port or 0))]
+        if name in ("localhost", "127.0.0.1"):
+            return _REAL_GETADDRINFO(host, port, *args, **kwargs)
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake)
+    for name in (
+        "DATAFLOW_EGRESS_ALLOWLIST", "DATAWRAP_EGRESS_ALLOWLIST",
+        "DATAFLOW_EGRESS_ENFORCE_NEW", "DATAWRAP_EGRESS_ENFORCE_NEW",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    return answers
+
+
+def _refused_client(service: str, cfg: dict) -> str:
+    from connectors.aws_common import boto3_client
+    from services.egress_guard import EgressRefused
+
+    with pytest.raises(EgressRefused) as refused:
+        boto3_client(service, cfg)
+    return str(refused.value)
+
+
+@pytest.mark.parametrize("ip", _TARGETS)
+@pytest.mark.parametrize(
+    ("service", "cfg"),
+    [
+        pytest.param("s3", {"type": "s3", "host": "us-east-1", "port": 9000}, id="s3-host-port"),
+        pytest.param(
+            "s3", {"type": "s3", "host": "us-east-1", "endpoint_url": "http://us-east-1:80"},
+            id="s3-endpoint-url",
+        ),
+        pytest.param(
+            "s3", {"type": "s3", "host": "eu-west-1", "endpoint_url": "http://US-EAST-1."},
+            id="s3-endpoint-upper-trailing-dot",
+        ),
+        pytest.param(
+            "dynamodb", {"type": "dynamodb", "host": "us-east-1", "port": 8000},
+            id="dynamodb-host-port",
+        ),
+    ],
+)
+def test_a_region_label_the_client_dials_is_checked(resolves, ip, service, cfg):
+    resolves["us-east-1"] = ip
+    assert "us-east-1" in _refused_client(service, dict(cfg))
+
+
+@pytest.mark.parametrize("ip", _TARGETS)
+@pytest.mark.parametrize("name", ["us-db-01", "eu-prod-1", "ap-cache-3", "ca-web-02", "us-gov-anything-9"])
+def test_a_region_shaped_host_name_is_not_a_region(resolves, ip, name):
+    """``-[a-z]+-\\d`` took any word: only AWS direction words name a region."""
+    from services.egress_guard import metadata_endpoint_refusal
+
+    resolves[name] = ip
+    assert name in _refused_client("s3", {"type": "s3", "host": name, "port": 9000})
+    # Even where the SDK would sign with it and dial AWS, it is resolved.
+    assert metadata_endpoint_refusal(name, db_type="s3", aws_endpoint="")
+
+
+@pytest.mark.parametrize("ip", _TARGETS)
+@pytest.mark.parametrize("label", ["us-east-١", "us-east-１", "us-east-\U0001d7cf"])
+def test_unicode_digits_are_not_a_region(resolves, ip, label):
+    """``\\d`` matched Arabic-Indic and fullwidth digits; the pattern is ASCII only."""
+    from services.egress_guard import is_aws_region_label, metadata_endpoint_refusal
+
+    resolves[label] = ip
+    assert not is_aws_region_label(label, "s3")
+    assert metadata_endpoint_refusal(label, db_type="s3", aws_endpoint="")
+
+
+@pytest.mark.parametrize("ip", _TARGETS)
+def test_metadata_endpoint_refusal_checks_a_url_on_the_label(resolves, ip):
+    from services.egress_guard import metadata_endpoint_refusal
+
+    resolves["us-east-1"] = ip
+    assert metadata_endpoint_refusal("http://us-east-1:80", db_type="s3")
+    assert metadata_endpoint_refusal(
+        "us-east-1", "http://us-east-1:9000", db_type="s3", aws_endpoint="http://us-east-1:9000"
+    )
+
+
+@pytest.mark.parametrize("ip", _TARGETS)
+def test_a_bare_label_is_checked_when_the_dialled_endpoint_is_not_known(resolves, ip):
+    """A caller that cannot say what the SDK dials (no port at hand) gets no skip."""
+    from services.egress_guard import metadata_endpoint_refusal
+
+    resolves["us-east-1"] = ip
+    assert metadata_endpoint_refusal("us-east-1", db_type="s3")
+
+
+@pytest.mark.parametrize("ip", _TARGETS)
+def test_cfg_sites_check_the_endpoint_derived_from_host_and_port(resolves, monkeypatch, ip):
+    """Save, scoped dials and the probe build the endpoint from ``host`` + ``port``."""
+    from services.egress_guard import EgressRefused, connector_dial_scope, connector_save_refusal
+    from src.transfer.connector_registry import _run_probe_impl
+
+    monkeypatch.setenv("DATAFLOW_EGRESS_ENFORCE_NEW", "1")
+    resolves["us-east-1"] = ip
+    cfg = {"type": "s3", "host": "us-east-1", "port": 9000, "username": "k", "password": "s"}
+    assert "us-east-1" in connector_save_refusal(dict(cfg, name="store"))
+    with pytest.raises(EgressRefused):
+        with connector_dial_scope(dict(cfg), point="transfer"):
+            pass
+    ok, message = _run_probe_impl("s3", dict(cfg))
+    assert not ok and "us-east-1" in message, message
+
+
+def test_ci_case_still_does_not_resolve_the_region(lookups):
+    """The Studio S3 connector: the label is skipped at every site that knows the endpoint."""
+    from services.egress_guard import connector_save_refusal
+
+    assert connector_save_refusal(dict(_studio_s3_cfg(42869), name="store")) == ""
+    assert connector_save_refusal(dict(_studio_s3_cfg(42869), name="store", port=443)) == ""
+    # Real AWS: no endpoint, no service port. The SDK dials the region's AWS host.
+    assert connector_save_refusal({"type": "s3", "host": "us-east-1", "name": "aws"}) == ""
+    assert "us-east-1" not in lookups, lookups
+
+
+def _botocore_regions() -> list[str]:
+    import json
+    import os
+
+    import botocore
+
+    data = os.path.join(os.path.dirname(botocore.__file__), "data")
+    names: set[str] = set()
+    for file_name in ("partitions.json", "endpoints.json"):
+        with open(os.path.join(data, file_name), encoding="utf-8") as handle:
+            for partition in json.load(handle).get("partitions", []):
+                names.update(partition.get("regions", {}))
+    # ``aws-global`` and friends are partition pseudo-regions, never typed in.
+    return sorted(name for name in names if not name.endswith("-global"))
+
+
+def test_every_region_botocore_ships_is_a_region_label():
+    from services.egress_guard import is_aws_region_label
+
+    regions = _botocore_regions()
+    assert "us-east-1" in regions and "us-gov-west-1" in regions and "cn-north-1" in regions
+    assert [r for r in regions if not is_aws_region_label(r, "s3")] == []
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["us-east-1\n", "us-east-1x", "us-east-100", "us-middle-1", "xx-east-1", "us-east-1.svc", "us-iso-db-1"],
+)
+def test_the_region_pattern_is_exact(host):
+    from services.egress_guard import is_aws_region_label
+
+    assert not is_aws_region_label(host, "s3")
