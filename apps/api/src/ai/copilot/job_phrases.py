@@ -126,7 +126,7 @@ _NEGATION = re.compile(
 #: A saved connector named after a preposition: "on Local Postgres".
 _NAMED_TARGET = re.compile(
     r"\b(?:on|from|to|into|via|using|in)\s+"
-    r"(?!(?:I|Datawrap|DataFlow|Pilot|Jobs?|Transfer|Studio|UTC)\b)((?:[A-Z][\w-]*)(?:\s+[A-Z][\w-]*){0,3})"
+    r"(?!(?:I|Data(?:wrap|[Ff]low)|Pilot|Jobs?|Transfer|Studio|UTC)\b)((?:[A-Z][\w-]*)(?:\s+[A-Z][\w-]*){0,3})"
 )
 
 
