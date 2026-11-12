@@ -658,9 +658,9 @@ def _stream_database_transfer_impl(
             resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
         )
     if pre_write_rows_before is not None and isinstance(getattr(run.cfg.destination, "extra", None), dict):
-        # C16: a cancelled COPY is measured against this from the job record
-        # (its own key: the write-failure undo keeps reading dest_rows_before).
-        run.cfg.destination.extra.setdefault("cancel_rows_before", int(pre_write_rows_before))
+        # C16: a cancel is measured against this from the job record, per stream object.
+        from services.multi_stream_cancel import pin_rows_before
+        pin_rows_before(run.cfg, _source_name(run.cfg.source), int(pre_write_rows_before))
     # Schema evolution (ADD COLUMN / widen under backfill_new_fields) is owned
     # by the destination writer; a server-to-server copy would write into the
     # destination's current shape and fail on the column the source just grew.

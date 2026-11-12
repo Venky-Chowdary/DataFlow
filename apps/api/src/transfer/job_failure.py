@@ -673,7 +673,12 @@ def _fail_runtime_job(
         # A route that did not count its destination (COPY fast paths,
         # adapters) reports a progress meter, not committed batches.
         unmeasured = getattr(exc, "destination_rows_now", None) is None
-        if unmeasured and request is not None:
+        from services.multi_stream_cancel import measure_multi_stream_cancel
+
+        # A multi-stream run is counted on every stream object it reached,
+        # each against its own pre-run count, never on one object for the job.
+        per_stream = request is not None and measure_multi_stream_cancel(exc, request)
+        if unmeasured and request is not None and not per_stream:
             _measure_unmeasured_cancel(exc, request)
         outcome = cancel_outcome_for(
             status_kwargs.get("records_processed", prev.get("records_processed")),
@@ -682,8 +687,10 @@ def _fail_runtime_job(
             destination_table_exists=getattr(exc, "destination_table_exists", None),
             destination_rows_before=getattr(exc, "destination_rows_before", None),
             write_rolled_back=getattr(exc, "write_rolled_back", None) is True,
-            tally_is_commit_evidence=not (unmeasured and request is not None),
+            tally_is_commit_evidence=not ((unmeasured or per_stream) and request is not None),
         )
+        if per_stream:
+            outcome["streams"] = list(getattr(exc, "destination_streams", None) or [])
         status_kwargs["cancel_outcome"] = outcome
         if outcome.get("rows_committed_source") == "destination_count":
             # D199 — the destination's own count replaces the committed-batch

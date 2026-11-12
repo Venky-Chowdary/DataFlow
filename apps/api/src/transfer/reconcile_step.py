@@ -9452,15 +9452,11 @@ def _bind_endpoints_to_last_stream(
     def _bound(ep: EndpointConfig | None) -> EndpointConfig | None:
         if ep is None or getattr(ep, "kind", "") != "database":
             return ep
+        from services.multi_stream_targets import bind_endpoint_to_stream
+
+        # The orchestrator's own rule, so Gate-8 reads the object it wrote.
         bound = copy.copy(ep)
-        if getattr(ep, "format", "") == "mongodb" or (
-            getattr(ep, "collection", None) and not getattr(ep, "table", None)
-        ):
-            bound.collection = name
-        elif getattr(ep, "table", None):
-            bound.table = name
-        else:
-            return ep
+        bind_endpoint_to_stream(bound, name)
         return bound
 
     return _bound(endpoint) or endpoint, _bound(source_endpoint)
@@ -9483,6 +9479,9 @@ def _run_reconciliation_with_rules(
     endpoint, source_endpoint = _bind_endpoints_to_last_stream(
         endpoint, source_endpoint, dest_summary
     )
+    from services.reconcile_coverage import last_stream_rows_written
+
+    rows_written = last_stream_rows_written(dest_summary, rows_written)
     recon = _run_reconciliation_impl(
         endpoint=endpoint,
         records=records,

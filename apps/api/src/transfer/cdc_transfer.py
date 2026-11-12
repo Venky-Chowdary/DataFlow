@@ -52,6 +52,7 @@ from services.cdc_catchup import stamp_capture_identity
 from services.ops_events import emit_event
 from services.cdc_effectively_once import gate_cdc_destination
 from services.dest_precount import DestBeforeCensus
+from services.multi_stream_targets import bind_endpoint_to_stream
 from services.tombstone import (
     detect_tombstone_column as _detect_tombstone_column,
     is_tombstone_set as _is_tombstone_set,
@@ -2742,10 +2743,12 @@ def _run_cdc_shared_multi_table(
             if new_here:
                 ddl_log.append(propagation_note(new_here, table=stream, dest_table=stream))
         if original_dest_table is not None or original_dest_collection is not None:
-            if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
-                destination.collection = stream
-            else:
-                destination.table = stream
+            bind_endpoint_to_stream(
+                destination,
+                stream,
+                table=original_dest_table,
+                collection=original_dest_collection,
+            )
         dest_table = resolve_dest_table(dest_type, destination)
         shared_accum.dest_before.capture(
             destination,
@@ -3165,15 +3168,16 @@ def _run_cdc_multi_stream_sequential(
             for contract in selected:
                 stream_name = (contract.name or "").strip() or "stream"
                 # Bind source/dest object to this stream (table/collection name).
-                if getattr(source, "format", "") == "mongodb" or original_collection:
-                    source.collection = stream_name
-                else:
-                    source.table = stream_name
+                bind_endpoint_to_stream(
+                    source, stream_name, table=original_table, collection=original_collection
+                )
                 if original_dest_table is not None or original_dest_collection is not None:
-                    if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
-                        destination.collection = stream_name
-                    else:
-                        destination.table = stream_name
+                    bind_endpoint_to_stream(
+                        destination,
+                        stream_name,
+                        table=original_dest_table,
+                        collection=original_dest_collection,
+                    )
 
                 single_contracts = [
                     {
