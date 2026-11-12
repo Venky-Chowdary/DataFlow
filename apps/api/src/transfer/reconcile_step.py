@@ -3586,6 +3586,25 @@ def _maybe_attach_verification_ladder(
         for m in mappings
         if m.get("target") and (m.get("target_type") or m.get("inferredType"))
     }
+    # A source column the catalog declares datetime / boolean, landing in a text
+    # column, compares as what it is in whichever spelling the writer stored —
+    # the engine copy writes '2024-01-01 00:00:00', the re-read reads the ISO
+    # 'T' (review 1 H2). The report-level digests were taken on the plain text
+    # basis, so the ladder recomputes both sides when a column is marked.
+    carried_types = False
+    if source_endpoint is not None and str(getattr(source_endpoint, "kind", "")) == "database":
+        from services.dest_physical_types import mark_typed_source_text_carriers
+
+        _cat_cfg = resolve_connector_config(source_endpoint)
+        _marked = mark_typed_source_text_carriers(
+            dest_types,
+            mappings,
+            resolve_driver_type(source_endpoint.format),
+            _cat_cfg,
+            str(source_endpoint.table or _cat_cfg.get("table") or ""),
+        )
+        carried_types = _marked != dest_types
+        dest_types = _marked
     from services.sync_cursor import is_overwrite_sync
 
     sync_mode = str(
@@ -3839,12 +3858,12 @@ def _maybe_attach_verification_ladder(
         # destination digest — recompute on the compared populations (D67/D95).
         source_checksum=(
             ""
-            if (batch_scoped or window_scoped_target or _rej_keys)
+            if (batch_scoped or window_scoped_target or _rej_keys or carried_types)
             else str(report.get("source_checksum") or "")
         ),
         target_checksum=(
             ""
-            if (batch_scoped or window_scoped_target or _rej_keys)
+            if (batch_scoped or window_scoped_target or _rej_keys or carried_types)
             else str(report.get("target_checksum") or "")
         ),
         dest_db_type=dest_type,

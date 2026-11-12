@@ -26,7 +26,10 @@ Intended equality per declared destination type (version 2)
   a character column whose source column is declared a boolean is fingerprinted
   under ``<type> CARRYING SOURCE_BOOLEAN`` (:func:`mark_typed_text_carriers`), where a
   bool equals the ``'1'`` / ``'true'`` (``'0'`` / ``'false'``) a writer stores
-  for it; text that was text stays exact.
+  for it; one whose source column is declared a datetime is fingerprinted under
+  ``<type> CARRYING SOURCE_INSTANT``, where the stored text compares as the
+  instant it spells (either separator, the fraction the writer rendered).
+  Text that was text stays exact.
 * **Exact numbers** (NUMERIC / DECIMAL / NUMBER, with or without a scale, and
   integers): by numeric value, every significant digit kept. Trailing
   fractional zeros are not significant (``1.50`` equals ``1.5`` — the engine's
@@ -177,9 +180,13 @@ def nonfinite_token(value: Any) -> str | None:
     return None
 
 
-#: A character column carrying a typed source boolean (see the module notes).
+#: A character column carrying a typed source boolean / datetime (module notes).
 CARRIES_BOOLEAN: Final[str] = "SOURCE_BOOLEAN"
-_CARRIED_KINDS: Final[dict[str, str]] = {"boolean": CARRIES_BOOLEAN}
+CARRIES_INSTANT: Final[str] = "SOURCE_INSTANT"
+_CARRIED_KINDS: Final[dict[str, str]] = {
+    "boolean": CARRIES_BOOLEAN,
+    "datetime": CARRIES_INSTANT,
+}
 _CARRYING_RE: Final[re.Pattern[str]] = re.compile(
     r"^(?P<physical>.*\S)\s+CARRYING\s+(?P<kind>[A-Z_]+)$"
 )
@@ -208,7 +215,7 @@ def mark_typed_text_carriers(
     mappings: list[dict[str, Any]] | None,
     source_catalog: dict[str, str] | None,
 ) -> dict[str, str]:
-    """Mark each character column whose source column is declared a typed boolean.
+    """Mark each character column whose source column is declared a boolean / datetime.
 
     ``basis`` is the per-column type both Gate-8 sides fingerprint under.
     ``source_catalog`` is the source table's catalog-declared types

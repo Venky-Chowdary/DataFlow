@@ -64,6 +64,7 @@ from services.expected_rows import expected_destination_rows, held_out_rows
 from services.fingerprint_rules import (
     BOOL_STORED_TEXT as _BOOL_STORED_TEXT,
     CARRIES_BOOLEAN,
+    CARRIES_INSTANT,
     FINGERPRINT_VERSION,
     NAN as _NAN_TOKEN,
     NULL_TOKEN,
@@ -3512,9 +3513,12 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         # scientific ('1.5E-8') — the reprs of the same value must agree
         # (X-26 live: tiny decimals flagged 'did not apply as declared').
         return format(value, "f") if isinstance(value, Decimal) else str(value)
-    if _text_declared and not isinstance(value, str):
+    if _text_declared and not isinstance(value, str) and not (
+        _carried == CARRIES_INSTANT and isinstance(value, _datetime)
+    ):
         # Any other typed value bound for a character column is stored as the
         # wire text the writer binds for it; that text is the value compared.
+        # (A typed datetime the column carries compares as the instant.)
         value = cell_to_string(value, preserve_sql_null=True)
         if isinstance(value, str):
             value = unescape_wire_text(value)
@@ -3679,20 +3683,26 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             text
             and text[0].isdigit()
             and len(text) >= 8
-            and str(engine or "").lower().startswith("sqlite")
+            and (
+                str(engine or "").lower().startswith("sqlite")
+                or _carried == CARRIES_INSTANT
+            )
             and _DATE_LIKE_CHARS.intersection(text)
             and _DATE_LIKE_RE.search(text)
         ):
             # SQLite has no temporal storage class: TEXT is the carrier of a
             # timestamp, and DataFlow's own SQLite reader reads date-like text
             # as one. '2024-06-01 00:00:00' and '2024-06-01T00:00:00' are the
-            # same instant there, on that engine only.
-            dtm = _parse_datetime(text)
+            # same instant there — and in a text column whose source column
+            # is a typed datetime, which writers spell either way (H2). A
+            # date alone is not how a writer spells a datetime: it stays text.
+            date_only = _carried == CARRIES_INSTANT and ":" not in text
+            dtm = None if date_only else _parse_datetime(text)
             if dtm:
                 return _checksum_datetime_utc_wall(
                     dtm if isinstance(dtm, str) else str(dtm), original=text
                 )
-            dt = _parse_date(text)
+            dt = None if date_only else _parse_date(text)
             if dt:
                 return f"{dt}T00:00:00"
         if _carried == CARRIES_BOOLEAN and text.lower() in _BOOL_STORED_TEXT:
