@@ -108,7 +108,9 @@ ORDINARY = [
 
 @pytest.mark.parametrize("sql", TSQL)
 def test_tsql_statements_after_a_select_are_refused(sql):
-    assert not _is_safe_sql(sql), sql
+    # Round 3 (M1): T-SQL's grammar applies to SQL Server connectors only; for
+    # them the text must parse as exactly one SELECT (M2).
+    assert not _is_safe_sql(sql, dialect="sqlserver"), sql
 
 
 @pytest.mark.parametrize("sql", FUNCTIONS)

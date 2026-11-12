@@ -59,8 +59,13 @@ _MONGODB_JS_OPERATORS = {"$where", "$function", "$accumulator", "$mapReduce"}
 _MONGODB_FORBIDDEN_OPERATORS = _MONGODB_WRITE_STAGES | _MONGODB_JS_OPERATORS
 
 
-def _is_safe_sql(raw_query: str) -> bool:
+def _is_safe_sql(raw_query: str, dialect: str = "") -> bool:
     """Allow read and metadata queries; block any destructive or write SQL.
+
+    ``dialect`` is the connector's type (or its URL scheme). For SQL Server
+    the text must also parse as exactly one SELECT (``services.tsql_select``,
+    security review round 3, M2); no other dialect is held to T-SQL's grammar
+    (M1).
 
     Uses ``sqlparse`` when installed; otherwise a conservative regex fallback so
     Datawrap Pilot / query playground never hard-fail on a missing optional dep.
@@ -68,6 +73,11 @@ def _is_safe_sql(raw_query: str) -> bool:
     quoted identifier is not a literal, and text one engine reads as a comment
     can be a second statement on another.
     """
+    if _is_sqlserver_dialect(dialect):
+        from services.tsql_select import tsql_single_select
+
+        if not tsql_single_select(raw_query):
+            return False
     try:
         import sqlparse  # noqa: F401
     except ImportError:
@@ -88,6 +98,18 @@ def _is_safe_sql(raw_query: str) -> bool:
     if "PRAGMA" in heads and not _pragma_is_readonly(raw_query):
         return False
     return bool(heads)
+
+
+def _is_sqlserver_dialect(dialect: str) -> bool:
+    """SQL Server, Azure SQL, Synapse, or a ``mssql+...`` URL."""
+    text = str(dialect or "").strip().lower()
+    if not text:
+        return False
+    if text.startswith("mssql") or text in {"sqlserver", "sql_server", "azure_sql", "azuresql", "synapse"}:
+        return True
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    return resolve_driver_type(text).lower() == "sqlserver"
 
 
 _DESTRUCTIVE_KEYWORDS = frozenset({
@@ -360,43 +382,11 @@ _PURE_PACKAGE_FUNCTIONS = frozenset({
 _STATEMENT_WORD_RE = re.compile(
     r"(?<![A-Za-z0-9_$#@.])(?:exec|execute|waitfor)(?![A-Za-z0-9_$#])", re.I
 )
-# More statements T-SQL runs after a SELECT with no separator (security review
-# round 2, M3): ``select 1 backup database x to disk='\\host\share\x.bak'``.
-# Refused wherever a statement could start: not where the grammar needs an
-# expression or a name (``select open, close from prices``), and never as a
-# qualified (``t.kill``) or quoted identifier, or inside a literal.
-_TSQL_STATEMENT_WORDS = frozenset({
-    "backup", "restore", "shutdown", "kill", "dbcc", "reconfigure", "deny", "setuser",
-    "enable", "disable", "begin", "declare", "open", "revert", "raiserror", "checkpoint",
-})
-#: Tokens after which a word is an expression or a name, never a new statement.
-#: ``else`` is not one: T-SQL's ``IF ... ELSE`` takes a statement there.
-_EXPRESSION_CONTINUES = frozenset({
-    "select", "distinct", "all", "from", "join", "on", "where", "and", "or", "not", "by",
-    "as", "in", "is", "like", "ilike", "between", "case", "when", "then", "having", "over",
-    "partition", "using", "apply", "union", "intersect", "except", "minus", "with",
-    "lateral", "values", "escape", "collate", "interval", "exists", "any", "some", "qualify",
-    ",", "(", "=", "<", ">", "<=", ">=", "<>", "!=", "+", "-", "/", "%", "||", "^", "&",
-    "|", "~", "::",
-    # A name quoted with [..] or `..` in a view that does not read those quotes.
-    "[", "`", '"',
-})
-_CODE_TOKEN_RE = re.compile(
-    r"__DF[IQ]\d+__|[A-Za-z_@#][A-Za-z0-9_$#@]*|\d+(?:\.\d+)?(?:e[+-]?\d+)?|<>|!=|<=|>=|\|\||::|\S", re.I
-)
-
-
-def _starts_tsql_statement(code: str) -> bool:
-    """True when a T-SQL statement word stands where a new statement could start."""
-    tokens = _CODE_TOKEN_RE.findall(code)
-    for i, token in enumerate(tokens[1:], start=1):
-        if token.lower() not in _TSQL_STATEMENT_WORDS:
-            continue
-        after = tokens[i + 1] if i + 1 < len(tokens) else ""
-        if "." in (tokens[i - 1], after) or tokens[i - 1].lower() in _EXPRESSION_CONTINUES:
-            continue
-        return True
-    return False
+# T-SQL statements after a SELECT with no separator (``select 1 backup ...``,
+# ``select 1 use master``) are refused for SQL Server by parsing the whole text
+# as exactly one SELECT (``services.tsql_select``, review round 3, M2). The
+# word deny-list that ran on every dialect refused ordinary column names
+# (``open``, ``begin``) on all of them (M1) and is gone.
 # ``U&"d\0061ta"`` / ``U&'...'``: PostgreSQL reads the escapes, this filter
 # would read the text. Refused outright; the views mask the quoted part.
 _UNICODE_ESCAPED_RE = re.compile(r"(?<![A-Za-z0-9_$#])U&__DF[IQ]\d+__", re.I)
@@ -439,8 +429,6 @@ def _has_side_effect_functions(sql: str) -> bool:
 
     for code in sql_code_views(sql or ""):
         if _STATEMENT_WORD_RE.search(code) or _UNICODE_ESCAPED_RE.search(code) or _names_database_link(code):
-            return True
-        if _starts_tsql_statement(code):
             return True
     for scrubbed in sql_call_views(sql or ""):
         for match in _FUNC_CALL_RE.finditer(scrubbed):
@@ -1899,7 +1887,10 @@ def _run_sql_query(
     raw_query = body.query.strip()
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
-    if not _is_safe_sql(raw_query):
+    dialect = str(connector.type or "")
+    if str(connector.connection_string or "").lower().startswith("mssql"):
+        dialect = "mssql"
+    if not _is_safe_sql(raw_query, dialect=dialect):
         raise HTTPException(
             status_code=400,
             detail=sql_refusal_message(raw_query, playground=True),
@@ -2076,7 +2067,7 @@ def _run_snowflake_query(connector, body):
     raw_query = body.query.strip()
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
-    if not _is_safe_sql(raw_query):
+    if not _is_safe_sql(raw_query, dialect="snowflake"):
         raise HTTPException(
             status_code=400,
             detail=sql_refusal_message(raw_query, playground=True),
