@@ -121,16 +121,26 @@ store imports its node's file for that store (for example `tenants.json` or
 rewritten. While that import runs, other processes refuse to read the store
 (503) rather than serve a half-imported ACL or tenant list.
 
+Imported records are staged: no process serves them, and none treats the
+store as having data, until the import completes, and then all of them
+become visible in one write. A reader therefore gets the whole file or
+nothing, never part of it.
+
 The import claim has an owner and a lease (`DATAFLOW_CONTROL_STORE_IMPORT_LEASE_SECONDS`,
-default 30) that the importer renews before every record it writes. If the
-importing process dies or stalls past its lease:
+default 30) that the importer renews before every record it writes. The lease
+is timed on the database server's clock, so a replica whose clock runs ahead
+does not cut a live import short. If the importing process dies or stalls past
+its lease:
 
 - a process with the same file (the same pod restarted, or a shared data
   volume) finishes the import; it may do so at once, records are never
   written twice;
 - any other process takes the claim over once the lease has run out, removes
-  the records the dead import wrote, logs a warning and records the
-  `control_store.import_abandoned` security event. The store is then empty
+  the records the dead import staged, leaves an `import_abandoned` note in
+  `control_plane_docs`, logs a warning and records the
+  `control_store.import_abandoned` security event. A record the stalled
+  process still writes when it resumes is never served and is removed. The
+  store is then empty
   and serves again; a process holding its own file imports that one. With
   per-pod `emptyDir` data, the dead pod's file is gone with it: re-create what
   only it held through the UI or API.

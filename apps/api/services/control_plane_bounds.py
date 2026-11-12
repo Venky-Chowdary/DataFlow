@@ -167,6 +167,10 @@ class _BoundedDatabase:
     def __getitem__(self, name: str) -> "BoundedCollection":
         return BoundedCollection(self._database[name])
 
+    def command(self, *args: Any, **kwargs: Any) -> Any:
+        with deadline():
+            return self._database.command(*args, **kwargs)
+
 
 class BoundedCollection:
     """A pymongo collection whose every call is short and bounded (see module docstring)."""

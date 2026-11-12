@@ -221,15 +221,35 @@ class FakeCollection:
                     return _Result(deleted=1)
         return _Result(deleted=0)
 
-    def delete_many(self, flt: dict[str, Any]) -> None:
+    def delete_many(self, flt: dict[str, Any]) -> _Result:
         with self._lock:
-            for key in [k for k, d in self._docs.items() if _matches(d, flt)]:
+            keys = [k for k, d in self._docs.items() if _matches(d, flt)]
+            for key in keys:
                 del self._docs[key]
+        return _Result(deleted=len(keys))
+
+    def update_many(self, flt: dict[str, Any], update: dict[str, Any], **_kwargs: Any) -> _Result:
+        with self._lock:
+            ids = [k for k, d in self._docs.items() if _matches(d, flt)]
+        for doc_id in ids:
+            self.update_one({"_id": doc_id}, update)
+        return _Result(len(ids))
 
 
 class FakeDatabase:
     def __init__(self) -> None:
         self._collections: dict[str, FakeCollection] = {}
+        #: Seconds the database server's clock runs ahead of this host's (a test moves server time with it).
+        self.server_clock_offset = 0.0
+
+    def command(self, name: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        """``hello``: the server's own time, which the processes' clocks may disagree with."""
+        import time
+        from datetime import datetime, timezone
+
+        if name != "hello":
+            raise NotImplementedError(name)
+        return {"ok": 1, "localTime": datetime.fromtimestamp(time.time() + self.server_clock_offset, timezone.utc)}
 
     def __getitem__(self, name: str) -> FakeCollection:
         if name not in self._collections:

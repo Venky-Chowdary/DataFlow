@@ -66,7 +66,7 @@ from pathlib import Path
 from typing import Any
 
 from services import shared_doc_store as _sds
-from services.control_plane_import import LeasedImport
+from services.control_plane_import import STAGED, LeasedImport
 from services.shared_doc_store import (
     DOCS_COLLECTION,
     SharedDoc,
@@ -287,7 +287,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             return chosen, (offset + limit if more else None)
         self._prepare(coll)
         self._refuse_while_importing(coll)
-        cursor = coll.find({"store": self.name, "fence": {"$exists": False}})
+        cursor = coll.find({"store": self.name, "fence": {"$exists": False}, STAGED: self._visible()})
         docs = list(cursor.sort([("seq", -1), ("_id", -1)]).skip(offset).limit(limit + 1))
         more = len(docs) > limit
         ordered = [(str(d.get("key")), str(d.get("body") or "{}")) for d in docs[:limit]]
@@ -303,7 +303,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         coll = _sds._collection(ITEMS_COLLECTION)
         if coll is None:
             return 0
-        cursor = coll.find({"store": self.name, "part": str(part)}, {"_id": 1, "updated_at": 1})
+        cursor = coll.find({"store": self.name, "part": str(part), STAGED: self._visible()}, {"_id": 1, "updated_at": 1})
         older = list(cursor.sort([("updated_at", -1), ("_id", -1)]).skip(max(0, int(keep))))
         if not older:
             return 0
@@ -317,7 +317,8 @@ class SharedRecordSet(LeasedImport, SharedDoc):
 
     def _read(self, coll: Any, flt: dict[str, Any] | None = None) -> dict[str, tuple[int, str, int, str]]:
         items: dict[str, tuple[int, str, int, str]] = {}
-        for doc in coll.find(flt or {"store": self.name}):
+        # Records an unfinished import staged are not part of the store (services.control_plane_import).
+        for doc in coll.find({**(flt or {"store": self.name}), STAGED: self._visible()}):
             if "fence" in doc:  # a per-partition fence an earlier build wrote: not a record
                 continue
             items[str(doc.get("key"))] = (
@@ -589,15 +590,24 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             self.name, key, claim,
         )
 
-    def _write_imported(self, coll: Any, docs: Any, key: str, row: Row, seq: int, *, stamp: str = "") -> None:
+    def _write_imported(
+        self, coll: Any, docs: Any, key: str, row: Row, seq: int, *, stamp: str = "", epoch: int | None = None,
+    ) -> None:
         """Insert one imported or split record unless it exists; a claim another record holds is reported.
 
-        ``stamp`` is the imported file's digest: an abandoned import's records are removed by it.
+        ``stamp`` is the imported file's digest. An imported record is staged
+        under the import's ``epoch``: invisible until the import completes.
         """
         doc = self._record_doc(key, row, seq)
-        doc.pop("_id")
         if stamp:
             doc["imp"] = stamp
+        if epoch is not None:
+            if not self._stage_record(coll, doc, epoch):
+                doc.pop("uniq", None)
+                self._stage_record(coll, doc, epoch)
+                self._claim_each(coll, docs, {"_id": doc["_id"], "key": key}, row[2])
+            return
+        doc.pop("_id")
         try:
             coll.update_one({"_id": self._item_id(key)}, {"$setOnInsert": doc}, upsert=True)
         except Exception as exc:
