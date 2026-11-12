@@ -6,7 +6,8 @@ pairs that do lose values on an existing destination column:
 * a character-counted ``varchar(10)`` into Oracle ``VARCHAR2(10)`` or
   ``VARCHAR2(10 BYTE)`` (byte semantics, the Oracle default): ten characters
   are up to forty bytes in AL32UTF8;
-* PostgreSQL bare ``varchar`` (unbounded) into ``VARCHAR(5)``;
+* PostgreSQL bare ``varchar`` (unbounded) into ``VARCHAR(5)`` (a SQLite or
+  DuckDB bare ``VARCHAR`` is also an inferred-string stamp and stays unknown);
 * ``bigint`` (19 digits) into Oracle ``NUMBER(10)``;
 * ``double precision`` (binary64) into MySQL ``FLOAT`` (binary32);
 * SQL Server ``float`` (binary64, ``FLOAT(53)``) into PostgreSQL ``REAL``.
@@ -80,6 +81,8 @@ def test_missed_lossy_pair_is_now_lossy(source_db, source_type, dest_db, target_
         ("", "varchar", "postgresql", "VARCHAR(5)"),
         ("mysql", "varchar(10)", "postgresql", "VARCHAR(10)"),
         ("postgresql", "varchar", "postgresql", "TEXT"),
+        ("sqlite", "VARCHAR", "postgresql", "VARCHAR(20)"),
+        ("duckdb", "VARCHAR", "postgresql", "VARCHAR(20)"),
         # Integer digits that fit.
         ("postgresql", "integer", "oracle", "NUMBER(10)"),
         ("postgresql", "bigint", "oracle", "NUMBER(19)"),

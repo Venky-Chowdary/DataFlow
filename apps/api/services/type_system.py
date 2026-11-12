@@ -5025,8 +5025,10 @@ def string_width_would_narrow(
     return src_w > tgt_w
 
 
-#: Engines whose bare ``VARCHAR`` / ``CHARACTER VARYING`` has no length limit.
-_BARE_VARCHAR_UNBOUNDED_ENGINES = frozenset({"postgresql", "sqlite", "duckdb"})
+#: Engines whose introspected bare ``VARCHAR`` / ``CHARACTER VARYING`` is an
+#: unbounded column. SQLite and DuckDB are left out: their bare VARCHAR is also
+#: the stamp of an inferred string whose width the sampled population proves.
+_BARE_VARCHAR_UNBOUNDED_ENGINES = frozenset({"postgresql"})
 
 
 def _bare_varchar_unbounded(source_type: str) -> bool:
@@ -7661,18 +7663,20 @@ def integer_storage_bounds(
 def integer_decimal_digits_would_narrow(source_type: str, target_type: str) -> bool:
     """True when an integer lands on DECIMAL(p,s) with fewer than its digits.
 
-    ``BIGINT`` holds 19 digits; Oracle ``NUMBER(10)`` holds 10 (audit 12). The
-    source width resolves under its engine; an unknown width is not invented.
+    ``BIGINT`` holds 19 digits; Oracle ``NUMBER(10)`` holds 10 (audit 12). Only
+    an explicit width counts: the ambiguous ``INTEGER``/``INT`` is also the
+    stamp of an inferred file column, whose values the per-cell fit check
+    judges, so it is not read as 64-bit here.
     """
     if normalize_logical_type(source_type) != LOGICAL_INTEGER:
         return False
     if normalize_logical_type(target_type) != LOGICAL_DECIMAL:
         return False
     precision, scale = parse_numeric_precision_scale(target_type)
-    bounds = integer_storage_bounds(source_type, dest_db=active_source_engine() or "")
-    if precision is None or bounds is None:
+    bits = integer_bit_width(source_type)
+    if precision is None or bits is None:
         return False
-    digits = max(len(str(abs(bounds[0]))), len(str(bounds[1])))
+    digits = integer_max_text_width(source_type) - (0 if bits % 2 else 1)
     return digits > precision - (scale or 0)
 
 
