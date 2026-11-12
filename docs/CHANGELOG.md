@@ -4,8 +4,24 @@ A factual summary of what merged into the main line recently. It is taken from
 the subjects of merge commits only (`git log --merges --first-parent`). It
 does not describe changes that are not named there.
 
+## 12 November 2026
+
+- **Workspace isolation and residency** (PR 403). Deny-by-default residency
+  addressing, per-workspace file volumes, and ownership checks on ids named
+  in a request body. Operators should read the upgrade notes before
+  deploying: see
+  [operate/backup-and-upgrade.md](operate/backup-and-upgrade.md#workspace-isolation-and-residency-pr-403)
+  and [operate/security.md](operate/security.md#data-residency).
+- **Training runtime and egress** (PR 410). Training runs on its own thread
+  with a stop event. The egress guard's skip of AWS region labels is strict.
+- **Schedules** (PR 409). Fixes a race when a schedule run is finalized, and
+  classifies a failure by an HTTP status code, not by a port that contains
+  the same digits.
+
 ## 11 November 2026
 
+- **Test database** (PR 408). Mail threads are kept out of the enterprise
+  test database.
 - **Trust Report states** (PR 401). The Trust Report shows honest states for
   failed and unverified runs. Destination labels are built from the parts of
   the destination that are set.

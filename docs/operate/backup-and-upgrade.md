@@ -56,6 +56,7 @@ the records are files here even when MongoDB is connected:
 | `audit_chain.key` | The audit signing key, when no key is configured and no database is connected |
 | `mcp_invocations.jsonl` | MCP call log |
 | `cdc_mapping_reviews.jsonl` | CDC schema change reviews |
+| `sqlite/`, `duckdb/` | Files of SQLite and DuckDB connectors, one area per workspace under `_workspaces/<workspace id>/`. `_workspaces/.partitioned_at` records when the volume was partitioned; it decides which older files can be moved to their workspace (see [security.md](security.md#sqlite-and-duckdb-volumes)). Keep it. |
 
 Other files in the directory belong to stores that also have a database path
 (for example `integrations.json`, `usage_metering.json`,
@@ -72,7 +73,7 @@ for this page.
 |---|---|---|
 | Upload directory | `DATAWRAP_UPLOAD_DIR` | Uploaded source files. A job that reads an upload cannot be resumed if the file is gone. |
 | Vector store directory | `DATAWRAP_VECTOR_STORE_DIR` | Pilot's local search index |
-| Exports | `DATAWRAP_EXPORTS_DIR` or the export bucket | Files produced by file-export transfers |
+| Exports | `DATAWRAP_EXPORTS_DIR` or the export bucket | Files produced by file-export transfers. On the API host, one folder per workspace under `_workspaces/<workspace id>/`; the top folder holds unscoped and older files. |
 | Object storage | `S3_*`, `BLOB_ROOT`, `EXPORT_*` settings | Staged uploads and exports, when configured |
 | Redis | `DATAWRAP_CDC_LEASE_REDIS_URL` | CDC source leases only. Nothing that needs a backup. |
 
@@ -134,6 +135,10 @@ backfill code that runs at start (for example
 - Workers have no graceful shutdown. Stop them when no job is running, or
   expect interrupted jobs to wait for the orphan sweep and then resume from
   their checkpoint.
+- The API started by `scripts/start-api.sh` waits at most
+  `DATAWRAP_GRACEFUL_SHUTDOWN_SECONDS` (default 10) for open connections on
+  SIGTERM, then stops its background work. Background training stops within
+  about a second; a run cut short writes no partial output.
 
 ### Things to check after an upgrade
 
@@ -156,6 +161,105 @@ backfill code that runs at start (for example
 - **Flag names.** `DATAFLOW_` names keep working. See the prefix rule in
   [configuration.md](configuration.md).
 - **API keys.** Keys starting `dfk_` stay valid.
+
+
+#### Workspace isolation and residency (PR 403)
+
+Take a backup of the data directory and the exports folder before this
+upgrade: the API moves files in both at its first start.
+
+- **A workspace with a data region is now fenced on every path.** Job
+  creation from any source (REST, schedules, sync-now, retries, MCP, Pilot),
+  every run start (resume, retry, worker claim, orphan sweep), quarantine
+  replay, CDC drift repair and query export are all checked. Before, only two
+  transfer routes checked S3 and DynamoDB destinations. Expect scheduled runs
+  to such destinations to be refused if their region cannot be proven.
+- **No region is allowed implicitly.** `us-east-1` is fenced like any other,
+  and a destination whose region cannot be proven is refused. An IP address,
+  a custom domain, an S3-compatible endpoint, GCS, BigQuery, ADLS, an Iceberg
+  warehouse or a SaaS API needs a platform administrator's region verification
+  (`POST /api/v1/connectors/saved/{id}/region-verification`). Any later edit
+  to the connector's address or credentials clears that verification.
+- **Set `DATAWRAP_DEFAULT_REGION`** if a fenced workspace writes to a local
+  file, a file export, SQLite, DuckDB or a database on loopback. Without it
+  those destinations are refused there.
+- **Connection options are deny by default in a fenced workspace.** A saved
+  connector or request whose connection string or `extra` carries a key not
+  on its family's allowlist is refused with a 422 naming the key. Remove the
+  key, or ask a platform administrator. See
+  [security.md](security.md#connection-options-in-a-fenced-workspace-deny-by-default).
+- **A tenant record with no workspace** fences every workspace without a
+  region of its own. If several such records name different regions, every
+  destination is refused until each record is assigned to its workspace.
+- **S3 writes in a fenced workspace read the bucket's region first.** The
+  credentials need `s3:GetBucketLocation` (or permission for `HeadBucket`);
+  a bucket whose region cannot be read is refused.
+- **Only a platform administrator can set, change or clear a data region.** A
+  `data_region` sent in a request no longer changes anything.
+- **Exports move to per-workspace folders.** At start, in the background, each
+  file in the flat exports folder whose owner the job records prove moves to
+  `_workspaces/<workspace id>/`. A recurring append export that runs first
+  moves its own file and continues it; when it cannot prove ownership it
+  starts a new file and its run summary says why. Files with no provable owner stay where they are and can be
+  downloaded only by a platform administrator. Scripts that read the exports
+  folder directly must look in the workspace folders.
+- **SQLite and DuckDB files move to per-workspace areas.** At first start the
+  API writes the partition marker, then moves each flat file that only one
+  workspace's connectors (saved before the marker) name. A file named by
+  connectors of two workspaces, or by none, stays in the flat area and no
+  workspace can open it any more. Connectors keep their stored path; it
+  resolves to the moved file.
+- **Ids from another workspace are 404.** A schedule, transform, export,
+  transfer or access grant whose request body names another workspace's
+  connector, contract, recipe, plan, job or schedule is refused with 404, as
+  if the id did not exist.
+- **Query playground.** SQL Server queries must parse as one `SELECT`; an
+  unquoted name that is a T-SQL reserved keyword must be quoted (`[open]`).
+  DuckDB path and URL readers and MotherDuck databases are refused. More
+  functions with side effects are refused on every dialect.
+- **SSO auto-provisioning with no allowed domains admits no new identity.**
+  Before, it admitted every identity the provider returned. Set
+  `DATAWRAP_SSO_ALLOWED_DOMAINS` if you rely on auto-provisioning. The API
+  logs a warning at start while the list is empty.
+- **Audit anchor receipts.** With `DATAWRAP_AUDIT_ANCHOR_PROVIDER` set to a
+  provider other than the local file, receipts are now labelled as the local
+  store and carry `requested_provider`, and the API logs a warning. The write
+  went to the local file before too; only the label changes.
+- **Flag names.** 64 flags that were read only under their `DATAFLOW_` name
+  now accept `DATAWRAP_` too, which wins. A `DATAWRAP_` value that was ignored
+  before takes effect now. An empty `DATAWRAP_` value no longer hides a set
+  `DATAFLOW_` one, and the API logs a warning at start for each flag set to
+  two different values. See [configuration.md](configuration.md#the-prefix-rule).
+- **Browser headers.** The web container now sends a Content-Security-Policy.
+  If you changed `apps/web/index.html`'s inline script or the nginx files,
+  update the hash (see [security.md](security.md#browser-security-headers)).
+
+#### Schedules (PR 409)
+
+- **Run now can answer 409 `run_still_recording`** with a `Retry-After`
+  header when the previous run's outcome is still being written. Retry after
+  the wait. The scheduler defers that one schedule and carries on with the
+  others.
+- **Failure classification.** A 403 or 429 in an error message counts as an
+  HTTP status only after words such as `http`, `status`, `code` or `error`, at
+  the start of the message, or in a known shape (`403 Forbidden`,
+  `429 Too Many Requests`). Numbers in ports, row counts, positions or ids no
+  longer make a failure look like a credential refusal or rate limiting, so
+  some failures are now retried, or not, differently.
+- A finished run is no longer visible without its outcome, and a parked retry
+  is not counted as a later run.
+
+#### Training and egress (PR 410)
+
+- **`DATAWRAP_TRAINING`.** Set, only `1`, `true`, `yes` or `on` turns
+  background training on; any other value, an empty one included, leaves it
+  off. Before, anything but `off`, `0` or `false` turned it on. Unset is
+  unchanged: on outside production, off in production.
+- **AWS region labels.** For S3, DynamoDB and Kinesis connectors that keep
+  the signing region in `host` (for example `us-east-1`), the egress guard no
+  longer looks the label up in DNS when the client dials another endpoint. A
+  label that the client does dial (a dot-less host plus a port) is still
+  checked.
 
 ## Not covered
 
@@ -181,3 +285,13 @@ backfill code that runs at start (for example
 - `apps/api/services/decision_kernel/execute_gate.py`, `apps/api/services/decision_kernel/models.py`
 - `apps/api/services/orphan_jobs.py`, `apps/api/services/checkpoint_service.py`
 - `apps/api/services/integrations_store.py` (API key prefixes)
+- `apps/api/services/data_residency.py`, `apps/api/services/residency_addressing.py`,
+  `apps/api/connectors/s3_residency.py` (residency upgrade notes)
+- `apps/api/services/export_migration.py`, `apps/api/services/embedded_volume.py`
+  (file moves at start)
+- `apps/api/services/sso_authorization.py`, `apps/api/services/audit_anchor.py`,
+  `apps/api/services/brand_env.py`
+- `apps/api/services/schedule_runner.py`, `apps/api/services/failure_retry_policy.py`
+- `apps/api/src/ai/training/training_scheduler.py`,
+  `apps/api/src/ai/training/training_runtime.py`, `apps/api/services/egress_guard.py`
+- `scripts/start-api.sh` (graceful-shutdown bound)
