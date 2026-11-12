@@ -758,3 +758,133 @@ def test_a_contended_retry_write_is_never_written_blind(
         assert final.running is True and final.running_job_id == "job-1"
         assert final.retry_attempt == 0 and final.retry_at is None
     assert len(peer_writes) == store._SAVE_CAS_ATTEMPTS
+
+
+# --- Duplicates that reach the store ------------------------------------------
+
+
+def test_a_duplicate_record_after_the_next_run_claimed_changes_nothing(store, runner):
+    """Store level, same verdict (scenario E): the run was recorded; jE2 runs now."""
+    before = _next_run_claimed(store, runner, "late-dup", REFUSED_BY_GATE, approve=True)
+    finding = {"id": "apr_dup", "status": "open", "code": "RUN_REFUSED", "job_id": "jE1",
+               "occurrences": 1}
+    outcome = store.RunOutcome(lambda after: {"approval_request": finding,
+                                              "last_status": "needs_approval"})
+
+    store.mark_schedule_run(before.id, "jE1", status="failed",
+                            run_entry={"job_id": "jE1", "status": "failed"}, outcome=outcome)
+
+    after = store.get_schedule(before.id)
+    assert outcome.recorded is False
+    assert _newer_run(after) == _newer_run(before)
+    assert after.approval_request == before.approval_request
+    assert after.last_status == before.last_status
+
+
+def test_a_second_retry_write_for_one_attempt_leaves_the_retry_alone(store):
+    """schedule_retry twice for one attempt; the retry claimed in between."""
+    sched, run_id = _claimed(store, "retry-twice", "job-1", max_retries=1,
+                             retry_backoff_seconds=0)
+    entry = {"run_id": run_id, "job_id": "job-1", "status": "failed", "attempt": 0,
+             "retry_scheduled": True}
+    first = store.schedule_retry(sched.id, retry_at=_now(), attempt=1, run_entry=entry)
+    assert first is not None and first.running is False and first.retry_attempt == 1
+    assert store.mark_schedule_running(sched.id, "beat-b", "job-retry") is not None
+    claimed = store.get_schedule(sched.id)
+
+    store.schedule_retry(sched.id, retry_at=_now() + timedelta(hours=1), attempt=1,
+                         run_entry=entry)
+
+    after = store.get_schedule(sched.id)
+    assert after.running is True and after.running_job_id == "job-retry"
+    assert after.retry_at == claimed.retry_at
+    assert after.run_history == claimed.run_history
+
+
+def _peer_recorded(store, schedule_id: str, job_id: str):
+    """A peer replica's finalizer records ``job_id``'s refused run, raw."""
+    coll = store._mongo_backend().get_database()["pipeline_schedules"]
+    finding = {"id": "apr_peer", "status": "open", "code": "RUN_REFUSED",
+               "job_id": job_id, "occurrences": 1, "finding": "peer"}
+
+    def write():
+        coll.update_one({"_id": schedule_id}, {
+            "$set": {"running": False, "running_job_id": "", "running_instance": "",
+                     "running_started_at": None, "last_job_id": job_id,
+                     "last_status": "needs_approval", "run_count": 1,
+                     "approval_request": finding},
+            "$inc": {"version": 1},
+        })
+
+    return write, finding
+
+
+@mongo_only
+def test_refusal_before_a_job_recorded_by_another_replica_is_not_announced_twice(
+    store, runner, monkeypatch, caplog
+):
+    sched, _run = _claimed(store, "pre-peer", "job-pre")
+    write, finding = _peer_recorded(store, sched.id, "job-pre")
+    state = _write_inside_finalize(store, monkeypatch, write)
+
+    with caplog.at_level("INFO"):
+        runner._park_on_decision(
+            sched.id, ValueError("Schedule cannot run — the recipe cannot be applied."),
+            attempt=0, job_id="job-pre",
+        )
+
+    assert not state["pending"], "the peer write never landed inside the finalize"
+    final = store.get_schedule(sched.id)
+    assert final.run_count == 1 and final.approval_request == finding
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "approval.requested" not in events
+    assert runner.notified == [], "the peer already recorded and announced this run"
+
+
+@mongo_only
+def test_start_error_recorded_by_another_replica_is_not_announced_twice(
+    store, runner, monkeypatch, caplog
+):
+    reason = "The scheduler could not start this run: RuntimeError: boom"
+    sched, run_id = _claimed(store, "start-peer", "job-start")
+    store.record_run_history(sched.id, {
+        "run_id": "run_before", "job_id": "job-before", "status": "failed",
+        "error": reason, "reason": reason,
+    })
+    write, finding = _peer_recorded(store, sched.id, "job-start")
+    state = _write_inside_finalize(store, monkeypatch, write)
+
+    with caplog.at_level("INFO"):
+        runner._fail_unstarted_run(sched.id, run_id, RuntimeError("boom"), attempt=0,
+                                   manual=False)
+
+    assert not state["pending"], "the peer write never landed inside the finalize"
+    final = store.get_schedule(sched.id)
+    assert final.run_count == 1 and final.approval_request == finding
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "approval.requested" not in events
+    assert runner.notified == [], "the peer already recorded and announced this run"
+
+
+def test_drift_preflight_parked_is_not_counted_again_by_the_run(store, runner, caplog):
+    """Preflight parked job-g13 on drift; the run's own finalizer sees the same refusal."""
+    sched, _run = _claimed(store, "drift-once", "job-g13")
+    parked = runner._finding_patch(
+        sched, G13, attempt=0, job_id="job-g13",
+        evidence={"gate_codes": ["g13_source_coverage.unaccounted"],
+                  "unmapped_columns": ["currency"]},
+    )
+    assert parked and parked["approval_request"]["code"] == "SOURCE_DRIFT"
+    store.update_schedule(sched.id, parked)
+    preflight = store.get_schedule(sched.id).approval_request
+    runner.jobs["job-g13"] = REFUSED_BY_G13
+
+    with caplog.at_level("INFO"):
+        runner._finalize_run(sched.id, "job-g13", 0, _now())
+
+    final = store.get_schedule(sched.id)
+    assert final.approval_request == preflight
+    assert final.approval_request["occurrences"] == 1
+    assert final.run_count == 1
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "approval.requested" not in events

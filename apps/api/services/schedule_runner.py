@@ -1632,8 +1632,10 @@ def _park_on_decision(
         outcome=outcome,
     )
     _announce_finding(schedule_id, outcome)
-    if updated is not None:
+    if updated is not None and outcome.recorded:
         # No job ran, so no job-level notification will ever say this failed.
+        # Only the caller that recorded the run says so: another replica's
+        # finalizer that recorded it first has already notified.
         _notify_schedule(updated, job_id, "failed", {"error": message})
 
 
@@ -2202,7 +2204,8 @@ def _fail_unstarted_run(
         emit_event(logger, "schedule.run.fire", outcome="failed", reason_code="start_error",
                    schedule_id=schedule_id, attempt=attempt + 1, error=exc)
         _announce_finding(schedule_id, outcome)
-        if updated is not None:
+        if updated is not None and outcome.recorded:
+            # Only the caller that recorded the run notifies (see _park_on_decision).
             _notify_schedule(updated, job_id, "failed", {"error": reason})
     except Exception:  # noqa: BLE001 — recording must not mask the original error
         logger.exception("Schedule %s failed run %s was not recorded", schedule_id, run_id)
