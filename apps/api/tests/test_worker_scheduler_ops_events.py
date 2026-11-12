@@ -392,7 +392,8 @@ def test_schedule_retry_and_give_up_events(monkeypatch, caplog):
     monkeypatch.setattr(schedule_runner, "_run_entry", lambda *_args: {})
     contract = importlib.import_module("services.execution_engine_contract")
     monkeypatch.setattr(contract, "committed_rows_of", lambda _doc: (0, True))
-    monkeypatch.setattr(schedule_store, "schedule_retry", lambda *_args, **_kwargs: None)
+    # schedule_retry returns the schedule when this call parked the retry.
+    monkeypatch.setattr(schedule_store, "schedule_retry", lambda *_args, **_kwargs: schedule)
     monkeypatch.setattr(schedule_store, "mark_schedule_run", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(schedule_runner, "_park_reason", lambda *_args: None)
     monkeypatch.setattr(schedule_runner, "_notify_schedule", lambda *_args: None)

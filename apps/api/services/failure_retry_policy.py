@@ -36,6 +36,53 @@ _DETERMINISTIC_PHASES = frozenset(
     {"validating", "validate", "preflight", "mapping", "planning"}
 )
 
+
+#: The reason phrase a server sends with each status that is matched here.
+_STATUS_REASON = {"403": "forbidden", "429": "too many requests"}
+
+
+def _http_status(code: str) -> str:
+    """``code`` as an HTTP status, read only where the message says it is one.
+
+    A bare ``403`` matched ``port 40312 failed: Connection refused``, so a
+    refused connection on about one ephemeral port in 180 parked as a
+    credential refusal instead of being retried (the r5 schedule e2e flake).
+    Excluding the shapes a number took one by one (a port, a position, a row
+    count, an id) never ended: a key value (``Key (id)=(429)``), a column
+    width (``varying(429)``), a line, a character or an index each still read
+    as a status. So the code counts only in a status context:
+
+    * after ``http`` (``HTTP 403``, ``HTTP/1.1 403``, ``HTTP-429``), ``status``
+      (``status=403``, ``statusCode: 403``, JSON ``"status":429``), ``code``
+      (``Error Code 403``, JSON ``"code":403``, ``code=E429``), ``error``
+      (``HTTP Error 403``, ``HTTPError: 403``, ``ApiError(429``) or
+      ``exception(`` (``AuthorizationException(403``), with only punctuation
+      or spaces between;
+    * at the very start of the message (``403 Client Error``, ``E403 ...``);
+    * in a recognised shape: ``(403)`` or ``[403]`` after a space,
+      ``403 Forbidden``, ``429 Too Many Requests``, ``403 Client Error``,
+      google-api-core's ``403 POST https://...`` and urllib3's
+      ``too many 429 error responses``.
+
+    Digits after it keep it a number (``40312``, ``403.5``, ``403-1``,
+    ``req_429abc``). Matched against lower-cased text.
+    """
+    num = rf"{code}(?!\w|-\d|\.\d)"
+    alone = r"(?<![\w.:/-])"
+    return (
+        r"(?:"
+        rf"(?:\bhttps?(?:/\d(?:\.\d)?)?|\bstatus(?:[ _]?code)?|\bcode|error|exception)"
+        rf"[\s:=(\[{{'\"/-]+e?{num}"
+        rf"|^e?{num}"
+        rf"|(?<!\S)[(\[]{num}[)\]]"
+        rf"|{alone}{num}[\s:'\"-]*{_STATUS_REASON[code]}"
+        rf"|{alone}{num} client error"
+        rf"|{alone}{num} (?:get|post|put|patch|delete|head) (?:https?://|/)"
+        rf"|too many {num} error responses"
+        r")"
+    )
+
+
 # Deterministic refusals the engine states in words. Each is owned by a gate or
 # a contract check and is resolved by changing the job, not by trying again.
 _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -72,7 +119,7 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
     # Classifying them differently made an unattended retry depend on the
     # server's pg_hba.conf, not on the failure.
     (r"authentication failed|invalid credentials|access denied|permission "
-     r"denied|not authorized|403|role \"[^\"]*\" does not exist|"
+     r"denied|not authorized|" + _http_status("403") + r"|role \"[^\"]*\" does not exist|"
      r"login failed for user|ora-01017|invalid username/password",
      "Credentials or grants are rejected — fix them on the connector."),
     (r"strict error policy blocks partial write",
@@ -142,7 +189,7 @@ _TRANSIENT_PATTERNS: tuple[str, ...] = (
     r"too many connections|connection pool|max connections",
     r"temporarily unavailable|service unavailable|try again|please retry",
     r"broken pipe|eof occurred|reset by peer|network is unreachable",
-    r"rate limit|throttl|429|slow ?down",
+    r"rate limit|throttl|slow ?down|too many requests|" + _http_status("429"),
     r"50[0234] (server )?error|internal server error|bad gateway",
     r"worker (lost|died|terminated)|lease expired|heartbeat lost",
     r"warehouse .*(suspend|resum)|is being resumed",

@@ -166,19 +166,25 @@ def note_rebuild_failure(schedule_id: str, job_id: str, error: str) -> dict[str,
     recovery = req.get("recovery") if isinstance(req.get("recovery"), dict) else {}
     if str(recovery.get("job_id") or "") != str(job_id):
         return None
-    failed = {**recovery, "outcome": "failed", "error": str(error or "")[:500],
-              "finished_at": datetime.now(timezone.utc).isoformat()}
-    update_schedule(schedule_id, {"approval_request": {**req, "recovery": failed}})
-    _audit(
-        sched,
-        action=str(recovery.get("action") or ACTION_REBUILD),
-        actor=str(recovery.get("actor") or ""),
-        reason=str(recovery.get("reason") or ""),
-        details={"dest_table": sched.dest_table, "job_id": job_id, "phase": "rebuild_failed",
-                 "error": str(error or "")[:300]},
-        outcome="failed",
-        status=409,
-    )
+    if str(recovery.get("outcome") or "") == "failed":
+        # Recorded and audited already: this job is finalized again (the beat
+        # after a finalize whose run write lost to other writers). The context
+        # still travels into the run's outcome.
+        failed = recovery
+    else:
+        failed = {**recovery, "outcome": "failed", "error": str(error or "")[:500],
+                  "finished_at": datetime.now(timezone.utc).isoformat()}
+        update_schedule(schedule_id, {"approval_request": {**req, "recovery": failed}})
+        _audit(
+            sched,
+            action=str(recovery.get("action") or ACTION_REBUILD),
+            actor=str(recovery.get("actor") or ""),
+            reason=str(recovery.get("reason") or ""),
+            details={"dest_table": sched.dest_table, "job_id": job_id,
+                     "phase": "rebuild_failed", "error": str(error or "")[:300]},
+            outcome="failed",
+            status=409,
+        )
     return {
         "continuity_finding": {"id": req.get("id"), "code": req.get("code"),
                                "finding": str(req.get("finding") or "")[:500]},
@@ -332,7 +338,7 @@ def recover_schedule_destination(
         from services.schedule_runner import ScheduleStartError, _run_schedule
 
         # The run starts first, and the finding stays open until it SUCCEEDS:
-        # the runner closes it on a completed run (close_finding_after_successful_run)
+        # the runner closes it on a completed run (finding_closed_by_success)
         # and sets the cadence; a run that starts and then fails leaves it
         # open (or parks a fresh finding). A start that is refused, raises, or
         # returns no job is a failed recovery: audited, finding untouched.
