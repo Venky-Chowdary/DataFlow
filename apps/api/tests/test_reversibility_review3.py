@@ -472,3 +472,73 @@ def test_low_a_header_taken_from_a_lower_row_is_a_row_change():
     assert "people: rows above the header" in gate_for(lowered)["message"]
     for first in ({"header_row": 1}, {"header_row": 0}, {}):
         assert report(first)["verdict"] == "reversible"
+
+
+# ------------------------------------------------------------------- Low: quarantine replay runs g24
+
+
+def _replay_parent(tmp_path, monkeypatch, fake, *, require: bool):
+    import importlib
+
+    import services.quarantine_dlq as dlq
+    from src.transfer.models import transfer_request_to_dict
+    from tests.test_shape_buffered_ops_stream_e2e import _request
+
+    router = importlib.import_module("src.routers.connectors_router")
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    monkeypatch.setattr(router, "get_mongodb_service", lambda: fake)
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _exec(src, "CREATE TABLE t (id TEXT, v TEXT)")
+    _exec(src, "INSERT INTO t (id, v) VALUES (?, ?)", [("1", "10"), ("2", "BAD")])
+    req = _request(src, dst, [{"op": "cast_column", "column": "v", "options": {"to_type": "integer"},
+                               "on_error": "divert"}])
+    job_id = "rq" + uuid.uuid4().hex[:12]
+    fake.update_job_status(job_id, "pending", transfer_request={})
+    from src.transfer.engine import UniversalTransferEngine
+
+    assert UniversalTransferEngine().execute_tracked(req, job_id).success
+    stored = transfer_request_to_dict(req)
+    stored["require_reversibility"] = require  # the parent's own flag, as a run that required it stores it
+    fake.update_job_fields(job_id, {"id": job_id, "job_id": job_id, "transfer_request": stored})
+    return job_id, dst
+
+
+def _http():
+    class _State:
+        pass
+
+    class _Req:
+        state = _State()
+        headers: dict = {}
+
+    return _Req()
+
+
+def test_low_a_quarantine_replay_of_a_reversible_job_runs_g24(tmp_path, fake, monkeypatch):
+    """The replay writes with skip_preflight: g24 is run on the replayed rows, and a lossy override is refused."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
+
+    job_id, dst = _replay_parent(tmp_path, monkeypatch, fake, require=True)
+    jobs_before = set(fake.jobs)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(replay_job_quarantine(job_id, QuarantineReplayRequest(
+            rows=[{"id": "2", "v": "42"}], transform_overrides={"v": "hash_pii"}), _http()))
+    assert caught.value.status_code == 409 and "must be reversible" in str(caught.value.detail), caught.value.detail
+    assert "t.v" in str(caught.value.detail) and set(fake.jobs) == jobs_before, "a refused replay starts no job"
+    assert ("2",) not in _q(dst, "SELECT id FROM t"), "nothing was written"
+
+
+def test_low_a_quarantine_replay_without_the_flag_is_unchanged(tmp_path, fake, monkeypatch):
+    import asyncio
+
+    from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
+
+    job_id, dst = _replay_parent(tmp_path, monkeypatch, fake, require=False)
+    resp = asyncio.run(replay_job_quarantine(job_id, QuarantineReplayRequest(
+        rows=[{"id": "2", "v": "42"}], transform_overrides={"v": "hash_pii"}), _http()))
+    assert resp.get("rows_written", 0) >= 1, resp
+

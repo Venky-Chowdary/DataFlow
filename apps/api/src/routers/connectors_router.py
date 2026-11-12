@@ -2588,6 +2588,13 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
     except (ValueError, ContractViolation) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # The replay writes with skip_preflight, so a job that must be reversible runs g24 here, on the rows
+    # it replays: a lossy override is refused, conditional columns are enforced while writing (review 3).
+    from services.reversibility_sources import execute_gate
+
+    reversibility = execute_gate(child_req, (mappings, schema, None, records, len(records)))
+    if reversibility is not None and reversibility.get("status") == "block":
+        raise HTTPException(status_code=409, detail=str(reversibility.get("message") or "g24_reversibility"))
     child_job_id = engine._create_pending_job(child_req)
     mongo.update_job_status(
         child_job_id,
