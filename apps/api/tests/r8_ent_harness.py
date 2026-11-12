@@ -147,9 +147,22 @@ def ent(monkeypatch, tmp_path):
 
     from src.main import app
 
+    # The mail outbox sweeper and send lane are process-wide threads: one left
+    # running by an earlier test's app lifespan resolves Mongo through the
+    # singleton patched above, so its next tick writes into this test's
+    # database (a ``mail_outbox`` collection appeared mid-test). Stop it and
+    # let any delivery already queued land before the test starts, and again
+    # before the database is dropped.
+    from services.signup_service import drain_mail_lane, stop_mail_outbox_sweeper
+
+    stop_mail_outbox_sweeper()
+    drain_mail_lane()
+
     db = svc.get_database()
     try:
         yield Ent(app, db, tmp_path)
     finally:
+        stop_mail_outbox_sweeper()
+        drain_mail_lane()
         svc.client.drop_database(name)
         svc.disconnect()
