@@ -226,10 +226,15 @@ def mark_typed_text_carriers(
     """
     from services.type_system import normalize_logical_type
 
-    declared = {str(k).lower(): str(v or "") for k, v in (source_catalog or {}).items()}
+    declared = {str(k): str(v or "") for k, v in (source_catalog or {}).items()}
     out = dict(basis)
     if not declared:
         return out
+    # The exact name first; a case-insensitive match only when it is unique —
+    # 'b' (text) beside 'B' (boolean) is two columns (review 2 F3).
+    folded: dict[str, list[str]] = {}
+    for name, ddl_text in declared.items():
+        folded.setdefault(name.lower(), []).append(ddl_text)
     for mapping in mappings or []:
         if not isinstance(mapping, dict):
             continue
@@ -237,7 +242,9 @@ def mark_typed_text_carriers(
         ddl = str(out.get(target) or "")
         if not ddl or not is_text_family(ddl):
             continue
-        source_ddl = declared.get(str(mapping.get("source") or "").lower(), "")
+        source = str(mapping.get("source") or "")
+        matches = folded.get(source.lower(), [])
+        source_ddl = declared.get(source, matches[0] if len(matches) == 1 else "")
         kind = _CARRIED_KINDS.get(normalize_logical_type(source_ddl)) if source_ddl else None
         if kind:
             out[target] = carrying(ddl, kind)
