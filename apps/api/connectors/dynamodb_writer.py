@@ -601,6 +601,27 @@ def _sparse_update_item(
     )
 
 
+def dynamodb_client_cfg(dest: dict[str, Any]) -> dict[str, Any]:
+    """The client config the writer dials, from a resolved destination config.
+
+    One derivation for the write and Gate-8's read-back (security follow-up 5):
+    the listen port as the engine hands it to the writer, and ``ssl``, so the
+    endpoint is the one ``egress_guard.aws_sdk_endpoint`` judged (a TLS
+    endpoint used to be written over plain http).
+    """
+    from src.transfer.connector_capabilities import effective_port
+
+    return {
+        "host": dest.get("host") or "",
+        "port": effective_port("dynamodb", dest.get("port")),
+        "username": dest.get("username") or "",
+        "password": dest.get("password") or "",
+        "connection_string": dest.get("connection_string") or "",
+        "endpoint_url": dest.get("endpoint_url") or "",
+        "ssl": bool(dest.get("ssl")),
+    }
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -624,17 +645,18 @@ def write_mapped_rows(
     conflict_columns: list[str] | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
-    del schema, ssl, backfill_new_fields
+    del schema, backfill_new_fields
     policy = transform_error_policy(error_policy)
     table = table_name or database
-    cfg = {
+    cfg = dynamodb_client_cfg({
         "host": host,
         "port": port,
         "username": username,
         "password": password,
         "connection_string": connection_string,
         "endpoint_url": endpoint_url,
-    }
+        "ssl": ssl,
+    })
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     live_dest = _kwargs.get("destination_column_types")
 

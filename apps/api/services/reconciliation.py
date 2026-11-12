@@ -2669,15 +2669,12 @@ def verify_target(
             pk_column=pk,
         )
     elif db_type == "dynamodb":
-        from connectors.aws_common import resolve_endpoint_url
+        from connectors.dynamodb_writer import dynamodb_client_cfg
 
-        conn_str = resolve_endpoint_url(dest) or "http://localhost:8000"
+        # Read where the write went (the writer's client config), never a local fallback.
         count, chk = verify_dynamodb_table(
-            connection_string=conn_str,
-            database=dest.get("database", ""),
+            cfg=dynamodb_client_cfg(dest),
             table_name=table_name,
-            username=dest.get("username", "local"),
-            password=dest.get("password", "local"),
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
