@@ -9377,6 +9377,9 @@ def _run_reconciliation_with_rules(
     endpoint, source_endpoint = _bind_endpoints_to_last_stream(
         endpoint, source_endpoint, dest_summary
     )
+    from services.reconcile_coverage import last_stream_rows_written
+
+    rows_written = last_stream_rows_written(dest_summary, rows_written)
     recon = _run_reconciliation_impl(
         endpoint=endpoint,
         records=records,
