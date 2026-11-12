@@ -96,8 +96,6 @@ def test_csv_non_iso_date_cursor_second_run_writes_only_new_rows(
     stored ISO watermark, rank it as text above every date, and re-append
     every earlier row while the run reported success."""
     if path == "row":
-        if preflight:
-            pytest.skip("the preflight read scope of a file source is fixed next")
         monkeypatch.setenv("DATAFLOW_CSV_LOCAL_COPY", "0")
     (run1, run2), landed = _two_file_runs(isolated, tmp_path, dates=dates, fmt="csv", preflight=preflight)
     assert run1.success and run1.records_transferred == 2, run1.error

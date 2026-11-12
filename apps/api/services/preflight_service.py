@@ -1032,10 +1032,11 @@ def run_file_preflight(
     read_scope = _resolve_read_scope(
         sync_mode=sync_mode,
         stream_contracts=stream_contracts,
-        source_format=source_format,
+        # A file route keys its watermark as ``file::<filename>`` (file_stream).
+        source_format="file" if is_file_source else source_format,
         source_config=source_config,
         source_connector_id=source_connector_id,
-        source_table=source_table,
+        source_table=(source_table or source_filename) if is_file_source else source_table,
         destination_db_type=destination_db_type,
         destination_config=destination_config,
         destination_table=destination_table,
