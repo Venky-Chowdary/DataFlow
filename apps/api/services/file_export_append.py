@@ -12,6 +12,7 @@ refused rather than silently turned into a replace.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -87,6 +88,7 @@ def land_export_bytes(
     fmt = str(getattr(destination, "format", "") or "")
     ext = os.path.splitext(export_name)[1].lstrip(".") or fmt or "json"
     configured = str(getattr(destination, "output_path", "") or "").strip()
+    legacy_note = ""
     # The export lands in the folder of the job's workspace (audit H-2): two
     # workspaces naming the same ``output_path`` never share a file.
     workspace_id = job_export_workspace(job_id)
@@ -94,9 +96,15 @@ def land_export_bytes(
         target = resolve_export_path(configured, default_ext=ext, workspace_id=workspace_id)
         export_path = str(target)
         target.parent.mkdir(parents=True, exist_ok=True)
-        appending = is_append_sync(
-            resolve_effective_sync_mode(sync_mode)
-        ) and os.path.exists(export_path)
+        append_mode = is_append_sync(resolve_effective_sync_mode(sync_mode))
+        if append_mode and not os.path.exists(export_path):
+            # Review M3: the file this export has been appending to may still be
+            # in the flat folder from before workspace folders. Continue it when
+            # this workspace provably owns it; otherwise say a new file started.
+            from services.export_migration import adopt_flat_export
+
+            legacy_note = adopt_flat_export(target, workspace_id)
+        appending = append_mode and os.path.exists(export_path)
         if appending:
             payload = append_payload(fmt or "csv", export_path, export_bytes)
             with open(export_path, "ab") as fh:
@@ -110,11 +118,15 @@ def land_export_bytes(
         export_path = str(generated_export_path(name, workspace_id=workspace_id))
         with open(export_path, "wb") as fh:
             fh.write(export_bytes)
-    return {
+    landed = {
         "filename": name,
         "path": export_path,
         "download_url": f"/api/v1/transfer/download/{name}",
     }
+    if legacy_note:
+        logging.getLogger(__name__).warning("Export %s for job %s: %s", name, job_id, legacy_note)
+        landed["legacy_flat_export"] = legacy_note
+    return landed
 
 
 def _first_line(data: bytes) -> bytes:

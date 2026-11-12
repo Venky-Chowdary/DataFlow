@@ -1309,6 +1309,19 @@ class MongoDBService:
             rows.append(doc)
         return rows
 
+    def list_export_file_claims(self, root: str) -> list[tuple[str, str]]:
+        """``(export path, workspace id)`` of every job whose export summary names
+        a file under ``root`` (system scope; ``services.export_migration``)."""
+        import re as _re
+
+        db = self.get_database()
+        query = {"destination_summary.path": {"$regex": "^" + _re.escape(str(root))}}
+        projection = {"destination_summary.path": 1, "workspace_id": 1}
+        return [
+            (str((doc.get("destination_summary") or {}).get("path") or ""), str(doc.get("workspace_id") or ""))
+            for doc in db["transfer_jobs"].find(query, projection)
+        ]
+
     def is_job_name_taken(
         self,
         name: str,
@@ -2103,6 +2116,16 @@ class MemoryMongoDBService:
             for rec in self._jobs.values()
             if unscoped.matches(rec.get("workspace_id"))
         ]
+
+    def list_export_file_claims(self, root: str) -> list[tuple[str, str]]:
+        """See ``MongoDBService.list_export_file_claims``."""
+        claims = []
+        for rec in self._jobs.values():
+            summary = rec.get("destination_summary")
+            path = str(summary.get("path") or "") if isinstance(summary, dict) else ""
+            if path.startswith(str(root)):
+                claims.append((path, str(rec.get("workspace_id") or "")))
+        return claims
 
     def is_job_name_taken(
         self,

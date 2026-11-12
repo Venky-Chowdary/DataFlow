@@ -16,8 +16,9 @@ files and neither can name the other's. The flat ``<exports>/`` folder is the
 unscoped one: what the single local operator (authentication off) writes, and
 whatever a deployment exported before workspaces had folders.
 :func:`downloadable_export` is the read side: the caller's own workspace
-folders, then a flat file only when its job proves the owner (or the caller's
-tenant scope covers unscoped rows).
+folders, then a flat file only when the job records prove its owner (or the
+caller's tenant scope covers unscoped rows). ``services.export_migration``
+moves the provably owned flat files into their workspace folders at startup.
 """
 
 from __future__ import annotations
@@ -216,11 +217,27 @@ def _file_in(folder: Path, filename: str) -> Path | None:
 
 
 def _flat_file_owner(filename: str) -> str | None:
-    """The workspace of the job a flat (pre-workspace-folder) export belongs to.
+    """The workspace a flat (pre-workspace-folder) export provably belongs to.
 
-    Only server-generated names carry their job: ``quarantine_<job>_<hex>.csv``,
-    and ``export_<job>.<ext>`` when that job's stored summary names this very
-    file. ``None`` means the owner cannot be proven.
+    A server-generated name carries its job (:func:`job_named_export_owner`);
+    any other name belongs to the workspace whose job records name exactly
+    this file (``services.export_migration``, security review M3). ``None``
+    means the owner cannot be proven.
+    """
+    owner = job_named_export_owner(filename)
+    if owner is not None:
+        return owner
+    from services.export_migration import flat_export_owner
+
+    return flat_export_owner(filename) or None
+
+
+def job_named_export_owner(filename: str) -> str | None:
+    """The workspace of the job a server-generated flat export name carries.
+
+    ``quarantine_<job>_<hex>.csv``, and ``export_<job>.<ext>`` when that job's
+    stored summary names this very file. ``None`` for any other name, and when
+    the job is unknown.
     """
     match = _JOB_QUARANTINE_NAME.fullmatch(filename) or _JOB_EXPORT_NAME.fullmatch(filename)
     if match is None:

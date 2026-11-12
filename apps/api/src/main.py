@@ -255,6 +255,11 @@ async def lifespan(app: FastAPI):
         # Cadence stays up when RAG warm-up fails — otherwise due pipelines
         # sit on Next run forever with Runs=0. Multi-replica API pods set
         # SCHEDULE_LOOP=0; src.scheduler_main owns the loop there.
+        # Review M3: exports written before workspaces had folders move to the
+        # folder of the workspace whose job records own them. Idempotent.
+        from services.export_migration import migrate_flat_exports_at_startup
+
+        await asyncio.to_thread(migrate_flat_exports_at_startup)
         try:
             from services.process_role import schedule_loop_enabled
             from services.schedule_store import import_file_schedules_into_mongo
