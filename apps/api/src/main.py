@@ -128,6 +128,9 @@ async def lifespan(app: FastAPI):
     from services.brand_env import warn_brand_flag_conflicts
 
     warn_brand_flag_conflicts(logger)
+    from services.sso_authorization import warn_sso_auto_provision_without_domains
+
+    warn_sso_auto_provision_without_domains(logging.getLogger("datawrap.security"))
     try:
         # Saved IP allowlists with no proxy hop count: say so once at boot.
         from services.ip_allowlist_policy import warn_if_hop_count_unset

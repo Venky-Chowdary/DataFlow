@@ -24,6 +24,22 @@ def _sso_auto_provision() -> bool:
     return getenv_brand("SSO_AUTO_PROVISION", "0").lower() in ("1", "true", "yes")
 
 
+def warn_sso_auto_provision_without_domains(log: logging.Logger) -> bool:
+    """Startup notice: auto-provisioning is on and no domain may be provisioned.
+
+    Since audit M-11 such a deployment refuses every new SSO identity (people
+    with an account still sign in). Returns whether it warned.
+    """
+    if not _sso_auto_provision() or _sso_allowed_domains():
+        return False
+    log.warning(
+        "SSO_AUTO_PROVISION is on but SSO_ALLOWED_DOMAINS is empty: no new SSO user will be "
+        "provisioned (existing accounts still sign in). Set SSO_ALLOWED_DOMAINS "
+        "(DATAWRAP_SSO_ALLOWED_DOMAINS) to the email domains that may be provisioned."
+    )
+    return True
+
+
 def _is_sso_email_allowed(email: str) -> bool:
     normalized = email.strip().lower()
     if lookup_user(normalized):
