@@ -74,6 +74,8 @@ DEFAULT_OVERLAP_VALUES = 1000
 #: large table. The probe transfers no rows, so it can afford to look further.
 PG_LOOKBACK_SECONDS = 86_400
 PG_LOOKBACK_VALUES = 1_000_000
+#: The same look-back for a DATE cursor, in its own unit (review M-3).
+PG_LOOKBACK_DAYS = max(1, PG_LOOKBACK_SECONDS // 86_400)
 #: At or below this estimated row count the PostgreSQL probe has no floor. A
 #: table whose estimate is unknown (``reltuples = -1``) is floored too.
 PG_UNBOUNDED_PROBE_ROWS = 1_000_000
@@ -141,6 +143,9 @@ _TEMPORAL_TYPES = frozenset(
     {"TIMESTAMP", "TIMESTAMPTZ", "DATETIME", "DATETIME2", "DATETIMEOFFSET", "SMALLDATETIME"}
 )
 _INT_SCALE_RE = re.compile(r"^\(\s*\d+\s*(?:,\s*0+\s*)?\)")
+#: Calendar dates: their natural unit is a day.
+_DATE_TYPES = frozenset({"DATE", "DATE32"})
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _SERIAL_APP_ASSIGNED = (
     "within one writer's commit order: the source runs one write transaction at a "
@@ -191,6 +196,9 @@ class LateRows:
     checked: int | None = None
     #: ``in_progress`` (judged on the stored in-progress list) or ``horizon``.
     rule: str = ""
+    #: Why the probe did not run ("" = it ran): on a large or never-analysed
+    #: table a cursor with no unit to floor it by would scan the whole table.
+    unprobed: str = ""
 
 
 @dataclass(frozen=True)
@@ -294,6 +302,37 @@ def _type_class(declared: Any) -> str:
     if word in _SCALED_NUMERIC_TYPES and _INT_SCALE_RE.match(text[len(word):].lstrip()):
         return "values"
     return ""
+
+
+def probe_floor_unit(cursor_type: Any, value: Any = None) -> str:
+    """The unit the late-commit probe can be floored in: ``seconds`` /
+    ``values`` / ``days``, or ``""`` (text, uuid, ...: no distance).
+
+    A DATE has a natural unit, a day (review M-3); with no declared type an
+    ISO date value is one.
+    """
+    if _type_base(cursor_type):
+        return "days" if _type_base(cursor_type) in _DATE_TYPES else _type_class(cursor_type)
+    if _ISO_DATE_RE.match(str(value or "").strip()):
+        return "days"
+    return cursor_distance_unit(cursor_type, value)
+
+
+def probe_floor(below: Any, cursor_type: Any) -> str:
+    """The lowest cursor value the late-commit probe reads on a large table, or ``""``."""
+    head = str(below or "").strip()
+    if probe_floor_unit(cursor_type, head) == "days":
+        from datetime import date
+
+        try:
+            day = date.fromisoformat(head[:10])
+        except ValueError:
+            return ""
+        try:
+            return (day - timedelta(days=PG_LOOKBACK_DAYS)).isoformat()
+        except OverflowError:
+            return date.min.isoformat()
+    return overlap_seed(below, cursor_type, seconds=PG_LOOKBACK_SECONDS, values=PG_LOOKBACK_VALUES) or ""
 
 
 def _canonical_integer(text: str) -> bool:
@@ -688,6 +727,15 @@ def _plan_pg(
             census_recommended=True,
             probe_error=f"{type(exc).__name__}: {exc}"[:300],
         )
+    if late.unprobed:
+        # The bound moves on: the next run could not check the range either.
+        return CommitSafeWindow(
+            **base,
+            late_row_rule=late.rule,
+            guarantee=GUARANTEE_NONE,
+            reason=unguarded_reason(late.unprobed),
+            census_recommended=True,
+        )
     floor_note = (
         f" (probe looks back to cursor {late.floor}; a row committed with an older "
         "cursor value than that is only found by the key census)"
@@ -1056,17 +1104,15 @@ def probe_pg_late_rows(
             # -1: never analysed, or a partitioned parent — size unknown, so
             # treated as large (review M5): an unfloored probe could scan it all.
             if est_rows > PG_UNBOUNDED_PROBE_ROWS or est_rows < 0:
-                floor = (
-                    overlap_seed(
-                        below, cursor_type, seconds=PG_LOOKBACK_SECONDS, values=PG_LOOKBACK_VALUES
-                    )
-                    or ""
-                )
+                floor = probe_floor(below, cursor_type)
                 if not floor:
+                    # Not run: it would scan the whole table under the probe
+                    # timeout, every run (review M-3). Said, as preflight says it.
                     logger.info(
-                        "commit-safe window: unfloored late-commit probe on %s.%s (~%d rows)",
-                        schema, table, est_rows,
+                        "commit-safe window: late-commit probe on %s.%s (~%d rows) not run: "
+                        "the cursor has no unit to floor it by", schema, table, est_rows,
                     )
+                    return LateRows(rule=rule, unprobed=whole_table_scan_note(est_rows))
             ident = sql.Identifier(cursor_column)
             rel = sql.SQL("{s}.{t}").format(
                 s=sql.Identifier(schema or "public"), t=sql.Identifier(table)
@@ -1150,6 +1196,20 @@ def probe_pg_late_rows(
     )
 
 
+def whole_table_scan_note(relation_rows: int | None) -> str:
+    """Why a large table's late-commit check is not run for a cursor with no unit."""
+    size = (
+        "not yet analysed, so its size is unknown"
+        if relation_rows is None or relation_rows < 0
+        else f"large (about {int(relation_rows):,} rows)"
+    )
+    return (
+        f"the late-commit check would scan the whole table: the table is {size}, and "
+        "this cursor type has no unit (a number, a time or a date) the check can be "
+        "limited by"
+    )
+
+
 def static_commit_safety(
     *,
     source_type: str,
@@ -1191,11 +1251,20 @@ def static_commit_safety(
         "cannot be re-read without duplicating rows already delivered. Give the "
         f"stream a key. {census}"
     )
-    lookback = (
-        f"{PG_LOOKBACK_VALUES:,} values or {PG_LOOKBACK_SECONDS // 3600} hours behind the "
-        "watermark"
+    unit = probe_floor_unit(cursor_type) if _type_base(cursor_type) else "?"
+    lookback = {
+        "values": f"{PG_LOOKBACK_VALUES:,} values",
+        "seconds": f"{PG_LOOKBACK_SECONDS // 3600} hours",
+        "days": f"{PG_LOOKBACK_DAYS:,} day" + ("s" if PG_LOOKBACK_DAYS != 1 else ""),
+    }.get(
+        unit,
+        f"{PG_LOOKBACK_VALUES:,} values, {PG_LOOKBACK_SECONDS // 3600} hours or "
+        f"{PG_LOOKBACK_DAYS:,} day",
+    ) + " behind the watermark"
+    floored = unit != ""
+    large = relation_rows is not None and (
+        relation_rows < 0 or relation_rows > PG_UNBOUNDED_PROBE_ROWS
     )
-    floored = bool(cursor_distance_unit(cursor_type)) if _type_base(cursor_type) else True
     if strategy == STRATEGY_SERIAL and cursor_database_assigned is True:
         guarantee = GUARANTEE_COMMIT_SAFE
         statement = (
@@ -1205,9 +1274,14 @@ def static_commit_safety(
     elif strategy == STRATEGY_SERIAL:
         guarantee = GUARANTEE_WITHIN_WINDOW
         statement = "Late commits are covered " + _SERIAL_APP_ASSIGNED + "."
-    elif strategy == STRATEGY_PG and has_identity and floored and relation_rows is not None and (
-        relation_rows < 0 or relation_rows > PG_UNBOUNDED_PROBE_ROWS
-    ):
+    elif strategy == STRATEGY_PG and has_identity and large and not floored:
+        guarantee = GUARANTEE_NONE
+        statement = (
+            "Cannot guarantee no skipped rows: "
+            + whole_table_scan_note(relation_rows)
+            + f", so it is not run. {census}"
+        )
+    elif strategy == STRATEGY_PG and has_identity and floored and large:
         guarantee = GUARANTEE_WITHIN_WINDOW
         statement = (
             f"Late commits are covered within a look-back of {lookback}: the table is "
@@ -1224,6 +1298,12 @@ def static_commit_safety(
                 f" (on a table above {PG_UNBOUNDED_PROBE_ROWS:,} rows, or one not yet "
                 f"analysed, the probe looks back {lookback})."
                 if relation_rows is None and floored
+                else (
+                    f" (on a table above {PG_UNBOUNDED_PROBE_ROWS:,} rows, or one not yet "
+                    "analysed, the check would scan the whole table for this cursor type, "
+                    "so it is not run and the route is not guaranteed)."
+                )
+                if relation_rows is None
                 else "."
             )
         )

@@ -458,3 +458,79 @@ def test_a_policy_gate_that_raises_is_an_honest_gate_not_a_preflight_error(monke
     assert "RuntimeError" in str(errored[0].get("details"))
     # Every other gate still ran.
     assert any(g.get("id") == "g10_schema_policy" for g in gates)
+
+
+# --------------------------------------------------------------------------
+# M-3 — a large table's late-commit check is floored on the cursor's own unit,
+# or stated "not guaranteed" where it cannot be
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rows", [50_000_000, -1])
+def test_large_table_date_cursor_is_claimed_within_a_day_look_back(rows):
+    from services import commit_safe_window as csw
+
+    claim = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="d",
+        cursor_type="date", has_identity=True, relation_kind="r", relation_rows=rows,
+    )
+    assert claim["guarantee"] == csw.GUARANTEE_WITHIN_WINDOW, claim
+    assert "day" in claim["statement"], claim["statement"]
+
+
+@pytest.mark.parametrize("cursor_type", ["text", "uuid", "varchar(40)"])
+@pytest.mark.parametrize("rows", [50_000_000, -1])
+def test_large_table_cursor_without_a_unit_is_not_claimed_covered(cursor_type, rows):
+    from services import commit_safe_window as csw
+
+    claim = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="c",
+        cursor_type=cursor_type, has_identity=True, relation_kind="r", relation_rows=rows,
+    )
+    assert claim["guarantee"] == csw.GUARANTEE_NONE, claim
+    assert "the late-commit check would scan the whole table" in claim["statement"]
+
+
+def test_date_cursor_probe_is_floored_by_days_on_a_large_table(pg):
+    from services import commit_safe_window as csw
+
+    _sql(f'CREATE TABLE "{SCHEMA}".bd (id bigint PRIMARY KEY, d date NOT NULL, v text)')
+    _sql(f"INSERT INTO \"{SCHEMA}\".bd SELECT g, date '2025-01-01' + g, 'x' FROM generate_series(1, 50) g")
+    _sql(f'ANALYZE "{SCHEMA}".bd')
+    _sql(f"UPDATE pg_class SET reltuples = 50000000 WHERE oid = '\"{SCHEMA}\".bd'::regclass")
+    xmin = _sql("SELECT txid_snapshot_xmin(txid_current_snapshot())", fetch=True)[0][0]
+    late = csw.probe_pg_late_rows(
+        _pg_cfg(), schema=SCHEMA, table="bd", cursor_column="d", since_xmin=str(xmin),
+        below="2025-02-10", cursor_type="date",
+    )
+    assert late.floor == "2025-02-09", late
+
+
+def test_text_cursor_on_a_large_table_run_says_not_guaranteed_like_preflight(isolated, pg):
+    """50M estimated rows and a text cursor: the check cannot be limited, so
+    preflight states "not guaranteed" and the run says the same (it does not
+    run a whole-table scan and call the route covered)."""
+    from services import commit_safe_window as csw
+    from services.preflight_cursor_gate import source_commit_facts
+
+    _sql(f'CREATE TABLE "{SCHEMA}".bt (id bigint PRIMARY KEY, c text NOT NULL)')
+    _sql(f"INSERT INTO \"{SCHEMA}\".bt SELECT g, lpad(g::text, 6, '0') FROM generate_series(1, 20) g")
+    first = _run(isolated, "bt", "bt_out", cursor="c")
+    assert first.success, first.error
+    _sql(f'ANALYZE "{SCHEMA}".bt')
+    _sql(f"UPDATE pg_class SET reltuples = 50000000 WHERE oid = '\"{SCHEMA}\".bt'::regclass")
+    facts = source_commit_facts("postgresql", _pg_cfg(), "bt", "incremental_append")("c")
+    assert facts["relation_rows"] == 50_000_000
+    claim = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="c",
+        cursor_type="text", has_identity=True, **facts,
+    )
+    assert claim["guarantee"] == csw.GUARANTEE_NONE
+    _sql(f"INSERT INTO \"{SCHEMA}\".bt VALUES (21, '000021')")
+    second = _run(isolated, "bt", "bt_out", cursor="c")
+    assert second.success, second.error
+    window = _window(second)
+    assert window.get("guarantee") == csw.GUARANTEE_NONE, window
+    assert "the late-commit check would scan the whole table" in window.get("reason", ""), window
+    assert "late_rows_detected" not in window, window
+    assert _missing("bt", "bt_out") == []
