@@ -451,8 +451,284 @@ def freshness_summary(
     }
 
 
-def prometheus_text() -> str:
-    """Render Prometheus exposition format (text/plain; version=0.0.4)."""
+# ---------------------------------------------------------------------------
+# HTTP request metrics (audit M-7)
+# ---------------------------------------------------------------------------
+
+#: Upper bounds of the latency histogram, in seconds.
+HTTP_BUCKETS: tuple[float, ...] = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
+#: Label for a request no route matched (404s, scanners) or that a middleware
+#: refused before routing. Never the raw path.
+UNMATCHED_ROUTE = "unmatched"
+#: Distinct (method, route, status class) series kept. The route label is a
+#: route template, so this is a backstop, not the normal bound.
+MAX_HTTP_SERIES = 2000
+_OVERFLOW_ROUTE = "other"
+_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+
+# (method, route, status_class) -> [count, duration_sum, per-bucket counts...]
+_http: dict[tuple[str, str, str], list[float]] = {}
+
+
+def route_template(scope: Any) -> str:
+    """The matched route's template (``/api/v1/jobs/{job_id}``), never the raw path.
+
+    A raw path carries ids, so it would create one series per job. The router
+    records the matched route and its path parameters on the request scope; a
+    route included under a prefix carries only its own part of the path, so
+    the prefix is recovered by removing the route's concrete path from the end
+    of the request path. A request no route matched, or one refused before
+    routing (401/403 from a middleware), is counted under one fixed label.
+    """
+    if not isinstance(scope, dict):
+        return UNMATCHED_ROUTE
+    route = scope.get("route")
+    template = getattr(route, "path", None)
+    if not template:
+        return UNMATCHED_ROUTE
+    template = str(template)
+    raw = str(scope.get("path") or "")
+    try:
+        concrete = str(getattr(route, "path_format", template)).format(**(scope.get("path_params") or {}))
+    except (KeyError, IndexError, ValueError):
+        return template
+    if concrete and raw != concrete and raw.endswith(concrete):
+        return raw[: len(raw) - len(concrete)] + template
+    return template
+
+
+def record_http_request(*, method: str, route: str, status_code: int, duration_seconds: float) -> None:
+    """Count one finished HTTP request and observe its latency."""
+    verb = method.upper() if method.upper() in _HTTP_METHODS else "OTHER"
+    status_class = f"{int(status_code) // 100}xx" if 100 <= int(status_code) <= 599 else "unknown"
+    key = (verb, route or UNMATCHED_ROUTE, status_class)
+    seconds = max(0.0, float(duration_seconds))
+    with _lock:
+        series = _http.get(key)
+        if series is None:
+            if len(_http) >= MAX_HTTP_SERIES:
+                key = (verb, _OVERFLOW_ROUTE, status_class)
+            series = _http.setdefault(key, [0.0, 0.0] + [0.0] * len(HTTP_BUCKETS))
+        series[0] += 1
+        series[1] += seconds
+        for index, bound in enumerate(HTTP_BUCKETS):
+            if seconds <= bound:
+                series[2 + index] += 1
+                break
+
+
+def _label_value(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _labels(**pairs: str) -> str:
+    return ",".join(f'{name}="{_label_value(value)}"' for name, value in pairs.items())
+
+
+def _http_lines() -> list[str]:
+    lines = [
+        "# HELP dataflow_http_requests_total HTTP requests by method, route template and status class",
+        "# TYPE dataflow_http_requests_total counter",
+    ]
+    with _lock:
+        series = {key: list(values) for key, values in sorted(_http.items())}
+    for (method, route, status_class), values in series.items():
+        lines.append(
+            f"dataflow_http_requests_total{{{_labels(method=method, route=route, status_class=status_class)}}} {values[0]}"
+        )
+    lines += [
+        "# HELP dataflow_http_request_duration_seconds HTTP request latency by method, route template and status class",
+        "# TYPE dataflow_http_request_duration_seconds histogram",
+    ]
+    for (method, route, status_class), values in series.items():
+        base = _labels(method=method, route=route, status_class=status_class)
+        cumulative = 0.0
+        for index, bound in enumerate(HTTP_BUCKETS):
+            cumulative += values[2 + index]
+            lines.append(f'dataflow_http_request_duration_seconds_bucket{{{base},le="{bound}"}} {cumulative}')
+        lines.append(f'dataflow_http_request_duration_seconds_bucket{{{base},le="+Inf"}} {values[0]}')
+        lines.append(f"dataflow_http_request_duration_seconds_sum{{{base}}} {values[1]}")
+        lines.append(f"dataflow_http_request_duration_seconds_count{{{base}}} {values[0]}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Gauges read from the shared job store at scrape time (audit M-7)
+# ---------------------------------------------------------------------------
+
+#: Job statuses reported as their own series; anything else is "other".
+JOB_STATUS_LABELS: tuple[str, ...] = (
+    "pending", "queued", "running", "retrying", "paused", "completed",
+    "completed_with_quarantine", "completed_with_warnings", "failed", "cancelled",
+)
+STORE_GAUGE_TTL_SECONDS = 10.0
+#: Server-side time limit for the job-count aggregation.
+STORE_QUERY_MAX_MS = 5000
+_RUNNING_SCAN_LIMIT = 200
+_store_cache: dict[str, Any] = {"at": 0.0, "value": None}
+
+
+def _aware_timestamp(value: Any) -> float | None:
+    from datetime import datetime, timezone
+
+    if isinstance(value, datetime):
+        return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).timestamp()
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+    return None
+
+
+def _read_store_gauges() -> dict[str, Any]:
+    """Jobs by status, queue depth and oldest running job, from the job store.
+
+    In-process counters only describe the process that is scraped: with a
+    worker fleet the API pods run no transfers and their counters stay at
+    zero. These come from the store every process shares.
+    """
+    from services.control_plane_store import mongo_collection
+    from services.mongodb_service import get_mongodb_service
+    from services.worker_fleet import _queue_coll
+
+    mongo = get_mongodb_service()
+    jobs = mongo_collection("transfer_jobs")
+    if jobs is not None:
+        # One status-only pass, bounded in time; no per-row attention $cond
+        # (ops review M9). Runs on one process only (store_gauges_owner()).
+        raw = {
+            str(row.get("_id")): int(row.get("n") or 0)
+            for row in jobs.aggregate([{"$group": {"_id": "$status", "n": {"$sum": 1}}}], maxTimeMS=STORE_QUERY_MAX_MS)
+        }
+    else:  # the in-memory job store (single process, tests)
+        raw = mongo.count_jobs(workspace_filter=WorkspaceFilter.everything()).get("by_status") or {}
+    by_status: dict[str, int] = dict.fromkeys(JOB_STATUS_LABELS, 0)
+    other = 0
+    for status, count in raw.items():
+        if status in by_status:
+            by_status[status] += int(count)
+        else:
+            other += int(count)
+    by_status["other"] = other
+
+    queue = _queue_coll()
+    if queue is not None:
+        queued = int(queue.count_documents({"status": "queued"}))
+        claimed = int(queue.count_documents({"status": "claimed"}))
+    else:
+        # No durable queue (single process): jobs waiting for the local pool.
+        queued = by_status["pending"] + by_status["queued"]
+        claimed = 0
+
+    oldest_age = 0.0
+    if by_status["running"]:
+        # Running jobs are few; the list is the store's bounded, slim page.
+        running = mongo.list_jobs(
+            limit=_RUNNING_SCAN_LIMIT, workspace_filter=WorkspaceFilter.everything(), status="running"
+        )
+        now = time.time()
+        for job in running:
+            started = _aware_timestamp(job.get("started_at") or job.get("created_at"))
+            if started is not None:
+                oldest_age = max(oldest_age, now - started)
+    return {"by_status": by_status, "queued": queued, "claimed": claimed, "oldest_running_age": oldest_age}
+
+
+def store_gauges(*, max_age_seconds: float | None = None) -> dict[str, Any] | None:
+    """The store-derived gauges, re-read at most every ``STORE_GAUGE_TTL_SECONDS``.
+
+    Returns None when the store cannot be read; the scrape then reports
+    ``dataflow_metrics_store_up 0`` instead of stale or invented numbers.
+    """
+    ttl = STORE_GAUGE_TTL_SECONDS if max_age_seconds is None else max_age_seconds
+    now = time.monotonic()
+    with _lock:
+        if _store_cache["value"] is not None and now - _store_cache["at"] < ttl:
+            return dict(_store_cache["value"])
+    try:
+        value = _read_store_gauges()
+    except Exception:  # noqa: BLE001 - a scrape must answer even when the store is down
+        import logging
+
+        logging.getLogger(__name__).warning("store-derived metrics unavailable", exc_info=True)
+        with _lock:
+            _store_cache["value"] = None
+        return None
+    with _lock:
+        _store_cache["at"] = now
+        _store_cache["value"] = value
+    return dict(value)
+
+
+def store_gauges_owner() -> bool:
+    """Whether this process reports the store-derived job gauges.
+
+    Exactly one process does: the one that owns the pipeline cadence (the
+    scheduler, or the API when no scheduler runs; the topology checks keep it
+    to one). Every API pod and worker counting the whole job collection on
+    every scrape was one collection scan per pod per scrape (ops review M9).
+    """
+    from services.process_role import schedule_loop_enabled
+
+    return schedule_loop_enabled()
+
+
+def _store_lines() -> list[str]:
+    if not store_gauges_owner():
+        return []
+    gauges = store_gauges()
+    lines = [
+        "# HELP dataflow_metrics_store_up 1 when the job store answered this scrape",
+        "# TYPE dataflow_metrics_store_up gauge",
+        f"dataflow_metrics_store_up {1 if gauges is not None else 0}",
+    ]
+    if gauges is None:
+        return lines
+    lines += [
+        "# HELP dataflow_jobs Transfer jobs in the shared store by status",
+        "# TYPE dataflow_jobs gauge",
+    ]
+    for status, count in gauges["by_status"].items():
+        lines.append(f"dataflow_jobs{{{_labels(status=status)}}} {float(count)}")
+    lines += [
+        "# HELP dataflow_job_queue_depth Jobs waiting for a worker",
+        "# TYPE dataflow_job_queue_depth gauge",
+        f"dataflow_job_queue_depth {float(gauges['queued'])}",
+        "# HELP dataflow_job_queue_claimed Jobs a worker has claimed and not finished",
+        "# TYPE dataflow_job_queue_claimed gauge",
+        f"dataflow_job_queue_claimed {float(gauges['claimed'])}",
+        "# HELP dataflow_oldest_running_job_age_seconds Age of the longest-running job (0 when none runs)",
+        "# TYPE dataflow_oldest_running_job_age_seconds gauge",
+        f"dataflow_oldest_running_job_age_seconds {round(float(gauges['oldest_running_age']), 3)}",
+    ]
+    return lines
+
+
+def _quoted_series_labels(key: str) -> str:
+    """``schedule_id=a,stream=b`` (the stored key) as valid exposition labels."""
+    return _labels(**dict(part.split("=", 1) for part in key.split(",") if "=" in part))
+
+
+def prometheus_text(*, deployment_wide: bool = True, workspace_filter: WorkspaceFilter | None = None) -> str:
+    """Render Prometheus exposition format (text/plain; version=0.0.4).
+
+    ``deployment_wide`` adds the per-route HTTP series and the job-store
+    gauges: every tenant's traffic and jobs, for platform administrators only
+    (``src.metrics_app.metrics_response`` decides). Otherwise the per-pipeline
+    series (labelled by schedule, stream and job) are kept only for pipelines
+    whose proven workspace ``workspace_filter`` allows (none without one; ops
+    review round 2, Medium 8). Reads the job store (cached for a few seconds):
+    call it off the event loop.
+    """
+    scope = None if deployment_wide else (workspace_filter or WorkspaceFilter.nothing())
+
+    def shown(labels: str) -> bool:
+        return scope is None or _pipeline_in_freshness_scope(labels, _series_parts(labels), scope)
+
     lines: list[str] = [
         "# HELP dataflow_jobs_total Total transfer jobs finalized",
         "# TYPE dataflow_jobs_total counter",
@@ -466,11 +742,17 @@ def prometheus_text() -> str:
             lines.append(f"{name} {value}")
         for name, value in sorted(_gauges.items()):
             lines.append(f"{name} {value}")
-        for name, series in sorted(_labeled_gauges.items()):
-            for labels, value in sorted(series.items()):
-                lines.append(f"{name}{{{labels}}} {value}")
-        for name, series in sorted(_labeled_counters.items()):
-            for labels, value in sorted(series.items()):
-                lines.append(f"{name}{{{labels}}} {value}")
+        labeled = [(name, dict(series)) for table in (_labeled_gauges, _labeled_counters)
+                   for name, series in sorted(table.items())]
+    # Ownership of an unstamped sample may need a schedule or job read: outside the lock.
+    for name, series in labeled:
+        for labels, value in sorted(series.items()):
+            if shown(labels):
+                lines.append(f"{name}{{{_quoted_series_labels(labels)}}} {value}")
+    if deployment_wide:
+        lines += _http_lines()
+        lines += _store_lines()
+    else:
+        lines.append("# Deployment-wide series (HTTP traffic, job gauges) are shown to platform administrators only.")
     lines.append("")
     return "\n".join(lines)

@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -31,7 +31,8 @@ from services.tenant_store import (
     delete_tenant,
     get_tenant,
     get_tenant_for_workspace,
-    list_tenants,
+    list_tenants_page,
+    tenants_for_workspaces,
     update_tenant,
 )
 
@@ -925,7 +926,7 @@ def _channel_scope_writable(request: Request, workspace_id: str) -> bool:
 
 
 @router.get("/notifications")
-async def get_notifications(workspace_id: str | None = None, request: Request = None):
+def get_notifications(workspace_id: str | None = None, request: Request = None):
     # The request's tenant scope decides which workspace this lists (D154): the
     # named one (403 unless the caller is in it), else the header / own workspace.
     # Unscoped channels are deployment-wide, so only an unrestricted actor reads them.
@@ -945,7 +946,7 @@ async def get_notifications(workspace_id: str | None = None, request: Request = 
 
 
 @router.post("/notifications")
-async def post_notification(body: NotificationChannelCreate, request: Request):
+def post_notification(body: NotificationChannelCreate, request: Request):
     actor = _actor(request)
     # Stamp the request's workspace when the body names none: the list reads
     # the caller's workspace, so a channel stored with workspace_id '' was
@@ -992,7 +993,7 @@ def _signing_disclosure(secret: str) -> dict[str, Any]:
 
 
 @router.post("/notifications/{channel_id}/signing-secret/rotate")
-async def rotate_notification_signing_secret(channel_id: str, request: Request):
+def rotate_notification_signing_secret(channel_id: str, request: Request):
     """Issue a new signing secret for a webhook channel (shown once).
 
     The old secret stops signing immediately; update the receiver first or
@@ -1019,7 +1020,7 @@ async def rotate_notification_signing_secret(channel_id: str, request: Request):
 
 
 @router.patch("/notifications/{channel_id}")
-async def patch_notification(channel_id: str, body: NotificationChannelUpdate, request: Request):
+def patch_notification(channel_id: str, body: NotificationChannelUpdate, request: Request):
     actor = _actor(request)
     from services.notification_store import get_channel, update_channel
 
@@ -1037,7 +1038,7 @@ async def patch_notification(channel_id: str, body: NotificationChannelUpdate, r
 
 
 @router.delete("/notifications/{channel_id}")
-async def delete_notification(channel_id: str, request: Request):
+def delete_notification(channel_id: str, request: Request):
     actor = _actor(request)
     from services.notification_store import delete_channel, get_channel
 
@@ -1053,7 +1054,7 @@ async def delete_notification(channel_id: str, request: Request):
 
 
 @router.post("/notifications/{channel_id}/test")
-async def test_notification(channel_id: str, request: Request):
+def test_notification(channel_id: str, request: Request):
     actor = _actor(request)
     from services.notification_service import build_job_payload, send_to_channel
     from services.notification_store import get_channel_decrypted
@@ -1079,7 +1080,7 @@ async def test_notification(channel_id: str, request: Request):
 
 
 @router.get("/notifications/{channel_id}/deliveries")
-async def list_notification_deliveries(channel_id: str, request: Request, limit: int = 50):
+def list_notification_deliveries(channel_id: str, request: Request, limit: int = 50):
     """Every delivery attempt to this channel, newest first (QA SC9).
 
     Records name the event, schedule and job, the HTTP status, the outcome and
@@ -1092,12 +1093,7 @@ async def list_notification_deliveries(channel_id: str, request: Request, limit:
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
     _assert_channel_visible(request, channel.workspace_id)
-    rows = await asyncio.to_thread(
-        list_deliveries,
-        workspace_id=channel.workspace_id or "",
-        channel_id=channel_id,
-        limit=limit,
-    )
+    rows = list_deliveries(workspace_id=channel.workspace_id or "", channel_id=channel_id, limit=limit)
     return {"channel_id": channel_id, "deliveries": rows}
 
 
@@ -1182,7 +1178,7 @@ def _refuse_self_lockout(
 
 
 @router.get("/tenant")
-async def get_current_tenant(request: Request):
+def get_current_tenant(request: Request):
     tenant = _authorized_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured for this workspace or domain")
@@ -1190,30 +1186,52 @@ async def get_current_tenant(request: Request):
 
 
 @router.get("/tenants")
-async def get_all_tenants(request: Request):
-    """List tenants the caller is allowed to see.
+def get_all_tenants(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500, description="Tenants per page (newest first)"),
+    offset: int = Query(0, ge=0, description="The next_offset of the previous page"),
+):
+    """List tenants the caller is allowed to see, a page at a time.
 
     Platform admins see every tenant (or the header workspace when named).
     Workspace admins see only tenants they administer — never another
-    customer's domain, MFA flag, or IP allowlist.
+    customer's domain, MFA flag, or IP allowlist. ``next_offset`` is null on
+    the last page. Only the tenants of the page (or of the caller's own
+    workspaces) are read from the store (ops review round 2, High 3).
     """
     from src.services import auth_service
 
     named = workspace_id_from_request_headers(request.headers)
-    tenants = list_tenants()
-    if auth_service.auth_required() and not _is_platform_admin(request):
-        tenants = [
-            t
-            for t in tenants
-            if t.workspace_id and _can_admin_workspace(request, t.workspace_id)
-        ]
+    restricted = auth_service.auth_required() and not _is_platform_admin(request)
     if named:
-        tenants = [t for t in tenants if t.workspace_id == named]
-    return {"tenants": [t.to_dict() for t in tenants]}
+        tenant = get_tenant_for_workspace(named)
+        tenants = [tenant] if tenant else []
+    elif restricted:
+        tenants = tenants_for_workspaces(_caller_workspaces(request))
+    else:
+        tenants, next_offset = list_tenants_page(limit=limit, offset=offset)
+        return JSONResponse({"tenants": [t.to_dict() for t in tenants], "next_offset": next_offset})
+    if restricted:
+        tenants = [t for t in tenants if t.workspace_id and _can_admin_workspace(request, t.workspace_id)]
+    tenants = sorted(tenants, key=lambda t: t.created_at, reverse=True)
+    page = tenants[offset:offset + limit]
+    next_offset = offset + limit if len(tenants) > offset + limit else None
+    return JSONResponse({"tenants": [t.to_dict() for t in page], "next_offset": next_offset})
+
+
+def _caller_workspaces(request: Request) -> set[str]:
+    """Workspaces the caller belongs to (an API key: its own): the only ones it can administer."""
+    from services.team_store import list_memberships_for_user
+
+    user = getattr(request.state, "user", None)
+    user = user if isinstance(user, dict) else {}
+    found = {str(m.get("workspace_id") or "") for m in list_memberships_for_user(_actor(request))}
+    found.add(str(user.get("workspace_id") or ""))
+    return {w for w in found if w}
 
 
 @router.post("/tenant")
-async def post_tenant(body: TenantCreateBody, request: Request):
+def post_tenant(body: TenantCreateBody, request: Request):
     from services.audit_log import append_audit_event
 
     actor = _actor(request)
@@ -1289,7 +1307,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
 
 
 @router.patch("/tenant/{tenant_id}")
-async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request):
+def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request):
     from services.audit_log import append_audit_event
 
     tenant = get_tenant(tenant_id)
@@ -1345,7 +1363,7 @@ _DOMAIN_REFUSALS = {
 
 
 @router.post("/tenant/{tenant_id}/custom-domain/verify")
-async def verify_tenant_custom_domain(tenant_id: str, request: Request):
+def verify_tenant_custom_domain(tenant_id: str, request: Request):
     """Prove DNS ownership of the tenant's custom domain (D337).
 
     Until this passes, the domain is stored but is not a CORS origin. The
@@ -1360,7 +1378,7 @@ async def verify_tenant_custom_domain(tenant_id: str, request: Request):
     _require_tenant_admin(request, tenant.workspace_id)
     if not tenant.custom_domain:
         raise HTTPException(status_code=400, detail="Set a custom domain before verifying it")
-    outcome = await asyncio.to_thread(verify, tenant_id)
+    outcome = verify(tenant_id)
     details = {"tenant_id": tenant_id, "workspace_id": tenant.workspace_id,
                "custom_domain": tenant.custom_domain, "reason": outcome.reason}
     record_security_event(
@@ -1385,7 +1403,7 @@ async def verify_tenant_custom_domain(tenant_id: str, request: Request):
 
 
 @router.delete("/tenant/{tenant_id}")
-async def delete_tenant_route(tenant_id: str, request: Request):
+def delete_tenant_route(tenant_id: str, request: Request):
     from services.audit_log import append_audit_event
 
     tenant = get_tenant(tenant_id)
@@ -1408,7 +1426,7 @@ async def delete_tenant_route(tenant_id: str, request: Request):
 
 
 @router.get("/tenant/byok-keys")
-async def get_tenant_byok_keys(request: Request):
+def get_tenant_byok_keys(request: Request):
     tenant = _authorized_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
@@ -1416,7 +1434,7 @@ async def get_tenant_byok_keys(request: Request):
 
 
 @router.post("/tenant/byok-keys")
-async def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
+def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
     tenant = _authorized_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
@@ -1447,7 +1465,7 @@ async def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
 
 
 @router.post("/tenant/byok-keys/{key_id}/rotate")
-async def rotate_tenant_byok_key(key_id: str, request: Request):
+def rotate_tenant_byok_key(key_id: str, request: Request):
     tenant = _authorized_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
@@ -1650,7 +1668,7 @@ def _posture_scope_workspace(request: Request, tenant: Tenant | None) -> str:
 
 
 @router.get("/security/posture")
-async def get_security_posture(request: Request):
+def get_security_posture(request: Request):
     """Posture for the workspace this request names.
 
     The body is not cacheable: an earlier unscoped read (allowlist off) must
@@ -1670,7 +1688,7 @@ async def get_security_posture(request: Request):
 
 
 @router.get("/security/report")
-async def get_security_report(request: Request):
+def get_security_report(request: Request):
     """Return a downloadable, human-readable compliance report for the tenant."""
     tenant = _authorized_request_tenant(request)
     posture = _security_posture(tenant, request)

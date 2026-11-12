@@ -13,10 +13,14 @@ from services.audit_log import append_audit_event
 from services.brand_env import getenv_brand
 from services.ops_events import emit_event
 from services.platform_config import data_dir
+from services.shared_doc_store import SharedLog
 from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "mcp_invocations.jsonl"
 MAX_ROWS = int(getenv_brand("DATAFLOW_MCP_LOG_MAX", "2000"))
+# Shared across replicas when a control-plane store is configured, so the
+# invocation history does not depend on which API pod served the call (H-5).
+_LOG = SharedLog("mcp_invocations", file_path=lambda: STORE_PATH, key_field="id")
 logger = logging.getLogger(__name__)
 
 
@@ -111,10 +115,15 @@ def log_mcp_invocation(
         "correlation_id": correlation_id,
         "error_kind": error_kind,
     }
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with STORE_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False, default=json_default) + "\n")
-    _trim_if_needed()
+    coll = _LOG.backend()
+    if coll is not None:
+        _LOG.append(coll, row)
+        _LOG.trim(coll, MAX_ROWS)
+    else:
+        STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with STORE_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False, default=json_default) + "\n")
+        _trim_if_needed()
     append_audit_event(
         action=f"mcp.{tool}",
         resource=tool,
@@ -127,17 +136,24 @@ def log_mcp_invocation(
 
 
 def list_mcp_invocations(*, limit: int = 50) -> list[dict[str, Any]]:
-    if not STORE_PATH.exists():
+    coll = _LOG.backend()
+    if coll is not None:
+        lines: list[Any] = _LOG.records(coll, limit=limit)
+    elif not STORE_PATH.exists():
         return []
-    lines = STORE_PATH.read_text(encoding="utf-8").strip().splitlines()
+    else:
+        lines = STORE_PATH.read_text(encoding="utf-8").strip().splitlines()
     rows: list[dict[str, Any]] = []
     for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        if isinstance(line, dict):
+            row = line
+        else:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
         if not isinstance(row, dict):
             continue
         rows.append({

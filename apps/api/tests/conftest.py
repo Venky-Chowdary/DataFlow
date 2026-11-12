@@ -51,13 +51,38 @@ import services as _canonical_services  # noqa: E402,F401
 # value would shadow every test that monkeypatches DATAFLOW_DATA_DIR to
 # isolate itself — those tests would all share one dir and pollute each
 # other. With only the fallback var set, a test patching either var wins.
+import atexit  # noqa: E402
+import shutil  # noqa: E402
 import tempfile  # noqa: E402
 
-os.environ.setdefault(
-    "DATAFLOW_DATA_DIR",
-    tempfile.mkdtemp(prefix="df-suite-data-"))
+if not os.environ.get("DATAFLOW_DATA_DIR"):
+    # Created only when the caller set none, and removed when this process
+    # exits: one was left behind per pytest process before (about 10,000
+    # directories, ~490 MB, on one shared machine in a day).
+    _suite_data_dir = tempfile.mkdtemp(prefix="df-suite-data-")
+    os.environ["DATAFLOW_DATA_DIR"] = _suite_data_dir
+    atexit.register(shutil.rmtree, _suite_data_dir, ignore_errors=True)
+
+# Uploads land in a temp directory of the suite's own, never in the source
+# tree's apps/api/uploads: a test that stored an upload (e.g. "orders.csv")
+# left it there for every later test and every later run, so Pilot resolved
+# "orders" to that stale upload and routed a plan-only request to a real
+# dataset transfer (test_pilot_colloquial_ops_wave50 on PR 406 CI, shard 6).
+# It is not under the suite data dir: import-time paths there are re-pointed
+# per module, which would split where an upload is stored from where
+# upload_dir() reads it back.
+if not os.environ.get("DATAFLOW_UPLOAD_DIR") and not os.environ.get("DATAWRAP_UPLOAD_DIR"):
+    _suite_upload_dir = tempfile.mkdtemp(prefix="df-suite-uploads-")
+    os.environ["DATAFLOW_UPLOAD_DIR"] = _suite_upload_dir
+    atexit.register(shutil.rmtree, _suite_upload_dir, ignore_errors=True)
 
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
+# Tenant settings, BYOK keys, ACLs and the other control-plane stores move to
+# the shared database whenever one is connected (audit H-5). Tests isolate
+# those stores per test through their files, including the worlds that run
+# users and jobs on a live MongoDB, so the suite pins the file backend; the
+# shared backend is exercised by tests/test_h5_shared_control_plane_stores.py.
+os.environ.setdefault("DATAFLOW_CONTROL_STORE_BACKEND", "file")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 # Pilot's dataset tests read the sample files in tests/fixtures. The product
 # lists only the deployment's upload directory (the image ships this folder,

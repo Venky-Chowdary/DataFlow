@@ -29,6 +29,7 @@ from services.shape_expr import ExpressionError, compile_expression, describe_fu
 from services.shape_models import MAX_STEPS, ShapeError, ShapeRecipe, describe_catalog
 from services.shape_preflight import shaped_column_types
 from services.shape_suggest import profile_columns, suggest_steps
+from services.threadpool_handler import off_event_loop
 from services.workspace_access import (
     assert_resource_workspace,
     resolve_read_workspace,
@@ -675,7 +676,8 @@ class _DraftBody(BaseModel):
 
 
 @router.get("/drafts")
-async def get_shape_draft(
+@off_event_loop  # the draft store may be the shared control-plane database (H-5)
+def get_shape_draft(
     request: Request,
     route_key: str = "",
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
@@ -690,12 +692,14 @@ async def get_shape_draft(
 
 
 @router.put("/drafts")
-async def put_shape_draft(
+@off_event_loop  # the draft store may be the shared control-plane database (H-5)
+def put_shape_draft(
     body: _DraftBody,
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
-    from services.shape_draft_store import save_shape_draft
+    from services.shape_draft_store import DraftTooLarge, save_shape_draft
+    from services.shared_record_store import RecordTooLarge
 
     ws = resolve_write_workspace(request, workspace_id)
     try:
@@ -706,13 +710,16 @@ async def put_shape_draft(
             source_columns=body.source_columns,
             canvas_layout=body.canvas_layout,
         )
+    except (DraftTooLarge, RecordTooLarge) as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except ShapeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"draft": draft}
 
 
 @router.delete("/drafts")
-async def delete_shape_draft(
+@off_event_loop  # the draft store may be the shared control-plane database (H-5)
+def delete_shape_draft(
     request: Request,
     route_key: str = "",
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),

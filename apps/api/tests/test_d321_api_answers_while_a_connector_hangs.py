@@ -42,9 +42,19 @@ DEADLINE = 2
 RELEASE_AFTER = 7.0
 #: An answer the operator would call "the API is up".
 FAST = 1.0
-#: The pre-fix loop stayed blocked until RELEASE_AFTER, so no latency limit at
-#: or above this can let that regression through.
-CEILING = RELEASE_AFTER / 2
+#: How much slower than its own no-hang baseline a route may answer during
+#: the hang, when that is more than FAST (a loaded runner is slow before the
+#: hang too).
+SLOWDOWN = 5.0
+#: Absolute ceiling for a route, whatever its baseline. In the second test a
+#: route that waits behind a blocked loop waits until the black hole lets go
+#: (RELEASE_AFTER, 7 s) from DEADLINE + 1.5 = 3.5 s: 3.5 s. In the first test
+#: a blocked loop wakes the 0.5 s sleep at the connector deadline at the
+#: earliest (DEADLINE, 2 s), 1.5 s late, which the event-loop bound (FAST,
+#: absolute) refuses. The slowest healthy route call seen on a loaded CI
+#: runner was 1.1 s (the first request of the process). 2 s leaves that room
+#: and is well below 3.5 s; the old RELEASE_AFTER / 2 was exactly 3.5 s.
+CEILING = 2.0
 
 
 def _limit(baseline: dict[str, float]) -> float:
@@ -153,6 +163,29 @@ async def _api_latencies(client) -> dict[str, float]:
     }
 
 
+def _limits(baseline: dict[str, float]) -> dict[str, float]:
+    """Per-route latency limit during the hang.
+
+    This test proves one thing: the API keeps answering WHILE a connector
+    call hangs. It used to compare each call with an absolute second, which
+    also measured whatever the first call of a process pays once (FastAPI
+    builds its route table inside the first request when the app was not
+    started through its lifespan) and how loaded the runner was: CI saw
+    ``health`` at 1.1s with the event loop on time and every other route in
+    milliseconds. The same calls are therefore made once before the hang, and
+    each route is held to its own baseline, and never more than CEILING.
+    Pre-fix, the loop stays blocked until the black hole lets go
+    (RELEASE_AFTER), far above any limit here.
+    """
+    return {route: min(CEILING, max(FAST, SLOWDOWN * seconds)) for route, seconds in baseline.items()}
+
+
+def _assert_responsive(measured: dict[str, float], baseline: dict[str, float]) -> None:
+    limits = {"event_loop": FAST, **_limits(baseline)}
+    slow = {route: seconds for route, seconds in measured.items() if seconds >= limits[route]}
+    assert not slow, {"slow": slow, "measured": measured, "baseline": baseline, "limits": limits}
+
+
 def _run(main) -> object:
     async def wrapper():
         loop = asyncio.get_running_loop()
@@ -186,7 +219,7 @@ def test_api_answers_while_a_connector_test_waits_on_a_silent_host(silent_host):
             return baseline, during, answer
 
     baseline, during, answer = _run(main)
-    assert max(during.values()) < _limit(baseline), (during, baseline)
+    _assert_responsive(during, baseline)
     body = answer.json()
     assert body["success"] is False
     # The deadline answer names the silent endpoint.
@@ -223,7 +256,7 @@ def test_mcp_keeps_answering_while_create_connector_probes_a_silent_host(silent_
             return baseline, after, answers
 
     baseline, after, answers = _run(main)
-    assert max(after.values()) < _limit(baseline), (after, baseline)
+    _assert_responsive(after, baseline)
     for response in answers:
         result = response.json()["result"]
         assert result["isError"] is True

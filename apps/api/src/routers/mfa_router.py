@@ -213,13 +213,13 @@ def _status_payload(request: Request, email: str) -> dict[str, Any]:
 
 
 @router.get("/mfa")
-async def mfa_status(request: Request):
+def mfa_status(request: Request):
     email = _account(request)
     return _status_payload(request, email)
 
 
 @router.post("/mfa/totp/enroll")
-async def mfa_enroll(body: ReauthBody, request: Request):
+def mfa_enroll(body: ReauthBody, request: Request):
     email = _account(request)
     _password_account(email)
     reauth = ""
@@ -238,7 +238,7 @@ async def mfa_enroll(body: ReauthBody, request: Request):
 
 
 @router.post("/mfa/totp/confirm")
-async def mfa_confirm(body: CodeBody, request: Request):
+def mfa_confirm(body: CodeBody, request: Request):
     email = _account(request)
     _password_account(email)
     result = mfa.confirm_enrollment(email, body.code)
@@ -299,7 +299,7 @@ async def mfa_regenerate_recovery(body: ReauthBody, request: Request):
 
 
 @router.post("/mfa/totp/disable")
-async def mfa_disable(body: ReauthBody, request: Request):
+def mfa_disable(body: ReauthBody, request: Request):
     email = _account(request)
     if not mfa.is_enrolled(email):
         raise HTTPException(status_code=409, detail="Two-factor authentication is not set up for this account.")
@@ -359,7 +359,7 @@ def login_step_up(request: Request, email: str) -> JSONResponse | None:
 
 
 @router.post("/login/mfa")
-async def login_mfa(body: ChallengeBody, request: Request):
+def login_mfa(body: ChallengeBody, request: Request):
     from services.user_store import get_user as get_stored_user
     from src.services.auth_service import create_token, lookup_user, public_user, token_jti
 

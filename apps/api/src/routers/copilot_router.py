@@ -568,7 +568,7 @@ async def _run_lifecycle_confirm(
         rid = str(payload.get("review_id") or "").strip()
         if not rid:
             raise HTTPException(status_code=400, detail="Approval is missing review_id")
-        return dict(acknowledge_cdc_mapping_review(rid, http_request))
+        return dict(await run_in_threadpool(acknowledge_cdc_mapping_review, rid, http_request))
     if kind == "rebaseline_transfer":
         from services.append_continuity import RebaselineError, rebaseline
         from services.connector_store import get_connector, list_connectors
@@ -792,7 +792,7 @@ async def copilot_confirm(
         if run_id:
             from services.preflight_run_store import get_preflight_run
 
-            preflight_run = get_preflight_run(run_id)
+            preflight_run = await run_in_threadpool(get_preflight_run, run_id)
             if not preflight_run:
                 ledger.release_claim(ack_id)
                 raise HTTPException(status_code=404, detail="Preflight run not found")

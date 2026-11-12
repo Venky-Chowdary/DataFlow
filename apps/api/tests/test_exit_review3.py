@@ -333,7 +333,7 @@ def test_h1_the_four_job_routes_answer_409_for_a_rehearsal_extract():
                 "replay_job_quarantine": "replayed from quarantine"}
     seen = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name in expected:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in expected:
             calls = [c for c in ast.walk(node) if isinstance(c, ast.Call)
                      and getattr(c.func, "id", "") == "_refuse_rehearsal_extract"]
             rebuilt = [c.lineno for c in ast.walk(node) if isinstance(c, ast.Call)

@@ -34,6 +34,8 @@ from services.value_serializer import json_default
 from services.upload_limits import PayloadTooLarge, read_upload
 from services.connector_telemetry import connector_operation, driver_family
 from services.rbac import require_admin_connector_access
+from services import shutdown_signal
+from services.threadpool_handler import off_event_loop
 
 from ..services.file_parser import FileParser
 from ..services.mongodb_service import get_mongodb_service
@@ -442,7 +444,8 @@ def _refuse_unsafe_egress(data: dict[str, Any]) -> None:
 
 
 @router.post("/", response_model=ConnectorResponse)
-async def create_connector(
+@off_event_loop
+def create_connector(
     config: ConnectorConfig,
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
@@ -530,7 +533,8 @@ async def create_connector(
 
 
 @router.get("/")
-async def list_connectors(
+@off_event_loop
+def list_connectors(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
@@ -715,7 +719,8 @@ async def list_transfer_jobs(
 
 
 @router.get("/jobs/{job_id}")
-async def get_transfer_job(job_id: str, request: Request):
+@off_event_loop
+def get_transfer_job(job_id: str, request: Request):
     """Get a specific transfer job"""
     try:
         from ..transfer.models import sanitize_job_for_api
@@ -904,7 +909,8 @@ def _sign_rerun_risk_acceptance(xfer_req: Any, acceptance: dict[str, Any]) -> li
 
 
 @router.post("/jobs/{job_id}/retry")
-async def retry_transfer_job(
+@off_event_loop
+def retry_transfer_job(
     job_id: str,
     background_tasks: BackgroundTasks,
     request: Request,
@@ -1119,7 +1125,8 @@ def _refuse_rehearsal_extract(job: dict[str, Any], verb: str) -> None:
 
 
 @router.post("/jobs/{job_id}/rerun")
-async def rerun_transfer_job(
+@off_event_loop
+def rerun_transfer_job(
     job_id: str,
     background_tasks: BackgroundTasks,
     request: Request,
@@ -1481,7 +1488,8 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_transfer_job(job_id: str, request: Request):
+@off_event_loop
+def cancel_transfer_job(job_id: str, request: Request):
     """Request cancellation of a running/pending transfer job."""
     try:
         mongo = get_mongodb_service()
@@ -1575,15 +1583,49 @@ async def cancel_transfer_job(job_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+#: How often the job stream reads the job, how often it re-sends an unchanged
+#: frame (the web client treats 8s of silence as a dropped stream and falls
+#: back to polling), and how long one stream may stay open.
+JOB_STREAM_POLL_SECONDS = 1.0
+JOB_STREAM_REFRESH_SECONDS = 5.0
+JOB_STREAM_MAX_SECONDS = 6 * 3600.0
+
+
+def _job_stream_frame(job_id: str) -> tuple[str | None, bool]:
+    """The job as one SSE data frame and whether it is terminal (None: job gone).
+
+    Synchronous on purpose: the stream runs it on the thread pool, so the
+    store read never holds the event loop.
+    """
+    from services.job_status import is_terminal
+
+    from ..transfer.models import sanitize_job_for_api
+
+    job = get_mongodb_service().get_job(job_id)
+    if not job:
+        return None, True
+    for key in ("created_at", "updated_at", "started_at", "completed_at"):
+        if job.get(key) and hasattr(job[key], "isoformat"):
+            job[key] = job[key].isoformat()
+    safe = sanitize_job_for_api(job)
+    safe["runtime_estimate"] = estimate_for_job_doc(job)
+    return f"data: {json.dumps(safe, default=json_default)}\n\n", is_terminal(safe.get("status"))
+
+
 @router.get("/jobs/{job_id}/stream")
 async def stream_transfer_job(job_id: str, request: Request):
     """Server-sent events for live transfer job progress."""
+    import time
+
+    from starlette.concurrency import run_in_threadpool
+
+    def _authorized_job() -> dict | None:
+        job = get_mongodb_service().get_job(job_id)
+        return job if job and _can_access_job(request, job) else None
 
     # Pre-check workspace access before entering the stream loop.
     try:
-        mongo = get_mongodb_service()
-        job = mongo.get_job(job_id)
-        if not job or not _can_access_job(request, job):
+        if await run_in_threadpool(_authorized_job) is None:
             raise HTTPException(status_code=404, detail="Job not found")
     except HTTPException:
         raise
@@ -1591,25 +1633,32 @@ async def stream_transfer_job(job_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
     async def event_generator():
-        from ..transfer.models import sanitize_job_for_api
-
-        mongo = get_mongodb_service()
+        last_frame: str | None = None
+        last_sent = 0.0
+        opened = time.monotonic()
         while True:
-            job = mongo.get_job(job_id)
-            if not job:
+            # A viewer that closed the tab must not keep a store poll alive.
+            if await request.is_disconnected():
+                break
+            frame, terminal = await run_in_threadpool(_job_stream_frame, job_id)
+            if frame is None:
                 yield f"event: error\ndata: {json.dumps({'error': 'Job not found'}, default=json_default)}\n\n"
                 break
-            for key in ("created_at", "updated_at", "started_at", "completed_at"):
-                if job.get(key) and hasattr(job[key], "isoformat"):
-                    job[key] = job[key].isoformat()
-            safe = sanitize_job_for_api(job)
-            safe["runtime_estimate"] = estimate_for_job_doc(job)
-            yield f"data: {json.dumps(safe, default=json_default)}\n\n"
-            from services.job_status import is_terminal
-
-            if is_terminal(safe.get("status")):
+            now = time.monotonic()
+            if frame != last_frame or terminal or now - last_sent >= JOB_STREAM_REFRESH_SECONDS:
+                yield frame
+                last_frame, last_sent = frame, now
+            if terminal:
                 break
-            await asyncio.sleep(0.4)
+            if now - opened >= JOB_STREAM_MAX_SECONDS:
+                # The client reconnects (EventSource) or falls back to polling.
+                yield f"event: timeout\ndata: {json.dumps({'reason': 'stream_max_age'})}\n\n"
+                break
+            # On SIGTERM the stream ends at once so the server can run its
+            # shutdown; the client reconnects to another replica (ops review High 4).
+            if await shutdown_signal.sleep_unless_shutdown(JOB_STREAM_POLL_SECONDS):
+                yield f"event: shutdown\ndata: {json.dumps({'reason': 'server_restarting'})}\n\n"
+                break
 
     return StreamingResponse(
         event_generator(),
@@ -1636,7 +1685,8 @@ def _operator_csv_cell(value: object) -> str:
 
 
 @router.get("/jobs/{job_id}/quarantine")
-async def get_job_quarantine(job_id: str, request: Request):
+@off_event_loop
+def get_job_quarantine(job_id: str, request: Request):
     """Return quarantined rows for a job with their rejection reasons.
 
     Includes write-time rejects and preflight integrity findings (encoding, etc.)
@@ -1787,7 +1837,8 @@ async def get_job_quarantine(job_id: str, request: Request):
 
 
 @router.post("/jobs/{job_id}/quarantine/export")
-async def export_job_quarantine(job_id: str, request: Request):
+@off_event_loop
+def export_job_quarantine(job_id: str, request: Request):
     """Export quarantined rows to a CSV in the exports folder and return a download URL."""
     import uuid
 
@@ -2973,7 +3024,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
 
 
 @router.get("/{connector_id}")
-async def get_connector(connector_id: str, request: Request):
+@off_event_loop
+def get_connector(connector_id: str, request: Request):
     """Get a specific connector"""
     try:
         from services.mongodb_service import redact_connector_secrets
@@ -2994,7 +3046,8 @@ async def get_connector(connector_id: str, request: Request):
 
 
 @router.delete("/{connector_id}")
-async def delete_connector(connector_id: str, request: Request):
+@off_event_loop
+def delete_connector(connector_id: str, request: Request):
     """Delete a connector"""
     try:
         mongo = get_mongodb_service()

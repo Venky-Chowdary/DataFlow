@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import io
 import json
@@ -192,7 +191,7 @@ def _reader_view(masker, events: list) -> tuple[list, bool]:
 
 
 @router.get("/events")
-async def list_events(
+def list_events(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
     level: str | None = Query(None, description="info | success | warn | error | all"),
@@ -251,7 +250,7 @@ async def list_events(
 
 
 @router.get("/export")
-async def export_events(
+def export_events(
     request: Request,
     format: str = Query("csv", description="csv | json | ndjson | cef"),
     limit: int = Query(5000, ge=1, le=20000),
@@ -391,7 +390,7 @@ async def export_events(
 
 
 @router.get("/tip")
-async def get_audit_tip(request: Request):
+def get_audit_tip(request: Request):
     """The chain head for the caller's scope.
 
     A platform admin gets the platform head, the anchor receipts and the
@@ -427,7 +426,8 @@ async def get_audit_tip(request: Request):
     tip = latest_event_hash()
     anchor = latest_anchor()
     # Verify-on-read: the receipt alone is not the anchor; the write-once object is.
-    verification = await asyncio.to_thread(verify_receipt, anchor) if anchor else None
+    # (This handler runs on the thread pool, so the read-back does not block the loop.)
+    verification = verify_receipt(anchor) if anchor else None
     return {
         "scope": "platform",
         "workspace_id": None,
@@ -753,7 +753,7 @@ async def purge_audit_retention(
 
 
 @router.post("/tip/anchor")
-async def force_anchor_tip(request: Request):
+def force_anchor_tip(request: Request):
     """Manually seal the current platform tip (ops / compliance export).
 
     Platform administrators only: it seals and returns the platform head.

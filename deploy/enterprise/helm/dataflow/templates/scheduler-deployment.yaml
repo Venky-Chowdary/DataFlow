@@ -21,6 +21,7 @@ spec:
       serviceAccountName: {{ include "dataflow.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.scheduler.terminationGracePeriodSeconds }}
       containers:
         - name: scheduler
           image: "{{ .Values.scheduler.image.repository }}:{{ .Values.scheduler.image.tag }}"
@@ -41,11 +42,18 @@ spec:
               value: "1"
             - name: DATAFLOW_ACK_BACKEND
               value: mongo
+            - name: DATAFLOW_METRICS_PORT
+              value: {{ .Values.metrics.port | quote }}
           {{- include "dataflow.secretEnvFrom" . | nindent 10 }}
+          {{- include "dataflow.metricsPortAndProbes" . | nindent 10 }}
           resources:
             {{- toYaml .Values.scheduler.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "dataflow.runtimeVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "dataflow.runtimeVolumes" . | nindent 8 }}
       nodeSelector:
         {{- toYaml .Values.scheduler.nodeSelector | nindent 8 }}
       tolerations:
