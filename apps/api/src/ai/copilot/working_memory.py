@@ -72,6 +72,47 @@ def _now() -> float:
     return time.time()
 
 
+# ---- at rest (review 2, M1) --------------------------------------------------
+#
+# A focus holds the WHERE clause a follow-up edits ("email is a@b.com"), and a
+# pending slot or proposal the arguments it will re-run. On disk and in the
+# shared collection each slot is sealed with the Pilot state key; when nothing
+# can seal it, it is persisted without its WHERE text.
+
+_STAMPS = ("updated_at", "created_at")
+
+
+def _without_where(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: ("" if k == "where" else _without_where(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_without_where(v) for v in value]
+    return value
+
+
+def _at_rest(doc: dict[str, Any]) -> dict[str, Any]:
+    """``doc`` as it may be written down: sealed, or else without its WHERE text."""
+    from .sealed_state import seal
+
+    token = seal(doc)
+    stamps = {k: doc[k] for k in _STAMPS if k in doc}
+    if token is not None:
+        return {"sealed": token, **stamps}
+    return _without_where(doc)
+
+
+def _from_rest(doc: Any) -> dict[str, Any] | None:
+    """A slot read back from disk or the collection (legacy plaintext included)."""
+    if not isinstance(doc, dict):
+        return None
+    if "sealed" not in doc:
+        return doc
+    from .sealed_state import unseal
+
+    value = unseal(doc["sealed"])
+    return value if isinstance(value, dict) else None
+
+
 @dataclass
 class PilotFocus:
     """The resolved subject of the last data turn in one session."""
@@ -173,25 +214,33 @@ class PilotWorkingMemory:
                 return
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             now = _now()
-            for sid, doc in (raw.get("focus") or {}).items():
-                if float(doc.get("updated_at") or 0) + self.ttl_sec > now:
-                    self._focus[str(sid)] = doc
-            for sid, doc in (raw.get("pending") or {}).items():
-                if float(doc.get("created_at") or 0) + self.ttl_sec > now:
-                    self._pending[str(sid)] = doc
-            for sid, doc in (raw.get("proposals") or {}).items():
-                if float(doc.get("created_at") or 0) + self.ttl_sec > now:
-                    self._proposals[str(sid)] = doc
+            legacy = False
+            for key, store, stamp in (
+                ("focus", self._focus, "updated_at"),
+                ("pending", self._pending, "created_at"),
+                ("proposals", self._proposals, "created_at"),
+            ):
+                for sid, stored in (raw.get(key) or {}).items():
+                    legacy = legacy or (isinstance(stored, dict) and "sealed" not in stored)
+                    doc = _from_rest(stored)
+                    if doc and float(doc.get(stamp) or 0) + self.ttl_sec > now:
+                        store[str(sid)] = doc
         except (OSError, json.JSONDecodeError, TypeError, AttributeError) as exc:
             _log.warning("pilot working memory load failed: %s", exc)
+            return
+        if legacy:
+            # Plaintext written by an earlier release is resealed now, not at
+            # the next write, which may never come.
+            self._persist()
 
     def _persist(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
-                "focus": self._focus,
-                "pending": self._pending,
-                "proposals": self._proposals,
+                key: {sid: _at_rest(doc) for sid, doc in store.items()}
+                for key, store in (
+                    ("focus", self._focus), ("pending", self._pending), ("proposals", self._proposals),
+                )
             }
             tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
             tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
@@ -367,7 +416,8 @@ class _MongoSlots:
 
     def get(self, sid: str, default: Any = None) -> Any:
         row = self._coll.find_one({"_id": self._id(sid)})
-        return dict(row["doc"]) if row and isinstance(row.get("doc"), dict) else default
+        doc = _from_rest(row.get("doc")) if row else None
+        return dict(doc) if doc else default
 
     def __setitem__(self, sid: str, doc: dict[str, Any]) -> None:
         self._coll.replace_one(
@@ -377,14 +427,14 @@ class _MongoSlots:
                 "kind": self._kind,
                 "sid": sid,
                 "stamp": float(doc.get(self._stamp) or 0),
-                "doc": json.loads(json.dumps(doc, default=str)),
+                "doc": _at_rest(json.loads(json.dumps(doc, default=str))),
             },
             upsert=True,
         )
 
     def pop(self, sid: str, default: Any = None) -> Any:
         row = self._coll.find_one_and_delete({"_id": self._id(sid)})
-        return row["doc"] if row else default
+        return (_from_rest(row.get("doc")) or default) if row else default
 
     def clear(self) -> None:
         self._coll.delete_many({"kind": self._kind})
