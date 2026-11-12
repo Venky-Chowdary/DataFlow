@@ -744,9 +744,15 @@ async def list_transfer_plans(limit: int = 50):
 
 
 @router.post("/plans")
-async def create_transfer_plan(body: CreatePlanRequest):
+async def create_transfer_plan(body: CreatePlanRequest, request: Request):
     from services.audit_log import append_audit_event
+    from services.body_id_ownership import assert_body_ids
     from services.transfer_plan_store import create_plan
+
+    # A plan stores its endpoints' connector ids: they must be the caller's (review 3, Low).
+    assert_body_ids(request, connectors=tuple(
+        str((side or {}).get("connector_id") or "") for side in (body.source, body.destination)
+    ))
 
     plan = create_plan(body.model_dump())
     append_audit_event(
@@ -1186,6 +1192,10 @@ async def execute_transfer_json(
         plan_payload = None
 
     _residency_check(request, dst, workspace_id)
+    from services.body_id_ownership import assert_body_ids
+
+    # Another workspace's contract answers like a missing one (review 3, Low).
+    assert_body_ids(request, contracts=(body.contract_id or "",))
     from src.transfer.contract_engine import stamp_request_contract
 
     plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
@@ -1777,8 +1787,10 @@ async def run_universal_transfer(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    from services.body_id_ownership import assert_body_ids
     from src.transfer.contract_engine import stamp_request_contract
 
+    assert_body_ids(request, contracts=(contract_id,))  # review 3, Low
     try:
         stamp_request_contract(
             request_obj,

@@ -1252,6 +1252,9 @@ async def post_tenant(body: TenantCreateBody, request: Request):
         from services.sso_enforcement import assert_may_enforce_sso
 
         assert_may_enforce_sso(request)
+    from services.body_id_ownership import assert_byok_key_in_workspace
+
+    assert_byok_key_in_workspace(body.byok_key_id, workspace_id)  # review 3, Low
     try:
         tenant = create_tenant(
             workspace_id=workspace_id,
@@ -1305,6 +1308,10 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
         from services.sso_enforcement import assert_may_enforce_sso
 
         assert_may_enforce_sso(request)
+    if body.byok_key_id:
+        from services.body_id_ownership import assert_byok_key_in_workspace
+
+        assert_byok_key_in_workspace(body.byok_key_id, tenant.workspace_id)  # review 3, Low
     try:
         updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
     except ValueError as exc:
