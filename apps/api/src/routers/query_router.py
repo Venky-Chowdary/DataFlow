@@ -309,6 +309,22 @@ _SIDE_EFFECT_FUNCTIONS = frozenset({
     "load_aws_credentials",
     # pg extensions: server-side HTTP (pgsql-http)
     "http", "http_get", "http_post", "http_put", "http_delete", "http_head", "http_patch",
+    # Security review round 2 (M3). ClickHouse: lakehouse, blob and Arrow Flight
+    # readers, every-table merge(), and unbounded generators (denial of service).
+    "icebergs3", "iceberglocal", "icebergazure", "iceberghdfs", "icebergs3cluster",
+    "icebergazurecluster", "iceberghdfscluster", "deltalakecluster", "deltalakes3",
+    "deltalakeazure", "hudicluster", "azureblobstoragecluster", "arrowflight", "merge",
+    "numbers", "numbers_mt", "zeros", "zeros_mt", "generaterandom",
+    # PostgreSQL backup / replication / WAL control, server-dir listings, catalog writes.
+    "pg_start_backup", "pg_stop_backup", "pg_copy_logical_replication_slot",
+    "pg_copy_physical_replication_slot", "pg_wal_replay_pause", "pg_wal_replay_resume",
+    "pg_ls_replslotdir", "pg_ls_logicalsnapdir", "pg_ls_logicalmapdir",
+    "pg_log_backend_memory_contexts", "pg_import_system_collations", "loread", "lowrite",
+    # Snowflake: URLs that hand out stage files.
+    "get_presigned_url", "build_scoped_file_url", "build_stage_file_url",
+    # MySQL: replication waits that hold the connection.
+    "master_pos_wait", "source_pos_wait", "wait_for_executed_gtid_set",
+    "wait_until_sql_thread_after_gtids",
     # oracle administrative packages are prefixed dbms_/utl_ below
 })
 _SIDE_EFFECT_PREFIXES = (
@@ -317,6 +333,9 @@ _SIDE_EFFECT_PREFIXES = (
     "xp_", "crosstab", "system$",
     # pg adminpack (server files) and statistics resets
     "pg_file_", "pg_stat_reset",
+    # pg replication origins; Oracle Data Pump's master process (runs PL/SQL
+    # outside the read-only transaction) (round 2, M3)
+    "pg_replication_origin_", "kupp$",
     # DuckDB / Databricks file and URL readers: read_csv, read_text, read_files ...
     "read_",
 )
@@ -341,6 +360,43 @@ _PURE_PACKAGE_FUNCTIONS = frozenset({
 _STATEMENT_WORD_RE = re.compile(
     r"(?<![A-Za-z0-9_$#@.])(?:exec|execute|waitfor)(?![A-Za-z0-9_$#])", re.I
 )
+# More statements T-SQL runs after a SELECT with no separator (security review
+# round 2, M3): ``select 1 backup database x to disk='\\host\share\x.bak'``.
+# Refused wherever a statement could start: not where the grammar needs an
+# expression or a name (``select open, close from prices``), and never as a
+# qualified (``t.kill``) or quoted identifier, or inside a literal.
+_TSQL_STATEMENT_WORDS = frozenset({
+    "backup", "restore", "shutdown", "kill", "dbcc", "reconfigure", "deny", "setuser",
+    "enable", "disable", "begin", "declare", "open", "revert", "raiserror", "checkpoint",
+})
+#: Tokens after which a word is an expression or a name, never a new statement.
+#: ``else`` is not one: T-SQL's ``IF ... ELSE`` takes a statement there.
+_EXPRESSION_CONTINUES = frozenset({
+    "select", "distinct", "all", "from", "join", "on", "where", "and", "or", "not", "by",
+    "as", "in", "is", "like", "ilike", "between", "case", "when", "then", "having", "over",
+    "partition", "using", "apply", "union", "intersect", "except", "minus", "with",
+    "lateral", "values", "escape", "collate", "interval", "exists", "any", "some", "qualify",
+    ",", "(", "=", "<", ">", "<=", ">=", "<>", "!=", "+", "-", "/", "%", "||", "^", "&",
+    "|", "~", "::",
+    # A name quoted with [..] or `..` in a view that does not read those quotes.
+    "[", "`", '"',
+})
+_CODE_TOKEN_RE = re.compile(
+    r"__DF[IQ]\d+__|[A-Za-z_@#][A-Za-z0-9_$#@]*|\d+(?:\.\d+)?(?:e[+-]?\d+)?|<>|!=|<=|>=|\|\||::|\S", re.I
+)
+
+
+def _starts_tsql_statement(code: str) -> bool:
+    """True when a T-SQL statement word stands where a new statement could start."""
+    tokens = _CODE_TOKEN_RE.findall(code)
+    for i, token in enumerate(tokens[1:], start=1):
+        if token.lower() not in _TSQL_STATEMENT_WORDS:
+            continue
+        after = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if "." in (tokens[i - 1], after) or tokens[i - 1].lower() in _EXPRESSION_CONTINUES:
+            continue
+        return True
+    return False
 # ``U&"d\0061ta"`` / ``U&'...'``: PostgreSQL reads the escapes, this filter
 # would read the text. Refused outright; the views mask the quoted part.
 _UNICODE_ESCAPED_RE = re.compile(r"(?<![A-Za-z0-9_$#])U&__DF[IQ]\d+__", re.I)
@@ -383,6 +439,8 @@ def _has_side_effect_functions(sql: str) -> bool:
 
     for code in sql_code_views(sql or ""):
         if _STATEMENT_WORD_RE.search(code) or _UNICODE_ESCAPED_RE.search(code) or _names_database_link(code):
+            return True
+        if _starts_tsql_statement(code):
             return True
     for scrubbed in sql_call_views(sql or ""):
         for match in _FUNC_CALL_RE.finditer(scrubbed):
@@ -1596,6 +1654,12 @@ def _apply_read_only_session(conn: Any, db_type: str) -> None:
             # runs first on a fresh connection checkout. DML and SELECT ... FOR
             # UPDATE then fail with ORA-01456 (audit M-5).
             conn.execute(text("SET TRANSACTION READ ONLY"))
+        elif db == "clickhouse":
+            # Per query (clickhouse_driver sends it with each query), never a
+            # session SET that would follow the pooled connection to a writer
+            # (security review round 2, M3).
+            current = dict((conn.get_execution_options() or {}).get("settings") or {})
+            conn.execution_options(settings={**current, "readonly": 1})
         # SQL Server / Azure SQL / Synapse: T-SQL has no read-only transaction,
         # and a session-level SET would follow the pooled connection to the
         # next writer. The guard there is the statement filter, and that this
