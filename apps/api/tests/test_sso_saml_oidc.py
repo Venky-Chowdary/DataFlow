@@ -39,6 +39,8 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "x" * 64)
     monkeypatch.setenv("DATAFLOW_SECRETS_KEY", "y" * 32)
     monkeypatch.setenv("DATAFLOW_SSO_AUTO_PROVISION", "1")
+    # Auto-provisioning needs an allowed-domain list (audit M-11: empty admits nobody).
+    monkeypatch.setenv("DATAFLOW_SSO_ALLOWED_DOMAINS", "example.com")
     monkeypatch.setattr(sso_state, "STATE_PATH", tmp_path / "sso_state.json")
     monkeypatch.setattr(sso_state, "data_dir", lambda: tmp_path)
     monkeypatch.setattr(integrations_store, "STORE_PATH", tmp_path / "integrations.json")

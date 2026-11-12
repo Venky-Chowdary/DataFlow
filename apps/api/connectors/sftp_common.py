@@ -12,6 +12,8 @@ import threading
 from collections.abc import Mapping
 from typing import Any
 
+from services.brand_env import getenv_brand
+
 logger = logging.getLogger(__name__)
 
 # Operator opt-out for host key verification. Trust-on-first-use is not a
@@ -120,10 +122,10 @@ def parse_sftp_config(
     # Saved connectors persist host-key trust on ``extra`` (and the
     # schedule runner lifts it onto the endpoint). The environment remains
     # the fallback when a caller supplies none; an inline value still wins.
-    cfg.host_key = (host_key or os.getenv("DATAFLOW_SFTP_HOST_KEY", "")).strip()
-    cfg.known_hosts = (known_hosts or os.getenv("DATAFLOW_SFTP_KNOWN_HOSTS", "")).strip()
+    cfg.host_key = (host_key or getenv_brand("DATAFLOW_SFTP_HOST_KEY", "")).strip()
+    cfg.known_hosts = (known_hosts or getenv_brand("DATAFLOW_SFTP_KNOWN_HOSTS", "")).strip()
     cfg.host_key_policy = (
-        host_key_policy or os.getenv("DATAFLOW_SFTP_HOST_KEY_POLICY", "")
+        host_key_policy or getenv_brand("DATAFLOW_SFTP_HOST_KEY_POLICY", "")
     ).strip().lower()
     raw = (connection_string or "").strip()
 

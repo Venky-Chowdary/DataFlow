@@ -20,7 +20,9 @@ never the guarantee it cannot.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 #: The cursor column is written on insert and never changes; rows are never
 #: updated. Inserts are captured; there are no updates to miss.
@@ -120,6 +122,9 @@ class CursorSemanticsVerdict:
     #: What the run may honestly claim to capture with this declaration.
     captures_updates: bool = False
     monotonic_on_insert: bool = False
+    #: What the route may claim about rows committed out of cursor order
+    #: (services.commit_safe_window.static_commit_safety); ``{}`` when unjudged.
+    commit_safety: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def blocks(self) -> bool:
@@ -136,6 +141,7 @@ class CursorSemanticsVerdict:
             "alternatives": list(self.alternatives),
             "captures_updates": self.captures_updates,
             "monotonic_on_insert": self.monotonic_on_insert,
+            "commit_safety": dict(self.commit_safety) or None,
         }
 
 
@@ -146,6 +152,7 @@ def evaluate_cursor_semantics(
     declared: str,
     validation_mode: str = "strict",
     lookback_days: int = 0,
+    commit_safety: Mapping[str, Any] | None = None,
 ) -> CursorSemanticsVerdict:
     """Judge a cursor declaration against what the sync mode promises.
 
@@ -184,9 +191,15 @@ def evaluate_cursor_semantics(
     promises_updates = mode in MODES_PROMISING_UPDATE_CAPTURE
 
     if monotonic:
-        # Every row the source adds sorts after the watermark, so nothing is
-        # skipped. Whether updates are seen depends on the class, and a class
+        # Every row the source adds is *assigned* a value after the watermark.
+        # That is not yet "nothing is skipped": the value is assigned before
+        # COMMIT, so a transaction that commits after a later value was read
+        # lands behind the watermark (audit C1). Whether that is covered is the
+        # route's commit-safety, stated beside the declaration — never implied
+        # by it. Whether updates are seen depends on the class, and a class
         # that does not see them is still sound when the source makes none.
+        safety = dict(commit_safety or {})
+        statement = str(safety.get("statement") or "").strip()
         if promises_updates and not captures:
             reason = (
                 f"{cursor} declared '{value}': it does not move when a row is "
@@ -204,9 +217,10 @@ def evaluate_cursor_semantics(
             declared=value,
             cursor_field=cursor,
             sync_mode=mode,
-            reason=reason,
+            reason=f"{reason}. {statement}" if statement else reason,
             captures_updates=captures,
             monotonic_on_insert=True,
+            commit_safety=safety,
         )
 
     # Not monotonic on insert: a row can arrive behind the watermark and be

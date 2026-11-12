@@ -92,10 +92,24 @@ def stamp_bound_contract(
 
         assert_signed_contract(cid, require_signed=require)
     if cid:
+        _assert_contract_in_workspace(cid, str(getattr(request, "workspace_id", "") or ""))
         request.contract_id = cid
         request.enforce_contract = True
         request.require_signed_contract = require
         _assert_breaker_allows(cid)
+
+
+def _assert_contract_in_workspace(contract_id: str, workspace_id: str) -> None:
+    """Another workspace's contract is not bound to this request (review round 3, Low):
+    its breaker and its rules are that workspace's. An unscoped legacy contract
+    stays bindable, as before."""
+    if not workspace_id:
+        return
+    from services.body_id_ownership import contract_owner
+
+    found, owner = contract_owner(contract_id)
+    if found and owner and owner != workspace_id:
+        raise ValueError(f"Contract {contract_id} not found")
 
 
 def _assert_breaker_allows(contract_id: str) -> None:

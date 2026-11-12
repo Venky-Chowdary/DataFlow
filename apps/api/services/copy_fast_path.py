@@ -679,7 +679,7 @@ def copy_spill_dir() -> str | None:
     temp directory is on the system volume. ``DATAFLOW_COPY_SPILL_DIR`` moves
     it to a volume sized for the migration.
     """
-    return (os.environ.get("DATAFLOW_COPY_SPILL_DIR") or "").strip() or None
+    return (getenv_brand("DATAFLOW_COPY_SPILL_DIR") or "").strip() or None
 
 
 def stream_between_cursors(

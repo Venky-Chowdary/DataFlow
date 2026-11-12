@@ -108,8 +108,11 @@ def list_signals_for_job(job: dict[str, Any], *, status: str = "") -> list[dict[
     ctx = resolve_job_cdc_snapshot_context(job)
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
+    workspace_id = str(job.get("workspace_id") or "")
     for key in ctx["source_keys"]:
-        for sig in list_signals(key, status=status):
+        # Only this job's workspace's signals: another workspace's signal on the
+        # same source key never shows its progress here (round 2, M2).
+        for sig in list_signals(key, status=status, workspace_id=workspace_id):
             if sig.id in seen:
                 continue
             seen.add(sig.id)

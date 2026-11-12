@@ -1,4 +1,24 @@
-"""Query Playground — run safe, limited queries against saved connectors."""
+"""Query Playground — run safe, limited queries against saved connectors.
+
+**What keeps a playground query read-only.** Two things, in this order:
+
+1. *The read-only session* (``_apply_read_only_session``): PostgreSQL, MySQL,
+   SQLite and Oracle run the statement in a transaction the server itself
+   refuses writes in, and local DuckDB opens with external access off. Where
+   the engine has one, this is the guard.
+2. *The statement filter* (``_is_safe_sql``): one statement, a read-only head,
+   no write keyword, and a **deny-list** of function, package and table-function
+   names with side effects outside the transaction (network calls, server
+   files, sleeps, backend control, dynamic SQL, database links). It is a
+   **backstop**: a deny-list names what is known. It is the only guard on SQL
+   Server-family engines (T-SQL has no read-only transaction) and for effects a
+   read-only transaction does not stop (dblink, ``pg_terminate_backend``, file
+   readers), so new names belong here as soon as they are known.
+
+Follow-up (security review M2, not done here): replace the deny-list with a
+per-dialect allow-list of statement shapes and functions, so an unknown name
+is refused instead of allowed.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +38,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from services import connector_store
 import services.query_extract as services_query_extract
+from services.brand_env import getenv_brand
 from services.connector_telemetry import connector_operation, driver_family
 from services.log_redaction import redact_log_text
 from services.safe_errors import public_error, safe_http_exception, user_query_error
@@ -38,8 +59,13 @@ _MONGODB_JS_OPERATORS = {"$where", "$function", "$accumulator", "$mapReduce"}
 _MONGODB_FORBIDDEN_OPERATORS = _MONGODB_WRITE_STAGES | _MONGODB_JS_OPERATORS
 
 
-def _is_safe_sql(raw_query: str) -> bool:
+def _is_safe_sql(raw_query: str, dialect: str = "") -> bool:
     """Allow read and metadata queries; block any destructive or write SQL.
+
+    ``dialect`` is the connector's type (or its URL scheme). For SQL Server
+    the text must also parse as exactly one SELECT (``services.tsql_select``,
+    security review round 3, M2); no other dialect is held to T-SQL's grammar
+    (M1).
 
     Uses ``sqlparse`` when installed; otherwise a conservative regex fallback so
     Datawrap Pilot / query playground never hard-fail on a missing optional dep.
@@ -47,6 +73,11 @@ def _is_safe_sql(raw_query: str) -> bool:
     quoted identifier is not a literal, and text one engine reads as a comment
     can be a second statement on another.
     """
+    if _is_sqlserver_dialect(dialect):
+        from services.tsql_select import tsql_single_select
+
+        if not tsql_single_select(raw_query):
+            return False
     try:
         import sqlparse  # noqa: F401
     except ImportError:
@@ -67,6 +98,18 @@ def _is_safe_sql(raw_query: str) -> bool:
     if "PRAGMA" in heads and not _pragma_is_readonly(raw_query):
         return False
     return bool(heads)
+
+
+def _is_sqlserver_dialect(dialect: str) -> bool:
+    """SQL Server, Azure SQL, Synapse, or a ``mssql+...`` URL."""
+    text = str(dialect or "").strip().lower()
+    if not text:
+        return False
+    if text.startswith("mssql") or text in {"sqlserver", "sql_server", "azure_sql", "azuresql", "synapse"}:
+        return True
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    return resolve_driver_type(text).lower() == "sqlserver"
 
 
 _DESTRUCTIVE_KEYWORDS = frozenset({
@@ -257,32 +300,156 @@ _SIDE_EFFECT_FUNCTIONS = frozenset({
     "pg_advisory_xact_lock", "pg_try_advisory_lock", "pg_try_advisory_xact_lock",
     "pg_advisory_xact_lock_shared", "pg_advisory_lock_shared",
     "pg_try_advisory_xact_lock_shared", "pg_try_advisory_lock_shared",
-    "pg_sleep", "sleep", "benchmark",
+    "pg_sleep", "pg_sleep_for", "pg_sleep_until", "sleep", "sleepeachrow", "benchmark",
+    # T-SQL runs a second statement with no ``;`` before it: ``select 1 exec('...')``
+    # reads as a call of a function named exec (security review M2).
+    "exec", "execute",
     # side-channel drivers (pg dblink, mysql locks/files, mssql xp_)
     "get_lock", "release_lock", "load_file",
     "xp_cmdshell", "xp_dirtree", "xp_fileexist", "xp_regread", "xp_regwrite",
-    "openrowset", "opendatasource", "bulk",
+    "openrowset", "opendatasource", "openquery", "bulk",
+    # mssql server-file readers
+    "fn_xe_file_target_read_file", "fn_trace_gettable", "fn_get_audit_file",
+    "fn_dblog", "fn_dump_dblog",
+    # pg: run a statement passed as a string, so the scan never sees it
+    "query_to_xml", "query_to_xmlschema", "query_to_xml_and_xmlschema",
+    "cursor_to_xml", "cursor_to_xmlschema", "xpath_table", "ts_stat", "ts_rewrite",
+    "connectby",
+    # oracle URI / file object constructors (HTTP and file reads from a SELECT)
+    "httpuritype", "dburitype", "xdburitype", "uritype", "bfilename",
+    # bigquery federated pass-through
+    "external_query",
+    # ClickHouse table functions: a URL, a server file or another server from a SELECT
+    "url", "urlcluster", "file", "filecluster", "remote", "remotesecure", "cluster",
+    "clusterallreplicas", "s3", "s3cluster", "gcs", "azureblobstorage", "hdfs", "hdfscluster",
+    "mysql", "postgresql", "mongodb", "redis", "sqlite", "jdbc", "odbc", "executable",
+    "deltalake", "hudi", "iceberg", "cosn", "oss",
+    # SQLite: load native code, read and write server files
+    "load_extension", "writefile", "readfile", "fts3_tokenizer", "edit", "fsdir", "zipfile",
+    # DuckDB (reached through a generic connector) and Databricks: environment and secrets
+    "getenv", "sniff_csv", "json_execute_serialized_sql", "duckdb_secrets", "which_secret",
+    "load_aws_credentials",
+    # pg extensions: server-side HTTP (pgsql-http)
+    "http", "http_get", "http_post", "http_put", "http_delete", "http_head", "http_patch",
+    # Security review round 2 (M3). ClickHouse: lakehouse, blob and Arrow Flight
+    # readers, every-table merge(), and unbounded generators (denial of service).
+    "icebergs3", "iceberglocal", "icebergazure", "iceberghdfs", "icebergs3cluster",
+    "icebergazurecluster", "iceberghdfscluster", "deltalakecluster", "deltalakes3",
+    "deltalakeazure", "hudicluster", "azureblobstoragecluster", "arrowflight", "merge",
+    "numbers", "numbers_mt", "zeros", "zeros_mt", "generaterandom",
+    # PostgreSQL backup / replication / WAL control, server-dir listings, catalog writes.
+    "pg_start_backup", "pg_stop_backup", "pg_copy_logical_replication_slot",
+    "pg_copy_physical_replication_slot", "pg_wal_replay_pause", "pg_wal_replay_resume",
+    "pg_ls_replslotdir", "pg_ls_logicalsnapdir", "pg_ls_logicalmapdir",
+    "pg_log_backend_memory_contexts", "pg_import_system_collations", "loread", "lowrite",
+    # Snowflake: URLs that hand out stage files.
+    "get_presigned_url", "build_scoped_file_url", "build_stage_file_url",
+    # MySQL: replication waits that hold the connection.
+    "master_pos_wait", "source_pos_wait", "wait_for_executed_gtid_set",
+    "wait_until_sql_thread_after_gtids",
     # oracle administrative packages are prefixed dbms_/utl_ below
 })
 _SIDE_EFFECT_PREFIXES = (
     "dblink", "lo_", "dbms_", "utl_", "sys_exec", "sys_eval", "sp_",
+    # mssql extended procedures, pg tablefunc crosstabN, snowflake account control
+    "xp_", "crosstab", "system$",
+    # pg adminpack (server files) and statistics resets
+    "pg_file_", "pg_stat_reset",
+    # pg replication origins; Oracle Data Pump's master process (runs PL/SQL
+    # outside the read-only transaction) (round 2, M3)
+    "pg_replication_origin_", "kupp$",
+    # DuckDB / Databricks file and URL readers: read_csv, read_text, read_files ...
+    "read_",
+)
+#: Members of the refused Oracle packages that only compute on their arguments.
+#: Allowed by exact ``package.function`` name; every other member of the same
+#: package (``dbms_lob.loadfromfile``, ``utl_raw`` is all pure but stays listed
+#: by name) is still refused (security review M2: the package rule refused
+#: ordinary LOB and RAW reads).
+_PURE_PACKAGE_FUNCTIONS = frozenset({
+    "dbms_lob.substr", "dbms_lob.getlength", "dbms_lob.instr", "dbms_lob.compare",
+    "utl_raw.cast_to_varchar2", "utl_raw.cast_to_nvarchar2", "utl_raw.cast_to_raw",
+    "utl_raw.cast_to_number", "utl_raw.cast_to_binary_integer", "utl_raw.cast_to_binary_float",
+    "utl_raw.cast_to_binary_double", "utl_raw.cast_from_number", "utl_raw.length",
+    "utl_raw.substr", "utl_raw.concat",
+    "utl_i18n.raw_to_char", "utl_i18n.string_to_raw",
+    "utl_encode.base64_encode", "utl_encode.base64_decode",
+    "utl_match.edit_distance", "utl_match.edit_distance_similarity",
+    "utl_match.jaro_winkler", "utl_match.jaro_winkler_similarity",
+})
+# Statements T-SQL accepts after a SELECT with no separator. As bare words
+# (not ``t.exec``, not a quoted identifier) they are refused anywhere.
+_STATEMENT_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_$#@.])(?:exec|execute|waitfor)(?![A-Za-z0-9_$#])", re.I
+)
+# T-SQL statements after a SELECT with no separator (``select 1 backup ...``,
+# ``select 1 use master``) are refused for SQL Server by parsing the whole text
+# as exactly one SELECT (``services.tsql_select``, review round 3, M2). The
+# word deny-list that ran on every dialect refused ordinary column names
+# (``open``, ``begin``) on all of them (M1) and is gone.
+# ``U&"d\0061ta"`` / ``U&'...'``: PostgreSQL reads the escapes, this filter
+# would read the text. Refused outright; the views mask the quoted part.
+_UNICODE_ESCAPED_RE = re.compile(r"(?<![A-Za-z0-9_$#])U&__DF[IQ]\d+__", re.I)
+# Oracle database link: ``fn@link(...)``, ``table@link``. Attached to the name
+# it is a link in every dialect; after whitespace it is one unless the word
+# before is a keyword (``where a = 1 and @flag = 1``, ``select @x``, ``from @t``).
+_DBLINK_ATTACHED_RE = re.compile(r"(?:[A-Za-z0-9_$#\]]|__DF[IQ]\d+__)@(?!@)\s*(?:[A-Za-z_\[]|__DF)")
+_DBLINK_SPACED_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_$#]*|__DF[IQ]\d+__|\])\s+@(?!@)\s*(?:[A-Za-z_\[]|__DF)")
+_NOT_AN_OBJECT_NAME = frozenset({
+    "select", "and", "or", "not", "where", "on", "when", "then", "else", "by", "limit", "top",
+    "offset", "in", "like", "ilike", "between", "is", "set", "values", "having", "case", "from",
+    "join", "distinct", "all", "union", "as", "exists", "any", "some", "with", "over", "using",
+    "end", "null", "true", "false", "fetch", "first", "next", "rows", "only", "escape", "into",
+    "return", "if", "while", "percent", "div", "mod", "xor", "rlike", "regexp",
+})
+
+# A call's whole dotted name: ``utl_http.request(``, ``sys.dbms_xmlgen.getxml(``,
+# ``master..xp_cmdshell(``, and Oracle's remote form ``pkg.fn@dblink(``.
+# Capturing only the identifier before ``(`` read ``request`` / ``getxml`` and
+# never met the package prefix (audit M-5).
+_FUNC_CALL_RE = re.compile(
+    r"(?<![A-Za-z0-9_$#.@])"
+    r"((?:[A-Za-z_][A-Za-z0-9_$#]*\s*\.\s*(?:\.\s*)?)*[A-Za-z_][A-Za-z0-9_$#]*)"
+    r"(?:\s*@\s*[A-Za-z0-9_$#.]+)?\s*\("
 )
 
-_FUNC_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+def _is_side_effect_name(name: str) -> bool:
+    return name in _SIDE_EFFECT_FUNCTIONS or name.startswith(_SIDE_EFFECT_PREFIXES)
 
 
 def _has_side_effect_functions(sql: str) -> bool:
-    """True when a read query invokes a function with session/server side effects."""
-    from services.sql_literals import sql_call_views
+    """True when a read query invokes a function with session/server side effects.
 
+    Every part of a qualified name is judged: the function itself against the
+    names and prefixes, and each qualifier (schema, package, type) against the
+    prefixes, so a package is refused whatever member is called on it.
+    """
+    from services.sql_literals import sql_call_views, sql_code_views
+
+    for code in sql_code_views(sql or ""):
+        if _STATEMENT_WORD_RE.search(code) or _UNICODE_ESCAPED_RE.search(code) or _names_database_link(code):
+            return True
     for scrubbed in sql_call_views(sql or ""):
         for match in _FUNC_CALL_RE.finditer(scrubbed):
-            name = match.group(1).lower()
-            if name in _SIDE_EFFECT_FUNCTIONS:
+            parts = [part.strip().lower() for part in match.group(1).split(".") if part.strip()]
+            if ".".join(parts[1:] if parts[0] == "sys" else parts) in _PURE_PACKAGE_FUNCTIONS:
+                continue  # a remote one (``@link``) was refused above
+            *qualifiers, name = parts
+            if _is_side_effect_name(name):
                 return True
-            if any(name.startswith(prefix) for prefix in _SIDE_EFFECT_PREFIXES):
+            if any(q.startswith(_SIDE_EFFECT_PREFIXES) for q in qualifiers):
                 return True
     return False
+
+
+def _names_database_link(code: str) -> bool:
+    """True when the statement reaches through an Oracle database link (``name@link``)."""
+    if _DBLINK_ATTACHED_RE.search(code):
+        return True
+    return any(
+        match.group(1).lower() not in _NOT_AN_OBJECT_NAME for match in _DBLINK_SPACED_RE.finditer(code)
+    )
 
 
 # DuckDB reads host files and URLs from a plain SELECT: reader table
@@ -309,6 +476,12 @@ _DUCKDB_FROM_LIST_END = frozenset({
     "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "FETCH", "UNION",
     "EXCEPT", "INTERSECT", "QUALIFY", "WINDOW", "SELECT", "ON", "USING",
     "RETURNING", "SAMPLE",
+})
+# Statements that take a table the way FROM does: ``DESCRIBE '<path>'``,
+# ``SHOW '<path>'``, ``SUMMARIZE '<path>'`` and ``PIVOT``/``UNPIVOT '<path>'``
+# read the file (its header, or its values as column names; review round 3, H7).
+_DUCKDB_TABLE_STATEMENTS = frozenset({
+    "DESCRIBE", "SHOW", "SUMMARIZE", "PIVOT", "UNPIVOT", "PIVOT_WIDER", "PIVOT_LONGER",
 })
 # ``EXTRACT(year FROM '2020-01-01')`` and ``IS DISTINCT FROM 'x'`` take a
 # value after FROM, not a table.
@@ -369,6 +542,11 @@ def _duckdb_reads_external(sql: str) -> bool:
             levels[-1][0] = False
             expect_table = False
             continue
+        if upper in _DUCKDB_TABLE_STATEMENTS:
+            expect_table = True
+            continue
+        if expect_table and upper in ("TABLE", "ALL"):
+            continue  # DESCRIBE TABLE '<path>', SHOW ALL ...
         if expect_table:
             if tok.startswith("__DFQ"):
                 return True
@@ -395,17 +573,29 @@ def _duckdb_playground_engine(engine: Any) -> Any:
     database instance and cannot be undone while it is open, so a shared
     connection would be crippled for a concurrent transfer. A connect-time
     config keeps it scoped to this playground connection. MotherDuck
-    (``md:``) loads its extension through external access, so it relies on
-    the SQL refusal alone.
+    (``md:``) loads its extension through external access, so the playground
+    refuses it.
     """
-    from sqlalchemy import create_engine
+    import sqlalchemy
     from sqlalchemy.pool import NullPool
 
+    from connectors.sqlite_common import is_duckdb_config_key
+
     database = str(getattr(engine.url, "database", "") or "")
-    if database.startswith("md:"):
-        return engine
-    guarded = create_engine(
-        engine.url,
+    if database.strip().lower().startswith(("md:", "motherduck:")):
+        # MotherDuck runs DuckDB in this process too, and needs external access
+        # on to load its extension, so the backstop cannot apply (review 3, H7).
+        raise HTTPException(
+            status_code=400,
+            detail="MotherDuck databases cannot be queried in the playground. "
+            "Use Transfer Studio to move the data, or query it in MotherDuck.",
+        )
+    # duckdb-sqlalchemy merges URL query keys into the DuckDB config after
+    # connect_args, so a configuration key in the URL would switch the backstop
+    # off; connector URLs refuse them, and this URL never carries one.
+    query = {k: v for k, v in dict(engine.url.query).items() if not is_duckdb_config_key(k)}
+    guarded = sqlalchemy.create_engine(
+        engine.url.set(query=query),
         poolclass=NullPool,
         connect_args={"config": {"enable_external_access": False}},
     )
@@ -860,6 +1050,27 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
     )
 
 
+def _export_residency_check(request: Request, body: QueryExportRequest, workspace_id: str) -> None:
+    """403 when the export's destination is outside the workspace's data region."""
+    from services.data_residency import addressing_refusal_for, residency_refusal
+    from src.transfer.models import EndpointConfig
+
+    destination_id = (body.destination_connector_id or "").strip()
+    if destination_id:
+        dest = EndpointConfig(kind="database", connector_id=destination_id)
+    else:
+        dest = EndpointConfig(kind="file_export", format=body.format, output_path=body.output_path)
+    tenant = str(getattr(request.state, "tenant_id", "") or "")
+    keyed = addressing_refusal_for(workspace_id, dest, host_tenant_id=tenant)
+    if keyed:
+        raise HTTPException(status_code=422, detail=keyed)
+    refusal = residency_refusal(
+        workspace_id, dest, host_tenant_id=str(getattr(request.state, "tenant_id", "") or "")
+    )
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+
+
 @router.post("/export", response_model=QueryExportResult)
 async def query_export(
     body: QueryExportRequest,
@@ -873,6 +1084,16 @@ async def query_export(
     connector = connector_store.get_connector(body.connector_id, workspace_id=workspace_id)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
+    if (body.destination_connector_id or "").strip():
+        from services.body_id_ownership import assert_body_ids
+
+        # Before the query is read (review 3, body routes): another workspace's
+        # destination answers like a missing one.
+        assert_body_ids(request, connectors=(body.destination_connector_id,), write=True)
+    # Security review H2: an export writes the workspace's rows without a job,
+    # so nothing else would ask where they land. Both branches (a connector, a
+    # file on this deployment) are judged before the query is read.
+    _export_residency_check(request, body, str(getattr(connector, "workspace_id", "") or "") or workspace_id)
 
     if body.full_population and not (body.destination_connector_id or "").strip():
         return _export_full_population_file(connector, body, workspace_id=workspace_id)
@@ -1020,7 +1241,9 @@ async def query_schema(
     try:
         # Off the event loop, under the connector deadline (D321).
         info = await run_off_event_loop(
-            "introspect_connector_schema", lambda: introspect_endpoint(endpoint), _timed_out
+            "introspect_connector_schema",
+            lambda: _in_connector_scope(body.connector_id, introspect_endpoint, endpoint),
+            _timed_out,
         )
     except HTTPException:
         raise
@@ -1134,7 +1357,7 @@ async def query_schemas(
     if endpoint is None:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    live = live_schema_names(endpoint)
+    live = _in_connector_scope(body.connector_id, live_schema_names, endpoint)
     tree = build_catalog_tree(
         connector_type=str(getattr(endpoint, "format", "") or ""),
         database=body.database or str(getattr(endpoint, "database", "") or ""),
@@ -1142,6 +1365,14 @@ async def query_schemas(
         live_schemas=live,
     )
     return QuerySchemasResult(**tree)
+
+
+def _in_connector_scope(connector_id: str, fn: Any, *args: Any) -> Any:
+    """Run ``fn`` with the stored connector's own workspace bound for the exports tree (H5)."""
+    from services.export_paths import stored_connector_export_scope
+
+    with stored_connector_export_scope(connector_id):
+        return fn(*args)
 
 
 def _object_matches(listed: str, requested: str) -> bool:
@@ -1231,16 +1462,23 @@ def _export_to_connector(
     if write_mode != "insert":
         write_mode = "insert"
 
+    from services.egress_guard import egress_workspace
+    from services.export_paths import connector_export_scope
+
+    owner = str(getattr(dest_connector, "workspace_id", "") or "")
     try:
-        rows_written, ddl_log, dest_summary = write_destination_database(
-            dest,
-            records=rows,
-            columns=columns,
-            schema=schema,
-            mappings=mappings,
-            write_mode=write_mode,
-            conflict_columns=body.conflict_columns,
-        )
+        # The write is made for the connector's workspace: its file area, and
+        # the workspace the S3 bucket-region guard judges (review round 3, H4).
+        with connector_export_scope(owner), egress_workspace(owner or workspace_id):
+            rows_written, ddl_log, dest_summary = write_destination_database(
+                dest,
+                records=rows,
+                columns=columns,
+                schema=schema,
+                mappings=mappings,
+                write_mode=write_mode,
+                conflict_columns=body.conflict_columns,
+            )
         return QueryExportResult(
             success=True,
             row_count=rows_written,
@@ -1436,6 +1674,21 @@ def _apply_read_only_session(conn: Any, db_type: str) -> None:
             # transaction. Its guard is the connect-time config in
             # _duckdb_playground_engine.
             conn.execute(text("PRAGMA query_only = ON"))
+        elif _is_oracle_connector(db):
+            # Must be the transaction's first statement, which it is: this
+            # runs first on a fresh connection checkout. DML and SELECT ... FOR
+            # UPDATE then fail with ORA-01456 (audit M-5).
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+        elif db == "clickhouse":
+            # Per query (clickhouse_driver sends it with each query), never a
+            # session SET that would follow the pooled connection to a writer
+            # (security review round 2, M3).
+            current = dict((conn.get_execution_options() or {}).get("settings") or {})
+            conn.execution_options(settings={**current, "readonly": 1})
+        # SQL Server / Azure SQL / Synapse: T-SQL has no read-only transaction,
+        # and a session-level SET would follow the pooled connection to the
+        # next writer. The guard there is the statement filter, and that this
+        # connection is closed without a commit.
     except Exception as exc:
         logging.getLogger(__name__).debug(
             "read-only session option not applied on %s: %s", db, exc
@@ -1452,9 +1705,8 @@ def _apply_statement_timeout(conn: Any, db_type: str, *, seconds_override: float
     The deadline frees the caller; this frees the database and the worker, which
     would otherwise keep executing for nobody. Best-effort per dialect.
     """
-    import os
 
-    raw = os.environ.get("DATAFLOW_QUERY_STATEMENT_TIMEOUT_SECONDS", "").strip()
+    raw = getenv_brand("DATAFLOW_QUERY_STATEMENT_TIMEOUT_SECONDS", "").strip()
     try:
         seconds = float(raw) if raw else DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS
     except ValueError:
@@ -1641,7 +1893,10 @@ def _run_sql_query(
     raw_query = body.query.strip()
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
-    if not _is_safe_sql(raw_query):
+    dialect = str(connector.type or "")
+    if str(connector.connection_string or "").lower().startswith("mssql"):
+        dialect = "mssql"
+    if not _is_safe_sql(raw_query, dialect=dialect):
         raise HTTPException(
             status_code=400,
             detail=sql_refusal_message(raw_query, playground=True),
@@ -1663,8 +1918,13 @@ def _run_sql_query(
         # TLS trust / SID / driver keywords the operator saved (QA round 11).
         "extra": dict(getattr(connector, "extra", None) or {}),
     }
+    from services.export_paths import connector_export_scope
+
     try:
-        engine = get_sqlalchemy_engine(cfg)
+        # An embedded file in the exports tree opens as the connector's own
+        # workspace, never the request header's (security review round 2, H5).
+        with connector_export_scope(getattr(connector, "workspace_id", "")):
+            engine = get_sqlalchemy_engine(cfg)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=400, detail=redact_log_text(str(exc))
@@ -1813,7 +2073,7 @@ def _run_snowflake_query(connector, body):
     raw_query = body.query.strip()
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
-    if not _is_safe_sql(raw_query):
+    if not _is_safe_sql(raw_query, dialect="snowflake"):
         raise HTTPException(
             status_code=400,
             detail=sql_refusal_message(raw_query, playground=True),

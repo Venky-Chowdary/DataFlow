@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 from services import form_token as form_token_mod
 from services import turnstile
+from services.brand_env import getenv_brand
 from services.client_ip import client_ip_from_request
 from services.contact_leads import persist_lead
 from services.mcp_rate_limit import TokenBucketStore
@@ -53,11 +54,10 @@ _MAX_ITEM_LEN = 120
 
 # ~5 submissions/hour per IP, ~2/hour per email — generous for humans,
 # useless for spray. Tunable via env for ops.
-import os
 
 
 def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name, "").strip()
+    raw = (getenv_brand(name, "") or "").strip()
     if not raw:
         return default
     try:

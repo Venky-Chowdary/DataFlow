@@ -243,15 +243,30 @@ def _text(endpoint: Any, key: str) -> str:
 
 
 def _duckdb_is_local(endpoint: Any) -> bool:
+    """Judged on what the engine opens (review round 3, H2).
+
+    ``generic_sql._build_url_unconfined`` opens ``connection_string`` when one
+    is set and ``database`` only otherwise, so ``database="local.duckdb"`` next
+    to ``connection_string="duckdb:///md:db"`` writes to MotherDuck. Any field
+    naming ``md:`` / ``motherduck:`` makes the destination remote.
+    """
     from connectors.sqlite_common import duckdb_unconfined_path
 
+    fields = (_text(endpoint, "connection_string"), _text(endpoint, "database"), _text(endpoint, "host"))
+    for value in fields:
+        try:
+            named = duckdb_unconfined_path(value, "", "")
+        except ValueError:  # an invalid path is refused elsewhere; it is not remote
+            continue
+        if named.lower().startswith(_REMOTE_DUCKDB_PREFIXES) or "md:" in value.lower():
+            return False
     try:
-        path = duckdb_unconfined_path(
-            _text(endpoint, "database"), _text(endpoint, "connection_string"), _text(endpoint, "host")
+        opened = duckdb_unconfined_path(fields[0], "", "") if fields[0] else duckdb_unconfined_path(
+            fields[1], "", fields[2]
         )
-    except ValueError:  # an invalid path is refused elsewhere; it is not remote
+    except ValueError:
         return True
-    return not path.lower().startswith(_REMOTE_DUCKDB_PREFIXES)
+    return not opened.lower().startswith(_REMOTE_DUCKDB_PREFIXES)
 
 
 def _iceberg_is_local(endpoint: Any) -> bool:

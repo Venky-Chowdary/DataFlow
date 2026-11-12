@@ -261,15 +261,21 @@ def list_invites(workspace_id: str) -> list[dict[str, Any]]:
     return [public_view(doc) for doc in store.list_for_workspace(workspace_id)]
 
 
-def _invite_in(workspace_id: str, invite_id: str) -> dict[str, Any]:
+def _invite_in(workspace_id: str, invite_id: str, principal: Any) -> dict[str, Any]:
+    """The workspace's invitation, or 404.
+
+    A caller with no role in the workspace gets the 404 of a missing id for a
+    real one too, so an invitation id is not an existence oracle (security
+    review); members are told why they may not act on it.
+    """
     doc = store.get(invite_id)
-    if doc is None or doc.get("workspace_id") != workspace_id:
+    if doc is None or doc.get("workspace_id") != workspace_id or not principal.member_role:
         raise ApiError(404, "invite_not_found", "Invitation not found")
     return doc
 
 
 def resend_invite(*, workspace_id: str, invite_id: str, principal: Any, ip: str = "") -> dict[str, Any]:
-    doc = _invite_in(workspace_id, invite_id)
+    doc = _invite_in(workspace_id, invite_id, principal)
     _authorize(principal, operation="resend", workspace_id=workspace_id, target=doc["email"],
                role=str(doc.get("role")), ip=ip)
     if doc.get("status") != "pending":
@@ -302,7 +308,7 @@ def resend_invite(*, workspace_id: str, invite_id: str, principal: Any, ip: str 
 
 
 def revoke_invite(*, workspace_id: str, invite_id: str, principal: Any, ip: str = "") -> dict[str, Any]:
-    doc = _invite_in(workspace_id, invite_id)
+    doc = _invite_in(workspace_id, invite_id, principal)
     _authorize(principal, operation="revoke", workspace_id=workspace_id, target=doc["email"],
                role=str(doc.get("role")), ip=ip)
     done = store.transition(invite_id, to_status="revoked", revoked_by=principal.email,

@@ -1032,10 +1032,11 @@ def run_file_preflight(
     read_scope = _resolve_read_scope(
         sync_mode=sync_mode,
         stream_contracts=stream_contracts,
-        source_format=source_format,
+        # A file route keys its watermark as ``file::<filename>`` (file_stream).
+        source_format="file" if is_file_source else source_format,
         source_config=source_config,
         source_connector_id=source_connector_id,
-        source_table=source_table,
+        source_table=(source_table or source_filename) if is_file_source else source_table,
         destination_db_type=destination_db_type,
         destination_config=destination_config,
         destination_table=destination_table,
@@ -2158,100 +2159,18 @@ def run_file_preflight(
         confidence_threshold=confidence_threshold,
     )
 
-    # D99: an incremental run bounds the delta with ``cursor > watermark`` —
-    # and ``NULL > x`` is never true, so NULL-cursor rows are absent from
-    # every delta forever while the job reports verified. Warn (block under
-    # strict) with the live count; a probe that cannot measure skips honestly
-    # rather than fail-closing on unmeasured state.
-    null_cursor_gate: dict[str, Any] | None = None
-    try:
-        from services.sync_cursor import incremental_read_narrows
+    # D99 (NULL-cursor rows are in no delta) and audit C3/H4b (a text cursor the
+    # source orders differently from the sync), judged on the live source: warn
+    # or block with the measured reason; an unmeasured probe skips honestly.
+    from services.null_cursor_probe import build_cursor_value_gates
 
-        _nc_cursor = str(getattr(read_scope, "cursor_column", "") or "").strip()
-        if _nc_cursor and incremental_read_narrows(sync_mode):
-            _nc_nullable = (column_nullability or {}).get(_nc_cursor)
-            from services.null_cursor_probe import probe_null_cursor_count
-
-            _nc = probe_null_cursor_count(
-                source_connector_id=source_connector_id,
-                source_config=source_config,
-                source_table=source_table,
-                source_collection=str(
-                    (source_config or {}).get("collection") or ""
-                ),
-                cursor_column=_nc_cursor,
-            )
-            _nc_details: dict[str, Any] = {
-                "cursor_column": _nc_cursor,
-                "probe_status": _nc.status,
-                "null_count": _nc.null_count,
-                "column_nullable": _nc_nullable,
-            }
-            if _nc.ran and _nc.null_count:
-                _nc_strict = (validation_mode or "strict").lower() == "strict"
-                if _nc_strict:
-                    enriched_blockers.append(
-                        {
-                            "id": "g_nullable_cursor",
-                            "message": (
-                                f"{_nc.null_count} source row(s) carry a NULL "
-                                f"value in the incremental cursor column "
-                                f"'{_nc_cursor}' — an incremental read can "
-                                "never see them: they are absent from every "
-                                "delta and only arrive via a full refresh."
-                            ),
-                            "details": _nc_details,
-                            "suggested_actions": [
-                                "Fill the cursor column on the NULL rows and re-validate",
-                                "Add a COALESCE fallback cursor (e.g. created_at)",
-                                "Run as full refresh so every row is read",
-                            ],
-                        }
-                    )
-                null_cursor_gate = {
-                    "id": "g_nullable_cursor",
-                    "status": "block" if _nc_strict else "warn",
-                    "message": (
-                        f"{_nc.null_count} source row(s) carry a NULL value in "
-                        f"the incremental cursor column '{_nc_cursor}' — an "
-                        "incremental read can never see them: they are absent "
-                        "from every delta and only arrive via a full refresh. "
-                        "Fill the cursor column, add a COALESCE fallback "
-                        "cursor, or acknowledge the gap."
-                    ),
-                    "duration_ms": 0,
-                    "details": _nc_details,
-                }
-            elif _nc.ran:
-                null_cursor_gate = {
-                    "id": "g_nullable_cursor",
-                    "status": "warn" if _nc_nullable else "pass",
-                    "message": (
-                        f"Cursor column '{_nc_cursor}' holds no NULL values"
-                        + (
-                            " (the column is nullable — a future NULL row "
-                            "would be skipped by every incremental delta)"
-                            if _nc_nullable
-                            else ""
-                        )
-                    ),
-                    "duration_ms": 0,
-                    "details": _nc_details,
-                }
-            elif _nc_nullable:
-                null_cursor_gate = {
-                    "id": "g_nullable_cursor",
-                    "status": "warn",
-                    "message": (
-                        f"Cursor column '{_nc_cursor}' is nullable — NULL "
-                        "rows would be skipped by every incremental delta "
-                        f"({_nc.message})"
-                    ),
-                    "duration_ms": 0,
-                    "details": _nc_details,
-                }
-    except Exception as exc:  # noqa: BLE001 — unmeasured, never a false pass
-        logger.warning("NULL-cursor gate probe skipped: %s", exc, exc_info=exc)
+    null_cursor_gate, _cursor_blockers = build_cursor_value_gates(
+        read_scope=read_scope, sync_mode=sync_mode, validation_mode=validation_mode,
+        column_nullability=column_nullability, column_types=column_types,
+        source_connector_id=source_connector_id, source_config=source_config,
+        source_table=source_table,
+    )
+    enriched_blockers.extend(_cursor_blockers)
 
     # Only an operator-declared manual_review gates create-new (the default is the golden path).
     create_ddl_gate = build_create_ddl_gate(

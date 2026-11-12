@@ -864,11 +864,12 @@ class UniversalTransferEngine:
         # create-new invention needs, and an inline format may be empty.
         self._resolve_saved_connectors(request)
         stamp_kafka_source(request)
-        # D276 local disk, unsafe identifier, source_filter that cannot be
-        # honoured (audit H2): refused before any read or write.
+        # Residency and local disk (job_scope: review H2/H3, D276), then an unsafe
+        # identifier or a source_filter that cannot be honoured (audit H2): before any read or write.
         from services.source_filter_gate import request_refusal
+        from .job_scope import start_refusal
 
-        ident_err = request_refusal(request)
+        ident_err = start_refusal(request) or request_refusal(request)
         if ident_err:
             try:
                 from services.mongodb_service import get_mongodb_service
@@ -1722,7 +1723,7 @@ class UniversalTransferEngine:
                 from services.batch_incremental import bind_transfer_request
 
                 incremental_bound = bind_transfer_request(request, src_fmt)
-                records = incremental_bound.bound(records)
+                records = incremental_bound.bound(records, schema)
             except ValueError as cursor_refusal:
                 mongo.update_job_status(
                     job_id, "failed", error=str(cursor_refusal), phase="failed"

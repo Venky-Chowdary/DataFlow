@@ -7,6 +7,8 @@ here so a 99999 port or a multi-megabyte host never reaches a socket.
 
 from __future__ import annotations
 
+import re
+
 PORTLESS_TYPES = frozenset({
     "sqlite",
     "duckdb",
@@ -25,6 +27,11 @@ PORTLESS_TYPES = frozenset({
 NAME_MAX = 200
 HOST_MAX = 253
 IDENT_MAX = 128
+# A file engine's "database" is a path. Workspace files live under
+# ``<volume>/_workspaces/<workspace id>/`` (about 50 characters before the
+# file name), so the identifier bound would refuse ordinary paths.
+PATH_MAX = 1024
+FILE_PATH_TYPES = frozenset({"sqlite", "duckdb"})
 CONNSTR_MAX = 4096
 TYPE_MAX = 64
 EXECUTE_LIMIT_MAX = 10_000_000
@@ -63,6 +70,28 @@ def _length_error(label: str, value: object, maximum: int, *, required: bool = F
     return ""
 
 
+#: C0 / C1 controls and the Unicode line / paragraph separators. A name with one
+#: in it renders as a line break or an invisible mark wherever it is shown, and
+#: a line break is how a name forged a bullet in Pilot's answers (review 2, H2).
+_CONTROL_CHARACTERS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def control_character_error(label: str, value: object) -> str:
+    """A refusal when ``value`` holds a control character, else ""."""
+    if value is not None and _CONTROL_CHARACTERS.search(str(value)):
+        return f"{label} must not contain control characters (line breaks, tabs or other invisible characters)."
+    return ""
+
+
+def refuse_control_characters(label: str, value: object) -> None:
+    """Raise a 422 for a name with a control character, on every path that saves one."""
+    error = control_character_error(label, value)
+    if error:
+        from services.api_errors import ApiError
+
+        raise ApiError(422, "NAME_HAS_CONTROL_CHARACTERS", error)
+
+
 def connector_request_errors(
     *,
     name: object = "",
@@ -78,9 +107,14 @@ def connector_request_errors(
     """First bound that fails, or empty when the draft may be probed."""
     checks = (
         _length_error("Name", name, NAME_MAX, required=require_name),
+        control_character_error("Name", name),
         _length_error("Type", db_type, TYPE_MAX),
         _length_error("Host", host, HOST_MAX),
-        _length_error("Database", database, IDENT_MAX),
+        _length_error(
+            "Database",
+            database,
+            PATH_MAX if str(db_type or "").strip().lower() in FILE_PATH_TYPES else IDENT_MAX,
+        ),
         _length_error("Username", username, IDENT_MAX),
         _length_error("Schema", schema, IDENT_MAX),
         _length_error("Connection string", connection_string, CONNSTR_MAX),

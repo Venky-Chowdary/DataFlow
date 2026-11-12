@@ -520,7 +520,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
               </p>
               <ul className="lp-ent-checklist">
                 <li>Workspace RBAC for who can map, approve drift, and run production loads</li>
-                <li>A workspace data region, with residency enforcement that refuses out-of-region destinations before the run</li>
+                <li>A workspace data region: once set, a run is refused before it starts when the destination&apos;s endpoint address or declared region is elsewhere, or shows no region</li>
                 <li>MCP and Datawrap Pilot run the same gates, with secret references instead of passwords</li>
                 <li>Signed proof packs and a verifiable audit export for every review</li>
                 <li>Security questionnaire and control-mapping pack for procurement kickoff</li>
@@ -944,7 +944,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       phase: "07",
       t: "Residency",
       tag: "Regions",
-      d: "Each workspace records its data region; with residency enforcement on, a destination in another region is refused before the run starts.",
+      d: "A workspace can record its data region. Once it has, a destination whose endpoint address or declared region is elsewhere, or shows no region, is refused before the run starts.",
       pill: "Region checked",
     },
     {

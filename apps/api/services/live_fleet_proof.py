@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from services.brand_env import getenv_brand
 from services.desktop_lab import run_desktop_lab
 from services.desktop_lab_cross import (
     LIVE_UNIQUE_ENGINES,
@@ -145,14 +146,14 @@ def _wait_job(job_id: str, *, timeout_sec: float = 180.0) -> dict[str, Any] | No
 
 
 def _api_base() -> str:
-    return os.environ.get("DATAFLOW_API_BASE", "http://127.0.0.1:8001").rstrip("/")
+    return getenv_brand("DATAFLOW_API_BASE", "http://127.0.0.1:8001").rstrip("/")
 
 
 def _inherit_api_process_env() -> dict[str, str]:
     """Copy Mongo URI from the running uvicorn without printing secrets."""
     copied: dict[str, str] = {}
     wanted = ("MONGODB_URI", "P2_MONGO_URI", "DATAFLOW_JOB_STORE")
-    need_admin = not os.environ.get("DATAFLOW_ADMIN_EMAIL")
+    need_admin = not getenv_brand("DATAFLOW_ADMIN_EMAIL")
     need_mongo = not os.environ.get("MONGODB_URI")
     if not need_admin and not need_mongo:
         return copied
@@ -228,8 +229,8 @@ def _json_request(
 
 def _login_api() -> tuple[str, str]:
     """Return (token, workspace_id) for the running API, or ('', '')."""
-    email = os.environ.get("DATAFLOW_ADMIN_EMAIL") or ""
-    password = os.environ.get("DATAFLOW_ADMIN_PASSWORD") or ""
+    email = getenv_brand("DATAFLOW_ADMIN_EMAIL") or ""
+    password = getenv_brand("DATAFLOW_ADMIN_PASSWORD") or ""
     if not email or not password:
         return "", ""
     status, payload = _json_request(

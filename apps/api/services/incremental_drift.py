@@ -326,7 +326,7 @@ def watermark_report(
         selected = int(rows_selected or 0)
     except (TypeError, ValueError):
         selected = 0
-    return {
+    report = {
         "cursor_key": key,
         "cursor_column": str(summary.get("incremental_cursor_column") or ""),
         "before": before,
@@ -334,6 +334,11 @@ def watermark_report(
         "rows_selected": selected,
         "advanced": after not in (None, "") and after != before,
     }
+    window = summary.get("commit_safe_window")
+    if isinstance(window, dict) and window:
+        # The commit-order bound and re-read window this run read under.
+        report["commit_safe_window"] = dict(window)
+    return report
 
 
 def measure_window_duplicates(

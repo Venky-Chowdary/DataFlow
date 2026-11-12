@@ -1440,17 +1440,7 @@ def run_five_layer_verification(
         assurance = "five_layer" if passed and "L4" in layers and layers["L4"].get("passed") else (
             "full_checksum" if passed else "failed"
         )
-    summary = ""
-    if localization.get("rows"):
-        first = localization["rows"][0]
-        summary = (
-            f"L4/L5 localized: row {_row_address(pk_label, key_cols, first.get('pk'))} "
-            f"column {first.get('column')!r} "
-            f"source={first.get('source_value')!r} "
-            f"target={first.get('target_value')!r}"
-        )
-    elif localization.get("columns"):
-        summary = f"L4 localized mismatched columns: {', '.join(localization['columns'])}"
+    summary = localization_summary(localization, pk_label, key_cols)
 
     return {
         "layers": layers,
@@ -1506,3 +1496,36 @@ def attach_ladder_to_reconcile_report(
     if ladder.get("assurance_level") == "five_layer" and out.get("passed"):
         out["assurance_level"] = "five_layer"
     return out
+
+
+def localization_summary(
+    localization: dict[str, Any], pk_label: str, key_cols: list[str]
+) -> str:
+    """One sentence naming the first localized difference.
+
+    A row present on one side only has no column and no values to quote:
+    printing them gave "column None source=None target=None" (audit H4b).
+    """
+    rows = localization.get("rows") or []
+    if rows:
+        first = rows[0]
+        address = _row_address(pk_label, key_cols, first.get("pk"))
+        if first.get("reason") == "missing_side" or (
+            first.get("column") is None and "source_present" in first
+        ):
+            where = (
+                "is on the destination but not among the source rows this run compared"
+                if first.get("target_present")
+                else "is among the source rows this run compared but not on the destination"
+            )
+            more = f" (and {len(rows) - 1} more row(s))" if len(rows) > 1 else ""
+            return f"L4/L5 localized: row {address} {where}{more}"
+        return (
+            f"L4/L5 localized: row {address} "
+            f"column {first.get('column')!r} "
+            f"source={first.get('source_value')!r} "
+            f"target={first.get('target_value')!r}"
+        )
+    if localization.get("columns"):
+        return f"L4 localized mismatched columns: {', '.join(localization['columns'])}"
+    return ""

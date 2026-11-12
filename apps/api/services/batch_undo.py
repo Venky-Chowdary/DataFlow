@@ -69,14 +69,16 @@ def restore_route_watermark_after_undo(dest_summary: dict[str, Any]) -> str:
                     "re-reads the full source instead of skipping it."
                 )
             return ""
-        set_watermark(
-            cursor_key,
-            str(prior),
-            metadata={
-                "watermark_restore": "batch_undo",
-                "job_id": str(dest_summary.get("job_id") or ""),
-            },
-        )
+        restored_meta: dict[str, object] = {
+            "watermark_restore": "batch_undo",
+            "job_id": str(dest_summary.get("job_id") or ""),
+        }
+        if "commit_horizon" in restore:
+            # The removed rows were read under this run's commit-order bound;
+            # put back the one the pre-run watermark was stored with, so the
+            # next run looks for late commits from there again.
+            restored_meta["commit_horizon"] = dict(restore.get("commit_horizon") or {})
+        set_watermark(cursor_key, str(prior), metadata=restored_meta)
         return (
             " The incremental watermark was rolled back to its pre-run value "
             "because this run's batch was removed — the next run re-reads "

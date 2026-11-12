@@ -27,8 +27,12 @@ def test_unset_returns_default(monkeypatch):
     assert getenv_brand("ENV") is None
 
 
-def test_empty_datawrap_still_wins(monkeypatch):
-    """Explicit empty DATAWRAP_* shadows legacy (operator cleared the new var)."""
+def test_empty_datawrap_does_not_shadow_a_set_legacy_name(monkeypatch):
+    """An empty DATAWRAP_* is unset when DATAFLOW_* has a value (security review:
+    a blank line in an environment block turned security flags off). To clear
+    a flag, clear both names."""
     monkeypatch.setenv("DATAWRAP_TRAINING", "")
     monkeypatch.setenv("DATAFLOW_TRAINING", "on")
+    assert getenv_brand("TRAINING") == "on"
+    monkeypatch.setenv("DATAFLOW_TRAINING", "")
     assert getenv_brand("TRAINING") == ""

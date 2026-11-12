@@ -94,13 +94,38 @@ def _day_start(value: date | None) -> datetime | None:
     return datetime.combine(value, time.min, tzinfo=timezone.utc)
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def created_bounds(
+    date_from: date | datetime | None, date_to: date | datetime | None
+) -> tuple[datetime | None, datetime | None]:
+    """``created_at`` window as ``[lower, upper)`` UTC instants.
+
+    A plain ``date`` is a whole UTC calendar day, inclusive at both ends (the
+    Jobs grid). A ``datetime`` is an exact instant — inclusive lower, exclusive
+    upper — so a caller whose "today" is not the UTC day (a workspace time
+    zone) can ask for precisely its own day.
+    """
+    if isinstance(date_from, datetime):
+        lower = _as_utc(date_from)
+    else:
+        lower = _day_start(date_from)
+    if isinstance(date_to, datetime):
+        upper = _as_utc(date_to)
+    else:
+        upper = _day_start(date_to + timedelta(days=1) if date_to else None)
+    return lower, upper
+
+
 def mongo_job_list_query(
     base: dict[str, Any] | None = None,
     *,
     status: str | None = None,
     search: str = "",
-    date_from: date | None = None,
-    date_to: date | None = None,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
     source_type: str | None = None,
     destination_type: str | None = None,
     sync_mode: str | None = None,
@@ -150,9 +175,7 @@ def mongo_job_list_query(
         clauses.append({"$or": alternatives})
 
     created: dict[str, datetime] = {}
-    lower = _day_start(date_from)
-    upper_day = date_to + timedelta(days=1) if date_to else None
-    upper = _day_start(upper_day)
+    lower, upper = created_bounds(date_from, date_to)
     if lower:
         created["$gte"] = lower
     if upper:
@@ -185,8 +208,8 @@ def memory_job_matches(
     *,
     status: str | None = None,
     search: str = "",
-    date_from: date | None = None,
-    date_to: date | None = None,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
     source_type: str | None = None,
     destination_type: str | None = None,
     sync_mode: str | None = None,
@@ -225,9 +248,9 @@ def memory_job_matches(
         created = _parse_timestamp(job.get("created_at"))
         if created is None:
             return False
-        created_day = created.date()
-        if date_from and created_day < date_from:
+        lower, upper = created_bounds(date_from, date_to)
+        if lower and created < lower:
             return False
-        if date_to and created_day > date_to:
+        if upper and created >= upper:
             return False
     return True

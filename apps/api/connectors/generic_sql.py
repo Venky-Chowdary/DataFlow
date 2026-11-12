@@ -776,24 +776,12 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
 
 def _confine_embedded_file_url(url: str | sa.URL) -> str | sa.URL:
     """Apply ``connectors.sqlite_common`` path confinement to SQLite/DuckDB URLs."""
-    from connectors.sqlite_common import confine_duckdb_path, confine_sqlite_path
+    from connectors.sqlite_common import confine_embedded_url
 
     if not SQLALCHEMY_AVAILABLE:
         return url
     text = url.render_as_string(hide_password=False) if isinstance(url, sa.URL) else str(url)
-    lowered = text.lower()
-    if lowered.startswith("sqlite"):
-        confine = confine_sqlite_path
-    elif lowered.startswith("duckdb"):
-        confine = confine_duckdb_path
-    else:
-        return url
-    try:
-        database = sa.engine.url.make_url(text).database or ""
-    except Exception as exc:
-        raise ValueError(f"Invalid embedded database URL: {exc}") from exc
-    if database and database != ":memory:":
-        confine(database)
+    confine_embedded_url(text)
     return url
 
 
@@ -944,6 +932,9 @@ def _engine(cfg: dict[str, Any]) -> Any:
     scoped = endpoint_scoped_engine(cfg)
     if scoped is not None:
         return scoped
+    kind = str(cfg.get("type") or cfg.get("format") or "").lower()
+    if kind in ("sqlite", "duckdb") or str(cfg.get("connection_string") or "").lower().startswith(("sqlite", "duckdb")):
+        _build_url(dict(cfg))  # a pool hit skips _build_engine: confine on every call
     # Flatten nested extra TLS/SID/driver keywords *before* the pool key, or
     # a verify-or-fail engine is reused after the operator declared trust.
     return get_pooled_engine(with_connection_options(cfg), _build_engine)
