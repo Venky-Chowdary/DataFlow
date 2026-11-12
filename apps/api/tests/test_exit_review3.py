@@ -821,3 +821,23 @@ def test_low_a_column_name_with_a_space_is_read_back_as_itself(tmp_path):
         assert list(rows) == [{"id": 1, "unit price": 9.5, "select": "x"}]
     finally:
         close()
+
+
+def test_web_the_proven_kpi_counts_the_systems_the_proven_tab_shows(world):  # noqa: F811
+    """Board KPI 'Systems with a proven exit' excludes overdue and stale systems, like the Proven tab (review 3)."""
+    from services import exit_inventory
+    from services.exit_inventory import update
+
+    fresh = _system(name="Fresh", tables=[{"name": "events"}], rehearsal_every_days=30)
+    late = _system(name="Late", tables=[{"name": "events"}], rehearsal_every_days=1)
+    changed = _system(name="Changed", tables=[{"name": "events"}], rehearsal_every_days=30)
+    for system in (fresh, late, changed):
+        _run(system)
+    update(changed["id"], {"exit_window_hours": 48}, actor="owner@example.com", expected_version=None)
+    board = exit_inventory.board([exit_inventory.get_system(s["id"]) for s in (fresh, late, changed)],
+                                 now=datetime.now(timezone.utc) + timedelta(days=3))
+    rows = {r["name"]: r for r in board["systems"]}
+    assert rows["Late"]["state"] == "proven" and rows["Late"]["overdue"] is True
+    tab = [r for r in board["systems"] if r["state"] == "proven" and not r["overdue"] and not r["stale"]]
+    assert [r["name"] for r in tab] == ["Fresh"]
+    assert board["kpis"]["systems_proven"] == len(tab) == 1

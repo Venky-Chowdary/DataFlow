@@ -704,7 +704,9 @@ def build_report(
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "verdict": verdict, "verdict_reason": reason, "require_reversibility": bool(require),
         "data_checked": {"rows": int(data_rows), "source": data_source if data_rows else "none",
-                         "population_rows": None if population_rows is None else int(population_rows)},
+                         "population_rows": None if population_rows is None else int(population_rows),
+                         # Only a count the server measured can say the rows checked are every row (review 3, M4).
+                         "covers_population": population_rows is not None and int(data_rows) >= int(population_rows)},
         "counts": {"invertible": counts[INVERTIBLE], "conditional": counts[CONDITIONAL], "lossy": counts[LOSSY],
                    "enforced": held_to},
         "lossy_columns": lossy, "tables": tables,

@@ -264,7 +264,8 @@ def test_plan_report_reads_the_active_revision_and_the_plan_sample():
     )
     report = plan_report(plan)
     assert report["scope"] == "plan" and report["require_reversibility"] is True
-    assert report["data_checked"] == {"rows": 2, "source": "plan_sample", "population_rows": None}
+    assert report["data_checked"] == {"rows": 2, "source": "plan_sample", "population_rows": None,
+                                      "covers_population": False}
     assert report["verdict"] == PARTLY
     assert report["gate"]["status"] == "block"
     amount = next(c for c in report["tables"][0]["columns"] if c["source"] == "amount")

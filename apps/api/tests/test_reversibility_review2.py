@@ -216,7 +216,8 @@ def test_n2_validate_says_checked_on_the_sample_and_enforced_at_execute():
         report = plan_report(plan)
         assert report["gate"]["status"] == "pass"
         assert "checked on the sample; enforced on every row at Execute" in report["gate"]["message"]
-        assert report["data_checked"] == {"rows": 1, "source": "plan_sample", "population_rows": None}
+        assert report["data_checked"] == {"rows": 1, "source": "plan_sample", "population_rows": None,
+                                          "covers_population": False}
         email = report["tables"][0]["columns"][1]
         assert email["check"] == {"status": "fits", "rows_checked": 1, "rows_not_fitting": 0,
                                   "covers_population": False, "enforcement": "at_execute"}

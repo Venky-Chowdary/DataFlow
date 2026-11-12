@@ -542,3 +542,18 @@ def test_low_a_quarantine_replay_without_the_flag_is_unchanged(tmp_path, fake, m
         rows=[{"id": "2", "v": "42"}], transform_overrides={"v": "hash_pii"}), _http()))
     assert resp.get("rows_written", 0) >= 1, resp
 
+
+def test_m4_data_checked_says_covers_population_only_for_a_measured_count():
+    from services.reversibility_sources import plan_report, request_report
+
+    plan = _plan([{"name": "people", "primary_key": ["id"]}], [dict(m) for m in _UP])
+    plan.row_count_estimate = 3
+    assert plan_report(plan)["data_checked"]["covers_population"] is False  # an estimate never covers
+    types = {"id": "INTEGER", "email": "TEXT"}
+    rows = [{"id": i, "email": f"U{i}@X.COM"} for i in range(1, 4)]
+    request = _sqlite_request(Path("s"), Path("d"))
+    measured = request_report(request, [dict(m) for m in _UP], types, types, sample_rows=rows, population_rows=3)
+    assert measured["data_checked"] == {"rows": 3, "source": "preflight_sample", "population_rows": 3,
+                                        "covers_population": True}
+    larger = request_report(request, [dict(m) for m in _UP], types, types, sample_rows=rows, population_rows=4)
+    assert larger["data_checked"]["covers_population"] is False

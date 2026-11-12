@@ -512,7 +512,8 @@ def board(systems: list[dict[str, Any]], *, now: datetime | None = None) -> dict
         "generated_at": _iso(current),
         "kpis": {
             "systems": len(rows),
-            "systems_proven": sum(1 for r in rows if r["state"] == "proven"),
+            # The systems the board's Proven tab shows: proven, current and not overdue (review 3).
+            "systems_proven": sum(1 for r in rows if r["state"] == "proven" and not r["overdue"] and not r["stale"]),
             "overdue": sum(1 for r in rows if r["overdue"]),
             "longest_measured_seconds": int(longest["measured_seconds"]) if longest else None,
             "longest_measured_system_id": longest["id"] if longest else None,
