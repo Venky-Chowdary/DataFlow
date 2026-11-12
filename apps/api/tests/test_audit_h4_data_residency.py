@@ -55,10 +55,13 @@ NO_REGION_WS = "22222222-2222-4222-8222-222222222222"
 @pytest.fixture
 def eu_tenant(tmp_path, monkeypatch):
     """The tenant store alone (no HTTP): ``EU_WS`` is ``eu-west-1``, ``NO_REGION_WS`` unset."""
-    from services import tenant_store
+    from services import connector_store, tenant_store
     from services.tenant_store import create_tenant
 
     monkeypatch.setattr(tenant_store, "STORE_PATH", tmp_path / "tenants.json")
+    # The destination is judged as the engine resolves it, saved connectors included.
+    monkeypatch.setattr(connector_store, "STORE_PATH", tmp_path / "connectors.json")
+    monkeypatch.setattr(connector_store, "_backend_choice", "file")
     for name in ("RESIDENCY_STRICT", "DEFAULT_REGION"):
         monkeypatch.delenv(f"DATAWRAP_{name}", raising=False)
         monkeypatch.delenv(f"DATAFLOW_{name}", raising=False)
@@ -95,10 +98,17 @@ IN_REGION = [
     ("snowflake account in the region", _endpoint("snowflake", host="xy12345.eu-west-1.snowflakecomputing.com")),
     ("snowflake account, cloud-qualified", _endpoint("snowflake", host="xy12345.eu-west-1.aws")),
     ("postgresql on RDS in the region", _endpoint("postgresql", host="db.abc.eu-west-1.rds.amazonaws.com")),
+]
+# Security review H1: a region typed on the destination is not evidence (the
+# three "declared region" rows that stood here are refused now; a platform
+# administrator's verified connector region is what speaks for such a place:
+# tests/test_review_h1_residency_region_evidence.py).
+DECLARED_ONLY = [
     ("on-prem database with a declared region", _endpoint("postgresql", host="db.internal", region="EU-West-1")),
     ("gcs with a declared region", _endpoint("gcs", database="bucket", region="eu-west-1")),
     ("s3-compatible endpoint with a declared region", _endpoint("s3", endpoint_url="https://minio.internal:9000", region="eu-west-1")),
 ]
+OUT_OF_REGION += DECLARED_ONLY
 
 
 @pytest.mark.parametrize("label,endpoint", OUT_OF_REGION, ids=[c[0] for c in OUT_OF_REGION])

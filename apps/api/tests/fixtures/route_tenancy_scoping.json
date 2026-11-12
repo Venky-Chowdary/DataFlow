@@ -103,6 +103,10 @@
       "scope": "workspace",
       "resource": "saved_connector"
     },
+    "POST /api/v1/connectors/saved/{connector_id}/region-verification": {
+      "scope": "platform",
+      "resource": "saved_connector"
+    },
     "POST /api/v1/connectors/saved/{connector_id}/rotate-secrets": {
       "scope": "workspace",
       "resource": "saved_connector"

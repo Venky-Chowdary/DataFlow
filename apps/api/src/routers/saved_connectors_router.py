@@ -536,6 +536,53 @@ def rotate_saved_connector_secrets(
     return ui
 
 
+class RegionVerificationBody(BaseModel):
+    """The region a platform administrator vouches for; empty withdraws it."""
+
+    region: str = Field(default="", max_length=64, pattern=r"^\s*[A-Za-z0-9][A-Za-z0-9-]*\s*$|^\s*$")
+
+
+@router.post("/{connector_id}/region-verification")
+def verify_saved_connector_region(
+    connector_id: str,
+    body: RegionVerificationBody,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Platform administrators only: state where this connector's data lands.
+
+    Data residency (``services.data_residency``) cannot read a region off an IP
+    address, a custom domain or a bucket name, and a region a workspace editor
+    types on the connector is not evidence. This is the operator's statement
+    for such a connector. It is bound to the connector's current address and
+    stops counting when that address changes (security review H1).
+    """
+    from services.audit_log import actor_from_request, append_audit_event
+    from services.connector_store import set_region_verification
+    from services.workspace_access import require_platform_admin
+
+    scope = tenant_scope(request, workspace_id)
+    require_platform_admin(
+        request, scope, "connector.region.verify",
+        "Only a platform administrator can verify a connector's region.",
+    )
+    actor = actor_from_request(request)
+    region = body.region.strip().lower()
+    updated = set_region_verification(
+        connector_id, region, verified_by=actor, workspace_id=scope.header_workspace_id or None
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    append_audit_event(
+        action="connector.region_verified" if region else "connector.region_verification_withdrawn",
+        resource=f"connector:{connector_id}",
+        actor=actor,
+        level="warning",
+        details={"region": region, "workspace_id": updated.workspace_id, "connector_type": updated.type},
+    )
+    return _to_ui(updated)
+
+
 @router.post("/{connector_id}/test")
 def test_saved_connector(
     connector_id: str,
