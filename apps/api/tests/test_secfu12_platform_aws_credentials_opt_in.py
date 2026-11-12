@@ -21,6 +21,8 @@ import logging
 
 import pytest
 
+from tests.helpers.platform_aws_chain import use_platform_aws_chain
+
 FLAG = "DATAFLOW_ALLOW_PLATFORM_AWS_CREDENTIALS"
 
 _SECRET = "tenant-secret-value"
@@ -38,8 +40,7 @@ def mode(request, monkeypatch):
         monkeypatch.setenv(FLAG, "1")
     # Never reach the metadata service or any AWS endpoint.
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "PLATFORMKEY")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "platform-secret")
+    use_platform_aws_chain(monkeypatch)
     for name in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL_DYNAMODB"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(

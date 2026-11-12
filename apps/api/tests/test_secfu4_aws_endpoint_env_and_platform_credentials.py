@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from connectors.aws_common import boto3_client
+from tests.helpers.platform_aws_chain import use_platform_aws_chain
 
 _PRIVATE = "http://127.0.0.1:9"  # nothing listens there; the request is stopped before sending
 
@@ -40,8 +41,7 @@ def _dialled_url(client, call) -> str:
 def endpoint_env(monkeypatch):
     for name in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL_DYNAMODB"):
         monkeypatch.setenv(name, _PRIVATE)
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "PLATFORMKEY")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "platform-secret")
+    use_platform_aws_chain(monkeypatch)
 
 
 def _tenant(service: str, **extra) -> dict:
