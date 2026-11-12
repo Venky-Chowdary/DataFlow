@@ -32,7 +32,8 @@ from .schedule_questions import (
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
-from .job_narration import is_decline, job_duration_line, narrate_jobs
+from . import job_narration
+from .job_narration import job_duration_line, narrate_jobs
 from .tool_permissions import (
     MUTATE,
     bind_current_context,
@@ -3339,7 +3340,9 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "list_jobs" and tr.success:
                 spoken = narrate_jobs(tr.output or {}, message)
                 parts.append(spoken)
-                if is_decline(spoken):
+                # Read through the module: the guard is one place, and a test
+                # that switches it off sees the effect (review 2, mutant decline_grounded).
+                if job_narration.is_decline(spoken):
                     # A decline is not evidence, however real the read behind it.
                     rendered.silent.add(id(tr))
             elif tr.name == "get_job" and tr.success:

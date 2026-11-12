@@ -100,7 +100,7 @@ did do does any there all please can could would will just only ones one those t
 that this so far now yet ever still also then and or but with in at on for from to into via using
 hey hi ok okay pilot datawrap workspace status state statuses current currently happened
 right moment present most recent latest newest last up
-ran started created executed launched happened occurred kicked off
+ran started created executed launched happened occurred kicked off take takes took taking
 """.split())
 #: Prepositions after which a remaining word is read as a source or destination name.
 _NAME_PREPS = frozenset({"for", "from", "to", "into", "on", "in", "via", "using"})

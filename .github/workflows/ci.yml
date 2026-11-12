@@ -193,6 +193,7 @@ jobs:
             tests/test_pilot_truth_compound.py \
             tests/test_pilot_truth_memory.py \
             tests/test_pilot_truth_lows2.py \
+            tests/test_pilot_truth_mutants.py \
             -q --tb=short -rs
 
   # Property 2 — no-config transfer must never be blocked by additive/DDL gates.
