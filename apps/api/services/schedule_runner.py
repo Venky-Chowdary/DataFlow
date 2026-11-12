@@ -1599,7 +1599,8 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                 else str(failure_class or "other")
             ),
         )
-        if "delay" in backoff and "next_run_at" in outcome.patch:
+        if outcome.recorded and "delay" in backoff and "next_run_at" in outcome.patch:
+            # Stored with the run: not for a schedule deleted before the write.
             emit_event(
                 logger,
                 "schedule.run.backoff",

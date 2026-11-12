@@ -1201,3 +1201,41 @@ def test_a_late_refusal_after_the_newer_run_succeeded_parks_nothing(store, runne
     assert after.last_status == "completed"
     events = [getattr(r, "event", None) for r in caplog.records]
     assert "approval.requested" not in events
+
+
+# --- Deleted while a back-off is recorded (review round 2, L-D) ---------------
+
+
+@mongo_only
+def test_a_back_off_on_a_schedule_deleted_meanwhile_is_not_reported(
+    store, runner, monkeypatch, caplog
+):
+    """L1x: the back-off was decided, then the schedule was deleted before it was stored."""
+    from services import schedule_run_lifecycle as life
+
+    runner.jobs["job-0"] = TRANSIENT
+    sched, _run = _claimed(store, "gone-flaky", "job-0", interval="", cron="* * * * *")
+    runner._finalize_run(sched.id, "job-0", 0, _now())
+    for n in (1, 2):
+        store.record_run_history(sched.id, {
+            "run_id": f"run_{n}", "job_id": f"job-{n}", "status": "failed",
+            "error": TRANSIENT["error"],
+        })
+    run_id = life.begin_run(sched.id, trigger=life.TRIGGER_CADENCE)
+    assert store.mark_schedule_running(sched.id, "beat-b", "job-3") is not None
+    life.mark_running(sched.id, run_id, "job-3")
+    runner.jobs["job-3"] = TRANSIENT
+    runner.notified.clear()
+    caplog.clear()
+    state = _write_inside_finalize(store, monkeypatch, lambda: store.delete_schedule(sched.id))
+
+    with caplog.at_level("INFO"):
+        runner._finalize_run(sched.id, "job-3", 0, _now())
+
+    assert not state["pending"], "the delete never landed inside the finalize"
+    assert store.get_schedule(sched.id) is None
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "schedule.run.backoff" not in events, "a back-off for a schedule that is gone"
+    # The job did fail: that is still said once (as for a refusal, I4).
+    assert events.count("schedule.run.give_up") == 1
+    assert runner.notified == [("job-3", "failed")]
