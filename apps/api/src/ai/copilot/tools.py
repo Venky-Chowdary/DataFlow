@@ -2007,6 +2007,18 @@ class DataPilotTools:
                 reason="permission_denied",
                 role=role,
             )
+        from services.connector_access import caller_workspace_id
+        from services.egress_guard import egress_workspace
+        from services.workspace_filter import current_workspace_stamp
+
+        # Every tool runs as the caller's workspace for the egress policy and
+        # the S3 bucket-region guard (review round 3, H4).
+        workspace = current_workspace_stamp(for_write=False) or caller_workspace_id()
+
+        def _in_workspace(**kwargs: Any) -> ToolResult:
+            with egress_workspace(workspace):
+                return handler(**kwargs)
+
         try:
             bound, bind_error = _bind_tool_arguments(name, handler, args)
             if bind_error:
@@ -2022,13 +2034,13 @@ class DataPilotTools:
                 # -32001 timeout.
                 result = run_with_deadline(
                     name,
-                    lambda: handler(**bound),
+                    lambda: _in_workspace(**bound),
                     lambda message: ToolResult(
                         name=name, success=False, output=None, error=message
                     ),
                 )
             else:
-                result = handler(**bound)
+                result = _in_workspace(**bound)
         except TypeError as e:
             return _tool_executed(
                 ToolResult(

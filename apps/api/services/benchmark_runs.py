@@ -86,7 +86,9 @@ def comparison(datawrap_rps: float, other_rps: float) -> dict[str, Any]:
     if ours <= 0 or theirs <= 0:
         return {"verdict": "unknown", "ratio": None, "label": "No measurement"}
     ratio = ours / theirs
-    if abs(ratio - 1) <= SIMILAR_BAND:
+    # Within SIMILAR_BAND either way: the faster side over the slower side,
+    # so a competitor 1.103x faster is not "About the same" (|0.907 - 1| was).
+    if max(ratio, 1 / ratio) <= 1 + SIMILAR_BAND:
         return {"verdict": "similar", "ratio": round(ratio, 3), "label": "About the same"}
     if ratio > 1:
         return {"verdict": "faster", "ratio": round(ratio, 3), "label": f"Datawrap {ratio:.1f}× faster"}

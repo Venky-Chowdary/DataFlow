@@ -25,7 +25,6 @@ Honesty
 from __future__ import annotations
 
 import json
-import os
 import socket
 import tempfile
 import uuid
@@ -36,6 +35,7 @@ from typing import Any
 
 from src.transfer.models import EndpointConfig, TransferRequest
 
+from services.brand_env import getenv_brand
 from services.desktop_lab import (
     CSV_BYTES,
     EXPECTED_PAYLOAD,
@@ -206,13 +206,13 @@ def engines_for_run() -> tuple[str, ...]:
     Pair/seed calls that exceed DATAFLOW_CROSS_PAIR_TIMEOUT (default 90s) are
     skipped with that reason, never counted as passed.
     """
-    if os.environ.get("DATAFLOW_CROSS_EXTENDED", "").strip() == "1":
+    if getenv_brand("DATAFLOW_CROSS_EXTENDED", "").strip() == "1":
         return LIVE_UNIQUE_ENGINES
     return CORE_UNIQUE_ENGINES
 
 
 def _pair_timeout_sec() -> float:
-    raw = (os.environ.get("DATAFLOW_CROSS_PAIR_TIMEOUT") or "90").strip()
+    raw = (getenv_brand("DATAFLOW_CROSS_PAIR_TIMEOUT") or "90").strip()
     try:
         return max(15.0, float(raw))
     except ValueError:
@@ -249,7 +249,7 @@ def _reachable(host: str, port: int, timeout: float = 0.8) -> bool:
 
 
 def _oracle_password() -> str:
-    env = (os.environ.get("DATAFLOW_ORACLE_PASSWORD") or "").strip()
+    env = (getenv_brand("DATAFLOW_ORACLE_PASSWORD") or "").strip()
     if env:
         return env
     path = Path("/tmp/df-desktop-lab/oracle_password")
@@ -306,7 +306,7 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             connection_string="mongodb://127.0.0.1:27017/dataflow",
         )
     if engine == "sqlserver":
-        ss_host = os.environ.get("DATAFLOW_SQLSERVER_HOST") or os.environ.get("DATAFLOW_TEST_MSSQL_HOST", "127.0.0.1")
+        ss_host = getenv_brand("DATAFLOW_SQLSERVER_HOST") or getenv_brand("DATAFLOW_TEST_MSSQL_HOST", "127.0.0.1")
         if not _reachable(ss_host, 1433):
             return f"SQL Server not reachable on {ss_host}:1433"
         return EndpointConfig(
@@ -316,7 +316,7 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             port=1433,
             database="dataflow",
             username="sa",
-            password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
+            password=getenv_brand("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
             schema="dbo",
             table=table,
             extra={
@@ -813,7 +813,7 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
         "measured_at": datetime.now(timezone.utc).isoformat(),
         "unique_engines": list(engines),
         "unique_engines_catalog": list(LIVE_UNIQUE_ENGINES),
-        "extended_opt_in": os.environ.get("DATAFLOW_CROSS_EXTENDED", "").strip() == "1",
+        "extended_opt_in": getenv_brand("DATAFLOW_CROSS_EXTENDED", "").strip() == "1",
         "unique_engines_seeded": sorted(seeds),
         "unique_engines_seed_failed": [r for r in seed_rows if r["status"] == "failed"],
         "unique_engines_seed_skipped": [r for r in seed_rows if r["status"] == "skipped"],

@@ -273,6 +273,15 @@ def cmd_export(*, api: str, token: str, local: bool, output: Path) -> int:
     return 0
 
 
+def _env(suffix: str, default: str) -> str:
+    """``DATAWRAP_<suffix>``, then the older ``DATAFLOW_<suffix>`` (as the API reads its flags)."""
+    for prefix in ("DATAWRAP_", "DATAFLOW_"):
+        value = os.environ.get(prefix + suffix)
+        if value is not None:
+            return value
+    return default
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="dataflow",
@@ -284,13 +293,13 @@ def build_parser() -> argparse.ArgumentParser:
     def add_conn_flags(sp: argparse.ArgumentParser) -> None:
         sp.add_argument(
             "--api",
-            default=os.getenv("DATAFLOW_API_BASE", "http://127.0.0.1:8001/api/v1"),
-            help="API base including /api/v1 (default: DATAFLOW_API_BASE or localhost)",
+            default=_env("API_BASE", "http://127.0.0.1:8001/api/v1"),
+            help="API base including /api/v1 (default: DATAWRAP_API_BASE, DATAFLOW_API_BASE or localhost)",
         )
         sp.add_argument(
             "--token",
-            default=os.getenv("DATAFLOW_API_TOKEN", ""),
-            help="Bearer token (or DATAFLOW_API_TOKEN)",
+            default=_env("API_TOKEN", ""),
+            help="Bearer token (or DATAWRAP_API_TOKEN / DATAFLOW_API_TOKEN)",
         )
         sp.add_argument(
             "--local",

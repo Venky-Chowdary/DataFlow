@@ -17,6 +17,7 @@ from typing import Any
 import psycopg2
 import pymysql
 
+from services.brand_env import getenv_brand
 from services.million_row_proof import (
     assert_clean_conservation,
     discover_oltp_pair,
@@ -951,7 +952,7 @@ def _sqlserver_cfg() -> dict[str, Any]:
         "database": "dataflow",
         "schema": "dbo",
         "username": "sa",
-        "password": os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
+        "password": getenv_brand("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         "trust_server_certificate": True,
         "encrypt": "yes",
     }
@@ -964,7 +965,7 @@ def _sqlserver_connect():
         server="127.0.0.1",
         port=1433,
         user="sa",
-        password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
+        password=getenv_brand("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         database="dataflow",
         login_timeout=10,
         autocommit=True,
@@ -1135,7 +1136,7 @@ def run_sqlserver_sqlserver_volume(
 
 
 def _oracle_password() -> str:
-    env = (os.environ.get("DATAFLOW_ORACLE_PASSWORD") or "").strip()
+    env = (getenv_brand("DATAFLOW_ORACLE_PASSWORD") or "").strip()
     if env:
         return env
     path = Path("/tmp/df-desktop-lab/oracle_password")
@@ -2931,12 +2932,11 @@ def run_oracle_sqlserver_volume(
 
 
 def _iceberg_rest_uri() -> str:
-    return os.environ.get("DATAFLOW_ICEBERG_REST_URI", "http://127.0.0.1:8181").rstrip("/")
+    return getenv_brand("DATAFLOW_ICEBERG_REST_URI", "http://127.0.0.1:8181").rstrip("/")
 
 
 def _iceberg_rest_warehouse() -> str:
-    return os.environ.get(
-        "DATAFLOW_ICEBERG_REST_WAREHOUSE", "file:///tmp/iceberg-rest-wh"
+    return getenv_brand("DATAFLOW_ICEBERG_REST_WAREHOUSE", "file:///tmp/iceberg-rest-wh"
     )
 
 
@@ -5921,7 +5921,7 @@ def run_iceberg_iceberg_volume(
 
 
 def _sqlite_bench_dir() -> Path:
-    root = Path(os.environ.get("DATAFLOW_SQLITE_BENCH_DIR", "/tmp/dataflow-sqlite-bench"))
+    root = Path(getenv_brand("DATAFLOW_SQLITE_BENCH_DIR", "/tmp/dataflow-sqlite-bench"))
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -11179,8 +11179,8 @@ def run_bigquery_bigquery_volume(
 def _require_redis() -> None:
     import socket
 
-    host = os.environ.get("DATAFLOW_REDIS_HOST", "127.0.0.1")
-    port = int(os.environ.get("DATAFLOW_REDIS_PORT", "6379"))
+    host = getenv_brand("DATAFLOW_REDIS_HOST", "127.0.0.1")
+    port = int(getenv_brand("DATAFLOW_REDIS_PORT", "6379"))
     try:
         socket.create_connection((host, port), timeout=1).close()
     except OSError as exc:
@@ -11188,9 +11188,9 @@ def _require_redis() -> None:
 
 
 def _redis_local_cfg(prefix: str) -> dict[str, Any]:
-    host = os.environ.get("DATAFLOW_REDIS_HOST", "127.0.0.1")
-    port = int(os.environ.get("DATAFLOW_REDIS_PORT", "6379"))
-    db = os.environ.get("DATAFLOW_REDIS_DB", "0")
+    host = getenv_brand("DATAFLOW_REDIS_HOST", "127.0.0.1")
+    port = int(getenv_brand("DATAFLOW_REDIS_PORT", "6379"))
+    db = getenv_brand("DATAFLOW_REDIS_DB", "0")
     return {
         "type": "redis",
         "format": "redis",
@@ -11372,8 +11372,8 @@ def run_redis_redis_volume(
 def _require_elasticsearch() -> None:
     import socket
 
-    host = os.environ.get("DATAFLOW_ES_HOST", "127.0.0.1")
-    port = int(os.environ.get("DATAFLOW_ES_PORT", "9200"))
+    host = getenv_brand("DATAFLOW_ES_HOST", "127.0.0.1")
+    port = int(getenv_brand("DATAFLOW_ES_PORT", "9200"))
     try:
         socket.create_connection((host, port), timeout=1).close()
     except OSError as exc:
@@ -11381,8 +11381,8 @@ def _require_elasticsearch() -> None:
 
 
 def _es_local_cfg(index: str) -> dict[str, Any]:
-    host = os.environ.get("DATAFLOW_ES_HOST", "127.0.0.1")
-    port = int(os.environ.get("DATAFLOW_ES_PORT", "9200"))
+    host = getenv_brand("DATAFLOW_ES_HOST", "127.0.0.1")
+    port = int(getenv_brand("DATAFLOW_ES_PORT", "9200"))
     return {
         "type": "elasticsearch",
         "format": "elasticsearch",

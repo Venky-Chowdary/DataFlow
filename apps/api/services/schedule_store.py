@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import threading
 import uuid
@@ -20,6 +19,7 @@ from functools import partial
 from typing import Any, Callable, Mapping, Sequence
 
 from services.atomic_file import write_json_atomic
+from services.brand_env import getenv_brand
 from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
 from services.ops_events import emit_event
@@ -2420,7 +2420,7 @@ def _unbound_claim_grace() -> timedelta:
     configurable rather than the 4h lookup-failure ceiling it used to inherit.
     """
     try:
-        seconds = int(os.getenv("DATAFLOW_SCHEDULE_UNBOUND_CLAIM_GRACE_SEC", "900"))
+        seconds = int(getenv_brand("DATAFLOW_SCHEDULE_UNBOUND_CLAIM_GRACE_SEC", "900"))
     except ValueError:
         seconds = 900
     return timedelta(seconds=max(60, seconds))

@@ -16,13 +16,46 @@ enters this once; every scope here is left on every outcome of the job
 * the export-bucket binding (``services.export_object_store``): the workspace
   a file export's object key is scoped to, and the job's staged local copy of
   that export (read back by Gate-8), deleted when the job ends.
+
+:func:`start_refusal` is the other thing every tracked run passes through: the
+reasons a resolved job may not write at all (data residency, local-disk policy).
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def start_refusal(request: Any) -> str | None:
+    """Why this run may not write to its destination, or ``None``.
+
+    ``execute_tracked`` asks once, on the resolved request, before any write:
+
+    * data residency (security review H2/H3). Job creation already refuses an
+      out-of-region destination, but a job is created once and run many times:
+      a resume, a retry of the stored request, a worker that claims the job
+      later, the orphan sweep. Each run is judged again here, on the address
+      it will dial now, so a connector moved to another region after the job
+      was created does not carry the earlier answer.
+    * the local-disk policy for file destinations (D276).
+    """
+    from services.data_residency import residency_refusal
+    from services.local_file_policy import local_destination_refusal
+
+    workspace_id = str(getattr(request, "workspace_id", "") or "")
+    out_of_region = residency_refusal(workspace_id, request.destination)
+    if out_of_region:
+        logger.warning(
+            "Run refused before any write: destination outside the data region of workspace %s",
+            workspace_id or "(none)",
+        )
+        return out_of_region
+    return local_destination_refusal(request.destination)
 
 
 @contextmanager

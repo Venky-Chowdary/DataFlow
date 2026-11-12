@@ -65,9 +65,14 @@ def _quick_done_before_the_door_ends(app, method: str, path: str, body: dict) ->
 
 
 def test_schedule_create_door_runs_off_the_event_loop(app):
+    from services import connector_store
+
+    # Real connectors: a schedule's connector ids are ownership-checked (review 3).
+    src, dst = (connector_store.create_connector({"name": n, "type": "postgresql", "host": "h", "database": "d"}).id
+                for n in ("door-s", "door-d"))
     assert _quick_done_before_the_door_ends(app, "POST", "/api/v1/schedules/", {
-        "name": "door", "source_connector_id": "s", "source_table": "t",
-        "dest_connector_id": "d", "dest_table": "o", "sync_mode": "upsert",
+        "name": "door", "source_connector_id": src, "source_table": "t",
+        "dest_connector_id": dst, "dest_table": "o", "sync_mode": "upsert",
         "mappings": [{"source": "id", "target": "id", "confidence": 0.99}], "enabled": False,
     })
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import io
 import json
-import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from services.audit_coverage import record_security_event
+from services.brand_env import getenv_brand
 from services.workspace_access import tenant_scope as _tenant_scope
 
 router = APIRouter(prefix="/audit", tags=["Audit"])
@@ -162,7 +162,7 @@ def _cef_line(event: dict[str, object]) -> str:
         f"cn1={event.get('chain_seq') or 0}",
         f"externalId={_cef_extension_escape(event.get('id') or '')}",
     ]
-    device_version = os.getenv("DATAFLOW_VERSION", "1")
+    device_version = getenv_brand("DATAFLOW_VERSION", "1")
     return (
         f"CEF:0|Datawrap|Datawrap|{_cef_header_escape(device_version)}|"
         f"{header_action}|{header_action}|{severity}|{' '.join(extension)}"

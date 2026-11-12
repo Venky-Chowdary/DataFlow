@@ -86,6 +86,10 @@ azure-storage-blob>=12.19.0
 # Local testing / emulators
 moto[server]>=5.0.0
 fakesnow>=0.8.0
+# The SQL Server playground filter parses T-SQL with sqlglot (services/tsql_select.py,
+# security review round 3, M2). It was only transitive (fakesnow pins ~=30.22.0);
+# declared here at the same pin so the security check never loses its parser.
+sqlglot~=30.22.0
 
 # Generic SQL engines (SQLAlchemy DBAPI drivers)
 pyodbc>=5.0.0                # SQL Server, Sybase, Informix, Exasol via unixodbc

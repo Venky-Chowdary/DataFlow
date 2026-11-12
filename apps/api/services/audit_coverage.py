@@ -459,6 +459,7 @@ SENSITIVE_ROUTE_RULES: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/v1/connectors/", "connector.create"),
     ("DELETE", "/api/v1/connectors/{connector_id}", "connector.delete"),
     ("POST", "/api/v1/connectors/saved/{connector_id}/rotate-secrets", "connector.rotate"),
+    ("POST", "/api/v1/connectors/saved/{connector_id}/region-verification", "connector.region_verify"),
     ("POST", "/api/v1/connectors/saved/{connector_id}/test", "connector.test"),
     ("POST", "/api/v1/connectors/saved", "connector.create"),
     ("PUT", "/api/v1/connectors/saved/{connector_id}", "connector.update"),

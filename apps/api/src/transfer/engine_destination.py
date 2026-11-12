@@ -20,12 +20,14 @@ class DestinationConnectTimeout(TimeoutError):
 
 
 def _destination_connect_deadline() -> float:
-    from src.ai.copilot.tool_deadline import _seconds_from_env
+    from services.brand_env import getenv_brand
 
-    return _seconds_from_env(
-        "DATAFLOW_DESTINATION_CONNECT_DEADLINE_SECONDS",
-        DEFAULT_DESTINATION_CONNECT_DEADLINE_SECONDS,
-    )
+    raw = getenv_brand("DESTINATION_CONNECT_DEADLINE_SECONDS", "") or ""
+    try:
+        value = float(raw) if raw.strip() else DEFAULT_DESTINATION_CONNECT_DEADLINE_SECONDS
+    except ValueError:
+        value = DEFAULT_DESTINATION_CONNECT_DEADLINE_SECONDS
+    return value if value > 0 else DEFAULT_DESTINATION_CONNECT_DEADLINE_SECONDS
 
 
 def _connect_destination(

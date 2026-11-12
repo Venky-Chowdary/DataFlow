@@ -31,7 +31,11 @@ def _actor_email(request: Request) -> str:
 
 
 class SnapshotBody(BaseModel):
-    source_key: str
+    #: ``connector:<id>`` of a saved connector, or one of a job's source keys;
+    #: resolved from ``connector_id`` / ``job_id`` when empty (round 2, M2).
+    source_key: str = ""
+    connector_id: str = ""
+    job_id: str = ""
     table: str
     primary_key: str  # required — refuse inventing default "id"
     chunk_size: int = 1000
@@ -39,8 +43,11 @@ class SnapshotBody(BaseModel):
 
 
 @router.post("/repair/propose/preflight")
-async def propose_preflight(body: ProposePreflightBody) -> dict[str, Any]:
+async def propose_preflight(body: ProposePreflightBody, request: Request) -> dict[str, Any]:
     from services.agentic_repair import propose_from_preflight
+    from services.body_id_ownership import assert_body_ids
+
+    assert_body_ids(request, jobs=(body.job_id,))  # review 3, Low
 
     p = propose_from_preflight(
         body.preflight,
@@ -51,8 +58,11 @@ async def propose_preflight(body: ProposePreflightBody) -> dict[str, Any]:
 
 
 @router.post("/repair/propose/quarantine")
-async def propose_quarantine(body: ProposeQuarantineBody) -> dict[str, Any]:
+async def propose_quarantine(body: ProposeQuarantineBody, request: Request) -> dict[str, Any]:
     from services.agentic_repair import propose_from_quarantine
+    from services.body_id_ownership import assert_body_ids
+
+    assert_body_ids(request, jobs=(body.job_id,))  # review 3, Low
 
     p = propose_from_quarantine(body.rejected_details, job_id=body.job_id)
     return p.to_dict()
@@ -80,6 +90,14 @@ async def decide_repair(proposal_id: str, body: DecideBody, request: Request) ->
     from services.agentic_repair import PARITY_SOURCE, apply_actions_with_report, decide_proposal, get_proposal
 
     found = get_proposal(proposal_id)
+    if found is not None:
+        # Deciding changes the proposal: an editor/admin role in its own
+        # workspace, not merely a credential that may see it (audit H-3).
+        from services.workspace_access import assert_resource_workspace
+
+        assert_resource_workspace(
+            request, found.workspace_id, write=True, not_found_detail="Proposal not found"
+        )
     if found is not None and found.source == PARITY_SOURCE:
         # One workflow, one entry point per kind: a parity fix is applied through
         # the transfer path and re-checked on the job's Trust Report.
@@ -109,43 +127,72 @@ async def decide_repair(proposal_id: str, body: DecideBody, request: Request) ->
     return p.to_dict()
 
 
-def _signal_workspace_stamp(request: Request) -> str:
-    """The workspace a new standalone signal belongs to.
+def _visible_signal(request: Request, signal_id: str, *, write: bool = False):
+    """The signal, or the same 404 for a missing id and another workspace's (D222).
 
-    The caller's write workspace; a platform admin acting with no workspace
-    named keeps the legacy unscoped stamp rather than a new 400.
-    """
-    from services.workspace_access import tenant_scope
-
-    scope = tenant_scope(request)
-    try:
-        return scope.target_workspace_id(write=True)
-    except HTTPException:
-        if scope.unrestricted:
-            return ""
-        raise
-
-
-def _visible_signal(request: Request, signal_id: str):
-    """The signal, or the same 404 for a missing id and another workspace's (D222)."""
+    ``write=True`` for a route that changes the signal: the caller must hold
+    write membership in the signal's own workspace (review M4)."""
     from services.cdc_incremental_snapshot import get_signal
     from services.workspace_access import assert_resource_workspace
 
     sig = get_signal(signal_id)
     if sig is None:
         raise HTTPException(404, "Snapshot signal not found")
-    assert_resource_workspace(request, sig.workspace_id, not_found_detail="Snapshot signal not found")
+    assert_resource_workspace(request, sig.workspace_id, write=write, not_found_detail="Snapshot signal not found")
     return sig
+
+
+def _snapshot_source(request: Request, body: SnapshotBody) -> tuple[str, str]:
+    """``(source_key, workspace_id)`` from a connector or job the caller may write.
+
+    An arbitrary ``source_key`` let workspace B queue a signal on A's source,
+    which A's CDC run then claimed and reported into B's signal (security
+    review round 2, M2). The signal belongs to that resource's workspace.
+    """
+    from services.workspace_access import assert_resource_workspace
+
+    key = (body.source_key or "").strip()
+    if body.job_id.strip():
+        from services.cdc_job_snapshots import resolve_job_cdc_snapshot_context
+        from services.mongodb_service import get_mongodb_service
+
+        job = get_mongodb_service().get_job(body.job_id.strip())
+        if not job:
+            raise HTTPException(404, "Job not found")
+        workspace_id = str(job.get("workspace_id") or "")
+        assert_resource_workspace(request, workspace_id, write=True, not_found_detail="Job not found")
+        try:
+            allowed = list(resolve_job_cdc_snapshot_context(job)["source_keys"])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    else:
+        from services.connector_store import connector_owner_workspace
+
+        connector_id = body.connector_id.strip() or (key[len("connector:"):] if key.startswith("connector:") else "")
+        if not connector_id:
+            raise HTTPException(
+                400,
+                "Name the CDC source by connector_id or job_id (a source_key must be "
+                "connector:<id> of a connector you can write)",
+            )
+        found, workspace_id = connector_owner_workspace(connector_id)
+        if not found:
+            raise HTTPException(404, "Connector not found")
+        assert_resource_workspace(request, workspace_id, write=True, not_found_detail="Connector not found")
+        allowed = [f"connector:{connector_id}"]
+    if key and key not in allowed:
+        raise HTTPException(400, "source_key is not a source key of that connector or job")
+    return key or allowed[0], workspace_id
 
 
 @router.post("/cdc/snapshots")
 async def request_snapshot(body: SnapshotBody, request: Request) -> dict[str, Any]:
     from services.cdc_incremental_snapshot import request_incremental_snapshot
 
-    workspace_id = _signal_workspace_stamp(request)
+    source_key, workspace_id = _snapshot_source(request, body)
     try:
         sig = request_incremental_snapshot(
-            body.source_key,
+            source_key,
             body.table,
             primary_key=body.primary_key,
             chunk_size=body.chunk_size,
@@ -179,7 +226,7 @@ async def get_snapshot(signal_id: str, request: Request) -> dict[str, Any]:
 async def cancel_snapshot(signal_id: str, request: Request) -> dict[str, Any]:
     from services.cdc_incremental_snapshot import cancel_signal
 
-    _visible_signal(request, signal_id)
+    _visible_signal(request, signal_id, write=True)
     sig = cancel_signal(signal_id)
     if sig is None:
         raise HTTPException(404, "Snapshot signal not found")

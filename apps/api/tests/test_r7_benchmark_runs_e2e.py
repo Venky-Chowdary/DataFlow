@@ -106,6 +106,21 @@ def test_comparison_label_names_datawrap_and_follows_the_ratio():
     assert comparison(0, 4000)["verdict"] == "unknown"
 
 
+def test_the_similar_band_is_the_same_width_on_both_sides():
+    """"About the same" means within 10% either way. The CI run that measured
+    3,626.7 rows/s against a 4,000 rows/s competitor (1.103x faster than us)
+    was labelled "About the same" because the slower side compared the ratio
+    with 0.9, a band of 1.111x."""
+    from services.benchmark_runs import comparison
+
+    assert comparison(3626.7, 4000)["verdict"] == "slower"
+    assert comparison(4000, 3626.7)["verdict"] == "faster"
+    for ours, theirs in ((1000, 1100), (1100, 1000), (1000, 1099), (1099, 1000)):
+        assert comparison(ours, theirs)["verdict"] == "similar", (ours, theirs)
+    for ours, theirs in ((1000, 1101), (1101, 1000), (1000, 1110), (1110, 1000)):
+        assert comparison(ours, theirs)["verdict"] != "similar", (ours, theirs)
+
+
 def test_unknown_run_is_404(client):
     res = client.get("/api/v1/workspace/benchmark/runs/nope")
     assert res.status_code == 404

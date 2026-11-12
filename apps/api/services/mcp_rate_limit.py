@@ -9,15 +9,16 @@ the router can emit HTTP 429. Treat MCP as a production API surface forever.
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from services.brand_env import getenv_brand
+
 
 def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name, "").strip()
+    raw = (getenv_brand(name, "") or "").strip()
     if not raw:
         return default
     try:
@@ -27,7 +28,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name, "").strip()
+    raw = (getenv_brand(name, "") or "").strip()
     if not raw:
         return default
     try:
@@ -106,7 +107,7 @@ _MCP_STORE = TokenBucketStore()
 
 def rate_limit_enabled() -> bool:
     """Default on at a generous ceiling; set DATAFLOW_MCP_RATE_LIMIT=0 to disable."""
-    raw = os.getenv("DATAFLOW_MCP_RATE_LIMIT", "1").strip().lower()
+    raw = getenv_brand("DATAFLOW_MCP_RATE_LIMIT", "1").strip().lower()
     return raw not in {"0", "false", "off", "no"}
 
 
@@ -130,7 +131,7 @@ _PILOT_STORE = TokenBucketStore()
 
 def check_pilot_rate_limit(principal: str) -> dict[str, float | bool | str]:
     """Consume one Pilot chat token for ``principal``; DATAFLOW_PILOT_RATE_LIMIT=0 disables."""
-    raw = os.getenv("DATAFLOW_PILOT_RATE_LIMIT", "1").strip().lower()
+    raw = getenv_brand("DATAFLOW_PILOT_RATE_LIMIT", "1").strip().lower()
     if raw in {"0", "false", "off", "no"}:
         return {"allowed": True, "disabled": True}
     return _PILOT_STORE.consume(
