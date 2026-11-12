@@ -260,10 +260,12 @@ async def lifespan(app: FastAPI):
             print(f"[!] RAG initialization warning: {e}")
 
         # Review M3: exports written before workspaces had folders move to the
-        # folder of the workspace whose job records own them. Idempotent.
-        from services.export_migration import migrate_flat_exports_at_startup
+        # folder of the workspace whose job records own them. Idempotent, and
+        # off the lifespan's critical path (round 2, Low): a large flat folder
+        # never delays the API's readiness.
+        from services.export_migration import migrate_flat_exports_at_startup, start_in_background
 
-        await asyncio.to_thread(migrate_flat_exports_at_startup)
+        app.state.flat_export_migration = start_in_background(migrate_flat_exports_at_startup)
         # Cadence stays up when RAG warm-up fails — otherwise due pipelines
         # sit on Next run forever with Runs=0. Multi-replica API pods set
         # SCHEDULE_LOOP=0; src.scheduler_main owns the loop there.

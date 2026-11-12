@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -47,15 +48,24 @@ __all__ = [
     "migrate_flat_exports",
     "migrate_flat_exports_at_startup",
     "remove_workspace_exports",
+    "start_in_background",
 ]
 
 
-def _recorded_owners(root: Path) -> dict[str, set[str]]:
-    """Flat export (path relative to ``root``) -> workspaces of the jobs that recorded it."""
+def _recorded_owners(root: Path, only: str = "") -> dict[str, set[str]]:
+    """Flat export (path relative to ``root``) -> workspaces of the jobs that recorded it.
+
+    ``only`` (a path relative to ``root``) asks about one file with an exact,
+    indexed query instead of every claim under the root (round 2, Low).
+    """
     try:
         from services.mongodb_service import get_mongodb_service
 
-        claims = get_mongodb_service().list_export_file_claims(str(root))
+        store = get_mongodb_service()
+        if only:
+            claims = store.list_export_file_claims(str(root), path=str(root / only))
+        else:
+            claims = store.list_export_file_claims(str(root))
     except Exception:  # noqa: BLE001 - no job store, no proof of ownership
         logger.warning("Job records unavailable: flat exports keep their place", exc_info=True)
         return {}
@@ -82,7 +92,9 @@ def _owner(root: Path, relative: str, recorded: dict[str, set[str]]) -> str:
 def flat_export_owner(filename: str) -> str:
     """The workspace that provably owns the flat export ``filename``, or ``""``."""
     root = exports_dir()
-    return _owner(root, filename, _recorded_owners(root))
+    if "/" not in filename and (named := job_named_export_owner(filename)) is not None:
+        return named
+    return _owner(root, filename, _recorded_owners(root, only=filename))
 
 
 def _flat_files(root: Path) -> list[Path]:
@@ -100,8 +112,28 @@ def _flat_files(root: Path) -> list[Path]:
     return sorted(found)
 
 
+def _link_or_exclusive_copy(source: Path, target: Path) -> None:
+    """Create ``target`` from ``source`` only if ``target`` does not exist (atomically)."""
+    try:
+        os.link(source, target, follow_symlinks=False)
+        return
+    except (FileExistsError, FileNotFoundError):
+        raise
+    except OSError:
+        pass  # a volume without hard links: an O_EXCL copy instead
+    with open(source, "rb") as src:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        with os.fdopen(fd, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
 def _move(root: Path, relative: str, workspace_id: str) -> str:
-    """Move one flat file into its workspace's folder: ``moved`` / ``kept_existing`` / ``gone``."""
+    """Move one flat file into its workspace's folder: ``moved`` / ``kept_existing`` / ``gone``.
+
+    ``os.link`` then ``unlink``: the link fails when the target exists, so a
+    file that appears after the check (an older pod still writing during a
+    rolling upgrade) is never overwritten; both files are kept (round 2, Low).
+    """
     source = root / relative
     target = workspace_exports_dir(workspace_id).joinpath(*relative.split("/"))
     if target.exists():
@@ -109,9 +141,15 @@ def _move(root: Path, relative: str, workspace_id: str) -> str:
         return "kept_existing"
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.replace(source, target)
+        _link_or_exclusive_copy(source, target)
+    except FileExistsError:
+        return "kept_existing"
     except FileNotFoundError:
         return "gone"  # another replica moved it first
+    try:
+        os.unlink(source)
+    except FileNotFoundError:
+        pass  # another replica linked and removed it as well: one copy remains
     logger.info("Moved flat export %s into the folder of workspace %s", relative, workspace_id)
     return "moved"
 
@@ -152,6 +190,23 @@ def migrate_flat_exports_at_startup() -> dict[str, Any]:
             "(no provable single owner; platform administrators only)", summary,
         )
     return summary
+
+
+def start_in_background(task: Any) -> threading.Thread:
+    """Run a startup pass off the API lifespan's critical path (round 2, Low).
+
+    The thread handles its own errors: a pass that raises is logged, never
+    re-raised into the process.
+    """
+    def _run() -> None:
+        try:
+            task()
+        except Exception:  # noqa: BLE001 - a startup pass must not take the API down
+            logger.warning("Background startup pass %s failed", getattr(task, "__name__", task), exc_info=True)
+
+    thread = threading.Thread(target=_run, name=f"startup-{getattr(task, '__name__', 'pass')}", daemon=True)
+    thread.start()
+    return thread
 
 
 def adopt_flat_export(target: Path, workspace_id: str) -> str:
