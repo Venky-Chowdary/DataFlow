@@ -280,6 +280,48 @@ def test_h1_every_path_that_rebuilds_a_stored_request_refuses_a_rehearsal_job(wo
     _refuse_rehearsal_extract(plain, "re-run")
 
 
+def test_h1_a_parity_resync_of_a_rehearsal_extract_starts_no_child(world, monkeypatch):  # noqa: F811
+    """Parity Studio's key re-sync rebuilds the stored request as a child job: refused, recorded on the fix."""
+    from services import parity_apply
+
+    out = _run(_system(tables=[{"name": "events"}]))
+    job_id = out["tables"][0]["job_id"]
+    job = _job(job_id)
+    settled: list[tuple] = []
+    monkeypatch.setattr(parity_apply, "_repair_decision", lambda *a, **k: None)
+    monkeypatch.setattr(parity_apply, "settle_fix", lambda jid, fid, *, ok, result, **_k: settled.append(
+        (jid, fid, ok, result)) or {"ok": ok})
+
+    def no_child(*_a, **_k):
+        raise AssertionError("a child job was built from a rehearsal's request")
+
+    monkeypatch.setattr(parity_apply, "_resync_request", no_child)
+    assert parity_apply._start_resync(job, job_id, {"id": "fix1", "_keys": ["1"]}, "ops@example.com") == {"ok": False}
+    assert settled and settled[0][2] is False and "cannot be re-synced" in settled[0][3]
+    assert "Start a new rehearsal instead" in settled[0][3]
+
+
+def test_h1_a_cdc_drift_repair_never_replays_a_rehearsal_request(world, monkeypatch):  # noqa: F811
+    from services import cdc_drift_repair
+    from services.parity_state import job_store
+
+    out = _run(_system(tables=[{"name": "events"}]))
+    job = dict(_job(out["tables"][0]["job_id"]))
+    saved = job["transfer_request"]
+    job.update(workspace_id="ws1", cdc_lease_cursor_key="k", extras={"cdc_drift_repair": {
+        "action": "operator_fenced_repair_required", "source_table": saved["source"].get("table") or "",
+        "dest_table": saved["destination"].get("table") or "", "cursor_key": "k",
+        "keys": [{"key_id": "1"}], "committed_position": {"lsn": "0/16B3748"}}})
+    store = job_store()
+    monkeypatch.setattr("services.mongodb_service.get_mongodb_service", lambda: type(
+        "S", (), {"get_job": staticmethod(lambda _jid: job)})())
+    monkeypatch.setattr("services.cdc_exactly_once.require_batch_lsn", lambda _p: "0/16B3748")
+    with pytest.raises(ValueError, match="Start a new rehearsal instead"):
+        cdc_drift_repair.run_fenced_drift_repair(job_id=str(job.get("_id") or out["tables"][0]["job_id"]),
+                                                 workspace_id="ws1", key_ids=["1"], actor="ops@example.com")
+    assert store.get_job(out["tables"][0]["job_id"])["status"] == "completed"
+
+
 def test_h1_the_four_job_routes_answer_409_for_a_rehearsal_extract():
     """Each job route calls the refusal right after its access checks (nothing is rebuilt first)."""
     import ast
