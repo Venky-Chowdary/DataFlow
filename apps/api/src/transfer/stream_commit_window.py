@@ -47,35 +47,73 @@ def _cursor_type(cfg: Any, scope: Any, catalog_types: dict[str, Any] | None) -> 
     )
 
 
-def route_replay_identity(cfg: Any, catalog: tuple | None) -> str:
-    """Source column a re-read row is recognised by, or ``""`` when none exists.
+def route_replay_key(cfg: Any, catalog: tuple | None) -> tuple[tuple[str, ...], bool]:
+    """Source columns a re-read row is recognised by, and whether they are a whole key.
 
-    An upsert collapses on its key. An append needs the row's own identity: the
-    tie-break the cursor seeks with (contract key, catalog primary key, or a
-    non-null unique key), or the cursor itself when the catalog proves it
-    unique. Without one a re-read row cannot be told from a new row.
+    An upsert collapses on its key. An append needs the row's own identity:
+    the declared key, the catalog primary key or non-null unique key the
+    cursor's tie-break comes from, the engine's intrinsic row id, or the cursor
+    itself when the catalog proves it unique. Always the *whole* key: two rows
+    of a composite key can share the cursor value and the first key column
+    (audit review C1), and only the full tuple tells them apart.
+
+    ``complete`` is False when the columns are not proven to be a unique key
+    (a tie-break with no key evidence). Such a key may still look rows up, but
+    it cannot prove a row delivered: every row the source reports behind the
+    watermark then counts as undelivered, so the route re-reads, never skips.
     """
-    from services.keyset_pagination import cursor_unique_evidence
+    from services.keyset_pagination import (
+        cursor_unique_evidence,
+        intrinsic_tiebreak_column,
+        safe_keyset_unique_columns,
+    )
     from services.sync_cursor import requires_upsert
 
-    cursor = cfg.cursor_source_col
+    cursor = str(cfg.cursor_source_col or "")
+    declared = tuple(str(c) for c in (cfg.pk_source_cols or []) if c)
     if requires_upsert(cfg.effective_sync):
-        if cfg.pk_source_cols and cfg.pk_target_cols:
-            return str(cfg.pk_source_cols[0])
-        return ""
-    if cfg.cursor_pk_source:
-        return str(cfg.cursor_pk_source)
-    if cfg.pk_source_cols:
-        return str(cfg.pk_source_cols[0])
+        return (declared, True) if declared and cfg.pk_target_cols else ((), False)
+    if declared:
+        return declared, True
     _types, nullable, keys = catalog or ({}, {}, {})
+    keys = keys or {}
+    catalog_pk = tuple(str(c) for c in (keys.get("primary_key_columns") or []) if c)
+    tie = str(getattr(cfg, "cursor_pk_source", "") or "")
+    if tie:
+        if tie in catalog_pk:
+            return catalog_pk, True
+        for uk in keys.get("unique_keys") or []:
+            cols = list((uk.get("columns") if isinstance(uk, dict) else uk) or [])
+            if tie in cols and safe_keyset_unique_columns([uk], cols, nullable or {}) == cols:
+                return tuple(str(c) for c in cols), True
+        if intrinsic_tiebreak_column(str(getattr(cfg, "src_read_type", "") or ""), cursor) == tie:
+            return (tie,), True
+        return (tie,), False
     if cursor_unique_evidence(
         cursor,
-        primary_key_columns=list((keys or {}).get("primary_key_columns") or []),
-        unique_keys=list((keys or {}).get("unique_keys") or []),
+        primary_key_columns=list(catalog_pk),
+        unique_keys=list(keys.get("unique_keys") or []),
         nullable=nullable or {},
     ):
-        return str(cursor)
-    return ""
+        return (cursor,), True
+    return (), False
+
+
+def route_replay_identity(cfg: Any, catalog: tuple | None) -> str:
+    """The key column re-read rows are looked up by at the destination, or ``""``.
+
+    One column of :func:`route_replay_key` — the cursor's tie-break when it is
+    part of the key, else the first key column that is not the cursor, so a
+    coarse cursor does not fetch every row of its value. Matching always uses
+    the whole key.
+    """
+    key, _complete = route_replay_key(cfg, catalog)
+    if not key:
+        return ""
+    tie = str(getattr(cfg, "cursor_pk_source", "") or "")
+    if tie in key:
+        return tie
+    return next((c for c in key if c != cfg.cursor_source_col), key[0])
 
 
 def bind_commit_window(run: Any, scope: Any, catalog: tuple | None, contract: Any, table: str) -> Any:
@@ -144,6 +182,7 @@ def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str
     cursor_type = _cursor_type(cfg, scope, (catalog or ({},))[0])
     identity = route_replay_identity(cfg, catalog)
     cfg.replay_identity = identity
+    cfg.replay_key, cfg.replay_key_complete = route_replay_key(cfg, catalog)
     src_cfg = cfg.src_cfg
     schema = str(src_cfg.get("schema") or "public")
     is_pg = commit_safety_strategy(cfg.src_read_type) == STRATEGY_PG
@@ -157,31 +196,34 @@ def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str
         can_replay=bool(identity),
         contract=contract.overlap_declaration() if contract is not None else {},
         capture_bound=(lambda: capture_pg_bound(src_cfg)) if is_pg else None,
-        probe_late=(lambda **kw: _probe_undelivered(cfg, schema, table, identity, **kw))
+        probe_late=(lambda **kw: _probe_undelivered(cfg, schema, table, **kw))
         if is_pg
         else None,
     )
 
 
-def _probe_undelivered(cfg: Any, schema: str, table: str, identity: str, **kw: Any) -> Any:
+def _probe_undelivered(cfg: Any, schema: str, table: str, **kw: Any) -> Any:
     """Rows committed behind the watermark that the destination does not hold.
 
     The source reports every row behind the watermark written since the stored
     bound — late commits, and rows merely edited in place. The second kind is
-    already at the destination under the same cursor value and identity, and
-    re-reading from it would re-read everything after it on every run that
-    follows an edit. So the reported rows are looked up at the destination by
-    identity and only the ones it lacks set the re-read seed. Unchecked (too
-    many, or the destination unreadable) they all count, which is the safe side.
+    already at the destination under the same cursor value and the same whole
+    key, and re-reading from it would re-read everything after it on every run
+    that follows an edit. So the reported rows are looked up at the destination
+    by key and only the ones it lacks set the re-read seed. Unchecked (too
+    many, the destination unreadable, or no whole unique key to prove a row
+    delivered) they all count, which is the safe side.
     """
+    key = tuple(getattr(cfg, "replay_key", ()) or ())
+    complete = bool(getattr(cfg, "replay_key_complete", False))
     late = probe_pg_late_rows(
         cfg.src_cfg, schema=schema, table=table, cursor_column=cfg.cursor_source_col,
-        identity_column=identity, **kw,
+        identity_columns=key if complete else (), **kw,
     )
     if not late.count or len(late.candidates) != late.count:
         return late
     try:
-        missing = _not_at_destination(cfg, table, identity, list(late.candidates))
+        missing = _not_at_destination(cfg, table, key, list(late.candidates))
     except Exception as exc:  # noqa: BLE001 — unchecked rows all count
         logger.warning("commit-safe window: destination lookup skipped: %s", exc)
         return late
@@ -191,9 +233,9 @@ def _probe_undelivered(cfg: Any, schema: str, table: str, identity: str, **kw: A
 
 
 def _not_at_destination(
-    cfg: Any, table: str, identity: str, candidates: list[tuple[str, str]]
-) -> list[tuple[str, str]]:
-    """``candidates`` (cursor, identity) with no such row version at the destination."""
+    cfg: Any, table: str, key: tuple[str, ...], candidates: list[tuple[str, tuple[str, ...]]]
+) -> list[tuple[str, tuple[str, ...]]]:
+    """``candidates`` (cursor, whole key) with no such row version at the destination."""
     from services.sync_cursor import compare_cursor_values
     from services.target_sample import read_target_sample
     from services.value_serializer import present_cell_text
@@ -201,31 +243,33 @@ def _not_at_destination(
     from .adapters import resolve_dest_table
 
     cursor_dest = _map_target(cfg.cursor_source_col, cfg.mappings)
-    key_dest = _map_target(identity, cfg.mappings)
+    key_dest = [_map_target(k, cfg.mappings) for k in key]
+    lookup = str(getattr(cfg, "replay_identity", "") or "") or key[0]
+    at = key.index(lookup) if lookup in key else 0
     dest_table = resolve_dest_table(cfg.dest_type, cfg.destination, table)
-    held: dict[str, list[str]] = {}
-    keys = list(dict.fromkeys(k for _c, k in candidates))
-    for start in range(0, len(keys), _LOOKUP_CHUNK):
-        chunk = keys[start : start + _LOOKUP_CHUNK]
+    held: dict[tuple[str, ...], list[str]] = {}
+    lookups = list(dict.fromkeys(k[at] for _c, k in candidates))
+    for start in range(0, len(lookups), _LOOKUP_CHUNK):
+        chunk = lookups[start : start + _LOOKUP_CHUNK]
         for row in read_target_sample(
             getattr(cfg, "dest_bind_dialect", None) or cfg.dest_type,
             cfg.dest_cfg,
             schema=str(cfg.dest_cfg.get("schema") or "public"),
             table_name=dest_table,
-            columns=list(dict.fromkeys([key_dest, cursor_dest])),
+            columns=list(dict.fromkeys([*key_dest, cursor_dest])),
             limit=max(10_000, 20 * len(chunk)),
-            sort_key=key_dest,
+            sort_key=key_dest[at],
             key_values=chunk,
         ) or []:
             low = {str(k).lower(): v for k, v in row.items()}
-            key = present_cell_text(low.get(key_dest.lower()))
+            ident = tuple(present_cell_text(low.get(c.lower())) for c in key_dest)
             mark = present_cell_text(low.get(cursor_dest.lower()))
-            if key is not None and mark is not None:
-                held.setdefault(key, []).append(mark)
+            if mark is not None and all(p is not None for p in ident):
+                held.setdefault(ident, []).append(mark)
     return [
-        (cursor, key)
-        for cursor, key in candidates
-        if not any(compare_cursor_values(cursor, mark) == 0 for mark in held.get(key, []))
+        (cursor, ident)
+        for cursor, ident in candidates
+        if not any(compare_cursor_values(cursor, mark) == 0 for mark in held.get(tuple(ident), []))
     ]
 
 
@@ -460,12 +504,19 @@ def replay_rows_already_landed(
             # it. The tie group *at* the mark keeps the rule it always had
             # (D124): (cursor, key) for a keyed append, every column otherwise,
             # so an upsert still rewrites a peer whose content changed.
-            version = list(
-                dict.fromkeys(
-                    c
-                    for c in [cursor_dest, key_dest, *(cfg.pk_target_cols or [])]
-                    if c in read_cols
+            whole_key = [_map_target(k, cfg.mappings) for k in getattr(cfg, "replay_key", ()) or ()]
+            version = (
+                list(
+                    dict.fromkeys(
+                        c
+                        for c in [cursor_dest, key_dest, *whole_key, *(cfg.pk_target_cols or [])]
+                        if c in read_cols
+                    )
                 )
+                # Without a proven unique key a row is its whole content: two
+                # rows that share (cursor, part of a key) are never one row.
+                if getattr(cfg, "replay_key_complete", True)
+                else read_cols
             )
             keyed_append = bool(
                 not requires_upsert(cfg.effective_sync)

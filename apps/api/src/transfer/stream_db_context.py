@@ -73,6 +73,9 @@ class RunConfig:
     route_watermark: Any = None
     replay_through: Any = ""
     replay_identity: Any = ""
+    #: The whole key a re-read row is matched on, and whether it is proven unique.
+    replay_key: Any = ()
+    replay_key_complete: bool = False
     #: ``(every, due this run, counter to store)`` of the periodic key census.
     census_plan: Any = None
     text_cursor_judged: bool = False

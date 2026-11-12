@@ -52,7 +52,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -146,9 +146,9 @@ class LateRows:
     min_cursor: str | None = None
     #: Lower cursor bound the probe was limited to ("" = none).
     floor: str = ""
-    #: ``(cursor value, identity value)`` of each reported row, lowest cursor
-    #: first — complete only when it holds ``count`` entries.
-    candidates: tuple[tuple[str, str], ...] = ()
+    #: ``(cursor value, whole-key values)`` of each reported row, lowest
+    #: cursor first — complete only when it holds ``count`` entries.
+    candidates: tuple[tuple[str, tuple[str, ...]], ...] = ()
     #: How many of them the destination does not hold yet (None = not checked).
     undelivered: int | None = None
 
@@ -632,7 +632,7 @@ def probe_pg_late_rows(
     since_xmin: str,
     below: str,
     cursor_type: Any = None,
-    identity_column: str = "",
+    identity_columns: Sequence[str] = (),
 ) -> LateRows:
     """Rows behind ``below`` written at or above the stored snapshot horizon.
 
@@ -692,18 +692,26 @@ def probe_pg_late_rows(
             cur.execute(query, [*params, int(since_xmin)])
             row = cur.fetchone()
             candidates: list[tuple[str, str]] = []
-            if identity_column and row and 0 < int(row[1] or 0) <= PG_CANDIDATE_ROWS:
+            key_cols = [str(k) for k in identity_columns or () if k]
+            if key_cols and row and 0 < int(row[1] or 0) <= PG_CANDIDATE_ROWS:
                 # Few enough to name: the caller checks which of them the
                 # destination lacks, so a row edited in place is not re-read.
+                # The whole key: rows of a composite key can share the cursor
+                # value and any one key column.
                 listing = sql.SQL(
                     "WITH snap AS (SELECT txid_snapshot_xmax(txid_current_snapshot()) AS m) "
-                    "SELECT t.{c}, t.{k} FROM {s}.{t} t, snap WHERE "
+                    "SELECT t.{c}, {k} FROM {s}.{t} t, snap WHERE "
                 ).format(
-                    c=ident, k=sql.Identifier(identity_column),
+                    c=ident,
+                    k=sql.SQL(", ").join(
+                        sql.SQL("t.{}").format(sql.Identifier(k)) for k in key_cols
+                    ),
                     s=sql.Identifier(schema or "public"), t=sql.Identifier(table),
                 ) + sql.SQL(" AND ").join(conds) + sql.SQL(" ORDER BY 1 LIMIT %s")
                 cur.execute(listing, [*params, int(since_xmin), PG_CANDIDATE_ROWS + 1])
-                candidates = [(_cell(c), _cell(k)) for c, k in cur.fetchall()]
+                candidates = [
+                    (_cell(r[0]), tuple(_cell(v) for v in r[1:])) for r in cur.fetchall()
+                ]
     finally:
         try:
             conn.close()
