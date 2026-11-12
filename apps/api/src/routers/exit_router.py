@@ -234,8 +234,9 @@ async def get_exit_rehearsal(rehearsal_id: str, request: Request):
     doc = _visible_rehearsal(rehearsal_id, request)
 
     def build() -> dict[str, Any]:
-        # Never verifies on the request thread: a finished rehearsal is verified in the background.
-        return public(settle(rehearsal_id, inline=False) or doc)
+        # A read only reports: the verification is started by the last extract job's completion (or the
+        # scheduler beat after a restart), never by a GET.
+        return public(settle(rehearsal_id, inline=False, start=False) or doc)
 
     return await asyncio.to_thread(build)
 

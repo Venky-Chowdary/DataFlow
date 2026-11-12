@@ -11,6 +11,8 @@ clocks; the Merkle root covers every part.
 
 from __future__ import annotations
 
+from tests.exit_background_guard import _no_exit_background_work_outlives_a_test  # noqa: F401
+
 import json
 import os
 import sqlite3

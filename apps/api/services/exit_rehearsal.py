@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -55,6 +56,121 @@ def _job_store() -> Any:
     from services.parity_state import job_store
 
     return job_store()
+
+
+# ------------------------------------------------- this process's background work
+
+#: What this process started for rehearsals and has not finished: verifier threads, the progress of
+#: running verifications (to stop them) and extract-job futures. Nothing here starts at import or on
+#: a read; :func:`stop_background` ends it at app shutdown and :func:`join_background` waits for it.
+_BG_LOCK = threading.Lock()
+_VERIFIERS: dict[str, list[tuple[threading.Thread, float]]] = {}
+_ACTIVE: dict[str, Any] = {}
+_FUTURES: dict[str, list[Any]] = {}
+_STOPPING = threading.Event()
+
+
+class _Abandoned(Exception):
+    """This verifier stopped without a result: its claim was taken over, or the process is shutting down."""
+
+
+def _start_verifier(rehearsal_id: str) -> bool:
+    """Verify ``rehearsal_id`` on a tracked background thread.
+
+    One per rehearsal in this process: repeated beats do not stack verifiers.
+    Only when the one here has been running longer than the stale window (its
+    claim could have gone stale: it hangs) is another started beside it.
+    """
+    now = time.monotonic()
+    with _BG_LOCK:
+        running = [(t, at) for t, at in _VERIFIERS.get(rehearsal_id, []) if t.is_alive()]
+        if _STOPPING.is_set() or any(now - at < VERIFY_STALE.total_seconds() for _t, at in running):
+            return False
+        thread = threading.Thread(target=_verifier_main, args=(rehearsal_id,), daemon=True,
+                                  name=f"exit-verify-{rehearsal_id}")
+        _VERIFIERS[rehearsal_id] = [*running, (thread, now)]
+    thread.start()
+    return True
+
+
+def _verifier_main(rehearsal_id: str) -> None:
+    try:
+        settle_quietly(rehearsal_id)
+    finally:
+        with _BG_LOCK:
+            left = [(t, at) for t, at in _VERIFIERS.get(rehearsal_id, []) if t is not threading.current_thread()]
+            if left:
+                _VERIFIERS[rehearsal_id] = left
+            else:
+                _VERIFIERS.pop(rehearsal_id, None)
+
+
+def _track_future(rehearsal_id: str, future: Any) -> None:
+    with _BG_LOCK:
+        _FUTURES.setdefault(rehearsal_id, []).append(future)
+
+    def done(_future: Any) -> None:
+        settle_quietly(rehearsal_id)  # the last job to finish verifies (on the job's worker, joined with it)
+        with _BG_LOCK:
+            left = [f for f in _FUTURES.get(rehearsal_id, []) if f is not future]
+            if left:
+                _FUTURES[rehearsal_id] = left
+            else:
+                _FUTURES.pop(rehearsal_id, None)
+
+    future.add_done_callback(done)
+
+
+def background_work() -> list[str]:
+    """Names of this process's unfinished rehearsal work (empty when idle)."""
+    with _BG_LOCK:
+        out = [t.name for group in _VERIFIERS.values() for t, _at in group if t.is_alive()]
+        out += [f"exit-extract-{rid}" for rid, futures in _FUTURES.items() for f in futures if not f.done()]
+        out += [f"exit-verify-callback-{rid}" for rid, futures in _FUTURES.items() if all(f.done() for f in futures)]
+    return out
+
+
+def join_background(timeout: float = 60.0, *, extracts: bool = True) -> bool:
+    """Wait until this process's extract jobs and verifications have finished; ``False`` on timeout.
+
+    ``extracts=False`` waits for running verifications only (extract jobs are the engine's to stop).
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        with _BG_LOCK:
+            threads = [t for group in _VERIFIERS.values() for t, _at in group if t.is_alive()]
+            futures = [f for group in _FUTURES.values() for f in group] if extracts else []
+            verifying = bool(_ACTIVE)
+        if not threads and not futures and not (verifying and not extracts):
+            return True
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return False
+        for thread in threads:
+            thread.join(min(left, 0.2))
+        if futures and not threads:
+            import concurrent.futures
+
+            concurrent.futures.wait(futures, timeout=min(left, 0.2))
+        if not threads:
+            time.sleep(0.01)  # a done callback runs just after its future completes
+
+
+def stop_background(timeout: float = 30.0) -> bool:
+    """App shutdown: stop running verifications (their claims are released, nothing is closed) and join.
+
+    A stopped rehearsal stays ``running``; the next start's scheduler beat verifies it.
+    """
+    _STOPPING.set()
+    try:
+        with _BG_LOCK:
+            active = list(_ACTIVE.values())
+        for progress in active:
+            progress.abandoned = True
+            progress.cancel()
+        return join_background(timeout, extracts=False)
+    finally:
+        _STOPPING.clear()
 
 
 # -------------------------------------------------------------------- start
@@ -205,8 +321,8 @@ def start(system: dict[str, Any], *, actor: str, trigger: str = "manual") -> dic
             _job_store().update_job_status(job_id, "failed", error="The scheduler did not accept the extract job.")
         else:
             if future is not None and hasattr(future, "add_done_callback"):
-                future.add_done_callback(lambda _f: settle_quietly(rid))
-    return settle(rid, inline=False) or rehearsal
+                _track_future(rid, future)
+    return settle(rid, inline=False, start=False) or rehearsal
 
 
 # ------------------------------------------------------------------- settle
@@ -256,8 +372,6 @@ class _Lease:
     """
 
     def __init__(self, rehearsal_id: str, claim_id: str, progress: Any = None) -> None:
-        import threading
-
         self._stop = threading.Event()
         self._rid, self._claim = rehearsal_id, claim_id
         self._progress, self._seen = progress, -1
@@ -270,20 +384,41 @@ class _Lease:
             raise ExitConflict("the claim was lost")
         current["_verify"] = {**held, "at": now_iso()}
 
+    def _lost(self) -> bool:
+        """Another verifier holds the rehearsal now (or it is closed): this one must stop reading."""
+        current = exit_store.get(REHEARSALS, self._rid) or {}
+        return current.get("verdict") != "running" or (current.get("_verify") or {}).get("id") != self._claim
+
+    def _stop_reading(self) -> None:
+        progress = self._progress
+        if progress is not None:
+            progress.lost = True
+            progress.cancel()
+
     def _beat(self) -> None:
         interval = max(VERIFY_STALE.total_seconds() / 4, 0.05)
         while not self._stop.wait(interval):
             progress = self._progress
-            if progress is not None:
-                if progress.expired():
-                    progress.cancel()  # the cap: stop the verifier and interrupt its blocked reads
-                    return
-                if progress.rows == self._seen:
-                    continue  # no row read since the last check: let the claim go stale
-                self._seen = progress.rows
             try:
-                if _update_retrying(self._rid, self._refresh) is None:
+                if progress is not None:
+                    if progress.expired():
+                        progress.cancel()  # the cap: stop the verifier and interrupt its blocked reads
+                        return
+                    if progress.rows == self._seen:
+                        # No row read since the last check: let the claim go stale - and once it has been
+                        # taken over, stop this verifier too (it must not read to the end for nothing).
+                        if self._lost():
+                            self._stop_reading()
+                            return
+                        continue
+                    self._seen = progress.rows
+                try:
+                    exit_store.update(REHEARSALS, self._rid, self._refresh)
+                except ExitConflict:
+                    self._stop_reading()  # the claim was lost: a verifier without it stops reading
                     return
+                except exit_store.StoreConflict:
+                    logger.debug("exit rehearsal %s: claim refresh raced; next beat retries", self._rid)
             except Exception as exc:  # noqa: BLE001 - a missed beat is retried on the next one
                 logger.info("exit rehearsal %s: claim refresh failed (%s)", self._rid, type(exc).__name__)
 
@@ -293,36 +428,60 @@ class _Lease:
 
 
 def _verify_within_cap(doc: dict[str, Any], jobs: dict[str, dict[str, Any]], rehearsal_id: str, claim_id: str,
-                       started: datetime | None) -> dict[str, Any]:
-    """``verify`` under its lease, progress tracking and total cap (review 2, N4)."""
+                       held_seconds: float) -> dict[str, Any]:
+    """``verify`` under its lease, progress tracking and total cap (review 2, N4; review 3).
+
+    ``held_seconds`` is how long earlier verifiers of this rehearsal held the
+    claim: the cap counts verifying time only, never the time nobody was
+    verifying (a replica that was down). Raises :class:`_Abandoned` when this
+    verifier lost its claim or the process is stopping (no result to close with).
+    """
     from services.exit_verify_guard import VerificationTimedOut, max_verify_seconds, tracking
 
     cap = max_verify_seconds()
-    left = cap - ((datetime.now(timezone.utc) - started).total_seconds() if started else 0.0)
+    left = cap - max(0.0, held_seconds)
     if left <= 0:
         return verify(doc, jobs, timed_out_after=cap)
     with tracking(left) as progress:
+        with _BG_LOCK:
+            _ACTIVE[claim_id] = progress
+            progress.abandoned = _STOPPING.is_set()
         lease = _Lease(rehearsal_id, claim_id, progress)
         try:
+            if progress.abandoned:
+                raise _Abandoned()
             result = verify(doc, jobs)
         except VerificationTimedOut:
+            if progress.abandoned or progress.lost:
+                raise _Abandoned() from None
             return verify(doc, jobs, timed_out_after=cap)
         finally:
             lease.release()
-        # A read the cap interrupted (or the server cancelled at it) is a timeout, not a read failure.
-        return verify(doc, jobs, timed_out_after=cap) if progress.cancelled.is_set() or progress.expired() else result
+            with _BG_LOCK:
+                _ACTIVE.pop(claim_id, None)
+        if progress.abandoned or progress.lost:
+            raise _Abandoned()
+        # A read the cap interrupted (or the server cancelled at it) is a timeout, not a read failure. A
+        # verification that read everything is kept, even when it finished a moment past the cap.
+        interrupted = progress.cancelled.is_set() and any(t.get("_read_failed") for t in result["tables"])
+        if interrupted:
+            return verify(doc, jobs, timed_out_after=cap)
+        for table in result["tables"]:
+            table.pop("_read_failed", None)
+        return result
 
 
-def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
+def settle(rehearsal_id: str, *, inline: bool = True, start: bool = True) -> dict[str, Any] | None:
     """Verify, seal and close a rehearsal whose extract jobs have all finished.
 
     Returns the stored document (unchanged while jobs still run). Exactly one
     caller verifies: the verification is claimed by compare-and-swap and kept
     fresh by its verifier (:class:`_Lease`); only a claim nobody refreshed for
-    ``VERIFY_STALE`` (its verifier died) is taken over. ``inline=False`` (a page read, the
+    ``VERIFY_STALE`` (its verifier died) is taken over. ``inline=False`` (the
     scheduler beat, a sign-off attempt) never runs the verification on the
-    caller's thread — it re-reads both whole populations — but starts it in
-    the background and answers with the tables "Verifying.".
+    caller's thread — it re-reads both whole populations — but starts it on one
+    tracked background thread and answers with the tables "Verifying.".
+    ``start=False`` (a page read) only reports: a read never starts work.
     """
     doc = exit_store.get(REHEARSALS, rehearsal_id)
     if not doc or doc.get("verdict") != "running":
@@ -333,12 +492,9 @@ def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
         doc["tables"] = _live_tables(doc, jobs)
         return doc
     if not inline:
-        import threading
-
         held = parse_ts((doc.get("_verify") or {}).get("at"))
-        if not held or datetime.now(timezone.utc) - held >= VERIFY_STALE:
-            threading.Thread(target=settle_quietly, args=(rehearsal_id,), daemon=True,
-                             name=f"exit-verify-{rehearsal_id}").start()
+        if start and (not held or datetime.now(timezone.utc) - held >= VERIFY_STALE):
+            _start_verifier(rehearsal_id)
         doc["tables"] = _live_tables(doc, jobs)
         return doc
     claim_id = uuid.uuid4().hex
@@ -348,14 +504,21 @@ def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
         at = parse_ts(held.get("at"))
         if current.get("verdict") != "running" or (at and datetime.now(timezone.utc) - at < VERIFY_STALE):
             raise ExitConflict("verification already claimed")
-        # ``started`` is the first attempt's: a takeover does not reset the total cap.
-        current["_verify"] = {"id": claim_id, "at": now_iso(), "started": held.get("started") or now_iso()}
+        # The total cap counts the time verifiers held the claim (each one: its claim to its last
+        # refresh), so a takeover does not reset it and time nobody was verifying does not count.
+        current["_verify"] = {"id": claim_id, "at": now_iso(), "claimed_at": now_iso(),
+                              "started": held.get("started") or now_iso(), "held_seconds": _held_seconds(held)}
 
     try:
         claimed, _ = exit_store.update(REHEARSALS, rehearsal_id, claim)
     except (ExitConflict, exit_store.StoreConflict):
         return exit_store.get(REHEARSALS, rehearsal_id)
-    result = _verify_within_cap(doc, jobs, rehearsal_id, claim_id, parse_ts(claimed["_verify"]["started"]))
+    try:
+        result = _verify_within_cap(doc, jobs, rehearsal_id, claim_id,
+                                    float(claimed["_verify"].get("held_seconds") or 0.0))
+    except _Abandoned:
+        _release_claim(rehearsal_id, claim_id)
+        return exit_store.get(REHEARSALS, rehearsal_id)
 
     def close(current: dict[str, Any]) -> None:
         if (current.get("_verify") or {}).get("id") != claim_id:
@@ -375,6 +538,37 @@ def settle(rehearsal_id: str, *, inline: bool = True) -> dict[str, Any] | None:
                    "merkle_root": closed["seal"]["merkle_root"]},
           outcome="failed" if closed["verdict"] == "failed" else "succeeded")
     return closed
+
+
+def _held_seconds(held: dict[str, Any]) -> float:
+    """Seconds verifiers have held a rehearsal's claim so far: earlier attempts plus ``held``'s own.
+
+    An attempt held the claim from when it took it until it last refreshed it,
+    plus at most the stale window (a verifier that stopped is presumed gone
+    once its claim is stale). The hours a rehearsal then waited for a verifier
+    are nobody's verifying time.
+    """
+    total = float(held.get("held_seconds") or 0.0)
+    claimed, last = parse_ts(held.get("claimed_at")), parse_ts(held.get("at"))
+    if claimed and last:
+        until = min(datetime.now(timezone.utc), last + VERIFY_STALE)
+        total += max(0.0, (until - claimed).total_seconds())
+    return total
+
+
+def _release_claim(rehearsal_id: str, claim_id: str) -> None:
+    """Give up a claim this verifier still holds (shutdown), keeping the time it was held."""
+    def release(current: dict[str, Any]) -> None:
+        held = current.get("_verify") or {}
+        if current.get("verdict") != "running" or held.get("id") != claim_id:
+            raise ExitConflict("the claim is not this verifier's")
+        spent = float(held.get("held_seconds") or 0.0)
+        claimed = parse_ts(held.get("claimed_at"))
+        spent += max(0.0, (datetime.now(timezone.utc) - claimed).total_seconds()) if claimed else 0.0
+        current["_verify"] = {"id": None, "at": None, "claimed_at": None, "started": held.get("started"),
+                              "held_seconds": spent}
+
+    _update_retrying(rehearsal_id, release)
 
 
 # ------------------------------------------------------------------- verify
@@ -482,6 +676,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
             close()
     except Exception as exc:  # noqa: BLE001 - not measured is a named gap, never a pass
         logger.info("exit rehearsal source read-back failed for %s", table["name"], exc_info=True)
+        out["_read_failed"] = True
         gaps.append(f"the source could not be re-read for a population digest ({safe_error(exc, what='the read', event=ERROR_EVENT, reference=True)})")
     seal_ok: bool | None = None
     try:
@@ -500,6 +695,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         part["verified_on_read"] = bool(seal_ok)
     except Exception as exc:  # noqa: BLE001 - an unreadable or expired part cannot be proven
         logger.info("exit rehearsal extract read-back failed for %s", table["name"], exc_info=True)
+        out["_read_failed"] = True
         gaps.append(f"the stored part could not be read back ({safe_error(exc, what='the read', event=ERROR_EVENT, reference=True)})")
     if not part["sha256"]:
         part = None

@@ -437,10 +437,15 @@ def validate_client(tmp_path, monkeypatch):
     h.isolate(tmp_path, monkeypatch)
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("DATAFLOW_SEED_DEMO", "false")
+    # The app's start-up sweepers are not this test's: no orphan pass, and none left running after it.
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+    from services.orphan_jobs import stop_orphan_sweeper
     from src.main import app
 
+    stop_orphan_sweeper()
     with TestClient(app) as c:
         yield c
+    stop_orphan_sweeper()
 
 
 @pytest.mark.parametrize("transform,status", [("hash_pii", "block"), ("none", "pass")])

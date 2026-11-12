@@ -353,6 +353,13 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    try:
+        # Rehearsal verifications this process is running stop here (claims released, nothing closed).
+        from services.exit_rehearsal import stop_background as stop_exit_verifications
+
+        await asyncio.to_thread(stop_exit_verifications, 10.0)
+    except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
+        logger.debug("Exit verification shutdown failed: %s", exc)
     warm = getattr(app.state, "warm_task", None)
     if warm and not warm.done():
         warm.cancel()

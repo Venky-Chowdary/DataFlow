@@ -63,6 +63,9 @@ class Progress:
     cancelled: threading.Event = field(default_factory=threading.Event)
     #: The deadline scope's own progress (registered connections to interrupt).
     scope: Any = None
+    #: Stopped without a result: the claim was taken over (``lost``) or the process is stopping (``abandoned``).
+    lost: bool = False
+    abandoned: bool = False
 
     def expired(self) -> bool:
         return time.monotonic() >= self.deadline
