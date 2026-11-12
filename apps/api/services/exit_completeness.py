@@ -439,6 +439,55 @@ def json_null_documents(endpoint: Any, types: dict[str, str], engine: str) -> di
     return {c: int(n or 0) for c, n in zip(columns, row or []) if int(n or 0) > 0}
 
 
+_DOMAIN_BASES = """
+WITH RECURSIVE d AS (
+  SELECT a.attname AS col, t.typbasetype AS base, t.typtypmod AS mod
+  FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+  WHERE a.attrelid = CAST(:rel AS regclass) AND a.attnum > 0 AND NOT a.attisdropped AND t.typtype = 'd'
+  UNION ALL
+  SELECT d.col, t.typbasetype, t.typtypmod FROM d JOIN pg_type t ON t.oid = d.base WHERE t.typtype = 'd'
+)
+SELECT d.col, format_type(d.base, d.mod) FROM d JOIN pg_type t ON t.oid = d.base WHERE t.typtype <> 'd'
+"""
+
+
+def pg_domain_base_types(endpoint: Any, engine: str) -> dict[str, str]:
+    """{column: declared type} of PostgreSQL columns typed by a domain, read as the domain's base type.
+
+    Introspection reports a domain (over an array, a time, a jsonb) as TEXT, so
+    honest values were digested as text against a typed extract and read
+    "incomplete ... or the source changed" (review 5). The catalog names each
+    domain's base type (through domains over domains), which is digested and
+    checked for driver folds like the base type itself.
+    """
+    if family_or_kind(engine) != POSTGRESQL:
+        return {}
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from connectors.sql_identifiers import quote_table_ref
+    from services.schema_introspect import _pg_to_logical
+    from src.transfer.adapters import resolve_connector_config
+
+    db = get_sqlalchemy_engine({**dict(resolve_connector_config(endpoint)), "type": POSTGRESQL})
+    rel = quote_table_ref(endpoint.table, getattr(endpoint, "schema", None) or None, dialect=POSTGRESQL)
+    with db.connect() as conn:
+        rows = conn.execute(sa.text(_DOMAIN_BASES), {"rel": rel}).fetchall()
+    return {str(col): _pg_to_logical(str(base)) for col, base in rows if base}
+
+
+_DOMAIN_AS_TEXT = ("is a domain over {base}: the extract job reads a domain as text, so it wrote each value as a "
+                   "JSON string rather than as {base}, and its values are not provable from this extract")
+
+
+def domain_written_as_text(domains: dict[str, str]) -> dict[str, str]:
+    """{column: why}: domains over an array or a JSON document, which a JSON extract holds as a string."""
+    from services.exit_value_fidelity import element_ddl
+
+    return {c: _DOMAIN_AS_TEXT.format(base=t) for c, t in domains.items()
+            if element_ddl(t) is not None or t.split("(")[0].strip().upper() in {"JSON", "JSONB"}}
+
+
 _MIXED_CLASSES = ("holds values of more than one SQLite storage class ({classes}): the extract writes them alike "
                   "(the text '1' and the integer 1 both as 1), so its values are not provable")
 
@@ -617,8 +666,15 @@ def judge_table(
     parity: dict[str, Any],
     not_measured: list[str],
 ) -> dict[str, Any]:
-    """Status, reason and differences of one extracted table (contract 4.1)."""
+    """Status, reason and differences of one extracted table (contract 4.1).
+
+    A column already named as not provable (``uncompared``) is reported with
+    its own reason: a row-digest or control-total difference confined to such
+    columns is not also reported as changed rows (review 5), which read "or the
+    source changed during the rehearsal" where the true cause was named.
+    """
     diffs: list[dict[str, Any]] = []
+    unproven = {**(extract.uncompared if extract else {}), **(source.uncompared if source else {})}
     if seal_ok is False:
         diffs.append({"kind": "seal", "rows": None, "rows_at_least": False,
                       "detail": "The stored part does not match the SHA-256 recorded when it was uploaded."})
@@ -645,14 +701,14 @@ def judge_table(
             diffs.append({"kind": "changed_rows", "rows": 1, "rows_at_least": True,
                           "detail": "The key sets differ: at least one key is missing and another is extra."})
         elif same_count and source.row_set_sha256 != extract.row_set_sha256 and not (
-                renamed and set(differing_columns(source, extract)) <= set(renamed)):
+                (differing := differing_columns(source, extract)) and set(differing) <= set(renamed) | set(unproven)):
             named = differing_columns(source, extract)
             where = f" in column(s) {', '.join(named[:10])}" if named else ""
             diffs.append({"kind": "changed_rows", "rows": 1, "rows_at_least": True,
                           "detail": f"The row digests differ{where}: at least one row holds different values "
                                     "(or the source changed during the rehearsal)."})
         for row in _totals_rows(source, extract):
-            if row["match"] is False:
+            if row["match"] is False and row["column"] not in unproven:
                 diffs.append({"kind": "control_total", "rows": None, "rows_at_least": False,
                               "detail": f"Control totals of {row['column']} differ."})
     unexplained = int(parity.get("unexplained") or 0)
@@ -660,7 +716,6 @@ def judge_table(
         diffs.append({"kind": "changed_rows", "rows": unexplained, "rows_at_least": False,
                       "detail": f"Parity Studio names {unexplained} unexplained difference(s) on the extract job."})
     method = value_method(parity, source, extract)
-    unproven = {**(extract.uncompared if extract else {}), **(source.uncompared if source else {})}
     not_measured = list(not_measured) + [f"{col} {why}" for col, why in unproven.items()]
     if diffs:
         status = "incomplete"

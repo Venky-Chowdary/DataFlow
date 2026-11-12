@@ -101,3 +101,60 @@ def test_review5_c1_the_same_tables_saved_under_a_postgresql_family_type_get_ide
     assert verdicts["postgresql"] == {"arrlb": "not_proven", "tm24": "not_proven", "jbnum": "not_proven",
                                       "numarr": "incomplete", "jbok": "proven"}, verdicts
     assert verdicts["supabase"] == verdicts["postgresql"] == verdicts["amazon_rds_postgresql"], verdicts
+
+
+@pytest.fixture()
+def pg_domains(pg):
+    """Domains over an array, a time and a jsonb (dropped with their tables after the test)."""
+    import uuid
+
+    import psycopg2
+
+    from tests.test_parity_live_pg import _pg_cfg
+
+    cfg = _pg_cfg()
+    conn = psycopg2.connect(host=cfg["host"], port=cfg["port"], dbname=cfg["database"], user=cfg["username"],
+                            password=cfg["password"], connect_timeout=3)
+    conn.autocommit = True
+    sfx = uuid.uuid4().hex[:6]
+    names = {k: f"r5dom_{k}_{sfx}" for k in ("numarr", "intarr", "tm", "jb", "outer")}
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE DOMAIN {names['numarr']} AS numeric[]")  # nosec B608 - generated test names
+        cur.execute(f"CREATE DOMAIN {names['intarr']} AS int[]")  # nosec B608
+        cur.execute(f"CREATE DOMAIN {names['tm']} AS time")  # nosec B608
+        cur.execute(f"CREATE DOMAIN {names['jb']} AS jsonb")  # nosec B608
+        cur.execute(f"CREATE DOMAIN {names['outer']} AS {names['tm']}")  # nosec B608 - a domain over a domain
+    try:
+        yield pg, names
+    finally:
+        with conn.cursor() as cur:
+            for name in reversed(list(names.values())):
+                cur.execute(f"DROP DOMAIN IF EXISTS {name} CASCADE")  # nosec B608
+        conn.close()
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "csv"])
+def test_review5_low_a_domain_typed_column_is_digested_as_its_base_type(pg_domains, fmt):
+    """Review 5 Low: a domain introspects as TEXT; the rehearsal resolves its base type (honest values proven)."""
+    make, d = pg_domains
+    shapes = {
+        "domarr": (f"id BIGINT PRIMARY KEY, a {d['numarr']}, b {d['intarr']}", ["1, '{1.5,2}', '{1,2}'",
+                                                                               "2, '{3}', NULL"]),
+        "domtm": (f"id BIGINT PRIMARY KEY, t {d['tm']}, u {d['outer']}", ["1, '10:00:00', '23:59:59.5'",
+                                                                         "2, '00:00:00', NULL"]),
+        "domjb": (f"id BIGINT PRIMARY KEY, j {d['jb']}", ["1, '{\"a\": 1}'", "2, '[1, 2]'"]),
+        "domtm24": (f"id BIGINT PRIMARY KEY, t {d['tm']}", ["1, '24:00:00'", "2, '00:00:00'"]),
+    }
+    tables = _rehearse(make(shapes), fmt)
+    # The extract job reads a domain as text: in JSON Lines an array or a jsonb domain is held as a JSON
+    # string, which is named; a CSV cell holds the same text as for the base type, which is compared.
+    named = {"domarr", "domjb"} if fmt == "jsonl" else set()
+    wrong = {g: (t["status"], t["reason"]) for g, t in tables.items()
+             if g not in named | {"domtm24"} and t["status"] != "proven"}
+    assert not wrong, wrong
+    for group in named:
+        assert tables[group]["status"] == "not_proven", tables[group]
+        assert "is a domain over" in tables[group]["reason"] and "source changed" not in tables[group]["reason"]
+    # Resolved to TIME, the driver's fold of 24:00:00 is named again, as for a plain TIME column.
+    assert tables["domtm24"]["status"] == "not_proven", tables["domtm24"]
+    assert "t holds 24:00:00" in tables["domtm24"]["reason"], tables["domtm24"]["reason"]

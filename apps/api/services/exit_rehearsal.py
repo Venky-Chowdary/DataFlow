@@ -680,14 +680,26 @@ def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> tuple[dict[st
     The types steer the digest of both sides; a text column the engine read as
     JSON is decided by the catalog, never by its content (review 3, M7).
     """
-    from services.exit_completeness import catalog_declared_types
+    from services.exit_completeness import catalog_declared_types, pg_domain_base_types
     from services.source_schema_authority import endpoint_source_column_types
-
     from src.transfer.engine_family import family_or_kind
 
     endpoint = _source_endpoint(doc["source"], table, doc["workspace_id"])
+    engine = family_or_kind(getattr(endpoint, "format", ""))
     types = endpoint_source_column_types(endpoint)
-    return catalog_declared_types(types, endpoint, family_or_kind(getattr(endpoint, "format", "")))
+    domains: dict[str, str] = {}
+    try:
+        # A domain-typed column is its base type (introspection reports it as TEXT; review 5).
+        domains = {c: t for c, t in pg_domain_base_types(endpoint, engine).items() if c in types}
+    except Exception:  # noqa: BLE001 - an unread catalog keeps the introspected type: it fails closed
+        logger.info("exit rehearsal: domain base types unread for %s", table.get("name"), exc_info=True)
+    types.update(domains)
+    types, unproven = catalog_declared_types(types, endpoint, engine)
+    if str(doc.get("extract_format") or "").lower() not in {"csv", "tsv"}:
+        from services.exit_completeness import domain_written_as_text
+
+        unproven.update(domain_written_as_text(domains))
+    return types, unproven
 
 
 def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
