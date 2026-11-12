@@ -696,6 +696,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         profile_extract,
         profile_rows,
         resolve_keys,
+        server_text_columns,
         source_columns_and_rows,
     )
     from services.parity_errors import safe_error
@@ -733,14 +734,15 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         endpoint = _source_endpoint(doc["source"], table, doc["workspace_id"])
         engine = str(getattr(endpoint, "format", "") or "").lower()
         types, unproven = _declared_types(doc, table)
-        columns, rows, close = source_columns_and_rows(endpoint)
+        columns, rows, close = source_columns_and_rows(endpoint, types=types)
         keys, missing = resolve_keys(keys, columns)
         if missing:
             gaps.append(f"the declared key column(s) {', '.join(missing)} are not columns of the table, so the "
                         "key set was not measured")
         try:
             source = profile_rows(rows, columns, keys, None, types=types, engine=engine,
-                                  extract_is_delimited=str(doc.get("extract_format") or "").lower() in {"csv", "tsv"})
+                                  extract_is_delimited=str(doc.get("extract_format") or "").lower() in {"csv", "tsv"},
+                                  server_text=server_text_columns(columns, types, engine))
         finally:
             close()
         source.uncompared.update(unproven)

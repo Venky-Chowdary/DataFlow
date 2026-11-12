@@ -33,7 +33,9 @@ HONEST = {
     "bytes": ("id BIGINT PRIMARY KEY, b BYTEA", ["1, ''", "2, '\\x01'", "3, NULL"]),
     "ancient": ("id BIGINT PRIMARY KEY, ts TIMESTAMP", ["1, '0001-01-01 00:00:00'", "2, '0999-12-31 10:00:00.5'",
                                                          "3, '2026-01-01 00:00:00'"]),
-    "jbstr": ("id BIGINT PRIMARY KEY, jb JSONB", ["1, '\"str\"'", "2, '[]'", "3, '{}'", "4, 'true'", "5, '1.10'"]),
+    # '1.10' moved to review 4's named set (test_exit_review4_live_pg.py, jbtop): the driver reads it as 1.1, so
+    # its scale is not in the extract and calling it proven broke the exact-scale rule (review 4, H-2).
+    "jbstr": ("id BIGINT PRIMARY KEY, jb JSONB", ["1, '\"str\"'", "2, '[]'", "3, '{}'", "4, 'true'", "5, '1.1'"]),
 }
 #: table -> (columns, rows, what the not_proven reason must say).
 NAMED = {

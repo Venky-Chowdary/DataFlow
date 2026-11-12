@@ -166,7 +166,8 @@ def _decimal(value: Any) -> Decimal | None:
 
 def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns: list[str],
                  numeric: list[str] | None, *, types: dict[str, str] | None = None,
-                 engine: str = "", documents_as_text: bool = False, extract_is_delimited: bool = False) -> Profile:
+                 engine: str = "", documents_as_text: bool = False, extract_is_delimited: bool = False,
+                 server_text: dict[str, str] | None = None) -> Profile:
     """Count, key-set digest, row digest and control totals in one streamed pass.
 
     ``types`` are the source's declared column types (both sides use the
@@ -178,6 +179,9 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
     the rows come from a delimited file, where a JSON document is a text cell;
     ``extract_is_delimited`` (the source side) says the extract is such a file,
     so a document the file cannot spell unambiguously is named, never compared.
+    ``server_text`` (the source side) maps a column to the row key holding the
+    server's own text of its value (:func:`server_text_columns`): a value the
+    driver folded is named, never compared as if the extract could hold it (review 4).
     """
     from services.reconciliation_api import FingerprintAccumulator, iter_row_fingerprints
 
@@ -189,6 +193,7 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
         token,
         token_kind,
     )
+    from services.exit_value_fidelity import adapter_fold, driver_fold, server_text_kind
     from services.exit_verify_guard import tick
 
     eng = str(engine or "").strip().lower()
@@ -200,6 +205,12 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
     for col in tokens:
         typed.pop(col, None)
         exact.discard(col)
+    for col in columns:
+        # A type whose driver can read two stored values as one is named, never proven (review 4, C-1).
+        if col not in uncompared and (why := adapter_fold(_declared(dict(types or {}), col), eng)):
+            uncompared[col] = why
+    folds = {c: (key, kind) for c, key in (server_text or {}).items()
+             if c in columns and (kind := server_text_kind(_declared(dict(types or {}), c), eng))}
     prof = Profile(columns=list(columns), uncompared=uncompared)
     documents = [c for c, kind in tokens.items() if kind == JSON_DOCUMENT]
     keys = [c for c in key_columns if c in columns]
@@ -236,6 +247,10 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
                     prof.uncompared[col] = _JSON_NUMBER  # named, never called equal (the driver rounded it)
                 if extract_is_delimited and col not in prof.uncompared and ambiguous_in_text_cell(raw):
                     prof.uncompared[col] = _JSON_AMBIGUOUS
+            for col, (key, kind) in folds.items():
+                if col not in prof.uncompared and (why := driver_fold(
+                        kind, _declared(dict(types or {}), col), row.get(key), row.get(col))):
+                    prof.uncompared[col] = why
             yield {c: (_exact(row.get(c)) if c in exact
                        else _exact(token(tokens[c], row.get(c), from_text=documents_as_text)) if c in tokens
                        else row.get(c)) for c in columns}
@@ -342,8 +357,20 @@ def profile_extract(part: dict[str, Any], *, local_path: str, fmt: str, columns:
     return prof, reader.digest.hexdigest(), reader.size
 
 
-def source_columns_and_rows(endpoint: Any, *, itersize: int = 5000) -> tuple[list[str], Iterator[dict[str, Any]], Any]:
-    """(columns, row iterator, closer) of a SQL source table, read in one streamed SELECT."""
+def server_text_columns(columns: list[str], types: dict[str, str], engine: str) -> dict[str, str]:
+    """{column: row key} of the columns also read as the server's own text (their driver is not one-to-one)."""
+    from services.exit_value_fidelity import server_text_kind
+
+    return {c: f"\u0000server_text:{c}" for c in columns if server_text_kind(_declared(types, c), engine)}
+
+
+def source_columns_and_rows(endpoint: Any, *, itersize: int = 5000, types: dict[str, str] | None = None,
+                            ) -> tuple[list[str], Iterator[dict[str, Any]], Any]:
+    """(columns, row iterator, closer) of a SQL source table, read in one streamed SELECT.
+
+    With ``types``, a column whose driver is not one-to-one is also read as the
+    server's own text, under the row key :func:`server_text_columns` names.
+    """
     import sqlalchemy as sa
 
     from connectors.generic_sql import get_sqlalchemy_engine
@@ -361,8 +388,10 @@ def source_columns_and_rows(endpoint: Any, *, itersize: int = 5000) -> tuple[lis
     conn = engine.connect()
     try:
         columns = list(conn.execute(sa.text(f"SELECT * FROM {table} WHERE 1=0")).keys())  # nosec B608
-        select = f"SELECT {', '.join(quote(str(c)) for c in columns)} FROM {table}"  # nosec B608
-        batches = iter_select_row_dicts(conn, sa.text(select), columns, itersize=itersize)
+        texts = server_text_columns(columns, dict(types or {}), db_type)
+        items = [quote(str(c)) for c in columns] + [f"CAST({quote(str(c))} AS text)" for c in texts]
+        select = f"SELECT {', '.join(items)} FROM {table}"  # nosec B608
+        batches = iter_select_row_dicts(conn, sa.text(select), columns + list(texts.values()), itersize=itersize)
     except Exception:
         conn.close()
         raise
