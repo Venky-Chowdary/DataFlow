@@ -255,3 +255,13 @@ def test_connector_test_runs_with_the_callers_egress_workspace(fenced, monkeypat
                                                         "port": 5432, "database": "d", "username": "u", "password": "p"})
     assert r.status_code == 200, r.text
     assert seen == [fenced.workspace_a]
+
+
+def test_a_tracked_job_in_the_unscoped_workspace_is_known_not_unbound(fenced):
+    """Fail closed is for writes no workspace can be named for; a job's workspace is known."""
+    from services.export_object_store import export_job_scope
+
+    fake = FakeS3(location="us-east-1", put_redirect_to="us-east-1")
+    with export_job_scope("job-unscoped", ""):
+        _put(_client(fake, _cfg()))
+    assert len(_puts(fake)) == 2  # unchanged: the unscoped workspace has no fence here

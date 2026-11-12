@@ -58,6 +58,11 @@ def _fence_for(workspaces: tuple[str, ...]) -> str:
     from services.data_residency import any_fence, enforced_region
 
     if not workspaces:
+        from services.export_object_store import _bound_job
+
+        if _bound_job.get() is not None:
+            # A tracked job in the unscoped workspace: its workspace is known.
+            return enforced_region("")
         # Review round 3 (H4): an unbound write is not an unfenced one.
         return _UNBOUND if any_fence() else ""
     fences = {enforced_region(w) for w in workspaces} - {""}
