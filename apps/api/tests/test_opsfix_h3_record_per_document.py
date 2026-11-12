@@ -229,3 +229,19 @@ def test_every_record_list_store_is_one_document_per_record_on_live_mongodb(live
     tenant_store.update_tenant(tenant.id, sso_enforced=True)
     assert items.find_one({"_id": f"tenant_settings:{tenant.id}"})["rev"] == 2
     assert tenant_store.get_tenant(tenant.id).sso_enforced is True
+
+
+def test_reads_fail_closed_while_another_process_imports_into_the_empty_store(tmp_path, monkeypatch):
+    """A half-imported tenant or ACL list must not be served as if complete."""
+    from services.control_plane_store import ControlPlaneUnavailable
+
+    db = install_shared_store(monkeypatch)
+    _pods(monkeypatch, tmp_path)
+    monkeypatch.setattr(tenant_store._DOC, "_settled", False)
+    monkeypatch.setattr(tenant_store._DOC, "_split_checked", False)
+    docs = db[shared_doc_store.DOCS_COLLECTION]
+    docs.insert_one({"_id": "tenant_settings", "kind": "store", "import_sources": ["another-pods-file"], "state": "importing"})
+    with pytest.raises(ControlPlaneUnavailable, match="being imported"):
+        tenant_store.list_tenants()
+    docs.update_one({"_id": "tenant_settings"}, {"$set": {"state": "done"}})
+    assert tenant_store.list_tenants() == []

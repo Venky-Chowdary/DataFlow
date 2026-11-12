@@ -166,6 +166,7 @@ class SharedRecordSet(SharedDoc):
         ):
             items, fences = cached[1], cached[2]
         else:
+            self._refuse_while_importing(coll)
             items, fences = self._read(coll)
             self._cache = (_sds._clock(), items, fences)
         return self._tracked(items, fences)
@@ -303,7 +304,15 @@ class SharedRecordSet(SharedDoc):
         if not self._split_checked:
             self._split_whole_document(coll, docs)
         self._import_local_file(coll)
+
+    def _refuse_while_importing(self, coll: Any) -> None:
+        """Fail closed while another process imports its file into this empty store.
+
+        Checked on a read from the database (not on a cached answer) until the
+        store has records or a finished import: then it can no longer start.
+        """
         if not self._settled:
+            docs = coll.database[DOCS_COLLECTION]
             meta = docs.find_one({"_id": self.name})
             if meta and meta.get("state") == "importing":
                 from services.control_plane_store import ControlPlaneUnavailable
