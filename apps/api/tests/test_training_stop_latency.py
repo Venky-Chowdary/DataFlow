@@ -14,6 +14,7 @@ the feeder's default upload directories hold no test fixtures.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -200,3 +201,142 @@ def test_feeder_reads_uploads_but_not_the_fixtures_beside_them(tmp_path):
     names = {s.name for s in UniversalDataFeeder(default_upload_dirs(tmp_path)).scan_uploads()}
 
     assert names == {"orders"}
+
+
+# --- every stop point is exercised (review mutants M6, M7, M8, M15) --------
+
+
+def _stub_phases(agent, monkeypatch, calls: list[str], *, after_ingest=None):
+    def feed_all(*a, **k):
+        calls.append("feed")
+        return []
+
+    def ingest(docs, **k):
+        calls.append("ingest")
+        if after_ingest is not None:
+            after_ingest()
+        return len(docs)
+
+    def save_artifacts(*a, **k):
+        calls.append("save")
+        return {}
+
+    monkeypatch.setattr(agent.feeder, "feed_all", feed_all)
+    monkeypatch.setattr(agent.conversation_synth, "synthesize_full", lambda *a, **k: [])
+    monkeypatch.setattr(agent.data_synth, "synthesize_full_dataset", lambda *a, **k: {})
+    monkeypatch.setattr(agent, "_ingest_training_documents_batched", ingest)
+    monkeypatch.setattr(agent, "_save_artifacts", save_artifacts)
+    monkeypatch.setattr("src.services.catalog_service.catalog_training_docs", lambda: [])
+
+
+def test_stop_before_the_run_starts_reads_no_data(tmp_path, monkeypatch):
+    """Phase 1 check (M15): a stop already requested never feeds a schema."""
+    agent = _bare_agent(tmp_path, monkeypatch)
+    calls: list[str] = []
+    _stub_phases(agent, monkeypatch, calls)
+    stop = threading.Event()
+    stop.set()
+
+    run = agent.run_full_training(False, True, stop_event=stop)
+
+    assert run.status == "stopped"
+    assert calls == []
+
+
+def test_stop_during_ingest_writes_no_artifacts(tmp_path, monkeypatch):
+    """Phase 5 check (M6): a stop that lands during the last ingest batch."""
+    agent = _bare_agent(tmp_path, monkeypatch)
+    calls: list[str] = []
+    stop = threading.Event()
+    _stub_phases(agent, monkeypatch, calls, after_ingest=stop.set)
+
+    run = agent.run_full_training(False, True, stop_event=stop)
+
+    assert run.status == "stopped"
+    assert calls[-1] == "ingest" and "save" not in calls, calls
+    assert sorted(os.listdir(agent.OUTPUT_DIR)) == []
+
+
+def test_ingest_stops_between_batches(tmp_path, monkeypatch):
+    """Ingest batch check (M7): no batch is sent after the stop request."""
+    from src.ai.training import training_agent
+    from src.ai.training.training_runtime import TrainingStopped
+
+    agent = _bare_agent(tmp_path, monkeypatch)
+    stop = threading.Event()
+    batches: list[int] = []
+
+    class _Store:
+        def add_documents(self, texts, metadatas, ids):
+            batches.append(len(texts))
+            stop.set()
+
+    monkeypatch.setattr("src.ai.rag.vector_store.get_vector_store", lambda: _Store())
+    docs = [{"id": f"d{i}", "text": "t", "metadata": {}} for i in range(training_agent.BATCH_SIZE * 3)]
+
+    with pytest.raises(TrainingStopped):
+        agent._ingest_training_documents_batched(docs, stop_event=stop)
+
+    assert batches == [training_agent.BATCH_SIZE]
+
+
+def test_conversation_synthesis_stops_between_steps_and_schemas(monkeypatch):
+    """Conversation synthesis checks (M8)."""
+    from src.ai.training.conversation_synthesis import ConversationSynthesizer
+    from src.ai.training.training_runtime import TrainingStopped
+
+    synth = ConversationSynthesizer()
+    stop = threading.Event()
+    steps: list[str] = []
+    for step in (
+        "synthesize_base_templates", "synthesize_from_industry_schemas",
+        "synthesize_from_semantic_patterns", "synthesize_agent_actions", "synthesize_from_catalog",
+    ):
+        monkeypatch.setattr(synth, step, lambda *a, _s=step, **k: steps.append(_s) or [])
+
+    def from_schema(*a, **k):
+        steps.append("schema")
+        stop.set()
+        return []
+
+    monkeypatch.setattr(synth, "synthesize_from_schema", from_schema)
+    schemas = [{"name": f"s{i}", "columns": ["a"]} for i in range(3)]
+
+    with pytest.raises(TrainingStopped):
+        synth.synthesize_full(schemas, stop_event=stop)
+    assert steps[-2:] == ["synthesize_from_catalog", "schema"], steps
+
+    stop.clear()
+    steps.clear()
+    monkeypatch.setattr(synth, "synthesize_base_templates", lambda *a, **k: stop.set() or [])
+    with pytest.raises(TrainingStopped):
+        synth.synthesize_full(schemas, stop_event=stop)
+    assert steps == [], steps
+
+
+def test_data_synthesis_stops_between_datasets(monkeypatch):
+    """Semantic data synthesis checks (M8)."""
+    from src.ai.training.data_synthesis import DataTransferDataSynthesizer
+    from src.ai.training.training_runtime import TrainingStopped
+
+    synth = DataTransferDataSynthesizer()
+    stop = threading.Event()
+    built: list[str] = []
+
+    def build(name):
+        def _build(*a, **k):
+            built.append(name)
+            stop.set()
+            return object()
+        return _build
+
+    for name in (
+        "synthesize_column_classification", "synthesize_column_mapping",
+        "synthesize_synonym_recognition", "synthesize_pii_detection",
+    ):
+        monkeypatch.setattr(synth, name, build(name))
+
+    with pytest.raises(TrainingStopped):
+        synth.synthesize_full_dataset(stop_event=stop)
+
+    assert built == ["synthesize_column_classification"]
