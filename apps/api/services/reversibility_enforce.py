@@ -37,6 +37,11 @@ _ROWS: OrderedDict[tuple[str, str, str], int] = OrderedDict()
 _MAX_TRACKED = 20_000
 
 
+#: ``services.reversibility_types.TYPE_CHECKED`` (kept in step by a test): type conditions checked per value.
+_TYPE_CODES = frozenset({"charset", "enum", "blank_pad", "text_width", "byte_length", "boolean_domain",
+                         "timestamp_range"})
+
+
 class ReversibilityViolation(ValueError):
     """A value would not round-trip on a run that must be reversible (the write stops)."""
 
@@ -84,16 +89,21 @@ def changes(rule: Mapping[str, Any], raw: Any, converted: Any, error: str | None
         return True  # a value the writer cannot convert does not land: that is a change
     if _is_null(raw):
         return not _is_null(converted)  # NULL filled in (``default:``)
-    from services.reversibility import strict_text
+    if type(raw) is str and type(converted) is str:
+        if raw != converted:  # the common case, without the generic text rendering
+            return True
+    else:
+        from services.reversibility import strict_text
 
-    text = strict_text(raw)
-    if _is_null(converted) or strict_text(converted) != text:
-        return True
-    code = str(rule.get("code") or "")
-    from services.reversibility_types import TYPE_CHECKED, check_type_values
+        if _is_null(converted) or strict_text(converted) != strict_text(raw):
+            return True
+    code = rule.get("code")
+    if code in _TYPE_CODES:
+        from services.reversibility import strict_text
+        from services.reversibility_types import check_type_values
 
-    if code in TYPE_CHECKED:
-        return check_type_values(code, [raw], str(rule.get("target_type") or ""), strict_text)["status"] != "fits"
+        return check_type_values(str(code), [raw], str(rule.get("target_type") or ""),
+                                 strict_text)["status"] != "fits"
     return False
 
 

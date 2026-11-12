@@ -391,7 +391,11 @@ def test_m3_the_check_names_the_column_and_the_rows_checked_never_the_value():
 
 
 def test_m3_a_type_condition_is_enforced_value_by_value():
+    from services import reversibility_enforce
     from services.reversibility_enforce import changes
+    from services.reversibility_types import TYPE_CHECKED
+
+    assert reversibility_enforce._TYPE_CODES == TYPE_CHECKED
 
     pad = {"code": "blank_pad", "target_type": "CHAR(5)"}
     assert changes(pad, "ab", "ab") is False and changes(pad, "ab ", "ab ") is True
