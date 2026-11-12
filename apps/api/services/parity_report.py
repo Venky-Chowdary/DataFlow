@@ -30,6 +30,7 @@ from services.parity_classifier import (
     classify_value,
     concurrent_source_update,
 )
+from services.fingerprint_rules import FINGERPRINT_VERSION, stored_fingerprint_version
 from services.parity_evidence import (
     MAX_KEYS_SAMPLE,
     Observation,
@@ -827,6 +828,18 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
             "signed_verdict": sealed_report.get("verdict"),
             "drift_since_signing": (content_sha256(report) != attested) if attested else None,
         }
+        # The pack names the rules it was signed under (absent = version 1).
+        sealed_rules = stored_fingerprint_version(signed.get("pack"))
+        if sealed_rules != FINGERPRINT_VERSION:
+            # Signed under other fingerprint rules: a different reading of the
+            # same stored cells is a rule change, not data that moved. The
+            # sealed pack still verifies as signed; drift is not asserted.
+            drift["drift_since_signing"] = None
+            drift["drift_not_comparable"] = {
+                "reason": "fingerprint_version",
+                "signed_under": sealed_rules,
+                "current": FINGERPRINT_VERSION,
+            }
     else:
         approvals, invalidated = valid_approvals(state, content_sha256(report))
     blocked_reason = None

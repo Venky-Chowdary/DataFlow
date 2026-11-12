@@ -133,7 +133,9 @@ def test_values_keep_the_scalar_masks_shape():
     out = json.loads(apply_transform(json.dumps(DOCS[0]), "mask_pii")[0])
     scalar = {v: apply_transform(v, "mask_pii")[0] for v in ("maria.garcia@example.com", "Springfield")}
     assert out["customer"]["email"] == scalar["maria.garcia@example.com"] == "m***********@*******.com"
-    assert out["address"]["city"] == scalar["Springfield"] == "Sp*******ld"
+    # A value no pattern recognises keeps its length class only — no head or
+    # tail characters (algorithm audit H7; was "Sp*******ld").
+    assert out["address"]["city"] == scalar["Springfield"] == "********"
 
 
 def test_a_json_number_is_masked_to_valid_json_not_unquoted_text():
@@ -145,17 +147,19 @@ def test_a_json_number_is_masked_to_valid_json_not_unquoted_text():
 
 def test_a_scalar_no_pattern_changes_is_still_masked():
     # Luhn-invalid 16 digits: the card pattern declines, the value was returned as is.
-    assert apply_transform("1234 5678 9012 3456", "mask_pii")[0] == "1234 5…3456"
-    assert apply_transform("1234567890123456", "mask_pii")[0] == "123456…3456"
-    # Unchanged scalar semantics.
+    # Masked to its length class: ten of its sixteen digits used to stay in
+    # clear ("123456…3456", algorithm audit H7).
+    assert apply_transform("1234 5678 9012 3456", "mask_pii")[0] == "*" * 16
+    assert apply_transform("1234567890123456", "mask_pii")[0] == "*" * 16
+    # Unchanged pattern semantics.
     assert apply_transform("a@b.co", "mask_pii")[0] == "a*@***.co"
-    assert apply_transform("Alice Johnson", "mask_pii")[0] == "Alice …nson"
+    assert apply_transform("Alice Johnson", "mask_pii")[0] == "********"
     assert apply_transform("", "mask_pii")[0] == ""
     assert apply_transform(None, "mask_pii")[0] is None
 
 
 def test_text_that_only_looks_like_json_is_masked_as_text():
-    assert apply_transform("[draft] notes about Bob", "mask_pii")[0] == "[draft… Bob"
+    assert apply_transform("[draft] notes about Bob", "mask_pii")[0] == "*" * 16
 
 
 @pytest.mark.parametrize("chain", [["mask_pii"], SIX_STEPS])

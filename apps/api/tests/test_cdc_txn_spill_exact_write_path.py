@@ -1,8 +1,9 @@
 """CDC transaction-buffer spill reread uses json_loads_exact.
 
 stdlib json.loads collapsed 1.234567890123456789 in spilled after-images
-before COMMIT applied them. IEEE-exact 1.5 stays float. Invalid lines
-stay skipped — never invent a DML event.
+before COMMIT applied them. IEEE-exact 1.5 stays float. An invalid line
+never invents a DML event: the loader returns None, and the buffer's commit
+refuses a spill holding one (audit 12) instead of skipping it.
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import pytest  # noqa: E402
+
 from services.cdc_transaction_buffer import (  # noqa: E402
+    CdcSpillCorrupt,
     TransactionBuffer,
     load_cdc_txn_spill_event,
 )
@@ -55,7 +59,7 @@ def test_load_cdc_txn_spill_invalid_is_none():
 
 def test_commit_materialize_keeps_long_fraction(tmp_path):
     path = tmp_path / "df_cdc_txn_exact.jsonl"
-    path.write_text("{not-json}\n" + _spill_line() + "\n42\n", encoding="utf-8")
+    path.write_text(_spill_line() + "\n", encoding="utf-8")
     buf = TransactionBuffer(max_events=100, spill_after=50, spill_dir=tmp_path)
     buf.begin("xid-exact")
     assert buf._open is not None
@@ -67,3 +71,16 @@ def test_commit_materialize_keeps_long_fraction(tmp_path):
     assert batch.inserts[0]["amt"] == Decimal(LONG)
     assert batch.inserts[0]["n"] == 1.5
     assert batch.inserts[0]["id"] == 1
+
+
+def test_commit_refuses_a_spill_with_an_unreadable_line(tmp_path):
+    path = tmp_path / "df_cdc_txn_exact.jsonl"
+    path.write_text("{not-json}\n" + _spill_line() + "\n42\n", encoding="utf-8")
+    buf = TransactionBuffer(max_events=100, spill_after=50, spill_dir=tmp_path)
+    buf.begin("xid-exact")
+    assert buf._open is not None
+    buf._open.spill_path = str(path)
+    buf._open.spilled_count = 3
+    with pytest.raises(CdcSpillCorrupt):
+        buf.commit(resume_token={"lsn": "0/1"})
+    assert buf._open is not None  # left open for redelivery, nothing emitted

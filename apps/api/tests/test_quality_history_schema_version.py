@@ -56,7 +56,15 @@ def test_same_schema_still_reports_a_null_rate_shift():
         prior_runs=[prior],
         current_row_count=100,
     )
-    assert any("null-rate" in item and "status" in item for item in report["anomalies"])
+    # One prior load is a finding, not a verdict (audit H6): advisory.
+    assert any("null-rate" in item and "status" in item for item in report["advisories"])
+    assert report["anomalies"] == [] and report["passed"] is True
+    blocking = build_load_history_report(
+        current_profile=current,
+        prior_runs=[prior] * 8,
+        current_row_count=100,
+    )
+    assert any("null-rate" in item and "status" in item for item in blocking["anomalies"])
 
 
 def test_run_recorded_under_old_null_definition_is_not_a_baseline():

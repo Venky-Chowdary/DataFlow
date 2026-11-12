@@ -95,8 +95,10 @@ def _raise_write_failure(result: Any, label: str) -> None:
         setattr(lost, "rows_written", written)
         setattr(lost, "dest_summary", summary)
         raise lost
+    # ``written`` is this batch's committed prefix, not the run's total: the
+    # run total is measured on the destination after the failure (audit H3).
     msg = (
-        f"partial write ({written} rows committed before failure): {err}"
+        f"partial write (the failing batch reported {written} row(s) committed): {err}"
         if written > 0
         else str(err)
     )
