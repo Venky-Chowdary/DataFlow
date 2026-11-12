@@ -22,6 +22,23 @@ contend with each other and no store is bound by MongoDB's 16 MB document
 limit. A record is at most 1 MB; a shape draft's canvas layout at most 256 KB
 (the API answers 413 above that), with at most 50 drafts per workspace.
 
+One tenant per workspace, one tenant per custom domain, one grant per
+principal and resource, and one active BYOK key per tenant are unique indexes
+on `control_plane_items` (`uniq`): a write that would break one is refused by
+the database, and the request answers 409 `concurrent_update` if it keeps
+losing. A save that changes several records (a BYOK rotation) is one
+transaction on a replica set. Lookups read only the records they need
+(indexed by tenant or workspace, record id and lookup tags such as the custom
+domain), and `GET /api/v1/workspace/tenants` is paginated (`limit`, `offset`,
+`next_offset`).
+
+**Resetting a store.** Never drop `control_plane_docs`: it records which
+node file each store was imported from. With it gone and the store empty, the
+next process to start re-imports its node's old file, including grants
+revoked and tenants deleted since. To empty a store, delete its records
+through the API, or with `deleteMany({store: "<store>"})` on
+`control_plane_items` only.
+
 ## Choosing the backend
 
 `DATAWRAP_CONTROL_STORE_BACKEND` (or `DATAFLOW_CONTROL_STORE_BACKEND`) picks

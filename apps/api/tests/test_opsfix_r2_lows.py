@@ -192,3 +192,19 @@ def test_the_renderer_reads_int_like_helm():
     from tests._helm_lite import _FUNCS
 
     assert _FUNCS["int"]("10s") == 0 and _FUNCS["int"]("10") == 10 and _FUNCS["int"](10.0) == 10
+
+
+# ---------------------------------------------------------------------------
+# Operator notes: resetting a store must not bring an old node file back
+# ---------------------------------------------------------------------------
+
+
+def test_the_operator_notes_say_never_to_drop_the_status_collection():
+    """Dropping control_plane_items and control_plane_docs re-imports a node's old file (revoked grants included)."""
+    from pathlib import Path
+
+    readme = Path(__file__).resolve().parents[3] / "deploy/enterprise/helm/dataflow/README.md"
+    text = " ".join(readme.read_text(encoding="utf-8").split())
+    assert "Never drop `control_plane_docs`" in text
+    assert "deleteMany" in text and "control_plane_items" in text
+    assert "re-import" in text
