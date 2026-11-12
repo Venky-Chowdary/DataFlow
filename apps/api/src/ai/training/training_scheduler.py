@@ -100,7 +100,7 @@ def start_admin_training(runtime: TrainingRuntime, *, include_embedding_tune: bo
                 runtime, include_embedding_tune=include_embedding_tune, force=force,
             )
             logger.info("Admin training run %s: %s", run.id, run.status)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - nobody awaits this task: log, never raise
             logger.warning("Admin training run failed: %s", exc)
 
     return runtime.start_task(_background(), name="training-admin")
