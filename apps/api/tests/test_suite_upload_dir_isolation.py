@@ -52,9 +52,14 @@ def test_a_stored_upload_is_not_seen_by_another_module(tmp_path):
             [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
              "-p", "no:randomly", str(first), str(second), "--basetemp", str(tmp_path / "bt")],
             cwd=API, capture_output=True, text=True, timeout=300,
-            env={**os.environ, "TMPDIR": str(tmp_path)},
+            # Not the parent's CI shard: the child's own split would drop modules.
+            env={k: v for k, v in {**os.environ, "TMPDIR": str(tmp_path)}.items()
+                 if k != "DATAFLOW_TEST_SHARD"},
         )
     finally:
         first.unlink(missing_ok=True)
         second.unlink(missing_ok=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-2000:]
+    # Both modules must really run: a child that ran only the store (or
+    # nothing) would pass without testing the routing.
+    assert "2 passed" in done.stdout, done.stdout[-3000:]
