@@ -147,27 +147,38 @@ def test_grounded_loop_checks_before_every_question_and_schema(
     assert (analyst.analysed, analyst.composed) == (analysed, composed)
 
 
-def test_schemas_wider_than_the_cap_are_skipped_and_reported(tmp_path, monkeypatch):
+def test_schemas_wider_than_the_cap_are_skipped_and_reported(tmp_path, monkeypatch, caplog):
+    import json
+    import logging
+
     from src.ai.training.training_agent import MAX_GROUNDED_COLUMNS
 
     assert MAX_GROUNDED_COLUMNS == 64
     stop = threading.Event()
     analyst = _CountingAnalyst(stop)
     schemas = [
-        _schema("too_wide", MAX_GROUNDED_COLUMNS + 1),
+        _schema("acme_payroll_export", MAX_GROUNDED_COLUMNS + 1),
         _schema("at_the_cap", MAX_GROUNDED_COLUMNS),
         _schema("narrow", 3, source="industry"),
         _schema("route_map", 426),
     ]
 
-    run = _run_with_analyst(tmp_path, monkeypatch, schemas, analyst, stop)
+    with caplog.at_level(logging.INFO):
+        run = _run_with_analyst(tmp_path, monkeypatch, schemas, analyst, stop)
 
     assert run.status == "completed", run.errors
     assert analyst.analysed == ["at_the_cap", "narrow"]
     assert run.metrics["grounded_schemas"] == 2
     assert run.metrics["grounded_schemas_skipped_too_wide"] == 2
-    assert run.metrics["grounded_schemas_skipped_names"] == ["too_wide", "route_map"]
     assert run.metrics["data_grounded_examples"] == 6
+    # Review L-T2: upload stems come from every workspace's uploads. The run
+    # metrics (returned by /copilot/train to any workspace admin) carry the
+    # count only; the names go to the server log.
+    metrics_text = json.dumps(run.metrics, default=str)
+    assert "acme_payroll_export" not in metrics_text and "route_map" not in metrics_text
+    assert "grounded_schemas_skipped_names" not in run.metrics
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "acme_payroll_export" in logged and "route_map" in logged, logged
 
 
 # --- the feeder never reads the repo's test fixtures ------------------------

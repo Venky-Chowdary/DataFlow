@@ -157,7 +157,13 @@ class DataTransferTrainingAgent:
             grounded_schemas, too_wide = _pick_grounded_schemas(schemas)
             run.metrics["grounded_schemas"] = len(grounded_schemas)
             run.metrics["grounded_schemas_skipped_too_wide"] = len(too_wide)
-            run.metrics["grounded_schemas_skipped_names"] = too_wide[:20]
+            if too_wide:
+                # Upload stems span every workspace: the server log names them,
+                # the run metrics (returned to the caller) count them only.
+                logging.getLogger(__name__).info(
+                    "Training: skipped %d schemas wider than %d columns: %s",
+                    len(too_wide), MAX_GROUNDED_COLUMNS, ", ".join(too_wide[:20]),
+                )
 
             data_grounded = []
             for schema in grounded_schemas:
