@@ -349,3 +349,167 @@ def test_run_recorded_by_another_replica_is_not_recorded_twice(store, runner, mo
     assert final.approval_request["id"] == "apr_peer", final.approval_request
     assert final.approval_request["occurrences"] == 1
     assert runner.notified == [], "the peer already recorded and announced this run"
+
+
+# --- A write that lands between the finalizer's read and its write ---------------
+#
+# On the shared (Mongo) store another replica can write the schedule while this
+# finalizer is between loading it and storing the run: an operator's decision,
+# a mapping edit. The run's outcome was decided on the copy that was loaded, so
+# it must be decided again on what is stored now, never merged over it.
+
+
+def _write_inside_finalize(store, monkeypatch, peer_write):
+    """Run ``peer_write()`` once, after the finalizer has loaded and decided."""
+    real_save, real_mark = store._save_all, store.mark_schedule_run
+    state = {"inside": False, "pending": True}
+
+    def mark(*args, **kwargs):
+        state["inside"] = True
+        try:
+            return real_mark(*args, **kwargs)
+        finally:
+            state["inside"] = False
+
+    def save(schedules, **kwargs):
+        if state["inside"] and state["pending"]:
+            state["pending"] = False
+            peer_write()
+        return real_save(schedules, **kwargs)
+
+    monkeypatch.setattr(store, "mark_schedule_run", mark)
+    monkeypatch.setattr(store, "_save_all", save)
+    return state
+
+
+#: A peer replica's write needs the shared (Mongo) store. In one process the
+#: store lock leaves no window (test_a_concurrent_writer_waits_for_the_finalize).
+mongo_only = pytest.mark.parametrize("store", ["mongo"], indirect=True)
+
+
+def _open_old_finding(store, schedule_id: str) -> None:
+    store.update_schedule(schedule_id, {
+        "approval_request": {"id": "apr_old", "status": "open", "code": "RUN_REFUSED",
+                             "job_id": "job-old", "occurrences": 1, "finding": "old"},
+        "last_status": "needs_approval",
+    })
+
+
+def _operator_rejects(store, schedule_id: str) -> None:
+    current = store.get_schedule(schedule_id).approval_request
+    store.update_schedule(schedule_id, {"approval_request": {
+        **current, "status": "rejected", "resolved_by": "operator@x", "resolved_at": "now",
+    }})
+
+
+@mongo_only
+def test_operator_rejection_made_while_a_success_is_recorded_survives(
+    store, runner, monkeypatch
+):
+    """I1: the success closes the finding only if it is still open when stored."""
+    sched, _run = _claimed(store, "reject", "job-ok")
+    _open_old_finding(store, sched.id)
+    runner.jobs["job-ok"] = COMPLETED
+    state = _write_inside_finalize(store, monkeypatch, lambda: _operator_rejects(store, sched.id))
+
+    runner._finalize_run(sched.id, "job-ok", 0, _now())
+
+    assert not state["pending"], "the peer write never landed inside the finalize"
+    final = store.get_schedule(sched.id)
+    assert final.approval_request["status"] == "rejected", final.approval_request
+    assert final.approval_request["resolved_by"] == "operator@x"
+    assert final.running is False and final.running_job_id == ""
+    assert final.run_count == 1 and final.last_status == "completed"
+    assert runner.notified == [("job-ok", "completed")]
+
+
+@mongo_only
+def test_mapping_edit_made_while_a_refusal_is_recorded_binds_the_finding_to_the_new_plan(
+    store, runner, monkeypatch, caplog
+):
+    """I3: a finding bound to the plan it replaced could never be approved."""
+    from services.standing_authorization import binding_from_schedule
+
+    sched, _run = _claimed(store, "remap", "job-refused")
+    runner.jobs["job-refused"] = REFUSED_BY_GATE
+    edited = [{"source": "id", "target": "id"}, {"source": "amt", "target": "amt"}]
+    state = _write_inside_finalize(
+        store, monkeypatch, lambda: store.update_schedule(sched.id, {"mappings": edited})
+    )
+
+    with caplog.at_level("INFO"):
+        runner._finalize_run(sched.id, "job-refused", 0, _now())
+
+    assert not state["pending"], "the peer write never landed inside the finalize"
+    final = store.get_schedule(sched.id)
+    assert final.mappings == edited
+    request = final.approval_request
+    assert request["status"] == "open" and request["job_id"] == "job-refused"
+    assert request["binding"]["binding_hash"] == binding_from_schedule(final)["binding_hash"]
+    assert final.last_status == "needs_approval" and final.run_count == 1
+    assert runner.notified == [("job-refused", "failed")]
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert events.count("approval.requested") == 1
+
+
+@mongo_only
+def test_a_schedule_that_keeps_moving_is_never_written_from_a_stale_decision(
+    store, runner, monkeypatch
+):
+    """Past the reload bound the finalize fails loudly; the claim stays for the beat."""
+    sched, _run = _claimed(store, "churn", "job-ok")
+    _open_old_finding(store, sched.id)
+    runner.jobs["job-ok"] = COMPLETED
+    coll = store._mongo_backend().get_database()["pipeline_schedules"]
+    real_save = store._save_all
+    peer_writes: list[int] = []
+
+    def save(schedules, **kwargs):
+        # A peer writes before every attempt this finalizer makes.
+        peer_writes.append(1)
+        coll.update_one({"_id": sched.id},
+                        {"$set": {"enabled_note": f"peer {len(peer_writes)}"},
+                         "$inc": {"version": 1}})
+        return real_save(schedules, **kwargs)
+
+    monkeypatch.setattr(store, "_save_all", save)
+
+    with pytest.raises(store.ScheduleWriteContended):
+        runner._finalize_run(sched.id, "job-ok", 0, _now())
+
+    held = store.get_schedule(sched.id)
+    assert held.running is True and held.running_job_id == "job-ok", "no blind write"
+    assert held.approval_request["status"] == "open" and held.run_count == 0
+    assert held.enabled_note == f"peer {len(peer_writes)}"
+    assert runner.notified == []
+    # The contention ends: the beat that notices the finished job records it once.
+    monkeypatch.setattr(store, "_save_all", real_save)
+    runner._finalize_run(sched.id, "job-ok", 0, _now())
+    final = store.get_schedule(sched.id)
+    assert final.run_count == 1 and final.running is False
+    assert final.approval_request["resolved_by"] == "system:run-succeeded"
+    assert runner.notified == [("job-ok", "completed")]
+
+
+def test_a_concurrent_writer_waits_for_the_finalize(store, runner, monkeypatch):
+    """In one process the store lock leaves no window (the file store's whole CAS)."""
+    sched, _run = _claimed(store, "waits", "job-ok")
+    _open_old_finding(store, sched.id)
+    runner.jobs["job-ok"] = COMPLETED
+    seen: dict[str, bool] = {}
+    writer = threading.Thread(target=_operator_rejects, args=(store, sched.id))
+
+    def peer_write():
+        writer.start()
+        writer.join(0.5)
+        seen["finished_inside"] = not writer.is_alive()
+
+    _write_inside_finalize(store, monkeypatch, peer_write)
+
+    runner._finalize_run(sched.id, "job-ok", 0, _now())
+    writer.join(20)
+
+    assert seen == {"finished_inside": False}, "a writer ran inside the finalize's window"
+    final = store.get_schedule(sched.id)
+    assert final.run_count == 1 and final.last_status == "completed"
+    assert final.approval_request["resolved_by"] == "operator@x"

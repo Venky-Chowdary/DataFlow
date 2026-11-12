@@ -813,11 +813,40 @@ class _WriteSuperseded(Exception):
     """Another writer already stored what this conditional write was for."""
 
 
+class _OutcomeStale(Exception):
+    """The schedule moved after the run's outcome was decided on it: decide again."""
+
+
+class ScheduleWriteContended(RuntimeError):
+    """A run's write kept losing to other writers; nothing was written blind.
+
+    The run's claim is still held, so the beat that notices the finished job
+    finalizes it again.
+    """
+
+
+@dataclass(frozen=True)
+class _RunWrite:
+    """The conditions a finalizer puts on the write of its own schedule.
+
+    ``superseded(stored)`` holds when another replica's finalizer already
+    recorded this run: nothing is written (:class:`_WriteSuperseded`).
+    ``reload_if_moved`` is set when the write carries a run outcome decided on
+    the loaded copy: if the stored revision moved, the outcome is decided again
+    on it (:class:`_OutcomeStale`) instead of being merged over a newer write —
+    an operator's rejection, or the plan the finding has to bind to.
+    """
+
+    schedule_id: str
+    superseded: Callable[[PipelineSchedule], bool] | None = None
+    reload_if_moved: bool = False
+
+
 def _save_one_mongo(
     coll: Any,
     sched: PipelineSchedule,
     *,
-    superseded: Callable[[PipelineSchedule], bool] | None = None,
+    guard: _RunWrite | None = None,
 ) -> None:
     """Write only what this caller changed, conditional on the stored revision.
 
@@ -827,10 +856,10 @@ def _save_one_mongo(
     document is now gone was deleted concurrently: it is dropped, never
     re-inserted.
 
-    ``superseded`` adds a condition on what is stored: when the document moved
-    since this copy was read and ``superseded(stored)`` holds, nothing is
-    written and :class:`_WriteSuperseded` is raised (a run another replica's
-    finalizer has recorded is not recorded a second time).
+    ``guard`` (:class:`_RunWrite`) adds conditions on what is stored once the
+    document moved since this copy was read: a run another replica's finalizer
+    has recorded is not recorded a second time, and a run outcome decided on
+    the old revision is decided again rather than three-way merged.
     """
     from pymongo.errors import DuplicateKeyError
 
@@ -872,12 +901,12 @@ def _save_one_mongo(
                 return
             continue
         current_version = _as_version(existing.get("version"))
-        if (
-            superseded is not None
-            and current_version != loaded_version
-            and superseded(_schedule_from_doc(existing))
-        ):
-            raise _WriteSuperseded(sched.id)
+        if guard is not None and current_version != loaded_version:
+            stored = _schedule_from_doc(existing)
+            if guard.superseded is not None and guard.superseded(stored):
+                raise _WriteSuperseded(sched.id)
+            if guard.reload_if_moved:
+                raise _OutcomeStale(sched.id)
         if current_version == loaded_version:
             # The stored doc *is* this copy's base: the diff against it is
             # exactly this caller's change.
@@ -931,7 +960,7 @@ def _save_mongo(
     schedules: list[PipelineSchedule],
     *,
     removed_ids: Sequence[str] = (),
-    superseded: Callable[[PipelineSchedule], bool] | None = None,
+    guard: _RunWrite | None = None,
 ) -> None:
     """Persist schedules as individual docs with three-way-merged version CAS.
 
@@ -950,7 +979,9 @@ def _save_mongo(
     seen = set()
     for s in schedules:
         seen.add(s.id)
-        _save_one_mongo(coll, s, superseded=superseded)
+        _save_one_mongo(
+            coll, s, guard=guard if guard is not None and guard.schedule_id == s.id else None
+        )
     # Only the ids a caller explicitly deleted are removed. Sweeping every doc
     # absent from this snapshot deleted schedules another instance created
     # between our load and this save.
@@ -977,14 +1008,16 @@ def _save_all(
     schedules: list[PipelineSchedule],
     *,
     removed_ids: Sequence[str] = (),
-    superseded: Callable[[PipelineSchedule], bool] | None = None,
+    guard: _RunWrite | None = None,
 ) -> None:
     svc = _mongo_backend()
     if svc:
-        _save_mongo(svc, schedules, removed_ids=removed_ids, superseded=superseded)
+        _save_mongo(svc, schedules, removed_ids=removed_ids, guard=guard)
         return
-    # One process owns the file: the callers' re-read under the store lock is
-    # the whole compare-and-swap, so ``superseded`` has nothing left to check.
+    # One process owns the file: every writer loads and saves under the store
+    # lock (``_CLAIM_LOCK``), so nothing lands between a caller's read and its
+    # write and ``guard`` has nothing left to check. Two processes sharing one
+    # file are not supported: they can both record one run and both notify.
     # Atomic replace: ``write_text`` truncated the file first, and a reader in
     # that window parsed nothing and saw no schedules at all (get_schedule ->
     # None; a run's result recorded against "no such schedule" was dropped).
@@ -2878,6 +2911,13 @@ def mark_schedule_run(
         )
 
 
+#: Times a finalizer loads its schedule again because the stored revision moved
+#: after the run's outcome was decided on it. Each pass is one read and one
+#: conditional write; losing every one means the schedule is being rewritten
+#: continuously, and the finalize fails rather than write a stale decision.
+_RUN_WRITE_ATTEMPTS = 4
+
+
 def _mark_schedule_run_locked(
     schedule_id: str,
     job_id: str,
@@ -2886,6 +2926,34 @@ def _mark_schedule_run_locked(
     run_entry: dict[str, Any] | None,
     cursor_value: str | None,
     outcome: RunOutcome | None = None,
+) -> PipelineSchedule | None:
+    for _attempt in range(_RUN_WRITE_ATTEMPTS):
+        try:
+            return _mark_schedule_run_once(
+                schedule_id, job_id, status=status, run_entry=run_entry,
+                cursor_value=cursor_value, outcome=outcome,
+            )
+        except _OutcomeStale:
+            # Another replica wrote this schedule after the outcome was decided
+            # on the loaded copy (an operator's decision, a mapping edit). The
+            # outcome is decided again on what is stored now; merged over the
+            # newer write, it undid a rejection or bound a finding to the plan
+            # that was just replaced.
+            continue
+    raise ScheduleWriteContended(
+        f"Schedule {schedule_id}: the run of job {job_id or '(none)'} was not recorded; "
+        f"the schedule changed under it {_RUN_WRITE_ATTEMPTS} times in a row."
+    )
+
+
+def _mark_schedule_run_once(
+    schedule_id: str,
+    job_id: str,
+    *,
+    status: str | None,
+    run_entry: dict[str, Any] | None,
+    cursor_value: str | None,
+    outcome: RunOutcome | None,
 ) -> PipelineSchedule | None:
     from services.schedule_run_lifecycle import merge_run_entry, trim_history
 
@@ -2900,6 +2968,17 @@ def _mark_schedule_run_locked(
         recorded_before = bool(job_id) and s.last_job_id == job_id and not s.running
         if recorded_before and outcome is None:
             return s
+        guard = _RunWrite(schedule_id)
+        if outcome is not None:
+            guard = _RunWrite(
+                schedule_id,
+                superseded=(
+                    partial(_run_already_recorded, job_id=job_id, status=status)
+                    if job_id
+                    else None
+                ),
+                reload_if_moved=True,
+            )
         if job_id and outcome is not None and _run_already_recorded(s, job_id, status):
             return s
         if recorded_before and outcome is not None:
@@ -2907,11 +2986,15 @@ def _mark_schedule_run_locked(
             # now reported failed): the record stays, the outcome is decided
             # again.
             extra = outcome.fields_for(s)
-            outcome.recorded = True
             if not extra:
+                outcome.recorded = True
                 return s
             schedules[i] = PipelineSchedule.from_dict({**s.to_dict(), **extra})
-            _save_all(schedules)
+            try:
+                _save_all(schedules, guard=guard)
+            except _WriteSuperseded:
+                return next((x for x in _load_all() if x.id == schedule_id), None)
+            outcome.recorded = True
             return schedules[i]
         missed = count_missed_windows(
             cron=s.cron, interval=s.interval, tz=s.timezone, next_run_at=s.next_run_at
@@ -2958,16 +3041,13 @@ def _mark_schedule_run_locked(
         if cursor_value is not None:
             payload["cursor_value"] = str(cursor_value)
         updated = PipelineSchedule.from_dict(payload)
-        superseded = None
         if outcome is not None:
             extra = outcome.fields_for(updated)
             if extra:
                 updated = PipelineSchedule.from_dict({**payload, **extra})
-            if job_id:
-                superseded = partial(_run_already_recorded, job_id=job_id, status=status)
         schedules[i] = updated
         try:
-            _save_all(schedules, superseded=superseded)
+            _save_all(schedules, guard=guard)
         except _WriteSuperseded:
             # Another replica's finalizer recorded this run between this read
             # and this write: its record and its outcome stand.
