@@ -1044,14 +1044,16 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "list_schedules",
         "description": (
             "List pipeline schedules (Pipelines page) with cadence, next run, last status, "
-            "and bound contract / breaker when one is set. ``total``, ``enabled_count`` and "
-            "``paused_count`` count every pipeline; ``schedules`` is one page (``truncated``)."
+            "and bound contract / breaker when one is set. ``total``, ``enabled_count``, "
+            "``paused_count``, ``parked_count``, ``failed_last_count`` and ``next_due`` (the "
+            "soonest run) are over every pipeline; ``schedules`` is one page (``truncated``). "
+            "``state`` filters the page: parked = open approval, failed = last run failed."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "default": 20},
-                "state": {"type": "string", "enum": ["", "enabled", "paused"]},
+                "state": {"type": "string", "enum": ["", "enabled", "paused", "parked", "failed"]},
             },
             "required": [],
         },

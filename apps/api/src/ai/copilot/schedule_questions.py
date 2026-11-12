@@ -24,17 +24,57 @@ _NEXT_RUN_RE = re.compile(
     r"|\bwhen\s+is\b[^?]*\b(?:due|scheduled)\b",
     re.I,
 )
-STATES = ("", "enabled", "paused")
+_PARKED_RE = re.compile(
+    r"\b(?:parked|awaiting\s+approval|on\s+approval|needs?\s+approval|pending\s+approval|held\s+for\s+approval)\b",
+    re.I,
+)
+_FAILED_RE = re.compile(r"\b(?:fail\w*|errored|erroring|broken)\b", re.I)
+STATES = ("", "enabled", "paused", "parked", "failed")
+#: The operator's own pipelines, not pipelines in general.
+_OWN_PIPELINES_RE = re.compile(r"\b(?:my|our|how\s+many|which|list|show)\b", re.I)
+_CONCEPT_RE = re.compile(r"\b(?:what\s+happens|if|when|whenever|explain|how\s+(?:do|does|can))\b", re.I)
 
 
 def schedule_state_asked(message: str) -> str:
-    """``enabled`` / ``paused`` when a pipelines question names that state."""
+    """``enabled`` / ``paused`` / ``parked`` / ``failed`` (last run) when named."""
     text = message or ""
     if not _SUBJECT_RE.search(text):
         return ""
     if _PAUSED_RE.search(text):
         return "paused"
+    if _PARKED_RE.search(text):
+        return "parked"
+    if _FAILED_RE.search(text):
+        return "failed"
     return "enabled" if _ENABLED_RE.search(text) else ""
+
+
+def _failed_last(row: dict[str, Any]) -> bool:
+    return str(row.get("last_status") or "").lower() in {"failed", "error"}
+
+
+def _parked(row: dict[str, Any]) -> bool:
+    return bool(row.get("needs_approval") or row.get("approval_finding"))
+
+
+def _next_due(rows: list[dict[str, Any]]) -> dict[str, str] | None:
+    """The soonest future run over every pipeline, not the newest pipeline's."""
+    now = datetime.now(timezone.utc)
+    best: tuple[datetime, dict[str, Any]] | None = None
+    for row in rows:
+        raw = str(row.get("next_run_at") or "").strip()
+        if not raw or not row.get("enabled") or _parked(row):
+            continue
+        try:
+            when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+        if when > now and (best is None or when < best[0]):
+            best = (when, row)
+    if best is None:
+        return None
+    return {"name": str(best[1].get("name") or ""), "at": str(best[1].get("next_run_at") or "")}
 
 
 def schedules_output(
@@ -43,16 +83,28 @@ def schedules_output(
     """``(output, "")`` for a pipelines read, or ``(None, refusal)``."""
     wanted = str(state or "").strip().lower()
     if wanted not in STATES:
-        return None, "state must be 'enabled' or 'paused'."
+        return None, "state must be one of: enabled, paused, parked, failed."
     cap = max(1, min(int(limit or 20), 100))
+    # Health is computed over every pipeline the caller may see, never over
+    # the page: failing or parked pipelines beyond row 20 still count (H3).
+    summaries = [summarize(s) for s in visible]
     enabled = [s for s in visible if getattr(s, "enabled", False)]
+    failed_last = [r for r in summaries if _failed_last(r)]
+    parked = [r for r in summaries if _parked(r)]
     matching = (
-        enabled if wanted == "enabled"
-        else [s for s in visible if not getattr(s, "enabled", False)] if wanted == "paused"
-        else visible
+        [r for r in summaries if r.get("enabled")] if wanted == "enabled"
+        else [r for r in summaries if not r.get("enabled")] if wanted == "paused"
+        else parked if wanted == "parked"
+        else failed_last if wanted == "failed"
+        else summaries
     )
-    rows = [summarize(s) for s in matching[:cap]]
+    rows = matching[:cap]
     return {
+        "failed_last_count": len(failed_last),
+        "failed_last_names": [str(r.get("name") or "") for r in failed_last[:4]],
+        "parked_count": len(parked),
+        "parked_names": [str(r.get("name") or "") for r in parked[:4]],
+        "next_due": _next_due(summaries),
         "schedules": rows,
         "count": len(rows),
         # Every pipeline the caller may see — the Pipelines page population.
@@ -96,8 +148,38 @@ def schedule_list_lead(output: dict[str, Any]) -> str:
     paused = int(output.get("paused_count") or 0)
     lead = f"You have **{total}** pipeline schedule(s): **{enabled}** enabled, **{paused}** paused."
     state = str(output.get("state") or "")
+    if state in ("failed", "parked"):
+        matched = int(output.get("filtered_total") or 0)
+        phrase = "failed their last run" if state == "failed" else "are parked on approval"
+        if not matched:
+            return f"None of your **{total}** pipeline(s) {phrase}."
+        return f"**{matched}** of your **{total}** pipeline(s) {phrase}:"
     if state:
         lead += f" The {state} ones:" if rows else f" None are {state}."
+    return lead
+
+
+def health_lead(output: dict[str, Any]) -> str:
+    """Pipeline health over every pipeline: parked, failed last run, next due."""
+    total = int(output.get("total") or 0)
+    enabled = int(output.get("enabled_count") or 0)
+    lead = f"You have **{total}** pipeline(s), **{enabled}** enabled."
+    parked = int(output.get("parked_count") or 0)
+    failed = int(output.get("failed_last_count") or 0)
+    if parked:
+        names = ", ".join(f"**{n}**" for n in output.get("parked_names") or [] if n)
+        lead += (
+            f" **{parked}** parked on approval" + (f" ({names})" if names else "")
+            + " — they will not tick until someone approves."
+        )
+    if failed:
+        names = ", ".join(f"**{n}**" for n in output.get("failed_last_names") or [] if n)
+        lead += f" **{failed}** failed their last run" + (f" ({names})" if names else "") + "."
+    if not enabled:
+        lead += " None are enabled, so they will not fire."
+    nxt = output.get("next_due") or {}
+    if nxt.get("at"):
+        lead += f" Next due: **{nxt.get('name')}** at {nxt.get('at')}."
     return lead
 
 
@@ -124,50 +206,8 @@ def render_schedule_list(
         return UNREAD_PIPELINES.format(reason=output.get("degraded_reason") or "the store did not answer")
     rows = output.get("schedules", [])
     if rows:
-        enabled = [
-            s for s in rows
-            if isinstance(s, dict) and s.get("enabled")
-        ]
-        failed_last = [
-            s for s in rows
-            if isinstance(s, dict)
-            and str(s.get("last_status") or "").lower() in {"failed", "error"}
-        ]
-        parked = [
-            s for s in rows
-            if isinstance(s, dict)
-            and (s.get("needs_approval") or s.get("approval_finding"))
-        ]
         if health:
-            lead = f"You have **{int(output.get('total') or len(rows))}** pipeline(s)."
-            if parked:
-                names = ", ".join(
-                    f"**{s.get('name')}**" for s in parked[:4] if s.get("name")
-                )
-                lead += (
-                    f" **{len(parked)}** are parked on approval"
-                    + (f" ({names})" if names else "")
-                    + " — they will not tick until someone approves."
-                )
-            elif failed_last:
-                lead += (
-                    f" **{len(failed_last)}** last run failed. "
-                    "Ask me for that pipeline and I'll open the finding."
-                )
-            elif not enabled:
-                lead += " None are enabled, so they will not fire."
-            else:
-                nxt = next(
-                    (
-                        str(s.get("next_run_at") or "").strip()
-                        for s in enabled
-                        if s.get("next_run_at")
-                    ),
-                    "",
-                )
-                lead += f" **{int(output.get('enabled_count') or len(enabled))}** enabled."
-                if nxt:
-                    lead += f" Next due: {nxt}."
+            lead = health_lead(output)
             lines = [lead]
         else:
             lines = [schedule_list_lead(output)]
@@ -240,6 +280,13 @@ def ground_schedule_plan(message: str, planned: list[tuple[str, dict]]) -> list[
         if _SUBJECT_RE.search(message or ""):
             return [("list_schedules", {"state": "enabled"})]
     state = schedule_state_asked(message)
+    if state in ("parked", "failed") and _OWN_PIPELINES_RE.search(message or "") and not _CONCEPT_RE.search(
+        message or ""
+    ) and names <= {
+        "explain_product", "search_knowledge", "list_schedules", "list_jobs", "brief_workspace",
+    }:
+        # "how many pipelines failed their last run" is a pipelines read, not the job ledger.
+        return [("list_schedules", {"state": state})]
     if state and _WHICH_RE.search(message or "") and "list_schedules" in names:
         return [(n, {**a, "state": state}) if n == "list_schedules" else (n, a) for n, a in planned]
     return planned
