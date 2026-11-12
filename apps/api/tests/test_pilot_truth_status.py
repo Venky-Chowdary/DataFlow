@@ -86,3 +86,17 @@ def test_negation_and_unknown_states_are_refused_by_name(ledger, question, phras
     assert "can't filter" in response.answer.lower(), response.answer
     assert not pt.grounded(response)
     assert pt.bold_ints(response.answer) == [], response.answer
+
+
+@pytest.mark.parametrize("question,status", [
+    ("which jobs completed with errors", "completed_with_errors"),
+    ("which jobs are partial", "partial"),
+    ("show me my failed jobs", "failed"),
+])
+def test_rows_listed_under_a_status_header_have_that_status(ledger, question, status):
+    """The exact-status page is the unfiltered ledger: only matching rows may be listed."""
+    response = pt.ask(ledger, question)
+    listed = pt.listed_job_ids(response.answer)
+    wanted = {jid for jid, doc in pt.mongo()._jobs.items() if doc.get("status") == status}
+    assert listed, response.answer
+    assert set(listed) <= {str(j) for j in wanted}, f"rows of another status listed under {status!r}"
