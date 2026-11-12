@@ -318,29 +318,29 @@ def secrets_encryption_ready() -> bool:
 
 
 def tenant_id_from_workspace(workspace_id: str | None) -> str | None:
-    """Resolve the tenant that owns ``workspace_id``, if one exists."""
+    """Resolve the tenant that owns ``workspace_id``, if one exists.
+
+    A tenant store that cannot be read raises (``ControlPlaneUnavailable``):
+    "no tenant" would choose the platform key for a BYOK tenant's secret
+    (ops review Medium 6). The API answers 503.
+    """
     ws = (workspace_id or "").strip()
     if not ws:
         return None
-    try:
-        from services.tenant_store import get_tenant_for_workspace
+    from services.tenant_store import get_tenant_for_workspace
 
-        tenant = get_tenant_for_workspace(ws)
-    except Exception:
-        return None
+    tenant = get_tenant_for_workspace(ws)
     return str(tenant.id) if tenant and getattr(tenant, "id", None) else None
 
 
 def _byok_active_for_tenant(tenant_id: str | None) -> bool:
+    """Whether the tenant's own key wraps its secrets. A key store error propagates (fail closed)."""
     tid = (tenant_id or "").strip()
     if not tid:
         return False
-    try:
-        from services.byok_key_manager import get_active_key_for_tenant
+    from services.byok_key_manager import get_active_key_for_tenant
 
-        return get_active_key_for_tenant(tid) is not None
-    except Exception:
-        return False
+    return get_active_key_for_tenant(tid) is not None
 
 
 def encrypt_secret(plain: str, *, tenant_id: str | None = None, label: str = "") -> str:

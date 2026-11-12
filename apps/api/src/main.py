@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
+from services.control_plane_store import ControlPlaneUnavailable
 from services.cors_policy import TenantAwareCORSMiddleware
 from services import health_service
 from services.safe_errors import public_error
@@ -960,6 +961,24 @@ async def connector_store_error_handler(request: Request, exc: ConnectorStoreErr
     return JSONResponse(
         status_code=503,
         content={"error": "connector_store_unavailable", "detail": str(exc)},
+    )
+
+
+@app.exception_handler(ControlPlaneUnavailable)
+async def control_plane_unavailable_handler(request: Request, exc: ControlPlaneUnavailable):
+    """A control-plane store (tenants, BYOK keys, ACLs, ...) cannot be read: fail closed, retryable.
+
+    Callers never fall back to a permissive default or a node's local file
+    (ops review High 1, Medium 6); the user gets a clean 503 instead of a 500.
+    """
+    logger.warning("Control-plane store unavailable on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "control_plane_unavailable",
+            "detail": "Workspace settings are temporarily unavailable. Retry shortly.",
+        },
+        headers={"Retry-After": "5"},
     )
 
 
