@@ -17,12 +17,14 @@ from services.commit_safe_window import (
     EVIDENCE_KEY,
     HORIZON_KEY,
     STRATEGY_PG,
+    STRATEGY_SERIAL,
     CommitSafeWindow,
     capture_pg_bound,
     commit_safety_strategy,
     pg_relation_kind,
     plan_commit_safe_window,
     probe_pg_late_rows,
+    sqlite_cursor_database_assigned,
     unplanned_window,
 )
 from services.keyset_pagination import header_column_index
@@ -194,9 +196,25 @@ def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str
     cfg.replay_key, cfg.replay_key_complete = route_replay_key(cfg, catalog)
     src_cfg = cfg.src_cfg
     schema = str(src_cfg.get("schema") or "public")
-    is_pg = commit_safety_strategy(cfg.src_read_type) == STRATEGY_PG
+    strategy = commit_safety_strategy(cfg.src_read_type)
+    is_pg = strategy == STRATEGY_PG
+    from services.type_system import destination_is_file_export
+
+    if destination_is_file_export(cfg.dest_type) or str(
+        getattr(cfg.destination, "kind", "") or ""
+    ).lower() == "file_export":
+        # An exported file cannot be looked up for a re-read row, whatever key
+        # the stream declares: no window, and the run says so (review M4).
+        from services.commit_safe_routes import unwindowed_evidence
+
+        return _unguarded_window(scope, unwindowed_evidence("file-export destination")["reason"])
     return plan_commit_safe_window(
         relation_kind=pg_relation_kind(src_cfg, schema, table) if is_pg else None,
+        cursor_database_assigned=(
+            sqlite_cursor_database_assigned(src_cfg, table, cfg.cursor_source_col)
+            if strategy == STRATEGY_SERIAL
+            else None
+        ),
         source_type=cfg.src_read_type,
         sync_mode=cfg.effective_sync,
         cursor_column=cfg.cursor_source_col,
@@ -209,6 +227,19 @@ def _plan(cfg: Any, scope: Any, catalog: tuple | None, contract: Any, table: str
         probe_late=(lambda **kw: _probe_undelivered(cfg, schema, table, **kw))
         if is_pg
         else None,
+    )
+
+
+def _unguarded_window(scope: Any, reason: str) -> CommitSafeWindow:
+    from services.commit_safe_window import GUARANTEE_NONE, STRATEGY_NONE
+
+    return CommitSafeWindow(
+        strategy=STRATEGY_NONE,
+        stored_watermark=scope.watermark,
+        seed=scope.watermark,
+        guarantee=GUARANTEE_NONE,
+        reason=reason,
+        census_recommended=True,
     )
 
 

@@ -784,3 +784,217 @@ def test_text_shape_scan_runs_on_first_run_then_on_interval(isolated, tmp_path, 
         assert len(seen) == 2, "a due interval confirms it again"
     finally:
         sa.event.remove(sa.engine.Engine, "before_cursor_execute", spy)
+
+
+# --------------------------------------------------------------------------
+# M3 / M4 — every statement no stronger than what runs
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rows", [5_000_000, -1])
+def test_large_or_unanalysed_pg_table_is_stated_within_the_look_back(rows):
+    claim = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="id",
+        cursor_type="BIGINT", has_identity=True, relation_kind="r", relation_rows=rows,
+    )
+    assert claim["guarantee"] == csw.GUARANTEE_WITHIN_WINDOW, claim
+    assert "1,000,000 values" in claim["statement"] and claim["census_recommended"]
+    small = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="id",
+        cursor_type="BIGINT", has_identity=True, relation_kind="r", relation_rows=10_000,
+    )
+    assert small["guarantee"] == csw.GUARANTEE_COMMIT_SAFE, small
+    # Unknown size (preflight could not read it): the limit is named.
+    unknown = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="id",
+        cursor_type="BIGINT", has_identity=True,
+    )
+    assert "1,000,000 values" in unknown["statement"], unknown
+
+
+def test_preflight_states_the_look_back_for_an_unanalysed_pg_table(pg):
+    from services.preflight_transfer_policy import run_transfer_policy_gates
+
+    _sql(
+        f"CREATE TABLE {SCHEMA}.ev (id bigserial PRIMARY KEY, v text) "
+        "WITH (autovacuum_enabled = false)"
+    )
+    c = pg_creds()
+    contract = {"name": "ev", "cursor_field": "id", "cursor_semantics": "monotonic_sequence",
+                "sync_mode": "incremental_append", "primary_key": "id"}
+    gates = run_transfer_policy_gates(
+        sync_mode="incremental_append", validation_mode="strict", stream_contracts=[contract],
+        source_columns=["id", "v"], dest_type="postgresql", source_type="postgresql",
+        source_kind="database", source_table="ev",
+        source_config={"type": "postgresql", "host": c["host"], "port": int(c["port"]),
+                       "database": c["database"], "username": c["username"],
+                       "password": c["password"], "schema": SCHEMA},
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    safety = (g9["details"]["cursor_semantics"] or [{}])[0].get("commit_safety") or {}
+    assert safety.get("guarantee") == csw.GUARANTEE_WITHIN_WINDOW, safety
+
+
+def test_sqlite_claim_depends_on_who_assigns_the_cursor():
+    app = csw.static_commit_safety(
+        source_type="sqlite", sync_mode="incremental_append", cursor_column="seq",
+        has_identity=True, cursor_database_assigned=False,
+    )
+    assert app["guarantee"] == csw.GUARANTEE_WITHIN_WINDOW, app
+    assert "one writer's commit order" in app["statement"] and app["census_recommended"]
+    unknown = csw.static_commit_safety(
+        source_type="sqlite", sync_mode="incremental_append", cursor_column="seq",
+        has_identity=True,
+    )
+    assert unknown["guarantee"] == csw.GUARANTEE_WITHIN_WINDOW, unknown
+    db = csw.static_commit_safety(
+        source_type="sqlite", sync_mode="incremental_append", cursor_column="id",
+        has_identity=True, cursor_database_assigned=True,
+    )
+    assert db["guarantee"] == csw.GUARANTEE_COMMIT_SAFE and not db["census_recommended"]
+
+
+def _sqlite_route(fake, src, dst, cursor, **extra):
+    contract = {"name": "t", "cursor_field": cursor, "sync_mode": "incremental_append",
+                "selected": True, **extra}
+    request = TransferRequest(
+        source=EndpointConfig(kind="database", format="sqlite", database=str(src), table="t"),
+        destination=EndpointConfig(kind="database", format="sqlite", database=str(dst), table="t"),
+        sync_mode="incremental_append", stream_contracts=[contract],
+        skip_preflight=True, validation_mode="strict",
+    )
+    job_id = "csr" + uuid.uuid4().hex[:16]
+    fake.update_job_status(job_id, "pending", transfer_request={})
+    return UniversalTransferEngine().execute_tracked(request, job_id)
+
+
+def test_sqlite_application_assigned_cursor_is_not_called_commit_safe(isolated, tmp_path):
+    """Review probe J: a value the application computed before the write lock
+    lands behind the watermark when another writer commits first."""
+    import sqlite3
+
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    with sqlite3.connect(src) as conn:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, v TEXT)")
+        conn.executemany("INSERT INTO t VALUES (?, ?, ?)", [(i, i, f"v{i}") for i in range(1, 11)])
+    result = _sqlite_route(isolated, src, dst, "seq")
+    assert result.success, result.error
+    evidence = _window(result)
+    assert evidence.get("guarantee") == csw.GUARANTEE_WITHIN_WINDOW, evidence
+    assert "one writer's commit order" in str(evidence.get("reason")), evidence
+    assert evidence.get("census_recommended") is True
+
+
+def test_sqlite_autoincrement_cursor_is_commit_safe(isolated, tmp_path):
+    import sqlite3
+
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    with sqlite3.connect(src) as conn:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)")
+        conn.executemany("INSERT INTO t (v) VALUES (?)", [(f"v{i}",) for i in range(1, 6)])
+    result = _sqlite_route(isolated, src, dst, "id")
+    assert result.success, result.error
+    assert _window(result).get("guarantee") == csw.GUARANTEE_COMMIT_SAFE, _window(result)
+
+
+def _assert_not_guaranteed(result, word):
+    assert result.success, result.error
+    evidence = _window(result)
+    assert evidence.get("guarantee") == csw.GUARANTEE_NONE, evidence
+    assert evidence.get("strategy") == csw.STRATEGY_NONE, evidence
+    assert word in str(evidence.get("reason")), evidence
+    assert evidence.get("census_recommended") is True
+    recon = (result.reconciliation or {}).get("commit_safe_window") or {}
+    assert recon.get("guarantee") == csw.GUARANTEE_NONE, result.reconciliation
+
+
+def test_file_export_route_states_not_guaranteed_at_run_time(isolated, tmp_path, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setenv("DATAFLOW_EXPORTS_DIR", str(tmp_path / "exports"))
+    src = tmp_path / "s.sqlite"
+    with sqlite3.connect(src) as conn:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)")
+        conn.executemany("INSERT INTO t (v) VALUES (?)", [(f"v{i}",) for i in range(1, 6)])
+    contract = {"name": "t", "cursor_field": "id", "sync_mode": "incremental_append",
+                "selected": True, "primary_key": "id"}
+    request = TransferRequest(
+        source=EndpointConfig(kind="database", format="sqlite", database=str(src), table="t"),
+        destination=EndpointConfig(kind="file_export", format="csv"),
+        sync_mode="incremental_append", stream_contracts=[contract],
+        skip_preflight=True, validation_mode="strict",
+    )
+    job_id = "csr" + uuid.uuid4().hex[:16]
+    isolated.update_job_status(job_id, "pending", transfer_request={})
+    _assert_not_guaranteed(UniversalTransferEngine().execute_tracked(request, job_id), "export")
+
+
+def test_file_source_route_states_not_guaranteed_at_run_time(isolated, tmp_path):
+    import sqlite3
+
+    csv_path = tmp_path / "events.csv"
+    csv_path.write_text("id,seq,v\n" + "".join(f"{i},{i},v{i}\n" for i in range(1, 6)))
+    dst = tmp_path / "d.sqlite"
+    contract = {"name": "events", "cursor_field": "seq", "sync_mode": "incremental_append",
+                "selected": True, "primary_key": "id"}
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"), source_path=str(csv_path),
+        source_filename="events.csv",
+        destination=EndpointConfig(kind="database", format="sqlite", database=str(dst), table="events"),
+        sync_mode="incremental_append", stream_contracts=[contract],
+        skip_preflight=True, validation_mode="strict",
+    )
+    job_id = "csr" + uuid.uuid4().hex[:16]
+    isolated.update_job_status(job_id, "pending", transfer_request={})
+    _assert_not_guaranteed(UniversalTransferEngine().execute_tracked(request, job_id), "file")
+    with sqlite3.connect(dst) as conn:
+        assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == 5
+
+
+def test_cdc_poll_route_states_not_guaranteed_at_run_time(tmp_path, monkeypatch):
+    import sqlite3
+
+    import services.sync_cursor as sc
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+
+    monkeypatch.setattr(sc, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+    monkeypatch.setenv("DATAFLOW_CDC_MAX_IDLE_POLLS", "1")
+    monkeypatch.setenv("DATAFLOW_CDC_MAX_POLL_ROUNDS", "1")
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    with sqlite3.connect(src) as conn:
+        conn.execute("CREATE TABLE src (id INTEGER PRIMARY KEY, updated_at TEXT, v TEXT)")
+        conn.executemany(
+            "INSERT INTO src VALUES (?, ?, ?)",
+            [(i, f"2026-01-01 00:00:{i:02d}", f"v{i}") for i in range(1, 6)],
+        )
+    rows, _ddl, summary, _cols = run_cdc_database_transfer(
+        EndpointConfig(kind="database", format="sqlite", database=str(src), table="src"),
+        EndpointConfig(kind="database", format="sqlite", database=str(dst), table="dst"),
+        mappings=[{"source": c, "target": c} for c in ("id", "updated_at", "v")],
+        schema={"id": "integer", "updated_at": "string", "v": "string"},
+        stream_contracts=[{"name": "src", "sync_mode": "cdc", "primary_key": "id",
+                           "cursor_field": "updated_at",
+                           "cursor_semantics": "modification_timestamp"}],
+        job_id="csrcdc" + uuid.uuid4().hex[:8],
+    )
+    assert rows == 5
+    evidence = summary.get("commit_safe_window") or {}
+    assert evidence.get("guarantee") == csw.GUARANTEE_NONE, evidence
+    assert "poll" in str(evidence.get("reason")), evidence
+
+
+def test_unwindowed_route_evidence_names_the_route_and_skips_windowed_runs():
+    from services.commit_safe_routes import stamp_unwindowed_route
+
+    summary = {"sync_mode": "incremental_append"}
+    stamp_unwindowed_route(summary, route="SDK source")
+    assert summary["commit_safe_window"]["guarantee"] == csw.GUARANTEE_NONE
+    assert "SDK source" in summary["commit_safe_window"]["reason"]
+    windowed = {"sync_mode": "incremental_append", "commit_safe_window": {"strategy": "x"}}
+    stamp_unwindowed_route(windowed, route="batch path")
+    assert windowed["commit_safe_window"] == {"strategy": "x"}
+    full = {"sync_mode": "full_refresh_overwrite"}
+    stamp_unwindowed_route(full, route="batch path")
+    assert "commit_safe_window" not in full
+

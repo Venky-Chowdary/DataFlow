@@ -142,6 +142,14 @@ _TEMPORAL_TYPES = frozenset(
 )
 _INT_SCALE_RE = re.compile(r"^\(\s*\d+\s*(?:,\s*0+\s*)?\)")
 
+_SERIAL_APP_ASSIGNED = (
+    "within one writer's commit order: the source runs one write transaction at a "
+    "time, but this cursor can be set by the application before its row is written "
+    "(it is not an AUTOINCREMENT key), so a row written later with an earlier value "
+    "lands behind the watermark. Run the periodic key census (key_census_every) to "
+    "detect skipped rows"
+)
+
 _UNGUARDED_REASON = (
     "cannot guarantee no skipped rows: a transaction that commits after a "
     "later cursor value was read leaves its row behind the watermark"
@@ -439,6 +447,7 @@ def plan_commit_safe_window(
     capture_bound: Callable[[], dict[str, Any]] | None = None,
     probe_late: Callable[..., LateRows] | None = None,
     relation_kind: str | None = None,
+    cursor_database_assigned: bool | None = None,
 ) -> CommitSafeWindow | None:
     """Decide one run's read window. Pure: engine access is injected.
 
@@ -448,6 +457,8 @@ def plan_commit_safe_window(
     ``relation_kind`` is the PostgreSQL ``pg_class.relkind`` of the source
     (``""`` when it could not be read; None when the caller did not ask): only
     a table carries the ``xmin`` the horizon bounds.
+    ``cursor_database_assigned`` (SQLite): whether the source assigns the
+    cursor itself (an AUTOINCREMENT key); None when the caller did not ask.
     """
     from services.sync_cursor import normalize_sync_mode, requires_incremental
 
@@ -458,12 +469,22 @@ def plan_commit_safe_window(
     seconds, values = declared_overlap(contract)
 
     if strategy == STRATEGY_SERIAL:
+        if cursor_database_assigned is False:
+            return CommitSafeWindow(
+                strategy=strategy,
+                stored_watermark=stored,
+                seed=stored,
+                guarantee=GUARANTEE_WITHIN_WINDOW,
+                reason=_SERIAL_APP_ASSIGNED,
+                census_recommended=True,
+            )
         return CommitSafeWindow(
             strategy=strategy,
             stored_watermark=stored,
             seed=stored,
             guarantee=GUARANTEE_COMMIT_SAFE,
-            reason="the source runs one write transaction at a time: commit order is write order",
+            reason="the source runs one write transaction at a time and assigns this cursor "
+            "itself: commit order is write order",
         )
 
     fallback = ""
@@ -557,13 +578,18 @@ def not_a_table_note(relation_kind: str) -> str:
     )
 
 
+def unguarded_reason(why: str) -> str:
+    """The "not guaranteed" sentence every unguarded route states, with its cause."""
+    return f"{_UNGUARDED_REASON} — {why}. Run the periodic key census to detect them."
+
+
 def _unguarded(stored: str | None, why: str, *, probe_error: str = "") -> CommitSafeWindow:
     return CommitSafeWindow(
         strategy=STRATEGY_NONE,
         stored_watermark=stored,
         seed=stored,
         guarantee=GUARANTEE_NONE,
-        reason=f"{_UNGUARDED_REASON} — {why}. Run the periodic key census to detect them.",
+        reason=unguarded_reason(why),
         census_recommended=True,
         probe_error=probe_error,
     )
@@ -872,6 +898,13 @@ def pg_relation_kind(src_cfg: Mapping[str, Any], schema: str, table: str) -> str
 
     Never raises: an unreadable kind is planned as "not a table" and said.
     """
+    return pg_relation_facts(src_cfg, schema, table)[0]
+
+
+def pg_relation_facts(
+    src_cfg: Mapping[str, Any], schema: str, table: str
+) -> tuple[str, int | None]:
+    """``(relkind, reltuples)`` of the source relation; ``("", None)`` when unreadable."""
     from connectors.sql_identifiers import split_qualified_table
 
     qualified, bare = split_qualified_table(table, (schema or "").strip() or None)
@@ -884,7 +917,7 @@ def pg_relation_kind(src_cfg: Mapping[str, Any], schema: str, table: str) -> str
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT c.relkind::text FROM pg_catalog.pg_class c "
+                "SELECT c.relkind::text, c.reltuples::bigint FROM pg_catalog.pg_class c "
                 "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE n.nspname = %s AND c.relname = %s",
                 (qualified or "public", bare),
@@ -892,13 +925,48 @@ def pg_relation_kind(src_cfg: Mapping[str, Any], schema: str, table: str) -> str
             row = cur.fetchone()
     except Exception as exc:  # noqa: BLE001
         logger.warning("commit-safe window: relation kind unreadable: %s", exc)
-        return ""
+        return "", None
     finally:
         try:
             conn.close()
         except Exception:  # noqa: BLE001
             logger.debug("commit-safe window: close skipped", exc_info=True)
-    return str(row[0]) if row and row[0] else ""
+    if not row or not row[0]:
+        return "", None
+    return str(row[0]), (int(row[1]) if row[1] is not None else None)
+
+
+def sqlite_cursor_database_assigned(src_cfg: Mapping[str, Any], table: str, column: str) -> bool:
+    """True when SQLite assigns ``column`` itself: an ``INTEGER PRIMARY KEY AUTOINCREMENT``.
+
+    Any other column — a plain rowid alias included, which takes an explicit
+    value as readily — can be set by the application before its row is
+    written. Unreadable is answered False (the weaker claim).
+    """
+    import re as _re
+
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
+
+    _schema, bare = split_qualified_table(table, None)
+    try:
+        with _engine(dict(src_cfg)).connect() as conn:
+            row = conn.execute(
+                sa.text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :t"),
+                {"t": bare},
+            ).first()
+    except Exception as exc:  # noqa: BLE001 — unreadable: the weaker claim
+        logger.info("commit-safe window: SQLite cursor definition unreadable: %s", exc)
+        return False
+    ddl = str(row[0] or "") if row else ""
+    name = _re.escape(column)
+    pattern = (
+        rf"(?:^|[,(]\s*)[\"`\[]?{name}[\"`\]]?\s+INTEGER\s+PRIMARY\s+KEY"
+        rf"(?:\s+(?:ASC|DESC))?\s+AUTOINCREMENT\b"
+    )
+    return bool(_re.search(pattern, ddl, flags=_re.IGNORECASE))
 
 
 def probe_pg_late_rows(
@@ -1058,6 +1126,8 @@ def static_commit_safety(
     has_identity: bool,
     contract: Mapping[str, Any] | None = None,
     relation_kind: str | None = None,
+    relation_rows: int | None = None,
+    cursor_database_assigned: bool | None = None,
 ) -> dict[str, Any]:
     """What a route may claim about late commits, judged without reading rows.
 
@@ -1065,6 +1135,10 @@ def static_commit_safety(
     same decision with the engine's bound filled in (:func:`plan_commit_safe_window`).
     ``relation_kind``: the PostgreSQL source's ``pg_class.relkind`` when
     preflight read it (``""`` = unreadable); only a table gets the horizon.
+    ``relation_rows``: its row estimate (``-1`` = never analysed, None =
+    unknown); beyond the probe's unbounded size the claim is the look-back.
+    ``cursor_database_assigned`` (SQLite): only a cursor the source assigns
+    itself is commit-safe there; unknown is judged as application-assigned.
     """
     from services.sync_cursor import normalize_sync_mode, requires_incremental
 
@@ -1084,14 +1158,41 @@ def static_commit_safety(
         "cannot be re-read without duplicating rows already delivered. Give the "
         f"stream a key. {census}"
     )
-    if strategy == STRATEGY_SERIAL:
+    lookback = (
+        f"{PG_LOOKBACK_VALUES:,} values or {PG_LOOKBACK_SECONDS // 3600} hours behind the "
+        "watermark"
+    )
+    floored = bool(cursor_distance_unit(cursor_type)) if _type_base(cursor_type) else True
+    if strategy == STRATEGY_SERIAL and cursor_database_assigned is True:
         guarantee = GUARANTEE_COMMIT_SAFE
-        statement = "The source commits one write transaction at a time: nothing commits late."
+        statement = (
+            "The source commits one write transaction at a time and assigns this cursor "
+            "itself (AUTOINCREMENT): nothing commits behind the watermark."
+        )
+    elif strategy == STRATEGY_SERIAL:
+        guarantee = GUARANTEE_WITHIN_WINDOW
+        statement = "Late commits are covered " + _SERIAL_APP_ASSIGNED + "."
+    elif strategy == STRATEGY_PG and has_identity and floored and relation_rows is not None and (
+        relation_rows < 0 or relation_rows > PG_UNBOUNDED_PROBE_ROWS
+    ):
+        guarantee = GUARANTEE_WITHIN_WINDOW
+        statement = (
+            f"Late commits are covered within a look-back of {lookback}: the table is "
+            + ("not yet analysed, so its size is unknown" if relation_rows < 0 else "large")
+            + ", so each run's late-commit probe is limited to that range, and a row "
+            f"committed further behind is found only by the key census. {census}"
+        )
     elif strategy == STRATEGY_PG and has_identity:
         guarantee = GUARANTEE_COMMIT_SAFE
         statement = (
             "Late commits are covered: each run records the PostgreSQL snapshot horizon "
-            "and the next run re-reads rows committed behind the watermark since then."
+            "and the next run re-reads rows committed behind the watermark since then"
+            + (
+                f" (on a table above {PG_UNBOUNDED_PROBE_ROWS:,} rows, or one not yet "
+                f"analysed, the probe looks back {lookback})."
+                if relation_rows is None and floored
+                else "."
+            )
         )
     elif strategy == STRATEGY_PG:
         guarantee = GUARANTEE_NONE

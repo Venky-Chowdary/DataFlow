@@ -8971,6 +8971,12 @@ def run_reconciliation(
     once per call — no early-return path inside the impl may skip them.
     """
     started = time.monotonic()
+    # Review M4: an incremental run on a path that applies no commit-safe
+    # window (batch, file source, file export, SDK) states "not guaranteed" in
+    # its own evidence, preflight or not.
+    from services.commit_safe_routes import stamp_reconciled_route
+
+    stamp_reconciled_route(dest_summary, source_endpoint=source_endpoint, endpoint=endpoint)
     try:
         recon = _run_reconciliation_with_rules(
             endpoint=endpoint,
