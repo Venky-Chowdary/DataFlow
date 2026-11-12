@@ -91,7 +91,7 @@ connection strings below always resolve.
 - name: DATAFLOW_CONTROL_STORE_BACKEND
   value: {{ .Values.controlPlane.storeBackend | quote }}
 - name: DATAFLOW_POD_LOCAL_STORES_ACK
-  value: {{ .Values.controlPlane.podLocalStoresAck | quote }}
+  value: {{ include "dataflow.podLocalStoresAck" . | quote }}
 - name: DATAFLOW_CDC_LEASE_BACKEND
   value: "redis"
 - name: DATAFLOW_REDIS_URL
@@ -189,3 +189,23 @@ readinessProbe:
   periodSeconds: 10
   timeoutSeconds: 5
 {{- end }}
+
+{{/*
+DATAFLOW_POD_LOCAL_STORES_ACK. transfer_plans and pilot_results have no
+shared backend: one copy for the deployment (a data volume every pod shares,
+or a single API replica) is acknowledged here; several API replicas on
+per-pod volumes need the operator's explicit controlPlane.podLocalStoresAck.
+*/}}
+{{- define "dataflow.podLocalStoresAck" -}}
+{{- if and .Values.persistence.data.sharedAcrossPods (not .Values.persistence.data.existingClaim) -}}
+{{- fail "persistence.data.sharedAcrossPods needs persistence.data.existingClaim: a ReadWriteMany claim every pod mounts" -}}
+{{- else if .Values.persistence.data.sharedAcrossPods -}}
+transfer_plans,pilot_results
+{{- else if and (not (gt (int .Values.api.replicas) 1)) (not (and .Values.horizontalPodAutoscaler.enabled (gt (int .Values.horizontalPodAutoscaler.api.maxReplicas) 1))) -}}
+transfer_plans,pilot_results
+{{- else if .Values.controlPlane.podLocalStoresAck -}}
+{{ .Values.controlPlane.podLocalStoresAck }}
+{{- else -}}
+{{- fail "Several API replicas on per-pod data volumes: transfer_plans and pilot_results would be one file per pod, and a plan saved on one replica is not found on the next. Set persistence.data.existingClaim to a ReadWriteMany claim with persistence.data.sharedAcrossPods=true, or accept per-pod behaviour with controlPlane.podLocalStoresAck=transfer_plans,pilot_results." -}}
+{{- end -}}
+{{- end -}}

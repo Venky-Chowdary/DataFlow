@@ -22,6 +22,19 @@ contend with each other and no store is bound by MongoDB's 16 MB document
 limit. A record is at most 1 MB; a shape draft's canvas layout at most 256 KB
 (the API answers 413 above that), with at most 50 drafts per workspace.
 
+### Stores that are still files
+
+`transfer_plans` and `pilot_results` have no shared backend yet; they are files
+on the data volume. With several API replicas on per-pod volumes (the emptyDir
+default, or the HPA) a plan saved on one replica is "not found" on the next.
+The chart therefore refuses to render several API replicas on per-pod volumes
+until you choose: mount one ReadWriteMany claim on every pod
+(`persistence.data.existingClaim` with `persistence.data.sharedAcrossPods: true`),
+or accept per-pod behaviour with
+`controlPlane.podLocalStoresAck: "transfer_plans,pilot_results"`. One API
+replica with the HPA off needs neither. Docker Compose mounts one volume in
+every service and acknowledges this itself.
+
 ## Upgrading from a build that kept these stores in files
 
 On the first start of this build, the first process to reach an empty shared

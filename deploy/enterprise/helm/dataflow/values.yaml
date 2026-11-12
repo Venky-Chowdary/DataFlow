@@ -262,12 +262,19 @@ metrics:
   apiKeySecretKey: METRICS_SCRAPE_API_KEY
 
 # Control-plane stores (tenant settings, BYOK keys, resource ACLs, ...) live in
-# the metadata database so every replica agrees. Two stores have no shared
-# backend in this build and stay one file per pod; naming them here is the
-# explicit acknowledgement the API requires to start with several replicas.
+# the metadata database so every replica agrees. Two stores, transfer_plans
+# and pilot_results, have no shared backend in this build and are files on the
+# data volume. With several API replicas on per-pod volumes (the emptyDir
+# default) a plan saved on one pod is "not found" on the next, so the chart
+# refuses to render that unless you choose one of:
+#   - persistence.data.existingClaim (ReadWriteMany) and
+#     persistence.data.sharedAcrossPods: true: one copy for every pod;
+#   - podLocalStoresAck: "transfer_plans,pilot_results": you accept per-pod
+#     plans and pilot results (multi-step plan flows can break across pods).
+# One API replica with the HPA off needs neither.
 controlPlane:
   storeBackend: mongo
-  podLocalStoresAck: "transfer_plans,pilot_results"
+  podLocalStoresAck: ""
 
 # The root filesystem is read-only. These are the writable paths the app uses.
 # data: connectors' local state, uploads, vector store, spill files. An
@@ -275,6 +282,9 @@ controlPlane:
 persistence:
   data:
     existingClaim: ""
+    # true only when existingClaim is ReadWriteMany and every pod mounts the
+    # same volume (see controlPlane above).
+    sharedAcrossPods: false
     sizeLimit: 10Gi
   tmp:
     sizeLimit: 2Gi

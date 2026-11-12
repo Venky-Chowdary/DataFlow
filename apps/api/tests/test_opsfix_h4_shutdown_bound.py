@@ -186,8 +186,9 @@ def test_chart_keeps_the_graceful_shutdown_inside_the_grace_period():
     from tests._helm_lite import ChartFail, render_chart
 
     chart = REPO / "deploy/enterprise/helm/dataflow"
+    choice = {"controlPlane": {"podLocalStoresAck": "transfer_plans,pilot_results"}}  # see Medium 5
     api = next(
-        o for o in render_chart(chart)
+        o for o in render_chart(chart, overrides=choice)
         if o.get("kind") == "Deployment" and o["metadata"]["labels"]["app.kubernetes.io/component"] == "api"
     )
     pod = api["spec"]["template"]["spec"]
@@ -200,4 +201,4 @@ def test_chart_keeps_the_graceful_shutdown_inside_the_grace_period():
     assert "DATAFLOW_WORKER_DRAIN_SECONDS" not in env
     assert pod["terminationGracePeriodSeconds"] >= pre_stop + graceful + 25 + 5
     with pytest.raises(ChartFail, match="gracefulShutdownSeconds"):
-        render_chart(chart, overrides={"api": {"gracefulShutdownSeconds": 40}})
+        render_chart(chart, overrides={**choice, "api": {"gracefulShutdownSeconds": 40}})

@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 import yaml
 
-from tests._helm_lite import ChartFail, render_chart
+from tests._helm_lite import ChartFail, _deep_merge, render_chart
 
 REPO = Path(__file__).resolve().parents[3]
 # DATAFLOW_TEST_CHART_DIR renders another checkout's chart (used to show these
@@ -40,8 +40,13 @@ def _production_overrides() -> dict[str, Any]:
     return yaml.safe_load((CHART / "values-production.yaml").read_text(encoding="utf-8")) or {}
 
 
+#: The chart refuses several API replicas on per-pod volumes until the operator
+#: chooses (ops review Medium 5); these renders make the explicit choice.
+OPERATOR_CHOICE: dict[str, Any] = {"controlPlane": {"podLocalStoresAck": "transfer_plans,pilot_results"}}
+
+
 def _lite(overrides: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    return render_chart(CHART, overrides=overrides)
+    return render_chart(CHART, overrides=_deep_merge(OPERATOR_CHOICE, overrides or {}))
 
 
 @pytest.fixture(params=["defaults", "production", "monitoring"])
@@ -317,7 +322,10 @@ def test_helm_template_output_passes_the_same_invariants(values):
     helm = shutil.which("helm")
     if not helm:
         pytest.skip("helm is not installed on this runner; the built-in renderer covered the invariants")
-    command = [helm, "template", "dataflow", str(CHART), "--set", "serviceMonitor.enabled=true"]
+    command = [
+        helm, "template", "dataflow", str(CHART), "--set", "serviceMonitor.enabled=true",
+        "--set", r"controlPlane.podLocalStoresAck=transfer_plans\,pilot_results",
+    ]
     if values == "production":
         command += ["-f", str(CHART / "values-production.yaml")]
     result = subprocess.run(command, capture_output=True, text=True, timeout=120)

@@ -16,7 +16,8 @@ CHART = Path(__file__).resolve().parents[3] / "deploy/enterprise/helm/dataflow"
 
 
 def test_chart_puts_exports_on_the_writable_data_volume():
-    for overrides in (None, {"serviceMonitor": {"enabled": True}}):
+    choice = {"controlPlane": {"podLocalStoresAck": "transfer_plans,pilot_results"}}  # see Medium 5
+    for overrides in (choice, {**choice, "serviceMonitor": {"enabled": True}}):
         for obj in render_chart(CHART, overrides=overrides):
             if obj.get("kind") != "Deployment":
                 continue
