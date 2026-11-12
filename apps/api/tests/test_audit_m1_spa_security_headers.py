@@ -35,7 +35,7 @@ if str(_TESTS) not in sys.path:
 REPO = Path(__file__).resolve().parents[3]
 TEMPLATE = REPO / "deploy" / "nginx.conf.template"
 COMPOSE_CONF = REPO / "deploy" / "nginx.conf"
-INDEX_HTML = REPO / "apps" / "web" / "index.html"
+WEB = REPO / "apps" / "web"
 START_SCRIPT = REPO / "deploy" / "start-nginx.sh"
 WEB_SRC = REPO / "apps" / "web" / "src"
 
@@ -57,6 +57,20 @@ def _csp(conf: Path) -> dict[str, list[str]]:
         assert name not in policy, f"{conf.name}: directive {name} repeated"
         policy[name] = sources
     return policy
+
+
+def _served_shell(web: Path = WEB) -> tuple[Path, str]:
+    """The ``index.html`` nginx serves, and which one it is.
+
+    The images copy ``apps/web/dist`` (Vite's build, which rewrites
+    ``index.html``) into nginx, so the hashes must match the *built* shell.
+    When a build exists here it is the one checked (``"built"``); otherwise the
+    source file is (``"source"``) -- today's build keeps the inline scripts
+    byte for byte, and the build-time check is what catches a change to that
+    (security review).
+    """
+    built = web / "dist" / "index.html"
+    return (built, "built") if built.is_file() else (web / "index.html", "source")
 
 
 def _sha256_source(script_body: str) -> str:
@@ -103,10 +117,13 @@ def test_policy_allows_scripts_by_origin_or_hash_only(conf):
 def test_every_inline_script_of_the_shell_is_allowed_by_hash(conf):
     """Editing an inline script changes its hash: this fails until the policy follows."""
     script_src = _csp(conf)["script-src"]
-    inline = _inline_scripts(INDEX_HTML.read_text(encoding="utf-8"))
-    assert inline, "index.html no longer has the inline theme script: drop its hash from the CSP"
+    shell, which = _served_shell()
+    inline = _inline_scripts(shell.read_text(encoding="utf-8"))
+    assert inline, f"the {which} index.html no longer has the inline theme script: drop its hash from the CSP"
     for body in inline:
-        assert _sha256_source(body) in script_src, f"inline script not allowed by {conf.name}:\n{body[:200]}"
+        assert _sha256_source(body) in script_src, (
+            f"inline script of the {which} index.html not allowed by {conf.name}:\n{body[:200]}"
+        )
     assert _sha256_source(_injected_script()) in script_src, "start-nginx.sh's API-base script is not allowed"
     hashes = [s for s in script_src if s.startswith("'sha256-")]
     assert len(hashes) == len(inline) + 1, "a hash in the policy matches no script the shell contains"
@@ -174,7 +191,7 @@ def spa_behind_nginx(tmp_path):
     dead_api = harness._free_port()
     proc, port = harness._run_nginx(tmp_path, TEMPLATE, f"http://127.0.0.1:{dead_api}/api/v1")
     html = tmp_path / "html"
-    shell = INDEX_HTML.read_text(encoding="utf-8").replace(
+    shell = _served_shell()[0].read_text(encoding="utf-8").replace(
         "</head>", f"<script>{_injected_script()}</script></head>"
     )
     (html / "index.html").write_text(shell, encoding="utf-8")
@@ -208,3 +225,15 @@ def test_real_nginx_serves_the_shell_and_assets_with_the_policy(spa_behind_nginx
     status, headers, body = _get(spa_behind_nginx, "/api/v1/status")
     assert status == 502 and body.startswith("{")
     assert headers.get("Content-Security-Policy") is None
+
+
+def test_hashes_are_checked_against_the_built_shell_when_there_is_one(tmp_path):
+    """Security review (low): the hashes were computed from source ``index.html``
+    only, while nginx serves Vite's built copy."""
+    (tmp_path / "index.html").write_text("<script>source()</script>", encoding="utf-8")
+    assert _served_shell(tmp_path) == (tmp_path / "index.html", "source")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.html").write_text("<script>built()</script>", encoding="utf-8")
+    shell, which = _served_shell(tmp_path)
+    assert (shell, which) == (tmp_path / "dist" / "index.html", "built")
+    assert _inline_scripts(shell.read_text(encoding="utf-8")) == ["built()"]
