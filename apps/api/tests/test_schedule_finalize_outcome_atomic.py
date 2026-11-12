@@ -561,3 +561,94 @@ def test_recording_a_run_on_a_schedule_deleted_meanwhile_reports_no_schedule(
     if outcome is not None:
         assert decided == [sched.id] and outcome.recorded is False
     assert store.get_schedule(sched.id) is None
+
+
+# --- A late finalizer after the next run has claimed --------------------------
+#
+# The job's own terminal write and the beat both finalize a job. If the slow one
+# arrives after the next run claimed the schedule, it may only re-decide this
+# job's outcome: the claim, the cadence and the newer run belong to that run.
+
+_NEWER_RUN_FIELDS = ("running", "running_job_id", "running_instance", "running_started_at",
+                     "next_run_at", "run_count", "last_run_at", "last_job_id",
+                     "retry_at", "retry_attempt", "missed_window_count")
+
+
+def _next_run_claimed(store, runner, name: str, first: dict, *, approve: bool):
+    """jE1 finished with ``first`` and was recorded; jE2 now holds the claim."""
+    from services import schedule_run_lifecycle as life
+
+    runner.jobs["jE1"] = first
+    sched, _run = _claimed(store, name, "jE1")
+    runner._finalize_run(sched.id, "jE1", 0, _now())
+    if approve:
+        current = store.get_schedule(sched.id).approval_request
+        store.update_schedule(sched.id, {"approval_request": {**current, "status": "approved"},
+                                         "last_status": "failed"})
+    run_id = life.begin_run(sched.id, trigger=life.TRIGGER_CADENCE)
+    assert store.mark_schedule_running(sched.id, "beat-b", "jE2") is not None
+    life.mark_running(sched.id, run_id, "jE2")
+    runner.notified.clear()
+    return store.get_schedule(sched.id)
+
+
+def _newer_run(sched) -> dict:
+    return {
+        **{name: getattr(sched, name) for name in _NEWER_RUN_FIELDS},
+        "history": [(r.get("job_id"), r.get("status")) for r in sched.run_history],
+    }
+
+
+def test_late_finalizer_with_a_changed_verdict_leaves_the_next_runs_claim(store, runner):
+    """Scenario F: jE1 recorded refused, then reported completed while jE2 runs."""
+    before = _next_run_claimed(store, runner, "late-ok", REFUSED_BY_GATE, approve=True)
+    assert before.running and before.running_job_id == "jE2" and before.run_count == 1
+
+    runner.jobs["jE1"] = COMPLETED
+    runner._finalize_run(before.id, "jE1", 0, _now())
+
+    after = store.get_schedule(before.id)
+    assert _newer_run(after) == _newer_run(before)
+    assert after.approval_request == before.approval_request
+
+
+def test_late_refusal_after_the_next_run_claimed_parks_without_touching_its_claim(
+    store, runner
+):
+    """jE1 recorded completed, then reported refused while jE2 runs."""
+    before = _next_run_claimed(store, runner, "late-refused", COMPLETED, approve=False)
+
+    runner.jobs["jE1"] = REFUSED_BY_GATE
+    runner._finalize_run(before.id, "jE1", 0, _now())
+
+    after = store.get_schedule(before.id)
+    assert _newer_run(after) == _newer_run(before)
+    # The changed verdict is still decided: jE1's refusal parks on one finding.
+    assert after.approval_request["status"] == "open"
+    assert after.approval_request["job_id"] == "jE1"
+    assert after.last_status == "needs_approval"
+
+
+def test_a_late_outcome_is_stored_without_the_fields_of_the_next_run(store, runner):
+    """Store level: a back-off or retry reset decided for jE1 is not jE2's to lose."""
+    before = _next_run_claimed(store, runner, "late-fields", COMPLETED, approve=False)
+    finding = {"id": "apr_late", "status": "open", "code": "RUN_REFUSED", "job_id": "jE1",
+               "occurrences": 1}
+    outcome = store.RunOutcome(lambda after: {
+        "approval_request": finding,
+        "last_status": "needs_approval",
+        "next_run_at": "2099-01-01T00:00:00+00:00",
+        "retry_at": None,
+        "retry_attempt": 0,
+        "running": False,
+        "running_job_id": "",
+        "run_count": 99,
+    })
+
+    store.mark_schedule_run(before.id, "jE1", status="failed",
+                            run_entry={"job_id": "jE1", "status": "failed"}, outcome=outcome)
+
+    after = store.get_schedule(before.id)
+    assert _newer_run(after) == _newer_run(before)
+    assert after.approval_request == finding and after.last_status == "needs_approval"
+    assert outcome.recorded is True

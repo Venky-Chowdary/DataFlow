@@ -2886,6 +2886,7 @@ def _run_already_recorded(s: PipelineSchedule, job_id: str, status: str | None) 
     finalize it, and both can pass the unlocked "already recorded" check before
     either writes. The second one finds the first one's record here — also when
     a later run has taken the claim since, which the second write would release.
+    With a changed verdict, :func:`_late_outcome_fields` limits what it stores.
     """
     from services.job_status import is_completed
     from services.schedule_run_lifecycle import run_finished
@@ -2894,6 +2895,18 @@ def _run_already_recorded(s: PipelineSchedule, job_id: str, status: str | None) 
     if run_finished(s, job_id, success=ok):
         return True
     return s.last_job_id == job_id and not s.running and ok == is_completed(s.last_status)
+
+
+def _late_outcome_fields(s: PipelineSchedule, extra: dict[str, Any]) -> dict[str, Any]:
+    """What a late finalizer may store once a later run has claimed the schedule.
+
+    This job's finding, and — while the later run is in flight — the status of
+    the last recorded run, which is still this job's. The claim, the cadence
+    (``next_run_at``, a back-off), the retry state, the run count and the
+    history belong to the later run.
+    """
+    allowed = ("approval_request", "last_status") if s.running else ("approval_request",)
+    return {k: v for k, v in extra.items() if k in allowed}
 
 
 def mark_schedule_run(
@@ -2967,7 +2980,7 @@ def _mark_schedule_run_once(
     cursor_value: str | None,
     outcome: RunOutcome | None,
 ) -> PipelineSchedule | None:
-    from services.schedule_run_lifecycle import merge_run_entry, trim_history
+    from services.schedule_run_lifecycle import merge_run_entry, run_finished, trim_history
 
     schedules = _load_all()
     now = _now()
@@ -2978,7 +2991,16 @@ def _mark_schedule_run_once(
         # arrive. Recording the same job twice advanced run_count and skipped
         # a cron slot.
         recorded_before = bool(job_id) and s.last_job_id == job_id and not s.running
-        if recorded_before and outcome is None:
+        # This job's run is finished on the schedule and a later run has claimed
+        # it since (or finished too). Only this job's outcome may still be
+        # decided; recording the run again released the later run's claim.
+        later_run = (
+            bool(job_id)
+            and not recorded_before
+            and not (s.running and str(s.running_job_id or "") == job_id)
+            and run_finished(s, job_id)
+        )
+        if (recorded_before or later_run) and outcome is None:
             return s
         guard = _RunWrite(schedule_id)
         if outcome is not None:
@@ -2993,11 +3015,13 @@ def _mark_schedule_run_once(
             )
         if job_id and outcome is not None and _run_already_recorded(s, job_id, status):
             return s
-        if recorded_before and outcome is not None:
+        if (recorded_before or later_run) and outcome is not None:
             # The job's verdict changed after its run was recorded (a success
             # now reported failed): the record stays, the outcome is decided
             # again.
             extra = outcome.fields_for(s)
+            if later_run:
+                extra = _late_outcome_fields(s, extra)
             if not extra:
                 outcome.recorded = True
                 return s
