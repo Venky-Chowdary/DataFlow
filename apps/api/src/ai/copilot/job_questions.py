@@ -261,14 +261,31 @@ def resolve_job_followup(message: str, history: list[dict] | None) -> str:
     a window, a status or a qualifier is rewritten — anything else is left to
     the normal reading, which refuses what it cannot apply.
     """
+    return _resolve_followup(message, history, depth=4)
+
+
+def _effective_question(history: list[dict] | None, depth: int) -> str:
+    """The last user turn as a full question (itself resolved if it was elliptical)."""
+    turns = list(history or [])
+    for i in range(len(turns) - 1, -1, -1):
+        if str(turns[i].get("role") or "") != "user":
+            continue
+        text = str(turns[i].get("content") or "")
+        if depth > 0:
+            resolved = _resolve_followup(text, turns[:i], depth=depth - 1)
+            if resolved:
+                return resolved
+        return text
+    return ""
+
+
+def _resolve_followup(message: str, history: list[dict] | None, *, depth: int) -> str:
     text = (message or "").strip()
     if not text or not _ELLIPTICAL_RE.search(text) or _JOBS_SUBJECT_RE.search(text):
         return ""
-    previous = ""
-    for turn in reversed(history or []):
-        if str(turn.get("role") or "") == "user":
-            previous = str(turn.get("content") or "")
-            break
+    # "and yesterday?" then "and completed?": the previous turn may itself
+    # have been a follow-up, so it is read as the question it stood for.
+    previous = _effective_question(history, depth)
     prior = parse_job_ask(previous)
     if prior is None or prior.unapplied or prior.last or prior.metric:
         return ""

@@ -87,3 +87,15 @@ def test_summarize_that_says_it_restates_the_earlier_answer(chat):
     response = chat("summarize that")
     assert "restat" in response.answer.lower() and "not re-read" in response.answer.lower(), response.answer
     assert not pt.grounded(response)
+
+
+def test_a_follow_up_to_a_follow_up_keeps_the_conversation(chat):
+    chat("how many jobs failed today")
+    chat("and yesterday?")
+    response = chat("and completed?")
+    truth = _count("completed", TODAY - timedelta(days=1), TODAY)
+    assert truth == 0
+    assert response.answer.startswith("None of") and "completed" in response.answer, response.answer
+    assert "yesterday" in response.answer
+    cdc = chat("how many of those were CDC?")
+    assert "cdc" in cdc.answer.lower() and "can't filter" in cdc.answer.lower(), cdc.answer
