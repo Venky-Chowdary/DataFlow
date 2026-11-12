@@ -64,6 +64,22 @@ _UNGUARDED_FILE_IO = (None, "", "pyiceberg.io.pyarrow.PyArrowFileIO")
 _REMOTE_CATALOGS = frozenset({"RestCatalog", "GlueCatalog", "HiveCatalog"})
 
 
+def remote_catalog(class_name: str, properties: Any) -> bool:
+    """Every file location in this catalog is the tenant's to name.
+
+    REST / Glue / Hive always. A ``SqlCatalog`` too unless its database is a
+    SQLite file on this host: on a PostgreSQL / MySQL / SQL Server the tenant
+    runs, the ``iceberg_tables.metadata_location`` rows are the tenant's, and
+    the Iceberg jail is one folder for every workspace (follow-up review 3, H2).
+    """
+    if class_name in _REMOTE_CATALOGS:
+        return True
+    if class_name != "SqlCatalog":
+        return False
+    scheme = str((properties or {}).get("uri") or "").strip().split("://", 1)[0].strip().lower()
+    return not (scheme == "sqlite" or scheme.startswith("sqlite+"))
+
+
 def check_catalog_properties(catalog_type: str, properties: dict[str, Any]) -> None:
     """Raise ``ValueError`` when the catalog would sign with the platform's AWS chain."""
     refusal = iceberg_credentials_refusal(catalog_type, properties)
@@ -170,8 +186,8 @@ def guarded_catalog(base: type) -> type:
             # A table's storage hosts, when the catalog did not already carry them.
             check_storage_hosts({**self._df_own, **self.properties}, properties or {}, TABLE_CONFIG)
             merged = file_io_properties({**self.properties, **(properties or {})})  # what pyiceberg hands it
-            if base.__name__ in _REMOTE_CATALOGS:
-                # The tenant's catalog names every file: none on this host (follow-up review 2).
+            if remote_catalog(base.__name__, {**self.properties, **self._df_own}):
+                # The tenant's catalog names every file: none on this host (follow-up review 2, 3).
                 merged[LOCAL_FILES] = REFUSE
             return super()._load_file_io(merged, location)
 
