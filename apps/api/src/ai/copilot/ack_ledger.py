@@ -27,10 +27,15 @@ from .sealed_state import owner_stamp, readable_by_caller, seal, unseal
 _log = logging.getLogger(__name__)
 
 _DEFAULT_TTL_SEC = 15 * 60  # 15 minutes
-_SECRET_KEYS = frozenset({
-    "password", "passwd", "pwd", "api_key", "token", "private_key",
-    "connection_string", "service_account", "secret",
-})
+def _secret_keys() -> frozenset[str]:
+    # The connector store's own list is the authority (secret_access_key,
+    # client_secret, refresh_token, ...): one list, not two that drift.
+    from services.connector_store import _CONNECTOR_SECRET_KEYS
+
+    return frozenset(_CONNECTOR_SECRET_KEYS) | {"passwd", "pwd", "secret"}
+
+
+_SECRET_KEYS = _secret_keys()
 _OBJECT_STORE_TYPES = frozenset({
     "s3", "amazon_s3", "aws_s3", "minio", "s3_compatible",
     "gcs", "google_cloud_storage", "adls", "azure_blob_storage",

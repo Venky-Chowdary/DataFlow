@@ -36,17 +36,18 @@ def _class_statuses(status: str) -> tuple[str, ...]:
 
 
 def _count(status_counts: dict, statuses: tuple[str, ...]) -> int:
+    # Exact, as the Jobs page counts: a stored "FAILED" is not the failed status.
     wanted = set(statuses)
     return sum(
         int(n or 0)
         for raw, n in (status_counts or {}).items()
-        if _CANON.get(str(raw).lower(), str(raw).lower()) in wanted or str(raw) in wanted
+        if _CANON.get(str(raw), str(raw)) in wanted
     )
 
 
 def _in_class(job: dict, statuses: tuple[str, ...]) -> bool:
     raw = str(job.get("status") or "")
-    return raw in statuses or _CANON.get(raw.lower(), raw.lower()) in statuses
+    return _CANON.get(raw, raw) in statuses
 
 
 def _bullet(job: dict) -> str:
@@ -139,7 +140,16 @@ def _success_rate(census: dict, scope: str, output: dict) -> str:
         f"a **{rate:.1f}%** success rate; {failed:,} failed."
     )
     if other > 0:
-        line += f" {other:,} other job(s) (in flight or cancelled) are not counted."
+        # Name what is left out: partial and completed-with-errors runs are
+        # neither a success nor a failure here, and are not "in flight" (review).
+        left = {
+            str(raw): int(n or 0) for raw, n in counts.items()
+            if int(n or 0) and _CANON.get(str(raw), str(raw)) not in set(_class_statuses("completed")) | FAILED_STATUSES
+        }
+        named = ", ".join(f"{n:,} {raw}" for raw, n in sorted(left.items(), key=lambda kv: -kv[1])[:6])
+        line += f" {other:,} other job(s) are not counted ({md_text(named)})." if named else (
+            f" {other:,} other job(s) are not counted."
+        )
     return _finish([line], output)
 
 

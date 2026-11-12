@@ -71,6 +71,13 @@ class PilotResultStore:
             _log.warning("pilot result store load failed: %s", exc)
             return
         self._merge_payload_locked(raw)
+        entries = raw.get("entries") if isinstance(raw, dict) else None
+        if isinstance(entries, dict) and any(
+            isinstance(doc, dict) and "rows" in doc for doc in entries.values()
+        ):
+            # A spill written before sealing holds rows in clear: rewrite it now
+            # (sealed, or without them) rather than at the next write (review).
+            self._persist()
 
     def _merge_payload_locked(self, raw: dict[str, Any]) -> None:
         """Fold a disk snapshot in. A row already in memory stays if it is newer."""

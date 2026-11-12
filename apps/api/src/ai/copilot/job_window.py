@@ -155,6 +155,23 @@ def resolve_window(
     zone: str | None = None,
 ) -> tuple[JobWindow | None, str]:
     """``(window, "")``, ``(None, "")`` when none was asked, or ``(None, refusal)``."""
+    if (window or "").strip() and (str(date_from or "").strip() or str(date_to or "").strip()):
+        # One of them would silently win over the other (review, low).
+        return None, "Pass either window or date_from/date_to, not both."
+    try:
+        return _resolve_window(window, date_from, date_to, now=now, zone=zone)
+    except OverflowError:
+        return None, "date_from and date_to must be dates between years 1 and 9999 in the workspace time zone (out of range)."
+
+
+def _resolve_window(
+    window: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    *,
+    now: datetime | None = None,
+    zone: str | None = None,
+) -> tuple[JobWindow | None, str]:
     if (window or "").strip():
         resolved = named_window(window, now=now, zone=zone)
         if resolved is None:
