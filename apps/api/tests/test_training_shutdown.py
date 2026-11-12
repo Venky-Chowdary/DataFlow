@@ -269,3 +269,116 @@ def test_ci_api_test_jobs_turn_training_off():
     assert suite_jobs
     for job in suite_jobs:
         assert str(job["env"]["DATAFLOW_TRAINING"]).lower() == "off"
+
+
+# --- each lifespan stops its own runtime (review L3) -----------------------
+
+
+class _OneSpinPerRun:
+    """Every ``run_full_training`` call is a separate spin agent."""
+
+    def __init__(self) -> None:
+        self.runs: list[_SpinAgent] = []
+
+    def run_full_training(self, include_embedding_tune=False, force=False, stop_event=None):
+        spin = _SpinAgent(SPIN_SECONDS)
+        self.runs.append(spin)
+        return spin.run_full_training(include_embedding_tune, force, stop_event)
+
+
+def _wait_for(predicate, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_nested_lifespans_each_stop_their_own_run(tmp_path, monkeypatch):
+    h.isolate(tmp_path, monkeypatch)
+    monkeypatch.delenv("DATAWRAP_TRAINING", raising=False)
+    monkeypatch.setenv("DATAFLOW_TRAINING", "on")
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+
+    import src.ai.training.training_agent as training_agent
+    import src.ai.training.training_scheduler as training_scheduler
+
+    agent = _OneSpinPerRun()
+    monkeypatch.setattr(training_agent, "get_training_agent", lambda: agent)
+    monkeypatch.setattr(training_scheduler, "asyncio", _FastStartAsyncio())
+    monkeypatch.setattr(training_scheduler, "TRAINING_INITIAL_DELAY_SECONDS", 0.1, raising=False)
+
+    from fastapi.testclient import TestClient
+
+    from src.main import app
+
+    outer = TestClient(app)
+    outer.__enter__()
+    try:
+        assert _wait_for(lambda: len(agent.runs) >= 1, 60), "the first lifespan never started a run"
+        inner = TestClient(app)
+        inner.__enter__()
+        try:
+            assert _wait_for(lambda: len(agent.runs) >= 2, 60), "the second lifespan never started a run"
+        finally:
+            inner.__exit__(None, None, None)
+    finally:
+        outer.__exit__(None, None, None)
+    try:
+        first, second = agent.runs[:2]
+        assert second.exited.wait(3.0) and second.saw_stop
+        assert first.exited.wait(3.0) and first.saw_stop, (
+            "the first lifespan's run was never stopped: its exit stopped the second runtime"
+        )
+    finally:
+        for run in agent.runs:
+            run.exited.wait(SPIN_SECONDS + 5)
+
+
+# --- an empty TRAINING value never enables training (review L4) ------------
+
+
+@pytest.mark.parametrize(
+    ("env", "production", "enabled"),
+    [
+        ({}, False, True),
+        ({}, True, False),
+        ({"DATAFLOW_TRAINING": "off", "DATAWRAP_TRAINING": ""}, False, False),
+        ({"DATAWRAP_TRAINING": ""}, False, False),
+        ({"DATAWRAP_TRAINING": "  "}, False, False),
+        ({"DATAFLOW_TRAINING": ""}, False, False),
+        ({"DATAFLOW_TRAINING": "on"}, True, True),
+        ({"DATAFLOW_TRAINING": "1"}, False, True),
+        ({"DATAWRAP_TRAINING": "on", "DATAFLOW_TRAINING": "off"}, False, True),
+        ({"DATAWRAP_TRAINING": "off", "DATAFLOW_TRAINING": "on"}, False, False),
+        ({"DATAFLOW_TRAINING": "false"}, False, False),
+    ],
+)
+def test_training_enabled_env_matrix(monkeypatch, env, production, enabled):
+    for name in ("DATAWRAP_TRAINING", "DATAFLOW_TRAINING"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    import src.ai.training.training_scheduler as training_scheduler
+
+    monkeypatch.setattr("services.platform_config.is_production", lambda: production)
+
+    assert training_scheduler.training_enabled() is enabled
+
+
+def test_empty_datawrap_training_does_not_start_training(tmp_path, monkeypatch):
+    """The review's case: conftest's DATAFLOW_TRAINING=off plus an empty DATAWRAP_TRAINING."""
+    h.isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("DATAFLOW_TRAINING", "off")
+    monkeypatch.setenv("DATAWRAP_TRAINING", "")
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+
+    from fastapi.testclient import TestClient
+
+    from src.main import app
+
+    with TestClient(app):
+        assert _wait_for(lambda: getattr(app.state, "ready", False), 60), "warm-up never finished"
+        started = [t.get_name() for t in app.state.training_runtime._tasks]
+    assert started == [], f"training started with an empty DATAWRAP_TRAINING: {started}"

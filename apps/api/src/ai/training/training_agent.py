@@ -14,13 +14,14 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from services.atomic_file import atomic_text_file, sweep_stale_temp_files
 from services.value_serializer import json_default
 
 from ..knowledge.copilot_knowledge import get_copilot_documents
 from .conversation_synthesis import ConversationSynthesizer
 from .data_synthesis import DataTransferDataSynthesizer
 from .fine_tuning import DataTransferFineTuningPipeline
-from .training_runtime import TrainingStopped, atomic_text_file, raise_if_stopped
+from .training_runtime import TrainingStopped, raise_if_stopped
 from .universal_data_feeder import UniversalDataFeeder
 
 CHECKPOINT_FILE = "training_checkpoint.json"
@@ -65,6 +66,9 @@ class DataTransferTrainingAgent:
         self._runs: list[TrainingRun] = []
         self._last_run: TrainingRun | None = None
         os.makedirs(self.OUTPUT_DIR, exist_ok=True)
+        # A run killed at process exit can leave an atomic write's temp file.
+        for directory in (self.OUTPUT_DIR, self.fine_tune.output_dir):
+            sweep_stale_temp_files(directory)
 
     def should_skip_training(self, min_docs: int = 400, max_age_hours: int = 6) -> bool:
         """Skip retrain if recently completed and vector store is populated."""

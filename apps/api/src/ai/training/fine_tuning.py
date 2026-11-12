@@ -11,9 +11,9 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from services.atomic_file import atomic_text_file
 from services.value_serializer import json_default
 from .data_synthesis import DataTransferDataSynthesizer
-from .training_runtime import atomic_text_file
 
 
 @dataclass

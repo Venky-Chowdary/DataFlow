@@ -19,6 +19,21 @@ TRAINING_INITIAL_DELAY_SECONDS = 60  # first periodic run, after the API is up
 BACKGROUND_TRAINING_DELAY_SECONDS = 120  # one-off warm-up run (src.main lifespan)
 
 
+def training_enabled() -> bool:
+    """Whether the lifespan starts background training.
+
+    Unset: on outside production, off in production. Set: only
+    ``1/true/yes/on`` enable it; an empty value (``DATAWRAP_TRAINING=``, which
+    shadows ``DATAFLOW_TRAINING``) or an unrecognised one leaves it off.
+    """
+    from services.brand_env import getenv_brand, getenv_brand_bool
+    from services.platform_config import is_production
+
+    if getenv_brand("TRAINING") is None:
+        return not is_production()
+    return getenv_brand_bool("TRAINING", False)
+
+
 async def run_training_loop(
     interval_seconds: int = TRAINING_INTERVAL_SECONDS,
     runtime: TrainingRuntime | None = None,

@@ -16,13 +16,10 @@ long loops and returns ``status="stopped"`` without writing partial output.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
-import os
-import tempfile
 import threading
 import time
-from typing import IO, Any, Callable, Coroutine, Iterator
+from typing import Any, Callable, Coroutine
 
 logger = logging.getLogger("datatransfer.training_agent")
 
@@ -39,24 +36,6 @@ def raise_if_stopped(stop_event: threading.Event | None) -> None:
     """Checkpoint for a training run: unwind if shutdown asked it to stop."""
     if stop_event is not None and stop_event.is_set():
         raise TrainingStopped("training stop requested")
-
-
-@contextlib.contextmanager
-def atomic_text_file(path: str) -> Iterator[IO[str]]:
-    """Write ``path`` via a sibling temp file + rename: readers (and the next
-    run) see the previous complete file or the new complete file, never half."""
-    directory = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            yield handle
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
 
 
 class TrainingRuntime:

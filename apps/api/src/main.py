@@ -8,7 +8,6 @@ import asyncio
 import logging
 import os
 import threading
-from services.brand_env import getenv_brand
 import time
 from contextlib import asynccontextmanager, nullcontext
 
@@ -210,14 +209,16 @@ async def lifespan(app: FastAPI):
     except Exception as de:
         print(f"[!] Driver bootstrap warning: {de}")
 
-    training_enabled = getenv_brand("TRAINING", "off" if is_production() else "on").lower() not in (
-        "off", "0", "false",
-    )
     from .ai.training.training_runtime import TrainingRuntime
+    from .ai.training.training_scheduler import training_enabled as _training_enabled
 
+    training_enabled = _training_enabled()
     # Always one runtime: admin routes (/training-agent/run, /copilot/train)
     # run on it even with background training off, and shutdown stops them.
-    app.state.training_runtime = TrainingRuntime()
+    # Kept local too: a second lifespan of this app replaces app.state's, and
+    # each lifespan must stop its own.
+    training = TrainingRuntime()
+    app.state.training_runtime = training
 
     # Accept traffic immediately — do not block on HuggingFace / RAG init.
     app.state.ready = False
@@ -235,7 +236,6 @@ async def lifespan(app: FastAPI):
             print(f"[+] RAG Pipeline initialized: {init_result.get('ingested', 0)} documents")
             print(f"[+] Knowledge Base: {get_pattern_count()} patterns, {get_synonym_count()} synonyms")
 
-            training = app.state.training_runtime
             if training_enabled:
                 # Own daemon threads + stop event: shutdown never waits on a run.
                 app.state.training_task = training.start_task(
@@ -355,10 +355,8 @@ async def lifespan(app: FastAPI):
             await warm
         except asyncio.CancelledError:
             pass
-    training = getattr(app.state, "training_runtime", None)
-    if training is not None:
-        # Sets the stop event, cancels the training tasks, waits <= 1 s.
-        await training.shutdown()
+    # This lifespan's runtime: sets its stop event, cancels its tasks, waits <= 1 s.
+    await training.shutdown()
     try:
         from services.otel_logging import shutdown_otel_logging
 
