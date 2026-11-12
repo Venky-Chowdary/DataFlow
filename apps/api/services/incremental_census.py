@@ -33,10 +33,32 @@ ROUTE_QUARANTINE_MAX = 10_000
 _SAMPLE = 5
 
 
-def _census_key_text(parts: Any) -> str:
-    """One key as the census spells it: the value, or the parts joined by U+001F."""
-    values = [str(p) for p in (parts if isinstance(parts, (list, tuple)) else [parts])]
-    return values[0] if len(values) == 1 else "\x1f".join(values)
+def _key_part_canon(text: str) -> str:
+    """One spelling of a key part, whichever side wrote it.
+
+    The census spells a key as its driver value's ``str()`` ('2026-01-01
+    10:00:00', 'True'); a quarantine finding as the wire ('2026-01-01T10:00:00',
+    'true'). A number or a date-time compares by its value, a boolean
+    case-free, anything else as written (review Low).
+    """
+    from services.cursor_order import order_key
+
+    value = str(text).strip()
+    if value.lower() in ("true", "false"):
+        return value.lower()
+    rank, key = order_key(value)
+    if rank == 0:
+        return f"n:{key.normalize()!r}"
+    if rank == 1:
+        return f"t:{key!r}"
+    return value
+
+
+def census_key_canon(key: Any) -> str:
+    """A census or quarantined key (value, parts list, or U+001F-joined text),
+    spelled one way for comparison."""
+    parts = list(key) if isinstance(key, (list, tuple)) else str(key).split("\x1f")
+    return "\x1f".join(_key_part_canon(str(p)) for p in parts)
 
 
 def route_quarantined_keys(
@@ -219,9 +241,9 @@ def apply_incremental_census(
     quarantined, complete = route_quarantined_keys(
         metadata.get(ROUTE_QUARANTINE_KEY), summary, key_cols
     )
-    held_out = {_census_key_text(k) for k in quarantined}
+    held_out = {census_key_canon(k) for k in quarantined}
     before = len(missing)
-    missing = [k for k in missing if str(k) not in held_out]
+    missing = [k for k in missing if census_key_canon(k) not in held_out]
     census["quarantined_excluded"] = before - len(missing)
     if not (complete and metadata.get(ROUTE_QUARANTINE_COMPLETE_KEY, True)):
         census["quarantine_record_complete"] = False

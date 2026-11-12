@@ -842,3 +842,36 @@ def test_inheritance_parent_is_sized_by_its_children(pg):
         below="25", cursor_type="bigint",
     )
     assert late.floor == str(25 - csw.PG_LOOKBACK_VALUES), late
+
+
+# Low: quarantined keys spelled like census keys
+
+
+@pytest.mark.parametrize(
+    "census_key,quarantined",
+    [
+        ("2026-01-01 10:00:00", "2026-01-01T10:00:00"),  # str(datetime) vs the wire
+        ("True", "true"),  # str(bool) vs the wire
+        ("7\x1f2026-01-01 10:00:00", ["7", "2026-01-01T10:00:00"]),
+    ],
+)
+def test_quarantined_keys_are_spelled_like_census_keys(tmp_path, monkeypatch, census_key, quarantined):
+    import services.sync_cursor as sc
+    from services.incremental_census import apply_incremental_census
+
+    monkeypatch.setattr(sc, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+    sc.set_watermark("route-q", "20", metadata={})
+    key_cols = ["id", "at"] if isinstance(quarantined, list) else ["id"]
+    summary = {
+        "incremental_cursor_key": "route-q",
+        "primary_key_columns": key_cols,
+        "rejected_details": [{"source_pk": quarantined, "error": "bad value"}],
+        "incremental_key_census": {"due": True, "every": 1, "cursor_column": "seq"},
+    }
+    out = apply_incremental_census(
+        {"passed": True, "message": "ok"}, source_endpoint=object(), endpoint=object(),
+        dest_summary=summary, mappings=[], key_census=lambda **_kw: ([], [census_key], [], None),
+    )
+    report = out["incremental_key_census"]
+    assert report["quarantined_excluded"] == 1 and report["missing_behind_watermark"] == 0, report
