@@ -245,12 +245,64 @@ def _confine_embedded_path(
     return str(resolved)
 
 
+# SQLite URI-filename controls (https://sqlite.org/uri.html). With them a
+# value names a file other than the one the path checks resolve (``file:``
+# is read as a relative name under the working directory, while the driver
+# opens the absolute path it carries), or changes how the file is opened
+# (``vfs``, ``immutable``, ``nolock``). A connector never needs them, so they
+# are refused rather than parsed (security review round 2, C1).
+URI_FILENAME_PARAMS = frozenset({"uri", "mode", "vfs", "immutable", "nolock"})
+
+
+def _uri_refusal(label: str) -> ValueError:
+    return ValueError(
+        f"{label} URI filenames are not accepted for a connector (a value that "
+        "starts with 'file:', or a uri, mode, vfs, immutable or nolock URL "
+        "parameter); give a plain file path"
+    )
+
+
+def refuse_uri_filename(value: str, *, label: str = "SQLite") -> None:
+    """Refuse a database value that SQLite or DuckDB could read as a URI filename."""
+    if str(value or "").lstrip().lower().startswith("file:"):
+        raise _uri_refusal(label)
+
+
+def refuse_uri_query(query: object, *, label: str = "SQLite") -> None:
+    """Refuse URI-filename parameters in a URL query (a mapping or ``a=b&c=d`` text)."""
+    from urllib.parse import parse_qsl
+
+    if isinstance(query, str):
+        keys = [k for k, _v in parse_qsl(query, keep_blank_values=True)]
+    else:
+        keys = list(dict(query or {}).keys())
+    if any(str(k).strip().lower() in URI_FILENAME_PARAMS for k in keys):
+        raise _uri_refusal(label)
+
+
+def _refuse_uri_in_path(path: str, *, label: str) -> None:
+    refuse_uri_filename(path, label=label)
+    if "?" in path:
+        refuse_uri_query(path.split("?", 1)[1], label=label)
+
+
+def sqlite_readonly_uri(path: str) -> str:
+    """A read-only SQLite URI for ``path`` whose ``?`` / ``#`` / ``%`` are escaped.
+
+    ``f"file:{path}?mode=ro"`` let a file name carry its own URI parameters,
+    or end the path early at ``?`` / ``#`` so SQLite opened a different file
+    from the one the caller checked.
+    """
+    return Path(os.path.abspath(path)).as_uri() + "?mode=ro"
+
+
 def confine_sqlite_path(path: str) -> str:
     """Confine a plain SQLite file path (no URL scheme) like :func:`sqlite_file_path`."""
     if not path or path == ":memory:":
         return path
     if "\x00" in path:
         raise ValueError("Invalid SQLite path")
+    _refuse_uri_in_path(path, label="SQLite")
     root, explicit = sqlite_root()
     return _confine_embedded_path(
         path, root, explicit,
@@ -265,11 +317,38 @@ def confine_duckdb_path(path: str) -> str:
         return path
     if "\x00" in path:
         raise ValueError("Invalid DuckDB path")
+    _refuse_uri_in_path(path, label="DuckDB")
     root, explicit = duckdb_root()
     return _confine_embedded_path(
         path, root, explicit,
         label="DuckDB", env_name="DATAFLOW_DUCKDB_ROOT", volume_subdir="duckdb",
     )
+
+
+def confine_embedded_url(text: str) -> None:
+    """Confine the file a SQLAlchemy ``sqlite`` / ``duckdb`` URL opens; other URLs pass.
+
+    ``file:`` databases and ``uri`` / ``mode`` / ``vfs`` parameters make the
+    driver open a file other than ``url.database``, so they are refused
+    before the path itself is confined (security review round 2, C1).
+    """
+    import sqlalchemy as sa
+
+    lowered = text.lower()
+    if lowered.startswith("sqlite"):
+        confine, label = confine_sqlite_path, "SQLite"
+    elif lowered.startswith("duckdb"):
+        confine, label = confine_duckdb_path, "DuckDB"
+    else:
+        return
+    try:
+        parsed = sa.engine.url.make_url(text)
+    except (sa.exc.ArgumentError, ValueError) as exc:
+        raise ValueError(f"Invalid embedded database URL: {exc}") from exc
+    refuse_uri_query(parsed.query, label=label)
+    database = parsed.database or ""
+    if database and database != ":memory:":
+        confine(database)
 
 
 def sqlite_unconfined_path(database: str, connection_string: str) -> str:
@@ -292,6 +371,7 @@ def sqlite_unconfined_path(database: str, connection_string: str) -> str:
             path = path[1:]  # sqlite:///relative -> relative
     if "\x00" in path:
         raise ValueError("Invalid SQLite path")
+    _refuse_uri_in_path(path, label="SQLite")
     return path
 
 
@@ -330,6 +410,7 @@ def duckdb_unconfined_path(database: str, connection_string: str, host: str = ""
         return ":memory:" if raw else ""
     if "\x00" in raw:
         raise ValueError("Invalid DuckDB path")
+    _refuse_uri_in_path(raw, label="DuckDB")
     return raw
 
 
