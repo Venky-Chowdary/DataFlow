@@ -252,8 +252,11 @@ def test_engine_run_in_region_is_not_refused_for_residency(eu_workspace, monkeyp
         dialled.append(str(cfg.get("host")))
         raise RuntimeError("no network in this test")
 
-    monkeypatch.setattr("connectors.aws_common.boto3_client", boto)
+    # s3_writer first: importing it while aws_common is already patched bound
+    # the stand-in into it, and undo then "restored" the stand-in for every
+    # later test in the session.
     monkeypatch.setattr("connectors.s3_writer.boto3_client", boto, raising=False)
+    monkeypatch.setattr("connectors.aws_common.boto3_client", boto)
     bucket = _s3_connector(world, "eu-west-1")
     job_id, job = _job_into(world, bucket)
     result = get_transfer_engine().execute_tracked(transfer_request_from_dict(job["transfer_request"]), job_id)

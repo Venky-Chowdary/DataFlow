@@ -167,7 +167,7 @@ def resolve_region(cfg: dict[str, Any]) -> str:
     return "us-east-1"
 
 
-def boto3_client(service: str, cfg: dict[str, Any]):
+def boto3_client(service: str, cfg: dict[str, Any], *, workspace_id: str = ""):
     import boto3
     from botocore.config import Config
 
@@ -203,5 +203,5 @@ def boto3_client(service: str, cfg: dict[str, Any]):
         from connectors.s3_residency import install_bucket_region_guard
 
         # The bucket's region decides where a write lands (review round 2, H3).
-        install_bucket_region_guard(client, cfg)
+        install_bucket_region_guard(client, cfg, workspace_id=workspace_id)
     return client

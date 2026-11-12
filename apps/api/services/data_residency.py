@@ -215,6 +215,20 @@ def enforced_region(workspace_id: str | None, *, host_tenant_id: str = "") -> st
     return _norm(default_region()) if _strict() else ""
 
 
+def any_fence() -> bool:
+    """Whether any workspace on this deployment has a data region enforced.
+
+    A write that cannot name its workspace is refused while this is true
+    (security review round 3, H4): with no workspace there is no fence to
+    judge it against, and "no fence" must never be the answer by default.
+    """
+    from services.tenant_store import default_region, list_tenants
+
+    if any(_norm(t.data_region) for t in list_tenants()):
+        return True
+    return bool(_strict() and _norm(default_region()))
+
+
 def job_data_region(workspace_id: str | None, requested: str = "", *, host_tenant_id: str = "") -> str:
     """The ``data_region`` tag a job carries.
 

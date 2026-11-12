@@ -238,7 +238,13 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
     connector executor under the test_connector deadline, never on the event
     loop (D321: one silent Oracle host froze every /api/v1 route).
     """
+    from services.egress_guard import egress_workspace
+    from services.workspace_filter import current_workspace_stamp
+
     from ..ai.copilot.tool_deadline import note_step, run_off_event_loop
+
+    # Whatever the probe writes is made for the caller's workspace (review 3, H4).
+    workspace = current_workspace_stamp(for_write=False)
 
     def _timed_out(message: str) -> dict[str, Any]:
         op.failed(category="probe_failed")
@@ -252,7 +258,8 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             "connection_string": request.connection_string or "",
         }
         note_step("test_connector: reaching the host", target, role="connector")
-        return _test_connection_blocking(request, op)
+        with egress_workspace(workspace):
+            return _test_connection_blocking(request, op)
 
     return await run_off_event_loop("test_connector", _probe, _timed_out)
 
@@ -2609,7 +2616,9 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         # The replay digests with the PARENT job's hash_pii key version (retired
         # versions are kept), so remediated rows match the rows the parent
         # wrote; the child job records that version (review B2).
-        with transfer_job_scope(
+        from services.egress_guard import egress_workspace
+
+        with egress_workspace(replay_workspace), transfer_job_scope(
             child_req,
             child_job_id,
             store=get_mongodb_service,

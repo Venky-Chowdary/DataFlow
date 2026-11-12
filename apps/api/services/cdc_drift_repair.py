@@ -211,6 +211,7 @@ def run_fenced_drift_repair(
     if out_of_region:
         raise PermissionError(out_of_region)
     from src.transfer.adapters import resolve_connector_config, write_destination_database
+    from services.egress_guard import egress_workspace
     from src.transfer.connector_capabilities import resolve_driver_type
     from services.cdc_value_digest import (
         _scan_table,
@@ -436,17 +437,19 @@ def run_fenced_drift_repair(
                     {"source": "_df_lsn", "target": "_df_lsn", "confidence": 1.0}
                 )
             try:
-                _written, _columns, writer_summary = write_destination_database(
-                    request.destination,
-                    [row],
-                    list(row),
-                    saved.get("column_types") or {},
-                    writer_mappings,
-                    write_mode="upsert",
-                    conflict_columns=pk_targets,
-                    sync_mode="cdc",
-                    allow_equal_lsn=True,
-                )
+                # Bound for the S3 bucket-region guard and the egress policy (review 3, H4).
+                with egress_workspace(workspace_id):
+                    _written, _columns, writer_summary = write_destination_database(
+                        request.destination,
+                        [row],
+                        list(row),
+                        saved.get("column_types") or {},
+                        writer_mappings,
+                        write_mode="upsert",
+                        conflict_columns=pk_targets,
+                        sync_mode="cdc",
+                        allow_equal_lsn=True,
+                    )
                 skipped_rows = int(writer_summary.get("rows_skipped") or 0)
                 if skipped_rows:
                     counts["refused_newer_event"] += 1

@@ -34,6 +34,12 @@ class S3ResidencyError(RuntimeError):
     """An S3 write that would land outside the workspace's data region."""
 
 
+#: The fence when no workspace can be named while some workspace is fenced.
+_UNBOUND = "(workspace cannot be determined)"
+#: The fence when the workspaces named for one write are fenced to different regions.
+_CONFLICT = "(conflicting workspace regions)"
+
+
 def _writing_workspace() -> str:
     """The workspace of the run or request making this write (``""`` = none bound)."""
     from services.egress_guard import current_egress_workspace
@@ -42,14 +48,33 @@ def _writing_workspace() -> str:
     return current_egress_workspace() or bound_job_workspace()
 
 
-def _fence_region(cache: dict[str, str]) -> str:
-    """The data region enforced for that workspace (``""`` = none), read once per client."""
-    from services.data_residency import enforced_region
+def _writing_workspaces(named: tuple[str, ...]) -> tuple[str, ...]:
+    """Every workspace this write is made for: the ones named when the client was
+    built (the caller's, the saved connector's) and the one bound now."""
+    return tuple(dict.fromkeys(w for w in (*named, _writing_workspace()) if w))
 
-    workspace = _writing_workspace()
-    if workspace not in cache:
-        cache[workspace] = enforced_region(workspace)
-    return cache[workspace]
+
+def _fence_for(workspaces: tuple[str, ...]) -> str:
+    from services.data_residency import any_fence, enforced_region
+
+    if not workspaces:
+        # Review round 3 (H4): an unbound write is not an unfenced one.
+        return _UNBOUND if any_fence() else ""
+    fences = {enforced_region(w) for w in workspaces} - {""}
+    if len(fences) > 1:
+        return _CONFLICT
+    return fences.pop() if fences else ""
+
+
+def _fence_region(cache: dict[tuple[str, ...], str], named: tuple[str, ...] = ()) -> str:
+    """The data region enforced for this write (``""`` = none), read once per client.
+
+    A workspace named in ``cfg`` can add a fence but never remove the bound one.
+    """
+    workspaces = _writing_workspaces(named)
+    if workspaces not in cache:
+        cache[workspaces] = _fence_for(workspaces)
+    return cache[workspaces]
 
 
 def _location_region(value: Any) -> str:
@@ -81,6 +106,16 @@ def bucket_region(client: Any, bucket: str) -> str:
 
 
 def _refusal(bucket: str, found: str, fence: str) -> S3ResidencyError:
+    if fence in (_UNBOUND, _CONFLICT):
+        why = (
+            "the workspace making it cannot be determined while a data region is enforced "
+            "on this deployment" if fence == _UNBOUND
+            else "the workspaces it is made for are fenced to different regions"
+        )
+        return S3ResidencyError(
+            f"Data residency violation: S3 write to bucket {bucket!r} refused because {why}; "
+            "nothing was written"
+        )
     where = f"is in {found}" if found else "has a region that cannot be read"
     return S3ResidencyError(
         f"Data residency violation: S3 bucket {bucket!r} {where}, outside this "
@@ -96,18 +131,26 @@ def _dials_aws(cfg: dict[str, Any]) -> bool:
     return not url or host.endswith(".amazonaws.com")
 
 
-def install_bucket_region_guard(client: Any, cfg: dict[str, Any]) -> Any:
-    """Arm ``client`` (an S3 client) with the bucket-region check; returns it."""
+def install_bucket_region_guard(client: Any, cfg: dict[str, Any], *, workspace_id: str = "") -> Any:
+    """Arm ``client`` (an S3 client) with the bucket-region check; returns it.
+
+    ``workspace_id`` is the workspace the client writes for; the resolved
+    connector's own ``cfg["workspace_id"]`` and the job or egress workspace
+    bound at write time are judged too (review round 3, H4).
+    """
     if not _dials_aws(cfg):
         return client
+    named = (str(workspace_id or "").strip(), str(cfg.get("workspace_id") or "").strip())
     checked: dict[str, str] = {}
-    fences: dict[str, str] = {}
+    fences: dict[tuple[str, ...], str] = {}
 
     def before_write(params: dict[str, Any] | None = None, **_kwargs: Any) -> None:
-        fence = _fence_region(fences)
+        fence = _fence_region(fences, named)
         if not fence:
             return
         bucket = str((params or {}).get("Bucket") or "")
+        if fence in (_UNBOUND, _CONFLICT):
+            raise _refusal(bucket, "", fence)
         if bucket not in checked:
             checked[bucket] = bucket_region(client, bucket)
         if checked[bucket] != fence:
@@ -119,7 +162,7 @@ def install_bucket_region_guard(client: Any, cfg: dict[str, Any]) -> Any:
         http, parsed = response
         moved = str((getattr(http, "headers", None) or {}).get("x-amz-bucket-region") or "").lower()
         status = int(getattr(http, "status_code", 0) or 0)
-        fence = _fence_region(fences) if moved and status in (301, 307, 400) else ""
+        fence = _fence_region(fences, named) if moved and status in (301, 307, 400) else ""
         if fence and moved != fence:
             bucket = str(((parsed or {}).get("Error") or {}).get("BucketName") or "")
             raise _refusal(bucket or "(this bucket)", moved, fence)

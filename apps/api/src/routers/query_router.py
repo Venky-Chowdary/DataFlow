@@ -1441,10 +1441,14 @@ def _export_to_connector(
     if write_mode != "insert":
         write_mode = "insert"
 
+    from services.egress_guard import egress_workspace
     from services.export_paths import connector_export_scope
 
+    owner = str(getattr(dest_connector, "workspace_id", "") or "")
     try:
-        with connector_export_scope(getattr(dest_connector, "workspace_id", "")):
+        # The write is made for the connector's workspace: its file area, and
+        # the workspace the S3 bucket-region guard judges (review round 3, H4).
+        with connector_export_scope(owner), egress_workspace(owner or workspace_id):
             rows_written, ddl_log, dest_summary = write_destination_database(
                 dest,
                 records=rows,
