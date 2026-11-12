@@ -90,8 +90,24 @@ On the first start of this build, the first process to reach an empty shared
 store imports its node's file for that store (for example `tenants.json` or
 `resource_acls.jsonl` under the data directory). The file is never deleted or
 rewritten. While that import runs, other processes refuse to read the store
-(503) rather than serve a half-imported ACL or tenant list; a process that
-dies mid-import finishes it when it starts again with the same file.
+(503) rather than serve a half-imported ACL or tenant list.
+
+The import claim has an owner and a lease (`DATAFLOW_CONTROL_STORE_IMPORT_LEASE_SECONDS`,
+default 30) that the importer renews before every record it writes. If the
+importing process dies or stalls past its lease:
+
+- a process with the same file (the same pod restarted, or a shared data
+  volume) finishes the import; it may do so at once, records are never
+  written twice;
+- any other process takes the claim over once the lease has run out, removes
+  the records the dead import wrote, logs a warning and records the
+  `control_store.import_abandoned` security event. The store is then empty
+  and serves again; a process holding its own file imports that one. With
+  per-pod `emptyDir` data, the dead pod's file is gone with it: re-create what
+  only it held through the UI or API.
+
+A record in a file larger than the 1 MB record limit is not imported (it is
+logged with its id and listed in the import report); the rest of the file is.
 
 Only one file per store is imported. Once the shared store holds a store's
 records, a node's file is never imported or merged again. A file that differs

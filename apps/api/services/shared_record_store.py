@@ -49,18 +49,14 @@ from pathlib import Path
 from typing import Any
 
 from services import shared_doc_store as _sds
+from services.control_plane_import import LeasedImport
 from services.shared_doc_store import (
     DOCS_COLLECTION,
     SharedDoc,
     SharedDocConflict,
     UniqueConflict,
-    _audit_import,
     _dumps,
-    _file_digest,
-    _file_stamp,
     _is_duplicate,
-    _node_name,
-    _record_conflict,
     tracked,
 )
 
@@ -97,7 +93,7 @@ def _claim_index_hit(exc: Exception) -> bool:
     return "uniq" in pattern or UNIQUE_INDEX in str(details.get("index") or exc)
 
 
-class SharedRecordSet(SharedDoc):
+class SharedRecordSet(LeasedImport, SharedDoc):
     """A record-list store, one document per record in MongoDB (see module docstring).
 
     ``list_key`` names the list in the store's shape (``{"tenants": [...]}``);
@@ -378,9 +374,10 @@ class SharedRecordSet(SharedDoc):
             except Exception as exc:
                 if not (_is_duplicate(exc) and _claim_index_hit(exc)):
                     raise
+                # Not lost: the record stays and the duplicate is reported for the operator.
                 self._report_duplicate(docs, str(doc.get("key")), claim)
-                continue
-            held.append(claim)
+            else:
+                held.append(claim)
         return held
 
     def _report_duplicate(self, docs: Any, key: str, claim: str) -> None:
@@ -397,10 +394,17 @@ class SharedRecordSet(SharedDoc):
             self.name, key, claim,
         )
 
-    def _write_imported(self, coll: Any, docs: Any, key: str, row: tuple[str, str, list[str]], seq: int) -> None:
-        """Insert one imported or split record unless it exists; a claim another record holds is reported."""
+    def _write_imported(
+        self, coll: Any, docs: Any, key: str, row: tuple[str, str, list[str]], seq: int, *, stamp: str = ""
+    ) -> None:
+        """Insert one imported or split record unless it exists; a claim another record holds is reported.
+
+        ``stamp`` is the imported file's digest: an abandoned import's records are removed by it.
+        """
         doc = self._record_doc(key, row, seq)
         doc.pop("_id")
+        if stamp:
+            doc["imp"] = stamp
         try:
             coll.update_one({"_id": self._item_id(key)}, {"$setOnInsert": doc}, upsert=True)
         except Exception as exc:
@@ -422,24 +426,6 @@ class SharedRecordSet(SharedDoc):
                 key=lambda row: (str(row.get("key")), str(row.get("claim"))),
             )
         return out
-
-    def _refuse_while_importing(self, coll: Any) -> None:
-        """Fail closed while another process imports its file into this empty store.
-
-        Checked on a read from the database (not on a cached answer) until the
-        store has records or a finished import: then it can no longer start.
-        """
-        if not self._settled:
-            docs = coll.database[DOCS_COLLECTION]
-            meta = docs.find_one({"_id": self.name})
-            if meta and meta.get("state") == "importing":
-                from services.control_plane_store import ControlPlaneUnavailable
-
-                # Another process is importing its node's file into this empty
-                # store. Serving a half-imported ACL or tenant list would open
-                # what the file restricts: fail closed until it is done.
-                raise ControlPlaneUnavailable(f"control-plane store {self.name} is being imported; retry shortly")
-            self._settled = bool(meta) or coll.find_one({"store": self.name}) is not None
 
     def _split_whole_document(self, coll: Any, docs: Any) -> None:
         """Turn ``{_id: <store>, rev, body}`` from an earlier build into records, idempotently."""
@@ -464,58 +450,6 @@ class SharedRecordSet(SharedDoc):
                 self._split_checked = True
                 self._cache = None
                 return
-
-    def _import_local_file(self, coll: Any) -> dict[str, Any] | None:
-        """Import this node's file into the empty store (claim, records, done); else a conflict."""
-        path = self._file_path()
-        stamp = _file_stamp(path)
-        if stamp is None or stamp in self._seen_stamps:
-            return None
-        found = _file_digest(path)
-        if found is None:
-            return None
-        digest = found[0]
-        key = f"{path}:{digest}"
-        if key in self._imported:
-            self._seen_stamps.add(stamp)
-            return None
-        docs = coll.database[DOCS_COLLECTION]
-        report: dict[str, Any] | None = None
-        settled = False
-        for _ in range(3):
-            meta = docs.find_one({"_id": self.name})
-            if meta is None:
-                if coll.find_one({"store": self.name}) is not None:
-                    report = _record_conflict(docs, self.name, path, digest)
-                    settled = True
-                    break
-                try:
-                    docs.insert_one({"_id": self.name, "kind": "store", "import_sources": [digest],
-                                     "state": "importing", "node": _node_name(), "at": _sds._now()})
-                except Exception as exc:
-                    if _is_duplicate(exc):
-                        continue
-                    raise
-                meta = {"import_sources": [digest], "state": "importing"}
-            if digest not in (meta.get("import_sources") or []):
-                report = _record_conflict(docs, self.name, path, digest)
-                settled = True
-                break
-            if meta.get("state") == "importing":
-                records = self._records(self._file_load())
-                for index, (rkey, row) in enumerate(records.items()):
-                    self._write_imported(coll, docs, rkey, row, index)
-                docs.update_one({"_id": self.name}, {"$set": {"state": "done", "records": len(records), "at": _sds._now()}})
-                report = {"action": "imported", "sha256": digest, "records": len(records)}
-                logger.warning("control-plane store %s: imported %s into the shared store (%s)", self.name, path, report)
-                _audit_import(self.name, path, report)
-            settled = True
-            break
-        if settled:
-            self._imported.add(key)
-            self._seen_stamps.add(stamp)
-        self._cache = None
-        return report if report and report["action"] != "conflict_already_recorded" else None
 
     def import_local_file(self) -> dict[str, Any] | None:
         coll = _sds._collection(ITEMS_COLLECTION)

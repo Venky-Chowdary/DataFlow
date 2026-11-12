@@ -39,6 +39,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "system.security_settings.snapshot": "Effective security settings at API startup.",
     "control_store.imported": "A control-plane store file was imported into the shared store.",
     "control_store.local_file_conflict": "A node's control-plane store file differs from the shared store and was not imported (shared state stays authoritative).",
+    "control_store.import_abandoned": "An import into an empty control-plane store whose owner stopped renewing its lease was taken over and its partial records removed.",
     "acl.grant.create": "A resource ACL grant was created.",
     "acl.grant.revoke": "A resource ACL grant was revoked.",
     "schedule.definition.create": "A schedule definition was created.",

@@ -211,12 +211,16 @@ def _file_digest(path: Path) -> tuple[str, bytes] | None:
     return hashlib.sha256(raw).hexdigest(), raw
 
 
-def _audit_import(store: str, path: Path, details: dict[str, Any], *, conflict: bool = False) -> None:
+def _audit_import(
+    store: str, path: Path, details: dict[str, Any], *, conflict: bool = False, abandoned: bool = False
+) -> None:
     try:
         from services.audit_coverage import record_security_event
 
         fields = {"resource": store, "actor": "system", "details": {"source": str(path), **details}}
-        if conflict:
+        if abandoned:
+            record_security_event("control_store.import_abandoned", outcome="succeeded", **fields)
+        elif conflict:
             record_security_event("control_store.local_file_conflict", outcome="skipped", **fields)
         else:
             record_security_event("control_store.imported", outcome="succeeded", **fields)
