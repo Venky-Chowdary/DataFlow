@@ -2417,6 +2417,18 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     dest = transfer_req.destination
     if dest.kind == "file_export":
         raise HTTPException(status_code=400, detail="Quarantine replay is not supported for file_export destinations")
+    # A replay writes like a run, so it is judged like one (review 3, H5): the
+    # destination as it resolves now, in the parent job's workspace, before any
+    # connect or write (a saved connector moved out of region after the job
+    # ran, or an inline destination stored before the workspace was fenced).
+    replay_workspace = str(job.get("workspace_id") or "")
+    transfer_req.workspace_id = replay_workspace
+    from ..transfer.job_scope import start_refusal
+
+    replay_refusal = start_refusal(transfer_req)
+    if replay_refusal:
+        logger.warning("Quarantine replay of job %s refused before any write", job_id)
+        raise HTTPException(status_code=403, detail=replay_refusal)
 
     # Replay must never carry the parent's overwrite semantics. A parent that
     # ran full_refresh_overwrite stamps overwrite-class flags on the request
@@ -2444,7 +2456,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
 
         from ..transfer.adapters import resolve_connector_config
 
-        dest_cfg = resolve_connector_config(dest)
+        dest_cfg = resolve_connector_config(dest, workspace_id=replay_workspace or None)
         mappings = refresh_mapping_target_types(
             mappings,
             resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
