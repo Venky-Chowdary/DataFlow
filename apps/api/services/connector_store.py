@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - non-POSIX platform
 from services.platform_config import data_dir
 from services.log_redaction import REDACTED
 from services.secret_config import mask_secrets_in_text
-from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
+from services.secret_vault import decrypt_for_workspace, decrypt_secret, encrypt_secret, tenant_id_from_workspace
 from services.workspace_filter import bound_allows, bound_workspace_filter, current_workspace_filter
 
 _CONNECTOR_SECRET_KEYS = (
@@ -398,7 +398,6 @@ class SavedConnector:
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, secrets_encrypted: bool = True) -> SavedConnector:
         workspace_id = data.get("workspace_id", "") or ""
-        tenant_id = tenant_id_from_workspace(workspace_id)
 
         def _secret(key: str) -> str:
             raw = str(data.get(key, "") or "")
@@ -407,7 +406,7 @@ class SavedConnector:
             # error on a connector that had just been created (R8-004).
             if not secrets_encrypted:
                 return raw
-            return decrypt_secret(raw, tenant_id=tenant_id)
+            return decrypt_for_workspace(raw, workspace_id)
 
         password = _secret("password")
         conn_str = _secret("connection_string")

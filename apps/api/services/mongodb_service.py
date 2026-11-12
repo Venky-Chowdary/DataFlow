@@ -111,15 +111,15 @@ def _decrypt_connector_secrets(data: dict | None) -> dict | None:
     """Decrypt secret fields after loading a connector for internal use."""
     if not data:
         return data
-    from services.secret_vault import decrypt_secret, tenant_id_from_workspace
+    from services.secret_vault import decrypt_for_workspace
 
     out = dict(data)
-    tenant_id = tenant_id_from_workspace(str(out.get("workspace_id") or ""))
+    workspace_id = str(out.get("workspace_id") or "")
     for key in _CONNECTOR_SECRET_KEYS:
         val = out.get(key)
         if isinstance(val, str) and val and val != "****":
             try:
-                out[key] = decrypt_secret(val, tenant_id=tenant_id)
+                out[key] = decrypt_for_workspace(val, workspace_id)
             except Exception as exc:
                 logger.warning("Failed to decrypt connector field %s: %s", key, exc)
     return out

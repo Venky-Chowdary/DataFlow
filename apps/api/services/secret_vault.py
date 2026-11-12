@@ -333,6 +333,18 @@ def tenant_id_from_workspace(workspace_id: str | None) -> str | None:
     return str(tenant.id) if tenant and getattr(tenant, "id", None) else None
 
 
+def decrypt_for_workspace(stored: str, workspace_id: str | None) -> str:
+    """Decrypt a secret saved for ``workspace_id``. Only a BYOK value needs (and looks up) the tenant.
+
+    A platform-key value decrypts without the tenant store, so a control-plane
+    outage does not break connectors of tenants without BYOK; a BYOK value
+    still fails closed (ops review round 2, Medium 6).
+    """
+    if stored and stored.startswith(_PREFIX_BYOK):
+        return decrypt_secret(stored, tenant_id=tenant_id_from_workspace(workspace_id))
+    return decrypt_secret(stored)
+
+
 def _byok_active_for_tenant(tenant_id: str | None) -> bool:
     """Whether the tenant's own key wraps its secrets. A key store error propagates (fail closed).
 
