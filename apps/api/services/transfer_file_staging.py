@@ -31,11 +31,14 @@ def _safe_filename(name: str) -> str:
 #: Filename prefix for per-job source spills in the shared upload directory.
 #: These belong to one transfer, not to the workspace's dataset catalog.
 TRANSFER_STAGING_PREFIX = "xfer_"
+#: A job's source re-materialised from the object store (``hydrate_<id>_<name>``):
+#: the same bytes as an ``xfer_`` spill, and no more a dataset than one.
+HYDRATE_STAGING_PREFIX = "hydrate_"
 
 
 def is_transfer_staging_file(name: str) -> bool:
     """True when ``name`` is a per-job transfer spill rather than a user upload."""
-    return str(name or "").startswith(TRANSFER_STAGING_PREFIX)
+    return str(name or "").startswith((TRANSFER_STAGING_PREFIX, HYDRATE_STAGING_PREFIX))
 
 
 def _source_file_id(request: "TransferRequest") -> str:
@@ -174,7 +177,7 @@ def hydrate_file_source(request: "TransferRequest") -> "TransferRequest":
         from services.platform_config import upload_dir
 
         filename = _safe_filename(request.source_filename or "upload.bin")
-        dest = upload_dir() / f"hydrate_{uuid.uuid4().hex[:12]}_{filename}"
+        dest = upload_dir() / f"{HYDRATE_STAGING_PREFIX}{uuid.uuid4().hex[:12]}_{filename}"
         if materialize_local(uri, dest):
             request.source_path = str(dest)
     except Exception:

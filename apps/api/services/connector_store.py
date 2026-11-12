@@ -598,6 +598,40 @@ def _resolve_backend() -> str:
     return _backend_choice
 
 
+def connector_store_unreadable() -> str:
+    """Why the configured connector store cannot be read right now, or "".
+
+    Read-side only (Pilot's briefing): listing keeps its file fallback, but a
+    file read while the configured Mongo store does not answer is not the
+    workspace's connectors, and must not be reported as "0 connectors".
+    """
+    try:
+        from src.services.mongodb_service import get_mongodb_service
+
+        svc = get_mongodb_service()
+    except Exception:  # noqa: BLE001 - an unopenable store is the answer itself
+        svc = None
+    mongo_down = svc is None or (
+        type(svc).__name__ != "MemoryMongoDBService" and getattr(svc, "client", None) is None
+    )
+    if _resolve_backend() == "mongo":
+        if mongo_down:
+            return "the connector store did not answer"
+        try:
+            _mongo_collection().database.client.admin.command("ping", maxTimeMS=2000)
+        except Exception:  # noqa: BLE001 - the ping failing is the signal
+            return "the connector store did not answer"
+        return ""
+    explicit_uri = any(
+        os.getenv(k) for k in ("MONGODB_URI", "MONGO_URL", "MONGO_PRIVATE_URL", "MONGO_PUBLIC_URL")
+    )
+    chosen_file = getenv_brand("CONNECTOR_STORE_BACKEND", "auto").lower() == "file"
+    if explicit_uri and not chosen_file and mongo_down:
+        # Auto selection fell back to the file because Mongo did not answer.
+        return "the connector store did not answer"
+    return ""
+
+
 def _use_mongo() -> bool:
     return _resolve_backend() == "mongo"
 
@@ -1014,6 +1048,9 @@ def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
     from connectors.sftp_common import apply_sftp_uri_endpoint, split_sftp_host_edit
+    from services.connector_request_limits import refuse_control_characters
+
+    refuse_control_characters("Connector name", data.get("name"))
 
     data = apply_sftp_uri_endpoint(split_sftp_host_edit(data, data.get("type")))
     conn_type = data["type"]
@@ -1110,6 +1147,10 @@ def _coerce_secret_update(new: Any, existing: Any) -> Any:
 
 
 def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
+    from services.connector_request_limits import refuse_control_characters
+
+    if "name" in data:
+        refuse_control_characters("Connector name", data.get("name"))
     workspace_id = _workspace_scope(workspace_id)
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return None

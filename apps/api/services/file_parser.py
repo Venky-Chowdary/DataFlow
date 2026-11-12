@@ -135,6 +135,49 @@ def _save_registry() -> None:
 _load_registry()
 
 
+def recorded_upload_files(root: Path) -> tuple[int, int]:
+    """``(recorded, present)``: uploads the registry says live in ``root``, and how many do.
+
+    The registry is read as persisted (Mongo or the registry file), not as
+    loaded: loading drops a record whose file is missing, which is exactly the
+    record that shows a volume came back empty (review 2, M2). Uploads kept in
+    an object store are not counted — their bytes are not on this volume.
+    """
+    rows: dict[str, dict] = {str(r.get("file_id") or ""): r for r in _file_registry.values()}
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection("upload_registry")
+        if coll is not None:
+            for item in coll.find({}, {"file_id": 1, "path": 1, "object_uri": 1}).limit(5000):
+                rows.setdefault(str(item.get("file_id") or item.get("_id") or ""), dict(item))
+        elif REGISTRY_PATH.exists():
+            raw = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+            for item in (raw.get("files", []) if isinstance(raw, dict) else []):
+                if isinstance(item, dict):
+                    rows.setdefault(str(item.get("file_id") or ""), item)
+    except (OSError, ValueError, TypeError) as exc:
+        logging.getLogger(__name__).warning("upload registry not read: %s", exc)
+    try:
+        base = Path(root).resolve()
+    except OSError:
+        return 0, 0
+    recorded = present = 0
+    for row in rows.values():
+        raw_path = str(row.get("path") or "")
+        if not raw_path or row.get("object_uri"):
+            continue
+        path = Path(raw_path)
+        try:
+            if path.resolve().parent != base:
+                continue
+        except OSError:
+            continue
+        recorded += 1
+        present += int(path.exists())
+    return recorded, present
+
+
 def detect_format(filename: str, content: bytes) -> str:
     lower = filename.lower()
     if lower.endswith(".csv"):
@@ -541,6 +584,32 @@ def resolve_attached_upload_path(file_id: str) -> str:
         if not bound_allows(owner):
             return ""
     return publish_upload_path(str(record.get("path") or ""))
+
+
+_STORED_UPLOAD_NAME = re.compile(r"^([0-9a-f]{16})_")
+
+
+def upload_workspace_for_path(path: str | Path) -> str | None:
+    """The workspace that owns the upload stored at ``path``.
+
+    ``""`` for an upload registered with no workspace, ``None`` when no upload
+    record names this file (it was not stored through ``store_upload``). The
+    file id is read from the stored name, so a record another replica wrote is
+    found through the shared registry.
+    """
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        return None
+    named = _STORED_UPLOAD_NAME.match(resolved.name)
+    record = get_file(named.group(1)) if named else None
+    if not record:
+        return None
+    try:
+        same_file = Path(str(record.get("path") or "")).resolve() == resolved
+    except OSError:
+        same_file = False
+    return str(record.get("workspace_id") or "") if same_file else None
 
 
 def get_file(file_id: str) -> dict | None:

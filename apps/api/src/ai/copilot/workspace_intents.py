@@ -95,6 +95,13 @@ def ground_plan(
     here = subject_of(message)
     prior = conversation_subject(history)
 
+    # Review 2, M3: a pipeline that failed is a pipeline's state, not a job
+    # count; "pipelines that need my attention" are the health read; "my
+    # uploads" is the dataset listing — never documentation, never jobs.
+    owned = _owned_subject_route(message, here)
+    if owned is not None:
+        return owned
+
     if _SCHEDULE_STATE_RE.search(message or "") and (
         here == "pipelines" or (not here and prior == "pipelines")
     ):
@@ -119,6 +126,34 @@ def ground_plan(
     ):
         return [("list_jobs", {"limit": 25})]
     return planned
+
+
+_PIPELINE_FAIL_RE = re.compile(r"\bfail\w*|\bbroken\b|\berrored\b", re.I)
+_PIPELINE_ATTENTION_RE = re.compile(
+    r"\b(?:need\w*|requir\w*|want\w*)\s+(?:my\s+|your\s+|our\s+|any\s+)?attention\b"
+    r"|\b(?:problems?|issues?|trouble|unhealthy|health(?:y)?|attention)\b",
+    re.I,
+)
+_MY_UPLOADS_RE = re.compile(
+    r"\b(?:datasets?|uploads?|uploaded\s+files?|files)\b[^?.!]*\b(?:mine|my|i\s+(?:have\s+)?upload\w*|i\s+have)\b"
+    r"|\b(?:my|mine|i\s+(?:have\s+)?upload\w*|have\s+i\s+upload\w*|do\s+i\s+have)\b[^?.!]*"
+    r"\b(?:datasets?|uploads?|uploaded|files)\b",
+    re.I,
+)
+
+
+def _owned_subject_route(message: str, here: str) -> list[tuple[str, dict]] | None:
+    """The tool that owns a pipeline-state or my-uploads question, or None."""
+    text = message or ""
+    if _HOW_TO_RE.match(text):
+        return None
+    if here == "pipelines" and _PIPELINE_FAIL_RE.search(text):
+        return [("list_schedules", {"state": "failed"})]
+    if here == "pipelines" and _PIPELINE_ATTENTION_RE.search(text):
+        return [("list_schedules", {})]
+    if not here and _MY_UPLOADS_RE.search(text) and not _DATA_SCOPE_RE.search(text):
+        return [("list_datasets", {})]
+    return None
 
 
 _LEDGER_ASK_RE = re.compile(r"\b(?:which|how\s+many|list|show|any|count|number\s+of)\b", re.I)
