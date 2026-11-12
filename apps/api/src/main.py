@@ -48,6 +48,7 @@ from .middleware.proxy_fix_middleware import ProxyFixMiddleware
 from .middleware.own_host_redirect_middleware import OwnHostRedirectMiddleware
 from .middleware.workspace_ip_allowlist_middleware import WorkspaceIpAllowlistMiddleware
 from .middleware.tenant_scope_middleware import TenantScopeMiddleware
+from .middleware.connector_access_middleware import ConnectorAccessMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
 from .routers.auth_router import router as auth_router
@@ -457,6 +458,9 @@ _cors_origins = cors_origins()
 # (an operator may still set CORS_ORIGIN_REGEX deliberately).
 _cors_origin_regex = cors_origin_regex()
 
+# Innermost: binds the authenticated caller for saved-connector resolution
+# (services.connector_access.current_caller), inside the tenant scope it narrows.
+app.add_middleware(ConnectorAccessMiddleware)
 app.add_middleware(TenantScopeMiddleware)
 app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)
