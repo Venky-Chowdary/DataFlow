@@ -22,7 +22,20 @@ data:
         root /usr/share/nginx/html;
         index index.html;
 
-        # Baseline security headers (TLS termination/WAF upstream can add HSTS/CSP).
+        # Browser hardening for the SPA shell and its assets (audit M-1). Applied in
+        # the SPA locations below, not server-wide: /api/ responses carry the API's
+        # own policy, and nginx stops inheriting add_header in any location that
+        # sets one of its own, so each SPA location repeats the set.
+        #
+        # script-src allows no inline script except by hash. The two hashes are the
+        # theme-paint script in apps/web/index.html and the one-line API-base script
+        # deploy/start-nginx.sh writes into it (Railway image); tests/test_audit_m1_spa_security_headers.py
+        # recomputes both, so editing either script fails the build until the hash
+        # here is updated. No 'unsafe-eval'. challenges.cloudflare.com is the signup
+        # Turnstile widget; youtube-nocookie / i.ytimg.com are the marketing videos.
+        set $dw_csp "default-src 'self'; script-src 'self' 'sha256-w2Abo+hIRz3RYBvVq/mAEENRH7y/xHyXeWKBJ15dFa0=' 'sha256-zzHFmAG2tczlGhNOz+fUFb5IbhiIpkrLqE3PUFIOfHo=' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com; font-src 'self' data:; connect-src 'self'; frame-src https://www.youtube-nocookie.com https://challenges.cloudflare.com; worker-src 'self' blob:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
+        # Baseline security headers (a TLS-terminating proxy upstream can add HSTS).
         add_header X-Frame-Options "DENY" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -118,6 +131,7 @@ data:
         }
 
         location /assets/ {
+            add_header Content-Security-Policy $dw_csp always;
             add_header X-Frame-Options "DENY" always;
             add_header X-Content-Type-Options "nosniff" always;
             add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -131,6 +145,7 @@ data:
             if ($request_method !~ ^(GET|HEAD)$) {
                 return 418;
             }
+            add_header Content-Security-Policy $dw_csp always;
             add_header X-Frame-Options "DENY" always;
             add_header X-Content-Type-Options "nosniff" always;
             add_header Referrer-Policy "strict-origin-when-cross-origin" always;
