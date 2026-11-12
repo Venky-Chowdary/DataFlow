@@ -59,8 +59,14 @@ def test_scan_finds_the_flags_the_product_depends_on(scanned) -> None:
         assert key in flags and flags[key].brand_read, key
     # Read through a local wrapper (``_int_env("JOB_ORPHAN_MAX_RECLAIMS", ...)``).
     assert flags["JOB_ORPHAN_MAX_RECLAIMS"].brand_read
-    # Read under one exact name: only the DATAFLOW_ spelling works.
-    assert flags["PUBLIC_RATE_LIMIT"].accepted_names() == ["DATAFLOW_PUBLIC_RATE_LIMIT"]
+    # Read under one exact name through a module constant (``os.getenv(EXPOSE_ENV)``):
+    # only the DATAFLOW_ spelling works.
+    assert flags["EXPOSE_ERROR_DETAIL"].accepted_names() == ["DATAFLOW_EXPOSE_ERROR_DETAIL"]
+    # Read through getenv_brand with the legacy spelling: both names work.
+    assert flags["PUBLIC_RATE_LIMIT"].accepted_names() == [
+        "DATAWRAP_PUBLIC_RATE_LIMIT",
+        "DATAFLOW_PUBLIC_RATE_LIMIT",
+    ]
     # Reached through a literal tuple that is looped over.
     assert "MONGO_PRIVATE_URL" in flags
     # A pydantic settings alias.
