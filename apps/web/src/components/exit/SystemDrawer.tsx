@@ -22,6 +22,8 @@ import {
   formatDuration,
   formatWindow,
   measuredVsWindowText,
+  canWithdrawPii,
+  piiHeldText,
   piiReasonError,
   piiReviewState,
   PII_REASON_MAX,
@@ -331,7 +333,7 @@ export function SystemDrawer({
 }
 
 export interface PiiReviewCardProps {
-  system: Pick<ExitSystem, "id" | "readiness" | "pii_acknowledgement">;
+  system: Pick<ExitSystem, "id" | "readiness" | "pii_acknowledgement" | "pii_hold">;
   reason: string;
   onReasonChange: (reason: string) => void;
   busy: boolean;
@@ -358,6 +360,7 @@ export function PiiReviewCard({
   onWithdraw,
 }: PiiReviewCardProps) {
   const pii = piiReviewState(system);
+  const hold = system.pii_hold ?? null;
   if (!pii.held && !pii.acknowledgement) return null;
   return (
     <section className="df2-parity-card" aria-label="PII review">
@@ -372,8 +375,29 @@ export function PiiReviewCard({
           {pii.current ? "" : " (an earlier definition)"}
         </p>
       )}
-      {pii.action === "acknowledge" && (
+      {pii.acknowledgement?.covers && pii.acknowledgement.covers.length > 0 && (
+        <div className="df2-parity-muted">
+          It covers:
+          <ul aria-label="Acknowledged PII">
+            {pii.acknowledgement.covers.map((t) => <li key={t.table}>{piiHeldText(t)}</li>)}
+          </ul>
+        </div>
+      )}
+      {pii.action === "acknowledge" && !hold && (
+        <p className="df2-parity-muted" role="note">
+          Rehearse this definition first: an acknowledgement covers what the PII gate held in its latest rehearsal, never
+          PII nobody has seen.
+        </p>
+      )}
+      {pii.action === "acknowledge" && hold && (
         <div className="df2-exit-pii-form">
+          <div className="df2-parity-muted">
+            The PII gate held rehearsal {hold.n} on:
+            <ul aria-label="Held PII">
+              {hold.tables.map((t) => <li key={t.table}>{piiHeldText(t)}</li>)}
+            </ul>
+            Acknowledging covers exactly these columns and categories; PII found beyond them is held again.
+          </div>
           <label className="df2-parity-muted" htmlFor={`pii-reason-${system.id}`}>Why the extract may carry this PII</label>
           <textarea
             id={`pii-reason-${system.id}`}
@@ -401,7 +425,7 @@ export function PiiReviewCard({
           </Button>
         </div>
       )}
-      {pii.acknowledgement && pii.action !== "acknowledge" && (
+      {canWithdrawPii(system) && (
         <Button size="sm" variant="ghost" onClick={onWithdraw} disabled={!canManage || busy} title={!canManage ? manageDeniedReason : undefined}>
           Withdraw acknowledgement
         </Button>

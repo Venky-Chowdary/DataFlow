@@ -32,6 +32,7 @@ import {
   rehearsalSignoffBlockedReason,
   rehearsalVerdictPresentation,
   shortHash,
+  staleNotice,
   stageLabel,
   stageStatusPresentation,
   tableStatusPresentation,
@@ -319,6 +320,9 @@ export function RehearsalView({
     });
   const reasonTone = rehearsal.verdict === "failed" || rehearsal.verdict === "incomplete" ? " is-danger" : "";
   const piiHeld = rehearsal.verdict === "needs_pii_review";
+  // The API's `current` (contract 12.1): false once the system's definition changed after this rehearsal.
+  const rehearsalStale = rehearsal.current === false && !running
+    ? staleNotice({ stale: true, stale_reason: rehearsal.stale_reason }) : null;
 
   const pickFile = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -410,6 +414,15 @@ export function RehearsalView({
           </span>
         </p>
       )}
+      {rehearsalStale && (
+        <p className="df2-parity-notice" role="status">
+          <DtIcon name="alert" size={14} />
+          <span>
+            <b>{rehearsalStale.label}.</b> This rehearsal proved an earlier definition of {rehearsal.system_name}; it does not
+            prove the system as it is defined now.{rehearsalStale.detail ? ` ${rehearsalStale.detail}` : ""}
+          </span>
+        </p>
+      )}
       {pollStopped && running && (
         <p className="df2-parity-notice" role="status">
           <DtIcon name="clock" size={14} />
@@ -454,6 +467,7 @@ export function RehearsalView({
             {completeness.tables_not_proven > 0 && <li><span className={pillClass("warn")}>{completeness.tables_not_proven.toLocaleString("en-US")} not proven</span></li>}
             {completeness.tables_incomplete > 0 && <li><span className={pillClass("danger")}>{completeness.tables_incomplete.toLocaleString("en-US")} incomplete</span></li>}
             {completeness.tables_failed > 0 && <li><span className={pillClass("danger")}>{completeness.tables_failed.toLocaleString("en-US")} failed</span></li>}
+            {(completeness.tables_needs_pii_review ?? 0) > 0 && <li><span className={pillClass("warn")}>{(completeness.tables_needs_pii_review ?? 0).toLocaleString("en-US")} held for PII review</span></li>}
           </ul>
           <p className="df2-parity-confidence">{completeness.statement}</p>
           <div className="df2-exit-coverage">

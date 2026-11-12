@@ -33,6 +33,7 @@ import {
 } from "./exitFixtures.js";
 import { realBoard, realFailed, realIncomplete, realMasked, realNotProven, realRunning, realSigned, realUnprovable, realVerify } from "./realExitPayloads.js";
 import { realPiiAcked, realPiiHeld, realSystemPii, realSystemPiiAcked } from "./realExitPayloads.js";
+import { realStale } from "./realExitPayloads.js";
 import { STALE_TEXT, formatDate, normalizeRehearsal, type ExitRehearsal } from "../../lib/exitReadiness.js";
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -154,7 +155,7 @@ describe("Page A: the exit readiness board", () => {
     assert.match(t, /Rehearsal failed/);
     assert.match(t, /Rehearsal running Running/);
     const m = boardMetrics(realBoard);
-    assert.equal(m[2].value, "0 s");
+    assert.match(m[2].value, /^\d+ s$/);  // a seconds-long engine run, measured
   });
 });
 
@@ -600,5 +601,46 @@ describe("contract 11: what the second review fixes changed on screen", () => {
       })),
     };
     assert.match(text(run(timedOut)), /stopped at its time limit, so nothing was proven or disproven: rehearse again/);
+  });
+});
+
+describe("contract 12: what the third review fixes changed on screen", () => {
+  function pii(system: Parameters<typeof PiiReviewCard>[0]["system"]) {
+    return text(renderToStaticMarkup(
+      <PiiReviewCard system={system} reason="" onReasonChange={noop} busy={false} error="" canManage onAcknowledge={noop}
+        onWithdraw={noop} />,
+    ));
+  }
+
+  it("rehearsal: one that no longer proves the system's definition says so on its own page", () => {
+    assert.equal(realStale.current, false);
+    const t = text(run(realStale));
+    assert.match(t, new RegExp(`${esc(STALE_TEXT)}\\. This rehearsal proved an earlier definition of Billing`));
+    assert.match(t, /changed since this rehearsal/);
+    assert.doesNotMatch(text(run(realPiiAcked)), new RegExp(esc(STALE_TEXT)));
+  });
+
+  it("rehearsal: the completeness chips count tables the PII gate held", () => {
+    const t = text(run(realPiiHeld));
+    assert.match(t, /1 held for PII review/);
+    assert.match(t, /0 proven/);
+  });
+
+  it("system: the PII form lists the held columns and categories it would cover, never a value", () => {
+    const t = pii(realSystemPii);
+    assert.match(t, /The PII gate held rehearsal 1 on: people: email \(email\), ssn \(ssn\)/);
+    assert.match(t, /Acknowledging covers exactly these columns and categories/);
+    assert.doesNotMatch(t, /123-45-60|p1@example\.com/);
+    const unheld = pii({ ...realSystemPii, pii_hold: null });
+    assert.match(unheld, /Rehearse this definition first/);
+    assert.doesNotMatch(unheld, /Acknowledge PII\b(?! for)/);
+  });
+
+  it("system: an acknowledgement names what it covers, and a stale one can still be withdrawn", () => {
+    assert.match(pii(realSystemPiiAcked), /It covers: people: email \(email\), ssn \(ssn\)/);
+    const ack = realSystemPiiAcked.pii_acknowledgement!;
+    const stale = pii({ ...realSystemPiiAcked, pii_acknowledgement: { ...ack, current: false } });
+    assert.match(stale, /\(an earlier definition\)/);
+    assert.match(stale, /Withdraw acknowledgement/);
   });
 });

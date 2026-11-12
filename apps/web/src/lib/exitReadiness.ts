@@ -88,11 +88,19 @@ export interface ExitSystem {
    * the system's definition changed: the next rehearsal's extracts are held again until someone acknowledges anew.
    */
   pii_acknowledgement?: PiiAcknowledgement | null;
+  /** The PII the latest rehearsal of this definition was held on, or null; acknowledging needs one (422 otherwise). */
+  pii_hold?: PiiHold | null;
   created_at: string;
   created_by: string;
   updated_at: string;
   updated_by: string;
   readiness: SystemReadiness;
+}
+
+/** A table's columns the PII gate held, with the categories it found in each (contract 12.1). */
+export interface PiiHeldTable {
+  table: string;
+  columns: Array<{ column: string; categories: string[] }>;
 }
 
 export interface PiiAcknowledgement {
@@ -101,6 +109,15 @@ export interface PiiAcknowledgement {
   at: string;
   /** Only on the system: the acknowledgement still applies to its definition. */
   current?: boolean;
+  /** The held tables, columns and categories it covers; PII beyond them is held again (review 3, M2). */
+  covers?: PiiHeldTable[];
+}
+
+/** What an acknowledgement given now would cover: the latest rehearsal's held tables (contract 12.1). */
+export interface PiiHold {
+  rehearsal_id: string;
+  n: number;
+  tables: PiiHeldTable[];
 }
 
 /** The writable fields of an ExitSystem (POST body; PATCH takes any subset). */
@@ -194,6 +211,8 @@ export interface RehearsalTable {
   job_id: string | null;
   status: TableStatus;
   reason: string;
+  /** The columns and categories the PII gate held in this table (empty when it held none; contract 12.1). */
+  pii_held?: Array<{ column: string; categories: string[] }>;
   rows_source: number | null;
   rows_extracted: number | null;
   key_columns: string[];
@@ -270,6 +289,13 @@ export interface ExitRehearsal {
   definition_sha256: string;
   /** The PII acknowledgement this rehearsal's extracts carried (in its signed pack), or null. */
   pii_acknowledgement?: PiiAcknowledgement | null;
+  /**
+   * Whether the system still has the definition this rehearsal proved (contract 12.1): false once it changed,
+   * null when the system was removed. Absent on answers before review 3.
+   */
+  current?: boolean | null;
+  /** Why it is no longer current (what changed), or null. */
+  stale_reason?: string | null;
   timeline: Array<{ stage: RehearsalStage; status: StageStatus; started_at: string | null; finished_at: string | null; seconds: number | null }>;
   completeness: {
     tables_declared: number;
@@ -1023,6 +1049,17 @@ export interface PiiReviewState {
   /** The next step, in words. */
   action: "acknowledge" | "rehearse" | "none";
   text: string;
+}
+
+/** "ssn (us_ssn), email (email)" for one held table: names and categories only, never a value. */
+export function piiHeldText(table: PiiHeldTable): string {
+  const cols = table.columns.map((c) => (c.categories.length ? `${c.column} (${c.categories.join(", ")})` : c.column));
+  return `${table.table}: ${cols.join(", ")}`;
+}
+
+/** Withdraw is offered for any acknowledgement on file, current or given for an earlier definition (review 3). */
+export function canWithdrawPii(system: Pick<ExitSystem, "pii_acknowledgement"> | null | undefined): boolean {
+  return Boolean(system?.pii_acknowledgement);
 }
 
 export function piiReviewState(system: Pick<ExitSystem, "readiness" | "pii_acknowledgement"> | null | undefined): PiiReviewState {

@@ -62,8 +62,11 @@ describe("reasons", () => {
   });
 
   it("says what the conditional columns were checked against, never the population", () => {
-    assert.equal(dataCheckedText({ rows: 25, source: "plan_sample" }), "Conditional columns were checked against 25 observed rows from the plan sample. A sample never proves the full table: a conditional column that fits only the sample is blocked at Execute unless the whole table is checked.");
+    assert.equal(dataCheckedText({ rows: 25, source: "plan_sample" }), "Conditional columns were checked against 25 observed rows from the plan sample. A sample never proves the full table: under Require reversibility a conditional column is checked on the sample here and enforced on every row while Execute writes.");
     assert.match(dataCheckedText({ rows: 0, source: "none" }), /No observed rows/);
+    // Review 3, M4: only the server's covers_population says the sample is the table, never a count alone.
+    assert.doesNotMatch(dataCheckedText({ rows: 25, source: "plan_sample", population_rows: 10 }), /holds every row/);
+    assert.match(dataCheckedText({ rows: 10, source: "preflight_sample", population_rows: 10, covers_population: true }), /all 10 rows of the table \(the Validate sample holds every row\)/);
   });
 });
 
@@ -75,6 +78,25 @@ describe("the gate line", () => {
     assert.equal(blocked.tone, "danger");
     assert.match(blocked.detail, /customers\.email/);
     assert.equal(gatePresentation({ require_reversibility: true, gate: { id: "g24_reversibility", status: "pass", message: "" } }).label, "Gate passes");
+  });
+
+  it("never shows a status it does not know as a pass (review 3)", () => {
+    for (const status of ["error", "", "pending"]) {
+      const shown = gatePresentation({ require_reversibility: true, gate: { id: "g24_reversibility", status: status as "pass", message: "" } });
+      assert.deepEqual([shown.label, shown.tone], ["Not evaluated", "muted"]);
+    }
+    assert.equal(gatePresentation({ require_reversibility: true, gate: undefined as never }).label, "Not evaluated");
+  });
+
+  it("words a conditional column enforced while writing or at Execute (review 3, M3)", () => {
+    const writing = { status: "fits" as const, rows_checked: 100, rows_not_fitting: 0, covers_population: false, enforcement: "while_writing" as const };
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: writing }), { label: "Enforced while writing", tone: "ok" });
+    assert.match(checkText(writing), /enforced while writing: every row is checked and the run stops on the first value that would change/);
+    const validate = { ...writing, enforcement: "at_execute" as const };
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: validate }), { label: "Enforced at Execute", tone: "ok" });
+    assert.equal(checkText(validate), "Checked on the sample (100 observed rows); enforced on every row at Execute.");
+    const inherited = { ...writing, enforcement: "unavailable" as const };
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: inherited }), { label: "Cannot be enforced", tone: "warn" });
   });
 });
 
@@ -152,13 +174,17 @@ describe("contract 11: a fit counts only over the whole table; new reason codes"
     const cols = realReversibilityReview2.tables[0].columns;
     const email = cols.find((c) => c.source === "email")!;
     assert.equal(email.check?.covers_population, false);
-    assert.deepEqual(columnPillPresentation(email), { label: "Fits sample only", tone: "warn" });
-    assert.match(checkText(email.check), /Fits the sample \(2 observed rows\), but Execute blocks it unless the whole table is checked/);
+    // Review 3 (M3): a run that must be reversible enforces it on every row at Execute.
+    assert.deepEqual(columnPillPresentation(email), { label: "Enforced at Execute", tone: "ok" });
+    const sampleOnly = { ...email, check: { ...email.check!, enforcement: undefined } };
+    assert.deepEqual(columnPillPresentation(sampleOnly), { label: "Fits sample only", tone: "warn" });
+    assert.match(checkText(sampleOnly.check), /Fits the sample \(2 observed rows\); rows not sampled are not proven/);
     const whole = { ...email, check: { ...email.check!, covers_population: true } };
     assert.deepEqual(columnPillPresentation(whole), { label: "Fits whole table", tone: "ok" });
     assert.match(checkText(whole.check), /the check covered the whole table/);
-    assert.match(dataCheckedText(realReversibilityReview2.data_checked), /2 observed rows of 3,000 from the plan sample/);
-    assert.match(dataCheckedText({ rows: 5, source: "preflight_sample", population_rows: 5 }), /all 5 rows of the table/);
+    // Review 3, M4: the plan's row_count_estimate is the client's, so no population is claimed.
+    assert.match(dataCheckedText(realReversibilityReview2.data_checked), /2 observed rows from the plan sample/);
+    assert.match(dataCheckedText({ rows: 5, source: "preflight_sample", population_rows: 5, covers_population: true }), /all 5 rows of the table/);
     assert.match(realReversibilityReview2.gate.message, /CONTACTS: source query/);
     assert.doesNotMatch(realReversibilityReview2.gate.message, /\(rows\)/);
   });
@@ -173,5 +199,17 @@ describe("contract 11: a fit counts only over the whole table; new reason codes"
     assert.equal(columnLabel(rows), "The table (read through a query)");
     assert.equal(columnReasonLabel({ reason_code: "row_change", transforms: ["skip_footer"] }), "Skipped trailing rows");
     assert.equal(realReversibilityReview2.tables[0].columns.find((c) => c.source === "name")!.reason_code, "byte_length");
+  });
+});
+
+describe("review 3: a real Validate report with a conditional column enforced at Execute", () => {
+  it("reads Enforced at Execute and says it is checked on the sample", async () => {
+    const { realReversibilityReview3 } = await import("../components/exit/realExitPayloads.js");
+    const email = realReversibilityReview3.tables[0].columns.find((c) => c.source === "email")!;
+    assert.equal(email.check?.enforcement, "at_execute");
+    assert.deepEqual(columnPillPresentation(email), { label: "Enforced at Execute", tone: "ok" });
+    assert.equal(checkText(email.check), "Checked on the sample (2 observed rows); enforced on every row at Execute.");
+    assert.equal(realReversibilityReview3.data_checked.covers_population, false);
+    assert.deepEqual(gatePresentation(realReversibilityReview3).label, "Gate passes");
   });
 });

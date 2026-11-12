@@ -71,7 +71,7 @@ describe("Reversibility tab (static)", () => {
     // Said once: the API's reason carries the data check, so the view does not repeat it.
     assert.equal(t.split("not proven for rows not sampled").length - 1, 1);
     assert.doesNotMatch(html, /df2-badge-live">Fits sample/);
-    assert.match(t, /Conditional columns were checked against 25 observed rows from the plan sample\. A sample never proves the full table: a conditional column that fits only the sample is blocked at Execute unless the whole table is checked\./);
+    assert.match(t, /Conditional columns were checked against 25 observed rows from the plan sample\. A sample never proves the full table: under Require reversibility a conditional column is checked on the sample here and enforced on every row while Execute writes\./);
   });
 
   it("the switch off: the gate is not required; on and not reversible: it blocks Execute", () => {

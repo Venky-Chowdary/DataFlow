@@ -20,19 +20,25 @@
  * the proven rehearsal that carries it, and a plan report whose conditional
  * column fits only the sample (covers_population false), with a source query
  * row change and an Oracle byte-length column.
+ *
+ * Since the third review fixes (contract 12): systems carry the PII hold an
+ * acknowledgement covers (pii_hold, pii_acknowledgement.covers), rehearsals say
+ * whether they still prove the current definition (current / stale_reason, with a
+ * stale rehearsal), and a plan report whose conditional column is checked on the
+ * sample and enforced on every row at Execute.
  */
 import type { ExitReadiness, ExitRehearsal, ExitSystem, ExitVerifyResult, RehearsalSummary, Trend } from "../../lib/exitReadiness";
 import type { ReversibilityReport } from "../../lib/reversibility";
 
 export const realBoard: ExitReadiness = {
-  "generated_at": "2026-11-11T22:01:33.378545Z",
+  "generated_at": "2026-11-12T01:39:08.267211Z",
   "kpis": {
-    "longest_measured_seconds": 0,
-    "longest_measured_system_id": "exs_4857369012ad",
+    "longest_measured_seconds": 1,
+    "longest_measured_system_id": "exs_bce599c1c2b2",
     "next_regulatory_date": {
       "date": "2027-01-12",
       "label": "Data Act switching charges end",
-      "system_id": "exs_4857369012ad"
+      "system_id": "exs_bce599c1c2b2"
     },
     "overdue": 0,
     "systems": 9,
@@ -44,12 +50,12 @@ export const realBoard: ExitReadiness = {
       "criticality": "important",
       "engine": "sqlite",
       "fits_window": null,
-      "id": "exs_d07c621a8dfe",
-      "last_rehearsal_at": "2026-11-11T22:01:32.331419Z",
-      "last_rehearsal_id": "exr_0f0738c160c0",
+      "id": "exs_5954d859dc03",
+      "last_rehearsal_at": "2026-11-12T01:39:05.620289Z",
+      "last_rehearsal_id": "exr_fe7f1ce7ce0f",
       "measured_seconds": 0,
       "name": "Billing",
-      "next_due_at": "2027-02-09T22:01:32.331419Z",
+      "next_due_at": "2027-02-10T01:39:05.620289Z",
       "overdue": false,
       "running_rehearsal_id": null,
       "stale": true,
@@ -62,12 +68,12 @@ export const realBoard: ExitReadiness = {
       "criticality": "critical",
       "engine": "sqlite",
       "fits_window": true,
-      "id": "exs_4857369012ad",
-      "last_rehearsal_at": "2026-11-11T22:01:28.592087Z",
-      "last_rehearsal_id": "exr_5367d6650e59",
-      "measured_seconds": 0,
+      "id": "exs_bce599c1c2b2",
+      "last_rehearsal_at": "2026-11-12T01:38:59.672251Z",
+      "last_rehearsal_id": "exr_14de9b944fc1",
+      "measured_seconds": 1,
       "name": "Core ledger",
-      "next_due_at": "2027-02-09T22:01:28.592087Z",
+      "next_due_at": "2027-02-10T01:38:59.672251Z",
       "overdue": false,
       "running_rehearsal_id": null,
       "stale": false,
@@ -80,12 +86,12 @@ export const realBoard: ExitReadiness = {
       "criticality": "standard",
       "engine": "sqlite",
       "fits_window": null,
-      "id": "exs_8a7b27a7a231",
-      "last_rehearsal_at": "2026-11-11T22:01:29.147168Z",
-      "last_rehearsal_id": "exr_11729acf41cc",
+      "id": "exs_045e6ec5ca56",
+      "last_rehearsal_at": "2026-11-12T01:39:01.020334Z",
+      "last_rehearsal_id": "exr_037298aad7f3",
       "measured_seconds": 0,
       "name": "CRM",
-      "next_due_at": "2027-02-09T22:01:29.147168Z",
+      "next_due_at": "2027-02-10T01:39:01.020334Z",
       "overdue": false,
       "running_rehearsal_id": null,
       "stale": false,
@@ -98,12 +104,12 @@ export const realBoard: ExitReadiness = {
       "criticality": "critical",
       "engine": "sqlite",
       "fits_window": true,
-      "id": "exs_9b601d1cc01b",
-      "last_rehearsal_at": "2026-11-11T22:01:31.865507Z",
-      "last_rehearsal_id": "exr_a4462206189d",
+      "id": "exs_bc05aa2ab318",
+      "last_rehearsal_at": "2026-11-12T01:39:04.799281Z",
+      "last_rehearsal_id": "exr_880f9f37e64c",
       "measured_seconds": 0,
       "name": "Customer master",
-      "next_due_at": "2027-02-09T22:01:31.865507Z",
+      "next_due_at": "2027-02-10T01:39:04.799281Z",
       "overdue": false,
       "running_rehearsal_id": null,
       "stale": false,
@@ -116,12 +122,12 @@ export const realBoard: ExitReadiness = {
       "criticality": "critical",
       "engine": "sqlite",
       "fits_window": true,
-      "id": "exs_bfaa393cbe77",
-      "last_rehearsal_at": "2026-11-11T22:01:33.129529Z",
-      "last_rehearsal_id": "exr_1811929347a3",
-      "measured_seconds": 0,
+      "id": "exs_f3c2784c966c",
+      "last_rehearsal_at": "2026-11-12T01:39:07.476614Z",
+      "last_rehearsal_id": "exr_ac482e4d03b9",
+      "measured_seconds": 1,
       "name": "HR people",
-      "next_due_at": "2027-02-09T22:01:33.129529Z",
+      "next_due_at": "2027-02-10T01:39:07.476614Z",
       "overdue": false,
       "running_rehearsal_id": null,
       "stale": false,
@@ -134,12 +140,12 @@ export const realBoard: ExitReadiness = {
       "criticality": "standard",
       "engine": "sqlite",
       "fits_window": null,
-      "id": "exs_1eee6b5eeb14",
-      "last_rehearsal_at": "2026-11-11T22:01:32.106809Z",
-      "last_rehearsal_id": "exr_27e65a0b33a0",
+      "id": "exs_4e2370aa438b",
+      "last_rehearsal_at": "2026-11-12T01:39:05.343579Z",
+      "last_rehearsal_id": "exr_d6446bcfacc2",
       "measured_seconds": 0,
       "name": "Notes archive",
-      "next_due_at": "2027-02-09T22:01:32.106809Z",
+      "next_due_at": "2027-02-10T01:39:05.343579Z",
       "overdue": false,
       "running_rehearsal_id": null,
       "stale": false,
@@ -152,12 +158,12 @@ export const realBoard: ExitReadiness = {
       "criticality": "important",
       "engine": "sqlite",
       "fits_window": null,
-      "id": "exs_8ed9f34da399",
-      "last_rehearsal_at": "2026-11-11T22:01:28.885903Z",
-      "last_rehearsal_id": "exr_1447baffd983",
+      "id": "exs_caa265b06cc8",
+      "last_rehearsal_at": "2026-11-12T01:39:00.466149Z",
+      "last_rehearsal_id": "exr_b3c3bc583b51",
       "measured_seconds": 0,
       "name": "Payments",
-      "next_due_at": "2027-02-09T22:01:28.885903Z",
+      "next_due_at": "2027-02-10T01:39:00.466149Z",
       "overdue": false,
       "running_rehearsal_id": null,
       "stale": false,
@@ -170,14 +176,14 @@ export const realBoard: ExitReadiness = {
       "criticality": "critical",
       "engine": "sqlite",
       "fits_window": null,
-      "id": "exs_be7956721598",
-      "last_rehearsal_at": "2026-11-11T22:01:32.600027Z",
-      "last_rehearsal_id": "exr_27bfefa5d35e",
+      "id": "exs_18cae43b6b93",
+      "last_rehearsal_at": "2026-11-12T01:39:06.204463Z",
+      "last_rehearsal_id": "exr_779644fab493",
       "measured_seconds": null,
       "name": "Running one",
-      "next_due_at": "2027-02-09T22:01:32.600027Z",
+      "next_due_at": "2027-02-10T01:39:06.204463Z",
       "overdue": false,
-      "running_rehearsal_id": "exr_27bfefa5d35e",
+      "running_rehearsal_id": "exr_779644fab493",
       "stale": false,
       "state": "running",
       "tables": 1,
@@ -188,12 +194,12 @@ export const realBoard: ExitReadiness = {
       "criticality": "critical",
       "engine": "sqlite",
       "fits_window": null,
-      "id": "exs_7c8c5532d507",
-      "last_rehearsal_at": "2026-11-11T22:01:29.393107Z",
-      "last_rehearsal_id": "exr_800ddd461348",
-      "measured_seconds": 2,
+      "id": "exs_4617d2dabe6b",
+      "last_rehearsal_at": "2026-11-12T01:39:01.617174Z",
+      "last_rehearsal_id": "exr_5353b7ee789e",
+      "measured_seconds": 3,
       "name": "Warehouse",
-      "next_due_at": "2027-02-09T22:01:29.393107Z",
+      "next_due_at": "2027-02-10T01:39:01.617174Z",
       "overdue": false,
       "running_rehearsal_id": null,
       "stale": false,
@@ -205,25 +211,26 @@ export const realBoard: ExitReadiness = {
 };
 
 export const realSystem: ExitSystem = {
-  "created_at": "2026-11-11T22:01:27.927883Z",
+  "created_at": "2026-11-12T01:38:56.531320Z",
   "created_by": "owner@example.com",
   "criticality": "critical",
   "description": "",
   "exit_window_hours": 720,
   "extract_format": "jsonl",
-  "id": "exs_4857369012ad",
+  "id": "exs_bce599c1c2b2",
   "name": "Core ledger",
   "pii_acknowledgement": null,
+  "pii_hold": null,
   "readiness": {
     "last_proven_rehearsal": {
       "current": true,
-      "finished_at": "2026-11-11T22:01:28.867452Z",
+      "finished_at": "2026-11-12T01:39:00.424284Z",
       "fits_window": true,
-      "id": "exr_5367d6650e59",
-      "measured_seconds": 0,
+      "id": "exr_14de9b944fc1",
+      "measured_seconds": 1,
       "n": 2,
       "signed": true,
-      "started_at": "2026-11-11T22:01:28.592087Z",
+      "started_at": "2026-11-12T01:38:59.672251Z",
       "tables_declared": 2,
       "tables_proven": 2,
       "total_bytes": 2818,
@@ -232,20 +239,20 @@ export const realSystem: ExitSystem = {
     },
     "last_rehearsal": {
       "current": true,
-      "finished_at": "2026-11-11T22:01:28.867452Z",
+      "finished_at": "2026-11-12T01:39:00.424284Z",
       "fits_window": true,
-      "id": "exr_5367d6650e59",
-      "measured_seconds": 0,
+      "id": "exr_14de9b944fc1",
+      "measured_seconds": 1,
       "n": 2,
       "signed": true,
-      "started_at": "2026-11-11T22:01:28.592087Z",
+      "started_at": "2026-11-12T01:38:59.672251Z",
       "tables_declared": 2,
       "tables_proven": 2,
       "total_bytes": 2818,
       "verdict": "proven",
       "window_seconds": 2592000
     },
-    "next_due_at": "2027-02-09T22:01:28.592087Z",
+    "next_due_at": "2027-02-10T01:38:59.672251Z",
     "overdue": false,
     "running_rehearsal_id": null,
     "stale": false,
@@ -283,7 +290,7 @@ export const realSystem: ExitSystem = {
       "schema": null
     }
   ],
-  "updated_at": "2026-11-11T22:01:27.927883Z",
+  "updated_at": "2026-11-12T01:38:56.531320Z",
   "updated_by": "owner@example.com",
   "version": 5,
   "window_basis": "EU Data Act switching window",
@@ -294,13 +301,13 @@ export const realRehearsals: { rehearsals: RehearsalSummary[]; trend: Trend } = 
   "rehearsals": [
     {
       "current": null,
-      "finished_at": "2026-11-11T22:01:28.867452Z",
+      "finished_at": "2026-11-12T01:39:00.424284Z",
       "fits_window": true,
-      "id": "exr_5367d6650e59",
-      "measured_seconds": 0,
+      "id": "exr_14de9b944fc1",
+      "measured_seconds": 1,
       "n": 2,
       "signed": true,
-      "started_at": "2026-11-11T22:01:28.592087Z",
+      "started_at": "2026-11-12T01:38:59.672251Z",
       "tables_declared": 2,
       "tables_proven": 2,
       "total_bytes": 2818,
@@ -309,13 +316,13 @@ export const realRehearsals: { rehearsals: RehearsalSummary[]; trend: Trend } = 
     },
     {
       "current": null,
-      "finished_at": "2026-11-11T22:01:28.587822Z",
+      "finished_at": "2026-11-12T01:38:59.657988Z",
       "fits_window": true,
-      "id": "exr_b6c9f4376ca5",
-      "measured_seconds": 0,
+      "id": "exr_5dc72d8d53a5",
+      "measured_seconds": 1,
       "n": 1,
       "signed": false,
-      "started_at": "2026-11-11T22:01:27.932386Z",
+      "started_at": "2026-11-12T01:38:58.286173Z",
       "tables_declared": 2,
       "tables_proven": 2,
       "total_bytes": 2818,
@@ -327,28 +334,28 @@ export const realRehearsals: { rehearsals: RehearsalSummary[]; trend: Trend } = 
     "growth_pct_rows": 0.0,
     "points": [
       {
-        "at": "2026-11-11T22:01:27.932386Z",
+        "at": "2026-11-12T01:38:58.286173Z",
         "bytes": 2818,
-        "measured_seconds": 0,
+        "measured_seconds": 1,
         "n": 1,
-        "rehearsal_id": "exr_b6c9f4376ca5",
+        "rehearsal_id": "exr_5dc72d8d53a5",
         "rows": 63,
         "verdict": "proven"
       },
       {
-        "at": "2026-11-11T22:01:28.592087Z",
+        "at": "2026-11-12T01:38:59.672251Z",
         "bytes": 2818,
-        "measured_seconds": 0,
+        "measured_seconds": 1,
         "n": 2,
-        "rehearsal_id": "exr_5367d6650e59",
+        "rehearsal_id": "exr_14de9b944fc1",
         "rows": 63,
         "verdict": "proven"
       }
     ],
     "projection": {
-      "basis": "Projection, not a measurement: rehearsal 2 measured 0 s for 63 rows; if the data grows again as it did since rehearsal 1 (63 rows), the next exit takes about 0 s.",
+      "basis": "Projection, not a measurement: rehearsal 2 measured 1 s for 63 rows; if the data grows again as it did since rehearsal 1 (63 rows), the next exit takes about 1 s.",
       "kind": "projection",
-      "seconds": 0
+      "seconds": 1
     }
   }
 };
@@ -373,25 +380,26 @@ export const realProven: ExitRehearsal = {
       "sampled": 0
     }
   },
-  "definition_sha256": "1b5f16e8664dd005b6e7908a2ac4143caf88a9df6e69a14ae2fbee8595ca5127",
+  "current": true,
+  "definition_sha256": "0f84ec8fc40910f9ef8263ac61c624e04f5ee46d163595a999e6b41707c5fa04",
   "duration": {
     "basis": "measured",
-    "extract_seconds": 0,
+    "extract_seconds": 1,
     "fits_window": true,
     "margin_pct": 100.0,
-    "measured_seconds": 0,
-    "statement": "Measured 0 s for 2,818 bytes (extract 0 s, verify 0 s) against a window of 720.0 h: this exit fits the window. The figure is measured, not projected.",
+    "measured_seconds": 1,
+    "statement": "Measured 1 s for 2,818 bytes (extract 1 s, verify 0 s) against a window of 720.0 h: this exit fits the window. The figure is measured, not projected.",
     "verify_seconds": 0,
     "window_seconds": 2592000
   },
   "evidence": {
     "anchor": null,
     "content_sha256": null,
-    "export": "/api/v1/exit/rehearsals/exr_5367d6650e59/evidence",
+    "export": "/api/v1/exit/rehearsals/exr_14de9b944fc1/evidence",
     "signed": false
   },
-  "finished_at": "2026-11-11T22:01:28.867452Z",
-  "id": "exr_5367d6650e59",
+  "finished_at": "2026-11-12T01:39:00.424284Z",
+  "id": "exr_14de9b944fc1",
   "n": 2,
   "pii_acknowledgement": null,
   "seal": {
@@ -399,7 +407,7 @@ export const realProven: ExitRehearsal = {
     "merkle_root": "sha256:46d0c7557b1ef6755c22ae599995ed8b33fe207828674f39cf13c0487bb2ef7d",
     "parts": [
       {
-        "name": "exit_exr_5367d6650e59_0000_orders.jsonl",
+        "name": "exit_exr_14de9b944fc1_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -409,7 +417,7 @@ export const realProven: ExitRehearsal = {
         "verified_on_read": true
       },
       {
-        "name": "exit_exr_5367d6650e59_0001_events.jsonl",
+        "name": "exit_exr_14de9b944fc1_0001_events.jsonl",
         "object_key": null,
         "sha256": "ac5873f24e420d2b64b1cb7be50ee55bf0618b29edd401761febb5f6cb485a47",
         "size_bytes": 71,
@@ -436,8 +444,9 @@ export const realProven: ExitRehearsal = {
     "signed_at": null,
     "status": "open"
   },
-  "started_at": "2026-11-11T22:01:28.592087Z",
-  "system_id": "exs_4857369012ad",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:38:59.672251Z",
+  "system_id": "exs_bce599c1c2b2",
   "system_name": "Core ledger",
   "tables": [
     {
@@ -474,8 +483,8 @@ export const realProven: ExitRehearsal = {
         }
       ],
       "differences": [],
-      "extract_seconds": 0.152,
-      "job_id": "6af4e5b8277708378a598847",
+      "extract_seconds": 0.568,
+      "job_id": "6af518b3b8526454d2d5a3e9",
       "key_columns": [
         "id"
       ],
@@ -486,7 +495,7 @@ export const realProven: ExitRehearsal = {
       },
       "name": "orders",
       "part": {
-        "name": "exit_exr_5367d6650e59_0000_orders.jsonl",
+        "name": "exit_exr_14de9b944fc1_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -495,6 +504,7 @@ export const realProven: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": true
       },
+      "pii_held": [],
       "reason": "Rows, key set, every value (by population digest) and control totals match over all 60 row(s); the part verified on read.",
       "row_set": {
         "extract_sha256": "dd7192488fc1fef0a1bdd78a6dda886ac25ad40d9125d341d1384e1d030e36ba",
@@ -508,7 +518,7 @@ export const realProven: ExitRehearsal = {
       "value_parity": {
         "method": "population_digest",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5b8277708378a598847/parity-report",
+        "report": "/api/v1/jobs/6af518b3b8526454d2d5a3e9/parity-report",
         "unexplained": 0
       }
     },
@@ -531,8 +541,8 @@ export const realProven: ExitRehearsal = {
         }
       ],
       "differences": [],
-      "extract_seconds": 0.094,
-      "job_id": "6af4e5b8277708378a598848",
+      "extract_seconds": 0.438,
+      "job_id": "6af518b3b8526454d2d5a3ea",
       "key_columns": [],
       "key_set": {
         "extract_sha256": null,
@@ -541,7 +551,7 @@ export const realProven: ExitRehearsal = {
       },
       "name": "events",
       "part": {
-        "name": "exit_exr_5367d6650e59_0001_events.jsonl",
+        "name": "exit_exr_14de9b944fc1_0001_events.jsonl",
         "object_key": null,
         "sha256": "ac5873f24e420d2b64b1cb7be50ee55bf0618b29edd401761febb5f6cb485a47",
         "size_bytes": 71,
@@ -550,6 +560,7 @@ export const realProven: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": true
       },
+      "pii_held": [],
       "reason": "Rows, every value (by population digest) and control totals match over all 3 row(s); the part verified on read.",
       "row_set": {
         "extract_sha256": "eb76c1445d7f89d6b45b5fb9396d281876db2ea30b1f27232f45ef9d6eb15a64",
@@ -563,38 +574,38 @@ export const realProven: ExitRehearsal = {
       "value_parity": {
         "method": "population_digest",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5b8277708378a598848/parity-report",
+        "report": "/api/v1/jobs/6af518b3b8526454d2d5a3ea/parity-report",
         "unexplained": 0
       }
     }
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:28.592087Z",
+      "finished_at": "2026-11-12T01:38:59.672251Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:28.592087Z",
+      "started_at": "2026-11-12T01:38:59.672251Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:28.757619Z",
-      "seconds": 0.142,
+      "finished_at": "2026-11-12T01:39:00.297617Z",
+      "seconds": 0.551,
       "stage": "extract",
-      "started_at": "2026-11-11T22:01:28.616087Z",
+      "started_at": "2026-11-12T01:38:59.746837Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:28.867452Z",
-      "seconds": 0.048,
+      "finished_at": "2026-11-12T01:39:00.424284Z",
+      "seconds": 0.062,
       "stage": "verify",
-      "started_at": "2026-11-11T22:01:28.819464Z",
+      "started_at": "2026-11-12T01:39:00.362157Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:28.867452Z",
+      "finished_at": "2026-11-12T01:39:00.424284Z",
       "seconds": 0.0,
       "stage": "seal",
-      "started_at": "2026-11-11T22:01:28.867452Z",
+      "started_at": "2026-11-12T01:39:00.424284Z",
       "status": "done"
     },
     {
@@ -609,28 +620,28 @@ export const realProven: ExitRehearsal = {
     "growth_pct_rows": 0.0,
     "points": [
       {
-        "at": "2026-11-11T22:01:27.932386Z",
+        "at": "2026-11-12T01:38:58.286173Z",
         "bytes": 2818,
-        "measured_seconds": 0,
+        "measured_seconds": 1,
         "n": 1,
-        "rehearsal_id": "exr_b6c9f4376ca5",
+        "rehearsal_id": "exr_5dc72d8d53a5",
         "rows": 63,
         "verdict": "proven"
       },
       {
-        "at": "2026-11-11T22:01:28.592087Z",
+        "at": "2026-11-12T01:38:59.672251Z",
         "bytes": 2818,
-        "measured_seconds": 0,
+        "measured_seconds": 1,
         "n": 2,
-        "rehearsal_id": "exr_5367d6650e59",
+        "rehearsal_id": "exr_14de9b944fc1",
         "rows": 63,
         "verdict": "proven"
       }
     ],
     "projection": {
-      "basis": "Projection, not a measurement: rehearsal 2 measured 0 s for 63 rows; if the data grows again as it did since rehearsal 1 (63 rows), the next exit takes about 0 s.",
+      "basis": "Projection, not a measurement: rehearsal 2 measured 1 s for 63 rows; if the data grows again as it did since rehearsal 1 (63 rows), the next exit takes about 1 s.",
       "kind": "projection",
-      "seconds": 0
+      "seconds": 1
     }
   },
   "trigger": "manual",
@@ -660,40 +671,41 @@ export const realSigned: ExitRehearsal = {
       "sampled": 0
     }
   },
-  "definition_sha256": "1b5f16e8664dd005b6e7908a2ac4143caf88a9df6e69a14ae2fbee8595ca5127",
+  "current": true,
+  "definition_sha256": "0f84ec8fc40910f9ef8263ac61c624e04f5ee46d163595a999e6b41707c5fa04",
   "duration": {
     "basis": "measured",
-    "extract_seconds": 0,
+    "extract_seconds": 1,
     "fits_window": true,
     "margin_pct": 100.0,
-    "measured_seconds": 0,
-    "statement": "Measured 0 s for 2,818 bytes (extract 0 s, verify 0 s) against a window of 720.0 h: this exit fits the window. The figure is measured, not projected.",
+    "measured_seconds": 1,
+    "statement": "Measured 1 s for 2,818 bytes (extract 1 s, verify 0 s) against a window of 720.0 h: this exit fits the window. The figure is measured, not projected.",
     "verify_seconds": 0,
     "window_seconds": 2592000
   },
   "evidence": {
     "anchor": {
       "anchored": false,
-      "anchored_at": "2026-11-11T22:01:28.878973+00:00",
-      "digest": "e9f4c5145575a8977f5a267f9cd2aa4cdf4febf7095c538d492bb9471a2d6510",
+      "anchored_at": "2026-11-12T01:39:00.448563+00:00",
+      "digest": "91a6de1b6aa3f8a0f9c78fed96776f81909d07fd6f010db24ed22fdd01008bc5",
       "event_time": null,
       "honesty": "Local stub anchor \u2014 not S3 Object Lock / RFC-3161 TSA, so not write-once: not anchored. Configure DATAFLOW_AUDIT_ANCHOR_PROVIDER=s3 with an Object Lock bucket.",
-      "id": "3a3248af-fb53-4f7f-81f4-134bda90d6f1",
+      "id": "ca52734f-e912-41a1-b87c-c86663d7f717",
       "kind": "exit_evidence",
       "location": null,
       "provider": "stub",
       "reason": "the local stub is not a write-once store",
       "retention": null,
       "status": "not_anchored",
-      "subject": "exit_evidence:exs_4857369012ad:exr_5367d6650e59",
-      "tip_hash": "e9f4c5145575a8977f5a267f9cd2aa4cdf4febf7095c538d492bb9471a2d6510"
+      "subject": "exit_evidence:exs_bce599c1c2b2:exr_14de9b944fc1",
+      "tip_hash": "91a6de1b6aa3f8a0f9c78fed96776f81909d07fd6f010db24ed22fdd01008bc5"
     },
-    "content_sha256": "e9f4c5145575a8977f5a267f9cd2aa4cdf4febf7095c538d492bb9471a2d6510",
-    "export": "/api/v1/exit/rehearsals/exr_5367d6650e59/evidence",
+    "content_sha256": "91a6de1b6aa3f8a0f9c78fed96776f81909d07fd6f010db24ed22fdd01008bc5",
+    "export": "/api/v1/exit/rehearsals/exr_14de9b944fc1/evidence",
     "signed": true
   },
-  "finished_at": "2026-11-11T22:01:28.867452Z",
-  "id": "exr_5367d6650e59",
+  "finished_at": "2026-11-12T01:39:00.424284Z",
+  "id": "exr_14de9b944fc1",
   "n": 2,
   "pii_acknowledgement": null,
   "seal": {
@@ -701,7 +713,7 @@ export const realSigned: ExitRehearsal = {
     "merkle_root": "sha256:46d0c7557b1ef6755c22ae599995ed8b33fe207828674f39cf13c0487bb2ef7d",
     "parts": [
       {
-        "name": "exit_exr_5367d6650e59_0000_orders.jsonl",
+        "name": "exit_exr_14de9b944fc1_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -711,7 +723,7 @@ export const realSigned: ExitRehearsal = {
         "verified_on_read": true
       },
       {
-        "name": "exit_exr_5367d6650e59_0001_events.jsonl",
+        "name": "exit_exr_14de9b944fc1_0001_events.jsonl",
         "object_key": null,
         "sha256": "ac5873f24e420d2b64b1cb7be50ee55bf0618b29edd401761febb5f6cb485a47",
         "size_bytes": 71,
@@ -728,9 +740,9 @@ export const realSigned: ExitRehearsal = {
   "signoff": {
     "approvals": [
       {
-        "at": "2026-11-11T22:01:28.871763Z",
+        "at": "2026-11-12T01:39:00.435378Z",
         "authority": "workspace admin",
-        "content_sha256": "c8c1f3b836b288e5dd0cde826ea3bb2c7aa0c6bdcdcaaf15dd0f6518cbd5dc9d",
+        "content_sha256": "4a39e29fd6e7233403d4fcddba8e5c2a74a72d06d7902f7b2271e100b6c78648",
         "note": "",
         "role": "engineering",
         "signer_role": "admin",
@@ -738,9 +750,9 @@ export const realSigned: ExitRehearsal = {
         "version": 4
       },
       {
-        "at": "2026-11-11T22:01:28.873765Z",
+        "at": "2026-11-12T01:39:00.437349Z",
         "authority": "workspace admin",
-        "content_sha256": "c8c1f3b836b288e5dd0cde826ea3bb2c7aa0c6bdcdcaaf15dd0f6518cbd5dc9d",
+        "content_sha256": "4a39e29fd6e7233403d4fcddba8e5c2a74a72d06d7902f7b2271e100b6c78648",
         "note": "",
         "role": "data_owner",
         "signer_role": "admin",
@@ -748,9 +760,9 @@ export const realSigned: ExitRehearsal = {
         "version": 5
       },
       {
-        "at": "2026-11-11T22:01:28.875610Z",
+        "at": "2026-11-12T01:39:00.445332Z",
         "authority": "workspace admin",
-        "content_sha256": "c8c1f3b836b288e5dd0cde826ea3bb2c7aa0c6bdcdcaaf15dd0f6518cbd5dc9d",
+        "content_sha256": "4a39e29fd6e7233403d4fcddba8e5c2a74a72d06d7902f7b2271e100b6c78648",
         "note": "",
         "role": "compliance",
         "signer_role": "admin",
@@ -765,12 +777,13 @@ export const realSigned: ExitRehearsal = {
       "data_owner",
       "compliance"
     ],
-    "signature": "hmac-sha256:5e4a9fb24b19b72d2af34141b0b01bf4b773b58eef594b77908649ae94407555",
-    "signed_at": "2026-11-11T22:01:28.875620Z",
+    "signature": "hmac-sha256:eb41b671f5c2533280a831846cc7e89fdddf7d21bd3c72ac118a90ddbb7522b4",
+    "signed_at": "2026-11-12T01:39:00.445342Z",
     "status": "signed"
   },
-  "started_at": "2026-11-11T22:01:28.592087Z",
-  "system_id": "exs_4857369012ad",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:38:59.672251Z",
+  "system_id": "exs_bce599c1c2b2",
   "system_name": "Core ledger",
   "tables": [
     {
@@ -807,8 +820,8 @@ export const realSigned: ExitRehearsal = {
         }
       ],
       "differences": [],
-      "extract_seconds": 0.152,
-      "job_id": "6af4e5b8277708378a598847",
+      "extract_seconds": 0.568,
+      "job_id": "6af518b3b8526454d2d5a3e9",
       "key_columns": [
         "id"
       ],
@@ -819,7 +832,7 @@ export const realSigned: ExitRehearsal = {
       },
       "name": "orders",
       "part": {
-        "name": "exit_exr_5367d6650e59_0000_orders.jsonl",
+        "name": "exit_exr_14de9b944fc1_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -828,6 +841,7 @@ export const realSigned: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": true
       },
+      "pii_held": [],
       "reason": "Rows, key set, every value (by population digest) and control totals match over all 60 row(s); the part verified on read.",
       "row_set": {
         "extract_sha256": "dd7192488fc1fef0a1bdd78a6dda886ac25ad40d9125d341d1384e1d030e36ba",
@@ -841,7 +855,7 @@ export const realSigned: ExitRehearsal = {
       "value_parity": {
         "method": "population_digest",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5b8277708378a598847/parity-report",
+        "report": "/api/v1/jobs/6af518b3b8526454d2d5a3e9/parity-report",
         "unexplained": 0
       }
     },
@@ -864,8 +878,8 @@ export const realSigned: ExitRehearsal = {
         }
       ],
       "differences": [],
-      "extract_seconds": 0.094,
-      "job_id": "6af4e5b8277708378a598848",
+      "extract_seconds": 0.438,
+      "job_id": "6af518b3b8526454d2d5a3ea",
       "key_columns": [],
       "key_set": {
         "extract_sha256": null,
@@ -874,7 +888,7 @@ export const realSigned: ExitRehearsal = {
       },
       "name": "events",
       "part": {
-        "name": "exit_exr_5367d6650e59_0001_events.jsonl",
+        "name": "exit_exr_14de9b944fc1_0001_events.jsonl",
         "object_key": null,
         "sha256": "ac5873f24e420d2b64b1cb7be50ee55bf0618b29edd401761febb5f6cb485a47",
         "size_bytes": 71,
@@ -883,6 +897,7 @@ export const realSigned: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": true
       },
+      "pii_held": [],
       "reason": "Rows, every value (by population digest) and control totals match over all 3 row(s); the part verified on read.",
       "row_set": {
         "extract_sha256": "eb76c1445d7f89d6b45b5fb9396d281876db2ea30b1f27232f45ef9d6eb15a64",
@@ -896,45 +911,45 @@ export const realSigned: ExitRehearsal = {
       "value_parity": {
         "method": "population_digest",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5b8277708378a598848/parity-report",
+        "report": "/api/v1/jobs/6af518b3b8526454d2d5a3ea/parity-report",
         "unexplained": 0
       }
     }
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:28.592087Z",
+      "finished_at": "2026-11-12T01:38:59.672251Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:28.592087Z",
+      "started_at": "2026-11-12T01:38:59.672251Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:28.757619Z",
-      "seconds": 0.142,
+      "finished_at": "2026-11-12T01:39:00.297617Z",
+      "seconds": 0.551,
       "stage": "extract",
-      "started_at": "2026-11-11T22:01:28.616087Z",
+      "started_at": "2026-11-12T01:38:59.746837Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:28.867452Z",
-      "seconds": 0.048,
+      "finished_at": "2026-11-12T01:39:00.424284Z",
+      "seconds": 0.062,
       "stage": "verify",
-      "started_at": "2026-11-11T22:01:28.819464Z",
+      "started_at": "2026-11-12T01:39:00.362157Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:28.867452Z",
+      "finished_at": "2026-11-12T01:39:00.424284Z",
       "seconds": 0.0,
       "stage": "seal",
-      "started_at": "2026-11-11T22:01:28.867452Z",
+      "started_at": "2026-11-12T01:39:00.424284Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:28.875620Z",
+      "finished_at": "2026-11-12T01:39:00.445342Z",
       "seconds": 0.0,
       "stage": "sign",
-      "started_at": "2026-11-11T22:01:28.875620Z",
+      "started_at": "2026-11-12T01:39:00.445342Z",
       "status": "done"
     }
   ],
@@ -942,28 +957,28 @@ export const realSigned: ExitRehearsal = {
     "growth_pct_rows": 0.0,
     "points": [
       {
-        "at": "2026-11-11T22:01:27.932386Z",
+        "at": "2026-11-12T01:38:58.286173Z",
         "bytes": 2818,
-        "measured_seconds": 0,
+        "measured_seconds": 1,
         "n": 1,
-        "rehearsal_id": "exr_b6c9f4376ca5",
+        "rehearsal_id": "exr_5dc72d8d53a5",
         "rows": 63,
         "verdict": "proven"
       },
       {
-        "at": "2026-11-11T22:01:28.592087Z",
+        "at": "2026-11-12T01:38:59.672251Z",
         "bytes": 2818,
-        "measured_seconds": 0,
+        "measured_seconds": 1,
         "n": 2,
-        "rehearsal_id": "exr_5367d6650e59",
+        "rehearsal_id": "exr_14de9b944fc1",
         "rows": 63,
         "verdict": "proven"
       }
     ],
     "projection": {
-      "basis": "Projection, not a measurement: rehearsal 2 measured 0 s for 63 rows; if the data grows again as it did since rehearsal 1 (63 rows), the next exit takes about 0 s.",
+      "basis": "Projection, not a measurement: rehearsal 2 measured 1 s for 63 rows; if the data grows again as it did since rehearsal 1 (63 rows), the next exit takes about 1 s.",
       "kind": "projection",
-      "seconds": 0
+      "seconds": 1
     }
   },
   "trigger": "manual",
@@ -993,7 +1008,8 @@ export const realIncomplete: ExitRehearsal = {
       "sampled": 0
     }
   },
-  "definition_sha256": "5b8b59cca0b59611edcb86e130cdd7d32d0cff9c890413599b4332a68c3fe3b7",
+  "current": true,
+  "definition_sha256": "0284c7c6d7683240bc0bd1e2de282732d4334ff9af14cc4bab1e96cc0756a10c",
   "duration": {
     "basis": "measured",
     "extract_seconds": 0,
@@ -1007,11 +1023,11 @@ export const realIncomplete: ExitRehearsal = {
   "evidence": {
     "anchor": null,
     "content_sha256": null,
-    "export": "/api/v1/exit/rehearsals/exr_1447baffd983/evidence",
+    "export": "/api/v1/exit/rehearsals/exr_b3c3bc583b51/evidence",
     "signed": false
   },
-  "finished_at": "2026-11-11T22:01:29.138761Z",
-  "id": "exr_1447baffd983",
+  "finished_at": "2026-11-12T01:39:01.002037Z",
+  "id": "exr_b3c3bc583b51",
   "n": 1,
   "pii_acknowledgement": null,
   "seal": {
@@ -1019,7 +1035,7 @@ export const realIncomplete: ExitRehearsal = {
     "merkle_root": "sha256:36c61d644152b69cd0d7138485893e63920113f5aee9e5c52b42e40641efbba1",
     "parts": [
       {
-        "name": "exit_exr_1447baffd983_0000_orders.jsonl",
+        "name": "exit_exr_b3c3bc583b51_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -1046,8 +1062,9 @@ export const realIncomplete: ExitRehearsal = {
     "signed_at": null,
     "status": "blocked"
   },
-  "started_at": "2026-11-11T22:01:28.885903Z",
-  "system_id": "exs_8ed9f34da399",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:39:00.466149Z",
+  "system_id": "exs_caa265b06cc8",
   "system_name": "Payments",
   "tables": [
     {
@@ -1109,8 +1126,8 @@ export const realIncomplete: ExitRehearsal = {
           "rows_at_least": false
         }
       ],
-      "extract_seconds": 0.125,
-      "job_id": "6af4e5b8277708378a598849",
+      "extract_seconds": 0.314,
+      "job_id": "6af518b4b8526454d2d5a3eb",
       "key_columns": [
         "id"
       ],
@@ -1121,7 +1138,7 @@ export const realIncomplete: ExitRehearsal = {
       },
       "name": "orders",
       "part": {
-        "name": "exit_exr_1447baffd983_0000_orders.jsonl",
+        "name": "exit_exr_b3c3bc583b51_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -1130,6 +1147,7 @@ export const realIncomplete: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": false
       },
+      "pii_held": [],
       "reason": "The stored part does not match the SHA-256 recorded when it was uploaded; The extract holds 1 row(s) fewer than the source; Control totals of amount differ; Control totals of id differ.",
       "row_set": {
         "extract_sha256": "e5eff841e775fc095fdbb2eb868126083b6f2901f960c335ad9942017e0dcfdd",
@@ -1143,38 +1161,38 @@ export const realIncomplete: ExitRehearsal = {
       "value_parity": {
         "method": "population_digest",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5b8277708378a598849/parity-report",
+        "report": "/api/v1/jobs/6af518b4b8526454d2d5a3eb/parity-report",
         "unexplained": 0
       }
     }
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:28.885903Z",
+      "finished_at": "2026-11-12T01:39:00.466149Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:28.885903Z",
+      "started_at": "2026-11-12T01:39:00.466149Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:29.022107Z",
-      "seconds": 0.114,
+      "finished_at": "2026-11-12T01:39:00.753361Z",
+      "seconds": 0.257,
       "stage": "extract",
-      "started_at": "2026-11-11T22:01:28.908381Z",
+      "started_at": "2026-11-12T01:39:00.495890Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:29.138761Z",
-      "seconds": 0.026,
+      "finished_at": "2026-11-12T01:39:01.002037Z",
+      "seconds": 0.092,
       "stage": "verify",
-      "started_at": "2026-11-11T22:01:29.112300Z",
+      "started_at": "2026-11-12T01:39:00.909768Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:29.138761Z",
+      "finished_at": "2026-11-12T01:39:01.002037Z",
       "seconds": 0.0,
       "stage": "seal",
-      "started_at": "2026-11-11T22:01:29.138761Z",
+      "started_at": "2026-11-12T01:39:01.002037Z",
       "status": "done"
     },
     {
@@ -1189,11 +1207,11 @@ export const realIncomplete: ExitRehearsal = {
     "growth_pct_rows": null,
     "points": [
       {
-        "at": "2026-11-11T22:01:28.885903Z",
+        "at": "2026-11-12T01:39:00.466149Z",
         "bytes": 2747,
         "measured_seconds": 0,
         "n": 1,
-        "rehearsal_id": "exr_1447baffd983",
+        "rehearsal_id": "exr_b3c3bc583b51",
         "rows": 59,
         "verdict": "incomplete"
       }
@@ -1227,7 +1245,8 @@ export const realNotProven: ExitRehearsal = {
       "sampled": 0
     }
   },
-  "definition_sha256": "5b8b59cca0b59611edcb86e130cdd7d32d0cff9c890413599b4332a68c3fe3b7",
+  "current": true,
+  "definition_sha256": "0284c7c6d7683240bc0bd1e2de282732d4334ff9af14cc4bab1e96cc0756a10c",
   "duration": {
     "basis": "measured",
     "extract_seconds": 0,
@@ -1241,11 +1260,11 @@ export const realNotProven: ExitRehearsal = {
   "evidence": {
     "anchor": null,
     "content_sha256": null,
-    "export": "/api/v1/exit/rehearsals/exr_11729acf41cc/evidence",
+    "export": "/api/v1/exit/rehearsals/exr_037298aad7f3/evidence",
     "signed": false
   },
-  "finished_at": "2026-11-11T22:01:29.386446Z",
-  "id": "exr_11729acf41cc",
+  "finished_at": "2026-11-12T01:39:01.592942Z",
+  "id": "exr_037298aad7f3",
   "n": 1,
   "pii_acknowledgement": null,
   "seal": {
@@ -1253,7 +1272,7 @@ export const realNotProven: ExitRehearsal = {
     "merkle_root": "sha256:36c61d644152b69cd0d7138485893e63920113f5aee9e5c52b42e40641efbba1",
     "parts": [
       {
-        "name": "exit_exr_11729acf41cc_0000_orders.jsonl",
+        "name": "exit_exr_037298aad7f3_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -1280,15 +1299,16 @@ export const realNotProven: ExitRehearsal = {
     "signed_at": null,
     "status": "blocked"
   },
-  "started_at": "2026-11-11T22:01:29.147168Z",
-  "system_id": "exs_8a7b27a7a231",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:39:01.020334Z",
+  "system_id": "exs_045e6ec5ca56",
   "system_name": "CRM",
   "tables": [
     {
       "control_totals": [],
       "differences": [],
-      "extract_seconds": 0.108,
-      "job_id": "6af4e5b9277708378a59884a",
+      "extract_seconds": 0.291,
+      "job_id": "6af518b5b8526454d2d5a3ec",
       "key_columns": [
         "id"
       ],
@@ -1299,7 +1319,7 @@ export const realNotProven: ExitRehearsal = {
       },
       "name": "orders",
       "part": {
-        "name": "exit_exr_11729acf41cc_0000_orders.jsonl",
+        "name": "exit_exr_037298aad7f3_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -1308,7 +1328,8 @@ export const realNotProven: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": true
       },
-      "reason": "Nothing differs where measured, but the source could not be re-read for a population digest (the read failed (RuntimeError): see the server log for the details. Reference c4e5d460b284486d96fa2a6d152ada31), so this table is not proven.",
+      "pii_held": [],
+      "reason": "Nothing differs where measured, but the source could not be re-read for a population digest (the read failed (RuntimeError): see the server log for the details. Reference eec11c7a9bd14c1f88691464eb27bde3), so this table is not proven.",
       "row_set": {
         "extract_sha256": "5d6dff9bdb1694d4530d5f03f62f64794cd77187947685f6930fe270336333ec",
         "match": null,
@@ -1321,38 +1342,38 @@ export const realNotProven: ExitRehearsal = {
       "value_parity": {
         "method": "count_only",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5b9277708378a59884a/parity-report",
+        "report": "/api/v1/jobs/6af518b5b8526454d2d5a3ec/parity-report",
         "unexplained": 0
       }
     }
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:29.147168Z",
+      "finished_at": "2026-11-12T01:39:01.020334Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:29.147168Z",
+      "started_at": "2026-11-12T01:39:01.020334Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:29.265995Z",
-      "seconds": 0.098,
+      "finished_at": "2026-11-12T01:39:01.298271Z",
+      "seconds": 0.236,
       "stage": "extract",
-      "started_at": "2026-11-11T22:01:29.167759Z",
+      "started_at": "2026-11-12T01:39:01.062060Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:29.386446Z",
-      "seconds": 0.015,
+      "finished_at": "2026-11-12T01:39:01.592942Z",
+      "seconds": 0.104,
       "stage": "verify",
-      "started_at": "2026-11-11T22:01:29.371672Z",
+      "started_at": "2026-11-12T01:39:01.488888Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:29.386446Z",
+      "finished_at": "2026-11-12T01:39:01.592942Z",
       "seconds": 0.0,
       "stage": "seal",
-      "started_at": "2026-11-11T22:01:29.386446Z",
+      "started_at": "2026-11-12T01:39:01.592942Z",
       "status": "done"
     },
     {
@@ -1367,11 +1388,11 @@ export const realNotProven: ExitRehearsal = {
     "growth_pct_rows": null,
     "points": [
       {
-        "at": "2026-11-11T22:01:29.147168Z",
+        "at": "2026-11-12T01:39:01.020334Z",
         "bytes": 2747,
         "measured_seconds": 0,
         "n": 1,
-        "rehearsal_id": "exr_11729acf41cc",
+        "rehearsal_id": "exr_037298aad7f3",
         "rows": 60,
         "verdict": "not_proven"
       }
@@ -1405,25 +1426,26 @@ export const realFailed: ExitRehearsal = {
       "sampled": 0
     }
   },
-  "definition_sha256": "80d9cb53423af2e10ea040a088e567539548ef33e69eb77578baa5d961d20eb8",
+  "current": true,
+  "definition_sha256": "5d6ad9cbc3363ca1f8c67c35d79346d00262f5994b36435c3dc351ff75ec7a7f",
   "duration": {
     "basis": "measured",
-    "extract_seconds": 2,
+    "extract_seconds": 3,
     "fits_window": null,
     "margin_pct": null,
-    "measured_seconds": 2,
-    "statement": "Measured 2 s (extract 2 s, verify 0 s), but the rehearsal is not proven (failed), so it is not compared with the window.",
+    "measured_seconds": 3,
+    "statement": "Measured 3 s (extract 3 s, verify 0 s), but the rehearsal is not proven (failed), so it is not compared with the window.",
     "verify_seconds": 0,
     "window_seconds": 2592000
   },
   "evidence": {
     "anchor": null,
     "content_sha256": null,
-    "export": "/api/v1/exit/rehearsals/exr_800ddd461348/evidence",
+    "export": "/api/v1/exit/rehearsals/exr_5353b7ee789e/evidence",
     "signed": false
   },
-  "finished_at": "2026-11-11T22:01:31.855000Z",
-  "id": "exr_800ddd461348",
+  "finished_at": "2026-11-12T01:39:04.700388Z",
+  "id": "exr_5353b7ee789e",
   "n": 1,
   "pii_acknowledgement": null,
   "seal": {
@@ -1431,7 +1453,7 @@ export const realFailed: ExitRehearsal = {
     "merkle_root": "sha256:36c61d644152b69cd0d7138485893e63920113f5aee9e5c52b42e40641efbba1",
     "parts": [
       {
-        "name": "exit_exr_800ddd461348_0000_orders.jsonl",
+        "name": "exit_exr_5353b7ee789e_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -1458,8 +1480,9 @@ export const realFailed: ExitRehearsal = {
     "signed_at": null,
     "status": "blocked"
   },
-  "started_at": "2026-11-11T22:01:29.393107Z",
-  "system_id": "exs_7c8c5532d507",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:39:01.617174Z",
+  "system_id": "exs_4617d2dabe6b",
   "system_name": "Warehouse",
   "tables": [
     {
@@ -1496,8 +1519,8 @@ export const realFailed: ExitRehearsal = {
         }
       ],
       "differences": [],
-      "extract_seconds": 0.135,
-      "job_id": "6af4e5b9277708378a59884b",
+      "extract_seconds": 0.316,
+      "job_id": "6af518b5b8526454d2d5a3ed",
       "key_columns": [
         "id"
       ],
@@ -1508,7 +1531,7 @@ export const realFailed: ExitRehearsal = {
       },
       "name": "orders",
       "part": {
-        "name": "exit_exr_800ddd461348_0000_orders.jsonl",
+        "name": "exit_exr_5353b7ee789e_0000_orders.jsonl",
         "object_key": null,
         "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
         "size_bytes": 2747,
@@ -1517,6 +1540,7 @@ export const realFailed: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": true
       },
+      "pii_held": [],
       "reason": "Rows, key set, every value (by population digest) and control totals match over all 60 row(s); the part verified on read.",
       "row_set": {
         "extract_sha256": "dd7192488fc1fef0a1bdd78a6dda886ac25ad40d9125d341d1384e1d030e36ba",
@@ -1530,7 +1554,7 @@ export const realFailed: ExitRehearsal = {
       "value_parity": {
         "method": "population_digest",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5b9277708378a59884b/parity-report",
+        "report": "/api/v1/jobs/6af518b5b8526454d2d5a3ed/parity-report",
         "unexplained": 0
       }
     },
@@ -1538,7 +1562,7 @@ export const realFailed: ExitRehearsal = {
       "control_totals": [],
       "differences": [],
       "extract_seconds": null,
-      "job_id": "6af4e5b9277708378a59884c",
+      "job_id": "6af518b5b8526454d2d5a3ee",
       "key_columns": [],
       "key_set": {
         "extract_sha256": null,
@@ -1547,7 +1571,8 @@ export const realFailed: ExitRehearsal = {
       },
       "name": "no_such_table",
       "part": null,
-      "reason": "The extract job 6af4e5b9277708378a59884c failed: see the server log for the details. Reference 8cbee4fdfd954114b4d847650c434275.",
+      "pii_held": [],
+      "reason": "The extract job 6af518b5b8526454d2d5a3ee failed: see the server log for the details. Reference 470fbe9a762a4a6ba89d22f154b0df90.",
       "row_set": {
         "extract_sha256": null,
         "match": null,
@@ -1560,38 +1585,38 @@ export const realFailed: ExitRehearsal = {
       "value_parity": {
         "method": "none",
         "parity_verdict": null,
-        "report": "/api/v1/jobs/6af4e5b9277708378a59884c/parity-report",
+        "report": "/api/v1/jobs/6af518b5b8526454d2d5a3ee/parity-report",
         "unexplained": null
       }
     }
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:29.393107Z",
+      "finished_at": "2026-11-12T01:39:01.617174Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:29.393107Z",
+      "started_at": "2026-11-12T01:39:01.617174Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:31.686026Z",
-      "seconds": 2.275,
+      "finished_at": "2026-11-12T01:39:04.610510Z",
+      "seconds": 2.92,
       "stage": "extract",
-      "started_at": "2026-11-11T22:01:29.411422Z",
+      "started_at": "2026-11-12T01:39:01.690800Z",
       "status": "failed"
     },
     {
-      "finished_at": "2026-11-11T22:01:31.855000Z",
-      "seconds": 0.031,
+      "finished_at": "2026-11-12T01:39:04.700388Z",
+      "seconds": 0.066,
       "stage": "verify",
-      "started_at": "2026-11-11T22:01:31.824485Z",
+      "started_at": "2026-11-12T01:39:04.634304Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:31.855000Z",
+      "finished_at": "2026-11-12T01:39:04.700388Z",
       "seconds": 0.0,
       "stage": "seal",
-      "started_at": "2026-11-11T22:01:31.855000Z",
+      "started_at": "2026-11-12T01:39:04.700388Z",
       "status": "done"
     },
     {
@@ -1606,11 +1631,11 @@ export const realFailed: ExitRehearsal = {
     "growth_pct_rows": null,
     "points": [
       {
-        "at": "2026-11-11T22:01:29.393107Z",
+        "at": "2026-11-12T01:39:01.617174Z",
         "bytes": 2747,
-        "measured_seconds": 2,
+        "measured_seconds": 3,
         "n": 1,
-        "rehearsal_id": "exr_800ddd461348",
+        "rehearsal_id": "exr_5353b7ee789e",
         "rows": 60,
         "verdict": "failed"
       }
@@ -1637,7 +1662,8 @@ export const realRunning: ExitRehearsal = {
     "tables_proven": 0,
     "value_methods": {}
   },
-  "definition_sha256": "5b8b59cca0b59611edcb86e130cdd7d32d0cff9c890413599b4332a68c3fe3b7",
+  "current": true,
+  "definition_sha256": "0284c7c6d7683240bc0bd1e2de282732d4334ff9af14cc4bab1e96cc0756a10c",
   "duration": {
     "basis": "measured",
     "extract_seconds": null,
@@ -1651,11 +1677,11 @@ export const realRunning: ExitRehearsal = {
   "evidence": {
     "anchor": null,
     "content_sha256": null,
-    "export": "/api/v1/exit/rehearsals/exr_27bfefa5d35e/evidence",
+    "export": "/api/v1/exit/rehearsals/exr_779644fab493/evidence",
     "signed": false
   },
   "finished_at": null,
-  "id": "exr_27bfefa5d35e",
+  "id": "exr_779644fab493",
   "n": 1,
   "pii_acknowledgement": null,
   "seal": {
@@ -1679,15 +1705,16 @@ export const realRunning: ExitRehearsal = {
     "signed_at": null,
     "status": "blocked"
   },
-  "started_at": "2026-11-11T22:01:32.600027Z",
-  "system_id": "exs_be7956721598",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:39:06.204463Z",
+  "system_id": "exs_18cae43b6b93",
   "system_name": "Running one",
   "tables": [
     {
       "control_totals": [],
       "differences": [],
       "extract_seconds": null,
-      "job_id": "6af4e5bc277708378a598850",
+      "job_id": "6af518bab8526454d2d5a3f2",
       "key_columns": [
         "id"
       ],
@@ -1698,6 +1725,7 @@ export const realRunning: ExitRehearsal = {
       },
       "name": "orders",
       "part": null,
+      "pii_held": [],
       "reason": "Extracting (pending).",
       "row_set": {
         "extract_sha256": null,
@@ -1718,10 +1746,10 @@ export const realRunning: ExitRehearsal = {
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:32.600027Z",
+      "finished_at": "2026-11-12T01:39:06.204463Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:32.600027Z",
+      "started_at": "2026-11-12T01:39:06.204463Z",
       "status": "done"
     },
     {
@@ -1785,7 +1813,8 @@ export const realMasked: ExitRehearsal = {
       "sampled": 0
     }
   },
-  "definition_sha256": "ec3674709db42092bf1db4ab3d121fe84084b24655d9d28eb7a06c63492c3814",
+  "current": true,
+  "definition_sha256": "52ba54949f382ce50abd8c123e0923f5dec8847391374acde85713363c16128e",
   "duration": {
     "basis": "measured",
     "extract_seconds": 0,
@@ -1799,11 +1828,11 @@ export const realMasked: ExitRehearsal = {
   "evidence": {
     "anchor": null,
     "content_sha256": null,
-    "export": "/api/v1/exit/rehearsals/exr_a4462206189d/evidence",
+    "export": "/api/v1/exit/rehearsals/exr_880f9f37e64c/evidence",
     "signed": false
   },
-  "finished_at": "2026-11-11T22:01:32.098168Z",
-  "id": "exr_a4462206189d",
+  "finished_at": "2026-11-12T01:39:05.280558Z",
+  "id": "exr_880f9f37e64c",
   "n": 1,
   "pii_acknowledgement": null,
   "seal": {
@@ -1811,7 +1840,7 @@ export const realMasked: ExitRehearsal = {
     "merkle_root": "sha256:c678f87a3ffc0085212a42aa1aaa6395b6dae7830cb626202b75386d4300edde",
     "parts": [
       {
-        "name": "exit_exr_a4462206189d_0000_customers.jsonl",
+        "name": "exit_exr_880f9f37e64c_0000_customers.jsonl",
         "object_key": null,
         "sha256": "2738dd048706091ad8eea58759f853d5752f4e7bf1523459defc68453f5c2800",
         "size_bytes": 821,
@@ -1838,8 +1867,9 @@ export const realMasked: ExitRehearsal = {
     "signed_at": null,
     "status": "open"
   },
-  "started_at": "2026-11-11T22:01:31.865507Z",
-  "system_id": "exs_9b601d1cc01b",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:39:04.799281Z",
+  "system_id": "exs_bc05aa2ab318",
   "system_name": "Customer master",
   "tables": [
     {
@@ -1891,8 +1921,8 @@ export const realMasked: ExitRehearsal = {
         }
       ],
       "differences": [],
-      "extract_seconds": 0.063,
-      "job_id": "6af4e5bb277708378a59884d",
+      "extract_seconds": 0.199,
+      "job_id": "6af518b8b8526454d2d5a3ef",
       "key_columns": [
         "id"
       ],
@@ -1903,7 +1933,7 @@ export const realMasked: ExitRehearsal = {
       },
       "name": "customers",
       "part": {
-        "name": "exit_exr_a4462206189d_0000_customers.jsonl",
+        "name": "exit_exr_880f9f37e64c_0000_customers.jsonl",
         "object_key": null,
         "sha256": "2738dd048706091ad8eea58759f853d5752f4e7bf1523459defc68453f5c2800",
         "size_bytes": 821,
@@ -1912,6 +1942,7 @@ export const realMasked: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": true
       },
+      "pii_held": [],
       "reason": "Rows, key set, every value (by population digest) and control totals match over all 20 row(s); the part verified on read.",
       "row_set": {
         "extract_sha256": "d2f28df0eb17177d307273fd9b4bf60e20a897132478f781711cd7416e3a8c97",
@@ -1925,38 +1956,38 @@ export const realMasked: ExitRehearsal = {
       "value_parity": {
         "method": "population_digest",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5bb277708378a59884d/parity-report",
+        "report": "/api/v1/jobs/6af518b8b8526454d2d5a3ef/parity-report",
         "unexplained": 0
       }
     }
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:31.865507Z",
+      "finished_at": "2026-11-12T01:39:04.799281Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:31.865507Z",
+      "started_at": "2026-11-12T01:39:04.799281Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:31.936724Z",
-      "seconds": 0.058,
+      "finished_at": "2026-11-12T01:39:05.094663Z",
+      "seconds": 0.186,
       "stage": "extract",
-      "started_at": "2026-11-11T22:01:31.878712Z",
+      "started_at": "2026-11-12T01:39:04.908327Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:32.098168Z",
-      "seconds": 0.016,
+      "finished_at": "2026-11-12T01:39:05.280558Z",
+      "seconds": 0.035,
       "stage": "verify",
-      "started_at": "2026-11-11T22:01:32.082292Z",
+      "started_at": "2026-11-12T01:39:05.245262Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:32.098168Z",
+      "finished_at": "2026-11-12T01:39:05.280558Z",
       "seconds": 0.0,
       "stage": "seal",
-      "started_at": "2026-11-11T22:01:32.098168Z",
+      "started_at": "2026-11-12T01:39:05.280558Z",
       "status": "done"
     },
     {
@@ -1971,11 +2002,11 @@ export const realMasked: ExitRehearsal = {
     "growth_pct_rows": null,
     "points": [
       {
-        "at": "2026-11-11T22:01:31.865507Z",
+        "at": "2026-11-12T01:39:04.799281Z",
         "bytes": 821,
         "measured_seconds": 0,
         "n": 1,
-        "rehearsal_id": "exr_a4462206189d",
+        "rehearsal_id": "exr_880f9f37e64c",
         "rows": 20,
         "verdict": "proven"
       }
@@ -2009,7 +2040,8 @@ export const realUnprovable: ExitRehearsal = {
       "sampled": 0
     }
   },
-  "definition_sha256": "f90f788aa48387bdd22148724e98fbd6daf550195bc46bb483f51a2905a9ae13",
+  "current": true,
+  "definition_sha256": "cc31ba14b33f57a704a88d100f69539263f8ec07fd8ffed4e2397d6b9f0beb41",
   "duration": {
     "basis": "measured",
     "extract_seconds": 0,
@@ -2023,11 +2055,11 @@ export const realUnprovable: ExitRehearsal = {
   "evidence": {
     "anchor": null,
     "content_sha256": null,
-    "export": "/api/v1/exit/rehearsals/exr_27e65a0b33a0/evidence",
+    "export": "/api/v1/exit/rehearsals/exr_d6446bcfacc2/evidence",
     "signed": false
   },
-  "finished_at": "2026-11-11T22:01:32.323847Z",
-  "id": "exr_27e65a0b33a0",
+  "finished_at": "2026-11-12T01:39:05.595750Z",
+  "id": "exr_d6446bcfacc2",
   "n": 1,
   "pii_acknowledgement": null,
   "seal": {
@@ -2035,7 +2067,7 @@ export const realUnprovable: ExitRehearsal = {
     "merkle_root": "sha256:7147b7cfdae6c569a288affb7862d0f7946634a16a2c184646fc72214ec4d4af",
     "parts": [
       {
-        "name": "exit_exr_27e65a0b33a0_0000_notes.jsonl",
+        "name": "exit_exr_d6446bcfacc2_0000_notes.jsonl",
         "object_key": null,
         "sha256": "4762bd3dd3496d2b5c6af92b7e1d7fb429dcdb830aa854fb75a20d1d7fdff3b7",
         "size_bytes": 154,
@@ -2062,8 +2094,9 @@ export const realUnprovable: ExitRehearsal = {
     "signed_at": null,
     "status": "blocked"
   },
-  "started_at": "2026-11-11T22:01:32.106809Z",
-  "system_id": "exs_1eee6b5eeb14",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:39:05.343579Z",
+  "system_id": "exs_4e2370aa438b",
   "system_name": "Notes archive",
   "tables": [
     {
@@ -2085,8 +2118,8 @@ export const realUnprovable: ExitRehearsal = {
         }
       ],
       "differences": [],
-      "extract_seconds": 0.034,
-      "job_id": "6af4e5bc277708378a59884e",
+      "extract_seconds": 0.139,
+      "job_id": "6af518b9b8526454d2d5a3f0",
       "key_columns": [
         "id"
       ],
@@ -2097,7 +2130,7 @@ export const realUnprovable: ExitRehearsal = {
       },
       "name": "notes",
       "part": {
-        "name": "exit_exr_27e65a0b33a0_0000_notes.jsonl",
+        "name": "exit_exr_d6446bcfacc2_0000_notes.jsonl",
         "object_key": null,
         "sha256": "4762bd3dd3496d2b5c6af92b7e1d7fb429dcdb830aa854fb75a20d1d7fdff3b7",
         "size_bytes": 154,
@@ -2106,6 +2139,7 @@ export const realUnprovable: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": true
       },
+      "pii_held": [],
       "reason": "Nothing differs where measured, but payload has no declared type, so its values could not be compared exactly, so this table is not proven.",
       "row_set": {
         "extract_sha256": "84c505b86c28139d7503a69f14beeb846ec9bc9be3ed7ff4af4a05667ddd5072",
@@ -2119,38 +2153,38 @@ export const realUnprovable: ExitRehearsal = {
       "value_parity": {
         "method": "population_digest",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5bc277708378a59884e/parity-report",
+        "report": "/api/v1/jobs/6af518b9b8526454d2d5a3f0/parity-report",
         "unexplained": 0
       }
     }
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:32.106809Z",
+      "finished_at": "2026-11-12T01:39:05.343579Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:32.106809Z",
+      "started_at": "2026-11-12T01:39:05.343579Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:32.146957Z",
-      "seconds": 0.031,
+      "finished_at": "2026-11-12T01:39:05.500662Z",
+      "seconds": 0.129,
       "stage": "extract",
-      "started_at": "2026-11-11T22:01:32.116315Z",
+      "started_at": "2026-11-12T01:39:05.371232Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:32.323847Z",
-      "seconds": 0.006,
+      "finished_at": "2026-11-12T01:39:05.595750Z",
+      "seconds": 0.024,
       "stage": "verify",
-      "started_at": "2026-11-11T22:01:32.317739Z",
+      "started_at": "2026-11-12T01:39:05.571841Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:32.323847Z",
+      "finished_at": "2026-11-12T01:39:05.595750Z",
       "seconds": 0.0,
       "stage": "seal",
-      "started_at": "2026-11-11T22:01:32.323847Z",
+      "started_at": "2026-11-12T01:39:05.595750Z",
       "status": "done"
     },
     {
@@ -2165,11 +2199,11 @@ export const realUnprovable: ExitRehearsal = {
     "growth_pct_rows": null,
     "points": [
       {
-        "at": "2026-11-11T22:01:32.106809Z",
+        "at": "2026-11-12T01:39:05.343579Z",
         "bytes": 154,
         "measured_seconds": 0,
         "n": 1,
-        "rehearsal_id": "exr_27e65a0b33a0",
+        "rehearsal_id": "exr_d6446bcfacc2",
         "rows": 5,
         "verdict": "not_proven"
       }
@@ -2184,25 +2218,26 @@ export const realUnprovable: ExitRehearsal = {
 };
 
 export const realSystemStale: ExitSystem = {
-  "created_at": "2026-11-11T22:01:32.327984Z",
+  "created_at": "2026-11-12T01:39:05.606252Z",
   "created_by": "owner@example.com",
   "criticality": "important",
   "description": "",
   "exit_window_hours": 48,
   "extract_format": "jsonl",
-  "id": "exs_d07c621a8dfe",
+  "id": "exs_5954d859dc03",
   "name": "Billing",
   "pii_acknowledgement": null,
+  "pii_hold": null,
   "readiness": {
     "last_proven_rehearsal": {
       "current": false,
-      "finished_at": "2026-11-11T22:01:32.586975Z",
+      "finished_at": "2026-11-12T01:39:06.172269Z",
       "fits_window": true,
-      "id": "exr_0f0738c160c0",
+      "id": "exr_fe7f1ce7ce0f",
       "measured_seconds": 0,
       "n": 1,
       "signed": false,
-      "started_at": "2026-11-11T22:01:32.331419Z",
+      "started_at": "2026-11-12T01:39:05.620289Z",
       "tables_declared": 1,
       "tables_proven": 1,
       "total_bytes": 2747,
@@ -2211,20 +2246,20 @@ export const realSystemStale: ExitSystem = {
     },
     "last_rehearsal": {
       "current": false,
-      "finished_at": "2026-11-11T22:01:32.586975Z",
+      "finished_at": "2026-11-12T01:39:06.172269Z",
       "fits_window": true,
-      "id": "exr_0f0738c160c0",
+      "id": "exr_fe7f1ce7ce0f",
       "measured_seconds": 0,
       "n": 1,
       "signed": false,
-      "started_at": "2026-11-11T22:01:32.331419Z",
+      "started_at": "2026-11-12T01:39:05.620289Z",
       "tables_declared": 1,
       "tables_proven": 1,
       "total_bytes": 2747,
       "verdict": "proven",
       "window_seconds": 2592000
     },
-    "next_due_at": "2027-02-09T22:01:32.331419Z",
+    "next_due_at": "2027-02-10T01:39:05.620289Z",
     "overdue": false,
     "running_rehearsal_id": null,
     "stale": true,
@@ -2252,7 +2287,7 @@ export const realSystemStale: ExitSystem = {
       "schema": null
     }
   ],
-  "updated_at": "2026-11-11T22:01:32.593134Z",
+  "updated_at": "2026-11-12T01:39:06.179164Z",
   "updated_by": "owner@example.com",
   "version": 4,
   "window_basis": "",
@@ -2260,35 +2295,36 @@ export const realSystemStale: ExitSystem = {
 };
 
 export const realSystemRunning: ExitSystem = {
-  "created_at": "2026-11-11T22:01:32.596117Z",
+  "created_at": "2026-11-12T01:39:06.191835Z",
   "created_by": "owner@example.com",
   "criticality": "critical",
   "description": "",
   "exit_window_hours": 720,
   "extract_format": "jsonl",
-  "id": "exs_be7956721598",
+  "id": "exs_18cae43b6b93",
   "name": "Running one",
   "pii_acknowledgement": null,
+  "pii_hold": null,
   "readiness": {
     "last_proven_rehearsal": null,
     "last_rehearsal": {
       "current": true,
       "finished_at": null,
       "fits_window": null,
-      "id": "exr_27bfefa5d35e",
+      "id": "exr_779644fab493",
       "measured_seconds": null,
       "n": 1,
       "signed": false,
-      "started_at": "2026-11-11T22:01:32.600027Z",
+      "started_at": "2026-11-12T01:39:06.204463Z",
       "tables_declared": 1,
       "tables_proven": 0,
       "total_bytes": null,
       "verdict": "running",
       "window_seconds": 2592000
     },
-    "next_due_at": "2027-02-09T22:01:32.600027Z",
+    "next_due_at": "2027-02-10T01:39:06.204463Z",
     "overdue": false,
-    "running_rehearsal_id": "exr_27bfefa5d35e",
+    "running_rehearsal_id": "exr_779644fab493",
     "stale": false,
     "stale_reason": null,
     "state": "running"
@@ -2301,7 +2337,7 @@ export const realSystemRunning: ExitSystem = {
     "data_owner",
     "compliance"
   ],
-  "running_rehearsal_id": "exr_27bfefa5d35e",
+  "running_rehearsal_id": "exr_779644fab493",
   "source": {
     "connector_id": "c1",
     "connector_name": "ledger",
@@ -2314,7 +2350,7 @@ export const realSystemRunning: ExitSystem = {
       "schema": null
     }
   ],
-  "updated_at": "2026-11-11T22:01:32.596117Z",
+  "updated_at": "2026-11-12T01:39:06.191835Z",
   "updated_by": "owner@example.com",
   "version": 2,
   "window_basis": "",
@@ -2324,10 +2360,12 @@ export const realSystemRunning: ExitSystem = {
 export const realReversibilityCodes: ReversibilityReport = {
   "counts": {
     "conditional": 2,
+    "enforced": 0,
     "invertible": 1,
     "lossy": 5
   },
   "data_checked": {
+    "covers_population": false,
     "population_rows": null,
     "rows": 2,
     "source": "plan_sample"
@@ -2337,7 +2375,7 @@ export const realReversibilityCodes: ReversibilityReport = {
     "message": "This transfer must be reversible, and it is not: events: top rows only, row cap, source filter; events.created_at; events.payload; events.code; events.span. Remove the lossy transform, widen the destination, or turn off require reversibility.",
     "status": "block"
   },
-  "generated_at": "2026-11-11T22:01:33.393297Z",
+  "generated_at": "2026-11-12T01:39:08.346735Z",
   "lossy_columns": [
     {
       "column": "created_at",
@@ -2413,6 +2451,7 @@ export const realReversibilityCodes: ReversibilityReport = {
         {
           "check": {
             "covers_population": false,
+            "enforcement": "at_execute",
             "rows_checked": 2,
             "rows_not_fitting": 1,
             "status": "does_not_fit"
@@ -2429,6 +2468,7 @@ export const realReversibilityCodes: ReversibilityReport = {
         {
           "check": {
             "covers_population": false,
+            "enforcement": "at_execute",
             "rows_checked": 2,
             "rows_not_fitting": 1,
             "status": "does_not_fit"
@@ -2496,10 +2536,12 @@ export const realReversibilityCodes: ReversibilityReport = {
 export const realReversibilityEnum: ReversibilityReport = {
   "counts": {
     "conditional": 1,
+    "enforced": 0,
     "invertible": 1,
     "lossy": 0
   },
   "data_checked": {
+    "covers_population": false,
     "population_rows": null,
     "rows": 2,
     "source": "plan_sample"
@@ -2509,7 +2551,7 @@ export const realReversibilityEnum: ReversibilityReport = {
     "message": "Reversibility is not required for this transfer; the analysis is shown for review.",
     "status": "skip"
   },
-  "generated_at": "2026-11-11T22:01:33.394024Z",
+  "generated_at": "2026-11-12T01:39:08.347633Z",
   "lossy_columns": [],
   "require_reversibility": false,
   "rollback_note": "tickets needs the source kept as the fallback until sign-off.",
@@ -2537,7 +2579,7 @@ export const realReversibilityEnum: ReversibilityReport = {
             "status": "fits"
           },
           "invertibility": "conditional",
-          "reason": "state is cast varchar(10) to enum('open','closed'); reversible only if every value is one of its labels; it fits the sample (2 observed value(s) round-trip), but will be blocked at Execute unless the whole table is checked (rows not sampled are not proven).",
+          "reason": "state is cast varchar(10) to enum('open','closed'); reversible only if every value is one of its labels; it fits the sample (2 observed value(s) round-trip); rows not sampled are not proven (under require reversibility every row is checked while writing).",
           "reason_code": "enum",
           "source": "state",
           "source_type": "varchar(10)",
@@ -2547,7 +2589,7 @@ export const realReversibilityEnum: ReversibilityReport = {
         }
       ],
       "name": "tickets",
-      "reason": "state is cast varchar(10) to enum('open','closed'); reversible only if every value is one of its labels; it fits the sample (2 observed value(s) round-trip), but will be blocked at Execute unless the whole table is checked (rows not sampled are not proven).",
+      "reason": "state is cast varchar(10) to enum('open','closed'); reversible only if every value is one of its labels; it fits the sample (2 observed value(s) round-trip); rows not sampled are not proven (under require reversibility every row is checked while writing).",
       "rollback": "keep_source_as_fallback",
       "rollback_note": "tickets needs the source kept as the fallback until sign-off.",
       "verdict": "partly_reversible"
@@ -2559,14 +2601,14 @@ export const realReversibilityEnum: ReversibilityReport = {
 
 export const realVerify: ExitVerifyResult = {
   "anchor": {
-    "checked_at": "2026-11-11T22:01:28.883325+00:00",
-    "digest": "e9f4c5145575a8977f5a267f9cd2aa4cdf4febf7095c538d492bb9471a2d6510",
+    "checked_at": "2026-11-12T01:39:00.459485+00:00",
+    "digest": "91a6de1b6aa3f8a0f9c78fed96776f81909d07fd6f010db24ed22fdd01008bc5",
     "provider": "stub",
     "reason": "the local stub is not a write-once store",
     "retention": null,
     "status": "not_anchored"
   },
-  "content_sha256": "e9f4c5145575a8977f5a267f9cd2aa4cdf4febf7095c538d492bb9471a2d6510",
+  "content_sha256": "91a6de1b6aa3f8a0f9c78fed96776f81909d07fd6f010db24ed22fdd01008bc5",
   "errors": [],
   "kind": "exit_evidence",
   "merkle_ok": true,
@@ -2580,10 +2622,12 @@ export const realVerify: ExitVerifyResult = {
 export const realPlanReversibility: ReversibilityReport = {
   "counts": {
     "conditional": 0,
+    "enforced": 0,
     "invertible": 1,
     "lossy": 3
   },
   "data_checked": {
+    "covers_population": false,
     "population_rows": null,
     "rows": 2,
     "source": "plan_sample"
@@ -2593,7 +2637,7 @@ export const realPlanReversibility: ReversibilityReport = {
     "message": "This transfer must be reversible, and it is not: payments.amount; payments.email; payments.note. Remove the lossy transform, widen the destination, or turn off require reversibility.",
     "status": "block"
   },
-  "generated_at": "2026-11-11T22:01:33.392109Z",
+  "generated_at": "2026-11-12T01:39:08.345283Z",
   "lossy_columns": [
     {
       "column": "amount",
@@ -2703,7 +2747,8 @@ export const realPiiHeld: ExitRehearsal = {
       "sampled": 0
     }
   },
-  "definition_sha256": "b7f0b53fade41cbba7e295efae8dc101a7ab013a039a9a0977482e9963bc90e9",
+  "current": true,
+  "definition_sha256": "630d5b12a96a4854f39f1be4b74a10d414fb3312e6c14a3792b2b3044acfdad6",
   "duration": {
     "basis": "measured",
     "extract_seconds": 0,
@@ -2717,11 +2762,11 @@ export const realPiiHeld: ExitRehearsal = {
   "evidence": {
     "anchor": null,
     "content_sha256": null,
-    "export": "/api/v1/exit/rehearsals/exr_c8248cbad528/evidence",
+    "export": "/api/v1/exit/rehearsals/exr_86ab69731545/evidence",
     "signed": false
   },
-  "finished_at": "2026-11-11T22:01:33.106283Z",
-  "id": "exr_c8248cbad528",
+  "finished_at": "2026-11-12T01:39:07.444763Z",
+  "id": "exr_86ab69731545",
   "n": 1,
   "pii_acknowledgement": null,
   "seal": {
@@ -2745,15 +2790,16 @@ export const realPiiHeld: ExitRehearsal = {
     "signed_at": null,
     "status": "blocked"
   },
-  "started_at": "2026-11-11T22:01:32.848455Z",
-  "system_id": "exs_bfaa393cbe77",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:39:06.741147Z",
+  "system_id": "exs_f3c2784c966c",
   "system_name": "HR people",
   "tables": [
     {
       "control_totals": [],
       "differences": [],
       "extract_seconds": null,
-      "job_id": "6af4e5bc277708378a598851",
+      "job_id": "6af518bab8526454d2d5a3f3",
       "key_columns": [
         "id"
       ],
@@ -2764,7 +2810,21 @@ export const realPiiHeld: ExitRehearsal = {
       },
       "name": "people",
       "part": null,
-      "reason": "The PII gate held the extract job 6af4e5bc277708378a598851: email (email); ssn (ssn) need PII review. A person acknowledges PII for this system (who and why are audited and kept in the evidence), then rehearses it again.",
+      "pii_held": [
+        {
+          "categories": [
+            "email"
+          ],
+          "column": "email"
+        },
+        {
+          "categories": [
+            "ssn"
+          ],
+          "column": "ssn"
+        }
+      ],
+      "reason": "The PII gate held the extract job 6af518bab8526454d2d5a3f3: email (email); ssn (ssn) need PII review. A person acknowledges PII for this system (who and why are audited and kept in the evidence), then rehearses it again.",
       "row_set": {
         "extract_sha256": null,
         "match": null,
@@ -2777,38 +2837,38 @@ export const realPiiHeld: ExitRehearsal = {
       "value_parity": {
         "method": "none",
         "parity_verdict": null,
-        "report": "/api/v1/jobs/6af4e5bc277708378a598851/parity-report",
+        "report": "/api/v1/jobs/6af518bab8526454d2d5a3f3/parity-report",
         "unexplained": null
       }
     }
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:32.848455Z",
+      "finished_at": "2026-11-12T01:39:06.741147Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:32.848455Z",
+      "started_at": "2026-11-12T01:39:06.741147Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:32.964438Z",
-      "seconds": 0.062,
+      "finished_at": "2026-11-12T01:39:07.179522Z",
+      "seconds": 0.273,
       "stage": "extract",
-      "started_at": "2026-11-11T22:01:32.902418Z",
+      "started_at": "2026-11-12T01:39:06.906627Z",
       "status": "failed"
     },
     {
-      "finished_at": "2026-11-11T22:01:33.106283Z",
-      "seconds": 0.0,
+      "finished_at": "2026-11-12T01:39:07.444763Z",
+      "seconds": 0.108,
       "stage": "verify",
-      "started_at": "2026-11-11T22:01:33.106246Z",
+      "started_at": "2026-11-12T01:39:07.336412Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:33.106283Z",
+      "finished_at": "2026-11-12T01:39:07.444763Z",
       "seconds": 0.0,
       "stage": "seal",
-      "started_at": "2026-11-11T22:01:33.106283Z",
+      "started_at": "2026-11-12T01:39:07.444763Z",
       "status": "pending"
     },
     {
@@ -2823,11 +2883,11 @@ export const realPiiHeld: ExitRehearsal = {
     "growth_pct_rows": null,
     "points": [
       {
-        "at": "2026-11-11T22:01:32.848455Z",
+        "at": "2026-11-12T01:39:06.741147Z",
         "bytes": 0,
         "measured_seconds": 0,
         "n": 1,
-        "rehearsal_id": "exr_c8248cbad528",
+        "rehearsal_id": "exr_86ab69731545",
         "rows": null,
         "verdict": "needs_pii_review"
       }
@@ -2842,33 +2902,56 @@ export const realPiiHeld: ExitRehearsal = {
 };
 
 export const realSystemPii: ExitSystem = {
-  "created_at": "2026-11-11T22:01:32.840074Z",
+  "created_at": "2026-11-12T01:39:06.724131Z",
   "created_by": "owner@example.com",
   "criticality": "critical",
   "description": "",
   "exit_window_hours": 720,
   "extract_format": "jsonl",
-  "id": "exs_bfaa393cbe77",
+  "id": "exs_f3c2784c966c",
   "name": "HR people",
   "pii_acknowledgement": null,
+  "pii_hold": {
+    "n": 1,
+    "rehearsal_id": "exr_86ab69731545",
+    "tables": [
+      {
+        "columns": [
+          {
+            "categories": [
+              "email"
+            ],
+            "column": "email"
+          },
+          {
+            "categories": [
+              "ssn"
+            ],
+            "column": "ssn"
+          }
+        ],
+        "table": "people"
+      }
+    ]
+  },
   "readiness": {
     "last_proven_rehearsal": null,
     "last_rehearsal": {
       "current": true,
-      "finished_at": "2026-11-11T22:01:33.106283Z",
+      "finished_at": "2026-11-12T01:39:07.444763Z",
       "fits_window": null,
-      "id": "exr_c8248cbad528",
+      "id": "exr_86ab69731545",
       "measured_seconds": 0,
       "n": 1,
       "signed": false,
-      "started_at": "2026-11-11T22:01:32.848455Z",
+      "started_at": "2026-11-12T01:39:06.741147Z",
       "tables_declared": 1,
       "tables_proven": 0,
       "total_bytes": 0,
       "verdict": "needs_pii_review",
       "window_seconds": 2592000
     },
-    "next_due_at": "2027-02-09T22:01:32.848455Z",
+    "next_due_at": "2027-02-10T01:39:06.741147Z",
     "overdue": false,
     "running_rehearsal_id": null,
     "stale": false,
@@ -2896,7 +2979,7 @@ export const realSystemPii: ExitSystem = {
       "schema": null
     }
   ],
-  "updated_at": "2026-11-11T22:01:32.840074Z",
+  "updated_at": "2026-11-12T01:39:06.724131Z",
   "updated_by": "owner@example.com",
   "version": 3,
   "window_basis": "",
@@ -2904,38 +2987,80 @@ export const realSystemPii: ExitSystem = {
 };
 
 export const realSystemPiiAcked: ExitSystem = {
-  "created_at": "2026-11-11T22:01:32.840074Z",
+  "created_at": "2026-11-12T01:39:06.724131Z",
   "created_by": "owner@example.com",
   "criticality": "critical",
   "description": "",
   "exit_window_hours": 720,
   "extract_format": "jsonl",
-  "id": "exs_bfaa393cbe77",
+  "id": "exs_f3c2784c966c",
   "name": "HR people",
   "pii_acknowledgement": {
     "actor": "dpo@example.com",
-    "at": "2026-11-11T22:01:33.116938Z",
+    "at": "2026-11-12T01:39:07.456545Z",
+    "covers": [
+      {
+        "columns": [
+          {
+            "categories": [
+              "email"
+            ],
+            "column": "email"
+          },
+          {
+            "categories": [
+              "ssn"
+            ],
+            "column": "ssn"
+          }
+        ],
+        "table": "people"
+      }
+    ],
     "current": true,
     "reason": "DPA clause 9 allows the exit extract"
+  },
+  "pii_hold": {
+    "n": 1,
+    "rehearsal_id": "exr_86ab69731545",
+    "tables": [
+      {
+        "columns": [
+          {
+            "categories": [
+              "email"
+            ],
+            "column": "email"
+          },
+          {
+            "categories": [
+              "ssn"
+            ],
+            "column": "ssn"
+          }
+        ],
+        "table": "people"
+      }
+    ]
   },
   "readiness": {
     "last_proven_rehearsal": null,
     "last_rehearsal": {
       "current": true,
-      "finished_at": "2026-11-11T22:01:33.106283Z",
+      "finished_at": "2026-11-12T01:39:07.444763Z",
       "fits_window": null,
-      "id": "exr_c8248cbad528",
+      "id": "exr_86ab69731545",
       "measured_seconds": 0,
       "n": 1,
       "signed": false,
-      "started_at": "2026-11-11T22:01:32.848455Z",
+      "started_at": "2026-11-12T01:39:06.741147Z",
       "tables_declared": 1,
       "tables_proven": 0,
       "total_bytes": 0,
       "verdict": "needs_pii_review",
       "window_seconds": 2592000
     },
-    "next_due_at": "2027-02-09T22:01:32.848455Z",
+    "next_due_at": "2027-02-10T01:39:06.741147Z",
     "overdue": false,
     "running_rehearsal_id": null,
     "stale": false,
@@ -2963,7 +3088,7 @@ export const realSystemPiiAcked: ExitSystem = {
       "schema": null
     }
   ],
-  "updated_at": "2026-11-11T22:01:33.122604Z",
+  "updated_at": "2026-11-12T01:39:07.457116Z",
   "updated_by": "dpo@example.com",
   "version": 4,
   "window_basis": "",
@@ -2990,29 +3115,49 @@ export const realPiiAcked: ExitRehearsal = {
       "sampled": 0
     }
   },
-  "definition_sha256": "b7f0b53fade41cbba7e295efae8dc101a7ab013a039a9a0977482e9963bc90e9",
+  "current": true,
+  "definition_sha256": "630d5b12a96a4854f39f1be4b74a10d414fb3312e6c14a3792b2b3044acfdad6",
   "duration": {
     "basis": "measured",
     "extract_seconds": 0,
     "fits_window": true,
     "margin_pct": 100.0,
-    "measured_seconds": 0,
-    "statement": "Measured 0 s for 2,350 bytes (extract 0 s, verify 0 s) against a window of 720.0 h: this exit fits the window. The figure is measured, not projected.",
+    "measured_seconds": 1,
+    "statement": "Measured 1 s for 2,350 bytes (extract 0 s, verify 0 s) against a window of 720.0 h: this exit fits the window. The figure is measured, not projected.",
     "verify_seconds": 0,
     "window_seconds": 2592000
   },
   "evidence": {
     "anchor": null,
     "content_sha256": null,
-    "export": "/api/v1/exit/rehearsals/exr_1811929347a3/evidence",
+    "export": "/api/v1/exit/rehearsals/exr_ac482e4d03b9/evidence",
     "signed": false
   },
-  "finished_at": "2026-11-11T22:01:33.369454Z",
-  "id": "exr_1811929347a3",
+  "finished_at": "2026-11-12T01:39:08.243181Z",
+  "id": "exr_ac482e4d03b9",
   "n": 2,
   "pii_acknowledgement": {
     "actor": "dpo@example.com",
-    "at": "2026-11-11T22:01:33.116938Z",
+    "at": "2026-11-12T01:39:07.456545Z",
+    "covers": [
+      {
+        "columns": [
+          {
+            "categories": [
+              "email"
+            ],
+            "column": "email"
+          },
+          {
+            "categories": [
+              "ssn"
+            ],
+            "column": "ssn"
+          }
+        ],
+        "table": "people"
+      }
+    ],
     "reason": "DPA clause 9 allows the exit extract"
   },
   "seal": {
@@ -3020,7 +3165,7 @@ export const realPiiAcked: ExitRehearsal = {
     "merkle_root": "sha256:7a45c7608f48f2583ec4d3721972c8a5748a62c77b4e35be6f01363282aaa32f",
     "parts": [
       {
-        "name": "exit_exr_1811929347a3_0000_people.jsonl",
+        "name": "exit_exr_ac482e4d03b9_0000_people.jsonl",
         "object_key": null,
         "sha256": "6a22e327228cb62aaf0d445a6b5ae996ec7592a60ee28eac5b51bcd43c147dbf",
         "size_bytes": 2350,
@@ -3047,8 +3192,9 @@ export const realPiiAcked: ExitRehearsal = {
     "signed_at": null,
     "status": "open"
   },
-  "started_at": "2026-11-11T22:01:33.129529Z",
-  "system_id": "exs_bfaa393cbe77",
+  "stale_reason": null,
+  "started_at": "2026-11-12T01:39:07.476614Z",
+  "system_id": "exs_f3c2784c966c",
   "system_name": "HR people",
   "tables": [
     {
@@ -3070,8 +3216,8 @@ export const realPiiAcked: ExitRehearsal = {
         }
       ],
       "differences": [],
-      "extract_seconds": 0.1,
-      "job_id": "6af4e5bd277708378a598852",
+      "extract_seconds": 0.389,
+      "job_id": "6af518bbb8526454d2d5a3f4",
       "key_columns": [
         "id"
       ],
@@ -3082,7 +3228,7 @@ export const realPiiAcked: ExitRehearsal = {
       },
       "name": "people",
       "part": {
-        "name": "exit_exr_1811929347a3_0000_people.jsonl",
+        "name": "exit_exr_ac482e4d03b9_0000_people.jsonl",
         "object_key": null,
         "sha256": "6a22e327228cb62aaf0d445a6b5ae996ec7592a60ee28eac5b51bcd43c147dbf",
         "size_bytes": 2350,
@@ -3091,6 +3237,7 @@ export const realPiiAcked: ExitRehearsal = {
         "upload_parts": null,
         "verified_on_read": true
       },
+      "pii_held": [],
       "reason": "Rows, key set, every value (by population digest) and control totals match over all 29 row(s); the part verified on read.",
       "row_set": {
         "extract_sha256": "ef4b84c56ebd40b0717d4979473a17543aff6095a2bebbe8e77c1e3e818a92f7",
@@ -3104,38 +3251,38 @@ export const realPiiAcked: ExitRehearsal = {
       "value_parity": {
         "method": "population_digest",
         "parity_verdict": "unverifiable",
-        "report": "/api/v1/jobs/6af4e5bd277708378a598852/parity-report",
+        "report": "/api/v1/jobs/6af518bbb8526454d2d5a3f4/parity-report",
         "unexplained": 0
       }
     }
   ],
   "timeline": [
     {
-      "finished_at": "2026-11-11T22:01:33.129529Z",
+      "finished_at": "2026-11-12T01:39:07.476614Z",
       "seconds": 0.0,
       "stage": "inventory",
-      "started_at": "2026-11-11T22:01:33.129529Z",
+      "started_at": "2026-11-12T01:39:07.476614Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:33.237125Z",
-      "seconds": 0.089,
+      "finished_at": "2026-11-12T01:39:07.891102Z",
+      "seconds": 0.362,
       "stage": "extract",
-      "started_at": "2026-11-11T22:01:33.147842Z",
+      "started_at": "2026-11-12T01:39:07.529321Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:33.369454Z",
-      "seconds": 0.017,
+      "finished_at": "2026-11-12T01:39:08.243181Z",
+      "seconds": 0.139,
       "stage": "verify",
-      "started_at": "2026-11-11T22:01:33.351968Z",
+      "started_at": "2026-11-12T01:39:08.104052Z",
       "status": "done"
     },
     {
-      "finished_at": "2026-11-11T22:01:33.369454Z",
+      "finished_at": "2026-11-12T01:39:08.243181Z",
       "seconds": 0.0,
       "stage": "seal",
-      "started_at": "2026-11-11T22:01:33.369454Z",
+      "started_at": "2026-11-12T01:39:08.243181Z",
       "status": "done"
     },
     {
@@ -3150,20 +3297,20 @@ export const realPiiAcked: ExitRehearsal = {
     "growth_pct_rows": null,
     "points": [
       {
-        "at": "2026-11-11T22:01:32.848455Z",
+        "at": "2026-11-12T01:39:06.741147Z",
         "bytes": 0,
         "measured_seconds": 0,
         "n": 1,
-        "rehearsal_id": "exr_c8248cbad528",
+        "rehearsal_id": "exr_86ab69731545",
         "rows": null,
         "verdict": "needs_pii_review"
       },
       {
-        "at": "2026-11-11T22:01:33.129529Z",
+        "at": "2026-11-12T01:39:07.476614Z",
         "bytes": 2350,
-        "measured_seconds": 0,
+        "measured_seconds": 1,
         "n": 2,
-        "rehearsal_id": "exr_1811929347a3",
+        "rehearsal_id": "exr_ac482e4d03b9",
         "rows": 29,
         "verdict": "proven"
       }
@@ -3179,21 +3326,23 @@ export const realPiiAcked: ExitRehearsal = {
 
 export const realReversibilityReview2: ReversibilityReport = {
   "counts": {
-    "conditional": 2,
-    "invertible": 1,
+    "conditional": 0,
+    "enforced": 2,
+    "invertible": 3,
     "lossy": 1
   },
   "data_checked": {
-    "population_rows": 3000,
+    "covers_population": false,
+    "population_rows": null,
     "rows": 2,
     "source": "plan_sample"
   },
   "gate": {
     "id": "g24_reversibility",
-    "message": "This transfer must be reversible, and it is not: CONTACTS: source query; CONTACTS.name (fits the sample only; the whole table was not checked); CONTACTS.email (fits the sample only; the whole table was not checked). Remove the lossy transform, widen the destination, or turn off require reversibility.",
+    "message": "This transfer must be reversible, and it is not: CONTACTS: source query. Remove the lossy transform, widen the destination, or turn off require reversibility.",
     "status": "block"
   },
-  "generated_at": "2026-11-11T22:01:33.396713Z",
+  "generated_at": "2026-11-12T01:39:08.366166Z",
   "lossy_columns": [
     {
       "column": "(rows)",
@@ -3223,12 +3372,13 @@ export const realReversibilityReview2: ReversibilityReport = {
         {
           "check": {
             "covers_population": false,
+            "enforcement": "at_execute",
             "rows_checked": 2,
             "rows_not_fitting": 0,
             "status": "fits"
           },
           "invertibility": "conditional",
-          "reason": "name is stored in VARCHAR2(10), which counts bytes, not characters; reversible only if every value's UTF-8 text fits; it fits the sample (2 observed value(s) round-trip), but will be blocked at Execute unless the whole table is checked (rows not sampled are not proven).",
+          "reason": "name is stored in VARCHAR2(10), which counts bytes, not characters; reversible only if every value's UTF-8 text fits; checked on the sample (2 observed value(s) round-trip); enforced on every row at Execute.",
           "reason_code": "byte_length",
           "source": "name",
           "source_type": "varchar(10)",
@@ -3239,12 +3389,13 @@ export const realReversibilityReview2: ReversibilityReport = {
         {
           "check": {
             "covers_population": false,
+            "enforcement": "at_execute",
             "rows_checked": 2,
             "rows_not_fitting": 0,
             "status": "fits"
           },
           "invertibility": "conditional",
-          "reason": "email is normalised (upper); reversible only if no value changes; it fits the sample (2 observed value(s) round-trip), but will be blocked at Execute unless the whole table is checked (rows not sampled are not proven).",
+          "reason": "email is normalised (upper); reversible only if no value changes; checked on the sample (2 observed value(s) round-trip); enforced on every row at Execute.",
           "reason_code": "normalize",
           "source": "email",
           "source_type": "TEXT",
@@ -3269,27 +3420,308 @@ export const realReversibilityReview2: ReversibilityReport = {
         }
       ],
       "name": "CONTACTS",
-      "reason": "the source is a query, so the table cannot be rebuilt from what it returns (a query can select, filter or rewrite rows and values); name is stored in VARCHAR2(10), which counts bytes, not characters; reversible only if every value's UTF-8 text fits; it fits the sample (2 observed value(s) round-trip), but will be blocked at Execute unless the whole table is checked (rows not sampled are not proven); email is normalised (upper); reversible only if no value changes; it fits the sample (2 observed value(s) round-trip), but will be blocked at Execute unless the whole table is checked (rows not sampled are not proven).",
+      "reason": "the source is a query, so the table cannot be rebuilt from what it returns (a query can select, filter or rewrite rows and values).",
       "rollback": "keep_source_as_fallback",
       "rollback_note": "CONTACTS needs the source kept as the fallback until sign-off.",
       "verdict": "partly_reversible"
     }
   ],
   "verdict": "partly_reversible",
-  "verdict_reason": "1 table(s): 1 column(s) invertible, 2 conditional and not shown to fit, 1 lossy."
+  "verdict_reason": "1 table(s): 3 column(s) invertible (2 of them conditional and enforced on every row), 0 conditional and not shown to fit, 1 lossy."
+};
+
+export const realStale: ExitRehearsal = {
+  "actor": "owner@example.com",
+  "completeness": {
+    "statement": "1 of 1 declared table(s) extracted. 1 proven complete (rows, key sets, every value and control totals). Value check: population digest on 1.",
+    "tables_declared": 1,
+    "tables_extracted": 1,
+    "tables_failed": 0,
+    "tables_incomplete": 0,
+    "tables_needs_pii_review": 0,
+    "tables_not_proven": 0,
+    "tables_proven": 1,
+    "value_methods": {
+      "count_only": 0,
+      "full_checksum": 0,
+      "key_diff": 0,
+      "none": 0,
+      "population_digest": 1,
+      "sampled": 0
+    }
+  },
+  "current": false,
+  "definition_sha256": "0284c7c6d7683240bc0bd1e2de282732d4334ff9af14cc4bab1e96cc0756a10c",
+  "duration": {
+    "basis": "measured",
+    "extract_seconds": 0,
+    "fits_window": true,
+    "margin_pct": 100.0,
+    "measured_seconds": 0,
+    "statement": "Measured 0 s for 2,747 bytes (extract 0 s, verify 0 s) against a window of 720.0 h: this exit fits the window. The figure is measured, not projected.",
+    "verify_seconds": 0,
+    "window_seconds": 2592000
+  },
+  "evidence": {
+    "anchor": null,
+    "content_sha256": null,
+    "export": "/api/v1/exit/rehearsals/exr_fe7f1ce7ce0f/evidence",
+    "signed": false
+  },
+  "finished_at": "2026-11-12T01:39:06.172269Z",
+  "id": "exr_fe7f1ce7ce0f",
+  "n": 1,
+  "pii_acknowledgement": null,
+  "seal": {
+    "algorithm": "sha256-merkle-rfc6962",
+    "merkle_root": "sha256:36c61d644152b69cd0d7138485893e63920113f5aee9e5c52b42e40641efbba1",
+    "parts": [
+      {
+        "name": "exit_exr_fe7f1ce7ce0f_0000_orders.jsonl",
+        "object_key": null,
+        "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
+        "size_bytes": 2747,
+        "storage": "local_file",
+        "table": "orders",
+        "upload_parts": null,
+        "verified_on_read": true
+      }
+    ],
+    "parts_count": 1,
+    "storage": "local_file",
+    "total_bytes": 2747
+  },
+  "signoff": {
+    "approvals": [],
+    "blocked_reason": null,
+    "invalidated_approvals": [],
+    "required_roles": [
+      "engineering",
+      "data_owner",
+      "compliance"
+    ],
+    "signature": null,
+    "signed_at": null,
+    "status": "open"
+  },
+  "stale_reason": "The system's source connection, tables, keys, window or extract format changed since this rehearsal; it no longer proves the system as it is defined now. Rehearse it again.",
+  "started_at": "2026-11-12T01:39:05.620289Z",
+  "system_id": "exs_5954d859dc03",
+  "system_name": "Billing",
+  "tables": [
+    {
+      "control_totals": [
+        {
+          "column": "amount",
+          "extract": {
+            "max": "75",
+            "min": "1.25",
+            "sum": "2287.50"
+          },
+          "masked": false,
+          "match": true,
+          "source": {
+            "max": "75",
+            "min": "1.25",
+            "sum": "2287.50"
+          }
+        },
+        {
+          "column": "id",
+          "extract": {
+            "max": null,
+            "min": null,
+            "sum": null
+          },
+          "masked": true,
+          "match": true,
+          "source": {
+            "max": null,
+            "min": null,
+            "sum": null
+          }
+        }
+      ],
+      "differences": [],
+      "extract_seconds": 0.289,
+      "job_id": "6af518b9b8526454d2d5a3f1",
+      "key_columns": [
+        "id"
+      ],
+      "key_set": {
+        "extract_sha256": "1eee5bfc7da0c1b04c6a916bf35c64faeda2366359bccf0bf3ffe7afd66124c9",
+        "match": true,
+        "source_sha256": "1eee5bfc7da0c1b04c6a916bf35c64faeda2366359bccf0bf3ffe7afd66124c9"
+      },
+      "name": "orders",
+      "part": {
+        "name": "exit_exr_fe7f1ce7ce0f_0000_orders.jsonl",
+        "object_key": null,
+        "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
+        "size_bytes": 2747,
+        "storage": "local_file",
+        "table": "orders",
+        "upload_parts": null,
+        "verified_on_read": true
+      },
+      "pii_held": [],
+      "reason": "Rows, key set, every value (by population digest) and control totals match over all 60 row(s); the part verified on read.",
+      "row_set": {
+        "extract_sha256": "dd7192488fc1fef0a1bdd78a6dda886ac25ad40d9125d341d1384e1d030e36ba",
+        "match": true,
+        "source_sha256": "dd7192488fc1fef0a1bdd78a6dda886ac25ad40d9125d341d1384e1d030e36ba"
+      },
+      "rows_extracted": 60,
+      "rows_source": 60,
+      "schema": null,
+      "status": "proven",
+      "value_parity": {
+        "method": "population_digest",
+        "parity_verdict": "unverifiable",
+        "report": "/api/v1/jobs/6af518b9b8526454d2d5a3f1/parity-report",
+        "unexplained": 0
+      }
+    }
+  ],
+  "timeline": [
+    {
+      "finished_at": "2026-11-12T01:39:05.620289Z",
+      "seconds": 0.0,
+      "stage": "inventory",
+      "started_at": "2026-11-12T01:39:05.620289Z",
+      "status": "done"
+    },
+    {
+      "finished_at": "2026-11-12T01:39:06.071027Z",
+      "seconds": 0.263,
+      "stage": "extract",
+      "started_at": "2026-11-12T01:39:05.808339Z",
+      "status": "done"
+    },
+    {
+      "finished_at": "2026-11-12T01:39:06.172269Z",
+      "seconds": 0.068,
+      "stage": "verify",
+      "started_at": "2026-11-12T01:39:06.104011Z",
+      "status": "done"
+    },
+    {
+      "finished_at": "2026-11-12T01:39:06.172269Z",
+      "seconds": 0.0,
+      "stage": "seal",
+      "started_at": "2026-11-12T01:39:06.172269Z",
+      "status": "done"
+    },
+    {
+      "finished_at": null,
+      "seconds": null,
+      "stage": "sign",
+      "started_at": null,
+      "status": "pending"
+    }
+  ],
+  "trend": {
+    "growth_pct_rows": null,
+    "points": [
+      {
+        "at": "2026-11-12T01:39:05.620289Z",
+        "bytes": 2747,
+        "measured_seconds": 0,
+        "n": 1,
+        "rehearsal_id": "exr_fe7f1ce7ce0f",
+        "rows": 60,
+        "verdict": "proven"
+      }
+    ],
+    "projection": null
+  },
+  "trigger": "manual",
+  "verdict": "proven",
+  "verdict_reason": "Every one of the 1 declared table(s) was extracted and proven complete.",
+  "version": 4,
+  "workspace_id": "ws1"
+};
+
+export const realReversibilityReview3: ReversibilityReport = {
+  "counts": {
+    "conditional": 0,
+    "enforced": 1,
+    "invertible": 2,
+    "lossy": 0
+  },
+  "data_checked": {
+    "covers_population": false,
+    "population_rows": null,
+    "rows": 2,
+    "source": "plan_sample"
+  },
+  "gate": {
+    "id": "g24_reversibility",
+    "message": "Every table is reversible. 1 conditional column(s): checked on the sample; enforced on every row at Execute.",
+    "status": "pass"
+  },
+  "generated_at": "2026-11-12T01:39:08.371991Z",
+  "lossy_columns": [],
+  "require_reversibility": true,
+  "rollback_note": "contacts can be restored from the destination (every mapping is lossless). Rollback plan: DOCUMENT_ONLY runbook; Datawrap does not undo committed rows.",
+  "scope": "plan",
+  "subject_id": "plan-5",
+  "tables": [
+    {
+      "columns": [
+        {
+          "check": null,
+          "invertibility": "invertible",
+          "reason": "id is copied unchanged.",
+          "reason_code": "identity",
+          "source": "id",
+          "source_type": "BIGINT",
+          "target": "id",
+          "target_type": "BIGINT",
+          "transforms": []
+        },
+        {
+          "check": {
+            "covers_population": false,
+            "enforcement": "at_execute",
+            "rows_checked": 2,
+            "rows_not_fitting": 0,
+            "status": "fits"
+          },
+          "invertibility": "conditional",
+          "reason": "email is normalised (upper); reversible only if no value changes; checked on the sample (2 observed value(s) round-trip); enforced on every row at Execute.",
+          "reason_code": "normalize",
+          "source": "email",
+          "source_type": "TEXT",
+          "target": "email",
+          "target_type": "TEXT",
+          "transforms": [
+            "upper"
+          ]
+        }
+      ],
+      "name": "contacts",
+      "reason": "Every mapping is lossless or enforced: email is checked on the sample and enforced on every row at Execute.",
+      "rollback": "restore_from_destination",
+      "rollback_note": "contacts can be restored from the destination (every mapping is lossless). Rollback plan: DOCUMENT_ONLY runbook; Datawrap does not undo committed rows.",
+      "verdict": "reversible"
+    }
+  ],
+  "verdict": "reversible",
+  "verdict_reason": "1 table(s): 2 column(s) invertible (1 of them conditional and enforced on every row), 0 conditional and not shown to fit, 0 lossy."
 };
 
 /** The signed Exit Evidence Pack (JSON export). */
 export const realPack: Record<string, unknown> = {
   "actor": "compliance@example.com",
-  "content_sha256": "e9f4c5145575a8977f5a267f9cd2aa4cdf4febf7095c538d492bb9471a2d6510",
-  "content_sha256_attested": "c8c1f3b836b288e5dd0cde826ea3bb2c7aa0c6bdcdcaaf15dd0f6518cbd5dc9d",
-  "issued_at": "2026-11-11T22:01:28.875620Z",
+  "content_sha256": "91a6de1b6aa3f8a0f9c78fed96776f81909d07fd6f010db24ed22fdd01008bc5",
+  "content_sha256_attested": "4a39e29fd6e7233403d4fcddba8e5c2a74a72d06d7902f7b2271e100b6c78648",
+  "issued_at": "2026-11-12T01:39:00.445342Z",
   "kind": "exit_evidence",
   "merkle_root": "sha256:46d0c7557b1ef6755c22ae599995ed8b33fe207828674f39cf13c0487bb2ef7d",
   "parts": [
     {
-      "name": "exit_exr_5367d6650e59_0000_orders.jsonl",
+      "name": "exit_exr_14de9b944fc1_0000_orders.jsonl",
       "object_key": null,
       "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
       "size_bytes": 2747,
@@ -3299,7 +3731,7 @@ export const realPack: Record<string, unknown> = {
       "verified_on_read": true
     },
     {
-      "name": "exit_exr_5367d6650e59_0001_events.jsonl",
+      "name": "exit_exr_14de9b944fc1_0001_events.jsonl",
       "object_key": null,
       "sha256": "ac5873f24e420d2b64b1cb7be50ee55bf0618b29edd401761febb5f6cb485a47",
       "size_bytes": 71,
@@ -3329,19 +3761,19 @@ export const realPack: Record<string, unknown> = {
         "sampled": 0
       }
     },
-    "definition_sha256": "1b5f16e8664dd005b6e7908a2ac4143caf88a9df6e69a14ae2fbee8595ca5127",
+    "definition_sha256": "0f84ec8fc40910f9ef8263ac61c624e04f5ee46d163595a999e6b41707c5fa04",
     "duration": {
       "basis": "measured",
-      "extract_seconds": 0,
+      "extract_seconds": 1,
       "fits_window": true,
       "margin_pct": 100.0,
-      "measured_seconds": 0,
-      "statement": "Measured 0 s for 2,818 bytes (extract 0 s, verify 0 s) against a window of 720.0 h: this exit fits the window. The figure is measured, not projected.",
+      "measured_seconds": 1,
+      "statement": "Measured 1 s for 2,818 bytes (extract 1 s, verify 0 s) against a window of 720.0 h: this exit fits the window. The figure is measured, not projected.",
       "verify_seconds": 0,
       "window_seconds": 2592000
     },
-    "finished_at": "2026-11-11T22:01:28.867452Z",
-    "id": "exr_5367d6650e59",
+    "finished_at": "2026-11-12T01:39:00.424284Z",
+    "id": "exr_14de9b944fc1",
     "n": 2,
     "pii_acknowledgement": null,
     "seal": {
@@ -3349,7 +3781,7 @@ export const realPack: Record<string, unknown> = {
       "merkle_root": "sha256:46d0c7557b1ef6755c22ae599995ed8b33fe207828674f39cf13c0487bb2ef7d",
       "parts": [
         {
-          "name": "exit_exr_5367d6650e59_0000_orders.jsonl",
+          "name": "exit_exr_14de9b944fc1_0000_orders.jsonl",
           "object_key": null,
           "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
           "size_bytes": 2747,
@@ -3359,7 +3791,7 @@ export const realPack: Record<string, unknown> = {
           "verified_on_read": true
         },
         {
-          "name": "exit_exr_5367d6650e59_0001_events.jsonl",
+          "name": "exit_exr_14de9b944fc1_0001_events.jsonl",
           "object_key": null,
           "sha256": "ac5873f24e420d2b64b1cb7be50ee55bf0618b29edd401761febb5f6cb485a47",
           "size_bytes": 71,
@@ -3376,9 +3808,9 @@ export const realPack: Record<string, unknown> = {
     "signoff": {
       "approvals": [
         {
-          "at": "2026-11-11T22:01:28.871763Z",
+          "at": "2026-11-12T01:39:00.435378Z",
           "authority": "workspace admin",
-          "content_sha256": "c8c1f3b836b288e5dd0cde826ea3bb2c7aa0c6bdcdcaaf15dd0f6518cbd5dc9d",
+          "content_sha256": "4a39e29fd6e7233403d4fcddba8e5c2a74a72d06d7902f7b2271e100b6c78648",
           "note": "",
           "role": "engineering",
           "signer_role": "admin",
@@ -3386,9 +3818,9 @@ export const realPack: Record<string, unknown> = {
           "version": 4
         },
         {
-          "at": "2026-11-11T22:01:28.873765Z",
+          "at": "2026-11-12T01:39:00.437349Z",
           "authority": "workspace admin",
-          "content_sha256": "c8c1f3b836b288e5dd0cde826ea3bb2c7aa0c6bdcdcaaf15dd0f6518cbd5dc9d",
+          "content_sha256": "4a39e29fd6e7233403d4fcddba8e5c2a74a72d06d7902f7b2271e100b6c78648",
           "note": "",
           "role": "data_owner",
           "signer_role": "admin",
@@ -3396,9 +3828,9 @@ export const realPack: Record<string, unknown> = {
           "version": 5
         },
         {
-          "at": "2026-11-11T22:01:28.875610Z",
+          "at": "2026-11-12T01:39:00.445332Z",
           "authority": "workspace admin",
-          "content_sha256": "c8c1f3b836b288e5dd0cde826ea3bb2c7aa0c6bdcdcaaf15dd0f6518cbd5dc9d",
+          "content_sha256": "4a39e29fd6e7233403d4fcddba8e5c2a74a72d06d7902f7b2271e100b6c78648",
           "note": "",
           "role": "compliance",
           "signer_role": "admin",
@@ -3414,11 +3846,11 @@ export const realPack: Record<string, unknown> = {
         "compliance"
       ],
       "signature": null,
-      "signed_at": "2026-11-11T22:01:28.875620Z",
+      "signed_at": "2026-11-12T01:39:00.445342Z",
       "status": "signed"
     },
-    "started_at": "2026-11-11T22:01:28.592087Z",
-    "system_id": "exs_4857369012ad",
+    "started_at": "2026-11-12T01:38:59.672251Z",
+    "system_id": "exs_bce599c1c2b2",
     "system_name": "Core ledger",
     "tables": [
       {
@@ -3455,8 +3887,8 @@ export const realPack: Record<string, unknown> = {
           }
         ],
         "differences": [],
-        "extract_seconds": 0.152,
-        "job_id": "6af4e5b8277708378a598847",
+        "extract_seconds": 0.568,
+        "job_id": "6af518b3b8526454d2d5a3e9",
         "key_columns": [
           "id"
         ],
@@ -3467,7 +3899,7 @@ export const realPack: Record<string, unknown> = {
         },
         "name": "orders",
         "part": {
-          "name": "exit_exr_5367d6650e59_0000_orders.jsonl",
+          "name": "exit_exr_14de9b944fc1_0000_orders.jsonl",
           "object_key": null,
           "sha256": "7ab3620fb9acf2b692029ceec82ef29368ce085482540483a79669221f119cbb",
           "size_bytes": 2747,
@@ -3476,6 +3908,7 @@ export const realPack: Record<string, unknown> = {
           "upload_parts": null,
           "verified_on_read": true
         },
+        "pii_held": [],
         "reason": "Rows, key set, every value (by population digest) and control totals match over all 60 row(s); the part verified on read.",
         "row_set": {
           "extract_sha256": "dd7192488fc1fef0a1bdd78a6dda886ac25ad40d9125d341d1384e1d030e36ba",
@@ -3489,7 +3922,7 @@ export const realPack: Record<string, unknown> = {
         "value_parity": {
           "method": "population_digest",
           "parity_verdict": "unverifiable",
-          "report": "/api/v1/jobs/6af4e5b8277708378a598847/parity-report",
+          "report": "/api/v1/jobs/6af518b3b8526454d2d5a3e9/parity-report",
           "unexplained": 0
         }
       },
@@ -3512,8 +3945,8 @@ export const realPack: Record<string, unknown> = {
           }
         ],
         "differences": [],
-        "extract_seconds": 0.094,
-        "job_id": "6af4e5b8277708378a598848",
+        "extract_seconds": 0.438,
+        "job_id": "6af518b3b8526454d2d5a3ea",
         "key_columns": [],
         "key_set": {
           "extract_sha256": null,
@@ -3522,7 +3955,7 @@ export const realPack: Record<string, unknown> = {
         },
         "name": "events",
         "part": {
-          "name": "exit_exr_5367d6650e59_0001_events.jsonl",
+          "name": "exit_exr_14de9b944fc1_0001_events.jsonl",
           "object_key": null,
           "sha256": "ac5873f24e420d2b64b1cb7be50ee55bf0618b29edd401761febb5f6cb485a47",
           "size_bytes": 71,
@@ -3531,6 +3964,7 @@ export const realPack: Record<string, unknown> = {
           "upload_parts": null,
           "verified_on_read": true
         },
+        "pii_held": [],
         "reason": "Rows, every value (by population digest) and control totals match over all 3 row(s); the part verified on read.",
         "row_set": {
           "extract_sha256": "eb76c1445d7f89d6b45b5fb9396d281876db2ea30b1f27232f45ef9d6eb15a64",
@@ -3544,38 +3978,38 @@ export const realPack: Record<string, unknown> = {
         "value_parity": {
           "method": "population_digest",
           "parity_verdict": "unverifiable",
-          "report": "/api/v1/jobs/6af4e5b8277708378a598848/parity-report",
+          "report": "/api/v1/jobs/6af518b3b8526454d2d5a3ea/parity-report",
           "unexplained": 0
         }
       }
     ],
     "timeline": [
       {
-        "finished_at": "2026-11-11T22:01:28.592087Z",
+        "finished_at": "2026-11-12T01:38:59.672251Z",
         "seconds": 0.0,
         "stage": "inventory",
-        "started_at": "2026-11-11T22:01:28.592087Z",
+        "started_at": "2026-11-12T01:38:59.672251Z",
         "status": "done"
       },
       {
-        "finished_at": "2026-11-11T22:01:28.757619Z",
-        "seconds": 0.142,
+        "finished_at": "2026-11-12T01:39:00.297617Z",
+        "seconds": 0.551,
         "stage": "extract",
-        "started_at": "2026-11-11T22:01:28.616087Z",
+        "started_at": "2026-11-12T01:38:59.746837Z",
         "status": "done"
       },
       {
-        "finished_at": "2026-11-11T22:01:28.867452Z",
-        "seconds": 0.048,
+        "finished_at": "2026-11-12T01:39:00.424284Z",
+        "seconds": 0.062,
         "stage": "verify",
-        "started_at": "2026-11-11T22:01:28.819464Z",
+        "started_at": "2026-11-12T01:39:00.362157Z",
         "status": "done"
       },
       {
-        "finished_at": "2026-11-11T22:01:28.867452Z",
+        "finished_at": "2026-11-12T01:39:00.424284Z",
         "seconds": 0.0,
         "stage": "seal",
-        "started_at": "2026-11-11T22:01:28.867452Z",
+        "started_at": "2026-11-12T01:39:00.424284Z",
         "status": "done"
       },
       {
@@ -3592,11 +4026,11 @@ export const realPack: Record<string, unknown> = {
     "version": 6,
     "workspace_id": "ws1"
   },
-  "rehearsal_id": "exr_5367d6650e59",
+  "rehearsal_id": "exr_14de9b944fc1",
   "signature": {
     "alg": "HMAC-SHA256",
     "key_id": "platform_auth_secret",
-    "value": "5e4a9fb24b19b72d2af34141b0b01bf4b773b58eef594b77908649ae94407555"
+    "value": "eb41b671f5c2533280a831846cc7e89fdddf7d21bd3c72ac118a90ddbb7522b4"
   },
   "system": {
     "criticality": "critical",
@@ -3605,7 +4039,7 @@ export const realPack: Record<string, unknown> = {
     "name": "Core ledger",
     "window_basis": "EU Data Act switching window"
   },
-  "system_id": "exs_4857369012ad",
+  "system_id": "exs_bce599c1c2b2",
   "version": "1",
   "workspace_id": "ws1"
 };

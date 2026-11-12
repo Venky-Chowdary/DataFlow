@@ -24,6 +24,13 @@ export interface ColumnCheck {
    * stays conditional, and Execute blocks it under require reversibility. Absent on a bare column analysis.
    */
   covers_population?: boolean;
+  /**
+   * How a conditional column is held to its condition when the run must be reversible (contract 12.1):
+   * "while_writing" (Execute: every row is checked as it is written and the run stops on the first value that
+   * would change), "at_execute" (Validate: checked on the sample here, enforced on every row at Execute),
+   * "unavailable" (a stream's inherited mapping the writer cannot be told about: still blocks).
+   */
+  enforcement?: "while_writing" | "at_execute" | "unavailable";
 }
 
 export interface ColumnInvertibility {
@@ -78,8 +85,11 @@ export interface ReversibilityReport {
     source: "plan_sample" | "preflight_sample" | "none" | string;
     /** The source's row count the check is measured against; null when unknown (contract 11.1.1). */
     population_rows?: number | null;
+    /** The rows checked are every row of a count the server measured (contract 12.1); never from an estimate. */
+    covers_population?: boolean;
   };
-  counts: { invertible: number; conditional: number; lossy: number };
+  /** `enforced`: conditional columns held to their condition on every row (contract 12.1). */
+  counts: { invertible: number; conditional: number; lossy: number; enforced?: number };
   /** Every lossy column, always. */
   lossy_columns: LossyColumn[];
   tables: ReversibilityTable[];
@@ -115,6 +125,10 @@ export function columnPillPresentation(col: Pick<ColumnInvertibility, "invertibi
   const status = col.check?.status ?? "not_checked";
   // Only a check over every source row counts (contract 11.1.2); a sample fit is still blocked at Execute.
   if (status === "fits" && col.check?.covers_population === true) return { label: "Fits whole table", tone: "ok" };
+  // Under Require reversibility a fitting conditional column is enforced on every row (contract 12.1).
+  if (status === "fits" && col.check?.enforcement === "while_writing") return { label: "Enforced while writing", tone: "ok" };
+  if (status === "fits" && col.check?.enforcement === "at_execute") return { label: "Enforced at Execute", tone: "ok" };
+  if (status === "fits" && col.check?.enforcement === "unavailable") return { label: "Cannot be enforced", tone: "warn" };
   if (status === "fits") return { label: "Fits sample only", tone: "warn" };
   if (status === "does_not_fit") return { label: "Does not fit", tone: "danger" };
   return { label: "Not checked", tone: "warn" };
@@ -213,8 +227,17 @@ export function checkText(check: ColumnCheck | null | undefined): string {
   if (check.status === "fits" && check.covers_population === true) {
     return `Fits every one of its ${plural(check.rows_checked, "value")}; the check covered the whole table.`;
   }
+  if (check.status === "fits" && check.enforcement === "while_writing") {
+    return `Fits the sample (${plural(check.rows_checked, "observed row")}); enforced while writing: every row is checked and the run stops on the first value that would change.`;
+  }
+  if (check.status === "fits" && check.enforcement === "at_execute") {
+    return `Checked on the sample (${plural(check.rows_checked, "observed row")}); enforced on every row at Execute.`;
+  }
+  if (check.status === "fits" && check.enforcement === "unavailable") {
+    return `Fits the sample (${plural(check.rows_checked, "observed row")}), but it cannot be enforced while writing on a mapping this stream inherits: declare the stream's own mappings.`;
+  }
   if (check.status === "fits" && check.covers_population === false) {
-    return `Fits the sample (${plural(check.rows_checked, "observed row")}), but Execute blocks it unless the whole table is checked.`;
+    return `Fits the sample (${plural(check.rows_checked, "observed row")}); rows not sampled are not proven. Under Require reversibility every row is checked while writing.`;
   }
   if (check.status === "fits") {
     return `Fits the ${plural(check.rows_checked, "observed row")}; not proven for rows not sampled.`;
@@ -233,11 +256,12 @@ export function dataCheckedText(data: ReversibilityReport["data_checked"] | null
   }
   const where = data.source === "preflight_sample" ? "the Validate sample" : data.source === "plan_sample" ? "the plan sample" : "a sample";
   const population = data.population_rows;
-  if (typeof population === "number" && population > 0 && rows >= population) {
+  // Only the server's own field says the sample is the whole table (a client estimate never does).
+  if (data.covers_population === true && typeof population === "number" && population > 0) {
     return `Conditional columns were checked against all ${plural(population, "row")} of the table (${where} holds every row).`;
   }
   const of = typeof population === "number" && population > 0 ? ` of ${population.toLocaleString("en-US")}` : "";
-  return `Conditional columns were checked against ${plural(rows, "observed row")}${of} from ${where}. A sample never proves the full table: a conditional column that fits only the sample is blocked at Execute unless the whole table is checked.`;
+  return `Conditional columns were checked against ${plural(rows, "observed row")}${of} from ${where}. A sample never proves the full table: under Require reversibility a conditional column is checked on the sample here and enforced on every row while Execute writes.`;
 }
 
 /** The gate line beside the switch: what Execute will do. */
@@ -249,7 +273,11 @@ export function gatePresentation(report: Pick<ReversibilityReport, "gate" | "req
   if (status === "block") {
     return { label: "Blocks Execute", tone: "danger", detail: report.gate.message || "The gate blocks this transfer until every table is reversible." };
   }
-  return { label: "Gate passes", tone: "ok", detail: report.gate?.message || "Every table is reversible, so the gate passes." };
+  if (status === "pass") {
+    return { label: "Gate passes", tone: "ok", detail: report.gate?.message || "Every table is reversible, so the gate passes." };
+  }
+  // A status this page does not know is never shown as a pass.
+  return { label: "Not evaluated", tone: "muted", detail: report.gate?.message || "The gate has not been evaluated for this transfer." };
 }
 
 const ROLLBACK_LABELS: Record<string, string> = {
