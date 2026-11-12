@@ -193,7 +193,8 @@ def test_compare_and_swap_on_live_mongodb_loses_no_increment(tmp_path, monkeypat
         # Each thread stands in for a replica: bypass the per-process lock so the
         # database's compare-and-swap is what keeps the writes apart.
         monkeypatch.setattr(doc, "_lock", _NoLock())
-        monkeypatch.setattr(shared_doc_store, "_MAX_ATTEMPTS", 200)
+        # The shipped retry settings (jittered backoff within a time budget),
+        # not a raised attempt count (ops review M10).
         threads = [
             threading.Thread(target=lambda n=n: [bump(f"{n}-{i}") for i in range(10)]) for n in range(6)
         ]

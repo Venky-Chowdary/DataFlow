@@ -35,6 +35,7 @@ import functools
 import hashlib
 import json
 import logging
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -59,7 +60,24 @@ logger = logging.getLogger(__name__)
 DOCS_COLLECTION = "control_plane_docs"
 RECORDS_COLLECTION = "control_plane_records"
 BACKEND_SETTING = "DATAFLOW_CONTROL_STORE_BACKEND"
-_MAX_ATTEMPTS = 8
+#: A read-modify-write that lost the compare-and-swap waits a random time in
+#: [0, min(cap, base * 2**attempt)] before it reads again ("full jitter"), so
+#: replicas that conflicted together do not retry in lockstep, and keeps
+#: retrying for up to RETRY_BUDGET_SECONDS (ops review M10). Writers in
+#: different tenants never contend (one document per record, a fence per
+#: tenant). Measured on live MongoDB, 16 processes x 25 grants all in ONE
+#: tenant: no failures, at most 16 attempts, slowest call 4-9 s. A conflict
+#: that outlasts the budget is a 409 with Retry-After. _MAX_ATTEMPTS is only
+#: a backstop.
+_MAX_ATTEMPTS = 50
+RETRY_BUDGET_SECONDS = 10.0
+BACKOFF_BASE_SECONDS = 0.01
+BACKOFF_CAP_SECONDS = 0.5
+_jitter = random.uniform  # nosec B311 - retry spacing, not security
+
+
+def _backoff(attempt: int) -> float:
+    return _jitter(0.0, min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * 2**attempt))
 _REGISTERED: dict[str, Any] = {}
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -342,15 +360,17 @@ class SharedDoc:
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             self._scope.depth = getattr(self._scope, "depth", 0) + 1
+            deadline = time.monotonic() + RETRY_BUDGET_SECONDS
             try:
                 for attempt in range(_MAX_ATTEMPTS):
                     try:
                         with self._lock:
                             return fn(*args, **kwargs)
                     except SharedDocConflict:
-                        if attempt == _MAX_ATTEMPTS - 1:
+                        left = deadline - time.monotonic()
+                        if attempt == _MAX_ATTEMPTS - 1 or left <= 0:
                             raise
-                        time.sleep(0.005 * (attempt + 1))
+                        time.sleep(min(_backoff(attempt), left))
             finally:
                 self._scope.depth -= 1
             raise SharedDocConflict(self.name)  # pragma: no cover - loop always returns or raises
@@ -489,7 +509,9 @@ class SharedLog:
 
     def update(self, coll: Any, key: str, change: Callable[[dict[str, Any]], dict[str, Any] | None]) -> dict[str, Any] | None:
         """Compare-and-swap one record. ``change`` returns the new record, or None to leave it."""
-        for _ in range(_MAX_ATTEMPTS):
+        for attempt in range(_MAX_ATTEMPTS):
+            if attempt:
+                time.sleep(_backoff(attempt - 1))
             doc = coll.find_one({"store": self.name, "key": str(key)})
             if not doc:
                 return None

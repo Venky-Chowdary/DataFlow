@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
 from services.control_plane_store import ControlPlaneUnavailable
+from services.shared_doc_store import SharedDocConflict
 from services.cors_policy import TenantAwareCORSMiddleware
 from services import health_service
 from services.safe_errors import public_error
@@ -979,6 +980,21 @@ async def control_plane_unavailable_handler(request: Request, exc: ControlPlaneU
             "detail": "Workspace settings are temporarily unavailable. Retry shortly.",
         },
         headers={"Retry-After": "5"},
+    )
+
+
+@app.exception_handler(SharedDocConflict)
+async def shared_doc_conflict_handler(request: Request, exc: SharedDocConflict):
+    """Concurrent writers kept winning a control-plane record after every retry: retryable, not a 500."""
+    logger.warning("Control-plane write conflict on %s after retries: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": "concurrent_update",
+            "detail": "Another change to the same settings was saved at the same moment. Retry the request.",
+            "retry_after_sec": 1,
+        },
+        headers={"Retry-After": "1"},
     )
 
 
