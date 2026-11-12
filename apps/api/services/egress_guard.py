@@ -464,6 +464,7 @@ def assert_connector_dial_allowed(
     db_type: str = "",
     point: str = "",
     connector: str = "",
+    aws_endpoint: str | None = None,
 ) -> None:
     """Raise ``EgressRefused`` before a driver dials a blocked address.
 
@@ -486,10 +487,12 @@ def assert_connector_dial_allowed(
             workspace_id=workspace_id,
             db_type=db_type,
             connector=connector,
+            aws_endpoint=aws_endpoint,
         )
     else:
         refusal = metadata_endpoint_refusal(
-            *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type
+            *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type,
+            aws_endpoint=aws_endpoint,
         )
     if refusal:
         raise EgressRefused(refusal)
@@ -512,11 +515,84 @@ FILE_ENGINE_TYPES = frozenset({
 })
 
 
+# AWS SDK connectors keep the signing region in ``host`` (ConnectorModal saves
+# ``us-east-1``). The SDK dials ``endpoint_url`` or the region's AWS endpoint,
+# so the label is not resolved: each lookup cost ~10 s on a stalled CI resolver
+# and timed out a 3 s test (run 43151557376). But ``resolve_endpoint_url`` turns
+# a dot-less host plus a service port into ``http://<host>:<port>``: then the
+# label IS the dial target (PR 410 review H-E1). So the label is skipped only
+# when it is the whole of a value, no URL among the values names it, and the
+# caller passes the endpoint the SDK dials (``aws_endpoint``, "" for AWS's own)
+# and that endpoint names another host. Only an exact ASCII region spelling, as
+# botocore's partitions list them, is a label; ``us-db-01`` is a host name.
+AWS_REGION_HOST_TYPES = frozenset({
+    "s3",
+    "amazon_s3",
+    "aws_s3",
+    "s3_compatible",
+    "dynamodb",
+    "amazon_dynamodb",
+    "aws_dynamodb",
+    "kinesis",
+})
+_AWS_REGION_LABEL = re.compile(
+    r"(?:us|eu|ap|sa|ca|me|af|il|mx|cn|eusc-de)(?:-gov|-iso[a-z]?)?"
+    r"-(?:north|south|east|west|central|northeast|northwest|southeast|southwest)-[0-9]{1,2}",
+    re.ASCII,
+)
+
+
+def is_aws_region_label(host: str, db_type: str) -> bool:
+    """True when ``host`` is spelled as an AWS region and ``db_type`` is an AWS SDK type."""
+    kind = (db_type or "").strip().lower()
+    return kind in AWS_REGION_HOST_TYPES and _AWS_REGION_LABEL.fullmatch(host or "") is not None
+
+
+def aws_sdk_endpoint(cfg: Any, db_type: str = "") -> str | None:
+    """The endpoint an AWS SDK client built from ``cfg`` dials ("" = AWS's own).
+
+    ``None`` when ``cfg`` is not an AWS SDK connector or the endpoint cannot be
+    worked out; the guard then skips no region label.
+    """
+    if not isinstance(cfg, dict):
+        return None
+    kind = str(db_type or cfg.get("type") or cfg.get("db_type") or "").strip().lower()
+    if kind not in AWS_REGION_HOST_TYPES:
+        return None
+    from connectors.aws_common import resolve_endpoint_url
+
+    try:
+        return resolve_endpoint_url(cfg)
+    except (TypeError, ValueError):
+        return None
+
+
+def _skipped_region_labels(
+    values: Sequence[str], db_type: str, aws_endpoint: str | None
+) -> set[str]:
+    """Region labels in ``values`` that no URL and no SDK endpoint dials."""
+    if aws_endpoint is None:
+        return set()
+    dialled = set(_hosts_from_values(aws_endpoint))
+    labels: set[str] = set()
+    for raw in values:
+        hosts = _hosts_from_values(raw)
+        if hosts == [_normalize_host(str(raw or ""))]:
+            labels.update(hosts)  # the whole value is one bare name
+        else:
+            dialled.update(hosts)  # a URL or a connection string names it
+    return {
+        label for label in labels
+        if label not in dialled and is_aws_region_label(label, db_type)
+    }
+
+
 def iter_refusals(
     *values: str,
     allowlist: Sequence[str] | None = None,
     workspace_id: str = "",
     db_type: str = "",
+    aws_endpoint: str | None = None,
 ) -> Iterator[tuple[str, str]]:
     """Yield ``(host, phrase)`` for every dial target in ``values`` the policy refuses.
 
@@ -526,11 +602,16 @@ def iter_refusals(
     and fail-closes, which is what stops a rebind onto a metadata address.
     Pass ``allowlist=()`` to ignore the workspace list and the process env.
     ``db_type`` of a file engine exempts the host fields entirely — those
-    engines never open a socket.
+    engines never open a socket. For an AWS SDK ``db_type`` with a known
+    ``aws_endpoint`` a region label nothing dials is skipped (see
+    :func:`aws_sdk_endpoint` and the note above ``AWS_REGION_HOST_TYPES``).
     """
     if (db_type or "").strip().lower() in FILE_ENGINE_TYPES:
         return
+    skipped = _skipped_region_labels(values, db_type, aws_endpoint)
     for host in _hosts_from_values(*values):
+        if host in skipped:
+            continue
         phrase = classify_host(
             host,
             allowlist=allowlist,
@@ -546,6 +627,7 @@ def metadata_endpoint_refusal(
     allowlist: Sequence[str] | None = None,
     workspace_id: str = "",
     db_type: str = "",
+    aws_endpoint: str | None = None,
 ) -> str:
     """Why a connector host is refused before any socket, or ``""``.
 
@@ -554,7 +636,8 @@ def metadata_endpoint_refusal(
     the audit-first variant the newer sites use.
     """
     for host, phrase in iter_refusals(
-        *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type
+        *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type,
+        aws_endpoint=aws_endpoint,
     ):
         return _refusal_text(host, phrase)
     return ""
@@ -567,6 +650,7 @@ def new_point_refusal(
     workspace_id: str = "",
     db_type: str = "",
     connector: str = "",
+    aws_endpoint: str | None = None,
 ) -> str:
     """Refusal text at a newer enforcement site, or ``""`` to allow.
 
@@ -575,7 +659,8 @@ def new_point_refusal(
     ``DATAFLOW_EGRESS_ENFORCE_NEW`` is set. Metadata and link-local always refuse.
     """
     for host, phrase in iter_refusals(
-        *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type
+        *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type,
+        aws_endpoint=aws_endpoint,
     ):
         if _refuse_at_new_point(
             point, host, phrase, workspace_id=workspace_id, connector=connector
@@ -598,11 +683,13 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     values = [str(data.get(key) or "") for key in _SAVE_TARGET_KEYS]
     workspace_id = str(data.get("workspace_id") or "")
     db_type = str(data.get("type") or "")
+    # The endpoint an S3/DynamoDB client dials (``host`` + ``port`` may be it).
+    aws_endpoint = aws_sdk_endpoint(data, db_type)
     if existing is not None and values == [
         str(getattr(existing, key, "") or "") for key in _SAVE_TARGET_KEYS
     ]:
         for host, phrase in iter_refusals(
-            *values, workspace_id=workspace_id, db_type=db_type
+            *values, workspace_id=workspace_id, db_type=db_type, aws_endpoint=aws_endpoint
         ):
             if is_always_blocked_target(host):
                 return _refusal_text(host, phrase)
@@ -613,6 +700,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         workspace_id=workspace_id,
         db_type=db_type,
         connector=str(data.get("name") or ""),
+        aws_endpoint=aws_endpoint,
     )
 
 
@@ -1042,12 +1130,15 @@ def assert_cfg_dial_allowed(cfg: Any, *extra: str, db_type: str = "", point: str
     metadata/link-local, and for private targets under the enforce flag.
     """
     cfg_map = cfg if isinstance(cfg, dict) else {}
+    values = _cfg_dial_values(cfg_map, extra)
+    kind = str(db_type or cfg_map.get("type") or cfg_map.get("db_type") or "")
     assert_connector_dial_allowed(
-        *_cfg_dial_values(cfg_map, extra),
+        *values,
         workspace_id=str(cfg_map.get("workspace_id") or ""),
-        db_type=str(db_type or cfg_map.get("type") or cfg_map.get("db_type") or ""),
+        db_type=kind,
         point=point,
         connector=_cfg_connector_name(cfg_map),
+        aws_endpoint=aws_sdk_endpoint(cfg_map, kind),
     )
 
 

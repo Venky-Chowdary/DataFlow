@@ -916,17 +916,20 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
 
     from services.connector_auth import engine_login_role, resolve_api_key
     from services.dial_target import reconcile_dial_host
-    from services.egress_guard import metadata_endpoint_refusal
+    from services.egress_guard import aws_sdk_endpoint, metadata_endpoint_refusal
 
     # A leftover localhost host must not hide an Atlas URI, and must not be
     # invented when the URI already names the cluster.
     reconcile_dial_host(cfg)
+    # The driver this probe runs, not a ``type`` the cfg carries (review L-E3).
+    guard_type = str(db_type or cfg.get("type") or "")
     refusal = metadata_endpoint_refusal(
         str(cfg.get("host") or ""),
         str(cfg.get("endpoint_url") or ""),
         str(cfg.get("connection_string") or ""),
         workspace_id=str(cfg.get("workspace_id") or ""),
-        db_type=str(cfg.get("type") or db_type or ""),
+        db_type=guard_type,
+        aws_endpoint=aws_sdk_endpoint(cfg, guard_type),
     )
     if refusal:
         return False, refusal

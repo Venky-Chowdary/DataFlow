@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import uuid
 from dataclasses import dataclass, field
 
 from services.value_serializer import json_default
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 from ..knowledge.synonyms import SYNONYM_DICTIONARY
+from .training_runtime import raise_if_stopped
 
 
 @dataclass
@@ -184,11 +186,18 @@ class DataTransferDataSynthesizer:
             metadata={"count": len(examples)},
         )
 
-    def synthesize_full_dataset(self) -> dict[str, TrainingDataset]:
-        """Generate all training datasets."""
-        return {
-            "column_classification": self.synthesize_column_classification(500),
-            "column_mapping": self.synthesize_column_mapping(500),
-            "synonym_recognition": self.synthesize_synonym_recognition(1000),
-            "pii_detection": self.synthesize_pii_detection(300),
-        }
+    def synthesize_full_dataset(self, stop_event: threading.Event | None = None) -> dict[str, TrainingDataset]:
+        """Generate all training datasets.
+
+        ``stop_event`` set (API shutdown) raises ``TrainingStopped`` between datasets.
+        """
+        datasets: dict[str, TrainingDataset] = {}
+        for name, build in (
+            ("column_classification", lambda: self.synthesize_column_classification(500)),
+            ("column_mapping", lambda: self.synthesize_column_mapping(500)),
+            ("synonym_recognition", lambda: self.synthesize_synonym_recognition(1000)),
+            ("pii_detection", lambda: self.synthesize_pii_detection(300)),
+        ):
+            raise_if_stopped(stop_event)
+            datasets[name] = build()
+        return datasets

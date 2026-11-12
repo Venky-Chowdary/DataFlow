@@ -218,6 +218,12 @@ def _refuse_unhonourable_ssl_mode(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+# Keys a probe takes from the request itself, never from ``extra``.
+_PROBE_FIELDS_EXTRA_CANNOT_SET = frozenset(
+    {"type", "db_type", "host", "port", "endpoint_url", "connection_string"}
+)
+
+
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest, http_request: Request):
     require_admin_connector_access(http_request, request.type)
@@ -365,7 +371,9 @@ def _test_connection_blocking(request: TestConnectionRequest, op):
             "host_key_policy": request.host_key_policy or "",
             "trust_server_certificate": bool(request.trust_server_certificate),
         }
-        cfg.update(extra_flat)
+        # ``extra`` adds driver options; it never replaces the type the guard
+        # and driver key on or a dial field the form already sent (review L-E3).
+        cfg.update({k: v for k, v in extra_flat.items() if k not in _PROBE_FIELDS_EXTRA_CANNOT_SET})
         if driver in {"sqlite", "duckdb"}:
             located = locate_connector_file(
                 connection_string=str(cfg.get("connection_string") or ""),
