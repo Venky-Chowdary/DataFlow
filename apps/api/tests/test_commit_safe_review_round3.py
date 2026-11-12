@@ -311,3 +311,22 @@ def test_small_unanalysed_table_with_a_text_cursor_still_gets_the_late_commit_ch
         f'SELECT s.id FROM "{SCHEMA}".ua s LEFT JOIN "{SCHEMA}".ua_out d ON d.id = s.id WHERE d.id IS NULL',
         fetch=True,
     ) == []
+
+
+# --------------------------------------------------------------------------
+# Finding 4 — the calendar-text refusal names the remedy that works first
+# --------------------------------------------------------------------------
+
+
+def test_calendar_text_refusal_names_the_date_order_remedy_first():
+    """For day/month or month/day dates the working remedy is the file's date
+    order (date_locale=DMY loads them); the refusal says that first."""
+    from services.sync_cursor import records_after_watermark
+
+    with pytest.raises(ValueError) as raised:
+        records_after_watermark([{"d": "01/15/2026"}], "d", "12/31/2025", text_calendar_refusal=True)
+    message = str(raised.value)
+    assert "date_locale=DMY" in message, message
+    remedy = message.index("date order")
+    assert all(remedy < message.index(other) for other in ("ISO-8601", "full refresh")), message
+    assert "Declare the column" not in message[:remedy], message

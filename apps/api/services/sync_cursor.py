@@ -1472,8 +1472,10 @@ def _refuse_calendar_text(records: list[dict[str, Any]], column: str) -> None:
                 f"Cursor '{column}' is kept as text, but it holds dates written day/month "
                 f"or month/day ('{text.strip()}'): as text they sort by their leading day "
                 "or month, not by date, so an incremental read past the watermark would "
-                "skip rows without an error. Declare the column as a date or timestamp, "
-                "use an ISO-8601 (YYYY-MM-DD) cursor, or run this sync as a full refresh."
+                "skip rows without an error. Set the file's date order (for example "
+                "date_locale=DMY or MDY) so the column is read as a date, declare it as a "
+                "date or timestamp, use an ISO-8601 (YYYY-MM-DD) cursor, or run this sync "
+                "as a full refresh."
             )
 
 
