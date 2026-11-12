@@ -226,6 +226,21 @@ def build_source_drift_approval(
     )
 
 
+def drift_already_parked(sched: Any, approval: Mapping[str, Any]) -> bool:
+    """True when ``approval``'s job already opened the drift finding on ``sched``.
+
+    Preflight and the run's finalizer both see one refusal; opening it twice
+    would count one refusal as two occurrences.
+    """
+    existing = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    return bool(
+        str(existing.get("status") or "").strip().lower() == "open"
+        and str(existing.get("code") or "") == SOURCE_DRIFT_CODE
+        and str(existing.get("job_id") or "") == str(approval.get("job_id") or "")
+        and str(existing.get("job_id") or "")
+    )
+
+
 def open_schedule_drift_approval(
     schedule_id: str,
     approval: dict[str, Any],
@@ -236,15 +251,7 @@ def open_schedule_drift_approval(
     from services.schedule_store import get_schedule
 
     sched = get_schedule(schedule_id)
-    if not sched:
-        return
-    existing = sched.approval_request if isinstance(sched.approval_request, dict) else {}
-    if (
-        str(existing.get("status") or "").strip().lower() == "open"
-        and str(existing.get("code") or "") == SOURCE_DRIFT_CODE
-        and str(existing.get("job_id") or "") == str(approval.get("job_id") or "")
-        and str(existing.get("job_id") or "")
-    ):
+    if not sched or drift_already_parked(sched, approval):
         return
     from services.standing_authorization import binding_from_schedule
 

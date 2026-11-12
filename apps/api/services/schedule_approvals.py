@@ -174,19 +174,17 @@ def build_approval_request(
     }
 
 
-def open_approval_request(
-    schedule_id: str,
-    request: dict[str, Any],
-) -> PipelineSchedule | None:
-    """Park the schedule on a human decision.
+def approval_patch(sched: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """The schedule fields that park ``sched`` on ``request`` (no store write).
 
     Idempotent by request id: an identical finding on an identical plan is
     counted, not duplicated. Any parked retry is released, because a retry cannot
     change a deterministic answer and would otherwise race the decision.
+
+    A run's finalizer stores these in the write that releases the run's claim
+    (``schedule_store.RunOutcome``), so a finished run is never visible without
+    the finding it parked on.
     """
-    sched = get_schedule(schedule_id)
-    if not sched:
-        return None
     existing = sched.approval_request if isinstance(sched.approval_request, dict) else {}
     payload = dict(request)
     if (
@@ -201,20 +199,34 @@ def open_approval_request(
             "job_id": payload.get("job_id") or existing.get("job_id") or "",
             "run_attempt": payload.get("run_attempt") or existing.get("run_attempt") or 0,
         }
-    updated = update_schedule(
-        schedule_id,
-        {
-            "approval_request": payload,
-            "last_status": NEEDS_APPROVAL_STATUS,
-            "retry_at": None,
-            "retry_attempt": 0,
-        },
+    return {
+        "approval_request": payload,
+        "last_status": NEEDS_APPROVAL_STATUS,
+        "retry_at": None,
+        "retry_attempt": 0,
+    }
+
+
+def approval_requested_event(schedule_id: str, request: dict[str, Any]) -> None:
+    """``approval.requested`` for a finding that was just stored on a schedule."""
+    _approval_event(
+        "approval.requested", "held", schedule_id, request,
+        occurrences=int(request.get("occurrences") or 1),
     )
+
+
+def open_approval_request(
+    schedule_id: str,
+    request: dict[str, Any],
+) -> PipelineSchedule | None:
+    """Park the schedule on a human decision (see :func:`approval_patch`)."""
+    sched = get_schedule(schedule_id)
+    if not sched:
+        return None
+    patch = approval_patch(sched, request)
+    updated = update_schedule(schedule_id, patch)
     if updated is not None:
-        _approval_event(
-            "approval.requested", "held", schedule_id, payload,
-            occurrences=int(payload.get("occurrences") or 1),
-        )
+        approval_requested_event(schedule_id, patch["approval_request"])
     return updated
 
 
@@ -511,25 +523,33 @@ def close_finding_after_successful_run(schedule_id: str) -> None:
     Leaving the finding open kept ``needs_approval`` after the operator had
     already proved the pipeline runs, so later beats never fired (QA R2-107).
     """
+    sched = get_schedule(schedule_id)
+    patch = finding_closed_by_success(sched) if sched else None
+    if patch:
+        update_schedule(schedule_id, patch)
+
+
+def finding_closed_by_success(sched: Any) -> dict[str, Any] | None:
+    """The fields that close ``sched``'s open finding after a completed run.
+
+    None when nothing is open. A run's finalizer stores them in the write that
+    records the run, so a completed run is never visible still parked.
+    """
     from services.schedule_store import has_open_approval
 
-    sched = get_schedule(schedule_id)
-    if not sched or not has_open_approval(sched):
-        return
+    if not has_open_approval(sched):
+        return None
     request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
-    update_schedule(
-        schedule_id,
-        {
-            "approval_request": close_request_record(
-                request,
-                actor="system:run-succeeded",
-                reason=(
-                    "A later run completed. The parked refusal no longer "
-                    "describes this pipeline, so the cadence is armed again."
-                ),
+    return {
+        "approval_request": close_request_record(
+            request,
+            actor="system:run-succeeded",
+            reason=(
+                "A later run completed. The parked refusal no longer "
+                "describes this pipeline, so the cadence is armed again."
             ),
-        },
-    )
+        ),
+    }
 
 
 def resolve_plan_change(
