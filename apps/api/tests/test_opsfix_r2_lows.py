@@ -113,3 +113,52 @@ def test_the_lifespan_does_not_flush_telemetry_after_the_budget():
     teardown = Path(__file__).resolve().parents[1].joinpath("src", "main.py").read_text(encoding="utf-8")
     teardown = teardown[teardown.index("stop_background_threads)"):teardown.index("_docs = ")]
     assert "shutdown_tracing" not in teardown and "shutdown_otel_logging" not in teardown
+
+
+# ---------------------------------------------------------------------------
+# Connector lists and the name check during a control-plane outage
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def byok_connector(tmp_path, monkeypatch):
+    from services import byok_key_manager, connector_store, secret_vault, tenant_store
+    from services.shared_record_store import SharedRecordSet
+
+    monkeypatch.setenv("DATAFLOW_CONTROL_STORE_BACKEND", "file")
+    monkeypatch.setattr(tenant_store, "STORE_PATH", tmp_path / "tenants.json")
+    monkeypatch.setattr(byok_key_manager, "STORE_PATH", tmp_path / "byok_keys.json")
+    tenant = tenant_store.create_tenant("ws-byok", "BYOK")
+    byok_key_manager.create_key(tenant.id, "k0")
+    doc = {"_id": "c-byok", "name": "warehouse", "type": "postgresql", "workspace_id": "ws-byok",
+           "password": secret_vault.encrypt_secret("s3cret", tenant_id=tenant.id, label="connector-password")}
+
+    class _Coll:
+        def find(self, *_args, **_kwargs):
+            return [dict(doc)]
+
+    monkeypatch.setattr(connector_store, "_use_mongo", lambda: True)
+    monkeypatch.setattr(connector_store, "_mongo_collection", lambda: _Coll())
+    assert [c.name for c in connector_store.list_connectors(workspace_id="ws-byok")] == ["warehouse"]
+
+    def down(*_args, **_kwargs):
+        from services.control_plane_store import ControlPlaneUnavailable
+
+        raise ControlPlaneUnavailable("the control-plane database is unavailable")
+
+    monkeypatch.setattr(SharedRecordSet, "load", down)
+    return connector_store
+
+
+def test_a_connector_list_during_an_outage_is_a_503_not_a_shorter_list(byok_connector):
+    from services.control_plane_store import ControlPlaneUnavailable
+
+    with pytest.raises(ControlPlaneUnavailable):
+        byok_connector.list_connectors(workspace_id="ws-byok")
+
+
+def test_the_name_check_during_an_outage_does_not_answer_free(byok_connector):
+    from services.control_plane_store import ControlPlaneUnavailable
+
+    with pytest.raises(ControlPlaneUnavailable):
+        byok_connector.connector_name_taken("warehouse", workspace_id="ws-byok")

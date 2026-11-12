@@ -669,10 +669,16 @@ def _materialize_docs(docs: Any) -> list[SavedConnector]:
     never zero the whole saved-connector list (prod census defect — two
     corrupt trial docs made brief_workspace + /connectors/saved return []
     while the raw store held 66)."""
+    from services.control_plane_store import ControlPlaneUnavailable
+
     out: list[SavedConnector] = []
     for doc in docs:
         try:
             out.append(_doc_to_connector(doc))
+        except ControlPlaneUnavailable:
+            # A BYOK record during a control-plane outage is not unreadable: the
+            # list is a 503 (retry), never a shorter list or "re-save required".
+            raise
         except Exception as exc:
             logger.warning(
                 "saved connector doc %s unreadable (%s) — listing degraded entry",
@@ -686,10 +692,14 @@ def _materialize_docs(docs: Any) -> list[SavedConnector]:
 
 
 def _load_all() -> list[SavedConnector]:
+    from services.control_plane_store import ControlPlaneUnavailable
+
     if _use_mongo():
         try:
             coll = _mongo_collection()
             return _materialize_docs(coll.find())
+        except ControlPlaneUnavailable:
+            raise
         except Exception as exc:
             logger.warning("MongoDB connector load failed, falling back to file: %s", exc)
 
@@ -892,10 +902,14 @@ def list_connectors(role: str | None = None, workspace_id: str | None = None) ->
     scripts) this is system scope; inside a request a caller that forgot to
     pass a filter still cannot read another workspace's credentials (D154).
     """
+    from services.control_plane_store import ControlPlaneUnavailable
+
     workspace_id = _workspace_scope(workspace_id)
     if _use_mongo():
         try:
             return _visible_connectors(_list_mongo(role, workspace_id))
+        except ControlPlaneUnavailable:
+            raise  # the file is not this deployment's connector list
         except Exception as exc:
             logger.warning("MongoDB list_connectors failed, falling back to file: %s", exc)
     return _visible_connectors(_list_file(role, workspace_id))
