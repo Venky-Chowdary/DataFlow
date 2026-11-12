@@ -107,3 +107,66 @@ def test_an_ordinary_braced_value_is_still_accepted(fenced_workspace):
     assert addressing_refusal(_sqlserver(_url(odbc))) is None
     assert not _refused(fenced_workspace, _url(odbc))
     assert not _refused(fenced_workspace, odbc)
+
+
+# --- Security review 5 of PR 403: readings that still differed from the driver.
+
+_FAR = "10.9.9.9"
+
+
+@pytest.mark.parametrize(
+    "cs",
+    [
+        # SQLAlchemy unquote_plus-es odbc_connect after parse_qsl: %3B is a ';'
+        # for pyodbc although one decode reads it as part of APP's value.
+        "mssql+pyodbc://u:p@/?odbc_connect="
+        + quote_plus(f"{DRV};Server={EU};APP=x%3BFailover_Partner%3D{_FAR}"),
+        # SQLAlchemy keeps '#...' inside the query; urlparse calls it a fragment.
+        f"mssql+pyodbc://u:p@{EU}/db?encrypt=yes#&odbc_connect="
+        + quote_plus(f"{DRV};Server={EU};Failover_Partner={_FAR}"),
+        f"mssql+pyodbc://u:p@{EU}/db#?odbc_connect="
+        + quote_plus(f"{DRV};Server={EU};Failover_Partner={_FAR}"),
+        # An unclosed brace at the end must not make the whole string one
+        # libpq value: the driver reads the pairs before it.
+        f"APP=x;Server={EU};Failover_Partner={_FAR};Description={{y",
+        f"Server={EU};Failover_Partner={_FAR};foo",
+        # A space before '{' makes the value plain for the driver (" {a"), so
+        # the keys after it are real.
+        f"Server={EU};APP= {{a;Failover_Partner={_FAR};X=}}",
+    ],
+)
+def test_review5_driver_readings_are_judged(fenced_workspace, cs):
+    assert _refused(fenced_workspace, cs), cs
+
+
+def test_review5_sqlalchemy_hands_pyodbc_what_the_check_judged():
+    """The reading the check judges is the string SQLAlchemy gives pyodbc."""
+    import sqlalchemy as sa
+    from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
+
+    from services.residency_addressing import _query_pairs
+
+    odbc = f"{DRV};Server={EU};APP=x%3BFailover_Partner%3D{_FAR}"
+    url = "mssql+pyodbc://u:p@/?odbc_connect=" + quote_plus(odbc)
+    (driver_string,), _ = MSDialect_pyodbc().create_connect_args(sa.engine.make_url(url))
+    judged = {k: v for where, k, v in _query_pairs(_sqlserver(url)) if where == "odbc_connect"}
+    assert judged.get("Failover_Partner") == _FAR
+    assert f"Failover_Partner={_FAR}" in driver_string
+
+
+@pytest.mark.parametrize(
+    "cs",
+    [
+        f"Driver={{ODBC Driver 18 for SQL Server}};Server=tcp:{EU},1433;Database=db;Uid=u;Pwd=p;"
+        "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;Authentication=ActiveDirectoryPassword",
+        "mssql+pyodbc://u:p@/?odbc_connect=" + quote_plus(
+            f"Driver={{ODBC Driver 18 for SQL Server}};Server=tcp:{EU},1433;Database=db;Encrypt=yes"
+        ),
+        f"{DRV};Server={EU};Pwd={{p;a}}}}ss}};Database=db",
+        f"mssql+pyodbc://u:p@{EU}/db?encrypt=yes&odbc_connect="
+        + quote_plus(f"{DRV};Server={EU};Database=db"),
+    ],
+)
+def test_review5_ordinary_strings_still_pass(fenced_workspace, cs):
+    # (also: an in-region URL with an allowed query key and no fragment trick)
+    assert not _refused(fenced_workspace, cs), cs

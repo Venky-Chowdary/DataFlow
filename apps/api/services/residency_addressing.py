@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, unquote_plus, urlparse
 
 #: ``extra`` keys the engine, writers and planners set or read that never
 #: choose where data goes. Allowed for every family.
@@ -355,9 +355,15 @@ def family_of(fmt: str, url: str = "") -> tuple[str, Family]:
 
 
 def _url_query(text: str) -> list[tuple[str, str]]:
-    if "://" not in text:
+    """The URL's query as the driver layer reads it.
+
+    SQLAlchemy's URL pattern takes everything after the first ``?`` as the
+    query, a ``#`` included; ``urlparse`` would call ``#...`` a fragment and
+    hide ``?a=b#&odbc_connect=...`` from this check (security review 5).
+    Reading the longer string can only add keys to judge."""
+    if "://" not in text or "?" not in text:
         return []
-    query = urlparse(text).query
+    query = text.split("?", 1)[1]
     return parse_qsl(query, keep_blank_values=True)
 
 
@@ -383,8 +389,8 @@ def _odbc_pairs(raw: str) -> list[tuple[str, str]] | None:
         if not key or "{" in key or "}" in key:
             return None
         i = eq + 1
-        while i < n and raw[i] in " \t":
-            i += 1
+        # Braced only when '{' is the very next character, as the driver
+        # manager reads it: "APP= {a;B=c}" is APP=" {a" then B=c (review 5).
         if i < n and raw[i] == "{":
             i += 1
             value: list[str] = []
@@ -473,9 +479,10 @@ def _dsn_pairs(text: str) -> list[tuple[str, str]] | None:
     if not _is_dsn(raw):
         return None
     if ";" in raw:
-        pairs = _odbc_pairs(raw)
-        if pairs is not None:
-            return pairs
+        # Text with ';' is an ODBC string to the drivers that take one; when it
+        # does not read as ODBC it is unreadable, never re-read as one libpq
+        # value that would hide every key after the first (review 5).
+        return _odbc_pairs(raw)
     return _libpq_pairs(raw)
 
 
@@ -499,6 +506,9 @@ def _query_pairs(endpoint: Any) -> list[tuple[str, str, str]]:
         for key, value in _url_query(text):
             found.append((name, key, value))
             if _norm_key(key) == "odbcconnect":
+                # SQLAlchemy's PyODBCConnector unquote_plus-es the value after
+                # parse_qsl: judge the string pyodbc receives (review 5).
+                value = unquote_plus(value)
                 if not _is_dsn(value):
                     raise ValueError("the odbc_connect value cannot be read as connection keys")
                 found.extend(("odbc_connect", k, v) for k, v in _read_dsn(value, "odbc_connect"))
