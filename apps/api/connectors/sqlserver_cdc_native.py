@@ -431,9 +431,14 @@ def classify_mssql_cdc_rows(
         }
         key = _pk_value(clean, pk_cols) or ""
         if op_i == 1:
-            if key:
-                deletes.append(key)
-                pending_before.pop(key, None)
+            if not key:
+                # A delete with no key cannot be applied; skipping it leaves
+                # the row at the destination while the LSN moves on.
+                from services.cdc_transaction_buffer import CdcUnkeyedDelete
+
+                raise CdcUnkeyedDelete(lsn=str(rec.get("__$start_lsn") or "") or None)
+            deletes.append(key)
+            pending_before.pop(key, None)
         elif op_i == 2:
             inserts.append(clean)
             pending_before.pop(key, None)

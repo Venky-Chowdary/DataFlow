@@ -42,6 +42,20 @@ DEADLINE = 2
 RELEASE_AFTER = 7.0
 #: An answer the operator would call "the API is up".
 FAST = 1.0
+#: The pre-fix loop stayed blocked until RELEASE_AFTER, so no latency limit at
+#: or above this can let that regression through.
+CEILING = RELEASE_AFTER / 2
+
+
+def _limit(baseline: dict[str, float]) -> float:
+    """FAST, widened for a slow runner by its own warm, unloaded latency.
+
+    A shared CI runner answered the first MCP list_jobs in 1.02 s with nothing
+    hanging; the regression this file guards blocks for RELEASE_AFTER (7 s).
+    The limit scales with the runner (4x its warm latency) but never reaches
+    CEILING, so a blocked loop still fails.
+    """
+    return min(CEILING, max(FAST, 4 * max(baseline.values())))
 #: The loop's default executor (MCP request threads), kept small and fixed.
 MCP_THREADS = 3
 
@@ -158,6 +172,8 @@ def test_api_answers_while_a_connector_test_waits_on_a_silent_host(silent_host):
     async def main():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://api", timeout=60) as client:
+            await _api_latencies(client)  # warm: first-call imports are not a hang
+            baseline = await _api_latencies(client)
             hung = asyncio.create_task(
                 client.post("/api/v1/connectors/test", json=_oracle(silent_host.port))
             )
@@ -167,10 +183,10 @@ def test_api_answers_while_a_connector_test_waits_on_a_silent_host(silent_host):
             late = time.monotonic() - issued - 0.5
             during = {"event_loop": late, **await _api_latencies(client)}
             answer = await hung
-            return during, answer
+            return baseline, during, answer
 
-    during, answer = _run(main)
-    assert max(during.values()) < FAST, during
+    baseline, during, answer = _run(main)
+    assert max(during.values()) < _limit(baseline), (during, baseline)
     body = answer.json()
     assert body["success"] is False
     # The deadline answer names the silent endpoint.
@@ -183,6 +199,8 @@ def test_mcp_keeps_answering_while_create_connector_probes_a_silent_host(silent_
     async def main():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://api", timeout=60) as client:
+            await _api_latencies(client)  # warm: first-call imports are not a hang
+            baseline = await _api_latencies(client)
             creates = [
                 asyncio.create_task(
                     client.post(
@@ -202,11 +220,19 @@ def test_mcp_keeps_answering_while_create_connector_probes_a_silent_host(silent_
             late = time.monotonic() - issued - (DEADLINE + 1.5)
             after = {"event_loop": late, **await _api_latencies(client)}
             answers = await asyncio.gather(*creates)
-            return after, answers
+            return baseline, after, answers
 
-    after, answers = _run(main)
-    assert max(after.values()) < FAST, after
+    baseline, after, answers = _run(main)
+    assert max(after.values()) < _limit(baseline), (after, baseline)
     for response in answers:
         result = response.json()["result"]
         assert result["isError"] is True
         assert f"127.0.0.1:{silent_host.port}" in result["content"][0]["text"], result
+
+
+def test_the_latency_limit_still_fails_a_blocked_loop():
+    """The pre-fix behaviour (blocked until the host lets go) fails at any
+    runner speed; a warm runner keeps the 1 s operator bar."""
+    assert _limit({"a": 0.01}) == FAST
+    assert _limit({"a": 0.5}) == 2.0
+    assert _limit({"a": 30.0}) == CEILING < RELEASE_AFTER - 0.5

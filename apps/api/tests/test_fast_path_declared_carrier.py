@@ -123,7 +123,7 @@ def test_keyed_upsert_join_token_is_read_as_cardinality_too():
     )
 
 
-def _engine_copy_report(tmp_path: Path) -> dict:
+def _engine_copy_report(tmp_path: Path, validation_mode: str = "strict") -> dict:
     src_path = tmp_path / "count_src.db"
     dst_path = tmp_path / "count_dst.db"
     src = sqlite3.connect(str(src_path))
@@ -145,7 +145,7 @@ def _engine_copy_report(tmp_path: Path) -> dict:
         ),
         mappings=_maps(),
         sync_mode="full_refresh_overwrite",
-        validation_mode="strict",
+        validation_mode=validation_mode,
         skip_preflight=True,
     )
     result = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
@@ -157,8 +157,13 @@ def _engine_copy_report(tmp_path: Path) -> dict:
 
 def test_engine_copy_reports_count_proof_only_when_the_digest_is_off(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("DATAFLOW_ENGINE_DIGEST", raising=False)
-    report = _engine_copy_report(tmp_path)
-    # Default: cardinality only, and the claim says exactly that.
+    # Strict never settles for the count (algorithm audit 10): it takes the
+    # verify-time digest, so the count-only claim is a balanced-mode outcome.
+    (tmp_path / "strict").mkdir()
+    strict = _engine_copy_report(tmp_path / "strict")
+    assert strict.get("checksum_scope") == "verify_time_population_digest"
+    report = _engine_copy_report(tmp_path, validation_mode="balanced")
+    # Balanced: cardinality only, and the claim says exactly that.
     assert report.get("checksum_scope") == "dest_count_equals_source_snapshot_count"
     assert report.get("checksum_scope") != "full_checksum"
     assert not report.get("source_checksum")

@@ -73,6 +73,13 @@ def test_shrunk_load_is_blocked_unless_the_volume_is_acknowledged(tmp_path, isol
 
     assert _run(isolated, _request(src, dst)).success  # history: 20 rows
 
+    # One prior load is not a baseline: the shrunk load is advice, not a block
+    # (audit H6 — a blocking verdict needs 8 prior loads).
+    early = _run(isolated, _request(src, dst, limit=5))
+    assert early.success, early.error
+    for _ in range(8):
+        assert _run(isolated, _request(src, dst)).success
+
     refused = _run(isolated, _request(src, dst, limit=5))
     assert not refused.success
     assert "Load volume 5 is below 50% of prior median 20" in str(refused.error)

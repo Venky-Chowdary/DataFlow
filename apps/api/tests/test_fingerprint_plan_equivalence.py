@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import pytest
 
+from services.fingerprint_rules import row_part
 from services.reconciliation import (
     _fingerprint_cell,
     _iter_fingerprints,
@@ -41,12 +42,14 @@ def test_row_loop_matches_per_cell_resolution(engine: str):
     """The hoisted plan must reproduce _fingerprint_cell exactly, cell for cell."""
     for row in ROWS:
         expected = "\x1f".join(
-            f"{col.lower()}="
-            + _fingerprint_cell(
-                row[COLUMNS.index(col)],
-                column=col,
-                dest_db_type=engine,
-                dest_types=DEST_TYPES,
+            row_part(
+                col.lower(),
+                _fingerprint_cell(
+                    row[COLUMNS.index(col)],
+                    column=col,
+                    dest_db_type=engine,
+                    dest_types=DEST_TYPES,
+                ),
             )
             for col in sorted(COLUMNS, key=str.lower)
         )
@@ -85,8 +88,8 @@ def test_short_rows_still_read_as_null():
             )
         )
     )
-    assert "amount=\x00NULL\x00" in fp
-    assert "flag=\x00NULL\x00" in fp
+    assert row_part("amount", "\x00NULL\x00") in fp
+    assert row_part("flag", "\x00NULL\x00") in fp
 
 
 def test_sort_key_is_resolved_against_its_own_column():

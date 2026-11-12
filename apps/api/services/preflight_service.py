@@ -2014,9 +2014,9 @@ def run_file_preflight(
 
     # D243: execute refuses a pre-load recipe on a route that merges against
     # stored history. Preflight must refuse the same recipe, not pass it green.
-    from services.multi_stream_plan import history_shape_route_gate
+    from services.source_filter_gate import route_request_gate  # + source_filter (audit H2)
 
-    shape_route_gate = history_shape_route_gate(shape_recipe, sync_mode)
+    shape_route_gate = route_request_gate(shape_recipe, sync_mode, source_filter)
     if shape_route_gate:
         blockers.append({k: shape_route_gate[k] for k in ("id", "message")}
                         | {"details": dict(shape_route_gate["details"])})
