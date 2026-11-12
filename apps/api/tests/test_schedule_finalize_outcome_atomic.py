@@ -964,6 +964,93 @@ def test_a_success_reported_after_its_retry_ran_leaves_the_retry_alone(store, ru
     assert _newer_run(after) == _newer_run(before)
 
 
+# --- A row with no job is not a later run (review round 3, Low 1) -------------
+
+
+def _retry_pending(store, runner, parked) -> None:
+    """MA2: the retry beat wrote its pending record; it has not claimed yet."""
+    from services import schedule_run_lifecycle as life
+
+    life.begin_run(parked.id, trigger=life.TRIGGER_RETRY, attempt=1)
+
+
+def _run_now_crashed(store, runner, parked) -> None:
+    """MA3: a Run now crashed before dispatch: a failed record with no job."""
+    from services import schedule_run_lifecycle as life
+
+    run_id = life.begin_run(parked.id, trigger=life.TRIGGER_MANUAL)
+    runner._fail_unstarted_run(parked.id, run_id, RuntimeError("connector registry unavailable"),
+                               attempt=0, manual=True)
+
+
+def _retry_lost_by_the_sweep(store, runner, parked) -> None:
+    """MA5: the orphan sweep failed the retry beat's pending record (no job)."""
+    from services import schedule_run_lifecycle as life
+
+    run_id = life.begin_run(parked.id, trigger=life.TRIGGER_RETRY, attempt=1)
+    life.finish_run(parked.id, run_id, life.FAILED,
+                    reason=life.worker_lost_reason("the scheduler stopped"),
+                    reason_code=life.WORKER_LOST_CODE)
+
+
+def _skipped_after_the_park(store, runner, parked) -> None:
+    """A skip record after the parked retry: a beat that started nothing."""
+    from services import schedule_run_lifecycle as life
+
+    life.record_skip(parked.id, "approval_pending", "Waiting on an approval: x")
+
+
+@pytest.mark.parametrize("between", [
+    _retry_pending, _run_now_crashed, _retry_lost_by_the_sweep, _skipped_after_the_park,
+], ids=["MA2-retry-pending", "MA3-run-now-crashed", "MA5-retry-lost", "skip"])
+def test_a_success_after_its_parked_retry_is_recorded_past_a_row_with_no_job(
+    store, runner, between
+):
+    """No run that dispatched a job came after jR1: its late success is recorded.
+
+    A pending record, a Run now that crashed before dispatch, a retry the orphan
+    sweep failed before it had a job, or a skip: none of them consumed the parked
+    retry, so the retry is still armed and would land jR1's rows a second time.
+    """
+    parked = _retry_parked(store, runner, f"no-job-{between.__name__}")
+    between(store, runner, parked)
+    assert store.get_schedule(parked.id).retry_at, "the parked retry was consumed"
+
+    runner.jobs["jR1"] = COMPLETED
+    runner._finalize_run(parked.id, "jR1", 0, _now())
+
+    final = store.get_schedule(parked.id)
+    assert final.retry_at is None and final.retry_attempt == 0
+    assert final.run_count == 1 and final.last_job_id == "jR1"
+    assert final.last_status == "completed"
+    assert runner.notified == [("jR1", "completed")]
+
+
+def test_a_success_after_its_retry_failed_to_start_leaves_that_run(store, runner):
+    """The retry beat crashed before dispatch and was recorded: that consumed the retry.
+
+    A recorded run clears ``retry_at``, so with the retry gone a failed record
+    with no job is a later run like any other, and jR1's late success changes
+    nothing of it.
+    """
+    from services import schedule_run_lifecycle as life
+
+    parked = _retry_parked(store, runner, "retry-start-error")
+    run_id = life.begin_run(parked.id, trigger=life.TRIGGER_RETRY, attempt=1)
+    runner._fail_unstarted_run(parked.id, run_id, RuntimeError("connector registry unavailable"),
+                               attempt=1, manual=False)
+    before = store.get_schedule(parked.id)
+    assert before.retry_at is None and before.run_count == 1, before.run_history
+    assert before.last_status == "failed"
+    runner.notified.clear()
+
+    runner.jobs["jR1"] = COMPLETED
+    runner._finalize_run(parked.id, "jR1", 0, _now())
+
+    after = store.get_schedule(parked.id)
+    assert _newer_run(after) == _newer_run(before)
+
+
 # --- A finalize write that keeps losing (review round 2, L-B) -------------------
 
 

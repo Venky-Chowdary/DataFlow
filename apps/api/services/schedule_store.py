@@ -2921,15 +2921,25 @@ def _run_after(s: PipelineSchedule, job_id: str) -> bool:
     ``schedule_retry`` parked finishes this job's record without a newer one:
     that is not a later run, and the job's changed verdict is recorded in full
     (a success disarms the retry, which would land the rows a second time).
-    Skip records are not runs.
+    Only a finished record that is not a skip counts. While the retry is still
+    parked, it must also have dispatched a job: a pending record, a Run now that
+    crashed before dispatch or a retry the orphan sweep failed with no job left
+    the retry armed. Every recorded run clears ``retry_at``, so once the retry
+    was consumed a failure with no job is a later run too.
     """
-    from services.schedule_run_lifecycle import SKIPPED
+    from services.schedule_run_lifecycle import SKIPPED, is_open
 
     history = list(s.run_history or [])
     mine = [i for i, row in enumerate(history) if str(row.get("job_id") or "") == job_id]
-    return bool(mine) and any(
-        str(row.get("status") or "") != SKIPPED for row in history[mine[-1] + 1:]
-    )
+    if not mine:
+        return False
+    later = [
+        row for row in history[mine[-1] + 1:]
+        if str(row.get("status") or "") != SKIPPED and not is_open(row.get("status"))
+    ]
+    if s.retry_at:
+        later = [row for row in later if str(row.get("job_id") or "")]
+    return bool(later)
 
 
 def _late_outcome_fields(s: PipelineSchedule, extra: dict[str, Any]) -> dict[str, Any]:
