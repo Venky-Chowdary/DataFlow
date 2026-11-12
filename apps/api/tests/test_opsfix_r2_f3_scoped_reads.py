@@ -240,3 +240,22 @@ def test_a_slow_query_fails_that_read_without_failing_every_store(monkeypatch):
         coll.count_documents({})
     assert control_plane_bounds.outage_retry_at() > 0.0, "an unreachable database is still remembered"
     control_plane_bounds.reset_outage_state()
+
+
+def test_the_per_workspace_draft_cap_still_evicts_the_oldest(tmp_path, monkeypatch):
+    """With drafts read one at a time, the cap is enforced by trim(): ids and write times only."""
+    import itertools
+
+    from services import shared_doc_store as sds
+
+    db = install_shared_store(monkeypatch)
+    _pods(monkeypatch, tmp_path)
+    clock = itertools.count(1_800_000_000)
+    monkeypatch.setattr(sds, "_now", lambda: float(next(clock)))
+    for n in range(shape_draft_store.MAX_DRAFTS + 2):
+        shape_draft_store.save_shape_draft(route_key=f"r{n}->d", recipe={"steps": []}, workspace_id="ws-a")
+    shape_draft_store.save_shape_draft(route_key="other->d", recipe={"steps": []}, workspace_id="ws-b")
+    kept = sorted(d["key"] for d in db[ITEMS].find({"store": "shape_drafts", "part": "ws-a"}))
+    assert len(kept) == shape_draft_store.MAX_DRAFTS
+    assert "ws-a::r0->d" not in kept and "ws-a::r1->d" not in kept, "the two oldest drafts went"
+    assert shape_draft_store.load_shape_draft("other->d", workspace_id="ws-b") is not None
