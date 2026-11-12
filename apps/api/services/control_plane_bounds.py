@@ -19,9 +19,11 @@ Settings (``DATAFLOW_`` or ``DATAWRAP_`` prefix):
 
 ``CONTROL_STORE_TIMEOUT_SECONDS``  per-call bound for reads, default 1, at most 5.
 ``CONTROL_STORE_WRITE_TIMEOUT_SECONDS``  per-call bound for writes (updates,
-                                   inserts, deletes, transaction commits),
-                                   default 3, at most 10: rare admin writes
-                                   under compare-and-swap contention.
+                                   inserts, deletes, transaction commits) and
+                                   for every call inside a read-modify-write
+                                   (:func:`write_scope`), default 3, at most
+                                   10: rare admin writes under compare-and-swap
+                                   contention.
 ``CONTROL_STORE_OUTAGE_SECONDS``   how long an outage is remembered, default 2,
                                    at most 10 (0 turns the memory off).
 
@@ -39,6 +41,8 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from services.brand_env import getenv_brand
@@ -189,10 +193,30 @@ def is_slow_query(exc: BaseException) -> bool:
     return isinstance(exc, ExecutionTimeout)
 
 
+_write_scope = threading.local()
+
+
+@contextmanager
+def write_scope() -> Iterator[None]:
+    """Every call in this block runs under the write bound.
+
+    The read of a read-modify-write is part of the write: under the short read
+    bound, a shared store that was slow but healthy made an admin's grant fail
+    while its write would have had the write bound (PR 406 CI, 16 writers on
+    one tenant). Request-path reads outside a write keep the short bound.
+    """
+    _write_scope.depth = getattr(_write_scope, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _write_scope.depth -= 1
+
+
 class _Deadline:
     """``pymongo.timeout`` around one call, with outage bookkeeping."""
 
     def __init__(self, *, write: bool = False) -> None:
+        write = write or getattr(_write_scope, "depth", 0) > 0
         self._seconds = write_timeout_seconds() if write else operation_timeout_seconds()
 
     def __enter__(self) -> "_Deadline":

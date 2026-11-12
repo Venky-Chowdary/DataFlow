@@ -65,8 +65,8 @@ within 2 s, not at once. Writes always re-read the database.
 Each read from the control-plane database is bounded by
 `DATAWRAP_CONTROL_STORE_TIMEOUT_SECONDS` (default `1`, at most `5`). Each write
 (an update, insert, delete or transaction commit, which may retry under
-contention) is bounded by `DATAWRAP_CONTROL_STORE_WRITE_TIMEOUT_SECONDS`
-(default `3`, at most `10`). When the database cannot be reached (no server
+contention), and each read a write makes before it writes, is bounded by
+`DATAWRAP_CONTROL_STORE_WRITE_TIMEOUT_SECONDS` (default `3`, at most `10`). When the database cannot be reached (no server
 can be selected, a connection is refused or lost, or three calls in a row time
 out with none succeeding), the failure is remembered for
 `DATAWRAP_CONTROL_STORE_OUTAGE_SECONDS` (default `2`, at most `10`): requests

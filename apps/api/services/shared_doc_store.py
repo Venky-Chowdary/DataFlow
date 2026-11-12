@@ -52,6 +52,7 @@ from services.control_plane_bounds import (  # noqa: F401 - re-exported for call
     outage_seconds,
     raise_if_recent_outage,
     reset_outage_state,
+    write_scope,
 )
 from services.value_serializer import json_default
 
@@ -382,8 +383,9 @@ class SharedDoc:
         """Run a read-modify-write function again when its write lost the swap.
 
         Inside the call every load is a fresh read (no cache), so the retry
-        sees the other writer's change. In file mode the calls of one process
-        are serialized instead.
+        sees the other writer's change, and every call runs under the write
+        bound (its reads are part of the write: :func:`write_scope`). In file
+        mode the calls of one process are serialized instead.
         """
 
         @functools.wraps(fn)
@@ -394,7 +396,7 @@ class SharedDoc:
             try:
                 for attempt in range(_MAX_ATTEMPTS):
                     try:
-                        with self._lock:
+                        with self._lock, write_scope():
                             return fn(*args, **kwargs)
                     except SharedDocConflict as exc:
                         left = deadline - time.monotonic()
@@ -543,7 +545,8 @@ class SharedLog:
         for attempt in range(_MAX_ATTEMPTS):
             if attempt:
                 time.sleep(_backoff(attempt - 1))
-            doc = coll.find_one({"store": self.name, "key": str(key)})
+            with write_scope():  # the read is part of the write
+                doc = coll.find_one({"store": self.name, "key": str(key)})
             if not doc:
                 return None
             current = json.loads(str(doc.get("body") or "{}"))
