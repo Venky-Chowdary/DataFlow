@@ -456,3 +456,12 @@ def test_two_real_postgres_tables_that_differ_do_not_digest_alike():
     finally:
         cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         conn.close()
+
+
+def test_nonfinite_spelling_is_only_a_number_on_a_numeric_or_untyped_cell():
+    for ddl in ("UUID", "DATE", "MY_DOMAIN"):
+        assert fp("NAN", ddl_type=ddl, engine="postgresql") != fp(
+            "nan", ddl_type=ddl, engine="postgresql"
+        )
+    # Untyped: the spellings Python and PostgreSQL emit, never a name.
+    assert fp("Nan") != fp("nan") and fp("nan") == fp(float("nan"))

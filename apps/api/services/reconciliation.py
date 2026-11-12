@@ -3687,10 +3687,13 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     if not text:
         return ""
     _nonfinite = _nonfinite_token(text)
-    if _nonfinite is not None and (ddl_type or text in _NONFINITE_PLAIN):
+    if _nonfinite is not None and (
+        _is_numeric_logical(ddl_type) if ddl_type else text in _NONFINITE_PLAIN
+    ):
         # 'Infinity' / '-inf' / 'NaN' on a numeric or untyped cell is the
         # number, one token per value. Untyped, only the spellings Python and
-        # PostgreSQL emit fold, so a name such as 'Nan' stays text.
+        # PostgreSQL emit fold, so a name such as 'Nan' stays text; on any
+        # other declared type the cell is not a number at all.
         return _nonfinite
     lowered = text.lower()
     # Align with transform_engine strict boolean tokens only. Status enums
