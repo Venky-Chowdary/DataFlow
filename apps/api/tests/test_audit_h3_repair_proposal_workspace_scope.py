@@ -91,17 +91,25 @@ def test_another_workspace_cannot_decide_a_proposal(tenancy_world):  # noqa: F81
 
 
 def test_proposal_cannot_be_planted_on_another_workspaces_job(tenancy_world):  # noqa: F811
-    """Naming a job the caller cannot see is the same as naming no real job:
-    the proposal stays in the caller's own workspace, out of the owner's queue."""
+    """Naming a job the caller cannot see is the same as naming no real job.
+
+    Since PR 403 review 3 (body ids) both are refused with the same 404, so
+    nothing is stored and the answer does not reveal that A's job exists; the
+    owner's queue stays empty either way."""
     job_a = tenancy_world.job(tenancy_world.workspace_a)
-    planted = _propose(tenancy_world.b, job_a)
-    unknown = _propose(tenancy_world.b, "0123456789abcdef01234567")
-    assert planted["workspace_id"] == unknown["workspace_id"] == tenancy_world.workspace_b
+    planted = tenancy_world.b.post(
+        "/api/v1/repair/propose/quarantine", json={**QUARANTINE, "job_id": job_a}
+    )
+    unknown = tenancy_world.b.post(
+        "/api/v1/repair/propose/quarantine",
+        json={**QUARANTINE, "job_id": "0123456789abcdef01234567"},
+    )
+    assert planted.status_code == unknown.status_code == 404, planted.text
+    assert planted.json() == unknown.json() == {"detail": "Job not found"}
 
     queue_a = tenancy_world.a.get("/api/v1/repair/proposals", params={"job_id": job_a})
     assert queue_a.json() == {"proposals": []}
-    queue_b = tenancy_world.b.get("/api/v1/repair/proposals")
-    assert {p["id"] for p in queue_b.json()["proposals"]} == {planted["id"], unknown["id"]}
+    assert tenancy_world.b.get("/api/v1/repair/proposals").json() == {"proposals": []}
 
 
 def test_proposal_without_a_job_belongs_to_the_callers_workspace(tenancy_world):  # noqa: F811
