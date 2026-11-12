@@ -133,6 +133,12 @@ async def lifespan(app: FastAPI):
     from services.local_file_policy import local_file_settings, warn_if_local_file_confinement_off
 
     warn_if_local_file_confinement_off(logging.getLogger("datawrap.security"))
+    from services.platform_aws_credentials import (
+        platform_aws_settings,
+        warn_if_platform_aws_credentials_allowed,
+    )
+
+    warn_if_platform_aws_credentials_allowed(logging.getLogger("datawrap.security"))
     from services.sso_authorization import warn_sso_auto_provision_without_domains
 
     warn_sso_auto_provision_without_domains(logging.getLogger("datawrap.security"))
@@ -174,6 +180,7 @@ async def lifespan(app: FastAPI):
                     "docs_enabled": bool(docs_enabled()),
                     "config_error_count": len(config_errors),
                     **local_file_settings(),
+                    **platform_aws_settings(),
                 },
             )
         except Exception as exc:

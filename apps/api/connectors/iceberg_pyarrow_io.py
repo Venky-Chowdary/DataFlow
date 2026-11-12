@@ -41,3 +41,20 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
         if scheme == "file":
             return scheme, netloc, strip_uri_drive_slash(path)
         return scheme, netloc, path
+
+
+class KeyedS3PyArrowFileIO(LocalUriPyArrowFileIO):
+    """Refuses to open S3 with the API process's AWS credentials (follow-up review 1, H2).
+
+    pyarrow's S3 filesystem falls back to the process's credential chain when
+    the properties carry no keys. The properties are the merged ones the
+    catalog hands the FileIO, so keys a REST catalog vends with a table count.
+    """
+
+    def _initialize_s3_fs(self, netloc: str | None) -> Any:
+        from services.platform_aws_credentials import s3_fileio_refusal
+
+        refusal = s3_fileio_refusal(self.properties)
+        if refusal:
+            raise ValueError(refusal)
+        return super()._initialize_s3_fs(netloc)

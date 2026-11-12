@@ -490,19 +490,23 @@ def _ensure_pyiceberg() -> None:
 def load_catalog(endpoint: Any) -> Any:
     """Load or create a pyiceberg Catalog from endpoint configuration."""
     _ensure_pyiceberg()
+    from connectors.iceberg_credential_guard import check_catalog_properties, guarded_catalog
+
     config = parse_iceberg_catalog_config(endpoint)
     catalog_type = config["catalog_type"]
     name = config["catalog_name"]
     props = config["properties"]
+    # Never the platform's AWS credentials (follow-up review 1, H2).
+    check_catalog_properties(catalog_type, props)
 
     if catalog_type == "rest":
         from pyiceberg.catalog.rest import RestCatalog
 
-        return RestCatalog(name, **props)
+        return guarded_catalog(RestCatalog)(name, **props)
     if catalog_type == "glue":
         from pyiceberg.catalog.glue import GlueCatalog
 
-        return GlueCatalog(name, **props)
+        return guarded_catalog(GlueCatalog)(name, **props)
     if catalog_type == "hadoop":
         try:
             from pyiceberg.catalog.hadoop import HadoopCatalog
@@ -512,11 +516,11 @@ def load_catalog(endpoint: Any) -> Any:
                 "use REST, Hive, Glue, or SQL. Refusing SqlCatalog fallback "
                 "that would invent a second catalog for leftover MERGE."
             ) from exc
-        return HadoopCatalog(name, **props)
+        return guarded_catalog(HadoopCatalog)(name, **props)
     if catalog_type == "hive":
         from pyiceberg.catalog.hive import HiveCatalog
 
-        return HiveCatalog(name, **props)
+        return guarded_catalog(HiveCatalog)(name, **props)
     if catalog_type == "filesystem":
         raise RuntimeError(
             "Iceberg filesystem CoW is not a pyiceberg SqlCatalog; "
@@ -525,7 +529,7 @@ def load_catalog(endpoint: Any) -> Any:
     # Default SQL catalog (SQLite, PostgreSQL, etc.).
     from pyiceberg.catalog.sql import SqlCatalog
 
-    return SqlCatalog(name, **props)
+    return guarded_catalog(SqlCatalog)(name, **props)
 
 
 def _namespace_exists(catalog: Any, namespace: tuple[str, ...]) -> bool:

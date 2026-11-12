@@ -2606,7 +2606,16 @@ def _iceberg_object_store_cfg(
             cfg.pop("username", None)
             cfg.pop("password", None)
             from connectors.aws_common import PLATFORM_DEFAULT_CREDENTIALS
+            from services.platform_aws_credentials import FLAG, platform_aws_credentials_allowed
 
+            if not platform_aws_credentials_allowed():
+                # The tenant's catalog has no keys: never the platform's chain
+                # (follow-up review 1, H2). The count stays unmeasured.
+                logger.warning(
+                    "Iceberg S3 COUNT unavailable (missing_credentials; the connector needs "
+                    "its own keys, or the operator sets %s=1)", FLAG,
+                )
+                return None
             cfg["use_default_aws_credentials"] = PLATFORM_DEFAULT_CREDENTIALS
             logger.warning(
                 "Iceberg S3 COUNT using default credential chain (missing_credentials)"

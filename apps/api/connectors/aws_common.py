@@ -195,23 +195,42 @@ _OFF_VALUES = frozenset({"", "0", "false", "no", "off", "none"})
 DEFAULT_CREDENTIALS_MESSAGE = (
     "use_default_aws_credentials is not accepted in a connector's settings: Datawrap does not "
     "sign a workspace's requests with the platform's own AWS credentials. Enter this "
-    "connector's access key and secret key instead."
+    "connector's access key and secret key instead, or ask the operator to set "
+    "DATAFLOW_ALLOW_PLATFORM_AWS_CREDENTIALS=1 (for a single-tenant deployment whose "
+    "connectors use the instance's IAM role)."
 )
 
 
-def default_credentials_refusal(cfg: Any) -> str:
-    """The refusal when tenant settings (top level or ``extra``) ask for the platform's
-    AWS credential chain, else ``""``."""
-    if not isinstance(cfg, dict):
-        return ""
+def _tenant_asks_for_platform_chain(cfg: dict[str, Any]) -> bool:
+    """Tenant settings (top level or ``extra``) ask for the process's AWS credential chain."""
     extra = cfg.get("extra")
     for holder in (cfg, extra if isinstance(extra, dict) else {}):
         value = holder.get("use_default_aws_credentials")
         if value is PLATFORM_DEFAULT_CREDENTIALS or value is None or value is False:
             continue
         if str(value).strip().lower() not in _OFF_VALUES:
-            return DEFAULT_CREDENTIALS_MESSAGE
-    return ""
+            return True
+    return False
+
+
+def default_credentials_refusal(cfg: Any) -> str:
+    """The refusal when tenant settings (top level or ``extra``) ask for the platform's
+    AWS credential chain and the operator has not allowed it
+    (``DATAFLOW_ALLOW_PLATFORM_AWS_CREDENTIALS``), else ``""``."""
+    from services.platform_aws_credentials import platform_aws_credentials_allowed
+
+    if not isinstance(cfg, dict) or not _tenant_asks_for_platform_chain(cfg):
+        return ""
+    return "" if platform_aws_credentials_allowed() else DEFAULT_CREDENTIALS_MESSAGE
+
+
+def signs_with_platform_chain(cfg: dict[str, Any]) -> bool:
+    """Platform code's marker, or a tenant's request the operator allowed (follow-up review 1, H2)."""
+    if cfg.get("use_default_aws_credentials") is PLATFORM_DEFAULT_CREDENTIALS:
+        return True
+    from services.platform_aws_credentials import platform_aws_credentials_allowed
+
+    return _tenant_asks_for_platform_chain(cfg) and platform_aws_credentials_allowed()
 
 
 def _client_config(service: str, endpoint_url: str, cfg: dict[str, Any]) -> Any:
@@ -244,7 +263,7 @@ def boto3_client(service: str, cfg: dict[str, Any], *, workspace_id: str = ""):
     kwargs: dict[str, Any] = {
         "region_name": region,
     }
-    if cfg.get("use_default_aws_credentials") is not PLATFORM_DEFAULT_CREDENTIALS:
+    if not signs_with_platform_chain(cfg):
         kwargs["aws_access_key_id"] = (
             (cfg.get("username") or "").strip() or "local"
         )
