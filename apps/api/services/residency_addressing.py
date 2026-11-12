@@ -354,7 +354,7 @@ def family_of(fmt: str, url: str = "") -> tuple[str, Family]:
 # --------------------------------------------------------------------------- reading keys
 
 
-def _url_query(text: str) -> list[tuple[str, str]]:
+def url_query_pairs(text: str) -> list[tuple[str, str]]:
     """The URL's query as the driver layer reads it.
 
     SQLAlchemy's URL pattern takes everything after the first ``?`` as the
@@ -503,7 +503,7 @@ def _query_pairs(endpoint: Any) -> list[tuple[str, str, str]]:
             continue
         if text.lower().startswith("jdbc:"):
             text = text[5:]
-        for key, value in _url_query(text):
+        for key, value in url_query_pairs(text):
             found.append((name, key, value))
             if _norm_key(key) == "odbcconnect":
                 # SQLAlchemy's PyODBCConnector unquote_plus-es the value after

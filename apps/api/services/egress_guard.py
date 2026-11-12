@@ -716,11 +716,18 @@ def egress_url_allowed(
     workspace_id: str = "",
 ) -> bool:
     """True when ``url`` is http(s) and its host survives the egress policy."""
-    parsed = urllib.parse.urlparse((url or "").strip())
+    try:
+        parsed = urllib.parse.urlparse((url or "").strip())
+        host = parsed.hostname or ""
+    except ValueError:  # a bracketed name urlparse rejects; HTTP clients read it otherwise
+        return False
     if parsed.scheme not in _ALLOWED_SCHEMES:
         return False
-    host = parsed.hostname or ""
-    return classify_host(host, allowlist=allowlist, workspace_id=workspace_id) is None
+    # urllib3 (requests) dials the percent-decoded host (security follow-up 7).
+    return all(
+        classify_host(name, allowlist=allowlist, workspace_id=workspace_id) is None
+        for name in {host, urllib.parse.unquote(host)}
+    )
 
 
 def redirect_target_allowed(url: str) -> bool:
@@ -762,13 +769,43 @@ def _authority_host(text: str) -> str:
     """
     if "://" not in text:
         return ""
-    parsed = urllib.parse.urlparse(text)
-    if parsed.hostname:
-        return parsed.hostname
-    path = parsed.path or ""
-    if "://" in path:
-        return urllib.parse.urlparse(path).hostname or ""
+    try:
+        parsed = urllib.parse.urlparse(text)
+        if parsed.hostname:
+            return parsed.hostname
+        path = parsed.path or ""
+        if "://" in path:
+            return urllib.parse.urlparse(path).hostname or ""
+    except ValueError:  # ``[name]``: judged by :func:`_driver_authority_hosts`
+        return ""
     return ""
+
+
+def _driver_authority_hosts(text: str) -> list[str]:
+    """The authority hosts as the drivers read them (security follow-up 7).
+
+    The last-``@`` parse (``connectors.url_authority``), percent-decoded the
+    way redis-py, libpq URIs and urllib3 decode it, each seed-list member, a
+    bracketed name unwrapped. ``urlparse`` alone judged
+    ``%31%36%39.254.169.254`` as nothing (or as an embedded ``39.254.169.254``)
+    and raised on ``[metadata.google.internal]``.
+    """
+    from connectors.url_authority import parse_url_authority
+
+    try:
+        authority = parse_url_authority(text).host
+    except (TypeError, ValueError):
+        return []
+    hosts: list[str] = []
+    for part in authority.split(","):
+        part = part.strip()
+        if part.startswith("[") and "]" in part:
+            part = part[1 : part.index("]")]
+        elif part.count(":") == 1:
+            part = part.rsplit(":", 1)[0]
+        if part:
+            hosts.append(part)
+    return hosts
 
 
 def _hosts_from_values(*values: str) -> list[str]:
@@ -783,14 +820,21 @@ def _hosts_from_values(*values: str) -> list[str]:
             # even when a directory name looks like an address.
             continue
         if "://" in text:
-            parsed = urllib.parse.urlparse(text)
+            try:
+                path = urllib.parse.urlparse(text).path or ""
+            except ValueError:
+                path = ""
             host = _authority_host(text)
             if host:
                 found.append(host)
-            elif (parsed.path or "").startswith("/") and "://" not in (parsed.path or ""):
+            elif path.startswith("/") and "://" not in path:
                 # Embedded file URL. Do not scan the path for addresses and
                 # do not DNS the URL string (IDNA: label empty or too long).
                 continue
+            seen = {_normalize_host(name) for name in found}
+            found.extend(
+                name for name in _driver_authority_hosts(text) if _normalize_host(name) not in seen
+            )
         found.extend(_KEYWORD_HOST.findall(text))
         found.extend(_EMBEDDED_IPV4.findall(text))
         found.extend(_EMBEDDED_METADATA_NAME.findall(text))
@@ -1181,11 +1225,17 @@ def follow_url_allowed(url: str, origin: str) -> bool:
     (``egress.would_block``) and followed unless ``DATAFLOW_EGRESS_ENFORCE_NEW``
     is set.
     """
-    target = urllib.parse.urlparse((url or "").strip())
-    if target.scheme not in _ALLOWED_SCHEMES or not target.hostname:
+    try:
+        target = urllib.parse.urlparse((url or "").strip())
+        if target.scheme not in _ALLOWED_SCHEMES or not target.hostname:
+            return False
+        base = urllib.parse.urlparse((origin or "").strip())
+        base_host = base.hostname
+    except ValueError:  # a bracketed name urlparse rejects (security follow-up 7)
         return False
-    base = urllib.parse.urlparse((origin or "").strip())
-    if base.scheme in _ALLOWED_SCHEMES and base.hostname:
+    if target.hostname != urllib.parse.unquote(target.hostname):
+        return False  # urllib3 dials the decoded host; never follow an encoded one
+    if base.scheme in _ALLOWED_SCHEMES and base_host:
         try:
             same = (
                 target.scheme == base.scheme
@@ -1214,9 +1264,7 @@ def redirect_guard_hook(origin: str = ""):
             location = str(resp.headers.get("Location") or "")
             target = urllib.parse.urljoin(str(getattr(resp, "url", "") or origin), location)
             if not follow_url_allowed(target, origin or str(getattr(resp, "url", "") or "")):
-                raise EgressRefused(
-                    _refusal_text(urllib.parse.urlparse(target).hostname or target, "redirect target")
-                )
+                raise EgressRefused(_refusal_text(target, "redirect target"))
         return resp
 
     return _hook
