@@ -765,3 +765,60 @@ def test_ids_named_in_a_request_body_are_scoped_too(world):
     # Owner control: A's administrator naming the same ids is not refused.
     own = world.admin_a.post("/api/v1/schedules/gitops/plan", json={"kind": "PipelineSchedule", "spec": spec})
     assert own.status_code != 403, own.text
+
+
+# --------------------------------------------------------------------------- ids in a request body
+
+
+def _body_declarations() -> dict[str, dict[str, Any]]:
+    return json.loads((FIXTURES / "route_tenancy_scoping.json").read_text(encoding="utf-8")).get("body_routes", {})
+
+
+def _cdc_snapshot_bodies(seeded: Seeded) -> list[dict[str, Any]]:
+    return [{"table": "t", "primary_key": "id", "job_id": seeded.params["job_id"]}]
+
+
+#: For each declared body route: the bodies that name workspace A's seeded ids.
+_BODY_ROUTE_BODIES: dict[str, Callable[[Seeded], list[dict[str, Any]]]] = {
+    "POST /api/v1/cdc/snapshots": _cdc_snapshot_bodies,
+}
+
+
+def test_every_body_id_route_refuses_other_tenants_and_serves_its_owner(world):
+    """Security review round 2 (M2): a route whose resource id travels in the body
+    is declared in ``body_routes`` and judged like a path-id route: B's
+    administrator and API key are refused for A's ids and leave nothing of A's,
+    and A's own administrator is served (owner control)."""
+    declared = _body_declarations()
+    assert set(declared) == set(_BODY_ROUTE_BODIES), "every declared body route needs request bodies here"
+    problems: list[str] = []
+    for route, entry in declared.items():
+        assert entry["scope"] == "workspace" and entry["resource"] in SEEDERS, (route, entry)
+        method, path = route.split(" ", 1)
+        seeded = SEEDERS[entry["resource"]](world)
+        for body in _BODY_ROUTE_BODIES[route](seeded):
+            for who, client in (("B's administrator", world.admin_b), ("B's API key", world.key_b)):
+                r = client.request(method, path, json=body)
+                if r.status_code not in (403, 404) or _leaks(r):
+                    problems.append(f"{route} {who} {body}: {r.status_code} {r.text[:120]}")
+            own = world.admin_a.request(method, path, json=body)
+            if own.status_code != 200:
+                problems.append(f"{route} owner control {body}: {own.status_code} {own.text[:120]}")
+        if not seeded.intact():
+            problems.append(f"{route}: A's resource changed")
+    assert not problems, "\n".join(problems)
+
+
+def test_a_cdc_snapshot_signal_names_only_a_source_the_caller_can_write(world):
+    """B naming A's connector as ``connector:<id>`` or ``connector_id``, or an
+    arbitrary fingerprint, never queues a signal on A's source."""
+    connector_id = _seed_saved_connector(world).params["connector_id"]
+    base = {"table": "t", "primary_key": "id"}
+    answers = [
+        world.admin_b.post("/api/v1/cdc/snapshots", json={**base, "source_key": f"connector:{connector_id}"}),
+        world.admin_b.post("/api/v1/cdc/snapshots", json={**base, "connector_id": connector_id}),
+        world.admin_b.post("/api/v1/cdc/snapshots", json={**base, "source_key": f"postgresql:{SENTINEL}.db:5432/x"}),
+    ]
+    assert [r.status_code for r in answers] == [404, 404, 400], [r.text[:160] for r in answers]
+    own = world.admin_a.post("/api/v1/cdc/snapshots", json={**base, "connector_id": connector_id})
+    assert own.status_code == 200 and own.json()["workspace_id"] == world.workspace_a, own.text
