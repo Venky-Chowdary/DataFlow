@@ -2879,7 +2879,9 @@ class RunOutcome:
     returns the fields the outcome adds. It runs under the store lock: no I/O.
     ``recorded`` is set when this caller's write recorded the run — two
     finalizers can arrive for one job, and only the one that recorded it
-    announces it. ``patch`` is what ``decide`` returned.
+    announces it. ``patch`` is what ``decide`` returned, less any field a late
+    finalizer may not store (:func:`_late_outcome_fields`): what the caller
+    announces is what was stored.
     """
 
     decide: Callable[[PipelineSchedule], dict[str, Any] | None] | None = None
@@ -3033,7 +3035,7 @@ def _mark_schedule_run_once(
             # again.
             extra = outcome.fields_for(s)
             if later_run:
-                extra = _late_outcome_fields(s, extra)
+                extra = outcome.patch = _late_outcome_fields(s, extra)
             if not extra:
                 outcome.recorded = True
                 return s

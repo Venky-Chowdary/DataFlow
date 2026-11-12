@@ -574,12 +574,12 @@ _NEWER_RUN_FIELDS = ("running", "running_job_id", "running_instance", "running_s
                      "retry_at", "retry_attempt", "missed_window_count")
 
 
-def _next_run_claimed(store, runner, name: str, first: dict, *, approve: bool):
+def _next_run_claimed(store, runner, name: str, first: dict, *, approve: bool, **fields):
     """jE1 finished with ``first`` and was recorded; jE2 now holds the claim."""
     from services import schedule_run_lifecycle as life
 
     runner.jobs["jE1"] = first
-    sched, _run = _claimed(store, name, "jE1")
+    sched, _run = _claimed(store, name, "jE1", **fields)
     runner._finalize_run(sched.id, "jE1", 0, _now())
     if approve:
         current = store.get_schedule(sched.id).approval_request
@@ -627,6 +627,27 @@ def test_late_refusal_after_the_next_run_claimed_parks_without_touching_its_clai
     assert after.approval_request["status"] == "open"
     assert after.approval_request["job_id"] == "jE1"
     assert after.last_status == "needs_approval"
+
+
+def test_a_late_back_off_that_is_not_stored_is_not_reported(store, runner, caplog):
+    """jE1 recorded completed, then reported as a repeated transient failure."""
+    before = _next_run_claimed(store, runner, "late-flaky", COMPLETED, approve=False,
+                               interval="", cron="* * * * *")
+    for n in range(3):  # failed beats in a row: a back-off would be owed
+        store.record_run_history(before.id, {
+            "run_id": f"run_{n}", "job_id": f"job-{n}", "status": "failed",
+            "error": TRANSIENT["error"],
+        })
+    before = store.get_schedule(before.id)
+    runner.jobs["jE1"] = TRANSIENT
+
+    with caplog.at_level("INFO"):
+        runner._finalize_run(before.id, "jE1", 0, _now())
+
+    after = store.get_schedule(before.id)
+    assert _newer_run(after) == _newer_run(before)
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "schedule.run.backoff" not in events, "a back-off jE2's cadence never got"
 
 
 def test_a_late_outcome_is_stored_without_the_fields_of_the_next_run(store, runner):

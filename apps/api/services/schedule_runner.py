@@ -1566,7 +1566,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                 else str(failure_class or "other")
             ),
         )
-        if "delay" in backoff:
+        if "delay" in backoff and "next_run_at" in outcome.patch:
             emit_event(
                 logger,
                 "schedule.run.backoff",
