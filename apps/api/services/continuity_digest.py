@@ -250,7 +250,9 @@ def _mongodb(cfg: dict[str, Any], table: str) -> dict[str, Any] | None:
 def _sqlite(path: str, table: str) -> dict[str, Any] | None:
     import sqlite3
 
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    from connectors.sqlite_common import sqlite_readonly_uri
+
+    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
     try:
         q = '"' + table.replace('"', '""') + '"'
         info = conn.execute(f"PRAGMA table_info({q})").fetchall()  # nosec B608

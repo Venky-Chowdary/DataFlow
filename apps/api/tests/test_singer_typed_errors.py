@@ -188,6 +188,9 @@ def test_schedule_router_passes_typed_error_through(monkeypatch):
         singer_taps_dir()
 
     monkeypatch.setattr(schedules_router, "create_schedule", _refuse)
+    # A unit test of the error passthrough: no connector store behind these ids
+    # (their ownership is checked first, security review round 3).
+    monkeypatch.setattr("services.body_id_ownership.assert_schedule_body_ids", lambda *_a, **_k: None)
     resp = _app(schedules_router.router).post(
         "/api/v1/schedules/",
         json={

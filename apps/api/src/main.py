@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+
+from services.brand_env import getenv_brand
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
 from services.control_plane_store import ControlPlaneUnavailable
@@ -22,6 +24,7 @@ from services import health_service
 from services.safe_errors import public_error
 from services.upload_limits import PayloadTooLarge
 from services.procedure_source import ProcedureSourceError
+from services.data_residency import ResidencyRefused
 from services.audit_coverage import AuditAccessMiddleware, http_route_template
 
 # Tests and callers historically import the route-template helper from the
@@ -131,6 +134,13 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    # Review (low): a flag set differently under DATAWRAP_ and DATAFLOW_ is named, never its values.
+    from services.brand_env import warn_brand_flag_conflicts
+
+    warn_brand_flag_conflicts(logger)
+    from services.sso_authorization import warn_sso_auto_provision_without_domains
+
+    warn_sso_auto_provision_without_domains(logging.getLogger("datawrap.security"))
     try:
         # Saved IP allowlists with no proxy hop count: say so once at boot.
         from services.ip_allowlist_policy import warn_if_hop_count_unset
@@ -278,6 +288,24 @@ async def lifespan(app: FastAPI):
         except Exception as import_exc:  # noqa: BLE001 - a store that cannot be reached fails closed on use
             print(f"[!] Control-plane store import skipped: {import_exc}")
 
+        # Review M3: exports written before workspaces had folders move to the
+        # folder of the workspace whose job records own them. Idempotent, and
+        # off the lifespan's critical path (round 2, Low): a large flat folder
+        # never delays the API's readiness.
+        from services.export_migration import migrate_flat_exports_at_startup, start_in_background
+
+        app.state.flat_export_migration = start_in_background(migrate_flat_exports_at_startup)
+        # Review round 3 (H3): the shared SQLite/DuckDB volumes are partitioned per
+        # workspace. The partition time is recorded before any request is served
+        # (connectors saved after it prove no ownership); owned flat files then
+        # move home off the critical path.
+        try:
+            from services.embedded_volume import mark_partitioned, migrate_flat_volume_files_at_startup
+
+            mark_partitioned()
+            app.state.flat_volume_migration = start_in_background(migrate_flat_volume_files_at_startup)
+        except OSError as exc:
+            print(f"[!] SQLite/DuckDB volume partition marker not written: {exc}")
         # Cadence stays up when RAG warm-up fails — otherwise due pipelines
         # sit on Next run forever with Runs=0. Multi-replica API pods set
         # SCHEDULE_LOOP=0; src.scheduler_main owns the loop there.
@@ -429,7 +457,7 @@ def _build_commit() -> str:
     checkout's HEAD. "unknown" rather than a hardcoded fake.
     """
     env = (
-        os.getenv("DATAFLOW_COMMIT_SHA")
+        getenv_brand("DATAFLOW_COMMIT_SHA")
         or os.getenv("RAILWAY_GIT_COMMIT_SHA")
         or os.getenv("SOURCE_COMMIT")
         or ""
@@ -692,7 +720,7 @@ async def _add_timing_header_response(request: Request, call_next):
             "Content-Security-Policy",
             "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
         )
-    hsts_flag = os.getenv("DATAFLOW_HSTS", "").strip().lower()
+    hsts_flag = getenv_brand("DATAFLOW_HSTS", "").strip().lower()
     forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
     https = request.url.scheme == "https" or forwarded == "https"
     if hsts_flag in {"1", "true", "on", "yes"}:
@@ -947,6 +975,18 @@ async def duplicate_transfer_handler(
             "job_id": exc.existing_job_id,
         },
     )
+
+
+@app.exception_handler(ResidencyRefused)
+async def residency_refused_handler(request: Request, exc: ResidencyRefused):
+    """A destination outside the workspace's data region is a 403 on every submit path.
+
+    Job creation raises it (``services.data_residency``); the two Studio run
+    routes answer it themselves first, and this covers every other route that
+    queues a job (retry, rerun, replay, upload-and-run).
+    """
+    logger.info("Residency refusal on %s", request.url.path)
+    return JSONResponse(status_code=403, content={"error": "data_residency", "detail": str(exc)})
 
 
 @app.exception_handler(ConnectorStoreError)

@@ -62,3 +62,24 @@ def test_unknown_or_all_status_does_not_add_a_status_filter():
     assert status_values("unknown") is None
     assert status_values("running") == ("running", "pending", "queued", "retrying")
     assert {"success", "succeeded", "completed_with_warnings"}.issubset(set(status_values("completed") or ()))
+
+def test_datetime_bounds_are_exact_instants_for_a_workspace_local_day():
+    """A date is a whole UTC day; a datetime is an exact [from, to) instant.
+
+    Pilot asks for "today" in the workspace time zone, whose day does not start
+    at 00:00 UTC, so the same filters must take instants as well as dates.
+    """
+    start = datetime(2026, 11, 10, 18, 30, tzinfo=timezone.utc)  # 11 Nov 00:00 Asia/Kolkata
+    end = datetime(2026, 11, 11, 18, 30, tzinfo=timezone.utc)
+    query = mongo_job_list_query(date_from=start, date_to=end)
+    assert query == {"created_at": {"$gte": start, "$lt": end}}
+
+    def job(at: datetime) -> dict:
+        return {"_id": "j", "status": "completed", "created_at": at}
+
+    assert memory_job_matches(job(start), date_from=start, date_to=end)
+    assert memory_job_matches(job(datetime(2026, 11, 10, 19, 0, tzinfo=timezone.utc)), date_from=start, date_to=end)
+    assert not memory_job_matches(job(datetime(2026, 11, 10, 18, 29, tzinfo=timezone.utc)), date_from=start, date_to=end)
+    assert not memory_job_matches(job(end), date_from=start, date_to=end)
+    # Plain dates keep their inclusive whole-day meaning.
+    assert memory_job_matches(job(end), date_from=date(2026, 11, 11), date_to=date(2026, 11, 11))

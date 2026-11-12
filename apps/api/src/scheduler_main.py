@@ -12,21 +12,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import signal
 import sys
 
-from services.brand_env import getenv_brand
+from services.brand_env import getenv_brand, setenv_brand
 
 
 def _force_scheduler_env() -> None:
     """This command is the scheduler, even if a parent shell left API env behind."""
-    os.environ["DATAFLOW_PROCESS_ROLE"] = "scheduler"
-    os.environ["DATAFLOW_SCHEDULE_LOOP"] = "1"
-    os.environ["DATAFLOW_API_CLAIM_LOOP"] = "0"
+    # Both names: a DATAWRAP_ value left in a shared env block must not win
+    # over the entrypoint (the reader prefers DATAWRAP_).
+    setenv_brand("PROCESS_ROLE", "scheduler")
+    setenv_brand("SCHEDULE_LOOP", "1")
+    setenv_brand("API_CLAIM_LOOP", "0")
     # A due pipeline calls run_transfer_async. Fleet on means enqueue, not a
     # thread-pool execute inside the scheduler.
-    os.environ["DATAFLOW_WORKER_FLEET"] = "1"
+    setenv_brand("WORKER_FLEET", "1")
 
 
 def main() -> int:

@@ -565,6 +565,12 @@ def test_bare_value_error_routes_are_safe(
         monkeypatch.setattr(transfer_plan_service, "build_run_payload", _raise())
         method, path = "GET", "/api/v1/transfer/plans/r3-plan/run-payload"
     elif case == "json_plan_merge":
+        from services import body_id_ownership
+
+        # /transfer/execute answers 404 for a plan the caller does not own
+        # before it merges (PR 403 review 3); this case is about a merge that
+        # raises, so the plan is one the caller owns.
+        monkeypatch.setattr(body_id_ownership, "plan_owner", lambda _plan_id: (True, ""))
         monkeypatch.setattr(transfer_plan_service, "merge_plan_into_run", _raise())
         method, path = "POST", "/api/v1/transfer/execute"
         request_kwargs["json"] = {**_JSON_EXECUTE, "plan_id": "r3-plan"}

@@ -162,8 +162,8 @@ def test_scoped_contract_write_mode(workspace_b):
     assert _status(lambda: module._scoped_contract(_request(EDITOR), contract.id, "", write=True)) == 200
 
 
-_GUARDS = ("assert_resource_workspace", "_bound_schedule", "_can_access_connector", "_scoped_contract")
-_ROUTERS = ("connectors", "saved_connectors", "schedules", "contracts", "transforms", "transform_library")
+_GUARDS = ("assert_resource_workspace", "_bound_schedule", "_can_access_connector", "_scoped_contract", "_visible_signal")
+_ROUTERS = ("connectors", "saved_connectors", "schedules", "contracts", "transforms", "transform_library", "transfer", "repair")
 
 
 def test_every_put_patch_delete_route_uses_write_mode():
@@ -194,3 +194,41 @@ def test_every_put_patch_delete_route_uses_write_mode():
                 if not (isinstance(write, ast.Constant) and write.value is True):
                     offenders.append(f"{name}_router.{fn.name}:{call.lineno}")
     assert not offenders, f"mutating routes gate with read-level check: {offenders}"
+
+
+@pytest.mark.parametrize(("email", "expected", "decided"), [(VIEWER, 403, False), (EDITOR, 200, True), (OUTSIDER, 404, False)])
+def test_deciding_a_repair_proposal_needs_write_in_its_workspace(workspace_b, monkeypatch, email, expected, decided):
+    """``POST /repair/proposals/{id}/decide`` changes the proposal: the caller's
+    editor credential is not enough, the proposal's own workspace must grant
+    write (security review M4: this ``write=True`` had no test)."""
+    from services import agentic_repair
+
+    module = importlib.import_module("src.routers.repair_router")
+    found = SimpleNamespace(id="B_PROPOSAL", workspace_id=workspace_b, source="quarantine", actions=[], job_id="j")
+    calls: list[str] = []
+
+    def _decide(proposal_id, **_kwargs):
+        calls.append(proposal_id)
+        return SimpleNamespace(to_dict=lambda: {"id": proposal_id, "status": "rejected"})
+
+    monkeypatch.setattr(agentic_repair, "get_proposal", lambda _pid: found)
+    monkeypatch.setattr(agentic_repair, "decide_proposal", _decide)
+    body = module.DecideBody(approve=False)
+    status = _status(lambda: asyncio.run(module.decide_repair("B_PROPOSAL", body, _request(email))))
+    assert status == expected
+    assert bool(calls) is decided
+
+
+@pytest.mark.parametrize(("email", "expected", "cancelled"), [(VIEWER, 403, False), (EDITOR, 200, True), (OUTSIDER, 404, False)])
+def test_cancelling_a_snapshot_signal_needs_write_in_its_workspace(workspace_b, monkeypatch, email, expected, cancelled):
+    """Cancelling changes the signal, so a read membership is not enough (review M4)."""
+    from services import cdc_incremental_snapshot
+
+    module = importlib.import_module("src.routers.repair_router")
+    signal = SimpleNamespace(id="B_SIGNAL", workspace_id=workspace_b, to_dict=lambda: {"id": "B_SIGNAL"})
+    calls: list[str] = []
+    monkeypatch.setattr(cdc_incremental_snapshot, "get_signal", lambda _sid: signal)
+    monkeypatch.setattr(cdc_incremental_snapshot, "cancel_signal", lambda sid: calls.append(sid) or signal)
+    status = _status(lambda: asyncio.run(module.cancel_snapshot("B_SIGNAL", _request(email))))
+    assert status == expected
+    assert bool(calls) is cancelled

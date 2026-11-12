@@ -1,8 +1,10 @@
 """External audit tip anchoring — WORM / Object-Lock style receipts.
 
 Engineering diligence: seals the current HMAC chain tip into an append-only
-anchor store. The default provider is a local stub (not S3 Object Lock / TSA).
-Real object-lock backends can plug in behind ``DATAFLOW_AUDIT_ANCHOR_PROVIDER``.
+anchor store. The only provider in this build is a local stub (not S3 Object
+Lock / TSA). ``AUDIT_ANCHOR_PROVIDER`` records what the operator asked for; a
+receipt always names the store that really holds it, and says so when the
+requested provider is not implemented.
 """
 
 from __future__ import annotations
@@ -39,9 +41,46 @@ def _store_path() -> Path:
 # "latest anchor" is the deployment's, not this pod's (H-5).
 _LOG = SharedLog("audit_tip_anchors", file_path=_store_path, key_field="id")
 
+#: Where a receipt is really written. The only provider this build implements
+#: is the built-in append-only store (the local file, or the shared
+#: control-plane log when one is configured); ``stub`` is its long-standing label.
+LOCAL_PROVIDER = "stub"
+_LOCAL_ALIASES = frozenset({"", "stub", "local"})
+
+
+def requested_anchor_provider() -> str:
+    """What ``AUDIT_ANCHOR_PROVIDER`` asks for (``s3`` …), whether or not it exists yet."""
+    return (getenv_brand("AUDIT_ANCHOR_PROVIDER", LOCAL_PROVIDER) or LOCAL_PROVIDER).strip().lower()
+
 
 def anchor_provider() -> str:
-    return (getenv_brand("AUDIT_ANCHOR_PROVIDER", "stub") or "stub").strip().lower()
+    """The provider that actually stores receipts: the local store, whatever was requested.
+
+    A receipt must not carry the name of a provider that did not store it
+    (audit M-16): ``AUDIT_ANCHOR_PROVIDER=s3`` used to label a local write "s3".
+    """
+    return LOCAL_PROVIDER
+
+
+def _say_requested_provider_not_implemented(receipt: dict[str, Any], requested: str, *, shared: bool) -> None:
+    """Say what was asked for and that it did not happen (audit M-16).
+
+    Never label the stub write with the requested provider's name, and name
+    the store that really holds the receipt: this node's file, or the
+    deployment's shared control-plane log.
+    """
+    where = "the stub store in this deployment's shared control-plane database" if shared else (
+        "the local stub store on this node"
+    )
+    receipt["requested_provider"] = requested
+    receipt["honesty"] = (
+        f"Requested anchor provider '{requested}' is not implemented in this build: "
+        f"this receipt was written to {where}. "
+        "It is not S3 Object Lock / RFC-3161 TSA and is not an external anchor."
+    )
+    logger.warning(
+        "AUDIT_ANCHOR_PROVIDER=%s is not implemented; audit tip anchored to the stub store", requested
+    )
 
 
 def anchor_tip(tip_hash: str, *, event_time: str = "") -> dict[str, Any] | None:
@@ -49,23 +88,20 @@ def anchor_tip(tip_hash: str, *, event_time: str = "") -> dict[str, Any] | None:
     tip = (tip_hash or "").strip()
     if not tip:
         return None
-    provider = anchor_provider()
-    receipt = {
+    requested = requested_anchor_provider()
+    receipt: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "tip_hash": tip,
         "anchored_at": _now(),
         "event_time": event_time or None,
-        "provider": provider,
-        "honesty": (
-            "Local stub anchor — not S3 Object Lock / RFC-3161 TSA. "
-            "Configure DATAFLOW_AUDIT_ANCHOR_PROVIDER=s3 when infra is ready."
-            if provider in {"stub", "local", ""}
-            else f"Anchor provider={provider} (verify ops runbook separately)."
-        ),
+        "provider": anchor_provider(),
+        "externally_anchored": False,
+        "honesty": "Local stub anchor — not S3 Object Lock / RFC-3161 TSA.",
     }
-    # Future: provider == "s3" → PutObject with Object Lock; keep stub fail-safe.
     try:
         coll = _LOG.backend()
+        if requested not in _LOCAL_ALIASES:
+            _say_requested_provider_not_implemented(receipt, requested, shared=coll is not None)
         if coll is not None:
             _LOG.append(coll, receipt)
             return receipt

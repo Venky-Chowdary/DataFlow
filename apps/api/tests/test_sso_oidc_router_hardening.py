@@ -19,6 +19,8 @@ def oidc_client_fixture(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "x" * 64)
     monkeypatch.setenv("DATAFLOW_SECRETS_KEY", "y" * 32)
     monkeypatch.setenv("DATAFLOW_SSO_AUTO_PROVISION", "1")
+    # Auto-provisioning needs an allowed-domain list (audit M-11: empty admits nobody).
+    monkeypatch.setenv("DATAFLOW_SSO_ALLOWED_DOMAINS", "example.test,example.com")
 
     from services import integrations_store, sso_state
     from src.main import app

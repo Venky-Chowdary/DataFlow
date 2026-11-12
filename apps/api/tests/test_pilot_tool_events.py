@@ -87,7 +87,10 @@ def test_unhandled_exception_logs_error_type_only_and_keeps_tool_result(capture)
     with caller_role("admin"):
         result = tools.execute("describe_pilot", {})
     assert result.success is False
-    assert result.error == SENTINEL  # caller-facing contract unchanged
+    # The caller gets a safe sentence and a reference; the exception text —
+    # here a prompt fragment and a URI password — stays in the log (audit H6).
+    assert "SENTINEL-PROMPT" not in result.error and "hunter2" not in result.error
+    assert "RuntimeError" in result.error and "Reference:" in result.error
     record = _only_event(capture)
     assert (record.outcome, record.levelno) == ("failed", logging.ERROR)
     assert record.reason == "exception"

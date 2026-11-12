@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 from services.brand_env import getenv_brand
 import threading
 from collections import OrderedDict
@@ -121,7 +120,7 @@ def pool_settings() -> dict[str, int]:
 
     def _int(name: str, default: int) -> int:
         try:
-            return max(1, int(os.getenv(name, str(default))))
+            return max(1, int(getenv_brand(name, str(default)) or default))
         except ValueError:
             return default
 

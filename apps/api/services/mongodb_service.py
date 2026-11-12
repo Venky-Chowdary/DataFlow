@@ -1216,6 +1216,17 @@ class MongoDBService:
             logger.warning("idempotency release failed for %s: %s", key, exc)
             return False
 
+    def _ensure_export_path_index(self, jobs: Any) -> None:
+        """Index ``destination_summary.path`` once per process (round 2, Low): the
+        flat-export owner lookups were collection scans. Failure is logged."""
+        if getattr(self, "_export_path_index_ready", False):
+            return
+        try:
+            jobs.create_index("destination_summary.path")
+        except Exception as exc:  # noqa: BLE001 - an index is an optimisation
+            logger.debug("transfer_jobs export-path index setup skipped: %s", exc)
+        self._export_path_index_ready = True
+
     def _ensure_claim_indexes(self, claims: Any) -> None:
         """Add the TTL index that reclaims abandoned claims.
 
@@ -1308,6 +1319,25 @@ class MongoDBService:
             doc["_id"] = str(doc["_id"])
             rows.append(doc)
         return rows
+
+    def list_export_file_claims(self, root: str, path: str | None = None) -> list[tuple[str, str]]:
+        """``(export path, workspace id)`` of every job whose export summary names
+        a file under ``root``, or exactly ``path`` (system scope;
+        ``services.export_migration``). Both use the ``destination_summary.path``
+        index (an anchored prefix ``$regex`` is an index range scan)."""
+        import re as _re
+
+        db = self.get_database()
+        self._ensure_export_path_index(db["transfer_jobs"])
+        if path:
+            query: dict[str, Any] = {"destination_summary.path": str(path)}
+        else:
+            query = {"destination_summary.path": {"$regex": "^" + _re.escape(str(root))}}
+        projection = {"destination_summary.path": 1, "workspace_id": 1}
+        return [
+            (str((doc.get("destination_summary") or {}).get("path") or ""), str(doc.get("workspace_id") or ""))
+            for doc in db["transfer_jobs"].find(query, projection)
+        ]
 
     def is_job_name_taken(
         self,
@@ -2103,6 +2133,16 @@ class MemoryMongoDBService:
             for rec in self._jobs.values()
             if unscoped.matches(rec.get("workspace_id"))
         ]
+
+    def list_export_file_claims(self, root: str, path: str | None = None) -> list[tuple[str, str]]:
+        """See ``MongoDBService.list_export_file_claims``."""
+        claims = []
+        for rec in self._jobs.values():
+            summary = rec.get("destination_summary")
+            recorded = str(summary.get("path") or "") if isinstance(summary, dict) else ""
+            if (recorded == str(path)) if path else recorded.startswith(str(root)):
+                claims.append((recorded, str(rec.get("workspace_id") or "")))
+        return claims
 
     def is_job_name_taken(
         self,

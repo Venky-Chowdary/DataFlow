@@ -865,9 +865,9 @@ class UniversalTransferEngine:
         self._resolve_saved_connectors(request)
         stamp_kafka_source(request)
         from connectors.sql_identifiers import unsafe_destination_identifier_reason
-        from services.local_file_policy import local_destination_refusal  # D276: local disk, before any write
+        from .job_scope import start_refusal  # residency (review H2/H3) and local disk (D276), before any write
         dest = request.destination
-        ident_err = local_destination_refusal(dest) or (
+        ident_err = start_refusal(request) or (
             unsafe_destination_identifier_reason(str(dest.format or ""), str(dest.table or dest.collection or ""))
         )
         if ident_err:
@@ -1723,7 +1723,7 @@ class UniversalTransferEngine:
                 from services.batch_incremental import bind_transfer_request
 
                 incremental_bound = bind_transfer_request(request, src_fmt)
-                records = incremental_bound.bound(records)
+                records = incremental_bound.bound(records, schema)
             except ValueError as cursor_refusal:
                 mongo.update_job_status(
                     job_id, "failed", error=str(cursor_refusal), phase="failed"

@@ -9,6 +9,12 @@ def create_pending_job(engine: Any, request: Any) -> str:
     from src.transfer import engine as engine_module
 
     engine._resolve_saved_connectors(request)
+    # Audit H-4: the one place every job is created (REST, schedules, sync-now,
+    # retries, MCP, the Pilot) refuses a destination outside the workspace's
+    # region, judged on the resolved endpoint; raises ResidencyRefused.
+    from services.data_residency import enforce_request_residency
+
+    enforce_request_residency(request)
     # QA C3: every route that queues a job passes the same callable intake. The
     # routes run it first so they can answer 422; running it here as well means
     # a route that skipped it cannot queue an unresolved source. It is

@@ -398,6 +398,9 @@ def boundary_append_insert_sql(
     if watermark is None or str(watermark) == "":
         return f"INSERT INTO {dest_ref} ({cols}) SELECT {cols} FROM {staging_ref}"
     cur_val, _tb = split_cursor_bookmark(str(watermark), has_tiebreak=True)
+    # A seed that re-reads behind the stored mark names the mark itself: the
+    # tie group is at the stored watermark, not at the lowered seed.
+    cur_val = str(getattr(watermark, "replay_through", "") or cur_val)
     eq = lambda l, r: _sql_null_safe_eq(dialect, l, r)  # noqa: E731
     s_cur = f"s.{quote(cursor_col)}"
     match_cols = [pk_col] if pk_col else list(columns)
@@ -409,6 +412,100 @@ def boundary_append_insert_sql(
         f"WHERE {eq(f'd.{quote(cursor_col)}', s_cur)} "
         f"AND {_sql_text_eq(dialect, s_cur, cur_val)} "
         f"AND {match})"
+    )
+
+
+def replay_prune_sql(
+    *,
+    dialect: str,
+    dest_ref: str,
+    staging_ref: str,
+    quote,
+    cursor_col: str,
+    match_cols: list[str],
+    through_literal: str,
+) -> tuple[str, str]:
+    """``(count, delete)`` statements for staged re-reads the destination holds.
+
+    Identifiers arrive quoted by the route's own ``quote``; ``through_literal``
+    is the stored watermark's cursor value rendered by the destination driver.
+    Strictly below the stored mark: the tie group at it keeps its own rule (an
+    upsert rewrites a changed peer; an append drops delivered peers —
+    :func:`boundary_append_insert_sql`).
+    """
+    s_cur = f"s.{quote(cursor_col)}"
+    same = " AND ".join(
+        _sql_null_safe_eq(dialect, f"d.{quote(c)}", f"s.{quote(c)}")
+        for c in dict.fromkeys([cursor_col, *match_cols])
+    )
+    below = f"{s_cur} < {through_literal}"
+    landed = f"{below} AND EXISTS (SELECT 1 FROM {dest_ref} d WHERE {same})"
+    count_sql = f"SELECT COUNT(*) FROM {staging_ref} s WHERE {below}"  # nosec B608
+    if dialect == "mysql":
+        delete_sql = f"DELETE s FROM {staging_ref} s WHERE {landed}"  # nosec B608
+    elif dialect == "sqlite":
+        delete_sql = (
+            f"DELETE FROM {staging_ref} WHERE rowid IN "  # nosec B608
+            f"(SELECT s.rowid FROM {staging_ref} s WHERE {landed})"
+        )
+    else:
+        delete_sql = f"DELETE FROM {staging_ref} s WHERE {landed}"  # nosec B608
+    return count_sql, delete_sql
+
+
+def prune_replayed_staging(
+    dst_cur: Any,
+    result: FastPathResult,
+    *,
+    dialect: str,
+    dest_ref: str,
+    staging_ref: str,
+    quote,
+    cursor_col: str,
+    match_cols: list[str],
+    watermark: str | None,
+) -> tuple[FastPathResult, int]:
+    """Drop staged re-reads the destination already holds (audit C1).
+
+    A commit-safe window seeds the COPY behind the stored watermark
+    (``services.commit_safe_window.ReplaySeed``), so staging carries rows an
+    earlier run delivered. A staged row below the stored watermark whose
+    row version — its cursor value and its identity (``match_cols``; none when
+    the cursor itself is the unique key) — is already at the destination is
+    that delivery: it leaves staging before the append or the merge, so a quiet
+    poll stays a no-op and a late commit is the only row written. A row edited
+    in place without moving its cursor is the same version: it stays
+    out-of-window drift (D188). Returns the result re-counted and the rows
+    still staged.
+    """
+    through = str(getattr(watermark, "replay_through", "") or "")
+    staged = int(result.source_rows)
+    if not through or not staged:
+        return result, staged
+    if dialect == "mysql":
+        literal = dst_cur.mogrify("%s", (through,))
+        literal = literal.decode() if isinstance(literal, bytes) else str(literal)
+    elif dialect == "sqlite":
+        literal = _sqlite_quoted_literal(sqlite_normalize_cursor_watermark(through))
+    else:
+        literal = _pg_quoted_literal(dst_cur, through)
+    count_sql, delete_sql = replay_prune_sql(
+        dialect=dialect, dest_ref=dest_ref, staging_ref=staging_ref, quote=quote,
+        cursor_col=cursor_col, match_cols=match_cols, through_literal=literal,
+    )
+    dst_cur.execute(count_sql)
+    replayed = int(dst_cur.fetchone()[0] or 0)
+    if not replayed:
+        return result, staged
+    dst_cur.execute(delete_sql)
+    removed = max(0, int(dst_cur.rowcount or 0))
+    remaining = max(0, staged - removed)
+    snapshot = dict(result.source_snapshot or {})
+    snapshot["replay_rows_read"] = replayed
+    snapshot["replay_rows_already_landed"] = removed
+    return (
+        result._replace(rows_copied=remaining, source_rows=remaining, source_snapshot=snapshot),
+        remaining,
     )
 
 
@@ -646,7 +743,11 @@ def _apply_staging_to_mysql(
     high = encode_high_water(
         read_high_water_row(dst_cur, staging_q, wm_cols, quote, mysql=True)
     )
-    staging_count = int(result.source_rows)
+    result, staging_count = prune_replayed_staging(
+        dst_cur, result, dialect="mysql", dest_ref=dest_q, staging_ref=staging_q, quote=quote,
+        cursor_col=dest_cursor, match_cols=[c for c in (dest_pk, dest_pk_col) if c],
+        watermark=watermark,
+    )
     if staging_count == 0:
         dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
         return _stamp_incremental(
@@ -752,7 +853,11 @@ def _apply_staging_to_pg(
     high = encode_high_water(
         read_high_water_row(dst_cur, staging_ref, wm_cols, _quote, mysql=False)
     )
-    staging_count = int(result.source_rows)
+    result, staging_count = prune_replayed_staging(
+        dst_cur, result, dialect="pg", dest_ref=dest_ref, staging_ref=staging_ref, quote=_quote,
+        cursor_col=dest_cursor, match_cols=[c for c in (dest_pk, dest_pk_col) if c],
+        watermark=watermark,
+    )
     if staging_count == 0:
         dst_cur.execute(f"DROP TABLE IF EXISTS {staging_ref}")  # nosec B608
         return _stamp_incremental(
@@ -861,7 +966,11 @@ def _apply_staging_to_sqlite(
             dst_cur, staging_q, wm_cols, sqlite_ident, mysql=False, sqlite=True
         )
     )
-    staging_count = int(result.source_rows)
+    result, staging_count = prune_replayed_staging(
+        dst_cur, result, dialect="sqlite", dest_ref=dest_q, staging_ref=staging_q,
+        quote=sqlite_ident, cursor_col=dest_cursor,
+        match_cols=[c for c in (dest_pk, dest_pk_col) if c], watermark=watermark,
+    )
     if staging_count == 0:
         dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
         return _stamp_incremental(

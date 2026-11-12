@@ -17,7 +17,7 @@ import signal
 import sys
 import threading
 
-from services.brand_env import getenv_brand
+from services.brand_env import getenv_brand, setenv_brand
 
 
 def _force_worker_env() -> None:
@@ -26,10 +26,12 @@ def _force_worker_env() -> None:
     ``WORKER_MODE`` is left alone so the chart can run one batch Deployment
     and one CDC Deployment from the same module.
     """
-    os.environ["DATAFLOW_PROCESS_ROLE"] = "worker"
-    os.environ["DATAFLOW_WORKER_FLEET"] = "1"
-    os.environ["DATAFLOW_SCHEDULE_LOOP"] = "0"
-    os.environ["DATAFLOW_API_CLAIM_LOOP"] = "0"
+    # Both names: a DATAWRAP_ value left in a shared env block must not win
+    # over the entrypoint (the reader prefers DATAWRAP_).
+    setenv_brand("PROCESS_ROLE", "worker")
+    setenv_brand("WORKER_FLEET", "1")
+    setenv_brand("SCHEDULE_LOOP", "0")
+    setenv_brand("API_CLAIM_LOOP", "0")
 
 
 def install_stop_signals(

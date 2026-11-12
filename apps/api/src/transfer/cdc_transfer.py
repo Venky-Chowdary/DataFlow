@@ -4837,6 +4837,11 @@ def _run_cdc_single_stream(
                 high=final_watermark,
             )
             summary["cdc_poll_key_columns"] = list(pk_source_cols)
+            # Review M4: a query poll reads ``cursor > watermark`` with no
+            # commit-order bound, so a late commit can stay behind it.
+            from services.commit_safe_routes import stamp_unwindowed_route
+
+            stamp_unwindowed_route(summary, route="CDC poll (query-based capture)", incremental=True)
         _stamp_cdc_source_image(
             summary,
             src_type=src_type,

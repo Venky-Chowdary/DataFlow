@@ -388,6 +388,10 @@ class SavedConnector:
     #: older than this is stale — the connection has since moved data.
     last_transfer_ok_at: str | None = None
     credentials_rotated_at: str | None = None
+    #: Security review H1: ``{"region", "by", "at", "address"}`` when a platform
+    #: administrator verified where this connector's data lands. Written only
+    #: by :func:`set_region_verification`; dropped when the connector moves.
+    region_verification: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: _now())
 
     def to_dict(self) -> dict[str, Any]:
@@ -456,6 +460,9 @@ class SavedConnector:
             last_used_at=data.get("last_used_at"),
             last_transfer_ok_at=data.get("last_transfer_ok_at"),
             credentials_rotated_at=data.get("credentials_rotated_at"),
+            region_verification=dict(data.get("region_verification") or {})
+            if isinstance(data.get("region_verification"), dict)
+            else {},
             created_at=data.get("created_at", _now()),
         )
 
@@ -486,7 +493,39 @@ def connector_extra_from_payload(data: Mapping[str, Any] | None) -> dict[str, An
         value = payload.get(key)
         if value not in (None, ""):
             extra[key] = value
+    extra.pop("region_verification", None)  # never an operator extra (review H1)
     return extra
+
+
+def _kept_region_verification(before: Any, after: Mapping[str, Any]) -> dict[str, Any]:
+    """The stored region verification, kept only while the connector has not moved.
+
+    An edit never supplies one (``set_region_verification`` is the only
+    writer): whatever the payload carried is discarded, and the stored stamp
+    survives the edit only when the edited connector still points at the
+    address that was verified (security review H1).
+    """
+    stamp = before if isinstance(before, dict) else {}
+    if not stamp:
+        return {}
+    from types import SimpleNamespace
+
+    from services.region_verification import address_unreadable, verification_address
+
+    target = SimpleNamespace(**{key: after.get(key, "") for key in _STAMP_ADDRESS_KEYS})
+    try:
+        moved = stamp.get("address") != verification_address(target) or address_unreadable(target)
+    except Exception:  # noqa: BLE001 - a stamp that cannot be re-checked is dropped
+        moved = True
+    return {} if moved else dict(stamp)
+
+
+#: Every connector field a region verification is bound to (round 2, H4; round 3,
+#: H6: a SaaS token in ``password``, ``private_key``, the Iceberg ``warehouse``).
+_STAMP_ADDRESS_KEYS = (
+    "type", "host", "port", "database", "schema", "endpoint_url", "connection_string",
+    "username", "api_key", "service_account", "password", "private_key", "warehouse", "extra",
+)
 
 
 #: Trust extras that identify one endpoint's key — never valid for another host.
@@ -556,6 +595,40 @@ def _resolve_backend() -> str:
     _backend_choice = "file"
     logger.info("Connector store backend: file")
     return _backend_choice
+
+
+def connector_store_unreadable() -> str:
+    """Why the configured connector store cannot be read right now, or "".
+
+    Read-side only (Pilot's briefing): listing keeps its file fallback, but a
+    file read while the configured Mongo store does not answer is not the
+    workspace's connectors, and must not be reported as "0 connectors".
+    """
+    try:
+        from src.services.mongodb_service import get_mongodb_service
+
+        svc = get_mongodb_service()
+    except Exception:  # noqa: BLE001 - an unopenable store is the answer itself
+        svc = None
+    mongo_down = svc is None or (
+        type(svc).__name__ != "MemoryMongoDBService" and getattr(svc, "client", None) is None
+    )
+    if _resolve_backend() == "mongo":
+        if mongo_down:
+            return "the connector store did not answer"
+        try:
+            _mongo_collection().database.client.admin.command("ping", maxTimeMS=2000)
+        except Exception:  # noqa: BLE001 - the ping failing is the signal
+            return "the connector store did not answer"
+        return ""
+    explicit_uri = any(
+        os.getenv(k) for k in ("MONGODB_URI", "MONGO_URL", "MONGO_PRIVATE_URL", "MONGO_PUBLIC_URL")
+    )
+    chosen_file = getenv_brand("CONNECTOR_STORE_BACKEND", "auto").lower() == "file"
+    if explicit_uri and not chosen_file and mongo_down:
+        # Auto selection fell back to the file because Mongo did not answer.
+        return "the connector store did not answer"
+    return ""
 
 
 def _use_mongo() -> bool:
@@ -988,6 +1061,9 @@ def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
     from connectors.sftp_common import apply_sftp_uri_endpoint, split_sftp_host_edit
+    from services.connector_request_limits import refuse_control_characters
+
+    refuse_control_characters("Connector name", data.get("name"))
 
     data = apply_sftp_uri_endpoint(split_sftp_host_edit(data, data.get("type")))
     conn_type = data["type"]
@@ -1084,6 +1160,10 @@ def _coerce_secret_update(new: Any, existing: Any) -> Any:
 
 
 def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
+    from services.connector_request_limits import refuse_control_characters
+
+    if "name" in data:
+        refuse_control_characters("Connector name", data.get("name"))
     workspace_id = _workspace_scope(workspace_id)
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return None
@@ -1113,6 +1193,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             merged.get("role"),
         )
         validate_merged_ssl_mode(data, merged)
+        merged["region_verification"] = _kept_region_verification(existing.region_verification, merged)
         return SavedConnector.from_dict(merged, secrets_encrypted=False)
 
     if _use_mongo():
@@ -1148,6 +1229,17 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             # reads: decrypting the mix made production's vault refuse the
             # plaintext and every secret-bearing edit fail (D292).
             doc = _encrypt_connector_doc(merged)
+            if raw.get("region_verification"):
+                tenant = tenant_id_from_workspace(doc.get("workspace_id") or "")
+                doc["region_verification"] = _kept_region_verification(raw.get("region_verification"), {
+                    **doc,
+                    **{
+                        name: decrypt_secret(str(doc.get(name) or ""), tenant_id=tenant)
+                        for name in ("connection_string", "api_key", "service_account", "password", "private_key")
+                    },
+                })
+            else:
+                doc.pop("region_verification", None)
             if _TLS_PLAN_FIELDS & set(data):
                 plain_dsn = decrypt_secret(
                     str(doc.get("connection_string") or ""),
@@ -1265,6 +1357,47 @@ def mark_tested(connector_id: str, ok: bool, *, tested_at: str | None = None) ->
             logger.warning("MongoDB mark_tested failed, falling back to file: %s", exc)
 
     _patch_file_connector(connector_id, patch)
+
+
+def set_region_verification(
+    connector_id: str, region: str, *, verified_by: str, workspace_id: str | None = None
+) -> SavedConnector | None:
+    """Record (or, with an empty ``region``, withdraw) a platform administrator's
+    statement of where this connector's data lands (security review H1).
+
+    The stamp is bound to the connector's current address; residency honours it
+    only while the address is unchanged. ``None`` when the connector is absent.
+    """
+    connector = get_connector(connector_id, workspace_id=workspace_id)
+    if connector is None:
+        return None
+    from services.region_verification import address_unreadable, resolved_address, verification_address
+
+    region = str(region or "").strip().lower()
+    stamp: dict[str, Any] = {}
+    if region:
+        if address_unreadable(connector):
+            raise ValueError(
+                "This connector's address cannot be read (an alias, a service name or a "
+                "parameter residency cannot resolve), so its region cannot be verified; "
+                "give the host or endpoint explicitly"
+            )
+        stamp = {
+            "region": region,
+            "by": str(verified_by or "").strip(),
+            "at": _now(),
+            "address": verification_address(connector),
+            "resolved": resolved_address(connector),
+        }
+    patch = {"region_verification": stamp}
+    if _use_mongo():
+        try:
+            _mongo_collection().update_one(_connector_id_query(connector_id, workspace_id), {"$set": patch})
+        except Exception as exc:
+            raise _mongo_write_failed("update", connector_id, exc) from exc
+    else:
+        _patch_file_connector(connector_id, patch)
+    return get_connector(connector_id, workspace_id=workspace_id)
 
 
 def note_transfer_succeeded(*connector_ids: str | None) -> int:
@@ -1413,6 +1546,9 @@ def mask_connector(c: SavedConnector) -> dict[str, Any]:
         d["private_key"] = "****"
     if isinstance(d.get("extra"), dict):
         d["extra"] = _redact_response_value(d["extra"])
+    d["region_verification"] = {
+        k: v for k, v in (d.get("region_verification") or {}).items() if k in ("region", "by", "at")
+    }
     d.setdefault("workspace_id", "")
     d.setdefault("endpoint_url", "")
     d.setdefault("path_style", False)
