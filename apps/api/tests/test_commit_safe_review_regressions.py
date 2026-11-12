@@ -188,3 +188,124 @@ def test_replay_key_is_the_whole_unique_key_or_says_it_is_not():
     # a unique key — every reported row then counts as undelivered.
     assert route_replay_key(cfg(cursor_pk_source="x"), None) == (("x",), False)
     assert route_replay_key(cfg(), None) == ((), False)
+
+
+# --------------------------------------------------------------------------
+# H1 — a text cursor whose type name contains INT or LONG
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "declared,unit",
+    [
+        ("LONGTEXT", ""),
+        ("LONG VARCHAR", ""),
+        ("LONG", ""),  # Oracle LONG is character data
+        ("POINT", ""),
+        ("MULTIPOINT", ""),
+        ("INTERVAL", ""),
+        ("INTERVAL DAY TO SECOND", ""),
+        ("VARCHAR(20)", ""),
+        ("TEXT", ""),
+        ("NUMBER", ""),  # no scale: not an integer
+        ("NUMBER(10,2)", ""),
+        ("DECIMAL(18,4)", ""),
+        ("FLOAT", ""),
+        ("DATE", ""),
+        ("INT", "values"),
+        ("int unsigned", "values"),
+        ("INTEGER", "values"),
+        ("BIGINT", "values"),
+        ("BIGINT UNSIGNED", "values"),
+        ("SMALLINT", "values"),
+        ("TINYINT", "values"),
+        ("MEDIUMINT", "values"),
+        ("SERIAL", "values"),
+        ("BIGSERIAL", "values"),
+        ("INT2", "values"),
+        ("INT4", "values"),
+        ("INT8", "values"),
+        ("INT64", "values"),
+        ("NUMBER(10)", "values"),
+        ("NUMBER(10,0)", "values"),
+        ("NUMERIC(12, 0)", "values"),
+        ("DECIMAL(18)", "values"),
+        ("TIMESTAMP", "seconds"),
+        ("TIMESTAMP(6) WITH TIME ZONE", "seconds"),
+        ("TIMESTAMPTZ", "seconds"),
+        ("DATETIME", "seconds"),
+        ("DATETIME2", "seconds"),
+        ("SMALLDATETIME", "seconds"),
+    ],
+)
+def test_cursor_distance_is_decided_by_whole_type_words(declared, unit):
+    assert csw.cursor_distance_unit(declared) == unit
+
+
+def test_zero_padded_text_never_gets_an_integer_seed():
+    # The seed would lose its padding: '4000' sorts above '005001' as text.
+    assert csw.overlap_seed("005000", "LONGTEXT", seconds=300, values=1000) is None
+    assert csw.overlap_seed("005000", "", seconds=300, values=1000) is None
+    assert csw.overlap_seed("005000", "BIGINT", seconds=300, values=1000) is None
+    assert csw.overlap_seed("+5000", "BIGINT", seconds=300, values=1000) is None
+    assert csw.overlap_seed("5000", "BIGINT", seconds=300, values=1000) == "4000"
+    assert csw.overlap_seed("-5", "INT", seconds=300, values=10) == "-15"
+
+
+def test_text_cursor_route_is_not_guaranteed_and_reads_from_the_watermark():
+    window = csw.plan_commit_safe_window(
+        source_type="mysql", sync_mode="incremental_append", cursor_column="code",
+        cursor_type="LONGTEXT", stored_watermark="005000", metadata={}, can_replay=True,
+        contract={},
+    )
+    assert window.strategy == csw.STRATEGY_NONE and window.guarantee == csw.GUARANTEE_NONE
+    assert window.seed == "005000" and not window.replays
+    assert window.census_recommended
+    static = csw.static_commit_safety(
+        source_type="mysql", sync_mode="incremental_append", cursor_column="code",
+        cursor_type="LONGTEXT", has_identity=True,
+    )
+    assert static["guarantee"] == csw.GUARANTEE_NONE, static
+    assert static["statement"].startswith("Cannot guarantee no skipped rows"), static
+    assert static["census_recommended"]
+
+
+def test_mysql_longtext_cursor_delivers_every_new_row(isolated, pg):
+    """Live MySQL → PostgreSQL. A LONGTEXT cursor of zero-padded numbers: the
+    integer re-read seed '4000' sat above every new value as text, so runs 2
+    and 3 read nothing and reported commit_safe_within_window."""
+    from tests.helpers.live_env import mysql_up
+    from tests.test_incremental_commit_safe_window import _mysql, _mysql_endpoint
+
+    if not mysql_up():
+        pytest.skip("live MySQL not reachable")
+    src = "csr_lt_" + uuid.uuid4().hex[:6]
+    dst = "csr_ltd_" + uuid.uuid4().hex[:6]
+    conn = _mysql()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {src} (id INT PRIMARY KEY, code LONGTEXT NOT NULL, v VARCHAR(20))")
+            cur.executemany(
+                f"INSERT INTO {src} VALUES (%s, %s, %s)",
+                [(i, f"{i:06d}", f"v{i}") for i in range(4995, 5001)],
+            )
+        kw = dict(cursor="code", mode="incremental_append", source=_mysql_endpoint(src))
+        assert _run(isolated, src, dst, **kw).success
+        with conn.cursor() as cur:
+            cur.executemany(
+                f"INSERT INTO {src} VALUES (%s, %s, %s)",
+                [(i, f"{i:06d}", f"new{i}") for i in range(5001, 5004)],
+            )
+        second = _run(isolated, src, dst, **kw)
+        assert second.success, second.error
+        assert int(second.records_transferred) == 3
+        evidence = _window(second)
+        assert evidence.get("guarantee") == csw.GUARANTEE_NONE, evidence
+        assert evidence.get("replay_seed") is None, evidence
+        assert _run(isolated, src, dst, **kw).success
+        got = sorted(r[0] for r in _sql(f"SELECT id FROM {SCHEMA}.{dst}", fetch=True))
+        assert got == list(range(4995, 5004))
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {src}")
+        conn.close()

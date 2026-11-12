@@ -50,6 +50,7 @@ never moves backwards.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
@@ -107,13 +108,22 @@ _OVERLAP_SOURCES = frozenset(
     }
 )
 
-_INTEGER_TYPES = (
-    "INT",
-    "SERIAL",
-    "NUMBER",
-    "LONG",
+#: Integer type names, matched as the declared type's whole first word. A
+#: substring match read LONGTEXT and LONG VARCHAR (LONG) and POINT (INT) as
+#: integers and shifted a zero-padded text cursor by integer arithmetic.
+_INTEGER_TYPES = frozenset(
+    {
+        "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT",
+        "SERIAL", "BIGSERIAL", "SMALLSERIAL",
+        "INT2", "INT4", "INT8", "INT64",
+    }
 )
-_TEMPORAL_TYPES = ("TIMESTAMP", "DATETIME", "SMALLDATETIME")
+#: Exact numerics that are integers only at scale 0: ``NUMBER(10)``, ``NUMBER(10,0)``.
+_SCALED_NUMERIC_TYPES = frozenset({"NUMBER", "NUMERIC", "DECIMAL"})
+_TEMPORAL_TYPES = frozenset(
+    {"TIMESTAMP", "TIMESTAMPTZ", "DATETIME", "DATETIME2", "DATETIMEOFFSET", "SMALLDATETIME"}
+)
+_INT_SCALE_RE = re.compile(r"^\(\s*\d+\s*(?:,\s*0+\s*)?\)")
 
 _UNGUARDED_REASON = (
     "cannot guarantee no skipped rows: a transaction that commits after a "
@@ -223,23 +233,50 @@ def _type_base(declared: Any) -> str:
     return text.split("(", 1)[0].strip()
 
 
+def _type_class(declared: Any) -> str:
+    """``seconds`` / ``values`` / ``""`` for a declared type, by whole words.
+
+    Text first: a text column has no distance, whatever its name contains.
+    """
+    from services.cursor_order import is_text_declared
+
+    text = " ".join(str(declared or "").upper().split())
+    if not text or is_text_declared(text):
+        return ""
+    word = re.split(r"[\s(]", text, maxsplit=1)[0]
+    if word in _TEMPORAL_TYPES:
+        return "seconds"
+    if word in _INTEGER_TYPES:
+        return "values"
+    if word in _SCALED_NUMERIC_TYPES and _INT_SCALE_RE.match(text[len(word):].lstrip()):
+        return "values"
+    return ""
+
+
+def _canonical_integer(text: str) -> bool:
+    """True when ``text`` is an integer written the one way ``str(int(...))`` writes it.
+
+    A seed is rendered by ``str(int)``. Any other spelling (``005000``,
+    ``+5``) would come back different, and on a text column a different
+    spelling sorts somewhere else.
+    """
+    try:
+        return str(int(text)) == text
+    except ValueError:
+        return False
+
+
 def cursor_distance_unit(cursor_type: Any, value: Any = None) -> str:
     """``seconds`` / ``values`` when a distance exists on this cursor, else ``""``.
 
     The declared type decides. With no declared type the value's own shape
-    does: digits are a sequence, an ISO date-time is a clock.
+    does: an integer in canonical form is a sequence, an ISO date-time is a
+    clock.
     """
-    base = _type_base(cursor_type)
-    if base:
-        if any(base.startswith(t) or t in base for t in _TEMPORAL_TYPES):
-            return "seconds"
-        if base == "DATE":
-            return ""
-        if any(t in base for t in _INTEGER_TYPES) and "INTERVAL" not in base:
-            return "values"
-        return ""
+    if _type_base(cursor_type):
+        return _type_class(cursor_type)
     text = str(value or "").strip()
-    if text.lstrip("-").isdigit():
+    if _canonical_integer(text):
         return "values"
     return "seconds" if _parse_temporal(text) is not None else ""
 
@@ -292,12 +329,11 @@ def overlap_seed(
         return None
     unit = cursor_distance_unit(cursor_type, head)
     if unit == "values":
-        if values <= 0:
+        if values <= 0 or not _canonical_integer(head):
+            # Refused rather than re-spelled: a zero-padded value shifted by
+            # integer arithmetic loses its padding and sorts elsewhere.
             return None
-        try:
-            return str(int(head) - int(values))
-        except ValueError:
-            return None
+        return str(int(head) - int(values))
     if unit == "seconds":
         if seconds <= 0:
             return None
