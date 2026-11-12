@@ -25,7 +25,10 @@ inferred from a location) is ``LocalUriPyArrowFileIO``, which refuses that
 builds from its own properties (a SQL catalog's metadata file).
 
 The REST server's ``/v1/config`` may not set ``ssl`` (the session's client
-certificate and verification) or change ``uri`` (follow-up review 2, M1).
+certificate and verification) or change ``uri`` (follow-up review 2, M1), nor
+send the connector's OAuth2 credential off the catalog's origin or name a
+storage host the egress policy refuses, there or in a table's configuration
+(``connectors.iceberg_server_hosts``).
 
 A FileIO's properties, the REST server's ``/v1/config`` answer, each part of a
 table response (metadata properties, config, every storage credential, checked
@@ -49,6 +52,7 @@ from services.iceberg_class_properties import (
     TABLE_METADATA,
     check_class_properties,
 )
+from connectors.iceberg_server_hosts import check_server_oauth_uri, check_storage_hosts
 from services.platform_aws_credentials import iceberg_credentials_refusal, s3_fileio_refusal
 
 KEYED_S3_FILE_IO = "connectors.iceberg_pyarrow_io.KeyedS3PyArrowFileIO"
@@ -138,6 +142,7 @@ def guarded_catalog(base: type) -> type:
 
     class Guarded(base):  # type: ignore[misc, valid-type]
         def __init__(self, name: str, *args: Any, **properties: Any) -> None:
+            self._df_own = dict(properties)  # the connector's own settings, before any server's
             if base.__name__ == "GlueCatalog" and not args and properties.get("client") is None:
                 check_catalog_properties("glue", properties)
             super().__init__(name, *args, **properties)
@@ -150,12 +155,17 @@ def guarded_catalog(base: type) -> type:
             check_class_properties(self.properties, SERVER_CONFIG)
             # Before _create_session reads them (follow-up review 2, M1).
             check_server_session_properties(own, self.properties)
+            # The credential's destination and the storage hosts (follow-up review 2).
+            check_server_oauth_uri(own, self.properties, SERVER_CONFIG)
+            check_storage_hosts(own, self.properties, SERVER_CONFIG)
 
         def _init_sigv4(self, session: Any) -> None:  # REST: after the server's overrides
             check_catalog_properties("rest", {**self.properties, "rest.sigv4-enabled": "true"})
             super()._init_sigv4(session)
 
         def _load_file_io(self, properties: Any = None, location: str | None = None) -> Any:
+            # A table's storage hosts, when the catalog did not already carry them.
+            check_storage_hosts({**self._df_own, **self.properties}, properties or {}, TABLE_CONFIG)
             merged = {**self.properties, **(properties or {})}  # what pyiceberg hands the FileIO
             return super()._load_file_io(file_io_properties(merged), location)
 
