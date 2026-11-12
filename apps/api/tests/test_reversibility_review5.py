@@ -347,3 +347,20 @@ def test_low_a_g24_column_names_the_transform_never_its_literal(transform, name)
                           data_source="preflight_sample")
     text = json.dumps([entry, report, gate_for(report)])
     assert "TOPSECRET" not in text and "4111111111111111" not in text, text
+
+
+def test_low_the_pre_write_scan_is_logged_and_recorded_on_the_destination_summary(tmp_path, fake, caplog):  # noqa: F811
+    import logging
+
+    from tests.test_reversibility_review3 import _UP, _exec, _sqlite_request
+
+    src, dst = tmp_path / "s.sqlite", tmp_path / "d.sqlite"
+    _exec(src, "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT)")
+    _exec(src, "INSERT INTO people VALUES (?, ?)", [(i, f"U{i}@EXAMPLE.COM") for i in range(1, 1201)])
+    _exec(dst, "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT)")
+    with caplog.at_level(logging.INFO, logger="services.reversibility_prescan"):
+        res = _run(fake, _sqlite_request(src, dst, mappings=[dict(m) for m in _UP], sync_mode="full_refresh_append"))
+    assert res.success is True, res.error
+    scan = res.destination_summary["reversibility_enforcement"].get("prescan") or {}
+    assert scan.get("rows_scanned") == 1200 and isinstance(scan.get("seconds"), float), scan
+    assert any("pre-write scan read 1,200 row(s)" in r.getMessage() for r in caplog.records), caplog.text

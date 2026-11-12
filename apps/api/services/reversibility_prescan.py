@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -134,7 +135,7 @@ def prescan(request: Any, mappings: Sequence[Any] | None, column_types: Mapping[
     if not needs_prescan(request, mappings):
         return None
     from connectors.writer_common import build_mapped_rows_with_details
-    from services.reversibility_enforce import STAMP, ReversibilityViolation, describe_rule, summary
+    from services.reversibility_enforce import STAMP, ReversibilityViolation, describe_rule, note_prescan, summary
 
     stamped = _stamped(mappings)
     columns = list(dict.fromkeys(str(m.get("source") or "") for m in stamped if m.get("source")))
@@ -173,6 +174,8 @@ def prescan(request: Any, mappings: Sequence[Any] | None, column_types: Mapping[
                     "value at the source, remove the transform, or turn off require reversibility.")
         return None
 
+    started = time.monotonic()
+
     def walk() -> str | None:
         nonlocal scanned, chunk
         for row in rows:
@@ -194,3 +197,7 @@ def prescan(request: Any, mappings: Sequence[Any] | None, column_types: Mapping[
         return None
     finally:
         summary(scan_key)  # forget the scan's own tally
+        read, seconds = scanned + len(chunk), time.monotonic() - started
+        logger.info("reversibility pre-write scan read %s row(s) of %s in %.2f s", f"{read:,}", _table_name(request),
+                    seconds)
+        note_prescan(job, read, seconds)  # stated on the run's destination summary

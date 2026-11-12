@@ -38,6 +38,8 @@ _LOCK = threading.Lock()
 #: reports (a crashed worker) is evicted by newer ones.
 _ROWS: OrderedDict[tuple[str, str, str], int] = OrderedDict()
 _MAX_TRACKED = 20_000
+#: job id -> what the pre-write scan read (rows, seconds, streams), for the run's destination summary (review 5).
+_PRESCANS: OrderedDict[str, dict[str, Any]] = OrderedDict()
 #: Set while rows are mapped a second time for something that is not their write (a pre-write scan, Gate-8's
 #: re-read): they are still checked, but not counted as written rows (review 5, H-1).
 _UNCOUNTED: ContextVar[bool] = ContextVar("reversibility_uncounted", default=False)
@@ -229,17 +231,33 @@ def note_rows_checked(mappings: Sequence[Any] | None, first_row: int, rows: int)
                 _ROWS[key] = _ROWS.get(key, 0) + int(rows)
 
 
+def note_prescan(job_id: str, rows: int, seconds: float) -> None:
+    """The pre-write scan read ``rows`` source rows in ``seconds`` for ``job_id`` (summed over its streams)."""
+    with _LOCK:
+        found = _PRESCANS.setdefault(job_id, {"rows_scanned": 0, "seconds": 0.0, "scans": 0})
+        found["rows_scanned"] += int(rows)
+        found["seconds"] = round(found["seconds"] + float(seconds), 3)
+        found["scans"] += 1
+        while len(_PRESCANS) > _MAX_TRACKED:
+            _PRESCANS.popitem(last=False)
+
+
 def summary(job_id: str, *, forget: bool = True) -> dict[str, Any] | None:
     """{enforced, columns: [{table, column, rows_checked}]} for ``job_id``'s run, or ``None`` when none was."""
     with _LOCK:
         keys = [k for k in _ROWS if k[0] == job_id]
         rows = [{"table": k[1], "column": k[2], "rows_checked": _ROWS[k]} for k in keys]
+        scan = dict(_PRESCANS.get(job_id) or {})
         if forget:
             for k in keys:
                 _ROWS.pop(k, None)
+            _PRESCANS.pop(job_id, None)
     if not rows:
         return None
-    return {"enforced": True, "columns": sorted(rows, key=lambda r: (r["table"], r["column"]))}
+    out = {"enforced": True, "columns": sorted(rows, key=lambda r: (r["table"], r["column"]))}
+    if scan:
+        out["prescan"] = scan  # rows the pre-write scan read and how long it took (review 5)
+    return out
 
 
 def _named(column: Mapping[str, Any]) -> str:
