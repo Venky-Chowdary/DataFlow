@@ -101,7 +101,9 @@ def check_read_only_root_has_writable_volumes(objects: list[dict[str, Any]]) -> 
             assert path in writable, f"{component}: read-only root filesystem and no writable volume at {path}"
         if component in PYTHON_COMPONENTS:
             env = _env(container)
-            for name in ("DATAFLOW_DATA_DIR", "DATAFLOW_UPLOAD_DIR", "DATAFLOW_VECTOR_STORE_DIR", "HOME"):
+            for name in (
+                "DATAFLOW_DATA_DIR", "DATAFLOW_UPLOAD_DIR", "DATAFLOW_VECTOR_STORE_DIR", "DATAFLOW_EXPORTS_DIR", "HOME",
+            ):
                 value = str(env.get(name) or "")
                 assert any(value == p or value.startswith(p + "/") for p in writable), (
                     f"{component}: {name}={value!r} is not on a writable volume"

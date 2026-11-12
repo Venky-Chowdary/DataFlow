@@ -114,6 +114,8 @@ connection strings below always resolve.
   value: /data/vector_store
 - name: DATAFLOW_BLOB_ROOT
   value: /data/blobs
+- name: DATAFLOW_EXPORTS_DIR
+  value: /data/exports
 - name: HOME
   value: /tmp
 - name: HF_HOME
