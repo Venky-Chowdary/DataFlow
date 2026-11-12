@@ -178,6 +178,7 @@ jobs:
             tests/test_pilot_truth_result_store.py \
             tests/test_pilot_truth_errors.py \
             tests/test_pilot_truth_egress.py \
+            tests/test_pilot_truth_windows.py \
             -q --tb=short -rs
 
   # Property 2 — no-config transfer must never be blocked by additive/DDL gates.

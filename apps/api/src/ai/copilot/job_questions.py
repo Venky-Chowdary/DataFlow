@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .job_phrases import narrowing_in, read_filters
 from .job_window import window_args_from_message
 
 LAST_JOB_RE = re.compile(
@@ -28,6 +29,9 @@ _OTHER_SUBJECT_RE = re.compile(
     r"datasets?|gates?|preflight|validat\w+)\b",
     re.I,
 )
+#: A question that asks the ledger for a count or a list.
+_LEDGER_ASK_RE = re.compile(r"\b(?:how\s+many|which|list|show|count|number\s+of|any|did|status)\b", re.I)
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _JOB_ID_RE = re.compile(r"\b[0-9a-f]{24}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}\b", re.I)
 _HOW_TO_RE = re.compile(r"^\s*(?:how\s+(?:do|can|would|should|to)\b|what\s+(?:does|do)\b|explain\b)", re.I)
 # A question about jobs in general — "what happens if a job fails halfway",
@@ -83,9 +87,17 @@ class JobAsk:
     metric: str = ""  # success_rate | duration | rows_moved
     last: bool = False
     window: dict[str, str] = field(default_factory=dict)
+    #: A time phrase or qualifier the question names that no filter applies.
+    #: Such a question is refused by name, never answered for the whole history.
+    unapplied: str = ""
+    #: ``time`` when ``unapplied`` is a time phrase, else ``filter``.
+    unapplied_kind: str = ""
 
     def tool_args(self) -> dict[str, Any]:
         """Arguments that make ``list_jobs`` filter and count server-side."""
+        if self.unapplied:
+            # The tool refuses an unknown window by name: never a silent drop.
+            return {"window": self.unapplied}
         args: dict[str, Any] = dict(self.window)
         if self.metric == "rows_moved":
             args["limit"] = 100
@@ -107,25 +119,37 @@ def parse_job_ask(message: str) -> JobAsk | None:
     about_jobs = bool(_JOBS_SUBJECT_RE.search(text))
     if _OTHER_SUBJECT_RE.search(text) and not rows_moved:
         return None
-    window = window_args_from_message(text)
+    reading = read_filters(text)
+    window = reading.window
     if rows_moved:
         metric = "rows_moved" if (window or about_jobs) else ""
         if not metric:
             return None
-        return JobAsk(metric=metric, window=window)
+        return JobAsk(metric=metric, window=window, unapplied=reading.unapplied, unapplied_kind=reading.kind)
     if not about_jobs or _DATA_SCOPE_RE.search(text):
         return None
     last = bool(LAST_JOB_RE.search(text))
     if _SUCCESS_RATE_RE.search(text):
-        return JobAsk(metric="success_rate", window=window)
-    if _DURATION_RE.search(text):
+        metric = "success_rate"
+    elif _DURATION_RE.search(text):
         # Only the last job's duration is on a ledger row; anything wider is
         # declined by the composer rather than answered with a job list.
-        return JobAsk(metric="duration", last=last, window=window)
-    status = asked_status(text)
-    if not (status or window):
+        metric = "duration"
+    else:
+        metric = ""
+    status = "" if metric else asked_status(text)
+    unapplied, kind = reading.unapplied, reading.kind
+    if unapplied and not (status or metric or last or _LEDGER_ASK_RE.search(text)):
+        # "if I run the same CDC change twice is it safe" is not a ledger read.
         return None
-    return JobAsk(status=status, last=last, window=window)
+    if not unapplied and not last and (status or metric or window):
+        # "failed jobs on Local Postgres", "did not fail": a connector filter
+        # and a negated count are not computed.
+        unapplied, kind = narrowing_in(text), "filter"
+    if not (status or window or metric or unapplied):
+        return None
+    return JobAsk(status=status, metric=metric, last=last, window=window,
+                  unapplied=unapplied, unapplied_kind=kind if unapplied else "")
 
 
 def asked_status(message: str) -> str:
@@ -163,8 +187,10 @@ def ground_job_plan(message: str, planned: list[tuple[str, dict]]) -> list[tuple
             (name, {**args, **ask.tool_args()}) if name == "list_jobs" else (name, args)
             for name, args in planned
         ]
+    # "failed on 2026-11-08" reads to the data planner as a connector named
+    # 2026-11-08: a date is never a connector name.
     misread_aggregate = names == {"aggregate_data"} and not any(
-        str(args.get(key) or "").strip()
+        str(args.get(key) or "").strip() and not _ISO_DATE.fullmatch(str(args.get(key) or "").strip())
         for _, args in planned
         for key in ("name", "connector_id", "connector_name")
     )

@@ -158,7 +158,8 @@ LIST_JOBS_TOOL: dict[str, Any] = {
                 "description": (
                     "Created-at window in the workspace time zone: today, yesterday, "
                     "this_week, last_week, this_month, last_month, since_yesterday, or "
-                    "last_<N>_hours / last_<N>_days / last_<N>_weeks. Anything else is refused."
+                    "last_<N>_minutes / last_<N>_hours / last_<N>_days / last_<N>_weeks. "
+                    "Anything else is refused."
                 ),
             },
             "date_from": {

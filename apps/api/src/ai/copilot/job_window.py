@@ -20,7 +20,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SUPPORTED_WINDOWS_HINT = (
     "today, yesterday, this week, last week, this month, last month, "
-    "the last N hours / days / weeks, or a date range (YYYY-MM-DD to YYYY-MM-DD)"
+    "the last N minutes / hours / days / weeks, a day (on YYYY-MM-DD), "
+    "or a date range (from YYYY-MM-DD to YYYY-MM-DD)"
 )
 
 
@@ -66,7 +67,7 @@ class JobWindow:
         }
 
 
-_ROLLING_KEY = re.compile(r"^last_(\d{1,4})_(hours?|days?|weeks?)$")
+_ROLLING_KEY = re.compile(r"^last_(\d{1,4})_(minutes?|hours?|days?|weeks?)$")
 
 
 def _day(d: date) -> str:
@@ -121,7 +122,10 @@ def named_window(key: str, *, now: datetime | None = None, zone: str | None = No
         unit = rolling.group(2).rstrip("s")
         if n < 1:
             return None
-        span = {"hour": timedelta(hours=n), "day": timedelta(days=n), "week": timedelta(weeks=n)}[unit]
+        span = {
+            "minute": timedelta(minutes=n), "hour": timedelta(hours=n),
+            "day": timedelta(days=n), "week": timedelta(weeks=n),
+        }[unit]
         plural = unit if n == 1 else unit + "s"
         return build(f"the last {n} {plural}", f"to {current.strftime('%H:%M')}", current - span, current)
     return None
@@ -180,72 +184,17 @@ def resolve_window(
 
 # ---- reading a window out of a question -------------------------------------
 
-_WORD_NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-                 "six": 6, "seven": 7, "twelve": 12, "couple of": 2}
-_ISO = r"\d{4}-\d{2}-\d{2}"
-_RANGE_RE = re.compile(
-    rf"\b(?:from|between)\s+({_ISO})\s+(?:to|and|until|through|-)\s+({_ISO})\b", re.I
-)
-_ON_RE = re.compile(rf"\bon\s+({_ISO})\b", re.I)
-_SINCE_ISO_RE = re.compile(rf"\b(?:since|after|from)\s+({_ISO})\b", re.I)
-_ROLLING_RE = re.compile(
-    r"\b(?:in\s+|over\s+|during\s+|for\s+)?(?:the\s+)?(?:last|past|previous)\s+"
-    r"(?:(\d{1,4}|a|an|one|two|three|four|five|six|seven|twelve|couple\s+of)\s+)?"
-    r"(hours?|days?|weeks?)\b",
-    re.I,
-)
-_NAMED_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("since_yesterday", re.compile(r"\bsince\s+yesterday\b", re.I)),
-    ("today", re.compile(r"\b(?:today|so\s+far\s+today)\b", re.I)),
-    ("yesterday", re.compile(r"\byesterday\b", re.I)),
-    ("this_week", re.compile(r"\bthis\s+week\b", re.I)),
-    ("last_week", re.compile(r"\b(?:last|previous)\s+week\b(?!s)", re.I)),
-    ("this_month", re.compile(r"\bthis\s+month\b", re.I)),
-    ("last_month", re.compile(r"\b(?:last|previous)\s+month\b(?!s)", re.I)),
-)
-# A time phrase Pilot recognises as one but cannot turn into a ledger filter.
-_UNSUPPORTED_RE = re.compile(
-    r"\b(?:this|last|past|previous|next)\s+(?:\d+\s+)?"
-    r"(?:quarters?|years?|months?|mornings?|afternoons?|evenings?|nights?|weekends?|"
-    r"fortnights?|minutes?|mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|sundays?)\b"
-    r"|\b(?:tonight|overnight|this\s+morning|recently|lately|earlier\s+today)\b"
-    r"|\b(?:since|before|after|until)\s+(?:last\s+)?(?:monday|tuesday|wednesday|thursday|friday|"
-    r"saturday|sunday|january|february|march|april|may|june|july|august|september|october|"
-    r"november|december|noon|midnight|\d{1,2}\s*(?:am|pm))\b"
-    r"|\b(?:in|during)\s+(?:january|february|march|april|june|july|august|september|october|"
-    r"november|december|q[1-4])\b"
-    r"|\b\d+\s+(?:minutes?|hours?|days?|weeks?|months?|years?)\s+ago\b",
-    re.I,
-)
-
 
 def window_args_from_message(message: str) -> dict[str, str]:
     """``list_jobs`` window arguments named in a question, or ``{}``.
 
-    An unsupported time phrase is returned verbatim as ``window`` so the tool
-    refuses it by name instead of answering for the whole history.
+    A phrase that could not be applied is returned verbatim as ``window`` so
+    the tool refuses it by name instead of answering for the whole history.
+    The reading itself is :func:`job_phrases.read_filters`.
     """
-    text = message or ""
-    rng = _RANGE_RE.search(text)
-    if rng:
-        return {"date_from": rng.group(1), "date_to": rng.group(2)}
-    on = _ON_RE.search(text)
-    if on:
-        return {"date_from": on.group(1), "date_to": on.group(1)}
-    since = _SINCE_ISO_RE.search(text)
-    if since:
-        return {"date_from": since.group(1)}
-    unsupported = _UNSUPPORTED_RE.search(text)
-    for key, pattern in _NAMED_RES:
-        if pattern.search(text):
-            return {"window": key}
-    rolling = _ROLLING_RE.search(text)
-    if rolling and not unsupported:
-        raw = re.sub(r"\s+", " ", (rolling.group(1) or "1").lower())
-        n = int(raw) if raw.isdigit() else _WORD_NUMBERS.get(raw, 0)
-        unit = rolling.group(2).lower().rstrip("s")
-        if n >= 1:
-            return {"window": f"last_{n}_{unit}s"}
-    if unsupported:
-        return {"window": unsupported.group(0).strip()}
-    return {}
+    from .job_phrases import read_filters
+
+    reading = read_filters(message or "")
+    if reading.unapplied:
+        return {"window": reading.unapplied}
+    return dict(reading.window)

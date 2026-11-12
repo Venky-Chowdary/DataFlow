@@ -271,6 +271,31 @@ def _window_answer(output: dict, census: dict, scope: str) -> str:
     return _finish(lines, output)
 
 
+def unapplied_filter_answer(message: str | None) -> str | None:
+    """A named refusal when the question names a filter Pilot cannot apply.
+
+    Answering such a question with the unfiltered count is how "how many jobs
+    failed in 2025" came back as the all-time failure count (review C2).
+    """
+    ask = parse_job_ask(message or "")
+    if ask is None or not ask.unapplied:
+        return None
+    from .job_window import SUPPORTED_WINDOWS_HINT
+
+    lead = (
+        f"I can't apply the time window “{ask.unapplied}” to the job ledger — I can't filter jobs by it yet"
+        if ask.unapplied_kind == "time"
+        else f"I can't filter jobs by “{ask.unapplied}” yet"
+    )
+    return (
+        f"{lead}, so I won't give you a number for it — "
+        "the unfiltered count would not answer what you asked.\n"
+        "Here is what I can do: count or list jobs by status (failed, running, completed, "
+        f"needs attention) and by time window ({SUPPORTED_WINDOWS_HINT}). "
+        "The **Jobs** page also filters by source type, destination type and sync mode."
+    )
+
+
 def narrate_jobs(output: dict, message: str | None) -> str:
     """Answer a jobs question from the counted ledger, then the rows read."""
     if output.get("degraded"):

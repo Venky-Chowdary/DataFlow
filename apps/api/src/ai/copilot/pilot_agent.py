@@ -1423,6 +1423,24 @@ class DataPilotAgent:
                 _resolve_pilot_engine(),
             )
 
+        # A jobs question naming a time phrase or qualifier no filter applies
+        # is refused by name before any tool runs (review C2): never the
+        # unfiltered number, never a narrated guess.
+        from .job_narration import unapplied_filter_answer
+
+        refusal = unapplied_filter_answer(message)
+        if refusal:
+            return _with_llm_footnote(
+                CopilotResponse(
+                    answer=refusal,
+                    intent="jobs",
+                    confidence=0.3,
+                    method="pilot_local_engine",
+                    reasoning="job filter phrase not applied",
+                ),
+                _resolve_pilot_engine(),
+            )
+
         # Meta questions stay on the local agent — never RAG-dump ontology shards
         # and never race cloud LLMs for a "who are you" answer.
         from .tools import _is_meta_pilot_question, _looks_like_unsupported_mutation
