@@ -226,3 +226,68 @@ def test_shared_mongo_ledger_seals_secrets_and_keeps_other_values_typed(stores):
     with acting_as("ws-B", "bob@b.example"):
         assert ledger.peek(ack_id) is None
         assert ledger.get_pending_payload(ack_id)[0] is None
+
+
+# ---- review H4: Pilot state never goes to an external secrets manager ---------
+
+
+class _FakeSecretsManager:
+    """Records every call a Secrets Manager client would have received."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+        self.secrets: dict[str, str] = {}
+
+    def create_secret(self, **kw):
+        self.calls.append(("create_secret", kw))
+        self.secrets[kw["Name"]] = kw["SecretString"]
+        return {"Name": kw["Name"], "VersionId": "v1"}
+
+    def get_secret_value(self, **kw):
+        self.calls.append(("get_secret_value", kw))
+        return {"SecretString": self.secrets[kw["SecretId"]]}
+
+    def delete_secret(self, **kw):
+        self.calls.append(("delete_secret", kw))
+
+
+@pytest.fixture
+def aws_vault(stores, monkeypatch):
+    from services import secret_vault
+
+    fake = _FakeSecretsManager()
+    monkeypatch.setenv("DATAFLOW_SECRETS_BACKEND", "aws_secretsmanager")
+    monkeypatch.setattr(secret_vault, "_vault_instance", None)
+    monkeypatch.setattr(secret_vault.AwsSecretsManagerVault, "_get_client", lambda self: fake)
+    return fake
+
+
+def test_sampled_rows_are_never_written_to_a_secrets_manager(aws_vault, alices_result, stores):
+    from src.ai.copilot.result_store import PilotResultStore
+
+    pilot = [c for c in aws_vault.calls if c[0] == "create_secret" and "pilot-state" in c[1]["Name"]]
+    assert pilot == [], "sampled rows became AWS secrets"
+    on_disk = (Path(stores) / "pilot_results.json").read_text(encoding="utf-8")
+    for cell in (SALARY, "Alice", "Carl"):
+        assert cell not in on_disk
+    reopened = PilotResultStore(path=Path(stores) / "pilot_results.json")
+    with acting_as("ws-A", "alice@a.example"):
+        doc = reopened.get(alices_result)
+    assert doc and [row["name"] for row in doc["rows"]] == ["Alice", "Carl"]
+
+
+def test_staged_ack_is_never_written_to_a_secrets_manager(aws_vault, stores):
+    with acting_as("ws-A", "alice@a.example"):
+        _stage_connector_ack()
+    assert [c for c in aws_vault.calls if c[0] == "create_secret" and "pilot-state" in c[1]["Name"]] == []
+    assert PASSWORD not in (Path(stores) / "pilot_acks.json").read_text(encoding="utf-8")
+
+
+def test_without_a_local_key_pilot_state_stays_in_memory(stores, monkeypatch):
+    from src.ai.copilot import sealed_state
+
+    for prefix in ("DATAFLOW", "DATAWRAP"):
+        monkeypatch.setenv(f"{prefix}_ENV", "production")
+    monkeypatch.delenv("DATAFLOW_SECRETS_KEY", raising=False)
+    monkeypatch.delenv("DATAWRAP_SECRETS_KEY", raising=False)
+    assert sealed_state.seal({"rows": [{"salary": SALARY}]}) is None

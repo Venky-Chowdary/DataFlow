@@ -3,14 +3,17 @@
 The result store spills sampled rows and the ack ledger spills staged
 connector payloads (passwords, connection strings) so that a second worker or
 a restarted API can serve the follow-up. Both wrote them in plaintext (audit
-H5, L4). They are now sealed with the same vault that protects saved connector
-credentials (``services.secret_vault``) — no second key, no second scheme —
-and each record carries who staged it and in which workspace, which is what a
-read is checked against.
+H5, L4). They are sealed with a local Fernet data key derived (HKDF, its own
+purpose label) from the key that protects saved connector credentials — never
+handed to the configured vault backend: with ``SECRETS_BACKEND=aws_secretsmanager``
+that backend turned every sampled row set into a permanent AWS secret (review
+H4). With no local key, state is kept in memory only. Each record carries who
+staged it and in which workspace, which is what a read is checked against.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from typing import Any
@@ -19,7 +22,18 @@ from services.value_serializer import json_default
 from services.workspace_filter import bound_allows, current_actor, current_workspace_stamp
 
 _log = logging.getLogger(__name__)
-_LABEL = "pilot-state"
+_PREFIX = "pilot:v1:"
+_KEY_INFO = b"datawrap-pilot-state-v1"
+
+
+def _data_key() -> Any:
+    """Fernet over a key derived for Pilot state only; raises when there is none."""
+    from cryptography.fernet import Fernet
+
+    from services.secret_vault import _fernet_key_material, _hkdf_32
+
+    root = base64.urlsafe_b64decode(_fernet_key_material())
+    return Fernet(base64.urlsafe_b64encode(_hkdf_32(root, info=_KEY_INFO)))
 
 
 def seal(value: Any) -> str | None:
@@ -28,12 +42,9 @@ def seal(value: Any) -> str | None:
     None means "do not persist this": the caller keeps the value in memory
     only, which is the safe failure for a production vault with no key.
     """
-    from services.secret_vault import encrypt_secret
-
     try:
-        # Wrapped in an object: the vault passes strings that look like a
-        # placeholder ("[...]", "****") through untouched.
-        return encrypt_secret(json.dumps({"v": value}, default=json_default), label=_LABEL)
+        plain = json.dumps({"v": value}, default=json_default).encode("utf-8")
+        return _PREFIX + _data_key().encrypt(plain).decode("ascii")
     except Exception as exc:  # noqa: BLE001 - never fall back to plaintext on disk
         _log.warning("pilot state could not be sealed (%s); keeping it in memory only", type(exc).__name__)
         return None
@@ -41,12 +52,13 @@ def seal(value: Any) -> str | None:
 
 def unseal(token: Any) -> Any:
     """The value sealed by :func:`seal`, or None when it cannot be opened."""
-    from services.secret_vault import decrypt_secret
-
-    if not isinstance(token, str) or not token:
+    if not isinstance(token, str) or not token.startswith(_PREFIX):
+        # Including state sealed by an earlier release through the vault: it is
+        # simply gone, like state sealed under a rotated key.
         return None
     try:
-        return json.loads(decrypt_secret(token)).get("v")
+        plain = _data_key().decrypt(token[len(_PREFIX):].encode("ascii"))
+        return json.loads(plain.decode("utf-8")).get("v")
     except Exception as exc:  # noqa: BLE001 - a record sealed under another key is simply gone
         _log.warning("pilot state could not be unsealed (%s)", type(exc).__name__)
         return None
