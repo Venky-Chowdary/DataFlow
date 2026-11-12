@@ -129,6 +129,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, MutableMapping, Sequence
 
+from services.expected_rows import expected_destination_rows, held_out_rows
 from services.value_serializer import key_identity_text
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
@@ -870,9 +871,9 @@ def hold_outs(rejected_rows: int, coerced_null_rows: int) -> int:
     """Rows the dest engine does not hold.
 
     Coerced-null cells landed; they are not hold-outs. Gate-8's
-    ``dropped_rows = max(rejected - coerced_null, 0)`` is the same number.
+    ``dropped_rows`` is this number (``services.expected_rows.held_out_rows``).
     """
-    return max(int(rejected_rows or 0) - int(coerced_null_rows or 0), 0)
+    return held_out_rows(rejected_rows, coerced_null_rows)
 
 
 def _as_optional_int(value: Any) -> int | None:
@@ -2292,7 +2293,19 @@ def _close_population(
     if kind == KIND_APPEND_DELTA:
         dest_short = "dest Δ"
 
-    unaccounted = (read + expanded) - (written + quarantined + skipped + removed)
+    # Gate-8's and ladder L1's expected count (services.expected_rows), unclamped
+    # so a ledger can say by how many rows the terms over-account.
+    unaccounted = (
+        expected_destination_rows(
+            read,
+            rejected_rows=quarantined,
+            rows_skipped=skipped,
+            rows_shaped_out=removed,
+            rows_expanded=expanded,
+            clamp=False,
+        )
+        - written
+    )
     ack_delta = (written - ack) if ack is not None else None
     append_delta = written if kind == KIND_APPEND_DELTA else None
 

@@ -48,6 +48,39 @@ except Exception:
     MAX_LADDER_ROWS = 250_000
 
 
+def ladder_coverage_limit(rows: int, limit: int | None = None) -> dict[str, Any]:
+    """The verdict's statement that the in-memory ladder did not cover this run.
+
+    L2 aggregates and L4/L5 localisation load both populations into memory and
+    stop at ``MAX_LADDER_ROWS``. A run past it is not verified by those layers;
+    the verdict says so instead of leaving their absence to be read as a pass.
+    """
+    budget = int(limit if limit is not None else MAX_LADDER_ROWS)
+    return {
+        "kind": "verification_ladder_max_rows",
+        "rows": int(rows),
+        "limit": budget,
+        "layers_not_run": ["L2", "L4", "L5"],
+        "note": (
+            f"Coverage limit: {int(rows):,} rows exceed the {budget:,}-row in-memory "
+            "verification limit, so column aggregates (L2) and cell localisation "
+            "(L4/L5) did not run. Row balance (L1) and any full-population digest "
+            "(L3) are the only evidence."
+        ),
+    }
+
+
+def stamp_coverage_limit(report: dict[str, Any], rows: int, limit: int | None = None) -> dict[str, Any]:
+    """Put the ladder's coverage limit on a Gate-8 report: field, verdict qualifier, message."""
+    info = ladder_coverage_limit(rows, limit)
+    report["coverage_limit"] = info
+    report["verification_verdict_qualifier"] = "coverage_limited"
+    message = str(report.get("message") or "").rstrip()
+    if info["note"] not in message:
+        report["message"] = f"{message} {info['note']}".strip()
+    return report
+
+
 class PopulationTooLarge(RuntimeError):
     """Raised by the readers before an oversized population reaches memory."""
 
@@ -104,8 +137,17 @@ def layer_l1_row_balance(
     target_rows_before: int | None = None,
     keyed_cardinality: bool = False,
     keyed_expected_delta: int | None = None,
+    rows_shaped_out: int = 0,
+    rows_source_filtered: int = 0,
+    rows_expanded: int = 0,
+    retained_rows: int = 0,
 ) -> LayerReport:
     """L1 — the same three cardinality identities ``row_conservation`` closes.
+
+    The expected count is ``services.expected_rows.expected_destination_rows``,
+    the function Gate-8 and row conservation use: rows a declared source
+    filter or an approved recipe removed on the read are not expected at the
+    destination, and rows a recipe added are.
 
     Overwrite: ``source - dropped - skipped == dest COUNT(*)``.
     Append: ``dest - dest_before == expected`` (Full Append dest-Δ —
@@ -120,9 +162,22 @@ def layer_l1_row_balance(
     classified as new or existing, so with hold-outs the keyed identity is the
     bound ``expected - dropped <= dest Δ <= expected``.
     """
-    dropped = max(max(int(rejected_rows or 0), 0) - max(int(coerced_null_rows or 0), 0), 0)
+    from services.expected_rows import expected_destination_rows, held_out_rows
+
+    dropped = held_out_rows(rejected_rows, coerced_null_rows)
     skipped = max(int(rows_skipped or 0), 0)
-    batch_expected = max(int(source_rows) - dropped - skipped, 0)
+    removed = max(int(rows_shaped_out or 0), 0) + max(int(rows_source_filtered or 0), 0)
+    added = max(int(rows_expanded or 0), 0) + max(int(retained_rows or 0), 0)
+    batch_expected = expected_destination_rows(
+        int(source_rows),
+        rejected_rows=rejected_rows,
+        coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
+        retained_rows=retained_rows,
+    )
     target = int(target_rows)
     details: dict[str, Any] = {
         "source_rows": int(source_rows),
@@ -135,6 +190,13 @@ def layer_l1_row_balance(
         "target_rows_before": target_rows_before,
         "keyed_expected_delta": keyed_expected_delta,
     }
+    if removed or added:
+        details.update(
+            rows_shaped_out=max(int(rows_shaped_out or 0), 0),
+            rows_source_filtered=max(int(rows_source_filtered or 0), 0),
+            rows_expanded=max(int(rows_expanded or 0), 0),
+            retained_rows=max(int(retained_rows or 0), 0),
+        )
     if keyed_cardinality:
         details["equation"] = "target - target_rows_before == inserts - deletes"
         if keyed_expected_delta is None or target_rows_before is None:
@@ -167,6 +229,8 @@ def layer_l1_row_balance(
             details=details,
         )
     equation = "source - dropped - skipped == target"
+    if removed or added:
+        equation = "source + added - dropped - skipped - removed_on_read == target"
     if allow_extra_rows and target_rows_before is not None:
         delta = target - int(target_rows_before)
         ok = delta == batch_expected
@@ -1108,6 +1172,10 @@ def run_five_layer_verification(
     keyed_expected_delta: int | None = None,
     l2_skip_reason: str = "",
     scoped_to_written_keys: bool = False,
+    rows_shaped_out: int = 0,
+    rows_source_filtered: int = 0,
+    rows_expanded: int = 0,
+    retained_rows: int = 0,
 ) -> dict[str, Any]:
     """Execute L1–L5 on two in-memory populations (SQL-loaded or buffered).
 
@@ -1147,6 +1215,9 @@ def run_five_layer_verification(
             "population_proof": False,
             "population_checksum_proof": False,
             "skipped": True,
+            "coverage_limit": ladder_coverage_limit(
+                max(len(source_rows), len(target_rows), src_n, tgt_n)
+            ),
             "reason": (
                 f"Population exceeds VERIFICATION_LADDER_MAX_ROWS={MAX_LADDER_ROWS}; "
                 "refuse in-memory L2/L4/L5. Gate-8 L1/L3 checksum still applies."
@@ -1169,6 +1240,10 @@ def run_five_layer_verification(
         target_rows_before=target_rows_before,
         keyed_cardinality=keyed_cardinality,
         keyed_expected_delta=keyed_expected_delta,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
+        retained_rows=retained_rows,
     )
 
     src_agg = compute_column_aggregates(source_rows, cols)
@@ -1399,6 +1474,9 @@ def attach_ladder_to_reconcile_report(
     if not ladder:
         return out
     out["verification_ladder"] = ladder
+    limit = ladder.get("coverage_limit")
+    if isinstance(limit, dict):
+        stamp_coverage_limit(out, int(limit.get("rows") or 0), int(limit.get("limit") or 0) or None)
     # Evidence changed — recompute the fidelity claim from the single procedure.
     from services.signed_proof_pack import apply_fidelity_veto
 

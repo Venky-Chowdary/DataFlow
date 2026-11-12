@@ -1609,15 +1609,12 @@ def _stream_database_transfer_impl(
     try:
         from services.dest_physical_types import (
             apply_physical_temporal_precision,
+            mark_typed_source_text_carriers,
             physical_column_types,
         )
         from services.reconciliation import overlay_physical_dest_types
 
-        # Same type basis as the dest read-back: the carrier the rows land in
-        # steers the digest — a pre-existing non-text column (DECLARED DECIMAL
-        # over a Mongo string carrier) and a degraded TEXT carrier both follow
-        # overlay_physical_dest_types, or write-pass and read-back hash
-        # identical rows differently.
+        # The dest read-back's basis (physical overlay; typed-source text marked, review 1 H1).
         run.cfg.digest_dest_types = overlay_physical_dest_types(
             run.cfg.digest_dest_types,
             physical_column_types(
@@ -1626,6 +1623,9 @@ def _stream_database_transfer_impl(
         )
         run.cfg.digest_dest_types = apply_physical_temporal_precision(
             run.cfg.digest_dest_types, run.cfg.dest_type, run.cfg.dest_cfg, table=str(run.cfg.dest_table)
+        )
+        run.cfg.digest_dest_types = mark_typed_source_text_carriers(
+            run.cfg.digest_dest_types, run.cfg.mappings, run.cfg.src_read_type, run.cfg.src_cfg, str(run.cfg.table or ""), source=run.cfg.source
         )
     except Exception as exc:
         logger.warning(

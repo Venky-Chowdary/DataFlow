@@ -1,8 +1,15 @@
 """The ``mask_pii`` transform's cell semantics, and the clear-value check (D355).
 
-``mask_pii`` on a scalar cell has always masked the whole value: a recognised
-PII pattern keeps its shape (``a***@****.com``), anything else keeps a short
-head and tail (``Al*****on``). On a JSON document it masked only the pattern
+``mask_pii`` on a scalar cell masks the whole value: a recognised PII pattern
+keeps its shape (``a***@****.com``); anything else keeps its length class only
+(``Alice Johnson`` -> ``********``). It used to keep a short head and tail
+(``Al*****on``, ``Alice …nson``): ten of fourteen characters of a name in
+clear, and 35 of 40 common first names with a unique mask (algorithm audit
+H7). No source character of an unrecognised value survives now; a mask is
+never longer than its value, so it fits the same column. Operators who need
+joinable pseudonyms use ``hash_pii``.
+
+On a JSON document it masked only the pattern
 matches inside the text, so every name, address, date of birth, short or
 foreign phone number, unformatted SSN and luhn-invalid card number landed in
 clear — on every destination, and a document holding none of the patterns
@@ -12,7 +19,7 @@ pattern matched was replaced by unquoted text, which is not JSON.
 A document is now masked value by value: every string and number in it is
 masked as the same value would be in a scalar column (keys, nesting, booleans
 and nulls keep the document's shape). The pattern mask is kept for each value,
-and a value no pattern changed falls back to the head/tail mask — a
+and a value no pattern changed falls back to the length-class mask — a
 luhn-invalid 16-digit "card" is still a value the operator asked to mask.
 
 ``clear_tokens`` lists the values a cell carries (the cell, and each value of a
@@ -26,6 +33,7 @@ import json
 from collections.abc import Iterator
 from typing import Any
 
+from services.pii_guard import PII_PATTERNS, _looks_structured
 from services.pii_guard import mask as pattern_mask
 
 
@@ -37,23 +45,43 @@ class _JsonNumber(str):
 _MASK_CHARS = frozenset("*…")
 
 
-def _head_tail_mask(text: str) -> str:
-    """The scalar mask for a value no PII pattern recognises (pii_guard.mask)."""
-    if len(text) <= 4:
-        return "*" * len(text)
-    if len(text) <= 12:
-        return text[:2] + "*" * (len(text) - 4) + text[-2:]
-    return text[:6] + "…" + text[-4:]
+#: Longest mask written for a value no pattern recognises.
+_MAX_CLASS_MASK = 32
+
+
+def _length_class_mask(text: str) -> str:
+    """The mask of a value no PII pattern recognises: its length class only.
+
+    Stars, as many as the largest power of two that fits the value (the value's
+    own length below four, at most 32). No character of the value survives, the
+    exact length is not disclosed, and the mask is never longer than the value.
+    """
+    size = len(text)
+    if size < 4:
+        return "*" * size
+    return "*" * min(1 << (size.bit_length() - 1), _MAX_CLASS_MASK)
+
+
+def _pattern_recognised(text: str) -> bool:
+    """A value ``pii_guard.mask`` masks by pattern, not by its head/tail fallback."""
+    return bool(
+        PII_PATTERNS["email"].fullmatch(text.strip())
+        or _looks_structured(text)
+        or any(p.search(text) for p in PII_PATTERNS.values())
+    )
 
 
 def mask_text(text: str) -> str:
     """Mask one scalar value; never return a non-empty value unchanged."""
-    out = pattern_mask(text)
-    if out == text and text and not set(text) <= _MASK_CHARS:
+    if not text or set(text) <= _MASK_CHARS:
+        return text
+    if _pattern_recognised(text):
+        out = pattern_mask(text)
+        if out != text:
+            return out
         # A pattern matched nothing it would change (e.g. a luhn-invalid
         # 16-digit number): the operator still asked for the value masked.
-        out = _head_tail_mask(text)
-    return out
+    return _length_class_mask(text)
 
 
 def _parse_document(raw: Any, text: str) -> Any:

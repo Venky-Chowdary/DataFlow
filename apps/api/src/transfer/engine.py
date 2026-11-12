@@ -864,12 +864,12 @@ class UniversalTransferEngine:
         # create-new invention needs, and an inline format may be empty.
         self._resolve_saved_connectors(request)
         stamp_kafka_source(request)
-        from connectors.sql_identifiers import unsafe_destination_identifier_reason
-        from .job_scope import start_refusal  # residency (review H2/H3) and local disk (D276), before any write
-        dest = request.destination
-        ident_err = start_refusal(request) or (
-            unsafe_destination_identifier_reason(str(dest.format or ""), str(dest.table or dest.collection or ""))
-        )
+        # Residency and local disk (job_scope: review H2/H3, D276), then an unsafe
+        # identifier or a source_filter that cannot be honoured (audit H2): before any read or write.
+        from services.source_filter_gate import request_refusal
+        from .job_scope import start_refusal
+
+        ident_err = start_refusal(request) or request_refusal(request)
         if ident_err:
             try:
                 from services.mongodb_service import get_mongodb_service

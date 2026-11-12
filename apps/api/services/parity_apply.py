@@ -25,6 +25,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from services.fingerprint_rules import FINGERPRINT_VERSION
 from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES
 from services.parity_errors import safe_error
 from services.parity_evidence import request_of, target_to_source
@@ -567,6 +568,7 @@ def settle_fix(job_id: str, fix_id: str, *, ok: bool, result: str, stale: bool =
             if table and keys and (after["evidence"]["reread"].get(table) or {}).get("status") == "ok":
                 resolved = set(state["resolved"].get(table) or []) | (set(keys) - still)
                 state["resolved"][table] = sorted(resolved)
+                state["resolved_fingerprint_version"] = FINGERPRINT_VERSION
             state["rounds"].append({
                 "n": len(state["rounds"]) + 1, "at": now_iso(),
                 "unexplained_before": int(record.get("_unexplained_before") or 0),
