@@ -190,11 +190,34 @@ def _load_proposals() -> list[dict[str, Any]]:
     return rows
 
 
+#: Proposals kept per workspace in the file store (the MongoDB store pages by
+#: workspace in its query).
+_MAX_PROPOSALS_PER_WORKSPACE = 200
+
+
+def _capped_per_workspace(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The newest ``_MAX_PROPOSALS_PER_WORKSPACE`` rows of each workspace, in stored order.
+
+    Security review M1: one cap over the whole file let a workspace that
+    created 200 proposals push every other workspace's out of the store. Rows
+    with no workspace (legacy, unassigned) are capped as their own group.
+    """
+    seen: dict[Any, int] = {}
+    keep: list[dict[str, Any]] = []
+    for row in reversed(rows):
+        owner = row.get("workspace_id") if "workspace_id" in row else None
+        seen[owner] = seen.get(owner, 0) + 1
+        if seen[owner] <= _MAX_PROPOSALS_PER_WORKSPACE:
+            keep.append(row)
+    keep.reverse()
+    return keep
+
+
 def _write_proposals_file(rows: list[dict[str, Any]]) -> None:
     os.makedirs(_data_dir(), exist_ok=True)
     tmp = _proposals_path() + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"proposals": rows[-200:]}, f, indent=2, default=str)
+        json.dump({"proposals": _capped_per_workspace(rows)}, f, indent=2, default=str)
     os.replace(tmp, _proposals_path())
 
 
