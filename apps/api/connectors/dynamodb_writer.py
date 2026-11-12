@@ -607,7 +607,11 @@ def dynamodb_client_cfg(dest: dict[str, Any]) -> dict[str, Any]:
     One derivation for the write and Gate-8's read-back (security follow-up 5):
     the listen port as the engine hands it to the writer, and ``ssl``, so the
     endpoint is the one ``egress_guard.aws_sdk_endpoint`` judged (a TLS
-    endpoint used to be written over plain http).
+    endpoint used to be written over plain http). The destination's
+    workspace, when the config has one, so the pre-dial check reads that
+    workspace's egress allowlist (follow-up review 1, L4). The signing region
+    is ``aws_common.resolve_region``'s: the region label in ``host`` (or in an
+    ``amazonaws.com`` endpoint), else us-east-1.
     """
     from src.transfer.connector_capabilities import effective_port
 
@@ -619,6 +623,7 @@ def dynamodb_client_cfg(dest: dict[str, Any]) -> dict[str, Any]:
         "connection_string": dest.get("connection_string") or "",
         "endpoint_url": dest.get("endpoint_url") or "",
         "ssl": bool(dest.get("ssl")),
+        "workspace_id": str(dest.get("workspace_id") or ""),
     }
 
 
