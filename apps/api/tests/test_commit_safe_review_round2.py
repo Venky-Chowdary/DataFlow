@@ -534,3 +534,160 @@ def test_text_cursor_on_a_large_table_run_says_not_guaranteed_like_preflight(iso
     assert "the late-commit check would scan the whole table" in window.get("reason", ""), window
     assert "late_rows_detected" not in window, window
     assert _missing("bt", "bt_out") == []
+
+
+# --------------------------------------------------------------------------
+# M-4 — the snapshot narrowing's safety checks, each with a test that fails
+# without it
+# --------------------------------------------------------------------------
+
+
+def test_presnapshot_subtransaction_row_is_recovered(isolated, pg):
+    """The reviewer's Q6: a SAVEPOINT row whose subtransaction id was assigned
+    before the capture, while its parent writes nothing itself. Only the
+    parent's id is in the in-progress list, so the run must judge rows on the
+    horizon (one subtransaction open), and recovers the row."""
+    _sql(f'CREATE TABLE "{SCHEMA}".ps (id bigint PRIMARY KEY, v text)')
+    _sql(f"INSERT INTO \"{SCHEMA}\".ps SELECT g, 'r' FROM generate_series(1, 10) g")
+    _sql(f'ANALYZE "{SCHEMA}".ps')
+    assert _run(isolated, "ps", "ps_out", cursor="id").success
+    writer = _connect(autocommit=False)
+    try:
+        cur = writer.cursor()
+        cur.execute("SAVEPOINT s")
+        cur.execute(f"INSERT INTO \"{SCHEMA}\".ps VALUES (11, 'SUBXACT-row')")
+        _sql(f"INSERT INTO \"{SCHEMA}\".ps SELECT g, 'fast' FROM generate_series(12, 30) g")
+        second = _run(isolated, "ps", "ps_out", cursor="id")
+        assert second.success, second.error
+        bound = _window(second).get("bound") or {}
+        assert bound.get("open_subxacts") == 1, bound
+        writer.commit()
+    finally:
+        writer.close()
+    _sql(f"INSERT INTO \"{SCHEMA}\".ps VALUES (40, 'n')")
+    third = _run(isolated, "ps", "ps_out", cursor="id")
+    assert third.success, third.error
+    assert _window(third).get("late_row_rule") == "horizon", _window(third)
+    assert _missing("ps", "ps_out") == []
+
+
+def test_late_row_on_the_second_page_of_candidates_is_recovered(isolated, pg):
+    """The reviewer's Q7: the late row sits behind 1,500 in-place edits with
+    lower cursors, so it is on the second page the check walks."""
+    _sql(f'CREATE TABLE "{SCHEMA}".sp (id bigint PRIMARY KEY, v text)')
+    _sql(f"INSERT INTO \"{SCHEMA}\".sp SELECT g, 'r' FROM generate_series(1, 1500) g")
+    _sql(f"INSERT INTO \"{SCHEMA}\".sp SELECT g, 'r' FROM generate_series(2000, 3000) g")
+    _sql(f'ANALYZE "{SCHEMA}".sp')
+    assert _run(isolated, "sp", "sp_out", cursor="id").success
+    late = _connect(autocommit=False)
+    try:
+        late.cursor().execute(f"INSERT INTO \"{SCHEMA}\".sp VALUES (1700, 'LATE')")
+        _sql(f"INSERT INTO \"{SCHEMA}\".sp SELECT g, 'fast' FROM generate_series(3001, 3100) g")
+        assert _run(isolated, "sp", "sp_out", cursor="id").success
+        late.commit()
+    finally:
+        late.close()
+    _sql(f"UPDATE \"{SCHEMA}\".sp SET v = v || '!' WHERE id <= 1500")
+    third = _run(isolated, "sp", "sp_out", cursor="id")
+    assert third.success, third.error
+    window = _window(third)
+    assert window.get("late_rows_detected") == 1501, window
+    assert window.get("late_rows_checked") == 1501, window
+    assert window.get("replay_seed") == "1700", window
+    assert _missing("sp", "sp_out") == []
+
+
+class _FakeCursor:
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.statements = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, statement, params=None):
+        self.statements.append(statement)
+        answer = self.answers.pop(0) if self.answers else None
+        if isinstance(answer, BaseException):
+            raise answer
+        self._row = answer
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.autocommit = True
+
+    def cursor(self):
+        return self._cursor
+
+    def close(self):
+        pass
+
+
+def test_a_truncated_in_progress_list_is_never_stored_as_complete(monkeypatch):
+    from services import commit_safe_window as csw
+
+    xip = [str(1000 + i) for i in range(csw.PG_XIP_MAX + 1)]
+    cursor = _FakeCursor([("1000", "5000", xip)])
+    monkeypatch.setattr(csw, "_pg_connect", lambda _cfg: _FakeConn(cursor))
+    bound = csw.capture_pg_bound({})
+    assert bound.get("xip_complete") is False and bound.get("xip_truncated") is True, bound
+    assert "xip" not in bound
+    assert csw.late_row_rule(bound) == ("horizon", 1000, ())
+
+
+@pytest.mark.parametrize(
+    "matched,why",
+    [(1, "a listed transaction has no backend (prepared, or finished)"), (0, "none matched")],
+)
+def test_an_unmatched_or_prepared_backend_falls_back_to_the_horizon(monkeypatch, matched, why):
+    """Two transactions in progress; only some are found running in a
+    backend (a prepared transaction has none). Their open subtransactions
+    cannot be counted, so the count is unknown and the horizon rule applies."""
+    from services import commit_safe_window as csw
+
+    cursor = _FakeCursor([("1000", "1003", ["1000", "1002"]), (matched, 0, False)])
+    monkeypatch.setattr(csw, "_pg_connect", lambda _cfg: _FakeConn(cursor))
+    bound = csw.capture_pg_bound({})
+    assert bound.get("open_subxacts") is None, (why, bound)
+    assert csw.late_row_rule(bound)[0] == "horizon"
+    # Every listed transaction found, none with a subtransaction: narrowed.
+    cursor = _FakeCursor([("1000", "1003", ["1000", "1002"]), (2, 0, False)])
+    monkeypatch.setattr(csw, "_pg_connect", lambda _cfg: _FakeConn(cursor))
+    complete = csw.capture_pg_bound({})
+    assert complete.get("open_subxacts") == 0
+    assert csw.late_row_rule(complete) == ("in_progress", 1003, (1000, 1002))
+
+
+def test_a_missing_relation_is_unreadable_not_a_table(pg):
+    from services import commit_safe_window as csw
+
+    assert csw.pg_relation_facts(_pg_cfg(), SCHEMA, "no_such_table") == ("", None)
+
+
+def test_nothing_to_re_read_only_when_every_reported_row_was_checked():
+    """``undelivered == 0`` proves nothing about rows that were never checked:
+    the run re-reads from the lowest reported cursor instead."""
+    from services import commit_safe_window as csw
+
+    def _plan(late):
+        return csw.plan_commit_safe_window(
+            source_type="postgresql", sync_mode="incremental_append", cursor_column="id",
+            cursor_type="bigint", stored_watermark="100", can_replay=True, contract={},
+            metadata={csw.HORIZON_KEY: {"xmin": "10", "strategy": csw.STRATEGY_PG}},
+            capture_bound=lambda: {"xmin": "20", "strategy": csw.STRATEGY_PG},
+            probe_late=lambda **_kw: late, relation_kind="r",
+        )
+
+    partly = _plan(csw.LateRows(count=5, min_cursor="3", undelivered=0, checked=3, rule="horizon"))
+    assert partly.replays and str(partly.seed) == "3", partly
+    assert "3 of them" in partly.reason or "3 of 5" in partly.reason, partly.reason
+    whole = _plan(csw.LateRows(count=5, min_cursor=None, undelivered=0, checked=5, rule="horizon"))
+    assert not whole.replays and "nothing to re-read" in whole.reason, whole

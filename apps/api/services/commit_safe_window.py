@@ -756,7 +756,7 @@ def _plan_pg(
         f"{int(late.count):,} row(s) changed or committed behind the watermark since "
         "the last read"
     )
-    if late.count and late.undelivered == 0:
+    if late.count and late.undelivered == 0 and late.checked == late.count:
         # Every one of those row versions is already at the destination: rows
         # edited in place without moving the cursor, or delivered by the read
         # that saw them. Out-of-window drift (D188), not a gap — nothing to
@@ -807,12 +807,19 @@ def _plan_pg(
             ),
             census_recommended=True,
         )
-    where = (
-        f"the destination lacks the one at cursor {late.min_cursor}, the first gap in "
-        "cursor order"
-        if late.undelivered
-        else "they could not be checked against the destination"
-    )
+    if late.undelivered:
+        where = (
+            f"the destination lacks the one at cursor {late.min_cursor}, the first gap in "
+            "cursor order"
+        )
+    elif late.undelivered == 0:
+        # A check that stopped short proves nothing about the rest (review M-4).
+        where = (
+            f"only {int(late.checked or 0):,} of them could be checked against the "
+            "destination"
+        )
+    else:
+        where = "they could not be checked against the destination"
     return CommitSafeWindow(
         **{**base, "seed": ReplaySeed(str(late.min_cursor), cursor_part(stored))},
         **judged,
@@ -1186,7 +1193,7 @@ def probe_pg_late_rows(
             logger.debug("commit-safe window: close skipped", exc_info=True)
     count = int(row[1] or 0) if row else 0
     low = _cell(row[0]) if row and row[0] is not None else None
-    if missing == 0:
+    if missing == 0 and checked == count:
         low = None
     elif missing:
         low = first_gap

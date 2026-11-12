@@ -108,7 +108,8 @@ def test_rows_edited_in_place_are_not_a_late_commit():
     # those row versions: no re-read, and the bound moves on.
     window = _plan(
         probe_late=lambda **_: csw.LateRows(
-            count=2, min_cursor=None, candidates=(("5", "5"), ("7", "7")), undelivered=0
+            count=2, min_cursor=None, candidates=(("5", "5"), ("7", "7")), undelivered=0,
+            checked=2,
         )
     )
     assert not window.replays and window.seed == "13"
