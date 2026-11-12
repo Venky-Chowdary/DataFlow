@@ -1180,3 +1180,4 @@ def test_keyless_append_probe_range_stays_bounded_after_a_late_row(isolated, pg)
         evidence = _window(later)
         assert int(evidence.get("late_rows_detected") or 0) == 0, evidence
         assert evidence["previous_bound"]["xmin"] != _window(third)["previous_bound"]["xmin"]
+

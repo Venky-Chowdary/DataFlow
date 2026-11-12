@@ -751,3 +751,64 @@ def test_a_row_edited_in_place_is_not_reread_and_stays_drift(isolated, events, m
     assert _duplicates(dst) == [] and _missing(dst) == []
     kept = _sql(f"SELECT v FROM {SCHEMA}.{dst} WHERE id = 3", fetch=True)
     assert kept == [("base3",)]  # the cursor did not select the edit (D188 drift)
+
+
+# --------------------------------------------------------------------------
+# PR 407 review — tests that kill the three mutation survivors
+# --------------------------------------------------------------------------
+
+
+def test_a_replaying_run_never_moves_the_watermark_backwards(isolated, events):
+    """The rows that set the watermark are deleted; the next run re-reads from a
+    late commit below them and pages only up to it. The stored mark must stay
+    where it was, not follow the re-read down (``_never_behind``)."""
+    from services.sync_cursor import compare_cursor_values, get_watermark
+
+    dst = "ev_nb_" + uuid.uuid4().hex[:8]
+    kw = dict(cursor="id", mode="incremental_append")
+    assert _run(isolated, dst, **kw).success
+    slow = _connect(autocommit=False)
+    try:
+        slow.cursor().execute(f"INSERT INTO {SCHEMA}.ev (v) VALUES ('SLOW-TXN')")  # id 11
+        _sql(f"INSERT INTO {SCHEMA}.ev (v) VALUES ('fast-1'), ('fast-2')")  # 12, 13
+        second = _run(isolated, dst, **kw)
+        assert second.success, second.error
+        slow.commit()
+    finally:
+        slow.close()
+    key = (second.destination_summary or {}).get("incremental_cursor_key")
+    stored = get_watermark(key)
+    _sql(f"DELETE FROM {SCHEMA}.ev WHERE id IN (12, 13)")
+    third = _run(isolated, dst, **kw)
+    assert third.success, third.error
+    evidence = third.destination_summary.get("commit_safe_window") or {}
+    assert evidence.get("replay_seed") not in (None, ""), evidence
+    after = get_watermark(key)
+    assert compare_cursor_values(after, stored) >= 0, (stored, after)
+
+
+def test_pg_keyless_route_is_never_claimed_commit_safe_statically():
+    claim = csw.static_commit_safety(
+        source_type="postgresql", sync_mode="incremental_append", cursor_column="seq",
+        cursor_type="BIGINT", has_identity=False,
+    )
+    assert claim["guarantee"] == csw.GUARANTEE_NONE, claim
+    assert claim["statement"].startswith("Cannot guarantee no skipped rows"), claim
+    assert claim["census_recommended"]
+
+
+def test_a_non_identity_copy_route_is_declined_for_a_replaying_run():
+    from types import SimpleNamespace
+
+    from src.transfer.stream_commit_window import copy_declined_for_replay
+
+    def cfg(src, dst, through):
+        return SimpleNamespace(src_read_type=src, dest_type=dst, replay_through=through)
+
+    # An engine-side copy that cannot prune re-read rows would deliver them again.
+    assert copy_declined_for_replay(cfg("postgresql", "snowflake", "13"))
+    assert copy_declined_for_replay(cfg("mysql", "duckdb", "13"))
+    # The identity incremental COPY prunes its staging table: kept.
+    assert not copy_declined_for_replay(cfg("postgresql", "postgresql", "13"))
+    # A run that re-reads nothing declines nothing.
+    assert not copy_declined_for_replay(cfg("postgresql", "snowflake", ""))
