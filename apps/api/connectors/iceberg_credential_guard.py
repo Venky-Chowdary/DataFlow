@@ -52,6 +52,7 @@ from services.iceberg_class_properties import (
     TABLE_METADATA,
     check_class_properties,
 )
+from connectors.iceberg_pyarrow_io import LOCAL_FILES, REFUSE
 from connectors.iceberg_server_hosts import check_server_oauth_uri, check_storage_hosts
 from services.platform_aws_credentials import iceberg_credentials_refusal, s3_fileio_refusal
 
@@ -59,6 +60,8 @@ KEYED_S3_FILE_IO = "connectors.iceberg_pyarrow_io.KeyedS3PyArrowFileIO"
 LOCAL_URI_FILE_IO = "connectors.iceberg_pyarrow_io.LocalUriPyArrowFileIO"
 _PY_IO_IMPL = "py-io-impl"
 _UNGUARDED_FILE_IO = (None, "", "pyiceberg.io.pyarrow.PyArrowFileIO")
+#: Catalogs a tenant runs or writes (every file location in them is the tenant's).
+_REMOTE_CATALOGS = frozenset({"RestCatalog", "GlueCatalog", "HiveCatalog"})
 
 
 def check_catalog_properties(catalog_type: str, properties: dict[str, Any]) -> None:
@@ -166,8 +169,11 @@ def guarded_catalog(base: type) -> type:
         def _load_file_io(self, properties: Any = None, location: str | None = None) -> Any:
             # A table's storage hosts, when the catalog did not already carry them.
             check_storage_hosts({**self._df_own, **self.properties}, properties or {}, TABLE_CONFIG)
-            merged = {**self.properties, **(properties or {})}  # what pyiceberg hands the FileIO
-            return super()._load_file_io(file_io_properties(merged), location)
+            merged = file_io_properties({**self.properties, **(properties or {})})  # what pyiceberg hands it
+            if base.__name__ in _REMOTE_CATALOGS:
+                # The tenant's catalog names every file: none on this host (follow-up review 2).
+                merged[LOCAL_FILES] = REFUSE
+            return super()._load_file_io(merged, location)
 
         def commit_table(self, *args: Any, **kwargs: Any) -> Any:
             response = super().commit_table(*args, **kwargs)

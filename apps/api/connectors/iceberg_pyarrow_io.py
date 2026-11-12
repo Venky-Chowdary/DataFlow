@@ -17,6 +17,13 @@ POSIX locations are returned untouched.
 Every FileIO here also refuses to open Google Cloud or Azure storage without
 the table's own credential (follow-up review 1): pyarrow would use the API
 host's identity (``services.platform_gcp_azure_credentials``).
+
+And it never opens, creates or deletes a file on the API host that a tenant's
+catalog named (follow-up review 2, local files): a REST, Glue or Hive catalog
+decides every metadata, manifest, data and delete file location, so a local one
+from it is refused (the guarded catalog sets :data:`LOCAL_FILES` to
+``refuse``); any other local location must pass the Iceberg jail
+(``iceberg_catalog._jail_local_path``).
 """
 
 from __future__ import annotations
@@ -36,8 +43,51 @@ def strip_uri_drive_slash(path: str) -> str:
     return match.group(1) if match else path
 
 
+#: FileIO property the guarded catalog sets to ``refuse`` for a remote catalog's tables.
+LOCAL_FILES = "dataflow.local-files"
+REFUSE = "refuse"
+
+
+def local_location_refusal(properties: Any, path: str) -> str:
+    """Why this FileIO may not touch the local ``path``, else ``""``."""
+    if str((properties or {}).get(LOCAL_FILES) or "").strip().lower() == REFUSE:
+        return (
+            "This Iceberg catalog named a local file on the Datawrap server (a metadata, "
+            "manifest, data or delete file). Datawrap does not read or write the server's own "
+            "files for a remote catalog; its tables must live in object storage."
+        )
+    from connectors.iceberg_catalog import _jail_local_path
+
+    try:
+        _jail_local_path(path, "data or metadata file")
+    except ValueError:
+        return (
+            "This Iceberg table named a local file outside the Iceberg warehouse folder "
+            "(DATAFLOW_ICEBERG_ROOT, else the data folder's iceberg area); Datawrap does not open it."
+        )
+    return ""
+
+
 class LocalUriPyArrowFileIO(PyArrowFileIO):
     """``PyArrowFileIO`` that hands the local filesystem a path it accepts."""
+
+    def _check_local(self, location: Any) -> None:
+        raw = getattr(location, "location", location)  # delete() takes a file object too
+        scheme, _netloc, path = self.parse_location(str(raw), self.properties)
+        if scheme == "file":
+            _refuse(local_location_refusal(self.properties, path))
+
+    def new_input(self, location: str) -> Any:
+        self._check_local(location)
+        return super().new_input(location)
+
+    def new_output(self, location: str) -> Any:
+        self._check_local(location)
+        return super().new_output(location)
+
+    def delete(self, location: Any) -> None:
+        self._check_local(location)
+        super().delete(location)
 
     @staticmethod
     def parse_location(location: str, properties: Any = EMPTY_DICT) -> tuple[str, str, str]:
