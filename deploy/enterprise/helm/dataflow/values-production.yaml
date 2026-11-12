@@ -57,6 +57,7 @@ data:
   redis:
     host: "FILL_REDIS_ENDPOINT"
   documentdb:
+    engine: documentdb
     host: "FILL_DOCDB_ENDPOINT"
 
 objectStore:

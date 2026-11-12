@@ -16,10 +16,13 @@ spec:
     - from:
         - namespaceSelector: {}
       ports:
+        # Pod ports (a NetworkPolicy matches the container port, not the Service port).
         - protocol: TCP
-          port: 8000
+          port: {{ .Values.api.containerPort }}
         - protocol: TCP
-          port: 3000
+          port: {{ .Values.web.containerPort }}
+        - protocol: TCP
+          port: {{ .Values.metrics.port }}
   egress:
     # Intra-namespace traffic (DNS, sidecars, service mesh, metadata).
     - to:
@@ -29,6 +32,9 @@ spec:
           port: 53
         - protocol: UDP
           port: 53
+        # web -> api inside the cluster.
+        - protocol: TCP
+          port: {{ .Values.api.containerPort }}
     # Allow outbound to all destinations on common database / API ports.
     # The default is permissive so transfers to arbitrary SaaS APIs, warehouses,
     # and managed DBs do not fail out of the box; tighten with networkPolicy.egress.cidrs.
@@ -65,4 +71,19 @@ spec:
           port: 22
         - protocol: TCP
           port: 21
+        # Redshift, Cassandra, ClickHouse (HTTP and native TLS), Trino, OTLP.
+        - protocol: TCP
+          port: 5439
+        - protocol: TCP
+          port: 9042
+        - protocol: TCP
+          port: 8123
+        - protocol: TCP
+          port: 9440
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 4317
+        - protocol: TCP
+          port: 4318
 {{- end }}

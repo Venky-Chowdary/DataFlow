@@ -205,4 +205,10 @@ def topology_errors() -> list[str]:
             "is invisible to the replica that receives the click. "
             "Unset the variable or set DATAFLOW_ACK_BACKEND=mongo."
         )
+
+    # Tenant settings, BYOK keys, ACLs and the other control-plane stores:
+    # one file per pod would let replicas disagree on an IP allowlist (H-5).
+    from services.shared_doc_store import store_topology_errors
+
+    errors.extend(store_topology_errors(role_explicit=process_role_explicit()))
     return errors

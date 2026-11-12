@@ -23,6 +23,15 @@ _logger = logging.getLogger(__name__)
 _executor: concurrent.futures.ThreadPoolExecutor | None = None
 _started = threading.Event()
 _shutdown = False
+#: Set while :func:`drain` runs: no new transfer is accepted.
+_draining = False
+#: Set by a drain that ran after SIGTERM: the process is exiting, and a request
+#: that finishes after the drain must not start a transfer (ops review round 2,
+#: Low). Only :func:`start` (a new lifespan) opens the pool again.
+_closed_for_exit = False
+#: Futures of transfers submitted and not finished, by job id.
+_futures: dict[concurrent.futures.Future, str] = {}
+_futures_lock = threading.Lock()
 _worker_id = worker_id()
 _lease_store = WorkerLeaseStore(_worker_id)
 #: job id -> runs of it this process has submitted and not finished. A count,
@@ -37,6 +46,8 @@ def _ensure_executor() -> concurrent.futures.ThreadPoolExecutor:
     global _executor, _shutdown
     if _shutdown:
         raise RuntimeError("Transfer scheduler has been shut down")
+    if _draining or _closed_for_exit:
+        raise RuntimeError("Transfer scheduler is draining for shutdown")
     if _executor is None or _executor._shutdown:
         # Phase F6 — default concurrent jobs raised 4 → 8 (still process-local pool).
         max_workers = max(1, int(getenv_brand("TRANSFER_WORKERS", "8")))
@@ -50,6 +61,8 @@ def _ensure_executor() -> concurrent.futures.ThreadPoolExecutor:
 
 def start() -> None:
     """Start the scheduler and make it ready to accept jobs."""
+    global _closed_for_exit
+    _closed_for_exit = False
     _ensure_executor()
     _started.set()
     _logger.info("Transfer scheduler started")
@@ -200,10 +213,75 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
                     pass
 
     try:
-        return executor.submit(_leased_fn, *args, **kwargs)
+        future = executor.submit(_leased_fn, *args, **kwargs)
     except Exception:
         _done()
         raise
+    with _futures_lock:
+        _futures[future] = job_id
+
+    def _forget(fut: concurrent.futures.Future) -> None:
+        with _futures_lock:
+            _futures.pop(fut, None)
+        if fut.cancelled():
+            _done()  # never started: its lease and heartbeat end here
+
+    future.add_done_callback(_forget)
+    return future
+
+
+def drain(grace_seconds: float | None = None) -> list[str]:
+    """Stop taking transfers and drain the pool for shutdown (ops review M12).
+
+    Running transfers get ``grace_seconds`` (default ``WORKER_DRAIN_SECONDS``)
+    to finish. Before the time is up, the ones still running are superseded
+    through the run-attempt fence, so their writers stop at the next batch
+    boundary and release their leases; the orphan sweep resumes them from
+    their checkpoint. A transfer that never started is cancelled and its
+    lease released. A writer that does not stop in time keeps its lease, so
+    nothing else writes while it may still be writing. Returns the job ids
+    still running when the drain gave up. The pool takes work again after,
+    unless the process received SIGTERM: then it stays closed until it exits.
+    """
+    global _executor, _draining, _closed_for_exit
+    from services import shutdown_signal
+
+    from services.worker_fleet import _supersede_local_run, worker_drain_seconds
+
+    grace = worker_drain_seconds() if grace_seconds is None else max(0.0, float(grace_seconds))
+    _draining = True
+    _started.clear()
+    executor = _executor
+    try:
+        if executor is None:
+            return []
+        with _futures_lock:
+            tracked = dict(_futures)
+        for future in tracked:
+            future.cancel()  # only succeeds for a transfer that has not started
+        running = {f: jid for f, jid in tracked.items() if not f.cancelled()}
+        # The last third of the period (at most 10 s) is what a superseded
+        # writer gets to reach a batch boundary, as in the worker drain.
+        margin = min(10.0, grace / 3.0)
+        _finished, pending = concurrent.futures.wait(running, timeout=max(0.0, grace - margin))
+        if pending:
+            for jid in sorted({running[f] for f in pending}):
+                if _supersede_local_run(jid):
+                    emit_event(_logger, "job.drain.handover", outcome="succeeded", job_id=jid)
+            _finished, pending = concurrent.futures.wait(pending, timeout=margin)
+        executor.shutdown(wait=False, cancel_futures=True)
+        left = sorted({running[f] for f in pending})
+        if left:
+            emit_event(
+                _logger, "job.drain.timeout", outcome="failed",
+                reason_code="grace_period_elapsed", job_count=len(left),
+            )
+        return left
+    finally:
+        if _executor is executor:
+            _executor = None
+        _closed_for_exit = _closed_for_exit or shutdown_signal.signalled()
+        _draining = False
 
 
 def mark_local_run(job_id: str) -> None:

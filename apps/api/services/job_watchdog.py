@@ -280,9 +280,13 @@ def start_stall_watchdog(*, interval_seconds: float | None = None) -> bool:
     return True
 
 
-def stop_stall_watchdog() -> None:
+def stop_stall_watchdog(timeout: float = 5.0) -> None:
+    """Stop the watchdog and wait for its thread, so no sweep runs after this returns."""
     global _stall_sweeper_stop, _stall_sweeper_thread
+    thread = _stall_sweeper_thread
     if _stall_sweeper_stop is not None:
         _stall_sweeper_stop.set()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout)
     _stall_sweeper_stop = None
     _stall_sweeper_thread = None
