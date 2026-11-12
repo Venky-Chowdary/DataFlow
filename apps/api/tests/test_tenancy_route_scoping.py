@@ -822,3 +822,19 @@ def test_a_cdc_snapshot_signal_names_only_a_source_the_caller_can_write(world):
     assert [r.status_code for r in answers] == [404, 404, 400], [r.text[:160] for r in answers]
     own = world.admin_a.post("/api/v1/cdc/snapshots", json={**base, "connector_id": connector_id})
     assert own.status_code == 200 and own.json()["workspace_id"] == world.workspace_a, own.text
+
+
+def test_verifying_a_connector_region_needs_a_platform_admin_even_for_its_own_workspace(world):
+    """Security review round 2 (mutant ``verify_route_no_admin_check``): another
+    workspace's id is a 404 anyway, so the platform-admin rule is only proven on
+    an id the caller's own workspace owns."""
+    connector_id = _seed_saved_connector(world).params["connector_id"]
+    path = f"/api/v1/connectors/saved/{connector_id}/region-verification"
+    own_admin = world.admin_a.post(path, json={"region": "eu-west-1"})
+    assert own_admin.status_code == 403, own_admin.text
+    from services import connector_store
+
+    with world.as_workspace(world.workspace_a):
+        assert not connector_store.get_connector(connector_id, workspace_id=world.workspace_a).region_verification
+    platform = world.admin.post(path, json={"region": "eu-west-1"}, headers={"X-Workspace-Id": world.workspace_a})
+    assert platform.status_code == 200, platform.text
