@@ -3328,6 +3328,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if not isinstance(facts, dict):
                     facts = tr.output or {}
                 parts.append(compose_briefing(facts))
+                if facts.get("unreadable"):
+                    # A briefing with a section unread is not the workspace's
+                    # state: it is not grounded, and its confidence drops (review 2, M4).
+                    rendered.silent.add(id(tr))
             elif tr.name == "list_jobs" and tr.success:
                 spoken = narrate_jobs(tr.output or {}, message)
                 parts.append(spoken)

@@ -131,7 +131,13 @@ def compose_briefing(facts: dict[str, Any]) -> str:
     # a claim about the workspace that nothing read supports (audit C3).
     unreadable = {str(u) for u in (facts.get("unreadable") or [])}
 
-    lines = ["Here's the workspace as it stands — counts are from live stores, not a demo."]
+    if unreadable:
+        lines = [
+            "I could not read every store, so this is only part of the workspace — "
+            "the sections marked unread below may hold failures."
+        ]
+    else:
+        lines = ["Here's the workspace as it stands — counts are from live stores, not a demo."]
     conn_bit = f"**{n_conn}** connector(s)"
     if n_conn:
         conn_bit += f" ({passed} last-test passed"

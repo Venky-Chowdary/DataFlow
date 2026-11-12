@@ -199,3 +199,19 @@ def test_corrupt_schedules_file_says_unreadable(workspace, monkeypatch):
     assert "No pipeline" not in response.answer
     assert not pt.grounded(response)
     assert "0 pipeline" not in _line(briefing.answer, "Pipelines").replace("**", "")
+
+
+@pytest.mark.parametrize("broken", ["jobs", "pipelines"])
+def test_a_briefing_with_any_unread_section_is_not_grounded(workspace, monkeypatch, broken):
+    """Review 2, M4: one unread section lowers the whole briefing; it is not "live counts"."""
+    import services.schedule_store as schedule_store
+
+    if broken == "jobs":
+        _break_job_store(monkeypatch)
+    else:
+        monkeypatch.setattr(schedule_store, "list_schedules", _boom)
+    response = pt.ask(pt.agent(), "give me a workspace briefing")
+    assert not pt.grounded(response), response.answer
+    assert float(response.confidence or 0) < 0.9, response.confidence
+    assert "counts are from live stores" not in response.answer, response.answer
+    assert "could not read" in response.answer.splitlines()[0].lower(), response.answer
