@@ -888,12 +888,14 @@ def _plan_pg(
             f"the destination lacks the one at cursor {late.min_cursor}, the first gap in "
             "cursor order"
         )
-    elif late.undelivered == 0:
+    elif late.undelivered == 0 and int(late.checked or 0) < int(late.count):
         # A check that stopped short proves nothing about the rest (review M-4).
         where = (
             f"only {int(late.checked or 0):,} of them could be checked against the "
             "destination"
         )
+    elif late.undelivered == 0:
+        where = "not all of them could be checked against the destination"
     else:
         where = "they could not be checked against the destination"
     return CommitSafeWindow(
@@ -1200,7 +1202,8 @@ def probe_pg_late_rows(
     With ``identity_columns`` (a whole unique key) and ``undelivered`` (which of
     a page of ``(cursor, key)`` rows the destination lacks, in order), the rows
     are checked page by page in cursor order until the first one the
-    destination lacks: its cursor is ``min_cursor``. Every page is bounded and
+    destination lacks: its cursor is ``min_cursor``. The count and every page
+    read one REPEATABLE READ snapshot; every page is bounded and
     runs under the probe connection's statement timeout.
 
     On a large table the probe is floored at the PostgreSQL look-back window so
@@ -1218,6 +1221,11 @@ def probe_pg_late_rows(
     first_gap: str | None = None
     try:
         with conn.cursor() as cur:
+            # One snapshot for the count and every page of the walk (review 3,
+            # High): read separately, a concurrent in-place edit moves the
+            # candidate set between them, the walk never matches the count,
+            # and every run of a busy table re-read it from its oldest edit.
+            cur.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             cur.execute(_PG_RELATION_SIZE_SQL, (schema or "public", table) * 2)
             est = cur.fetchone()
             est_rows = int(est[1]) if est and est[1] is not None else -1
