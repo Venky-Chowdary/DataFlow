@@ -367,6 +367,10 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
         owned = admin.get(owner_path, headers=exit_owner_headers)
         assert owned.status_code == 200, f"{owner_path}: {owned.status_code} {owned.text}"
         assert sentinel in owned.text, f"{owner_path} does not return B's resource to B's own caller"
+    # Modules that bind ``get_mongodb_service`` by name at import must be imported before it is patched:
+    # one first imported inside the patch (the exit routes reach the transfer scheduler) would keep the
+    # fixture after the test and every later job in the process would fail on it.
+    importlib.import_module("src.transfer.background")
     mongo = _MongoFixture(workspace_b)
     connectors_module = importlib.import_module("src.routers.connectors_router")
     monkeypatch.setattr(connectors_module, "get_mongodb_service", lambda: mongo)
