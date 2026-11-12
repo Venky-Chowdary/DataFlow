@@ -5019,9 +5019,21 @@ def string_width_would_narrow(
         return False
     src_w = parse_string_carrier_width(source_type)
     if src_w is None:
-        # Unlimited generic TEXT/CLOB → bounded; bare VARCHAR unknown → no invent.
-        return is_unlimited_string_carrier(source_type)
+        # Unlimited generic TEXT/CLOB → bounded. A bare VARCHAR is unknown
+        # unless its engine is known to leave it unbounded (audit 12).
+        return is_unlimited_string_carrier(source_type) or _bare_varchar_unbounded(source_type)
     return src_w > tgt_w
+
+
+#: Engines whose bare ``VARCHAR`` / ``CHARACTER VARYING`` has no length limit.
+_BARE_VARCHAR_UNBOUNDED_ENGINES = frozenset({"postgresql", "sqlite", "duckdb"})
+
+
+def _bare_varchar_unbounded(source_type: str) -> bool:
+    bare = re.sub(r"\s+", " ", strip_identity_qualifier(source_type).strip().upper())
+    if bare not in {"VARCHAR", "CHARACTER VARYING"}:
+        return False
+    return _normalize_dest_db(active_source_engine() or "") in _BARE_VARCHAR_UNBOUNDED_ENGINES
 
 
 def blocking_string_width_narrowing(
@@ -5187,6 +5199,30 @@ def oracle_char_byte_polarity_loss(source_type: str, target_type: str) -> bool:
         return True
     per_char = 4 if src_u == "CHAR" else 1
     return int(tgt_w.group(1)) < int(src_w.group(1)) * per_char
+
+
+def char_count_into_oracle_bytes_would_truncate(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
+    """True when a character-counted width lands on Oracle byte semantics.
+
+    ``VARCHAR2(n)`` without a unit is ``n BYTE`` (default NLS_LENGTH_SEMANTICS)
+    and a character is up to 4 bytes in AL32UTF8, so a non-Oracle
+    ``varchar(n)`` needs ``4n`` bytes. An Oracle source in byte semantics, or a
+    source whose engine is unknown, is left to ``oracle_char_byte_polarity_loss``.
+    """
+    if _normalize_dest_db(dest_db) != "oracle" or oracle_char_byte_unit(target_type) == "CHAR":
+        return False
+    tgt = re.match(
+        r"^\s*(VARCHAR2|VARCHAR|CHAR)\s*\(\s*(\d+)", strip_identity_qualifier(target_type).upper()
+    )
+    src_w = parse_string_carrier_width(source_type)
+    engine = _normalize_dest_db(active_source_engine() or "")
+    if not tgt or src_w is None or not engine or engine == "oracle":
+        return False
+    if normalize_logical_type(source_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    return int(tgt.group(2)) < src_w * 4
 
 
 def is_oracle_long_text_carrier(inferred: str | None) -> bool:
@@ -7620,6 +7656,24 @@ def integer_storage_bounds(
 
     bounds: tuple[int, int] | None = _impl(inferred, dest_db=dest_db)
     return bounds
+
+
+def integer_decimal_digits_would_narrow(source_type: str, target_type: str) -> bool:
+    """True when an integer lands on DECIMAL(p,s) with fewer than its digits.
+
+    ``BIGINT`` holds 19 digits; Oracle ``NUMBER(10)`` holds 10 (audit 12). The
+    source width resolves under its engine; an unknown width is not invented.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_INTEGER:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_DECIMAL:
+        return False
+    precision, scale = parse_numeric_precision_scale(target_type)
+    bounds = integer_storage_bounds(source_type, dest_db=active_source_engine() or "")
+    if precision is None or bounds is None:
+        return False
+    digits = max(len(str(abs(bounds[0]))), len(str(bounds[1])))
+    return digits > precision - (scale or 0)
 
 
 def integer_width_would_narrow(
