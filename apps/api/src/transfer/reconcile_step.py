@@ -9350,15 +9350,11 @@ def _bind_endpoints_to_last_stream(
     def _bound(ep: EndpointConfig | None) -> EndpointConfig | None:
         if ep is None or getattr(ep, "kind", "") != "database":
             return ep
+        from services.multi_stream_targets import bind_endpoint_to_stream
+
+        # The orchestrator's own rule, so Gate-8 reads the object it wrote.
         bound = copy.copy(ep)
-        if getattr(ep, "format", "") == "mongodb" or (
-            getattr(ep, "collection", None) and not getattr(ep, "table", None)
-        ):
-            bound.collection = name
-        elif getattr(ep, "table", None):
-            bound.table = name
-        else:
-            return ep
+        bind_endpoint_to_stream(bound, name)
         return bound
 
     return _bound(endpoint) or endpoint, _bound(source_endpoint)

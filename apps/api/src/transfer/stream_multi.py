@@ -162,6 +162,7 @@ def run_non_cdc_multi_stream_sequential(
         review_stream_procedures,
         strip_session_hooks,
     )
+    from services.multi_stream_targets import bind_endpoint_to_stream
     from services.procedure_destination import ProcedureDestinationError, plan_dest_procedure
     from services.rule_compiler.normalize import fold
 
@@ -245,15 +246,18 @@ def run_non_cdc_multi_stream_sequential(
             # The copy is what lets the table that owns the checkpoint seek.
             stream_checkpoint = isolate_stream_checkpoint(checkpoint, stream_name)
             begin_table_population(checkpoint)
-            if getattr(source, "format", "") == "mongodb" or original_collection:
-                source.collection = stream_name
-            else:
-                source.table = stream_name
+            # Every field naming the object moves to this stream: a field left
+            # on the request's name made each stream overwrite the last.
+            bind_endpoint_to_stream(
+                source, stream_name, table=original_table, collection=original_collection
+            )
             if original_dest_table is not None or original_dest_collection is not None:
-                if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
-                    destination.collection = stream_name
-                else:
-                    destination.table = stream_name
+                bind_endpoint_to_stream(
+                    destination,
+                    stream_name,
+                    table=original_dest_table,
+                    collection=original_dest_collection,
+                )
 
             raw = contract_for_stream(stream_contracts, stream_name)
             single_contracts = [
