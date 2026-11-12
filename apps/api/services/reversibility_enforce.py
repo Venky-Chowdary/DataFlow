@@ -40,6 +40,12 @@ _ROWS: OrderedDict[tuple[str, str, str], int] = OrderedDict()
 _MAX_TRACKED = 20_000
 #: job id -> what the pre-write scan read (rows, seconds, streams), for the run's destination summary (review 5).
 _PRESCANS: OrderedDict[str, dict[str, Any]] = OrderedDict()
+#: job id -> the checkpoint a resumed run started from ({rows, stream}), noted where the resume is resolved
+#: (``src.transfer.resume_state``); its rows were written by an earlier attempt and never checked by this one.
+_RESUMES: OrderedDict[str, dict[str, Any]] = OrderedDict()
+#: Destination summary key (the run's, or one stream's entry): rows the stream's tally was seeded with from the
+#: checkpoint, i.e. written by an earlier attempt (review 6). The streaming writer stamps it under this name.
+RESUMED_KEY = "resumed_checkpoint_rows"
 #: Set while rows are mapped a second time for something that is not their write (a pre-write scan, Gate-8's
 #: re-read): they are still checked, but not counted as written rows (review 5, H-1).
 _UNCOUNTED: ContextVar[bool] = ContextVar("reversibility_uncounted", default=False)
@@ -242,21 +248,45 @@ def note_prescan(job_id: str, rows: int, seconds: float) -> None:
             _PRESCANS.popitem(last=False)
 
 
+def note_resumed(job_id: str, *, rows: Any, stream: Any = "") -> None:
+    """``job_id`` resumed from a checkpoint of ``rows`` committed rows that names ``stream`` (``""``: none)."""
+    try:
+        count = max(0, int(rows or 0))
+    except (TypeError, ValueError):
+        count = 0
+    with _LOCK:
+        _RESUMES[job_id] = {"rows": count, "stream": str(stream or "").strip()}
+        while len(_RESUMES) > _MAX_TRACKED:
+            _RESUMES.popitem(last=False)
+
+
+def note_resumed_reapplied(job_id: str) -> None:
+    """``job_id``'s resume re-applies its whole population: no written count starts at the checkpoint."""
+    with _LOCK:
+        found = _RESUMES.get(job_id)
+        if found is not None:
+            found["reapplied"] = True
+
+
 def summary(job_id: str, *, forget: bool = True) -> dict[str, Any] | None:
     """{enforced, columns: [{table, column, rows_checked}]} for ``job_id``'s run, or ``None`` when none was."""
     with _LOCK:
         keys = [k for k in _ROWS if k[0] == job_id]
         rows = [{"table": k[1], "column": k[2], "rows_checked": _ROWS[k]} for k in keys]
         scan = dict(_PRESCANS.get(job_id) or {})
+        resumed = dict(_RESUMES.get(job_id) or {})
         if forget:
             for k in keys:
                 _ROWS.pop(k, None)
             _PRESCANS.pop(job_id, None)
+            _RESUMES.pop(job_id, None)
     if not rows:
         return None
     out = {"enforced": True, "columns": sorted(rows, key=lambda r: (r["table"], r["column"]))}
     if scan:
         out["prescan"] = scan  # rows the pre-write scan read and how long it took (review 5)
+    if resumed:
+        out["resumed"] = resumed  # the checkpoint this run resumed from (review 6)
     return out
 
 
@@ -289,24 +319,79 @@ def _written_by_table(tables: set[str], rows_written: Any, streams: Any) -> dict
             for t in tables}
 
 
-def assess(found: Mapping[str, Any], rows_written: Any, streams: Any = None) -> tuple[dict[str, Any], str | None]:
+def _resumed_by_table(tables: set[str], dest: Any, streams: Any, resumed: Any) -> dict[str, int | None]:
+    """Rows each table's written count holds from the checkpoint it resumed from (``None``: not recorded).
+
+    Only tables a resume seeded are listed. The streaming writer stamps
+    :data:`RESUMED_KEY` on its summary (a multi-stream run on each stream's
+    entry); a run noted as resumed (:func:`note_resumed`) without that count
+    for the table the checkpoint applies to is ``None`` (review 6).
+    """
+    entries = streams.values() if isinstance(streams, Mapping) else streams if isinstance(streams, list) else []
+    per = {str(e["name"]).strip().lower(): e for e in entries
+           if isinstance(e, Mapping) and str(e.get("name") or "").strip()}
+    top = dest.get(RESUMED_KEY) if isinstance(dest, Mapping) else None
+    one_table = len(tables) == 1 and len(per) <= 1
+    resume = resumed if isinstance(resumed, Mapping) else {}
+    owner = str(resume.get("stream") or "").strip().lower()
+    out: dict[str, int | None] = {}
+    for table in tables:
+        entry = per.get(table.strip().lower()) or {}
+        value = entry.get(RESUMED_KEY)
+        if value is None and one_table:
+            value = top
+        if value is not None:
+            try:
+                out[table] = int(value)
+            except (TypeError, ValueError):
+                out[table] = None
+            continue
+        # A multi-stream run applies the checkpoint only to the stream it names; the others read from their start.
+        # The buffered route re-applies every row it holds (``reapplied``): its count starts at 0.
+        if (int(resume.get("rows") or 0) > 0 and not resume.get("reapplied")
+                and (one_table or (owner and owner == table.strip().lower()))):
+            out[table] = None
+    return {t: n for t, n in out.items() if n is None or n > 0}
+
+
+def assess(found: Mapping[str, Any], rows_written: Any, streams: Any = None,
+           dest: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], str | None]:
     """(the tally with each column's ``rows_written``, why the run cannot be called enforced or ``None``).
 
     An enforced column checked on fewer rows than its own table wrote fails the
     run (the fail-closed backstop behind every bulk path's decline, review 4,
     H-1). Where no per-table written count exists the comparison is not made:
     the tally says so under ``unverified`` instead of failing an honest run.
+    A resumed run's written count holds the rows an earlier attempt committed:
+    they are subtracted (``resumed_from``), and where that count is not known
+    the column is ``unverified`` too (review 6).
     """
     columns = [dict(c) for c in found.get("columns") or [] if isinstance(c, Mapping)]
-    written = _written_by_table({str(c.get("table") or "") for c in columns}, rows_written, streams)
+    tables = {str(c.get("table") or "") for c in columns}
+    written = _written_by_table(tables, rows_written, streams)
+    resumed = _resumed_by_table(tables, dest, streams, found.get("resumed"))
     for column in columns:
-        column["rows_written"] = written.get(str(column.get("table") or ""))
+        table = str(column.get("table") or "")
+        column["rows_written"] = written.get(table)
+        if table in resumed:
+            column["resumed_from"] = resumed[table]
+            if resumed[table] is not None and column["rows_written"] is not None:
+                column["rows_written"] = max(0, column["rows_written"] - resumed[table])
     out: dict[str, Any] = {**found, "columns": columns}
     unverified = [_named(c) for c in columns if c["rows_written"] is None]
+    unknown = [_named(c) for c in columns if c["rows_written"] is not None and "resumed_from" in c
+               and c["resumed_from"] is None]
+    notes = []
     if unverified:
-        out["unverified"] = (f"{', '.join(unverified[:6])}: no per-table written count was recorded for the run, "
-                             "so the rows checked were not compared with the rows written.")
-    short = [c for c in columns if c["rows_written"] is not None and int(c.get("rows_checked") or 0) < c["rows_written"]]
+        notes.append(f"{', '.join(unverified[:6])}: no per-table written count was recorded for the run, "
+                     "so the rows checked were not compared with the rows written.")
+    if unknown:
+        notes.append(f"{', '.join(unknown[:6])}: the run resumed from a checkpoint whose row count was not "
+                     "recorded for the table, so the rows checked were not compared with the rows written.")
+    if notes:
+        out["unverified"] = " ".join(notes)
+    short = [c for c in columns if c["rows_written"] is not None and c.get("resumed_from", 0) is not None
+             and int(c.get("rows_checked") or 0) < c["rows_written"]]
     if not short:
         return out, None
     named = "; ".join(f"{_named(c)} was checked on only {int(c.get('rows_checked') or 0):,} of "
@@ -329,7 +414,7 @@ def record_on_success(job_id: str, fields: dict[str, Any]) -> str | None:
         return None
     dest = fields.get("destination_summary")
     streams = dest.get("streams") if isinstance(dest, dict) else None
-    found, note = assess(found, fields.get("records_processed"), streams)
+    found, note = assess(found, fields.get("records_processed"), streams, dest if isinstance(dest, dict) else None)
     if isinstance(dest, dict):
         dest[SUMMARY_KEY] = found
     else:

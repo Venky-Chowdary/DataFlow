@@ -543,7 +543,7 @@ def _enforcement_shortfall(job_id: str, request: Any, dest_summary: dict[str, An
     found = summary(job_id, forget=False)
     if found is None:
         return None
-    found, note = assess(found, rows_written, dest_summary.get("streams"))  # each table against its own count
+    found, note = assess(found, rows_written, dest_summary.get("streams"), dest_summary)  # each table: own count
     if note is None:
         return None
     summary(job_id)  # the run ends here: its tally is recorded below, never as enforced

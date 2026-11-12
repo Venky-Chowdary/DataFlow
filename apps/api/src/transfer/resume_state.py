@@ -85,6 +85,7 @@ def resolve_resume_checkpoint(
             )
 
     if has_progress(checkpoint):
+        _note_resumed(job_id, checkpoint)
         return checkpoint
 
     try:
@@ -103,6 +104,31 @@ def resolve_resume_checkpoint(
         decision.get("reason"),
     )
     return Checkpoint(job_id=job_id)
+
+
+def _note_resumed(job_id: str, checkpoint: Any) -> None:
+    """Tell the reversibility backstop which committed rows this run resumes after (review 6).
+
+    The run's written count starts at the checkpoint's rows, which this attempt
+    never checked; the backstop compares only the rows written after them.
+    """
+    from services.reversibility_enforce import note_resumed
+    from services.sync_cursor import checkpoint_stream_name
+
+    note_resumed(job_id, rows=getattr(checkpoint, "rows_processed", 0),
+                 stream=checkpoint_stream_name(checkpoint) or "")
+
+
+def reapplies_population(job_id: str) -> int:
+    """The buffered route resumes by re-applying every row it holds: its count starts at 0 (review 6).
+
+    Returns the rows its pass skips (none), and tells the reversibility
+    backstop that this resume seeded no written count from the checkpoint.
+    """
+    from services.reversibility_enforce import note_resumed_reapplied
+
+    note_resumed_reapplied(job_id)
+    return 0
 
 
 #: Checkpoint phase stamped once every batch of the write pass is committed.

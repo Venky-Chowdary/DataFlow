@@ -2326,7 +2326,7 @@ class UniversalTransferEngine:
                         # Engine record spill owns the population; do not
                         # duplicate the dict list for resume.
                         resume_full_records = []
-                        resume_skipped_rows = 0
+                        resume_skipped_rows = _resume_state.reapplies_population(job_id)
                         total_rows = len(records)
                         mongo.update_job_status(
                             job_id,

@@ -1822,6 +1822,8 @@ def stream_file_to_database(
     )
 
     written = checkpoint.rows_processed or 0
+    # Rows an earlier attempt committed: the written count starts at them (review 6).
+    resumed_from_rows = int(written)
     chunk_idx = checkpoint.chunk_index or 0
     resumed = chunk_idx > 0 or written > 0
     dest_summary: dict[str, Any] = {
@@ -3443,6 +3445,11 @@ def stream_file_to_database(
             cleanup_write_ledger(dest_type=dest_type, cfg=dest_cfg, job_id=job_id)
 
     dest_summary["rows_written"] = int(written or 0)
+    if resumed:
+        # The reversibility backstop compares only the rows this attempt wrote.
+        from services.reversibility_enforce import RESUMED_KEY
+
+        dest_summary[RESUMED_KEY] = resumed_from_rows
     # The exact type basis this stream fingerprinted on — Gate-8's dest
     # read-back must hash against it (SQLite TEXT degrade; see stream.py).
     dest_summary.setdefault("gate8_digest_types", dict(fingerprint_dest_types))

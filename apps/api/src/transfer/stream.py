@@ -1663,7 +1663,7 @@ def _stream_database_transfer_impl(
     # compares against the whole destination — the write-pass digest is not a
     # population checksum for this run.
     resumed_pass = bool(run.tally.written or offset)
-    run.tally.dest_summary: dict[str, Any] = {}
+    run.tally.dest_summary: dict[str, Any] = {"resumed_checkpoint_rows": run.tally.written} if resumed_pass else {}
     if run.cfg.resume_write_complete:
         _seed_write_complete_summary(run.tally.dest_summary, checkpoint)
     # Failed-Gate-8 restore guard: renamed-aside route tables (armed once,
