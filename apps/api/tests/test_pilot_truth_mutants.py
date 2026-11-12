@@ -55,3 +55,19 @@ def test_every_decline_sentence_is_recognised():
     for sentence in job_narration._DECLINES:
         assert job_narration.is_decline(f"Something. {sentence}. More.")
     assert not job_narration.is_decline("**3** of your **5** job(s) failed:")
+
+
+def test_a_value_line_in_a_cell_free_earlier_answer_is_still_withheld(monkeypatch):
+    """Kills ``history_value_lines_kept``: an answer that read no cell tool can still
+    quote a value on an "Error:" line (a connection test's driver error names the user)."""
+    from src.ai.copilot.pilot_egress import forget_recorded_turns, history_for_model, record_turn
+
+    monkeypatch.delenv("DATAFLOW_AI_METADATA_ONLY", raising=False)
+    answer = "Connection test for **CRM** failed.\nError: password authentication failed for user \"bob.k@corp.example\""
+    record_turn(answer, [{"name": "test_connector", "success": True}])
+    try:
+        sent = history_for_model([{"role": "assistant", "content": answer}])
+        assert "bob.k@corp.example" not in sent[0]["content"], sent
+        assert "Connection test for **CRM** failed." in sent[0]["content"], "the cell-free prose stays"
+    finally:
+        forget_recorded_turns()

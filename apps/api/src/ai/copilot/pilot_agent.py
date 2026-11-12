@@ -108,8 +108,11 @@ def _number_contexts(text: str) -> collections.Counter:
     words next to each number are what tie it to its subject (review 2, H1).
     """
     raw = text or ""
+    stated = _numbers(raw)
     out: collections.Counter = collections.Counter()
     for match in _NUMBER.finditer(raw):
+        if match.group(0).replace(",", "") not in stated:
+            continue
         before = _CONTEXT_WORD.findall(raw[max(0, match.start() - 60):match.start()])
         after = _CONTEXT_WORD.findall(raw[match.end():match.end() + 60])
         out[(

@@ -140,16 +140,6 @@ _QUALIFIERS = (
 )
 #: Connector types and sync modes: a filter on a count, never on "the last job".
 NARROWING_WORDS = re.compile("|".join(f"(?:{p.pattern})" for p in _QUALIFIERS[:2]), re.I)
-_NEGATION = re.compile(
-    r"\b(?:not|never|no|without|except|excluding|other\s+than|non[\s-]\w+)\b|\w+n['’]t\b", re.I
-)
-#: A saved connector named after a preposition: "on Local Postgres".
-_NAMED_TARGET = re.compile(
-    r"\b(?:on|from|to|into|via|using|in)\s+"
-    r"(?!(?:I|Data(?:wrap|[Ff]low)|Pilot|Jobs?|Transfer|Studio|UTC)\b)((?:[A-Z][\w-]*)(?:\s+[A-Z][\w-]*){0,3})"
-)
-
-
 @dataclass(frozen=True)
 class FilterReading:
     """What a question asks the ledger to filter by, and what it could not apply."""
@@ -268,16 +258,3 @@ def read_filters(message: str) -> FilterReading:
         window=windows[0] if windows else {}, verification=verdicts[0] if verdicts else "", rest=text,
         window_text=" ".join(original[a:b].strip() for a, b in sorted(window_spans)),
     )
-
-
-def narrowing_in(message: str) -> str:
-    """A named connector ("on Local Postgres") or a negation ("didn't"), or "".
-
-    Read only for a filtered count or list: there either one would silently
-    widen the answer to every connector, or invert it.
-    """
-    target = _NAMED_TARGET.search(message or "")
-    if target:
-        return f"{target.group(0).split()[0]} {target.group(1)}"
-    found = _NEGATION.search(message or "")
-    return found.group(0) if found else ""
