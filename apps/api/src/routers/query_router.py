@@ -489,6 +489,12 @@ _DUCKDB_FROM_LIST_END = frozenset({
     "EXCEPT", "INTERSECT", "QUALIFY", "WINDOW", "SELECT", "ON", "USING",
     "RETURNING", "SAMPLE",
 })
+# Statements that take a table the way FROM does: ``DESCRIBE '<path>'``,
+# ``SHOW '<path>'``, ``SUMMARIZE '<path>'`` and ``PIVOT``/``UNPIVOT '<path>'``
+# read the file (its header, or its values as column names; review round 3, H7).
+_DUCKDB_TABLE_STATEMENTS = frozenset({
+    "DESCRIBE", "SHOW", "SUMMARIZE", "PIVOT", "UNPIVOT", "PIVOT_WIDER", "PIVOT_LONGER",
+})
 # ``EXTRACT(year FROM '2020-01-01')`` and ``IS DISTINCT FROM 'x'`` take a
 # value after FROM, not a table.
 _DUCKDB_FROM_VALUE_FUNCTIONS = frozenset({"extract", "trim", "substring", "overlay", "position"})
@@ -548,6 +554,11 @@ def _duckdb_reads_external(sql: str) -> bool:
             levels[-1][0] = False
             expect_table = False
             continue
+        if upper in _DUCKDB_TABLE_STATEMENTS:
+            expect_table = True
+            continue
+        if expect_table and upper in ("TABLE", "ALL"):
+            continue  # DESCRIBE TABLE '<path>', SHOW ALL ...
         if expect_table:
             if tok.startswith("__DFQ"):
                 return True
@@ -574,17 +585,29 @@ def _duckdb_playground_engine(engine: Any) -> Any:
     database instance and cannot be undone while it is open, so a shared
     connection would be crippled for a concurrent transfer. A connect-time
     config keeps it scoped to this playground connection. MotherDuck
-    (``md:``) loads its extension through external access, so it relies on
-    the SQL refusal alone.
+    (``md:``) loads its extension through external access, so the playground
+    refuses it.
     """
-    from sqlalchemy import create_engine
+    import sqlalchemy
     from sqlalchemy.pool import NullPool
 
+    from connectors.sqlite_common import is_duckdb_config_key
+
     database = str(getattr(engine.url, "database", "") or "")
-    if database.startswith("md:"):
-        return engine
-    guarded = create_engine(
-        engine.url,
+    if database.strip().lower().startswith(("md:", "motherduck:")):
+        # MotherDuck runs DuckDB in this process too, and needs external access
+        # on to load its extension, so the backstop cannot apply (review 3, H7).
+        raise HTTPException(
+            status_code=400,
+            detail="MotherDuck databases cannot be queried in the playground. "
+            "Use Transfer Studio to move the data, or query it in MotherDuck.",
+        )
+    # duckdb-sqlalchemy merges URL query keys into the DuckDB config after
+    # connect_args, so a configuration key in the URL would switch the backstop
+    # off; connector URLs refuse them, and this URL never carries one.
+    query = {k: v for k, v in dict(engine.url.query).items() if not is_duckdb_config_key(k)}
+    guarded = sqlalchemy.create_engine(
+        engine.url.set(query=query),
         poolclass=NullPool,
         connect_args={"config": {"enable_external_access": False}},
     )

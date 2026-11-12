@@ -261,6 +261,37 @@ def _confine_embedded_path(
 URI_FILENAME_PARAMS = frozenset({"uri", "mode", "vfs", "immutable", "nolock"})
 
 
+#: DuckDB configuration keys a connector never sets. duckdb-sqlalchemy merges
+#: URL query keys into the DuckDB config after ``connect_args``, so with one of
+#: these in the URL a connector could switch the playground's
+#: ``enable_external_access = false`` back on, allow host paths or load
+#: extensions (security review round 3, H7).
+_DUCKDB_CONFIG_KEYS = frozenset({"enable_external_access", "lock_configuration"})
+_DUCKDB_CONFIG_PREFIXES = ("allowed_", "allow_", "autoinstall", "autoload")
+
+
+def is_duckdb_config_key(key: object) -> bool:
+    """Whether a URL query key is a DuckDB configuration key a connector never sets."""
+    name = str(key or "").strip().lower()
+    return name in _DUCKDB_CONFIG_KEYS or name.startswith(_DUCKDB_CONFIG_PREFIXES) or "extension" in name
+
+
+def refuse_duckdb_config_query(query: object) -> None:
+    """Refuse DuckDB configuration keys in a URL query (a mapping or ``a=b&c=d`` text)."""
+    from urllib.parse import parse_qsl, unquote
+
+    if isinstance(query, str):
+        keys = [k for k, _v in parse_qsl(query, keep_blank_values=True)]
+    else:
+        keys = list(dict(query or {}).keys())
+    found = sorted({unquote(str(k)) for k in keys if is_duckdb_config_key(unquote(str(k)))})
+    if found:
+        raise ValueError(
+            "DuckDB configuration options are not accepted in a connector URL "
+            f"({', '.join(found)}); Datawrap sets them itself"
+        )
+
+
 def _uri_refusal(label: str) -> ValueError:
     return ValueError(
         f"{label} URI filenames are not accepted for a connector (a value that "
@@ -291,6 +322,8 @@ def _refuse_uri_in_path(path: str, *, label: str) -> None:
     refuse_uri_filename(path, label=label)
     if "?" in path:
         refuse_uri_query(path.split("?", 1)[1], label=label)
+        if label == "DuckDB":
+            refuse_duckdb_config_query(path.split("?", 1)[1])
 
 
 def sqlite_readonly_uri(path: str) -> str:
@@ -353,6 +386,8 @@ def confine_embedded_url(text: str) -> None:
     except (sa.exc.ArgumentError, ValueError) as exc:
         raise ValueError(f"Invalid embedded database URL: {exc}") from exc
     refuse_uri_query(parsed.query, label=label)
+    if label == "DuckDB":
+        refuse_duckdb_config_query(parsed.query)
     database = parsed.database or ""
     if database and database != ":memory:":
         confine(database)
