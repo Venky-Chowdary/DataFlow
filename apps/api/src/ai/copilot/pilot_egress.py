@@ -24,7 +24,10 @@ so the egress manifest records that they left.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import threading
+from collections import OrderedDict
 from typing import Any
 
 from services.ai_egress import (
@@ -32,6 +35,7 @@ from services.ai_egress import (
     WITHHELD,
     declare_cells,
     declare_free_text,
+    declare_turn_cells,
     free_text_declared,
     metadata_only_enabled,
     withhold_row_values,
@@ -161,10 +165,88 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
+#: Scalar results of a cell tool: an aggregate's value, a profile's extremes.
+_SCALAR_CELL_KEYS = frozenset({"value", "min", "max", "mode", "median", "most_common", "first", "last"})
+
+
+def cell_tool_values(output: Any) -> list[Any]:
+    """Every value a cell tool's output holds: scalars, rows and group keys."""
+    if not isinstance(output, dict):
+        return []
+    found = [output[key] for key in _SCALAR_CELL_KEYS if output.get(key) is not None]
+    return found + _row_values(output)
+
+
 def note_tool_result(name: str, success: bool, output: Any) -> None:
-    """Declare the free text a job / run tool read, so no channel sends it."""
+    """Declare what a tool read that is cell data, when it runs (review 2, C1).
+
+    Job / run free text (driver errors, blockers) and a cell tool's values —
+    an aggregate scalar written into a sentence, group keys — are declared, so
+    the gate withholds them under metadata-only and the manifest records them
+    as included when cells are allowed.
+    """
     if success and name in FREE_TEXT_TOOLS:
         declare_free_text(free_text_values(output))
+    if success and name in CELL_TOOLS:
+        declare_turn_cells(cell_tool_values(output))
+
+
+# ---- what each answered turn read (review 2, C1) ------------------------------
+#
+# The transcript is the client's copy of earlier answers. A value an answer
+# stated in a sentence ("Maximum of `email` …: **a@b.com**") matches no
+# pattern, so whether a turn read cells is recorded when it is answered, keyed
+# by a digest of the answer text, and the transcript is judged by that record.
+# A turn with no record (another replica, a restart, an edited transcript) is
+# treated as cell-bearing: under metadata-only it fails closed.
+
+#: The router keeps this much of each history turn; the digest covers the same span.
+_TURN_DIGEST_CHARS = 8000
+_MAX_RECORDED_TURNS = 4096
+_turns: "OrderedDict[str, bool]" = OrderedDict()
+_turns_lock = threading.Lock()
+_EARLIER_ANSWER_WITHHELD = (
+    "[withheld: metadata-only] An earlier answer built from cell values; its text is not sent to the model."
+)
+
+
+def _turn_digest(text: str) -> str:
+    body = str(text or "")[:_TURN_DIGEST_CHARS].strip()
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def turn_read_cells(tools_used: list[dict] | None) -> bool:
+    """Whether the turn being answered read cell data: a cell tool, or job free text."""
+    if free_text_declared():
+        return True
+    return any(str(tool.get("name") or "") in CELL_TOOLS for tool in tools_used or [])
+
+
+def record_turn(answer: str, tools_used: list[dict] | None) -> bool:
+    """Record whether this answer was built from cell data. Returns that verdict."""
+    if not str(answer or "").strip():
+        return False
+    cells = turn_read_cells(tools_used)
+    digest = _turn_digest(answer)
+    with _turns_lock:
+        # Once cell-bearing, always: the same text answered twice is still those cells.
+        _turns[digest] = cells or _turns.get(digest, False)
+        _turns.move_to_end(digest)
+        while len(_turns) > _MAX_RECORDED_TURNS:
+            _turns.popitem(last=False)
+    return cells
+
+
+def recorded_cells(text: str) -> bool | None:
+    """True / False as recorded for an earlier answer; ``None`` when never recorded."""
+    with _turns_lock:
+        return _turns.get(_turn_digest(text))
+
+
+def forget_recorded_turns() -> None:
+    """Tests only: drop every turn record."""
+    with _turns_lock:
+        _turns.clear()
 
 
 def _value_lines(text: str) -> list[str]:
@@ -219,22 +301,44 @@ def _list_items(text: str) -> list[str]:
     return [line for line in (text or "").splitlines() if _LIST_ITEM.match(line)]
 
 
+def _turn_body(turn: dict) -> tuple[str, str]:
+    """The key a transcript turn keeps its text under, and the text."""
+    for key in ("content", "text"):
+        if isinstance(turn.get(key), str) and turn[key].strip():
+            return key, turn[key]
+    return "content", ""
+
+
 def history_for_model(history: list[dict] | None) -> list[dict]:
-    """The transcript a model may be sent: rendered rows withheld under metadata-only."""
+    """The transcript a model may be sent.
+
+    Under metadata-only an earlier answer that read cells — or whose record
+    this server does not hold — is withheld whole; every other turn has its
+    rendered rows and value lines withheld. With cells allowed, a recorded
+    cell-bearing answer is declared, so the manifest says its cells left.
+    """
     turns = [dict(turn) for turn in (history or []) if isinstance(turn, dict)]
     if not metadata_only_enabled():
         for turn in turns:
-            content = str(turn.get("content") or "")
+            _key, content = _turn_body(turn)
             declare_cells(rendered_cells(content))
             if turn.get("role") == "assistant":
                 declare_cells(_value_lines(content) + _list_items(content))
+                if recorded_cells(content) is not False:
+                    declare_cells([line for line in content.splitlines() if line.strip()])
         return turns
     for turn in turns:
-        if isinstance(turn.get("content"), str):
-            turn["content"] = withhold_rendered_rows(turn["content"])
-            # Pilot's own earlier answers state values outside tables too.
-            if turn.get("role") == "assistant":
-                turn["content"] = _withhold_value_lines(turn["content"])
+        key, content = _turn_body(turn)
+        if not content:
+            continue
+        if turn.get("role") == "assistant" and recorded_cells(content) is not False:
+            turn[key] = _EARLIER_ANSWER_WITHHELD
+            continue
+        content = withhold_rendered_rows(content)
+        # Pilot's own earlier answers state values outside tables too.
+        if turn.get("role") == "assistant":
+            content = _withhold_value_lines(content)
+        turn[key] = content
     return turns
 
 

@@ -1351,15 +1351,20 @@ class DataPilotAgent:
         """Answer one turn, honouring a length instruction the turn carried."""
         from services.ai_egress import egress_turn
 
+        from .dialogue_acts import wants_brief_answer
+        from .pilot_egress import record_turn
+
         # What this turn declares to the egress gate ends with the turn.
         with egress_turn():
             response = self._chat(message, history, data_context)
-        from .dialogue_acts import wants_brief_answer
+            if response and response.answer and wants_brief_answer(message):
+                from .conversation_composer import condense_to_lead
 
-        if response and response.answer and wants_brief_answer(message):
-            from .conversation_composer import condense_to_lead
-
-            response.answer = condense_to_lead(response.answer)
+                response.answer = condense_to_lead(response.answer)
+            # Whether this answer read cells is recorded on the turn, so a later
+            # turn's transcript is judged by what it read, not by its prose.
+            if response is not None:
+                record_turn(response.answer, response.tools_used)
         return response
 
     def _chat(

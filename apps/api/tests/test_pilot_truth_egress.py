@@ -339,3 +339,102 @@ def test_manifest_records_free_text_as_included_when_cells_are_allowed(wire, mon
     pt.ask(pt.agent(), NARRATED, history=VALUE_HISTORY)
     assert _free_leaked(wire.sent, VALUE_HISTORY_CELLS)
     assert last_manifest()["cell_values_included"] is True
+
+
+# ---- values an earlier answer stated in prose (review 2, C1) ------------------
+#
+# "Maximum of `email` …: **person7@example.com**." is a cell value in a
+# sentence: no table, no "Error:" label, no list item. Pattern-matching the
+# transcript cannot find it, so what a turn read is recorded on the turn when
+# it is answered, and an earlier answer built from a cell tool is withheld
+# whole from every later model call under metadata-only. With cells allowed it
+# is sent, and the manifest says cells were included.
+
+AGGREGATE_CASES = [
+    ("what is the max email in customers on CRM SQLite", pt.pii_email(7)),
+    ("what is the min ssn in customers on CRM SQLite", pt.pii_ssn(1)),
+]
+#: A documentation answer: still narrated, and it carries the transcript.
+DOC_QUESTION = "how do I schedule a nightly sync"
+
+
+def _after_aggregate(question: str, key: str = "content"):
+    agent = pt.agent()
+    first = pt.ask(agent, question, pilot_session_id="c1-prose")
+    return agent, first, [{"role": "user", "content": question}, {"role": "assistant", key: first.answer}]
+
+
+@pytest.mark.parametrize("key", ["content", "text"])
+@pytest.mark.parametrize("question,cell", AGGREGATE_CASES)
+def test_a_value_stated_in_prose_is_withheld_from_later_model_calls(wire, question, cell, key):
+    from services.ai_egress import last_manifest
+
+    agent, first, history = _after_aggregate(question, key)
+    assert cell in first.answer, first.answer  # the operator reads the value
+    wire.sent.clear()
+    pt.ask(agent, DOC_QUESTION, history=history, pilot_session_id="c1-prose")
+    assert wire.sent, "a documentation answer is narrated, transcript included"
+    assert _free_leaked(wire.sent, [cell]) == [], "a prose cell value rode the transcript"
+    manifest = last_manifest()
+    assert manifest["cells_withheld"] is True and manifest["cell_values_included"] is False
+
+
+@pytest.mark.parametrize("question,cell", AGGREGATE_CASES)
+def test_a_value_stated_in_prose_is_declared_when_cells_are_allowed(wire, monkeypatch, question, cell):
+    from services.ai_egress import last_manifest
+
+    monkeypatch.setenv("DATAFLOW_AI_METADATA_ONLY", "false")
+    agent, _first, history = _after_aggregate(question)
+    wire.sent.clear()
+    pt.ask(agent, DOC_QUESTION, history=history, pilot_session_id="c1-prose")
+    assert _free_leaked(wire.sent, [cell]), "cells allowed: the earlier answer is sent"
+    assert last_manifest()["cell_values_included"] is True, "the manifest hid a cell value that left"
+
+
+def test_an_assistant_turn_this_server_did_not_record_is_withheld(wire):
+    """Unknown provenance (another replica, a restart, an edited transcript) fails closed."""
+    history = [
+        {"role": "user", "content": "who is our biggest customer"},
+        {"role": "assistant", "content": "Your biggest customer is jane.roe@corp.example, by far."},
+    ]
+    pt.ask(pt.agent(), DOC_QUESTION, history=history)
+    assert wire.sent
+    assert _free_leaked(wire.sent, ["jane.roe@corp.example"]) == []
+
+
+def test_a_documentation_answer_in_the_transcript_still_reaches_the_narrator(wire):
+    """Withholding is by what a turn read, not wholesale: a cell-free answer is context."""
+    agent = pt.agent()
+    first = pt.ask(agent, "what is a sync mode", pilot_session_id="c1-doc")
+    history = [{"role": "user", "content": "what is a sync mode"}, {"role": "assistant", "content": first.answer}]
+    wire.sent.clear()
+    pt.ask(agent, DOC_QUESTION, history=history, pilot_session_id="c1-doc")
+    sent = json.dumps(wire.sent)
+    assert first.answer.splitlines()[0][:40] in sent
+
+
+def test_aggregate_scalar_and_group_keys_are_declared_when_the_tool_runs():
+    from services.ai_egress import contains_cell_values, egress_turn
+    from src.ai.copilot.pilot_egress import note_tool_result
+
+    output = {"value": pt.pii_email(7), "rows": [{"email": pt.pii_email(5), "count": 2}], "row_count": 1}
+    with egress_turn():
+        note_tool_result("aggregate_data", True, output)
+        assert contains_cell_values(f"Maximum: {pt.pii_email(7)}")
+        assert contains_cell_values(f"group {pt.pii_email(5)} has 2")
+    assert not contains_cell_values(f"Maximum: {pt.pii_email(7)}"), "a declaration outlived its turn"
+
+
+@pytest.mark.parametrize("key", sorted([
+    "error", "message", "error_message", "last_error", "last_message", "error_details",
+    "blockers", "failure_reason",
+]))
+def test_every_free_text_key_is_declared(key):
+    """Each free-text key a job tool returns is declared, not only ``error``."""
+    from services.ai_egress import contains_cell_values, egress_turn, free_text_declared
+    from src.ai.copilot.pilot_egress import note_tool_result
+
+    with egress_turn():
+        note_tool_result("get_job", True, {"job": {"status": "failed", key: "jane.roe@corp.example broke it"}})
+        assert free_text_declared()
+        assert contains_cell_values("jane.roe@corp.example broke it")

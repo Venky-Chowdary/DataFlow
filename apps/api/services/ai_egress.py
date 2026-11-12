@@ -143,6 +143,17 @@ def declare_free_text(values: Any) -> None:
         _free_text.set(True)
 
 
+def declare_turn_cells(values: Any) -> None:
+    """Declare cell values a tool read in this turn (an aggregate scalar, group keys).
+
+    Only inside an :func:`egress_turn`, for the same reason as free text: outside
+    one nothing would ever clear the declaration.
+    """
+    cells = _cell_strings(values)
+    if cells and _in_turn.get():
+        _declared.set(_declared.get() | cells)
+
+
 def free_text_declared() -> bool:
     """True when this turn has read value-carrying free text."""
     return _free_text.get()
