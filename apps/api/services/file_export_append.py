@@ -222,6 +222,9 @@ def _fields(data: bytes, delimiter: bytes):
         i = k + len(end)
 
 
+_BOM = b"\xef\xbb\xbf"
+
+
 def _never_quotes(head: bytes, delimiter: bytes) -> bool:
     """Whether an existing file shows it was written without quoting (a quote left bare inside a value)."""
     for _raw, value, quoted, end, well_formed in _fields(head, delimiter):
@@ -261,11 +264,13 @@ def append_payload(fmt: str, path: str, data: bytes) -> bytes:
     if refusal:
         raise ValueError(refusal)
     body = data
+    separator = b"\n"
     if f in _HEADERED_FORMATS:
         new_header = _first_line(data)
         head = _existing_head(path)
         old_header = _first_line(head)
-        if _strip_trailing_newline(old_header) != _strip_trailing_newline(new_header):
+        # A byte order mark (a file re-saved by Excel) is not part of the first column's name (review 5).
+        if _strip_trailing_newline(old_header.removeprefix(_BOM)) != _strip_trailing_newline(new_header):
             raise ValueError(
                 "Append refused: the existing export header "
                 f"({_strip_trailing_newline(old_header).decode('utf-8', 'replace')}) "
@@ -275,11 +280,15 @@ def append_payload(fmt: str, path: str, data: bytes) -> bytes:
             )
         body = data[len(new_header):]
         delimiter = _DELIMITERS.get(f)
+        # The existing file's line ending; a header with none (a header-only file) takes this run's. The
+        # separator before the appended rows uses it too, so one file never mixes line endings (review 5).
+        source = old_header if old_header.endswith(b"\n") else new_header
+        separator = eol = b"\r\n" if source.endswith(b"\r\n") else b"\n"
         if delimiter is not None and old_header.endswith(b"\n"):
-            # Append in the existing file's own line ending, and its quoting where it shows (review 4, H-3):
-            # an earlier build wrote a file-source export with LF, and a TSV it never quoted.
-            eol = b"\r\n" if old_header.endswith(b"\r\n") else b"\n"
-            unquoted = f == "tsv" and _never_quotes(head[len(old_header):], delimiter)
+            # Append in the existing file's own line ending, and its quoting (review 4, H-3): an earlier build
+            # wrote a file-source export with LF, and never quoted a TSV. This build writes CRLF, so an LF TSV
+            # is that build's, whether or not its first bytes show a bare quote (review 5, M-4).
+            unquoted = f == "tsv" and (eol == b"\n" or _never_quotes(head[len(old_header):], delimiter))
             if eol != b"\r\n" or unquoted:
                 body = _in_existing_dialect(body, delimiter, eol, unquoted=unquoted)
     with open(path, "rb") as fh:
@@ -290,4 +299,4 @@ def append_payload(fmt: str, path: str, data: bytes) -> bytes:
             needs_newline = fh.read(1) != b"\n"
         else:
             needs_newline = False
-    return (b"\n" + body) if needs_newline else body
+    return (separator + body) if needs_newline else body
