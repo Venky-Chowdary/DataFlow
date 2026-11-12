@@ -266,6 +266,17 @@ async def lifespan(app: FastAPI):
         from services.export_migration import migrate_flat_exports_at_startup, start_in_background
 
         app.state.flat_export_migration = start_in_background(migrate_flat_exports_at_startup)
+        # Review round 3 (H3): the shared SQLite/DuckDB volumes are partitioned per
+        # workspace. The partition time is recorded before any request is served
+        # (connectors saved after it prove no ownership); owned flat files then
+        # move home off the critical path.
+        try:
+            from services.embedded_volume import mark_partitioned, migrate_flat_volume_files_at_startup
+
+            mark_partitioned()
+            app.state.flat_volume_migration = start_in_background(migrate_flat_volume_files_at_startup)
+        except OSError as exc:
+            print(f"[!] SQLite/DuckDB volume partition marker not written: {exc}")
         # Cadence stays up when RAG warm-up fails — otherwise due pipelines
         # sit on Next run forever with Runs=0. Multi-replica API pods set
         # SCHEDULE_LOOP=0; src.scheduler_main owns the loop there.

@@ -233,6 +233,13 @@ def _confine_embedded_path(
             f"opened as a connector; place the file under {volume_dir} "
             f"or set {env_name}"
         )
+    remapped = False
+    if is_within(resolved, volume_dir):
+        # One area per workspace, bound like the exports tree (review round 3, H3).
+        from services.embedded_volume import volume_open_path
+
+        opened = volume_open_path(resolved, volume_dir, kind=volume_subdir, label=label)
+        remapped, resolved = opened != resolved, opened
     if is_within(resolved, exports) and not connector_may_open_export_path(resolved):
         raise ValueError(
             f"{label} path is inside the Datawrap export folder, outside this "
@@ -241,7 +248,7 @@ def _confine_embedded_path(
         )
     if not roots:
         audit_would_confine(volume_subdir, resolved)
-        return path
+        return str(resolved) if remapped else path
     return str(resolved)
 
 
