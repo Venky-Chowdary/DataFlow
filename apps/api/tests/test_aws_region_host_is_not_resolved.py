@@ -330,3 +330,93 @@ def test_the_region_pattern_is_exact(host):
     from services.egress_guard import is_aws_region_label
 
     assert not is_aws_region_label(host, "s3")
+
+
+# --- review round 2, L-E3: ``extra.type`` must not pick the guard's rule ----
+#
+# ``POST /connectors/test`` merged ``extra`` into the probe cfg after the
+# request's own fields, so ``{"type": "postgresql", "extra": {"type": "s3"}}``
+# probed Postgres while the guard applied the S3 rule (``cfg.type`` first).
+
+
+def _capture_route_probe(monkeypatch, tmp_path) -> dict:
+    import importlib
+
+    import tests.r4_route_harness as h
+
+    h.isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+    seen: dict = {}
+
+    def capture(driver, cfg):
+        seen.update(cfg, _driver=driver)
+        return True, "ok"
+
+    router_mod = importlib.import_module("src.routers.connectors_router")
+    monkeypatch.setattr(router_mod, "run_probe", capture)
+    return seen
+
+
+def test_extra_cannot_override_the_type_or_dial_fields_of_a_probe(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from src.main import app
+
+    seen = _capture_route_probe(monkeypatch, tmp_path)
+    response = TestClient(app).post(
+        "/api/v1/connectors/test",
+        json={
+            "type": "postgresql", "host": "us-db-01",
+            "extra": {
+                "type": "s3", "db_type": "s3", "host": "us-east-1", "port": 9000,
+                "endpoint_url": "http://us-east-1:9000", "connection_string": "http://us-east-1",
+                "sslrootcert": "/certs/ca.pem",
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert seen["_driver"] == "postgresql"
+    assert seen["type"] == "postgresql"
+    assert "db_type" not in seen
+    assert seen["host"] == "us-db-01"
+    assert seen["port"] in (0, None, "")
+    assert seen["endpoint_url"] == ""
+    assert "us-east-1" not in str(seen.get("connection_string") or "")
+    assert seen["sslrootcert"] == "/certs/ca.pem", "other extra fields still reach the probe"
+
+
+@pytest.mark.parametrize("ip", _TARGETS)
+def test_postgres_probe_with_extra_type_s3_is_refused(resolves, monkeypatch, tmp_path, ip):
+    """The review's request, end to end through the real probe."""
+    import tests.r4_route_harness as h
+    from fastapi.testclient import TestClient
+
+    from src.main import app
+
+    h.isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+    monkeypatch.delenv("DATAFLOW_EGRESS_ALLOWLIST", raising=False)  # the harness allows loopback
+    resolves["us-db-01"] = ip
+    response = TestClient(app).post(
+        "/api/v1/connectors/test",
+        json={
+            "type": "postgresql", "host": "us-db-01", "port": 5432, "database": "app",
+            "username": "probe", "password": "probe-pass", "extra": {"type": "s3"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is False
+    assert "Refused connector host us-db-01" in body["message"], body
+
+
+@pytest.mark.parametrize("ip", _TARGETS)
+def test_probe_guard_uses_the_driver_not_a_cfg_type(resolves, monkeypatch, ip):
+    """``_run_probe_impl`` checks with the driver it is about to run."""
+    import src.transfer.connector_registry as registry
+
+    resolves["us-east-1"] = ip
+    monkeypatch.setattr(registry, "CONNECTOR_MODULES", {})  # nothing past the guard
+    ok, message = registry._run_probe_impl("postgresql", {"type": "s3", "host": "us-east-1"})
+    assert not ok
+    assert "Refused connector host us-east-1" in message, message

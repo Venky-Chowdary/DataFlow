@@ -921,7 +921,8 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     # A leftover localhost host must not hide an Atlas URI, and must not be
     # invented when the URI already names the cluster.
     reconcile_dial_host(cfg)
-    guard_type = str(cfg.get("type") or db_type or "")
+    # The driver this probe runs, not a ``type`` the cfg carries (review L-E3).
+    guard_type = str(db_type or cfg.get("type") or "")
     refusal = metadata_endpoint_refusal(
         str(cfg.get("host") or ""),
         str(cfg.get("endpoint_url") or ""),
