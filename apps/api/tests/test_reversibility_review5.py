@@ -364,3 +364,27 @@ def test_low_the_pre_write_scan_is_logged_and_recorded_on_the_destination_summar
     scan = res.destination_summary["reversibility_enforcement"].get("prescan") or {}
     assert scan.get("rows_scanned") == 1200 and isinstance(scan.get("seconds"), float), scan
     assert any("pre-write scan read 1,200 row(s)" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_low_a_stop_after_kept_rows_names_the_written_count_not_a_lagging_tally():
+    """The source changed after the scan: the stop says how many rows were written, not the tally at that time."""
+    from services.reversibility_enforce import ReversibilityViolation
+    from src.transfer.job_failure import account_blocked_write
+
+    class _Mongo:
+        def get_job(self, _job_id):
+            return {"records_processed": 100_000}
+
+    class _Blocked(Exception):
+        rows_written = 0
+
+    violation = ReversibilityViolation(
+        "Reversibility is required and people.email would change under its transform (upper): a value in the batch "
+        "after the first 20,000 checked row(s) does not round-trip (normalize). That batch was not written; "
+        "reversibility blocks partial write. Fix the value at the source, remove the transform, or turn off "
+        "require reversibility.")
+    kept, message = account_blocked_write(_Mongo(), "j", _Blocked(str(violation)))
+    assert kept == 100_000
+    assert "after the first 100,000 written row(s)" in message, message
+    assert "20,000 checked" not in message
+    assert "100000 row(s) were already written and were not removed" in message
