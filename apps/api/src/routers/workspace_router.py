@@ -31,7 +31,6 @@ from services.tenant_store import (
     delete_tenant,
     get_tenant,
     get_tenant_for_workspace,
-    list_tenants,
     list_tenants_page,
     tenants_for_workspaces,
     update_tenant,
