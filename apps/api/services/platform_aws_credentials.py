@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from services.brand_env import getenv_brand
+from services.iceberg_credential_values import credential_text, non_text_credential_refusal
 
 FLAG = "DATAFLOW_ALLOW_PLATFORM_AWS_CREDENTIALS"
 _ON = frozenset({"1", "true", "yes", "on"})
@@ -71,11 +72,8 @@ def platform_credentials_message(what: str) -> str:
 
 
 def _text(props: Mapping[str, Any], *keys: str) -> str:
-    for key in keys:
-        value = props.get(key)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return ""
+    """A non-empty string only: pyiceberg reads ``0`` / ``False`` / ``[]`` as no key (follow-up review 2, H1)."""
+    return credential_text(props, *keys)
 
 
 def _has_keys(props: Mapping[str, Any], prefix: str) -> bool:
@@ -89,7 +87,8 @@ def chain_property(props: Mapping[str, Any]) -> str:
     for key in props:
         name = str(key).strip().lower()
         if name in _CHAIN_KEYS or name.endswith(_CHAIN_KEY_SUFFIXES):
-            if props[key] not in (None, "", False):
+            value = props[key]
+            if value is not None and not (isinstance(value, str) and not value.strip()):
                 return str(key)
     return ""
 
@@ -99,7 +98,11 @@ def s3_fileio_refusal(props: Mapping[str, Any]) -> str:
 
     Explicit keys (``s3.*`` or ``client.*``, as pyiceberg reads them, a vended
     credential included) or ``s3.anonymous`` sign with no platform credential.
+    A credential property that is not text is refused in every mode.
     """
+    malformed = non_text_credential_refusal(props)
+    if malformed:
+        return malformed
     if platform_aws_credentials_allowed():
         return ""
     named = chain_property(props)
@@ -116,8 +119,12 @@ def iceberg_credentials_refusal(catalog_type: str, props: Mapping[str, Any]) -> 
     REST SigV4 (``rest.sigv4-enabled``) signs with ``client.*`` keys or the
     process chain; Glue with ``glue.*`` / ``client.*`` keys or the chain. The
     S3 FileIO is judged when it is built (:func:`s3_fileio_refusal`), since a
-    REST catalog may vend its keys with the table.
+    REST catalog may vend its keys with the table. A credential property that is
+    not text (any provider's) is refused in every mode.
     """
+    malformed = non_text_credential_refusal(props)
+    if malformed:
+        return malformed
     if platform_aws_credentials_allowed():
         return ""
     named = chain_property(props)
@@ -144,10 +151,9 @@ def iceberg_connector_refusal(data: Mapping[str, Any]) -> str:
 
     Reads the settings the catalog factory reads (dotted keys at the top level
     and in ``extra``) without building anything; the factory checks again,
-    with a REST catalog's own overrides, when it builds the catalog.
+    with a REST catalog's own overrides, when it builds the catalog. The opt-in
+    is applied there, after a credential that is not text is refused.
     """
-    if platform_aws_credentials_allowed():
-        return ""
     if str(data.get("type") or data.get("format") or "").strip().lower() not in _ICEBERG_TYPES:
         return ""
     raw_extra = data.get("extra")

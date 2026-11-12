@@ -31,6 +31,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from services.brand_env import getenv_brand
+from services.iceberg_credential_values import credential_text, non_text_credential_refusal
 
 FLAG = "DATAFLOW_ALLOW_PLATFORM_GCP_AZURE_CREDENTIALS"
 _ON = frozenset({"1", "true", "yes", "on"})
@@ -90,11 +91,20 @@ def _endpoint_message(prop: str, needs: str) -> str:
 
 
 def _set(props: Mapping[str, Any], key: str) -> bool:
+    """An endpoint property is present unless null or blank (any other value is judged as set)."""
     value = props.get(key)
     return value is not None and bool(str(value).strip())
 
 
+def _own(props: Mapping[str, Any], key: str) -> bool:
+    """A credential counts only as non-empty text: pyiceberg reads ``0`` / ``[]`` as none (follow-up review 2, H1)."""
+    return bool(credential_text(props, key))
+
+
 def _refusal(props: Mapping[str, Any], own: bool, endpoints: tuple[str, ...], what: str, needs: str) -> str:
+    malformed = non_text_credential_refusal(props)
+    if malformed:
+        return malformed
     if own:
         return ""
     for prop in endpoints:
@@ -107,7 +117,7 @@ def gcs_fileio_refusal(props: Mapping[str, Any]) -> str:
     """Why pyarrow's GCS filesystem from ``props`` would use the platform's identity, else ``""``."""
     return _refusal(
         props,
-        _set(props, GCS_TOKEN),
+        _own(props, GCS_TOKEN),
         _GCS_ENDPOINTS,
         "This Iceberg table's Google Cloud Storage files have no access token",
         GCS_TOKEN,
@@ -116,7 +126,7 @@ def gcs_fileio_refusal(props: Mapping[str, Any]) -> str:
 
 def azure_fileio_refusal(props: Mapping[str, Any]) -> str:
     """Why pyarrow's Azure filesystem from ``props`` would use the platform's identity, else ``""``."""
-    own = any(_set(props, key) for key in _ADLS_OWN) or all(_set(props, key) for key in _ADLS_CLIENT)
+    own = any(_own(props, key) for key in _ADLS_OWN) or all(_own(props, key) for key in _ADLS_CLIENT)
     return _refusal(
         props,
         own,
