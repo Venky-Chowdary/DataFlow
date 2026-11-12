@@ -327,6 +327,13 @@ def _resync_request(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor
         f"Parity Studio fix {fix['id']}: re-sync {len(keys)} key(s) approved by {actor or 'operator'}."
     )
     req.idempotency_key = f"parity-{job_id}-{fix['id']}"
+    if getattr(req, "require_reversibility", False):
+        # The parent must be reversible; this child restores named keys of it. Its key filter is the
+        # repair itself, not a row change, so g24's row rule is waived for it (its columns are still
+        # analysed and enforced) and the waiver is stored on the request and audited (review 3, M5).
+        from services.reversibility_sources import PARITY_KEY_RESYNC
+
+        req.reversibility_row_rule_exemption = PARITY_KEY_RESYNC
     return req
 
 
@@ -360,6 +367,12 @@ def _start_resync(job: dict[str, Any], job_id: str, fix: dict[str, Any], actor: 
             record["result"] = f"Re-sync job {child_id} is running."
 
     update_state(job_id, link)
+    if getattr(req, "reversibility_row_rule_exemption", ""):
+        audit("job.parity.resync_row_rule_waived", job=job, job_id=job_id, actor=actor,
+              details={"fix_id": fix_id, "child_job_id": child_id, "keys": len(fix.get("_keys") or []),
+                       "exemption": req.reversibility_row_rule_exemption,
+                       "reason": "a key re-sync restores named keys; the reversibility row-change rule "
+                                 "does not apply to its key filter"})
     _repair_decision(job_id, fix, approve=True, actor=actor,
                      apply_fn=lambda _a: {"applied": False, "reason": "running", "child_job_id": child_id})
     try:
