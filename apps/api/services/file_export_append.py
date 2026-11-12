@@ -83,6 +83,7 @@ def land_export_bytes(
     fmt = str(getattr(destination, "format", "") or "")
     ext = os.path.splitext(export_name)[1].lstrip(".") or fmt or "json"
     configured = str(getattr(destination, "output_path", "") or "").strip()
+    appending, rows_before = False, None
     if configured:
         target = resolve_export_path(configured, default_ext=ext)
         export_path = str(target)
@@ -104,6 +105,7 @@ def land_export_bytes(
                 ) from exc
         elif appending:
             payload = append_payload(fmt or "csv", export_path, export_bytes)
+            rows_before = existing_record_count(fmt or "csv", export_path)
             with open(export_path, "ab") as fh:
                 fh.write(payload)
         else:
@@ -120,7 +122,7 @@ def land_export_bytes(
     from services.transfer_journal import _sha256_file
 
     sha256, size = _sha256_file(Path(export_path)), os.path.getsize(export_path)
-    return {
+    landed = {
         "filename": name,
         "path": export_path,
         "download_url": f"/api/v1/transfer/download/{name}",
@@ -128,6 +130,28 @@ def land_export_bytes(
         "sha256": sha256,
         "size_bytes": size,
     }
+    if configured and appending and rows_before is not None:
+        from services.dest_precount import PRECOUNT_KEY
+
+        # The file's records before this run appended: the run's own rows are the delta (review 4, H-3).
+        landed[PRECOUNT_KEY] = rows_before
+    return landed
+
+
+def existing_record_count(fmt: str, path: str) -> int | None:
+    """The records an existing export holds (``None``: they could not be counted, so nothing is claimed)."""
+    from services.dest_precount import _iter_artifact_records
+
+    try:
+        with open(path, "rb") as fh:
+            return sum(1 for _ in _iter_artifact_records(fh, name=os.path.basename(path),
+                                                         fmt=normalize_export_format(fmt), written_here=True))
+    except Exception:  # noqa: BLE001 - an uncounted file leaves the append unproven, never proven
+        import logging
+
+        logging.getLogger(__name__).info("existing export %s could not be counted", os.path.basename(path),
+                                         exc_info=True)
+        return None
 
 
 def _first_line(data: bytes) -> bytes:
@@ -135,13 +159,95 @@ def _first_line(data: bytes) -> bytes:
     return data if idx < 0 else data[: idx + 1]
 
 
-def _existing_header(path: str) -> bytes:
+def _existing_head(path: str) -> bytes:
     with open(path, "rb") as fh:
-        return _first_line(fh.read(65536))
+        return fh.read(65536)
+
+
+def _existing_header(path: str) -> bytes:
+    return _first_line(_existing_head(path))
 
 
 def _strip_trailing_newline(data: bytes) -> bytes:
-    return data[:-1] if data.endswith(b"\n") else data
+    """A header line without its line ending, whichever it is (review 4, H-3: LF files from earlier builds)."""
+    return data.rstrip(b"\r\n")
+
+
+#: Field delimiter of each headered delimited format.
+_DELIMITERS = {"csv": b",", "tsv": b"\t"}
+
+
+def _fields(data: bytes, delimiter: bytes):
+    """Yield ``(raw, value, quoted, end, well_formed)`` per field of delimited ``data``.
+
+    ``end`` is the bytes that close the field: the delimiter, a record's line
+    ending (``\r\n`` or ``\n``) or ``b""`` at the end. A line break inside a
+    quoted value stays in the value. ``well_formed`` is false for a quoted
+    field whose closing quote is not followed by a delimiter or a line ending.
+    """
+    i, n = 0, len(data)
+    while i < n:
+        well_formed = True
+        if data[i:i + 1] == b'"':
+            j = i + 1
+            while j < n:
+                if data[j:j + 1] == b'"':
+                    if data[j + 1:j + 2] == b'"':
+                        j += 2
+                        continue
+                    break
+                j += 1
+            raw = data[i:j + 1]
+            value = data[i + 1:j].replace(b'""', b'"')
+            quoted, k = True, j + 1
+            while k < n and data[k:k + 1] not in (delimiter, b"\r", b"\n"):
+                well_formed = False
+                k += 1
+            raw = data[i:k]
+        else:
+            k = i
+            while k < n and data[k:k + 1] not in (delimiter, b"\n") and data[k:k + 2] != b"\r\n":
+                k += 1
+            raw = value = data[i:k]
+            quoted = False
+        if k >= n:
+            end = b""
+        elif data[k:k + 1] == delimiter:
+            end = delimiter
+        elif data[k:k + 2] == b"\r\n":
+            end = b"\r\n"
+        else:
+            end = data[k:k + 1]
+        yield raw, value, quoted, end, well_formed
+        i = k + len(end)
+
+
+def _never_quotes(head: bytes, delimiter: bytes) -> bool:
+    """Whether an existing file shows it was written without quoting (a quote left bare inside a value)."""
+    for _raw, value, quoted, end, well_formed in _fields(head, delimiter):
+        if (not quoted and b'"' in value) or not well_formed:
+            return True
+        if quoted and not end:
+            return False  # the sample ends inside a quoted value: nothing more to read
+    return False
+
+
+def _in_existing_dialect(body: bytes, delimiter: bytes, eol: bytes, *, unquoted: bool) -> bytes:
+    """This run's rows (written CRLF and quoted) re-spelled in the existing file's line ending and quoting.
+
+    ``unquoted``: the existing file never quoted (an earlier build's TSV), so a
+    value quoted only for a quote or for being empty text is written bare as it
+    did; a value holding the delimiter or a line break stays quoted, or it
+    would not stay one cell.
+    """
+    out = bytearray()
+    for raw, value, quoted, end, _ok in _fields(body, delimiter):
+        if unquoted and quoted and not any(c in value for c in (delimiter, b"\r", b"\n")):
+            out += value
+        else:
+            out += raw
+        out += eol if end in (b"\r\n", b"\n") else end
+    return bytes(out)
 
 
 def append_payload(fmt: str, path: str, data: bytes) -> bytes:
@@ -157,7 +263,8 @@ def append_payload(fmt: str, path: str, data: bytes) -> bytes:
     body = data
     if f in _HEADERED_FORMATS:
         new_header = _first_line(data)
-        old_header = _existing_header(path)
+        head = _existing_head(path)
+        old_header = _first_line(head)
         if _strip_trailing_newline(old_header) != _strip_trailing_newline(new_header):
             raise ValueError(
                 "Append refused: the existing export header "
@@ -167,6 +274,14 @@ def append_payload(fmt: str, path: str, data: bytes) -> bytes:
                 "— appending would misalign every value."
             )
         body = data[len(new_header):]
+        delimiter = _DELIMITERS.get(f)
+        if delimiter is not None and old_header.endswith(b"\n"):
+            # Append in the existing file's own line ending, and its quoting where it shows (review 4, H-3):
+            # an earlier build wrote a file-source export with LF, and a TSV it never quoted.
+            eol = b"\r\n" if old_header.endswith(b"\r\n") else b"\n"
+            unquoted = f == "tsv" and _never_quotes(head[len(old_header):], delimiter)
+            if eol != b"\r\n" or unquoted:
+                body = _in_existing_dialect(body, delimiter, eol, unquoted=unquoted)
     with open(path, "rb") as fh:
         fh.seek(0, os.SEEK_END)
         size = fh.tell()

@@ -2080,8 +2080,10 @@ def _close_population(
     ack = writer_ack if writer_ack is not None else None
     # File replace is overwrite regardless of the operator's SQL sync-mode
     # label: the engine opens the artifact ``wb``. Append-delta / keyed
-    # identities do not apply to a replaced file.
-    if dest_count_source == DEST_ARTIFACT_READBACK:
+    # identities do not apply to a replaced file. An append onto an existing
+    # line-delimited export (``services.file_export_append``) records the
+    # file's record count before it wrote: only the delta proves that run.
+    if dest_count_source == DEST_ARTIFACT_READBACK and not (kind == KIND_APPEND_DELTA and dest_count_before):
         kind = KIND_OVERWRITE
     # Chunked vector loads are identity conservation regardless of the
     # operator's SQL sync-mode label. Physical embedding COUNT(*) is not dest.
@@ -2229,7 +2231,9 @@ def _close_population(
         )
 
     if kind == KIND_APPEND_DELTA:
-        if dest_count_source != DEST_READBACK:
+        # An export appended to (review 4, H-3) counts its own records before and after: the same
+        # independent artifact count on both sides, so the delta closes like a SQL COUNT(*) delta.
+        if dest_count_source not in (DEST_READBACK, DEST_ARTIFACT_READBACK):
             return ConservationLedger(
                 rows_read=read,
                 rows_written=None,
@@ -2273,7 +2277,7 @@ def _close_population(
                 writer_ack_delta=None,
             )
         written = dest_count - int(dest_count_before)
-        written_source = DEST_READBACK
+        written_source = dest_count_source
     else:
         written = dest_count
         written_source = dest_count_source
