@@ -540,7 +540,6 @@ def evaluate_resume_safety(
     (``gap_restart``) even without a checkpoint — the durable cursor is the
     problem. Delivery remains at-least-once.
     """
-    import os
 
     out: dict[str, Any] = {
         "ok": False,
@@ -631,7 +630,7 @@ def evaluate_resume_safety(
 
     if max_age_hours is None:
         try:
-            max_age_hours = float(os.getenv("DATAFLOW_RESUME_MAX_AGE_HOURS", "168") or "168")
+            max_age_hours = float(getenv_brand("DATAFLOW_RESUME_MAX_AGE_HOURS", "168") or "168")
         except ValueError:
             max_age_hours = 168.0
     if max_age_hours and age_hours is not None and age_hours > float(max_age_hours):

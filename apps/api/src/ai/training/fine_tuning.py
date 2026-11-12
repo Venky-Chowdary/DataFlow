@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from services.atomic_file import atomic_text_file
 from services.value_serializer import json_default
 from .data_synthesis import DataTransferDataSynthesizer
 
@@ -178,7 +179,8 @@ class DataTransferFineTuningPipeline:
         anthropic_path = os.path.join(self.output_dir, "anthropic_finetune.jsonl")
         count = 0
 
-        with open(openai_path, "w", encoding="utf-8") as fo, open(anthropic_path, "w", encoding="utf-8") as fa:
+        # Atomic (temp + rename): an interrupted export never leaves half a file.
+        with atomic_text_file(openai_path) as fo, atomic_text_file(anthropic_path) as fa:
             for ex in conversations:
                 if not ex.user_message or not ex.assistant_message:
                     continue

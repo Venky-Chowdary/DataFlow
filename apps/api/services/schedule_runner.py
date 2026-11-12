@@ -39,10 +39,40 @@ class ScheduleStartError(Exception):
     trigger must not collapse every refusal into "check connectors".
     """
 
-    def __init__(self, message: str, *, http_status: int = 400, code: str = ""):
+    def __init__(
+        self, message: str, *, http_status: int = 400, code: str = "", retry_after: int = 0
+    ):
         super().__init__(message)
         self.http_status = int(http_status)
         self.code = str(code or "")
+        #: Seconds after which the same Run now can succeed (``Retry-After``).
+        self.retry_after = max(0, int(retry_after or 0))
+
+    @property
+    def headers(self) -> dict[str, str] | None:
+        """The HTTP headers the refusal carries (``Retry-After`` when a wait helps)."""
+        return {"Retry-After": str(self.retry_after)} if self.retry_after else None
+
+
+#: Seconds a Run now refused with ``run_still_recording`` is told to wait: the
+#: write that records the previous run lost to other writers of the schedule,
+#: and the next attempt (Run now again, or the beat) records it.
+_RUN_STILL_RECORDING_RETRY_AFTER = 5
+
+
+def _finalize_deferred(schedule_id: str, job_id: str, exc: BaseException) -> None:
+    """A finished run whose record kept losing to other writers is left for later.
+
+    The store wrote nothing (``ScheduleWriteContended``) and the claim still
+    names the job, so the next beat — or the next Run now — records it. One
+    schedule's contended write must not stop the others (review round 2, L-B).
+    """
+    logger.warning(
+        "Schedule %s: the finished run of job %s was not recorded yet (%s); the next beat retries",
+        schedule_id, job_id, exc,
+    )
+    emit_event(logger, "schedule.run.finalize_deferred", outcome="held",
+               reason_code="write_contended", schedule_id=schedule_id, job_id=job_id)
 
 
 def _manual_start_failure_detail(sched: Any) -> str:
@@ -1282,15 +1312,17 @@ def _failure_kind(decision: dict[str, Any]) -> str:
     return str(failure_class or "")
 
 
-def _back_off_transient(schedule_id: str, sched: Any, park: str) -> None:
-    """Push the next beat out instead of parking a transient fault for approval.
+def _transient_backoff(current: Any, now: datetime) -> tuple[str, int]:
+    """``(next_run_at, delay_seconds)`` after a transient failed beat.
 
-    ``next_run_at`` stays set (the API shows when it fires next) and no approval
-    request opens; the first success resets the run of failures.
+    Doubles from the base per failed beat in a row, capped, and never earlier
+    than the schedule's own next slot. ``current`` already holds the failed run.
+    The finalizer stores it with the run instead of parking a transient fault
+    for approval: ``next_run_at`` stays set (the API shows when it fires next),
+    no approval request opens, and the first success resets the run of failures.
     """
-    from services.schedule_store import get_schedule, next_run_for, update_schedule
+    from services.schedule_store import next_run_for
 
-    current = get_schedule(schedule_id) or sched
     consecutive = 0
     for run in reversed(getattr(current, "run_history", None) or []):
         if not isinstance(run, dict) or str(run.get("status") or "") in (
@@ -1304,7 +1336,6 @@ def _back_off_transient(schedule_id: str, sched: Any, park: str) -> None:
         _TRANSIENT_BACKOFF_CAP_SECONDS,
         _TRANSIENT_BACKOFF_BASE_SECONDS * (2 ** max(0, consecutive - 1)),
     )
-    now = datetime.now(timezone.utc)
     slot = next_run_for(current, now)
     backoff_at = now + timedelta(seconds=delay)
     due = slot
@@ -1316,15 +1347,7 @@ def _back_off_transient(schedule_id: str, sched: Any, park: str) -> None:
             due = backoff_at.isoformat()
     except ValueError:
         due = backoff_at.isoformat()
-    update_schedule(schedule_id, {"next_run_at": due, "retry_at": None, "retry_attempt": 0})
-    emit_event(
-        logger,
-        "schedule.run.backoff",
-        outcome="backing_off",
-        schedule_id=schedule_id,
-        reason_code=park,
-        delay_seconds=delay,
-    )
+    return str(due), delay
 
 
 def _append_replay_blocked(sched: Any) -> str | None:
@@ -1379,6 +1402,7 @@ def _settle_if_worker_lost(
 def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
+        RunOutcome,
         get_schedule,
         has_open_approval,
         mark_schedule_run,
@@ -1455,6 +1479,19 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     if decision["retry"]:
         delay = max(0, sched.retry_backoff_seconds) * (attempt + 1)
         retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        parked = schedule_retry(
+            schedule_id,
+            retry_at=retry_at,
+            attempt=attempt + 1,
+            run_entry={**entry, "retry_scheduled": True, "retry_at": retry_at.isoformat()},
+        )
+        if parked is None:
+            # Parked already (a racing finalizer's write landed first), or the
+            # schedule is gone: the write that parked it reports it.
+            return
+        # Reported once this write parked the retry. Reported first, a write that
+        # lost (ScheduleWriteContended, the claim kept for the beat) reported a
+        # retry that did not exist, and the beat's finalize reported it again.
         logger.warning(
             "Schedule %s attempt %s failed; retrying at %s",
             schedule_id,
@@ -1474,84 +1511,112 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                 else str(failure_class or "other")
             ),
         )
-        schedule_retry(
-            schedule_id,
-            retry_at=retry_at,
-            attempt=attempt + 1,
-            run_entry={**entry, "retry_scheduled": True, "retry_at": retry_at.isoformat()},
-        )
         return
 
+    ok = _is_success(status)
     cursor_value = None
-    if _is_success(status) and sched.cursor_column:
+    if ok and sched.cursor_column:
         cursor_value = (job_doc or {}).get("cursor_value")
-    mark_schedule_run(
-        schedule_id, job_id, status=status, run_entry=entry, cursor_value=cursor_value
+    failure_class = decision.get("failure_class") or {}
+    # How the run ended is stored in the write that releases its claim. Written
+    # afterwards, a reader in between saw a refused run as a plain failure with
+    # a next run coming (the D119 / R12 schedule e2e race).
+    park = "" if ok else (_park_reason(sched, decision, entry) or "")
+    backs_off = bool(park) and _failure_kind(decision) == TRANSIENT and park in (
+        "identical_failure_repeated",
+        "consecutive_failures",
     )
-    if _is_success(status):
+    finding: dict[str, Any] = {}
+    if park and not backs_off:
+        # This beat's verdict will not change by itself, and the next beat
+        # would either replay it or — on an append with nothing to collapse
+        # a second copy — land the same rows again. Park on one finding.
+        from services.drift_approval import (
+            gate_codes_from_job,
+            unaccounted_sources_from_job,
+        )
+
+        finding = {
+            "exc": str((job_doc or {}).get("error") or decision.get("reason") or "")
+            or "The run was refused by a validation gate.",
+            "attempt": attempt,
+            "job_id": job_id,
+            "evidence": {
+                "failure_class": failure_class,
+                "phase": (job_doc or {}).get("phase", ""),
+                "park_reason": park,
+                "gate_codes": gate_codes_from_job(job_doc),
+                "unmapped_columns": unaccounted_sources_from_job(job_doc),
+                # The refusal's stable code (e.g. DESTINATION_CONTINUITY),
+                # so the park never classifies on wording.
+                "error_code": str((job_doc or {}).get("error_code") or ""),
+                **({"recovery_context": recovery_context} if recovery_context else {}),
+            },
+        }
+    backoff: dict[str, int] = {}
+
+    def decide(after: Any) -> dict[str, Any] | None:
+        try:
+            if ok:
+                from services.schedule_approvals import finding_closed_by_success
+
+                return finding_closed_by_success(after)
+            if backs_off:
+                due, backoff["delay"] = _transient_backoff(after, datetime.now(timezone.utc))
+                return {"next_run_at": due}
+            if finding:
+                return _finding_patch(after, **finding)
+        except Exception:  # noqa: BLE001 — never stops the run being recorded
+            logger.exception("Schedule %s run outcome was not stored with its run", schedule_id)
+        return None
+
+    outcome = RunOutcome(decide)
+    updated = mark_schedule_run(
+        schedule_id, job_id, status=status, run_entry=entry, cursor_value=cursor_value,
+        outcome=outcome,
+    )
+    if updated is not None and not outcome.recorded:
+        # Another finalizer recorded this run after the checks above (the job's
+        # terminal write and the beat both arrive), and announced it.
+        return
+    if ok:
         _observe_parallel_run(sched, job_doc)
         try:
-            from services.schedule_approvals import (
-                close_dest_exists_park_after_success,
-                close_finding_after_successful_run,
-            )
+            from services.schedule_approvals import close_dest_exists_park_after_success
 
-            close_finding_after_successful_run(schedule_id)
-            close_dest_exists_park_after_success(schedule_id)
+            if not outcome.late:
+                # A late success (a newer run has claimed or finished since)
+                # never releases a park the newer run made.
+                close_dest_exists_park_after_success(schedule_id)
         except Exception:
             logger.exception(
                 "Schedule %s dest-exists park close after success skipped",
                 schedule_id,
             )
     else:
-        if not _is_success(status):
-            failure_class = decision.get("failure_class") or {}
+        emit_event(
+            logger,
+            "schedule.run.give_up",
+            outcome="failed",
+            schedule_id=schedule_id,
+            attempt=attempt + 1,
+            classification=(
+                str(failure_class.get("kind") or "other")
+                if isinstance(failure_class, dict)
+                else str(failure_class or "other")
+            ),
+        )
+        if outcome.recorded and "delay" in backoff and "next_run_at" in outcome.patch:
+            # Stored with the run: not for a schedule deleted before the write.
             emit_event(
                 logger,
-                "schedule.run.give_up",
-                outcome="failed",
+                "schedule.run.backoff",
+                outcome="backing_off",
                 schedule_id=schedule_id,
-                attempt=attempt + 1,
-                classification=(
-                    str(failure_class.get("kind") or "other")
-                    if isinstance(failure_class, dict)
-                    else str(failure_class or "other")
-                ),
+                reason_code=park,
+                delay_seconds=backoff["delay"],
             )
-        park = _park_reason(sched, decision, entry)
-        if park and _failure_kind(decision) == TRANSIENT and park in (
-            "identical_failure_repeated",
-            "consecutive_failures",
-        ):
-            _back_off_transient(schedule_id, sched, park)
-            park = ""
-        if park:
-            # This beat's verdict will not change by itself, and the next beat
-            # would either replay it or — on an append with nothing to collapse
-            # a second copy — land the same rows again. Park on one finding.
-            from services.drift_approval import (
-                gate_codes_from_job,
-                unaccounted_sources_from_job,
-            )
-
-            _open_finding(
-                schedule_id,
-                str((job_doc or {}).get("error") or decision.get("reason") or "")
-                or "The run was refused by a validation gate.",
-                attempt=attempt,
-                job_id=job_id,
-                evidence={
-                    "failure_class": failure_class,
-                    "phase": (job_doc or {}).get("phase", ""),
-                    "park_reason": park,
-                    "gate_codes": gate_codes_from_job(job_doc),
-                    "unmapped_columns": unaccounted_sources_from_job(job_doc),
-                    # The refusal's stable code (e.g. DESTINATION_CONTINUITY),
-                    # so the park never classifies on wording.
-                    "error_code": str((job_doc or {}).get("error_code") or ""),
-                    **({"recovery_context": recovery_context} if recovery_context else {}),
-                },
-            )
+        _announce_finding(schedule_id, outcome)
     from services.schedule_run_lifecycle import default_reason
 
     doc = dict(job_doc or {})
@@ -1572,16 +1637,20 @@ def _park_on_decision(
 
     The run is still recorded as failed — nothing here pretends a refused run
     succeeded — but the schedule is additionally parked on one durable finding, so
-    the cadence stops replaying an answer that cannot change by itself.
+    the cadence stops replaying an answer that cannot change by itself. The
+    finding is stored in the write that records the failed run, never after it.
 
-    Best effort: if the inbox write fails, the failed run is already recorded and
-    the schedule behaves exactly as it did before this existed.
+    Best effort: if the finding cannot be built, the failed run is still recorded
+    and the schedule behaves exactly as it did before this existed.
     """
     from services.schedule_run_lifecycle import current_run_id
-    from services.schedule_store import mark_schedule_run
+    from services.schedule_store import RunOutcome, mark_schedule_run
 
     message = str(exc)
     now = datetime.now(timezone.utc).isoformat()
+    outcome = RunOutcome(
+        lambda after: _finding_patch(after, exc, attempt=attempt, job_id=job_id)
+    )
     updated = mark_schedule_run(
         schedule_id,
         job_id,
@@ -1601,10 +1670,13 @@ def _park_on_decision(
             "coerced_null_rows": 0,
             "error": message[:500],
         },
+        outcome=outcome,
     )
-    _open_finding(schedule_id, exc, attempt=attempt, job_id=job_id)
-    if updated is not None:
+    _announce_finding(schedule_id, outcome)
+    if updated is not None and outcome.recorded:
         # No job ran, so no job-level notification will ever say this failed.
+        # Only the caller that recorded the run says so: another replica's
+        # finalizer that recorded it first has already notified.
         _notify_schedule(updated, job_id, "failed", {"error": message})
 
 
@@ -1639,44 +1711,54 @@ def _missing_source_table(sched: Any, message: str) -> str:
     return source if got.lower() == wanted.lower() else ""
 
 
-def _open_finding(
-    schedule_id: str,
+def _announce_finding(schedule_id: str, outcome: Any) -> None:
+    """``approval.requested`` for the finding a run's outcome just stored."""
+    request = outcome.patch.get("approval_request") if outcome.recorded else None
+    if isinstance(request, dict) and str(request.get("status") or "open") == "open":
+        from services.schedule_approvals import approval_requested_event
+
+        approval_requested_event(schedule_id, request)
+
+
+def _finding_patch(
+    sched: Any,
     exc: BaseException | str,
     *,
     attempt: int,
     job_id: str = "",
     evidence: dict[str, Any] | None = None,
-) -> None:
-    """Park the schedule on one finding, describing it in the operator's terms.
+) -> dict[str, Any] | None:
+    """The fields that park ``sched`` on one finding, in the operator's terms.
 
     A structured ``ApprovalRequired`` already knows its code, scopes and corrective
     action. Anything else is classified from its message, and only findings an
     attestation could actually clear are offered as approvable — the rest name the
     configuration change that has to happen instead.
+
+    No store write: the caller hands the fields to ``mark_schedule_run`` as the
+    run's outcome, so they land with the claim release. None when the finding is
+    already open for this job, or could not be built.
     """
     from services.failure_retry_policy import classify_failure
     from services.blocker_titles import is_schema_drift_echo
-    from services.drift_approval import SOURCE_DRIFT_CODE, open_schedule_drift_approval
+    from services.drift_approval import SOURCE_DRIFT_CODE, drift_already_parked
     from services.schedule_approvals import (
         ApprovalRequired,
         KIND_RUN_REFUSED,
         KIND_SOURCE_DRIFT,
+        approval_patch,
         build_approval_request,
-        open_approval_request,
     )
     from services.schedule_mapping_contract import (
         EMPTY_MAPPING_CODE,
         EMPTY_MAPPING_CORRECTIVE,
         is_empty_mapping_refusal,
     )
-    from services.schedule_store import get_schedule
     from services.standing_authorization import delegable_scopes_for
 
     message = _collapse_repeated_finding(str(exc))
+    schedule_id = str(getattr(sched, "id", "") or "")
     try:
-        sched = get_schedule(schedule_id)
-        if not sched:
-            return
         if isinstance(exc, ApprovalRequired):
             kind, code, scopes = exc.kind, exc.code, exc.scopes
             corrective = exc.corrective_action
@@ -1757,14 +1839,14 @@ def _open_finding(
             run_attempt=attempt,
             evidence=found,
         )
-        if code == SOURCE_DRIFT_CODE:
+        if code == SOURCE_DRIFT_CODE and drift_already_parked(sched, request):
             # Preflight may already have parked this job. A second open
             # would count one refusal as two occurrences.
-            open_schedule_drift_approval(schedule_id, request)
-        else:
-            open_approval_request(schedule_id, request)
+            return None
+        return approval_patch(sched, request)
     except Exception:
         logger.exception("Schedule %s could not be parked on a decision", schedule_id)
+        return None
 
 
 def _record_authorization_use(schedule_id: str, *, rebind: bool = False) -> None:
@@ -1876,6 +1958,15 @@ def _dispatch_transfer(
             refusal = local_destination_refusal(destination) if destination is not None else None
             if refusal:
                 raise ValueError(refusal)
+        # Audit H-4: a destination outside the workspace's data region holds the
+        # schedule on that reason, before a job exists (the engine refuses too).
+        from services.data_residency import residency_refusal
+
+        out_of_region = residency_refusal(
+            str(getattr(request, "workspace_id", "") or ""), getattr(request, "destination", None)
+        )
+        if out_of_region:
+            raise ValueError(out_of_region)
         authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
         emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)
@@ -2127,7 +2218,7 @@ def _fail_unstarted_run(
     pressed Run now is told by the HTTP answer, and the cadence is untouched.
     """
     from services import schedule_run_lifecycle as life
-    from services.schedule_store import get_schedule, mark_schedule_run
+    from services.schedule_store import RunOutcome, get_schedule, mark_schedule_run
 
     reason = f"The scheduler could not start this run: {type(exc).__name__}: {exc}"[:500]
     try:
@@ -2151,12 +2242,20 @@ def _fail_unstarted_run(
             life.finish_run(schedule_id, run_id, "failed", reason=reason,
                             reason_code="start_error", error=reason, job_id=job_id)
             return
-        updated = mark_schedule_run(schedule_id, job_id, status="failed", run_entry=entry)
+        parks = before is not None and bool(_park_reason(before, {}, entry))
+        outcome = RunOutcome(
+            (lambda after: _finding_patch(after, reason, attempt=attempt, job_id=job_id))
+            if parks
+            else None
+        )
+        updated = mark_schedule_run(
+            schedule_id, job_id, status="failed", run_entry=entry, outcome=outcome
+        )
         emit_event(logger, "schedule.run.fire", outcome="failed", reason_code="start_error",
                    schedule_id=schedule_id, attempt=attempt + 1, error=exc)
-        if before is not None and _park_reason(before, {}, entry):
-            _open_finding(schedule_id, reason, attempt=attempt, job_id=job_id)
-        if updated is not None:
+        _announce_finding(schedule_id, outcome)
+        if updated is not None and outcome.recorded:
+            # Only the caller that recorded the run notifies (see _park_on_decision).
             _notify_schedule(updated, job_id, "failed", {"error": reason})
     except Exception:  # noqa: BLE001 — recording must not mask the original error
         logger.exception("Schedule %s failed run %s was not recorded", schedule_id, run_id)
@@ -2227,13 +2326,34 @@ def _start_schedule_run(
         # in flight is not: the two lookups can disagree for one beat, and
         # finalizing that beat let Run now start a second writer (R14-001).
         if _job_dispatch_state(held) == "terminal" and _job_is_live(held) is not True:
+            from services.schedule_store import ScheduleWriteContended
+
             started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
-            _finalize_run(
-                schedule_id,
-                held,
-                sched.retry_attempt if sched.retry_at else 0,
-                started,
-            )
+            try:
+                _finalize_run(
+                    schedule_id,
+                    held,
+                    sched.retry_attempt if sched.retry_at else 0,
+                    started,
+                )
+            except ScheduleWriteContended as exc:
+                # Nothing was written and the claim still names the finished
+                # job: this run cannot start yet, and nothing about it failed.
+                _finalize_deferred(schedule_id, held, exc)
+                detail = (
+                    f"The previous run of this schedule (job {held}) has finished and is "
+                    "still being recorded. Try again in a few seconds."
+                )
+                if manual:
+                    raise ScheduleStartError(
+                        detail, http_status=409, code="run_still_recording",
+                        retry_after=_RUN_STILL_RECORDING_RETRY_AFTER,
+                    ) from exc
+                life.finish_run(
+                    schedule_id, life.current_run_id(schedule_id), life.SKIPPED,
+                    reason=detail, reason_code="run_still_recording",
+                )
+                return None
             sched = get_schedule(schedule_id) or sched
 
     # Concurrency guard: refuse to start when this schedule or another writer
@@ -2359,6 +2479,7 @@ def _finalize_finished_schedule_claims() -> None:
     that a run was still in progress.
     """
     from services.schedule_store import (
+        ScheduleWriteContended,
         _is_running_stale,
         _job_is_live,
         _load_all,
@@ -2383,12 +2504,15 @@ def _finalize_finished_schedule_claims() -> None:
         if _job_is_live(sched.running_job_id) is not False:
             continue
         started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
-        _finalize_run(
-            sched.id,
-            sched.running_job_id,
-            sched.retry_attempt if sched.retry_at else 0,
-            started,
-        )
+        try:
+            _finalize_run(
+                sched.id,
+                sched.running_job_id,
+                sched.retry_attempt if sched.retry_at else 0,
+                started,
+            )
+        except ScheduleWriteContended as exc:
+            _finalize_deferred(sched.id, sched.running_job_id, exc)
 
 
 def _run_due_schedules() -> int:
@@ -2489,13 +2613,21 @@ def _clear_stale_running_schedules() -> None:
                 from services.schedule_store import _job_dispatch_state, get_schedule
 
                 if _job_dispatch_state(s.running_job_id) == "terminal":
+                    from services.schedule_store import ScheduleWriteContended
+
                     started = _parse_ts(s.running_started_at) or datetime.now(timezone.utc)
-                    _finalize_run(
-                        s.id,
-                        s.running_job_id,
-                        s.retry_attempt if s.retry_at else 0,
-                        started,
-                    )
+                    try:
+                        _finalize_run(
+                            s.id,
+                            s.running_job_id,
+                            s.retry_attempt if s.retry_at else 0,
+                            started,
+                        )
+                    except ScheduleWriteContended as exc:
+                        # The claim stays: releasing it as stale below would
+                        # drop the finished run unrecorded. The beat records it.
+                        _finalize_deferred(s.id, s.running_job_id, exc)
+                        continue
                     fresh = get_schedule(s.id)
                     if fresh is not None:
                         schedules[i] = fresh

@@ -25,6 +25,11 @@ PORTLESS_TYPES = frozenset({
 NAME_MAX = 200
 HOST_MAX = 253
 IDENT_MAX = 128
+# A file engine's "database" is a path. Workspace files live under
+# ``<volume>/_workspaces/<workspace id>/`` (about 50 characters before the
+# file name), so the identifier bound would refuse ordinary paths.
+PATH_MAX = 1024
+FILE_PATH_TYPES = frozenset({"sqlite", "duckdb"})
 CONNSTR_MAX = 4096
 TYPE_MAX = 64
 EXECUTE_LIMIT_MAX = 10_000_000
@@ -80,7 +85,11 @@ def connector_request_errors(
         _length_error("Name", name, NAME_MAX, required=require_name),
         _length_error("Type", db_type, TYPE_MAX),
         _length_error("Host", host, HOST_MAX),
-        _length_error("Database", database, IDENT_MAX),
+        _length_error(
+            "Database",
+            database,
+            PATH_MAX if str(db_type or "").strip().lower() in FILE_PATH_TYPES else IDENT_MAX,
+        ),
         _length_error("Username", username, IDENT_MAX),
         _length_error("Schema", schema, IDENT_MAX),
         _length_error("Connection string", connection_string, CONNSTR_MAX),

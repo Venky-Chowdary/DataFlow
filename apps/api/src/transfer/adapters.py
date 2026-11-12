@@ -802,6 +802,10 @@ def _lookup_saved_connector(
                 # SFTP host-key pin and other operator extras live here. Dropping
                 # them made a saved pin look untrusted on Pilot introspect.
                 "extra": dict(getattr(conn, "extra", None) or {}),
+                # The owner workspace: the S3 bucket-region guard and the egress
+                # policy judge a write by it (review round 3, H4). It wins over
+                # an inline ``extra`` key of the same name.
+                "workspace_id": str(getattr(conn, "workspace_id", "") or ""),
             }
     except Exception as exc:
         logger.debug("connector store lookup failed: %s", exc, exc_info=exc)

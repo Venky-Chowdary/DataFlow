@@ -167,7 +167,7 @@ def resolve_region(cfg: dict[str, Any]) -> str:
     return "us-east-1"
 
 
-def boto3_client(service: str, cfg: dict[str, Any]):
+def boto3_client(service: str, cfg: dict[str, Any], *, workspace_id: str = ""):
     import boto3
     from botocore.config import Config
 
@@ -186,10 +186,14 @@ def boto3_client(service: str, cfg: dict[str, Any]):
     if endpoint_url:
         from services.egress_guard import assert_connector_dial_allowed
 
+        # The guard skips a region label in ``host`` (``us-east-1``) that this
+        # client only signs with: never when ``endpoint_url`` dials that name.
         assert_connector_dial_allowed(
             endpoint_url,
             str(cfg.get("host") or ""),
             workspace_id=str(cfg.get("workspace_id") or ""),
+            db_type=service,
+            aws_endpoint=endpoint_url,
         )
         kwargs["endpoint_url"] = endpoint_url
     # MinIO and other custom endpoints require path-style addressing.
@@ -198,4 +202,10 @@ def boto3_client(service: str, cfg: dict[str, Any]):
     # endpoint) stays on the SDK default.
     if service == "s3" and (endpoint_url or cfg.get("path_style")):
         kwargs["config"] = Config(s3={"addressing_style": "path"})
-    return boto3.client(service, **kwargs)
+    client = boto3.client(service, **kwargs)
+    if service == "s3":
+        from connectors.s3_residency import install_bucket_region_guard
+
+        # The bucket's region decides where a write lands (review round 2, H3).
+        install_bucket_region_guard(client, cfg, workspace_id=workspace_id)
+    return client

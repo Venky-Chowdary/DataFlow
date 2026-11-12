@@ -438,12 +438,16 @@ def _skip_patch(sched: Any, entry: dict[str, Any]) -> dict[str, Any] | None:
         # A pending record of this attempt becomes the skip, unless an identical
         # skip is already the newest record: then the pending one is folded in.
         idx = _match(history, {"run_id": run_id})
-        if idx >= 0 and not is_open(history[idx].get("status")):
+        if idx < 0 or not is_open(history[idx].get("status")):
+            # This attempt was finished already, or folded into an identical
+            # skip (gone): the beat's start records its refusal, then
+            # ``_run_schedule`` finishes the attempt that started nothing. Added
+            # again, it was a false "not started" skip that broke coalescing.
             return None
         prior = _latest_skip_to_coalesce(
             [r for r in history if str(r.get("run_id") or "") != run_id], code, reason
         )
-        if prior >= 0 and idx >= 0:
+        if prior >= 0:
             history.pop(idx)
             return _bump_skip(history, code, reason, RUN_HISTORY_LIMIT)
         return {"run_history": trim_history(merge_run_entry(history, entry), RUN_HISTORY_LIMIT)}

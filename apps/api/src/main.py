@@ -8,11 +8,12 @@ import asyncio
 import logging
 import os
 import threading
-from services.brand_env import getenv_brand
 import time
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
+
+from services.brand_env import getenv_brand
 from fastapi.responses import JSONResponse, PlainTextResponse
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
@@ -21,6 +22,7 @@ from services.health_service import aggregate_health
 from services.safe_errors import public_error
 from services.upload_limits import PayloadTooLarge
 from services.procedure_source import ProcedureSourceError
+from services.data_residency import ResidencyRefused
 from services.audit_coverage import AuditAccessMiddleware, http_route_template
 
 # Tests and callers historically import the route-template helper from the
@@ -123,6 +125,13 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    # Review (low): a flag set differently under DATAWRAP_ and DATAFLOW_ is named, never its values.
+    from services.brand_env import warn_brand_flag_conflicts
+
+    warn_brand_flag_conflicts(logger)
+    from services.sso_authorization import warn_sso_auto_provision_without_domains
+
+    warn_sso_auto_provision_without_domains(logging.getLogger("datawrap.security"))
     try:
         # Saved IP allowlists with no proxy hop count: say so once at boot.
         from services.ip_allowlist_policy import warn_if_hop_count_unset
@@ -210,9 +219,16 @@ async def lifespan(app: FastAPI):
     except Exception as de:
         print(f"[!] Driver bootstrap warning: {de}")
 
-    training_enabled = getenv_brand("TRAINING", "off" if is_production() else "on").lower() not in (
-        "off", "0", "false",
-    )
+    from .ai.training.training_runtime import TrainingRuntime
+    from .ai.training.training_scheduler import training_enabled as _training_enabled
+
+    training_enabled = _training_enabled()
+    # Always one runtime: admin routes (/training-agent/run, /copilot/train)
+    # run on it even with background training off, and shutdown stops them.
+    # Kept local too: a second lifespan of this app replaces app.state's, and
+    # each lifespan must stop its own.
+    training = TrainingRuntime()
+    app.state.training_runtime = training
 
     # Accept traffic immediately — do not block on HuggingFace / RAG init.
     app.state.ready = False
@@ -223,34 +239,43 @@ async def lifespan(app: FastAPI):
             from .ai.knowledge.semantic_patterns import get_pattern_count
             from .ai.knowledge.synonyms import get_synonym_count
             from .ai.rag.pipeline import get_rag_pipeline
-            from .ai.training.training_scheduler import run_training_loop
+            from .ai.training.training_scheduler import run_background_training, run_training_loop
 
             pipeline = get_rag_pipeline()
             init_result = await asyncio.to_thread(pipeline.initialize)
             print(f"[+] RAG Pipeline initialized: {init_result.get('ingested', 0)} documents")
             print(f"[+] Knowledge Base: {get_pattern_count()} patterns, {get_synonym_count()} synonyms")
 
-            async def _background_training():
-                await asyncio.sleep(120)
-                try:
-                    from .ai.training.training_agent import get_training_agent
-                    training = get_training_agent()
-                    run = await asyncio.to_thread(training.run_full_training, False, False)
-                    ready = run.metrics.get("copilot_evaluation", {}).get("ready", False)
-                    examples = run.metrics.get("conversation_examples", 0)
-                    print(f"[+] Copilot Training Agent: {run.status} ({examples} examples, ready={ready})")
-                except Exception as te:
-                    print(f"[!] Copilot training warning: {te}")
-
             if training_enabled:
-                app.state.training_task = asyncio.create_task(_background_training())
-                asyncio.create_task(run_training_loop())
+                # Own daemon threads + stop event: shutdown never waits on a run.
+                app.state.training_task = training.start_task(
+                    run_background_training(training), name="training-warmup")
+                app.state.training_loop_task = training.start_task(
+                    run_training_loop(runtime=training), name="training-loop")
                 print("[+] Training Agent enabled")
             else:
                 print("[*] Training Agent disabled (DATAFLOW_TRAINING=off)")
         except Exception as e:
             print(f"[!] RAG initialization warning: {e}")
 
+        # Review M3: exports written before workspaces had folders move to the
+        # folder of the workspace whose job records own them. Idempotent, and
+        # off the lifespan's critical path (round 2, Low): a large flat folder
+        # never delays the API's readiness.
+        from services.export_migration import migrate_flat_exports_at_startup, start_in_background
+
+        app.state.flat_export_migration = start_in_background(migrate_flat_exports_at_startup)
+        # Review round 3 (H3): the shared SQLite/DuckDB volumes are partitioned per
+        # workspace. The partition time is recorded before any request is served
+        # (connectors saved after it prove no ownership); owned flat files then
+        # move home off the critical path.
+        try:
+            from services.embedded_volume import mark_partitioned, migrate_flat_volume_files_at_startup
+
+            mark_partitioned()
+            app.state.flat_volume_migration = start_in_background(migrate_flat_volume_files_at_startup)
+        except OSError as exc:
+            print(f"[!] SQLite/DuckDB volume partition marker not written: {exc}")
         # Cadence stays up when RAG warm-up fails — otherwise due pipelines
         # sit on Next run forever with Runs=0. Multi-replica API pods set
         # SCHEDULE_LOOP=0; src.scheduler_main owns the loop there.
@@ -358,13 +383,8 @@ async def lifespan(app: FastAPI):
             await warm
         except asyncio.CancelledError:
             pass
-    task = getattr(app.state, "training_task", None)
-    if task:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    # This lifespan's runtime: sets its stop event, cancels its tasks, waits <= 1 s.
+    await training.shutdown()
     try:
         from services.otel_logging import shutdown_otel_logging
 
@@ -402,7 +422,7 @@ def _build_commit() -> str:
     checkout's HEAD. "unknown" rather than a hardcoded fake.
     """
     env = (
-        os.getenv("DATAFLOW_COMMIT_SHA")
+        getenv_brand("DATAFLOW_COMMIT_SHA")
         or os.getenv("RAILWAY_GIT_COMMIT_SHA")
         or os.getenv("SOURCE_COMMIT")
         or ""
@@ -656,7 +676,7 @@ async def _add_timing_header_response(request: Request, call_next):
             "Content-Security-Policy",
             "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
         )
-    hsts_flag = os.getenv("DATAFLOW_HSTS", "").strip().lower()
+    hsts_flag = getenv_brand("DATAFLOW_HSTS", "").strip().lower()
     forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
     https = request.url.scheme == "https" or forwarded == "https"
     if hsts_flag in {"1", "true", "on", "yes"}:
@@ -900,6 +920,18 @@ async def duplicate_transfer_handler(
             "job_id": exc.existing_job_id,
         },
     )
+
+
+@app.exception_handler(ResidencyRefused)
+async def residency_refused_handler(request: Request, exc: ResidencyRefused):
+    """A destination outside the workspace's data region is a 403 on every submit path.
+
+    Job creation raises it (``services.data_residency``); the two Studio run
+    routes answer it themselves first, and this covers every other route that
+    queues a job (retry, rerun, replay, upload-and-run).
+    """
+    logger.info("Residency refusal on %s", request.url.path)
+    return JSONResponse(status_code=403, content={"error": "data_residency", "detail": str(exc)})
 
 
 @app.exception_handler(ConnectorStoreError)

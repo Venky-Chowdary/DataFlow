@@ -140,8 +140,14 @@ def test_s3_count_without_endpoint_or_static_keys_uses_aws_defaults(
 
     def client_spy(service, **kwargs):
         captured.update(service=service, kwargs=kwargs)
+        # A real botocore client: boto3_client arms its event system with the
+        # S3 bucket-region guard (PR 403 review 2, H3).
+        events = SimpleNamespace(
+            register=lambda *_a, **_k: None, register_first=lambda *_a, **_k: None
+        )
         return SimpleNamespace(
-            head_object=lambda **_kwargs: {"ContentLength": 17}
+            head_object=lambda **_kwargs: {"ContentLength": 17},
+            meta=SimpleNamespace(events=events),
         )
 
     monkeypatch.setattr(boto3, "client", client_spy)

@@ -46,6 +46,9 @@ def test_sso_domain_user_with_no_stored_record_stays_signed_in(ent, monkeypatch)
 def test_auto_provisioned_sso_user_stays_signed_in(ent, monkeypatch):
     monkeypatch.setenv("DATAWRAP_SSO_AUTO_PROVISION", "1")
     monkeypatch.setenv("DATAFLOW_SSO_AUTO_PROVISION", "1")
+    # Auto-provisioning admits only listed domains (audit M-11: empty admits nobody).
+    monkeypatch.setenv("DATAWRAP_SSO_ALLOWED_DOMAINS", "example.test")
+    monkeypatch.setenv("DATAFLOW_SSO_ALLOWED_DOMAINS", "example.test")
     from services.sso_authorization import require_sso_authorization
 
     email = f"auto-{uuid.uuid4().hex[:8]}@example.test"

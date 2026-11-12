@@ -881,8 +881,10 @@ async def explain_preflight(body: ExplainRequest):
         from services.preflight_run_store import get_preflight_run as _get
 
         record = _get(run_id)
-        if isinstance(record, dict):
-            payload = record.get("result") or record.get("preflight") or record
+        if not isinstance(record, dict):
+            # Another workspace's run answers like a missing one (review 3, body routes).
+            raise HTTPException(status_code=404, detail="Preflight run not found")
+        payload = record.get("result") or record.get("preflight") or record
     try:
         return explain_validation(
             slim_preflight_for_explain(payload),
