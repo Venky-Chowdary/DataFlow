@@ -12,12 +12,25 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.platform_config import data_dir
-from services.shared_doc_store import SharedDoc, tracked
+from services.shared_doc_store import tracked
+from services.shared_record_store import SharedRecordSet
 from services.shape_models import ShapeError, ShapeRecipe
 from services.workspace_filter import WorkspaceFilter, bound_allows, current_workspace_stamp
 
 STORE_PATH = data_dir() / "shape_drafts.json"
 MAX_DRAFTS = 50
+#: The canvas layout is client-supplied: node positions, not data. Capped so
+#: one workspace cannot fill the shared store (ops review High 3).
+MAX_CANVAS_LAYOUT_BYTES = 256 * 1024
+MAX_DRAFT_BYTES = 512 * 1024
+
+
+class DraftTooLarge(ShapeError):
+    """A draft (or its canvas layout) is larger than the store accepts: HTTP 413."""
+
+
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, default=str).encode("utf-8"))
 
 
 def _now() -> str:
@@ -62,11 +75,12 @@ def _file_save(data: dict[str, Any]) -> None:
     STORE_PATH.write_text(json.dumps(dict(data), indent=2), encoding="utf-8")
 
 
-_DOC = SharedDoc(
+_DOC = SharedRecordSet(
     "shape_drafts",
     file_load=lambda: _file_load(),
     file_save=lambda data: _file_save(data),
     file_path=lambda: STORE_PATH,
+    partition_key="workspace_id",
 )
 
 
@@ -102,14 +116,26 @@ def save_shape_draft(
         raise ShapeError("A draft needs a source and destination.")
     parsed = ShapeRecipe.parse(recipe, source_columns=source_columns or None)
     workspace_id = _owner(workspace_id)
+    layout = canvas_layout if isinstance(canvas_layout, dict) else {}
+    layout_bytes = _json_size(layout)
+    if layout_bytes > MAX_CANVAS_LAYOUT_BYTES:
+        raise DraftTooLarge(
+            f"The canvas layout is {layout_bytes // 1024} KB; a draft's canvas layout may be at most "
+            f"{MAX_CANVAS_LAYOUT_BYTES // 1024} KB. Remove unused nodes or annotations and save again."
+        )
     record = {
         "route_key": key,
         "workspace_id": workspace_id,
         "steps": [step.to_wire() for step in parsed.steps],
         "recipe_hash": parsed.recipe_hash,
-        "canvas_layout": canvas_layout if isinstance(canvas_layout, dict) else {},
+        "canvas_layout": layout,
         "saved_at": _now(),
     }
+    draft_bytes = _json_size(record)
+    if draft_bytes > MAX_DRAFT_BYTES:
+        raise DraftTooLarge(
+            f"The draft is {draft_bytes // 1024} KB; a draft may be at most {MAX_DRAFT_BYTES // 1024} KB."
+        )
     data = _load()
     data[_storage_key(key, workspace_id)] = record
     _save(data)

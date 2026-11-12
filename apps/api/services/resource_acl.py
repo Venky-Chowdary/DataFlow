@@ -22,7 +22,8 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.platform_config import data_dir
-from services.shared_doc_store import SharedDoc, tracked
+from services.shared_doc_store import tracked
+from services.shared_record_store import SharedRecordSet
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -95,12 +96,14 @@ def _file_save(data: dict[str, Any]) -> None:
 # Grants live in the shared control-plane store when one is configured: a
 # replica with no local grants file would otherwise treat a restricted
 # resource as unrestricted (H-5).
-_DOC = SharedDoc(
+_DOC = SharedRecordSet(
     "resource_acls",
     file_load=_file_load,
     file_save=_file_save,
     file_path=_store_path,
     empty=lambda: {"grants": []},
+    list_key="grants",
+    partition_key="tenant_id",
 )
 
 

@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.platform_config import data_dir
-from services.shared_doc_store import SharedDoc
+from services.shared_record_store import SharedRecordSet
 from services.value_serializer import json_default
 from services.secret_vault import decrypt_secret, encrypt_secret
 
@@ -81,12 +81,14 @@ def _file_save(data: dict[str, Any]) -> None:
     tmp.replace(STORE_PATH)
 
 
-_DOC = SharedDoc(
+_DOC = SharedRecordSet(
     "byok_keys",
     file_load=lambda: _file_load(),
     file_save=lambda data: _file_save(data),
     file_path=lambda: STORE_PATH,
     empty=lambda: {"keys": []},
+    list_key="keys",
+    partition_key="tenant_id",
 )
 
 

@@ -698,7 +698,8 @@ def put_shape_draft(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
-    from services.shape_draft_store import save_shape_draft
+    from services.shape_draft_store import DraftTooLarge, save_shape_draft
+    from services.shared_record_store import RecordTooLarge
 
     ws = resolve_write_workspace(request, workspace_id)
     try:
@@ -709,6 +710,8 @@ def put_shape_draft(
             source_columns=body.source_columns,
             canvas_layout=body.canvas_layout,
         )
+    except (DraftTooLarge, RecordTooLarge) as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except ShapeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"draft": draft}

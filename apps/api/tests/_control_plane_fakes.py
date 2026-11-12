@@ -1,8 +1,8 @@
 """A small in-memory stand-in for the two shared control-plane collections.
 
 Implements only what ``services.shared_doc_store`` calls, with the same
-duplicate-key and filtered-update behaviour as MongoDB, so compare-and-swap
-tests run on a runner with no database.
+duplicate-key, filtered-update and 16 MB document-size behaviour as MongoDB,
+so compare-and-swap tests run on a runner with no database.
 """
 
 from __future__ import annotations
@@ -11,7 +11,20 @@ import copy
 import threading
 from typing import Any
 
-from pymongo.errors import DuplicateKeyError
+import bson
+from pymongo.errors import DocumentTooLarge, DuplicateKeyError, WriteError
+
+#: MongoDB refuses a document larger than this (BSON size).
+MAX_BSON_SIZE = 16 * 1024 * 1024
+
+
+def _check_size(doc: dict[str, Any], *, update: bool) -> None:
+    size = len(bson.encode(doc))
+    if size <= MAX_BSON_SIZE:
+        return
+    if update:
+        raise WriteError(f"Resulting document after update is larger than {MAX_BSON_SIZE}", 17419)
+    raise DocumentTooLarge(f"BSON document too large ({size} bytes)")
 
 
 def _matches(doc: dict[str, Any], flt: dict[str, Any]) -> bool:
@@ -23,15 +36,18 @@ def _matches(doc: dict[str, Any], flt: dict[str, Any]) -> bool:
                     return False
                 if op == "$lt" and not (have is not None and have < arg):
                     return False
+                if op == "$exists" and (key in doc) != bool(arg):
+                    return False
         elif have != want:
             return False
     return True
 
 
 class _Result:
-    def __init__(self, matched: int = 0, upserted_id: Any = None) -> None:
+    def __init__(self, matched: int = 0, upserted_id: Any = None, deleted: int = 0) -> None:
         self.matched_count = matched
         self.upserted_id = upserted_id
+        self.deleted_count = deleted
 
 
 class _Cursor:
@@ -93,29 +109,48 @@ class FakeCollection:
                 doc["_id"] = f"auto-{self._auto:012d}"
             if doc["_id"] in self._docs:
                 raise DuplicateKeyError(f"duplicate _id {doc['_id']!r}")
+            _check_size(doc, update=False)
             self._docs[doc["_id"]] = doc
         return _Result(upserted_id=doc["_id"])
 
     def update_one(self, flt: dict[str, Any], update: dict[str, Any], upsert: bool = False) -> _Result:
         self.calls += 1
         with self._lock:
-            target = next((d for d in self._docs.values() if _matches(d, flt)), None)
+            found = next((d for d in self._docs.values() if _matches(d, flt)), None)
             created = None
-            if target is None:
+            if found is None:
                 if not upsert:
                     return _Result(0)
-                target = {k: v for k, v in flt.items() if not isinstance(v, dict)}
-                self._docs[target["_id"]] = target
-                created = target["_id"]
+                found = {k: v for k, v in flt.items() if not isinstance(v, dict)}
+                created = found["_id"]
+                if created in self._docs:  # the filter missed on another field: a duplicate _id
+                    raise DuplicateKeyError(f"duplicate _id {created!r}")
+            target = copy.deepcopy(found)
+            if created is not None:
+                for key, value in (update.get("$setOnInsert") or {}).items():
+                    target[key] = copy.deepcopy(value)
             for key, value in (update.get("$set") or {}).items():
                 target[key] = copy.deepcopy(value)
+            for key in (update.get("$unset") or {}):
+                target.pop(key, None)
             for key, value in (update.get("$inc") or {}).items():
                 target[key] = int(target.get(key) or 0) + value
             for key, value in (update.get("$addToSet") or {}).items():
                 target.setdefault(key, [])
                 if value not in target[key]:
                     target[key].append(value)
+            _check_size(target, update=True)
+            self._docs[target["_id"]] = target
             return _Result(0 if created else 1, created)
+
+    def delete_one(self, flt: dict[str, Any]) -> _Result:
+        self.calls += 1
+        with self._lock:
+            for key, doc in self._docs.items():
+                if _matches(doc, flt):
+                    del self._docs[key]
+                    return _Result(deleted=1)
+        return _Result(deleted=0)
 
     def delete_many(self, flt: dict[str, Any]) -> None:
         with self._lock:

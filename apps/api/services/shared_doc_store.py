@@ -7,7 +7,10 @@ interface and file format, and adds a shared home for it:
 
 ``SharedDoc``  one JSON document per store (``control_plane_docs``), written by
                compare-and-swap on a revision number, so two replicas changing
-               the same store cannot drop each other's write.
+               the same store cannot drop each other's write. For small
+               single-object documents only: the record-list stores use
+               ``services.shared_record_store.SharedRecordSet``, one document
+               per record (ops review High 3).
 ``SharedLog``  one record per line of an append log (``control_plane_records``).
 
 Backend choice (``DATAFLOW_CONTROL_STORE_BACKEND`` / ``DATAWRAP_…``):

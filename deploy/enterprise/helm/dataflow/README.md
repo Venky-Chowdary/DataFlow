@@ -11,17 +11,25 @@ preflight runs, CDC mapping reviews, MCP invocations and audit-tip anchors are
 control-plane stores. Every replica must see the same values, so they live in
 the metadata database (MongoDB or DocumentDB) rather than in one file per pod:
 
-| Collection             | Holds                                                       |
-|------------------------|-------------------------------------------------------------|
-| `control_plane_docs`   | One status document per store, import claims, conflict notes |
-| `control_plane_records`| Log stores (preflight runs, CDC reviews, MCP log, anchors)  |
+| Collection              | Holds                                                                 |
+|-------------------------|-----------------------------------------------------------------------|
+| `control_plane_items`   | One document per record of the record stores (tenants, BYOK key records, ACL grants, notification channels, shape drafts), `_id` `<store>:<record id>` |
+| `control_plane_records` | Log stores (preflight runs, CDC reviews, MCP log, audit-tip anchors) |
+| `control_plane_docs`    | One status document per store, import claims, conflict notes        |
+
+Records are written one at a time by compare-and-swap, so tenants never
+contend with each other and no store is bound by MongoDB's 16 MB document
+limit. A record is at most 1 MB; a shape draft's canvas layout at most 256 KB
+(the API answers 413 above that), with at most 50 drafts per workspace.
 
 ## Upgrading from a build that kept these stores in files
 
 On the first start of this build, the first process to reach an empty shared
 store imports its node's file for that store (for example `tenants.json` or
 `resource_acls.jsonl` under the data directory). The file is never deleted or
-rewritten.
+rewritten. While that import runs, other processes refuse to read the store
+(503) rather than serve a half-imported ACL or tenant list; a process that
+dies mid-import finishes it when it starts again with the same file.
 
 Only one file per store is imported. Once the shared store holds a store's
 records, a node's file is never imported or merged again. A file that differs
@@ -62,7 +70,7 @@ Keep a copy of the shared state before rolling back, so nothing changed since
 the upgrade is lost and it can be re-applied:
 
 ```sh
-for c in control_plane_docs control_plane_records; do
+for c in control_plane_items control_plane_records control_plane_docs; do
   mongoexport --uri "$MONGODB_URI" --collection "$c" --out "$c.json"
 done
 ```

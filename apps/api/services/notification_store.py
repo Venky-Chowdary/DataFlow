@@ -12,7 +12,7 @@ from typing import Any
 
 from services.platform_config import data_dir
 from services.secret_vault import decrypt_secret, encrypt_secret
-from services.shared_doc_store import SharedDoc
+from services.shared_record_store import SharedRecordSet
 from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "notifications.json"
@@ -100,12 +100,14 @@ def _file_save(data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-_DOC = SharedDoc(
+_DOC = SharedRecordSet(
     "notification_channels",
     file_load=_file_load,
     file_save=_file_save,
     file_path=_store_path,
     empty=lambda: {"channels": []},
+    list_key="channels",
+    partition_key="workspace_id",
 )
 
 

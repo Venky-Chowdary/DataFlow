@@ -18,6 +18,7 @@ from services import byok_key_manager, resource_acl, shared_doc_store, tenant_st
 from services.control_plane_store import ControlPlaneUnavailable
 from services.process_role import topology_errors
 from services.shared_doc_store import SharedDoc, SharedDocConflict, SharedLog
+from services.shared_record_store import ITEMS_COLLECTION
 from tests._control_plane_fakes import FakeDatabase, install_shared_store
 
 
@@ -145,17 +146,17 @@ def test_concurrent_tenant_updates_keep_both_changes(tmp_path, monkeypatch):
         return real_validate(name)
 
     def _other_replica_writes(tenant_id):
-        # A second replica has its own process lock; talk to the shared store directly.
-        coll = shared_doc_store._collection(shared_doc_store.DOCS_COLLECTION)
-        current = coll.find_one({"_id": "tenant_settings"})
+        # A second replica has its own process lock; talk to the shared store
+        # directly: one document per record (ops review High 3).
+        coll = shared_doc_store._collection(ITEMS_COLLECTION)
+        current = coll.find_one({"_id": f"tenant_settings:{tenant_id}"})
         body = json.loads(current["body"])
-        for raw in body["tenants"]:
-            if raw["id"] == tenant_id:
-                raw["sso_enforced"] = True
-        coll.update_one(
-            {"_id": "tenant_settings", "rev": current["rev"]},
+        body["sso_enforced"] = True
+        result = coll.update_one(
+            {"_id": current["_id"], "rev": current["rev"]},
             {"$set": {"body": json.dumps(body), "rev": current["rev"] + 1}},
         )
+        assert result.matched_count == 1
 
     monkeypatch.setattr(tenant_store, "_validate_name", validate_then_race)
     tenant_store.update_tenant(one.id, name="One renamed")
@@ -231,7 +232,8 @@ def test_existing_tenant_file_is_imported_once_and_never_deleted(tmp_path, monke
     db = install_shared_store(monkeypatch)
     assert tenant_store.get_tenant(legacy.id).ip_allowlist == ["192.0.2.0/24"]
     shared = db[shared_doc_store.DOCS_COLLECTION].find_one({"_id": "tenant_settings"})
-    assert shared["rev"] == 1 and len(shared["import_sources"]) == 1
+    assert shared["state"] == "done" and len(shared["import_sources"]) == 1
+    assert db[ITEMS_COLLECTION].find_one({"_id": f"tenant_settings:{legacy.id}"})["rev"] == 1
     assert tenant_store.STORE_PATH.read_bytes() == file_bytes, "the import must leave the file as it was"
 
     # A change through the shared store is not undone by importing the same file again.
@@ -544,12 +546,13 @@ def test_real_backend_path_on_live_mongodb(tmp_path, monkeypatch):
         _on_pod(monkeypatch, tmp_path / "pod-a")
         tenant = tenant_store.create_tenant("ws-live", "Live", ip_allowlist=["203.0.113.9/32"])
         assert not tenant_store.STORE_PATH.exists(), "multi-replica must not write the pod-local file"
-        stored = svc.get_database()[shared_doc_store.DOCS_COLLECTION].find_one({"_id": "tenant_settings"})
+        record_id = f"tenant_settings:{tenant.id}"
+        stored = svc.get_database()[ITEMS_COLLECTION].find_one({"_id": record_id})
         assert stored["rev"] == 1 and "203.0.113.9/32" in stored["body"]
         _on_pod(monkeypatch, tmp_path / "pod-b")
         assert tenant_store.get_tenant(tenant.id).ip_allowlist == ["203.0.113.9/32"]
         tenant_store.update_tenant(tenant.id, sso_enforced=True)
-        assert svc.get_database()[shared_doc_store.DOCS_COLLECTION].find_one({"_id": "tenant_settings"})["rev"] == 2
+        assert svc.get_database()[ITEMS_COLLECTION].find_one({"_id": record_id})["rev"] == 2
     finally:
         svc.client.drop_database(svc.db_name)
         svc.disconnect()
