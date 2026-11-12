@@ -348,3 +348,21 @@ def test_a_number_outside_a_status_context_is_not_a_status(message):
 def test_too_many_requests_is_rate_limiting_without_a_status():
     got = classify_failure(error="Request req_abc: Too many requests hit the API too quickly.")
     assert got.kind == TRANSIENT, got
+
+
+# Each part of the context rule, pinned (survivors of the fix's mutation pass):
+# a shape that is the only status signal in its message, and a near miss that
+# must stay a number.
+@pytest.mark.parametrize(("message", "expected"), [
+    ("gateway replied '403 Forbidden' to the upload", "D"),
+    ("sync aborted: 403 Client Error for url: https://api.example.com/x", "D"),
+    ("sync aborted: 429 Client Error for url: https://api.example.com/x", "T"),
+    ("failed to decode 403 bytes: something odd", "?"),
+    ("chunk 403 head mismatch: something odd", "?"),
+    ("chunk 429 head mismatch: something odd", "?"),
+    ("path /v1/403 post /retry: something odd", "?"),
+    ("error 40312 in batch: something odd", "?"),
+    ("error 403.5 percent over: something odd", "?"),
+])
+def test_each_part_of_the_status_context(message, expected):
+    test_the_retry_table(message, expected)
