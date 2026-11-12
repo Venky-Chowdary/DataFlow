@@ -175,9 +175,19 @@ def _steps(recipe: Any) -> list[dict[str, Any]]:
 
 
 def _engine(endpoint: Mapping[str, Any] | Any) -> str:
+    """The endpoint's engine by its family: a hosted tile (``supabase``) is its engine (review 5, C-1 / M-3).
+
+    MariaDB keeps its own name: it is MySQL on the wire, but its ``JSON`` is
+    text (:func:`services.reversibility_types.json_normalizes`); every other
+    rule folds it onto ``mysql`` again.
+    """
+    from src.transfer.engine_family import engine_flavour, family_or_kind
+
     if isinstance(endpoint, Mapping):
-        return str(endpoint.get("format") or endpoint.get("type") or "").lower()
-    return str(getattr(endpoint, "format", "") or "").lower()
+        raw = str(endpoint.get("format") or endpoint.get("type") or "")
+    else:
+        raw = str(getattr(endpoint, "format", "") or "")
+    return "mariadb" if engine_flavour(raw) == "mariadb" else family_or_kind(raw)
 
 
 def _table(dest: Any, src: Any) -> str:

@@ -683,9 +683,11 @@ def _declared_types(doc: dict[str, Any], table: dict[str, Any]) -> tuple[dict[st
     from services.exit_completeness import catalog_declared_types
     from services.source_schema_authority import endpoint_source_column_types
 
+    from src.transfer.engine_family import family_or_kind
+
     endpoint = _source_endpoint(doc["source"], table, doc["workspace_id"])
     types = endpoint_source_column_types(endpoint)
-    return catalog_declared_types(types, endpoint, str(getattr(endpoint, "format", "") or "").lower())
+    return catalog_declared_types(types, endpoint, family_or_kind(getattr(endpoint, "format", "")))
 
 
 def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
@@ -700,6 +702,7 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
         source_columns_and_rows,
     )
     from services.parity_errors import safe_error
+    from src.transfer.engine_family import family_or_kind
 
     out = {**table, "rows_source": None, "rows_extracted": None,
            "key_set": {"source_sha256": None, "extract_sha256": None, "match": None},
@@ -732,7 +735,8 @@ def verify_table(doc: dict[str, Any], table: dict[str, Any], job: dict[str, Any]
     engine = ""
     try:
         endpoint = _source_endpoint(doc["source"], table, doc["workspace_id"])
-        engine = str(getattr(endpoint, "format", "") or "").lower()
+        # The engine by its family: a hosted tile (supabase, azure_sql_database) is that engine (review 5, C-1).
+        engine = family_or_kind(getattr(endpoint, "format", ""))
         types, unproven = _declared_types(doc, table)
         columns, rows, close = source_columns_and_rows(endpoint, types=types)
         keys, missing = resolve_keys(keys, columns)

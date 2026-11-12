@@ -246,15 +246,16 @@ def json_normalizes(stype: str, ttype: str, *, dest_db: str, source_db: str) -> 
     ``OBJECT`` / ``ARRAY`` store a parsed document; a PostgreSQL ``json`` (and
     SQLite / DuckDB / MariaDB JSON text) keeps the exact text.
     """
-    if _base(stype) != "JSON" or engine(source_db) not in _TEXT_JSON_ENGINES \
-            or _norm(source_db).lower().startswith("maria"):
+    from src.transfer.engine_family import engine_flavour
+
+    if _base(stype) != "JSON" or engine(source_db) not in _TEXT_JSON_ENGINES or engine_flavour(source_db) == "mariadb":
         return False
     base, eng = _base(ttype), engine(dest_db)
     if base == "JSONB" or base in {"VARIANT", "OBJECT"}:
         return True
     if base == "ARRAY":
         return eng == "snowflake"
-    return base == "JSON" and eng in {"mysql", "bigquery", "oracle"} and not _norm(dest_db).lower().startswith("maria")
+    return base == "JSON" and eng in {"mysql", "bigquery", "oracle"} and engine_flavour(dest_db) != "mariadb"
 
 
 def _byte_semantics(type_str: str, db: str) -> bool:

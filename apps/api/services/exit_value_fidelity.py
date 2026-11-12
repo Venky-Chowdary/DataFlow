@@ -38,8 +38,9 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from src.transfer.engine_family import MYSQL, ORACLE, POSTGRESQL, SQLSERVER, family_or_kind
+
 ARRAY, TIME, TIMETZ, INTERVAL, JSONB = "array", "time", "timetz", "interval", "jsonb"
-_PG = frozenset({"postgresql", "postgres"})
 
 ARRAY_BOUNDS = ("holds an array whose lower bound is not 1; the driver reads it as a plain list, so the extract "
                 "cannot hold its bounds and the column is not provable")
@@ -87,7 +88,7 @@ def _scalar_kind(ddl: str) -> str | None:
 
 def server_text_kind(ddl: str, engine: str) -> str | None:
     """Whether a PostgreSQL column must also be read as the server's own text (its adapter is not one-to-one)."""
-    if str(engine or "").lower() not in _PG:
+    if family_or_kind(engine) != POSTGRESQL:
         return None
     if element_ddl(ddl) is not None:
         return ARRAY
@@ -366,17 +367,17 @@ def _precision(up: str) -> int | None:
 
 def adapter_fold(ddl: str, engine: str) -> str | None:
     """Why a declared type cannot be proven on this engine (its driver can read two values as one), else ``None``."""
-    eng = str(engine or "").lower()
+    eng = family_or_kind(engine)
     up = _upper(ddl)
     base = re.sub(r"\(.*$", "", up).strip()
-    if eng in {"sqlserver", "mssql"}:
+    if eng == SQLSERVER:
         if base in {"TIME", "DATETIME2", "DATETIMEOFFSET"} and (_precision(up) is None or _precision(up) > 6):
             return (f"is {base}({_precision(up) or 7}), which keeps 100-nanosecond ticks the driver reads to the "
                     "microsecond, so two values that differ in the seventh digit read alike and it is not provable")
         if base == "SQL_VARIANT":
             return ("is SQL_VARIANT: the driver reads each value as whatever Python type its base type maps to, so "
                     "its exact value and type are not provable")
-    if eng == "oracle":
+    if eng == ORACLE:
         if "TIME ZONE" in up and base.startswith("TIMESTAMP"):
             return ("is a TIMESTAMP WITH TIME ZONE: the driver hands back the wall clock without the offset or "
                     "region it was stored with, so it is not provable")
@@ -386,7 +387,7 @@ def adapter_fold(ddl: str, engine: str) -> str | None:
         if base.startswith("INTERVAL"):
             return ("is an INTERVAL: the driver reads it as a plain duration (months and fractional seconds past "
                     "the microsecond are not kept), so it is not provable")
-    if eng in {"mysql", "mariadb"} and base == "FLOAT" and (_precision(up) is None or _precision(up) <= 24):
+    if eng == MYSQL and base == "FLOAT" and (_precision(up) is None or _precision(up) <= 24):
         return ("is a single-precision FLOAT: the server sends it rounded to its display digits, so two stored "
                 "values can read alike and it is not provable")
     return None

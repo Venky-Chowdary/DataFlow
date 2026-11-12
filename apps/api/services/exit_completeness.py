@@ -49,6 +49,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, BinaryIO
 
+from src.transfer.engine_family import POSTGRESQL, family_or_kind
+
 logger = logging.getLogger(__name__)
 
 MERKLE_ALGORITHM = "sha256-merkle-rfc6962"
@@ -132,7 +134,7 @@ def digest_plan(columns: list[str], types: dict[str, str], engine: str) -> tuple
         if not ddl:
             uncompared[col] = _UNTYPED
             continue
-        if ddl.split("(")[0].strip().upper() == "JSON" and engine in {"postgresql", "postgres"}:
+        if ddl.split("(")[0].strip().upper() == "JSON" and family_or_kind(engine) == POSTGRESQL:
             uncompared[col] = _JSON_TEXT
             typed[col] = ddl
         elif normalize_logical_type(ddl) in {"string", "text"}:
@@ -196,7 +198,7 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
     from services.exit_value_fidelity import adapter_fold, array_token, driver_fold, element_ddl, server_text_kind
     from services.exit_verify_guard import tick
 
-    eng = str(engine or "").strip().lower()
+    eng = family_or_kind(engine)  # the engine by its family (review 5, C-1)
     exact, typed, uncompared = digest_plan(list(columns), dict(types or {}), eng)
     # Types Gate-8's typed kernel folds within (a double to 15 digits, a timetz to a wall clock, ...)
     # are compared by an exact token of what the type stores (review 2, N5 / N8).
@@ -204,7 +206,7 @@ def profile_rows(rows: Iterable[dict[str, Any]], columns: list[str], key_columns
               and (kind := token_kind(_declared(dict(types or {}), c), eng))}
     # An array is compared element by element, each number with its scale and sign (review 4, H-2).
     arrays = {c: ddl for c in columns if c not in uncompared and c not in tokens
-              and eng in {"postgresql", "postgres"} and element_ddl(ddl := _declared(dict(types or {}), c))}
+              and eng == POSTGRESQL and element_ddl(ddl := _declared(dict(types or {}), c))}
     for col in [*tokens, *arrays]:
         typed.pop(col, None)
         exact.discard(col)
@@ -417,6 +419,7 @@ def json_null_documents(endpoint: Any, types: dict[str, str], engine: str) -> di
     """
     from services.exit_value_tokens import JSON_DOCUMENT, token_kind
 
+    engine = family_or_kind(engine)
     columns = [c for c, ddl in types.items() if token_kind(ddl, engine) == JSON_DOCUMENT]
     if not columns:
         return {}
@@ -467,7 +470,7 @@ def text_read_as_json(types: dict[str, str], endpoint: Any, engine: str) -> set[
     hold JSON documents is text; only the catalog says which it is, so an
     unread catalog answers "none" and the column keeps the json rule (fail closed).
     """
-    if engine not in {"postgresql", "postgres"}:
+    if family_or_kind(engine) != POSTGRESQL:
         return set()
     inferred = {c for c, ddl in types.items() if str(ddl).split("(")[0].strip().upper() == "JSON"}
     if not inferred:

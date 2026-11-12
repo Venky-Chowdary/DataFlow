@@ -83,3 +83,21 @@ def test_c1_shapes_the_driver_reads_one_to_one_are_still_proven(pg, fmt):
     tables = _rehearse(pg(HONEST), fmt)
     wrong = {g: (t["status"], t["reason"]) for g, t in tables.items() if t["status"] != "proven"}
     assert not wrong, wrong
+
+
+def test_review5_c1_the_same_tables_saved_under_a_postgresql_family_type_get_identical_verdicts(pg, monkeypatch):
+    """Review 5, C-1: a hosted PostgreSQL tile (supabase, amazon_rds_postgresql) is PostgreSQL on the wire."""
+    from services import schedule_runner
+
+    shapes = {g: NAMED[g][:2] for g in ("arrlb", "tm24", "jbnum")}
+    shapes.update({"numarr": DIFFERS["numarr"][:2], "jbok": HONEST["jbok"]})
+    names = pg(shapes)
+    resolve = schedule_runner._resolve_connector_for_schedule
+    verdicts = {}
+    for ctype in ("postgresql", "supabase", "amazon_rds_postgresql"):
+        monkeypatch.setattr(schedule_runner, "_resolve_connector_for_schedule",
+                            lambda c, s, _t=ctype: {**resolve(c, s), "type": _t})
+        verdicts[ctype] = {g: t["status"] for g, t in _rehearse(names, "jsonl").items()}
+    assert verdicts["postgresql"] == {"arrlb": "not_proven", "tm24": "not_proven", "jbnum": "not_proven",
+                                      "numarr": "incomplete", "jbok": "proven"}, verdicts
+    assert verdicts["supabase"] == verdicts["postgresql"] == verdicts["amazon_rds_postgresql"], verdicts

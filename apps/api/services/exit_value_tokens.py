@@ -50,9 +50,12 @@ def token_kind(ddl: str, engine: str) -> str | None:
     from services.reversibility_types import keeps_offset
     from services.type_system import datetime_timezone_polarity, normalize_logical_type
 
+    from src.transfer.engine_family import family_or_kind
+
     text = str(ddl or "").strip()
     if not text:
         return None
+    engine = family_or_kind(engine)  # the engine by its family (review 5, C-1)
     family, base = normalize_logical_type(text), _base(text)
     if family == "float":
         return FLOAT
@@ -71,7 +74,7 @@ def token_kind(ddl: str, engine: str) -> str | None:
             return AWARE
         if polarity == "ntz":
             return NAIVE_DATETIME
-    if base == "JSONB" and engine in {"postgresql", "postgres"}:
+    if base == "JSONB" and engine == "postgresql":
         # A parsed document (the driver hands back the document itself). A PostgreSQL ``json`` keeps its
         # text and is not compared; other engines' JSON types stay on Gate-8's document comparison.
         return JSON_DOCUMENT

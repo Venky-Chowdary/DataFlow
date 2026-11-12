@@ -22,10 +22,9 @@ from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-_PG = frozenset({"postgresql", "postgres"})
-#: (engine, declared base) pairs stored as a single-precision float.
-_FLOAT4 = {("postgresql", "REAL"), ("postgresql", "FLOAT4"), ("postgres", "REAL"), ("postgres", "FLOAT4"),
-           ("mysql", "FLOAT"), ("mariadb", "FLOAT"), ("sqlserver", "REAL"), ("mssql", "REAL")}
+_PG = frozenset({"postgresql"})
+#: (engine family, declared base) pairs stored as a single-precision float.
+_FLOAT4 = {("postgresql", "REAL"), ("postgresql", "FLOAT4"), ("mysql", "FLOAT"), ("sqlserver", "REAL")}
 _REFUSED = object()
 
 
@@ -52,7 +51,7 @@ def _float_text(value: float, ddl: str, engine: str) -> str:
         text = _float4_text(value)
     else:
         text = float.__repr__(value)
-    if engine in _PG | {"mysql", "mariadb"} and text.endswith(".0"):
+    if engine in _PG | {"mysql"} and text.endswith(".0"):
         text = text[:-2]  # these engines print an integral float without ".0"
     return text
 
@@ -149,7 +148,9 @@ def cast_changes(text: str | None, converted: Any, ddl: str, engine: str, *, has
         return None
     if text is None:
         return False
-    eng = str(engine or "").lower()
+    from src.transfer.engine_family import family_or_kind
+
+    eng = family_or_kind(engine)  # a hosted tile renders as its engine (review 5, C-1 / M-3)
     if render_text(text, family, ddl, eng) != text:
         return True
     if has_converted and converted is not None and render_value(converted, family, ddl, eng) != text:
