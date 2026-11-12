@@ -92,9 +92,12 @@ def test_successful_run_closes_the_park_and_keeps_the_cadence(temp_store):
         "last_status": "needs_approval",
         "next_run_at": "2030-01-01T00:00:00+00:00",
     })
-    from services.schedule_approvals import close_finding_after_successful_run
+    from services.schedule_approvals import finding_closed_by_success
 
-    close_finding_after_successful_run(parked.id)
+    # What a completed run's finalizer stores with the run (_finalize_run).
+    patch = finding_closed_by_success(store.get_schedule(parked.id))
+    assert patch is not None
+    store.update_schedule(parked.id, patch)
     done = store.get_schedule(parked.id)
     assert done is not None
     assert not store.has_open_approval(done)

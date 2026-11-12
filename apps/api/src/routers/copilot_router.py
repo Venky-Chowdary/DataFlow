@@ -959,7 +959,9 @@ async def copilot_confirm(
                 job_id = _run_schedule(schedule_id, manual=True, triggered_by=actor)
             except ScheduleStartError as exc:
                 ledger.release_claim(ack_id)
-                raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+                raise HTTPException(
+                    status_code=exc.http_status, detail=str(exc), headers=exc.headers
+                ) from exc
             except ApiError:
                 ledger.release_claim(ack_id)
                 raise
