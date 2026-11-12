@@ -10,9 +10,6 @@ from __future__ import annotations
 
 import itertools
 
-from hypothesis import given, settings
-from hypothesis import strategies as st
-
 from services.cursor_order import compare_values, max_value, order_key
 from services.sync_cursor import (
     KEYSET_SEP,
@@ -21,17 +18,17 @@ from services.sync_cursor import (
     max_cursor_value,
 )
 
-_VALUE = st.one_of(
-    st.integers(min_value=-10**15, max_value=10**15).map(str),
-    st.decimals(allow_nan=False, allow_infinity=False, places=3,
-                min_value=-10**6, max_value=10**6).map(str),
-    st.datetimes().map(lambda d: d.isoformat()),
-    st.datetimes().map(lambda d: d.replace(microsecond=0).isoformat() + "Z"),
-    st.datetimes().map(lambda d: d.replace(microsecond=0).isoformat() + "-04:00"),
-    st.dates().map(lambda d: d.isoformat()),
-    st.text(alphabet="019aAzZ-_/. ", min_size=1, max_size=8).filter(lambda s: s.strip()),
-    st.sampled_from(["2", "10", "1a", "9999999999", "1000000000000", "01", "1.0", "1e3"]),
-)
+# One value of every class the comparator distinguishes, plus the audit's
+# cycle and the epoch-width pair. The exhaustive checks below run in every
+# environment; ``test_cursor_order_total_property.py`` widens the inputs
+# with hypothesis where it is installed.
+_CORPUS = [
+    "", "2", "10", "1a", "01", "-7", "0", "9999999999", "1000000000000",
+    "1.0", "1.5", "-0.25", "1e3",
+    "2024-01-01", "2024-01-01T09:00:00Z", "2024-01-01T05:30:00-04:00",
+    "2024-01-01T09:00:00", "2024-01-01T09:00:00.123456", "2026-01-01T16:15:00+05:30",
+    "abc", "ABC", "a-b", "z", "Z_9", "1/2", ". ",
+]
 
 
 def test_the_audit_cycle_is_gone():
@@ -75,28 +72,23 @@ def test_composite_watermarks_order_by_cursor_then_typed_tiebreak():
     assert advance_stored_cursor(high, low) == (high, False)
 
 
-@settings(max_examples=400, deadline=None)
-@given(_VALUE, _VALUE, _VALUE)
-def test_cursor_compare_is_transitive(a, b, c):
-    ab, bc, ac = compare_values(a, b), compare_values(b, c), compare_values(a, c)
-    if ab <= 0 and bc <= 0:
-        assert ac <= 0, (a, b, c, order_key(a), order_key(b), order_key(c))
-    if ab >= 0 and bc >= 0:
-        assert ac >= 0, (a, b, c)
+def test_cursor_compare_is_a_total_order_on_the_corpus():
+    for a, b in itertools.product(_CORPUS, repeat=2):
+        assert compare_values(a, b) == -compare_values(b, a), (a, b)
+        assert compare_cursor_values(a, b) == compare_values(a, b), (a, b)
+    for a, b, c in itertools.product(_CORPUS, repeat=3):
+        ab, bc, ac = compare_values(a, b), compare_values(b, c), compare_values(a, c)
+        if ab <= 0 and bc <= 0:
+            assert ac <= 0, (a, b, c, order_key(a), order_key(b), order_key(c))
+        if ab >= 0 and bc >= 0:
+            assert ac >= 0, (a, b, c)
 
 
-@settings(max_examples=400, deadline=None)
-@given(_VALUE, _VALUE)
-def test_cursor_compare_is_antisymmetric_and_matches_the_stored_cursor(a, b):
-    assert compare_values(a, b) == -compare_values(b, a)
-    assert compare_values(a, a) == 0
-    assert compare_cursor_values(a, b) == compare_values(a, b)
-
-
-@settings(max_examples=200, deadline=None)
-@given(st.lists(_VALUE, min_size=1, max_size=6))
-def test_max_is_the_same_for_every_arrival_order(values):
-    expected = order_key(max_value(values))
-    for perm in itertools.islice(itertools.permutations(values), 24):
-        got = max_cursor_value([[v] for v in perm], ["c"], "c")
-        assert order_key(got) == expected, (perm, got)
+def test_max_is_the_same_for_every_arrival_order_on_the_corpus():
+    values = [v for v in _CORPUS if v]
+    for window in range(0, len(values) - 3):
+        chunk = values[window:window + 4]
+        expected = order_key(max_value(chunk))
+        for perm in itertools.permutations(chunk):
+            got = max_cursor_value([[v] for v in perm], ["c"], "c")
+            assert order_key(got) == expected, (perm, got)
