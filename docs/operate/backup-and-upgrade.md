@@ -249,6 +249,34 @@ upgrade: the API moves files in both at its first start.
 - A finished run is no longer visible without its outcome, and a parked retry
   is not counted as a later run.
 
+#### Incremental syncs (PR 407)
+
+- **Overlap re-read.** Non-PostgreSQL SQL sources with a key re-read the last
+  300 s (temporal cursor) or 1,000 values (integer cursor) on every bounded
+  run; re-read rows collapse on the row version, so nothing is duplicated.
+  `cursor_overlap_seconds` / `cursor_overlap_values` (per stream) or
+  `DATAWRAP_CURSOR_OVERLAP_SECONDS` / `_VALUES` (deployment) change it; `0`
+  turns it off and the route then says it is not guaranteed.
+- **Refused cursors.** A schedule whose text cursor holds unpadded numbers,
+  mixed-offset or mixed-precision timestamps, non-UTC text timestamps where
+  the watermark is UTC, day/month or month/day dates, or ISO date-times mixing
+  `T` and a space now fails with the reason (before, rows could be skipped
+  silently). A file date cursor with a cell that is not a date (`N/A`) is
+  refused before the write; set the file's date order (`date_locale=DMY` or
+  `MDY`), clean the cells, or run a full refresh.
+- **First run after upgrade.** A PostgreSQL route records a snapshot bound and
+  is commit-safe from the next run on. Narrowing to the in-progress list needs
+  PostgreSQL 16; older servers judge on the horizon (correct, re-checks more
+  rows) and the evidence says so.
+- **Source load.** The PostgreSQL late-commit check holds one read-only
+  snapshot on the source for at most `DATAWRAP_COMMIT_SAFE_WALK_SECONDS`
+  (default 30); probe statements time out after
+  `DATAWRAP_COMMIT_SAFE_PROBE_TIMEOUT_MS` (default 5000).
+- **Grades and entries.** A run that recovers a late row can grade `partial`;
+  quiet PostgreSQL runs rewrite the route's cursor entry (the bound is new each
+  run). `key_census_every` is off by default; when on, a missing key fails the
+  run. Kill switch: `DATAWRAP_COMMIT_SAFE_WINDOW=0`.
+
 #### Training and egress (PR 410)
 
 - **`DATAWRAP_TRAINING`.** Set, only `1`, `true`, `yes` or `on` turns

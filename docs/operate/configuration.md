@@ -93,7 +93,7 @@ The scan covers the runtime Python under `apps/api/src`, `apps/api/services`,
 
 <!-- BEGIN GENERATED: config-flags (docs/tools/gen_config_reference.py) -->
 
-551 flags: 465 accept both prefixes, 10 are read under one exact product-prefixed name only, 76 are unprefixed.
+557 flags: 471 accept both prefixes, 10 are read under one exact product-prefixed name only, 76 are unprefixed.
 
 ### Flags that accept both prefixes
 
@@ -167,6 +167,9 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `CDC_TXN_HOLD_SLEEP_SEC` | `0.25` | Read by `_run_cdc_shared_multi_table()`: One log consumer for N tables (Debezium-class); demux apply per stream (and other readers) | `apps/api/src/transfer/cdc_transfer.py` |
 | `CDC_TXN_SPILL_AFTER` | `""` | Read by `default_txn_spill_after()`: Spill in-memory events to disk after this many (keeps RAM bounded) | `apps/api/services/cdc_transaction_buffer.py` |
 | `CHUNK_SIZE` | `20000` | Read at module level: Shared row mapping utilities for database writers | `apps/api/connectors/writer_common.py` |
+| `COMMIT_SAFE_PROBE_TIMEOUT_MS` | `5000` | Statement timeout, in milliseconds, of every commit-safe probe connection (relation facts, snapshot capture, late-commit check). A probe that times out makes that run "not guaranteed" and raises a Gate-8 warning. `0` = no timeout. | `apps/api/services/commit_safe_window.py` |
+| `COMMIT_SAFE_WALK_SECONDS` | `30` | Budget, in seconds, of one PostgreSQL late-commit walk, which holds one read-only snapshot on the source. Past it the walk stops and the run re-reads from the oldest reported row (no row is skipped). `0` = stop after one page. | `apps/api/services/commit_safe_window.py` |
+| `COMMIT_SAFE_WINDOW` | `True` | Kill switch for the commit-safe incremental read window (PR 407). On by default; `0`/`false` turns it off, and the run's evidence then says the window was switched off. | `apps/api/services/commit_safe_routes.py`, `apps/api/src/transfer/stream_commit_window.py` |
 | `COMMIT_SHA` | unset | Read by `_build_commit()`: Best-effort deployed git SHA for health reporting | `apps/api/src/main.py` |
 | `CONFINE_LOCAL_FILES` | `""` | Read by `confine_local_files()`: Where embedded databases and local warehouses may live on the API host | `apps/api/services/local_file_policy.py` |
 | `CONNECTOR_POOL_WORKERS` | `16` | Read by `__init__()`: A bounded executor of its own for calls that reach a customer's system (D181) | `apps/api/services/connector_executor.py` |
@@ -185,6 +188,8 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `CROSS_PAIR_TIMEOUT` | unset | Read by `_pair_timeout_sec()`: Unique-engine source × dest cartesian on live desktop backends | `apps/api/services/desktop_lab_cross.py` |
 | `CSV_LOCAL_COPY` | `1` | Read by `csv_local_copy_enabled()`: Local CSV/TSV identity COPY into PostgreSQL, MySQL, or SQLite | `apps/api/services/copy_csv_local.py` |
 | `CSV_LOCAL_COPY_BATCH` | `5000` | Read by `csv_local_copy_batch()`: Local CSV/TSV identity COPY into PostgreSQL, MySQL, or SQLite | `apps/api/services/copy_csv_local.py` |
+| `CURSOR_OVERLAP_SECONDS` | `300` | Deployment-wide overlap re-read window, in seconds, for a temporal cursor on non-PostgreSQL SQL sources. A stream's `cursor_overlap_seconds` overrides it; `0` turns the window off (the route then says it is not guaranteed). | `apps/api/services/commit_safe_window.py` |
+| `CURSOR_OVERLAP_VALUES` | `1000` | Deployment-wide overlap re-read window, in cursor values, for an integer cursor on non-PostgreSQL SQL sources. A stream's `cursor_overlap_values` overrides it; `0` turns the window off. | `apps/api/services/commit_safe_window.py` |
 | `DATA_DIR` | `""` | Directory for the service's own state files. When unset, a mounted volume's `data/` folder is used, else `apps/api/data`. | `apps/api/services/platform_config.py` |
 | `DATA_REGIONS` | `""` | Comma-separated regions a workspace may record. | `apps/api/services/tenant_store.py` |
 | `DATE_ORDER` | unset | Read by `_env_date_locale()`: Deployment-level date order from the environment | `apps/api/services/transform_engine.py` |
@@ -541,6 +546,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `TENANT_IP_ALLOWLIST_ENFORCE` | `True` | Read by `enforcement_on()`: Kill switch: on unless the platform turned allowlist enforcement off | `apps/api/services/ip_allowlist_policy.py` |
 | `TEST_MSSQL_HOST` | `127.0.0.1` | Read by `bind_live_engine()`: Bind one unique engine to a live desktop backend, or a skip reason | `apps/api/services/desktop_lab_cross.py` |
 | `TEST_MSSQL_PASSWORD` | `""` | Read by `bind_live_engine()`: Bind one unique engine to a live desktop backend, or a skip reason (and other readers) | `apps/api/services/desktop_lab_cross.py`, `apps/api/services/million_row_bench.py` |
+| `TEXT_CURSOR_SHAPE_CHECK_SECONDS` | `""` | How often, in seconds, a text cursor's every-row shape scan re-runs on a route (default daily). It also re-runs when the table's estimated size moves by more than 10%, and always on a route's first run. | `apps/api/services/cursor_order.py` |
 | `TOKEN_TTL_SEC` | set in code (not shown) | Lifetime of a session token in seconds. | `apps/api/src/services/auth_service.py` |
 | `TRACE_CONSOLE` | `0` | Read by `ensure_provider()`: Initialize the global TracerProvider once. Safe to call repeatedly | `apps/api/services/tracing.py` |
 | `TRAINING` | `False` | Runs the background training agent. Unset: on outside production, off in production. Set: only `1`, `true`, `yes` or `on` turn it on; any other value, an empty one included, leaves it off. | `apps/api/src/ai/training/training_scheduler.py` |

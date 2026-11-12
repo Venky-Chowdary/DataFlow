@@ -73,5 +73,11 @@
   "MONGODB_URI": "MongoDB connection string. Checked first, before `MONGO_URL`, `MONGO_PRIVATE_URL`, `MONGODB_URL` and `MONGO_PUBLIC_URL`.",
   "EMAIL_PROVIDER": "Transactional email provider: `smtp` (default), `sendgrid`, `resend` or `mailgun`.",
   "TRAINING": "Runs the background training agent. Unset: on outside production, off in production. Set: only `1`, `true`, `yes` or `on` turn it on; any other value, an empty one included, leaves it off.",
-  "SEED_DEMO": "Seeds example data at start. The deployment files in this repository set it to `0`."
+  "SEED_DEMO": "Seeds example data at start. The deployment files in this repository set it to `0`.",
+  "COMMIT_SAFE_WINDOW": "Kill switch for the commit-safe incremental read window (PR 407). On by default; `0`/`false` turns it off, and the run's evidence then says the window was switched off.",
+  "COMMIT_SAFE_PROBE_TIMEOUT_MS": "Statement timeout, in milliseconds, of every commit-safe probe connection (relation facts, snapshot capture, late-commit check). A probe that times out makes that run \"not guaranteed\" and raises a Gate-8 warning. `0` = no timeout.",
+  "COMMIT_SAFE_WALK_SECONDS": "Budget, in seconds, of one PostgreSQL late-commit walk, which holds one read-only snapshot on the source. Past it the walk stops and the run re-reads from the oldest reported row (no row is skipped). `0` = stop after one page.",
+  "CURSOR_OVERLAP_SECONDS": "Deployment-wide overlap re-read window, in seconds, for a temporal cursor on non-PostgreSQL SQL sources. A stream's `cursor_overlap_seconds` overrides it; `0` turns the window off (the route then says it is not guaranteed).",
+  "CURSOR_OVERLAP_VALUES": "Deployment-wide overlap re-read window, in cursor values, for an integer cursor on non-PostgreSQL SQL sources. A stream's `cursor_overlap_values` overrides it; `0` turns the window off.",
+  "TEXT_CURSOR_SHAPE_CHECK_SECONDS": "How often, in seconds, a text cursor's every-row shape scan re-runs on a route (default daily). It also re-runs when the table's estimated size moves by more than 10%, and always on a route's first run."
 }

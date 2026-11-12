@@ -6,6 +6,12 @@ does not describe changes that are not named there.
 
 ## 12 November 2026
 
+- **Incremental syncs no longer skip late-committed rows** (PR 407). A
+  commit-safe read window: the PostgreSQL snapshot horizon, an overlap re-read
+  for other SQL sources, one total cursor order, refusals for text and file
+  cursors that cannot be ordered, and an optional key census. Read the upgrade
+  notes: see
+  [operate/backup-and-upgrade.md](operate/backup-and-upgrade.md#incremental-syncs-pr-407).
 - **Workspace isolation and residency** (PR 403). Deny-by-default residency
   addressing, per-workspace file volumes, and ownership checks on ids named
   in a request body. Operators should read the upgrade notes before
