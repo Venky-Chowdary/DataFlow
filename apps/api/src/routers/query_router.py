@@ -1162,7 +1162,9 @@ async def query_schema(
     try:
         # Off the event loop, under the connector deadline (D321).
         info = await run_off_event_loop(
-            "introspect_connector_schema", lambda: introspect_endpoint(endpoint), _timed_out
+            "introspect_connector_schema",
+            lambda: _in_connector_scope(body.connector_id, introspect_endpoint, endpoint),
+            _timed_out,
         )
     except HTTPException:
         raise
@@ -1276,7 +1278,7 @@ async def query_schemas(
     if endpoint is None:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    live = live_schema_names(endpoint)
+    live = _in_connector_scope(body.connector_id, live_schema_names, endpoint)
     tree = build_catalog_tree(
         connector_type=str(getattr(endpoint, "format", "") or ""),
         database=body.database or str(getattr(endpoint, "database", "") or ""),
@@ -1284,6 +1286,14 @@ async def query_schemas(
         live_schemas=live,
     )
     return QuerySchemasResult(**tree)
+
+
+def _in_connector_scope(connector_id: str, fn: Any, *args: Any) -> Any:
+    """Run ``fn`` with the stored connector's own workspace bound for the exports tree (H5)."""
+    from services.export_paths import stored_connector_export_scope
+
+    with stored_connector_export_scope(connector_id):
+        return fn(*args)
 
 
 def _object_matches(listed: str, requested: str) -> bool:
@@ -1373,16 +1383,19 @@ def _export_to_connector(
     if write_mode != "insert":
         write_mode = "insert"
 
+    from services.export_paths import connector_export_scope
+
     try:
-        rows_written, ddl_log, dest_summary = write_destination_database(
-            dest,
-            records=rows,
-            columns=columns,
-            schema=schema,
-            mappings=mappings,
-            write_mode=write_mode,
-            conflict_columns=body.conflict_columns,
-        )
+        with connector_export_scope(getattr(dest_connector, "workspace_id", "")):
+            rows_written, ddl_log, dest_summary = write_destination_database(
+                dest,
+                records=rows,
+                columns=columns,
+                schema=schema,
+                mappings=mappings,
+                write_mode=write_mode,
+                conflict_columns=body.conflict_columns,
+            )
         return QueryExportResult(
             success=True,
             row_count=rows_written,
@@ -1813,8 +1826,13 @@ def _run_sql_query(
         # TLS trust / SID / driver keywords the operator saved (QA round 11).
         "extra": dict(getattr(connector, "extra", None) or {}),
     }
+    from services.export_paths import connector_export_scope
+
     try:
-        engine = get_sqlalchemy_engine(cfg)
+        # An embedded file in the exports tree opens as the connector's own
+        # workspace, never the request header's (security review round 2, H5).
+        with connector_export_scope(getattr(connector, "workspace_id", "")):
+            engine = get_sqlalchemy_engine(cfg)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=400, detail=redact_log_text(str(exc))

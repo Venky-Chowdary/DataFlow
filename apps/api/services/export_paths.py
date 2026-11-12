@@ -26,8 +26,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Iterator
 
 from services.brand_env import getenv_brand
 
@@ -122,23 +124,67 @@ def current_export_workspace() -> str:
     return bound_job_workspace() or current_workspace_stamp(for_write=False)
 
 
+#: The saved connector being opened right now: its own workspace (``""`` for
+#: an unscoped legacy connector). Bound by the code that loaded the stored
+#: record (:func:`connector_export_scope`), never from request input.
+_connector_workspace: ContextVar[str | None] = ContextVar("export_connector_workspace", default=None)
+
+
+@contextmanager
+def connector_export_scope(workspace_id: str | None) -> Iterator[None]:
+    """Open a stored connector's embedded-database file as that connector's workspace."""
+    token = _connector_workspace.set(str(workspace_id or "").strip())
+    try:
+        yield
+    finally:
+        _connector_workspace.reset(token)
+
+
+@contextmanager
+def stored_connector_export_scope(connector_id: str) -> Iterator[None]:
+    """:func:`connector_export_scope` for a stored connector, by its recorded owner."""
+    from services.connector_store import connector_owner_workspace
+
+    _found, owner = connector_owner_workspace(str(connector_id or ""))
+    with connector_export_scope(owner):
+        yield
+
+
+def _unbound_may_open_flat_folder() -> bool:
+    """With no job or connector bound: the single local operator (auth off) or a
+    platform administrator. A binding lost in a pool thread lands here and,
+    under multi-tenant auth, refuses (no caller is bound there either)."""
+    from services.connector_access import current_caller
+    from src.services.auth_service import auth_required
+
+    if not auth_required():
+        return True
+    caller = current_caller()
+    return bool(caller is not None and caller.platform_admin)
+
+
 def connector_may_open_export_path(resolved: Path) -> bool:
     """Whether an embedded-database connector path inside the exports tree is
     the caller's own export area.
 
-    The rule :func:`resolve_export_path` applies to an export name, applied to
-    an already-resolved path: with a workspace bound (the running job's, else
-    the request's), only that workspace's folder; with none (the single local
-    operator), the flat folder but never ``_workspaces``. A SQLite export the
-    platform writes therefore opens, and a path into another workspace's
-    folder never does.
+    The binding is the running job's workspace (``export_job_scope``), else
+    the stored connector's own workspace (:func:`connector_export_scope`),
+    and then only that workspace's folder. A request header never binds it:
+    a member who omitted ``X-Workspace-Id`` used to read as unbound and open
+    the flat folder (security review round 2, H5). With nothing bound,
+    ``_workspaces`` is always refused and the flat folder opens only for the
+    single local operator or a platform administrator.
     """
+    from services.export_object_store import bound_job_workspace
+
     root = exports_dir(create=False)
-    workspace = current_export_workspace()
+    workspace = bound_job_workspace() or (_connector_workspace.get() or "")
     if workspace:
         own = root / WORKSPACES_DIRNAME / _workspace_segment(workspace)
         return _is_within(own, resolved)
-    return _is_within(root, resolved) and not _is_within(root / WORKSPACES_DIRNAME, resolved)
+    if _is_within(root / WORKSPACES_DIRNAME, resolved):
+        return False
+    return _unbound_may_open_flat_folder()
 
 
 def _is_within(base: Path, candidate: Path) -> bool:

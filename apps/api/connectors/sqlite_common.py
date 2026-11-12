@@ -235,8 +235,8 @@ def _confine_embedded_path(
         )
     if is_within(resolved, exports) and not connector_may_open_export_path(resolved):
         raise ValueError(
-            f"{label} path is inside another workspace's area of the Datawrap "
-            "export folder and cannot be opened as a connector; "
+            f"{label} path is inside the Datawrap export folder, outside this "
+            "connector's own workspace area, and cannot be opened as a connector; "
             f"place the file elsewhere or set {env_name}"
         )
     if not roots:

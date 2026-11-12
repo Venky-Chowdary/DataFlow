@@ -932,6 +932,9 @@ def _engine(cfg: dict[str, Any]) -> Any:
     scoped = endpoint_scoped_engine(cfg)
     if scoped is not None:
         return scoped
+    kind = str(cfg.get("type") or cfg.get("format") or "").lower()
+    if kind in ("sqlite", "duckdb") or str(cfg.get("connection_string") or "").lower().startswith(("sqlite", "duckdb")):
+        _build_url(dict(cfg))  # a pool hit skips _build_engine: confine on every call
     # Flatten nested extra TLS/SID/driver keywords *before* the pool key, or
     # a verify-or-fail engine is reused after the operator declared trust.
     return get_pooled_engine(with_connection_options(cfg), _build_engine)

@@ -596,13 +596,14 @@ def test_saved_connector(
     require_admin_connector_access(request, conn.type)
 
     from services.connector_probe import probe_saved_connector
+    from services.export_paths import connector_export_scope
 
     with connector_operation(
         "probe",
         driver_family=driver_family(conn.type or ""),
         surface="saved_test",
         connector_id=connector_id,
-    ):
+    ), connector_export_scope(getattr(conn, "workspace_id", "")):
         ok, message, cfg = probe_saved_connector(
             connector_id,
             workspace_id=workspace_id,
