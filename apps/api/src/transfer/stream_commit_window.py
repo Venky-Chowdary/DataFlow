@@ -155,14 +155,14 @@ def refuse_unorderable_text_cursor(cfg: Any, scope: Any, catalog: tuple | None, 
     source that cannot be probed is read as before.
     """
     from connectors.cursor_bind import declared_type_is_zone_bearing
-    from services.cursor_order import is_text_declared, probe_text_cursor
+    from services.cursor_order import probe_text_cursor
 
-    # The sync's type for the column is inferred; the source's ordering is not.
-    # SQLite compares stored text as text whatever the column is declared, so
-    # it is always asked; elsewhere only a text-typed cursor is.
+    # The sync's type for the column is inferred (ISO-looking text infers as a
+    # timestamp, here and in the canonical catalog types); the source's
+    # ordering is not. So every SQL source is asked: the probe reads the
+    # column's own declared type and judges only a text column (SQLite: every
+    # column, since it compares stored text as text whatever it is declared).
     typed = _cursor_type(cfg, scope, (catalog or ({},))[0])
-    if not (is_text_declared(typed) or (cfg.src_read_type or "").lower() == "sqlite"):
-        return
     try:
         from services.null_cursor_probe import _resolve_source_cfg
         from services.source_duplicate_probe import is_sqlish_source

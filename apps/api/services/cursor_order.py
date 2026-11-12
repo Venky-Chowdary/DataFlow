@@ -45,6 +45,26 @@ _NAIVE_ISO_RE = re.compile(
 )
 _OFFSET_RE = re.compile(r"(Z|z|[+-]\d{2}(?::?\d{2})?)$")
 _DIGITS_RE = re.compile(r"^[0-9]+$")
+#: A calendar date written in any order other than ISO's year-month-day
+#: (``31/12/2023``, ``12/31/2023``, ``31.12.2023``, ``31-12-2023 10:00``). As
+#: text it sorts by its leading day or month, never in time order.
+_CALENDAR_TEXT_RE = re.compile(
+    r"^([0-9]{1,2})([/.\-])([0-9]{1,2})\2([0-9]{4}|[0-9]{2})(?:[ T][0-9].*)?$"
+)
+
+
+def _is_calendar_text(text: str) -> bool:
+    """A day/month or month/day date (with an optional time), year last.
+
+    Both readings are tried; a value neither reads as a calendar date (a
+    version '1.10.0', a code '7-40-12') is ordinary text.
+    """
+    match = _CALENDAR_TEXT_RE.match(text)
+    if match is None:
+        return False
+    first, _sep, second, _year = match.groups()
+    a, b = int(first), int(second)
+    return (1 <= a <= 31 and 1 <= b <= 12) or (1 <= a <= 12 and 1 <= b <= 31)
 
 
 def _naive_key(text: str) -> tuple[datetime, Decimal] | None:
@@ -142,6 +162,11 @@ SHAPE_NUMBER = "number_text"
 SHAPE_MIXED_OFFSETS = "instant_text_mixed_offsets"
 SHAPE_MIXED = "mixed"
 SHAPE_EMPTY = "empty"
+#: Dates written day/month or month/day: text order is not time order.
+SHAPE_CALENDAR_TEXT = "non_iso_date_text"
+#: ISO wall-clock text in more than one layout (separator, fraction width, or
+#: date-only beside date-time): text order is not time order across layouts.
+SHAPE_MIXED_LAYOUTS = "wallclock_text_mixed_layouts"
 
 #: Shapes for which the engine's text order is this module's order.
 ORDERABLE_TEXT_SHAPES = frozenset(
@@ -165,16 +190,61 @@ class TextCursorShape:
         return self.kind in ORDERABLE_TEXT_SHAPES
 
 
+def _layout_of(text: str, any_separator: bool = False) -> str:
+    """The layout of a value: every digit replaced by ``_``, separators kept.
+
+    ``any_separator``: the date/time separator (position 10) matches either
+    'T' or a space.
+    """
+    layout = re.sub(r"[0-9]", "_", text)
+    if any_separator and len(layout) > 10 and layout[10] in "T ":
+        layout = layout[:10] + "_" + layout[11:]
+    return layout
+
+
+def _split_fraction(layout: str) -> tuple[str, int]:
+    """``(layout without its fraction, fraction width)`` of a wall-clock layout."""
+    if len(layout) > 19 and layout[19] == ".":
+        return layout[:19], len(layout) - 20
+    return layout, 0
+
+
+def wallclock_like_patterns(
+    shape: TextCursorShape, values: Iterable[str], *, any_separator: bool = False
+) -> tuple[str, ...]:
+    """``LIKE`` patterns one wall-clock layout allows: its base, and with its fraction width."""
+    if shape.kind != SHAPE_WALLCLOCK:
+        return ()
+    base, width = "", 0
+    for value in values:
+        b, w = _split_fraction(_layout_of(str(value), any_separator))
+        base, width = b, max(width, w)
+    if not base:
+        return ()
+    escaped = base.replace("\\", "\\\\").replace("%", "\\%")
+    return (escaped,) + ((escaped + "." + "_" * width,) if width else ())
+
+
 def _offset_of(text: str) -> str:
     match = _OFFSET_RE.search(text)
     return match.group(1) if match else ""
 
 
-def text_cursor_shape(values: Iterable[Any]) -> TextCursorShape:
-    """Classify the values of a text cursor column by how text order treats them."""
+def text_cursor_shape(values: Iterable[Any], *, separator_normalized: bool = False) -> TextCursorShape:
+    """Classify the values of a text cursor column by how text order treats them.
+
+    ``separator_normalized``: the source orders ISO date-times with their 'T'
+    rewritten to a space (SQLite routes read through ``sqlite_cursor_sort_expr``),
+    so the separator is not part of a value's layout there.
+    """
     texts = sorted({str(v).strip() for v in values if v is not None and str(v).strip() != ""})
     if not texts:
         return TextCursorShape(SHAPE_EMPTY)
+    calendar = [t for t in texts if order_key(t)[0] == _TEXT and _is_calendar_text(t)]
+    if calendar:
+        # Never read as dates (one order per value), and never sorted as dates
+        # by the source either: refused rather than read on text order.
+        return TextCursorShape(SHAPE_CALENDAR_TEXT, low=calendar[0], high=calendar[-1])
     ranks = {order_key(t)[0] for t in texts}
     if len(ranks) > 1:
         # Values of more than one kind. Text order and this module's order may
@@ -206,6 +276,23 @@ def text_cursor_shape(values: Iterable[Any]) -> TextCursorShape:
 
     aware = [t for t in texts if cursor_instant_key(t) is not None]
     if not aware:
+        # One ISO layout only: 'T' sorts after ' ', a longer fraction after a
+        # shorter one, and a date-only value before the date-times of its day,
+        # so two layouts interleave differently as text than in time.
+        # A value without a fraction beside one fraction width is safe: it is
+        # a prefix of the same second and sorts first, and fraction digits
+        # compare left to right (Python's isoformat drops a zero fraction).
+        bases: dict[str, str] = {}
+        widths: dict[int, str] = {}
+        for t in texts:
+            base, width = _split_fraction(_layout_of(t, separator_normalized))
+            bases.setdefault(base, t)
+            widths.setdefault(width, t)
+        if len(bases) > 1 or len(set(widths) - {0}) > 1:
+            pair = list(bases.values())[:2] if len(bases) > 1 else [
+                widths[w] for w in sorted(set(widths) - {0})[:2]
+            ]
+            return TextCursorShape(SHAPE_MIXED_LAYOUTS, low=min(pair), high=max(pair))
         return TextCursorShape(SHAPE_WALLCLOCK)
     offsets = {_offset_of(t) for t in aware}
     if len(aware) == len(texts) and len(offsets) == 1 and len({len(t) for t in texts}) == 1:
@@ -231,6 +318,24 @@ def text_cursor_refusal(column: str, shape: TextCursorShape) -> str:
             "rows without an error. Zero-padded values of one width are the only numbers "
             "text order keeps in sequence." + remedy
         )
+    if shape.kind == SHAPE_CALENDAR_TEXT:
+        return (
+            f"{lead}, but it holds dates written day/month or month/day ('{shape.low}'"
+            + (f", '{shape.high}'" if shape.high and shape.high != shape.low else "")
+            + "): as text they sort by their leading day or month, not by date, so an "
+            "incremental read past the watermark would skip rows without an error. Only "
+            "ISO-8601 dates (YYYY-MM-DD, in one layout) sort in time order as text."
+            + remedy
+        )
+    if shape.kind == SHAPE_MIXED_LAYOUTS:
+        return (
+            f"{lead}, but it holds date-times in more than one layout ('{shape.low}' and "
+            f"'{shape.high}'): a 'T' or a space between date and time, fractions of "
+            "different widths, or a date beside date-times sort differently as text than "
+            "in time, so an incremental read past the watermark would skip rows without "
+            "an error. Only one ISO layout (one separator, one fraction width) keeps text "
+            "order in time order." + remedy
+        )
     if shape.kind == SHAPE_MIXED_OFFSETS:
         return (
             f"{lead}, but it holds timestamps written with more than one UTC offset or "
@@ -254,15 +359,19 @@ def text_cursor_refusal(column: str, shape: TextCursorShape) -> str:
 _SAMPLE_ROWS = 200
 
 
-def like_pattern_for(shape: TextCursorShape, example: str) -> str:
+def like_pattern_for(shape: TextCursorShape, example: str, *, any_separator: bool = False) -> str:
     """``LIKE`` pattern every value of this shape matches, or ``""``.
 
     A zero-padded number or a one-offset timestamp is a fixed width (and a
-    fixed suffix); any row outside the pattern is a row text order misplaces.
+    fixed suffix); a wall clock is one ISO layout, separators included. Any
+    row outside the pattern is a row text order misplaces.
     """
     width = len(example)
     if shape.kind == SHAPE_PADDED_NUMBER and width:
         return "_" * width
+    if shape.kind == SHAPE_WALLCLOCK and width:
+        patterns = wallclock_like_patterns(shape, [example], any_separator=any_separator)
+        return patterns[-1] if patterns else ""
     if shape.kind == SHAPE_INSTANT and width > len(shape.offset):
         suffix = shape.offset.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         return "_" * (width - len(shape.offset)) + suffix
@@ -332,7 +441,7 @@ def probe_text_cursor(
         values = [v.strip() for v in values if isinstance(v, str) and v.strip()]
         if not values:
             return ""
-        shape = text_cursor_shape(values)
+        shape = text_cursor_shape(values, separator_normalized=by_storage)
         reason = text_cursor_refusal(column, shape)
         if reason:
             return reason
@@ -345,18 +454,31 @@ def probe_text_cursor(
                 "the timestamps in UTC, use a column the source types as a timestamp, "
                 "or run this sync as a full refresh."
             )
-        pattern = like_pattern_for(shape, values[0])
-        if not pattern:
-            return ""
-        odd = conn.execute(
-            sa.select(col)
-            .select_from(tbl)
-            .where(col.is_not(None), col.not_like(pattern, escape="\\"))
-            .limit(1)
-        ).first()
-    if odd is None:
-        return ""
-    return text_cursor_refusal(column, text_cursor_shape([*values, str(odd[0])]))
+        # Confirm the shape on every row: rows outside the allowed pattern(s)
+        # are fetched one at a time and the shape judged again with them (a
+        # wall clock may show its fraction width only in a later row).
+        for _round in range(3):
+            patterns = (
+                wallclock_like_patterns(shape, values, any_separator=by_storage)
+                if shape.kind == SHAPE_WALLCLOCK
+                else tuple(p for p in [like_pattern_for(shape, values[0])] if p)
+            )
+            if not patterns:
+                return ""
+            odd = conn.execute(
+                sa.select(col)
+                .select_from(tbl)
+                .where(col.is_not(None), *(col.not_like(p, escape="\\") for p in patterns))
+                .limit(1)
+            ).first()
+            if odd is None:
+                return ""
+            values = [*values, str(odd[0]).strip()]
+            shape = text_cursor_shape(values, separator_normalized=by_storage)
+            reason = text_cursor_refusal(column, shape)
+            if reason:
+                return reason
+    return ""
 
 
 def _is_utc_offset(offset: str) -> bool:

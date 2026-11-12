@@ -349,15 +349,14 @@ def _text_cursor_blockers(
     """Refuse a text cursor whose text order is not the sync's order (C3/H4b)."""
     try:
         from connectors.cursor_bind import declared_type_is_zone_bearing
-        from services.cursor_order import is_text_declared, probe_text_cursor
+        from services.cursor_order import probe_text_cursor
 
         cfg, db_type = _resolve_source_cfg(source_connector_id, source_config, None)
         if not cfg or not source_table or not is_sqlish_source(db_type):
             return []
         typed = str((column_types or {}).get(cursor) or "")
-        # SQLite compares stored text as text whatever the column is declared.
-        if typed and not is_text_declared(typed) and db_type != "sqlite":
-            return []
+        # The probe reads the source's own declared type: an inferred type
+        # here can call ISO-looking text a timestamp (review M2).
         reason = probe_text_cursor(
             cfg, source_table, cursor, utc_watermark=declared_type_is_zone_bearing(typed)
         )

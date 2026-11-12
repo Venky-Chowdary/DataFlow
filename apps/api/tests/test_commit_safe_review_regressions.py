@@ -600,3 +600,71 @@ def test_idle_writer_does_not_hide_a_real_late_commit(isolated, pg):
         "WHERE d.id IS NULL", fetch=True,
     )
     assert missing == []
+
+
+# --------------------------------------------------------------------------
+# M2 — wall-clock text in more than one layout, on live PostgreSQL
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "batches",
+    [
+        (["2024-01-05T12:00:00"], ["2024-01-05 13:00:00"], ["2024-01-06T08:00:00"]),
+        (["31/12/2023"], ["13/01/2024"], ["14/01/2024"]),
+    ],
+    ids=["iso-T-vs-space", "dd-mm-yyyy"],
+)
+def test_text_cursor_in_a_non_iso_or_mixed_layout_is_refused_before_any_write(
+    isolated, pg, batches
+):
+    """Text order is not time order for these: they were accepted, a later run
+    then failed after the read ("Append refused before insert") and kept failing
+    — or skipped a row while reporting success."""
+    _sql(f"CREATE TABLE {SCHEMA}.tt (id serial PRIMARY KEY, c text NOT NULL)")
+    dst = "tt_" + uuid.uuid4().hex[:6]
+    conn = _connect()
+    refused = []
+    try:
+        for batch in batches:
+            with conn.cursor() as cur:
+                for value in batch:
+                    cur.execute(f"INSERT INTO {SCHEMA}.tt (c) VALUES (%s)", (value,))
+            result = _run(isolated, "tt", dst, cursor="c", mode="incremental_append")
+            error = str(result.error or "")
+            assert "Append refused before insert" not in error, error
+            if result.success:
+                missing = _sql(
+                    f"SELECT s.id FROM {SCHEMA}.tt s LEFT JOIN {SCHEMA}.{dst} d ON d.id = s.id "
+                    "WHERE d.id IS NULL", fetch=True,
+                )
+                assert missing == [], "a green run left a row behind the watermark"
+            else:
+                assert "Cursor 'c' is a text column" in error, error
+                assert int(result.records_transferred or 0) == 0
+                refused.append(error)
+    finally:
+        conn.close()
+    assert refused, "the layout was never refused"
+
+
+def test_preflight_refuses_a_day_month_text_cursor(pg):
+    from services.null_cursor_probe import build_cursor_value_gates
+    from services.sync_cursor import IncrementalReadScope
+
+    _sql(f"CREATE TABLE {SCHEMA}.tt (id serial PRIMARY KEY, c text NOT NULL)")
+    _sql(f"INSERT INTO {SCHEMA}.tt (c) VALUES ('31/12/2023'), ('13/01/2024')")
+    c = pg_creds()
+    gate, blockers = build_cursor_value_gates(
+        read_scope=IncrementalReadScope(cursor_column="c", watermark=None, cursor_key="k"),
+        sync_mode="incremental_append", validation_mode="strict",
+        column_nullability={"c": False}, column_types={"c": "text"},
+        source_connector_id="",
+        source_config={"type": "postgresql", "host": c["host"], "port": int(c["port"]),
+                       "database": c["database"], "username": c["username"],
+                       "password": c["password"], "schema": SCHEMA},
+        source_table="tt",
+    )
+    assert gate and gate["id"] == "g_cursor_order" and gate["status"] == "block", gate
+    assert "day" in gate["message"], gate["message"]
+

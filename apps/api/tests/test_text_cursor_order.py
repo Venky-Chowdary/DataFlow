@@ -106,8 +106,10 @@ def test_timestamps_in_text_are_orderable_only_in_one_offset_and_precision():
     assert (mixed.low, mixed.high) == ("2024-01-01T09:00:00Z", "2024-01-01T05:30:00-04:00")
     # One offset, two precisions: '.5Z' sorts before 'Z'.
     assert not co.text_cursor_shape(["2024-01-01T09:00:00Z", "2024-01-01T09:00:00.5Z"]).orderable
-    # A wall clock carries no offset to disagree on.
-    assert co.text_cursor_shape(["2024-01-01 08:00:00", "2024-01-01T09:00:00"]).orderable
+    # A wall clock carries no offset to disagree on, but its layout must be one:
+    # as text 'T' sorts after ' ', so '...T09:00' ranks above '... 10:00' (review M2).
+    assert not co.text_cursor_shape(["2024-01-01 08:00:00", "2024-01-01T09:00:00"]).orderable
+    assert co.text_cursor_shape(["2024-01-01 08:00:00", "2024-01-01 09:00:00"]).orderable
 
 
 def test_plain_text_and_harmless_mixes_stay_orderable():
@@ -244,3 +246,62 @@ def test_text_cursor_mixed_offsets_row_not_skipped(tmp_path, isolated, skip_pref
     third = _run(isolated, src, dst, "updated_at", skip_preflight=skip_preflight, **extra)
     assert third.success, third.error
     assert _dest_ids(dst) == [1, 2, 3]
+
+
+# --------------------------------------------------------------------------
+# PR 407 review M2 — wall-clock text is accepted in one ISO layout only
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "values,word",
+    [
+        (["31/12/2023", "01/01/2024", "15/01/2024"], "day"),
+        (["12/31/2023", "01/01/2024"], "day"),
+        (["31.12.2023", "01.01.2024"], "day"),
+        (["31-12-2023 10:00", "01-01-2024 09:00"], "day"),
+        (["2024-01-05 10:00:00", "2024-01-05T09:00:00"], "layout"),
+        (["2024-01-05 10:00:00.5", "2024-01-05 10:00:00.25"], "layout"),
+        (["2024-01-05 10:00:00.5", "2024-01-05 10:00:01.250", "2024-01-05 10:00:02"], "layout"),
+        (["2024-01-05", "2024-01-05 10:00:00"], "layout"),
+    ],
+)
+def test_wall_clock_text_outside_one_iso_layout_is_refused(values, word):
+    shape = co.text_cursor_shape(values)
+    assert not shape.orderable, shape
+    reason = co.text_cursor_refusal("stamp", shape)
+    assert "stamp" in reason and word in reason, reason
+
+
+def test_a_source_that_normalises_the_separator_accepts_both_iso_forms():
+    # SQLite routes order ISO text through sqlite_cursor_sort_expr ('T' -> ' ').
+    values = ["2025-01-01T00:01:00", "2025-01-01 03:21:00"]
+    shape = co.text_cursor_shape(values, separator_normalized=True)
+    assert shape.kind == co.SHAPE_WALLCLOCK and shape.orderable
+    assert co.like_pattern_for(shape, values[0], any_separator=True) == "____-__-_____:__:__"
+    # Two fraction widths still differ as text, whatever the separator.
+    assert not co.text_cursor_shape(
+        ["2025-01-01T00:01:00.5", "2025-01-01 03:21:00.25"], separator_normalized=True
+    ).orderable
+
+
+def test_codes_that_are_not_calendar_dates_stay_plain_text():
+    for values in (["1.2.3", "1.10.0"], ["7-40-12", "8-41-13"], ["2024/01/05", "2024/01/06"]):
+        assert co.text_cursor_shape(values).orderable, values
+
+
+@pytest.mark.parametrize(
+    "values,pattern",
+    [
+        (["2024-01-05 10:00:00", "2024-01-06 09:00:00"], "____-__-__ __:__:__"),
+        (["2024-01-05T10:00:00", "2024-01-06T09:00:00"], "____-__-__T__:__:__"),
+        (["2024-01-05T10:00:00.125", "2024-01-06T09:00:00.500"], "____-__-__T__:__:__.___"),
+        (["2024-01-05", "2024-01-06"], "____-__-__"),
+        # isoformat() drops a zero fraction: the bare second sorts first, as in time.
+        (["2024-01-05 10:00:00", "2024-01-05 10:00:00.123456"], "____-__-__ __:__:__.______"),
+    ],
+)
+def test_one_iso_wall_clock_layout_is_orderable_and_confirmed_on_every_row(values, pattern):
+    shape = co.text_cursor_shape(values)
+    assert shape.kind == co.SHAPE_WALLCLOCK and shape.orderable, shape
+    assert co.wallclock_like_patterns(shape, values)[-1] == pattern
