@@ -26,6 +26,11 @@ from .universal_data_feeder import UniversalDataFeeder
 CHECKPOINT_FILE = "training_checkpoint.json"
 BATCH_SIZE = 200
 MAX_GROUNDED_SCHEMAS = 40
+# Widest schema the grounded analysis takes. ``compose_response`` scores every
+# column pair (O(columns²)): 64 columns is a few seconds, the 426-"column"
+# RBAC fixture was 500+ s with no stop check. Wider schemas are skipped and
+# counted in the run's metrics (``grounded_schemas_skipped_too_wide``).
+MAX_GROUNDED_COLUMNS = 64
 
 
 @dataclass
@@ -145,14 +150,10 @@ class DataTransferTrainingAgent:
             _check()
             from ..copilot.data_analyst import get_data_analyst
             analyst = get_data_analyst()
-            grounded_schemas = [
-                s for s in schemas
-                if s.source in ("upload", "industry")
-            ][:MAX_GROUNDED_SCHEMAS]
-            if len(grounded_schemas) < MAX_GROUNDED_SCHEMAS:
-                grounded_schemas.extend(
-                    [s for s in schemas if s.source == "catalog"][: MAX_GROUNDED_SCHEMAS - len(grounded_schemas)]
-                )
+            grounded_schemas, too_wide = _pick_grounded_schemas(schemas)
+            run.metrics["grounded_schemas"] = len(grounded_schemas)
+            run.metrics["grounded_schemas_skipped_too_wide"] = len(too_wide)
+            run.metrics["grounded_schemas_skipped_names"] = too_wide[:20]
 
             data_grounded = []
             for schema in grounded_schemas:
@@ -163,6 +164,7 @@ class DataTransferTrainingAgent:
                     f"What PII is in {schema.name}?",
                     f"Show columns in {schema.name}",
                 ]:
+                    _check()  # one answer can take seconds: never run past a stop
                     data_grounded.append({
                         "id": f"data_{schema.name}_{len(data_grounded)}",
                         "text": f"User: {q}\nAssistant: {analyst.compose_response(insight, q, 'mapping_help')}",
@@ -369,6 +371,26 @@ class DataTransferTrainingAgent:
             })
         ingested = self._ingest_training_documents(docs)
         return {"ingested": ingested, "examples": len(examples)}
+
+
+def _pick_grounded_schemas(schemas: list) -> tuple[list, list[str]]:
+    """Uploads + industry first, then catalog, up to ``MAX_GROUNDED_SCHEMAS``.
+
+    Schemas wider than ``MAX_GROUNDED_COLUMNS`` are skipped (their names are
+    returned) so one wide file cannot hold a run for minutes.
+    """
+    ordered = [s for s in schemas if s.source in ("upload", "industry")]
+    ordered += [s for s in schemas if s.source == "catalog"]
+    picked: list = []
+    too_wide: list[str] = []
+    for schema in ordered:
+        if len(picked) >= MAX_GROUNDED_SCHEMAS:
+            break
+        if len(schema.columns) > MAX_GROUNDED_COLUMNS:
+            too_wide.append(schema.name)
+            continue
+        picked.append(schema)
+    return picked, too_wide
 
 
 _agent: DataTransferTrainingAgent | None = None
