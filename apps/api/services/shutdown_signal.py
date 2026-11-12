@@ -22,6 +22,8 @@ import time
 logger = logging.getLogger(__name__)
 
 _event = threading.Event()
+#: Set only by a real SIGTERM/SIGINT (not by :func:`request`).
+_signalled = threading.Event()
 _SIGNALS = (signal.SIGTERM, signal.SIGINT)
 _POLL_SECONDS = 0.2
 
@@ -38,6 +40,16 @@ def request() -> None:
 def reset() -> None:
     """Forget a shutdown request (tests and in-process restarts only)."""
     _event.clear()
+    _signalled.clear()
+
+
+def signalled() -> bool:
+    """True once this process received SIGTERM or SIGINT (since the last :func:`reset`).
+
+    Unlike :func:`requested`, an in-process lifespan teardown (tests) does not
+    set it: what it closes stays closed until the process exits.
+    """
+    return _signalled.is_set()
 
 
 def install() -> bool:
@@ -50,6 +62,7 @@ def install() -> bool:
             continue
 
         def handler(signum, frame, _previous=previous):
+            _signalled.set()
             _event.set()
             if callable(_previous):
                 _previous(signum, frame)

@@ -25,6 +25,10 @@ _started = threading.Event()
 _shutdown = False
 #: Set while :func:`drain` runs: no new transfer is accepted.
 _draining = False
+#: Set by a drain that ran after SIGTERM: the process is exiting, and a request
+#: that finishes after the drain must not start a transfer (ops review round 2,
+#: Low). Only :func:`start` (a new lifespan) opens the pool again.
+_closed_for_exit = False
 #: Futures of transfers submitted and not finished, by job id.
 _futures: dict[concurrent.futures.Future, str] = {}
 _futures_lock = threading.Lock()
@@ -42,7 +46,7 @@ def _ensure_executor() -> concurrent.futures.ThreadPoolExecutor:
     global _executor, _shutdown
     if _shutdown:
         raise RuntimeError("Transfer scheduler has been shut down")
-    if _draining:
+    if _draining or _closed_for_exit:
         raise RuntimeError("Transfer scheduler is draining for shutdown")
     if _executor is None or _executor._shutdown:
         # Phase F6 — default concurrent jobs raised 4 → 8 (still process-local pool).
@@ -57,6 +61,8 @@ def _ensure_executor() -> concurrent.futures.ThreadPoolExecutor:
 
 def start() -> None:
     """Start the scheduler and make it ready to accept jobs."""
+    global _closed_for_exit
+    _closed_for_exit = False
     _ensure_executor()
     _started.set()
     _logger.info("Transfer scheduler started")
@@ -234,9 +240,12 @@ def drain(grace_seconds: float | None = None) -> list[str]:
     their checkpoint. A transfer that never started is cancelled and its
     lease released. A writer that does not stop in time keeps its lease, so
     nothing else writes while it may still be writing. Returns the job ids
-    still running when the drain gave up. The pool takes work again after.
+    still running when the drain gave up. The pool takes work again after,
+    unless the process received SIGTERM: then it stays closed until it exits.
     """
-    global _executor, _draining
+    global _executor, _draining, _closed_for_exit
+    from services import shutdown_signal
+
     from services.worker_fleet import _supersede_local_run, worker_drain_seconds
 
     grace = worker_drain_seconds() if grace_seconds is None else max(0.0, float(grace_seconds))
@@ -271,6 +280,7 @@ def drain(grace_seconds: float | None = None) -> list[str]:
     finally:
         if _executor is executor:
             _executor = None
+        _closed_for_exit = _closed_for_exit or shutdown_signal.signalled()
         _draining = False
 
 
