@@ -146,9 +146,14 @@ def _collection(name: str) -> Any | None:
     return bounded(coll)
 
 
+#: A change saved on one replica (a revoked grant, a tighter allowlist) is in
+#: force on every other replica within the cache window; it is never longer.
+MAX_CACHE_SECONDS = 10.0
+
+
 def _cache_seconds() -> float:
     try:
-        return max(0.0, float(getenv_brand("CONTROL_STORE_CACHE_SECONDS", "2") or 0))
+        return min(MAX_CACHE_SECONDS, max(0.0, float(getenv_brand("CONTROL_STORE_CACHE_SECONDS", "2") or 0)))
     except ValueError:
         return 2.0
 

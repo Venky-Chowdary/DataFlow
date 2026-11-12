@@ -40,8 +40,8 @@ files, set it to `file` before upgrading; to move later, unset it or set
 `mongo` (the import then runs on the first start).
 
 Reads are cached per process for 2 s
-(`DATAWRAP_CONTROL_STORE_CACHE_SECONDS`, default `2`, `0` turns the cache
-off). A change saved on one replica, including a revoked ACL grant, a tighter
+(`DATAWRAP_CONTROL_STORE_CACHE_SECONDS`, default `2`, at most `10`, `0` turns
+the cache off). A change saved on one replica, including a revoked ACL grant, a tighter
 IP allowlist or require-SSO, is therefore enforced by every other replica
 within 2 s, not at once. Writes always re-read the database.
 
