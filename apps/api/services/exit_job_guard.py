@@ -128,3 +128,22 @@ def before_run(job_id: str, request: Any, store: Any) -> None:
           details={"rehearsal_id": owner, "job_id": job_id, "acknowledged_at": ack.get("at"),
                    "table": next((t.get("name") for t in doc.get("tables") or []
                                   if str(t.get("job_id") or "") == job_id), None)})
+
+
+def refuse_synchronous_run(job_id: str, request: Any) -> str | None:
+    """:func:`before_run` for a synchronous execute: why ``request`` must not run as ``job_id``, else ``None``.
+
+    The background worker calls :func:`before_run`; a synchronous execute did
+    not, so a job naming a running rehearsal's sealed export could create it
+    first and fail the real extract (review 4). The refused job is failed with
+    the reason.
+    """
+    from services.mongodb_service import get_mongodb_service
+
+    store = get_mongodb_service()
+    try:
+        before_run(job_id, request, store)
+    except ExtractRefused as exc:
+        store.update_job_status(job_id, "failed", phase="failed", error=str(exc), message=str(exc))
+        return str(exc)
+    return None

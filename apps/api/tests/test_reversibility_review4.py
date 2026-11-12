@@ -234,3 +234,92 @@ def test_m2_a_type_transform_from_text_is_checked_by_the_destination_rendering(t
     converted, _err = apply_transform(value, transform)
     assert changes(rule, value, converted) is (status == "does_not_fit")
 
+
+# ------------------------------------------------------------------------- Lows
+
+def test_low_g24_selects_streams_exactly_as_the_writer_does():
+    from services.reversibility_streams import selected_stream_names
+    from services.sync_cursor import resolve_selected_sync_contracts
+
+    contracts = [{"name": "people"}, {"stream": "orders"}, {"name": "off", "selected": None},
+                 {"name": "zero", "selected": 0}, {"name": "yes", "selected": "yes"}, {"name": "no", "selected": False}]
+    assert selected_stream_names(contracts) == [c.name for c in resolve_selected_sync_contracts(contracts)]
+    assert selected_stream_names(contracts) == ["people", "orders", "yes"]
+
+
+@pytest.mark.parametrize("second", [
+    {"stream": "orders", "primary_key": ["id"], "selected": True},
+    {"name": "orders", "primary_key": ["id"], "selected": "yes"},
+])
+def test_low_a_stream_named_by_its_stream_key_or_selected_truthy_is_analysed_by_g24(tmp_path, fake, second):  # noqa: F811
+    from tests.test_reversibility_review3 import _ID, _g24, _note, _sqlite_request, _tables, _two_tables
+
+    src, dst = _two_tables(tmp_path)
+    contracts = [{"name": "people", "primary_key": ["id"], "selected": True},
+                 {**second, "mappings": [dict(_ID), _note("hash_pii")]}]
+    result = _run(fake, _sqlite_request(src, dst, mappings=[], stream_contracts=contracts))
+    assert not result.success and _g24(result), result.error
+    assert "orders.note" in str(result.error), result.error
+    assert not _tables(dst) & {"people", "orders"}
+
+
+def test_low_a_column_the_writer_cannot_be_told_about_is_unavailable_not_enforced():
+    from services.reversibility import UNAVAILABLE, WHILE_WRITING, analyze_table, build_report
+    from services.reversibility_sources import _stamp_enforced, preflight_gate
+
+    maps = [{"source": "id", "target": "id", "source_type": "INTEGER", "target_type": "INTEGER"},
+            {"source": "email", "target": "email", "transform": "uppercase", "source_type": "TEXT",
+             "target_type": "TEXT"}]
+    table = analyze_table(table="people", mappings=maps, source_columns=["id", "email"],
+                          source_types={"id": "INTEGER", "email": "TEXT"}, target_types={}, key_columns=["id"],
+                          sample_rows=[{"id": 1, "email": "A@B.C"}], population_rows=None, enforce=WHILE_WRITING)
+    assert table["verdict"] == "reversible"
+    _stamp_enforced(table, [{"source": "id", "target": "id"}])  # the writer's dicts lack email: stamp() fails
+    email = next(c for c in table["columns"] if c["source"] == "email")
+    assert email["check"]["enforcement"] == UNAVAILABLE, email["check"]
+    assert table["verdict"] != "reversible"
+    gate = preflight_gate(build_report([table], scope="job", subject_id="j", require=True, data_rows=1,
+                                       data_source="preflight_sample", population_rows=None))
+    assert gate["status"] == "block" and "people.email" in gate["message"], gate
+
+
+@pytest.mark.parametrize("transform", ["default:Sekrit-Literal", "replace:Sekrit-Literal:x"])
+def test_low_the_violation_names_the_transform_never_its_literal(transform):
+    from services.reversibility_enforce import ReversibilityViolation, refuse_changed_value, summary
+
+    mapping = {"source": "c", "target": "c", "reversibility_enforce": {
+        "job_id": "low5", "table": "t", "column": "c", "code": "default", "transform": transform}}
+    with pytest.raises(ReversibilityViolation) as caught:
+        refuse_changed_value(mapping, None, "Sekrit-Literal")
+    text = str(caught.value)
+    assert f"t.c would change under its transform ({transform.split(':')[0]})" in text, text
+    assert "Sekrit" not in text
+    summary("low5")
+
+
+def test_low_a_quarantine_replay_reports_its_own_enforcement_tally(tmp_path, fake, monkeypatch):  # noqa: F811
+    """The replay's g24 runs before its child job exists: the tally must be keyed to that child, not to ''."""
+    import asyncio
+
+    import services.reversibility_sources as sources
+    from services.reversibility_enforce import stamp, summary
+    from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
+    from tests.test_reversibility_review3 import _http, _replay_parent
+
+    def gate(_request, planned):  # g24 as Execute runs it on a replay: it stamps with no job in context
+        for mapping in planned[0]:
+            if isinstance(mapping, dict) and mapping.get("source") == "v":
+                stamp(mapping, table="t", column="v", code="normalize", transform="uppercase", job_id="")
+        return {"id": "g24_reversibility", "status": "pass", "message": "Every table is reversible."}
+
+    monkeypatch.setattr(sources, "execute_gate", gate)
+    summary("")  # another test's stamp made outside a job: not this replay's
+    job_id, _dst = _replay_parent(tmp_path, monkeypatch, fake, require=True)
+    before = set(fake.jobs)
+    resp = asyncio.run(replay_job_quarantine(job_id, QuarantineReplayRequest(
+        rows=[{"id": "2", "v": "42"}], transform_overrides={"v": "uppercase"}), _http()))
+    assert resp.get("rows_written", 0) >= 1, resp
+    child = next(fake.jobs[j] for j in set(fake.jobs) - before)
+    found = (child.get("destination_summary") or {}).get("reversibility_enforcement") or {}
+    assert found.get("enforced") is True and [c["rows_checked"] for c in found["columns"]] == [1], found
+    assert summary("") is None, "nothing is left keyed to an empty job id"

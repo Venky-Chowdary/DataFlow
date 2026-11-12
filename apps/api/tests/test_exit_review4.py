@@ -119,3 +119,59 @@ def test_c1_a_type_the_driver_reads_one_to_one_is_not_named(engine, ddl):
     types = {"id": "BIGINT", "c": ddl}
     src = profile_rows([{"id": 1, "c": None}], list(types), ["id"], None, types=types, engine=engine)
     assert "c" not in src.uncompared, (engine, ddl, src.uncompared)
+
+
+def test_low_a_column_the_export_renamed_is_named_as_renamed_never_as_a_changed_source():
+    types = {"id": "BIGINT", "Prénom": "TEXT", "a,b": "TEXT"}
+    src = profile_rows([{"id": 1, "Prénom": "é", "a,b": "y"}], list(types), ["id"], None, types=types,
+                       engine="postgresql")
+    ext = profile_rows([{"id": 1, "prenom": "é", "a_b": "y"}], list(types), ["id"], ["id"], types=types,
+                       engine="postgresql")
+    ext.columns = ["id", "prenom", "a_b"]
+    out = judge_table(name="t", source=src, extract=ext, key_columns=["id"], seal_ok=True, parity=PARITY,
+                      not_measured=[])
+    assert out["status"] != "proven"
+    assert "the export renamed column(s) Prénom (as prenom), a,b (as a_b)" in out["reason"], out["reason"]
+    assert "source changed" not in out["reason"], out["reason"]
+
+
+def test_low_a_synchronous_execute_runs_the_rehearsal_guard_before_the_engine(tmp_path, monkeypatch):
+    """A sync job naming a running rehearsal's sealed export must not create it first (denial of service)."""
+    import ast
+    from pathlib import Path
+
+    from services import exit_job_guard
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    request = TransferRequest(source=EndpointConfig(kind="file", format="csv"),
+                              destination=EndpointConfig(kind="file_export", format="jsonl",
+                                                         output_path="exit_exr_0123456789ab_0002_orders.jsonl"),
+                              source_filename="t.csv", source_content=b"id\n1\n")
+    updates: list[tuple] = []
+
+    class _Store:
+        def get_job(self, _job_id):
+            return {"id": "j1"}
+
+        def update_job_status(self, job_id, status, **fields):
+            updates.append((job_id, status, fields.get("error")))
+
+    monkeypatch.setattr("services.mongodb_service.get_mongodb_service", lambda: _Store())
+    refused = exit_job_guard.refuse_synchronous_run("j1", request)
+    assert refused and "Start a new rehearsal instead" in refused
+    assert updates and updates[0][1] == "failed"
+    assert exit_job_guard.refuse_synchronous_run("j2", TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"), destination=EndpointConfig(kind="file_export",
+                                                                                     format="jsonl"),
+        source_filename="t.csv", source_content=b"id\n1\n")) is None
+    # Every synchronous execute in the routers runs that guard before the engine.
+    api = Path(__file__).resolve().parents[1]
+    for module in ("src/routers/transfer_router.py", "src/routers/connectors_router.py"):
+        tree = ast.parse((api / module).read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            calls = [n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", "")
+                     for n in ast.walk(fn) if isinstance(n, ast.Call)]
+            if "execute_tracked" in calls:
+                assert "refuse_synchronous_run" in calls, (module, fn.name)

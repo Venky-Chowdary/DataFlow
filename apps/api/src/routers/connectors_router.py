@@ -2596,6 +2596,9 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     if reversibility is not None and reversibility.get("status") == "block":
         raise HTTPException(status_code=409, detail=str(reversibility.get("message") or "g24_reversibility"))
     child_job_id = engine._create_pending_job(child_req)
+    from services.reversibility_enforce import rekey
+
+    rekey(mappings, child_job_id)  # g24 stamped before the child existed: its tally is the child's (review 4)
     mongo.update_job_status(
         child_job_id,
         "running",
@@ -2757,6 +2760,13 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         from services.quarantine_dlq import closure_with_promotion_outcome
 
         compact = closure_with_promotion_outcome(compact, promote_meta, job_id=job_id)
+        from services.reversibility_enforce import record_on_success
+
+        child_fields: dict = {"records_processed": rows_written,
+                              "destination_summary": {**dest_summary, "dest_dlq_promoted": promote_meta}}
+        unchecked = record_on_success(child_job_id, child_fields)  # the replay's own enforcement tally
+        if unchecked and status != "failed":
+            status, recon = "failed", {**recon, "message": unchecked}
         phase = "completed" if status != "failed" else "failed"
         mongo.update_job_status(
             child_job_id,
@@ -2771,7 +2781,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             progress_pct=100 if status != "failed" else 99,
             rejected_rows=rejected,
             rejected_details=dest_summary.get("rejected_details") or [],
-            destination_summary={**dest_summary, "dest_dlq_promoted": promote_meta},
+            destination_summary=child_fields["destination_summary"],
             reconciliation=recon,
             ddl_log=ddl_log,
             error=recon.get("message") if status == "failed" else None,
@@ -3320,6 +3330,11 @@ async def transfer_data(
                 "source": {"type": "file", "filename": file.filename, "file_type": src_fmt},
             }
 
+        from services.exit_job_guard import refuse_synchronous_run
+
+        refused = refuse_synchronous_run(job_id, request_obj)  # what the background worker checks too
+        if refused:
+            raise HTTPException(status_code=409, detail=refused)
         result = engine.execute_tracked(request_obj, job_id)
         if not result.success:
             raise HTTPException(status_code=422, detail={"error": result.error, "job_id": result.job_id})

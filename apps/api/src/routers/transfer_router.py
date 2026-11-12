@@ -1302,6 +1302,11 @@ async def execute_transfer_json(
             ),
         }
 
+    from services.exit_job_guard import refuse_synchronous_run
+
+    refused = refuse_synchronous_run(job_id, request_obj)  # what the background worker checks too
+    if refused:
+        raise HTTPException(status_code=409, detail=refused)
     result = engine.execute_tracked(request_obj, job_id)
     if not result.success:
         raise HTTPException(status_code=422, detail={
@@ -1902,6 +1907,11 @@ async def run_universal_transfer(
             ),
         }
 
+    from services.exit_job_guard import refuse_synchronous_run
+
+    refused = refuse_synchronous_run(job_id, request_obj)  # what the background worker checks too
+    if refused:
+        raise HTTPException(status_code=409, detail=refused)
     result = engine.execute_tracked(request_obj, job_id)
     if not result.success:
         raise HTTPException(status_code=422, detail={

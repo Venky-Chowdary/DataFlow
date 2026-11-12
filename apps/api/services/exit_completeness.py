@@ -592,6 +592,13 @@ def judge_table(
             diffs.append({"kind": "extra_rows", "rows": extract.rows - source.rows, "rows_at_least": True,
                           "detail": f"The extract holds {extract.rows - source.rows} row(s) more than the source."})
         missing_cols = [c for c in source.columns if c not in extract.columns]
+        renamed = renamed_columns(missing_cols, source.columns, extract.columns)
+        if renamed:
+            named = ", ".join(f"{c} (as {e})" for c, e in list(renamed.items())[:10])
+            diffs.append({"kind": "changed_rows", "rows": None, "rows_at_least": False,
+                          "detail": f"The extract does not hold every column under its own name: the export renamed "
+                                    f"column(s) {named} to plain identifiers, so their values were not compared."})
+        missing_cols = [c for c in missing_cols if c not in renamed]
         if missing_cols:
             diffs.append({"kind": "changed_rows", "rows": None, "rows_at_least": False,
                           "detail": f"The extract lacks column(s) {', '.join(missing_cols[:10])}."})
@@ -599,7 +606,8 @@ def judge_table(
         if same_count and source.key_set_sha256 and source.key_set_sha256 != extract.key_set_sha256:
             diffs.append({"kind": "changed_rows", "rows": 1, "rows_at_least": True,
                           "detail": "The key sets differ: at least one key is missing and another is extra."})
-        elif same_count and source.row_set_sha256 != extract.row_set_sha256:
+        elif same_count and source.row_set_sha256 != extract.row_set_sha256 and not (
+                renamed and set(differing_columns(source, extract)) <= set(renamed)):
             named = differing_columns(source, extract)
             where = f" in column(s) {', '.join(named[:10])}" if named else ""
             diffs.append({"kind": "changed_rows", "rows": 1, "rows_at_least": True,
@@ -630,6 +638,23 @@ def judge_table(
                   f"all {source.rows if source else 0} row(s); the part verified on read.")
     return {"status": status, "reason": reason, "differences": diffs, "value_method": method,
             "control_totals": _totals_rows(source, extract) if source else []}
+
+
+def renamed_columns(missing: list[str], source_columns: list[str], extract_columns: list[str]) -> dict[str, str]:
+    """{source column: the extract's name for it} for the columns the export renamed (``Prénom`` as ``prenom``).
+
+    The export names a column by its mapping's target, which the mapper writes as a
+    plain identifier (:func:`connectors.sql_identifiers.sanitize_identifier`).
+    """
+    from connectors.sql_identifiers import sanitize_identifier
+
+    spare = {e.lower(): e for e in extract_columns if e not in source_columns}
+    out: dict[str, str] = {}
+    for col in missing:
+        found = spare.get(sanitize_identifier(col).lower())
+        if found is not None:
+            out[col] = found
+    return out
 
 
 def differing_columns(source: Profile, extract: Profile) -> list[str]:

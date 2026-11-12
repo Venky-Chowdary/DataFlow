@@ -126,9 +126,11 @@ export function columnPillPresentation(col: Pick<ColumnInvertibility, "invertibi
   // Only a check over every source row counts (contract 11.1.2); a sample fit is still blocked at Execute.
   if (status === "fits" && col.check?.covers_population === true) return { label: "Fits whole table", tone: "ok" };
   // Under Require reversibility a fitting conditional column is enforced on every row (contract 12.1).
-  if (status === "fits" && col.check?.enforcement === "while_writing") return { label: "Enforced while writing", tone: "ok" };
-  if (status === "fits" && col.check?.enforcement === "at_execute") return { label: "Enforced at Execute", tone: "ok" };
-  if (status === "fits" && col.check?.enforcement === "unavailable") return { label: "Cannot be enforced", tone: "warn" };
+  // The gate's rule: an enforced column passes unless a value was already seen to change, even when its
+  // sample held no value to check (not_checked) - every row is checked as it is written (review 4).
+  if (status !== "does_not_fit" && col.check?.enforcement === "while_writing") return { label: "Enforced while writing", tone: "ok" };
+  if (status !== "does_not_fit" && col.check?.enforcement === "at_execute") return { label: "Enforced at Execute", tone: "ok" };
+  if (status !== "does_not_fit" && col.check?.enforcement === "unavailable") return { label: "Cannot be enforced", tone: "warn" };
   if (status === "fits") return { label: "Fits sample only", tone: "warn" };
   if (status === "does_not_fit") return { label: "Does not fit", tone: "danger" };
   return { label: "Not checked", tone: "warn" };

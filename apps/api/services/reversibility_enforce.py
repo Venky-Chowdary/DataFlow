@@ -53,18 +53,42 @@ def _job_id() -> str:
 
 
 def stamp(mapping: Any, *, table: str, column: str, code: str, transform: str = "", target_type: str = "",
-          job_id: str | None = None, dest_db: str = "") -> bool:
-    """Mark ``mapping`` (the dict the writer will read) as enforced; ``False`` when it cannot be marked."""
+          job_id: str | None = None, dest_db: str = "", transform_names: list[str] | None = None) -> bool:
+    """Mark ``mapping`` (the dict the writer will read) as enforced; ``False`` when it cannot be marked.
+
+    ``transform_names`` are the transforms by name only, for messages (never their arguments).
+    """
     if not isinstance(mapping, dict):
         return False
     job = _job_id() if job_id is None else job_id
     mapping[STAMP] = {"job_id": job, "table": table, "column": column, "code": code,
-                      "transform": transform, "target_type": target_type, "dest_db": dest_db}
+                      "transform": transform, "target_type": target_type, "dest_db": dest_db,
+                      "transform_names": list(transform_names) if transform_names is not None
+                      else [str(transform or "").split(":", 1)[0]]}
     with _LOCK:
         _ROWS.setdefault((job, table, column), 0)
         while len(_ROWS) > _MAX_TRACKED:
             _ROWS.popitem(last=False)
     return True
+
+
+def rekey(mappings: Sequence[Any] | None, job_id: str) -> None:
+    """Move the stamps (and their tally) of ``mappings`` onto ``job_id``.
+
+    A quarantine replay runs g24 before its child job exists, so its stamps
+    carry no job id; once the child is created they are keyed to it, so the
+    child's run reports its own ``rows_checked`` (review 4).
+    """
+    for mapping in mappings or []:
+        rule = mapping.get(STAMP) if isinstance(mapping, dict) else None
+        if not isinstance(rule, dict) or str(rule.get("job_id") or "") == job_id:
+            continue
+        old = (str(rule.get("job_id") or ""), str(rule.get("table") or ""), str(rule.get("column") or ""))
+        with _LOCK:
+            rows = _ROWS.pop(old, 0)
+            new = (job_id, old[1], old[2])
+            _ROWS[new] = max(_ROWS.get(new, 0), rows)
+        rule["job_id"] = job_id
 
 
 def enforced_columns(mappings: Sequence[Any] | None) -> list[str]:
@@ -121,7 +145,12 @@ def changes(rule: Mapping[str, Any], raw: Any, converted: Any, error: str | None
 
 def describe_rule(rule: Mapping[str, Any]) -> tuple[str, str]:
     """(``table.column``, how it changes) of a stamped rule, for a message that never repeats a value."""
-    how = (f"its transform ({rule.get('transform')})" if rule.get("transform")
+    # The transform by name only: its arguments (``default:<literal>``) are configuration that may carry a value.
+    listed = rule.get("transform_names")
+    if not isinstance(listed, (list, tuple)):
+        listed = [str(rule.get("transform") or "").split(":", 1)[0]]
+    names = ", ".join(dict.fromkeys(str(n).strip() for n in listed if str(n).strip()))
+    how = (f"its transform ({names})" if names
            else f"the cast into {rule.get('target_type') or 'the destination type'}")
     table, column = str(rule.get("table") or ""), str(rule.get("column") or "")
     return (f"{table}.{column}" if table else column), how

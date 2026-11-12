@@ -98,6 +98,16 @@ describe("the gate line", () => {
     const inherited = { ...writing, enforcement: "unavailable" as const };
     assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: inherited }), { label: "Cannot be enforced", tone: "warn" });
   });
+
+  it("an enforced column with an empty sample reads as the gate does: enforced, not a warning (review 4)", () => {
+    // The gate passes an enforced column whose sample held no value (status not_checked): every row is checked.
+    const empty = { status: "not_checked" as const, rows_checked: 0, rows_not_fitting: 0, covers_population: false };
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { ...empty, enforcement: "while_writing" as const } }), { label: "Enforced while writing", tone: "ok" });
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { ...empty, enforcement: "at_execute" as const } }), { label: "Enforced at Execute", tone: "ok" });
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { ...empty, enforcement: "unavailable" as const } }), { label: "Cannot be enforced", tone: "warn" });
+    // A value already seen to change stays a failure, enforced or not.
+    assert.deepEqual(columnPillPresentation({ invertibility: "conditional", check: { ...empty, status: "does_not_fit" as const, rows_checked: 3, rows_not_fitting: 1, enforcement: "while_writing" as const } }), { label: "Does not fit", tone: "danger" });
+  });
 });
 
 describe("review order", () => {

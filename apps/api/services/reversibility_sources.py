@@ -32,8 +32,8 @@ def flag(value: Any) -> bool:
 
 def _key_columns(stream_contracts: Any) -> list[str]:
     for contract in stream_contracts or []:
-        if not isinstance(contract, Mapping) or contract.get("selected") is False:
-            continue
+        if not isinstance(contract, Mapping) or not contract.get("selected", True):
+            continue  # the writer's selection (resolve_selected_sync_contracts)
         pk = contract.get("primary_key")
         cols = [pk] if isinstance(pk, str) else list(pk or [])
         cols = [str(c).strip() for c in cols if str(c or "").strip()]
@@ -221,10 +221,11 @@ def _enforce(require: bool, how: str) -> str | None:
 
 def _streams(contracts: Any) -> tuple[list[str], Any]:
     from services.multi_stream_plan import contract_for_stream
-    from services.reversibility_streams import selected_stream_names
+    from services.reversibility_streams import named_contracts, selected_stream_names
 
     names = selected_stream_names(contracts)
-    return names, (lambda name: contract_for_stream(contracts, name))
+    named = named_contracts(contracts)  # a contract named by its ``stream`` key is found as the writer finds it
+    return names, (lambda name: contract_for_stream(named, name))
 
 
 def _primary(raw: Mapping[str, Any], shared: list[Any], source: Any, read_options: Any,
@@ -485,13 +486,29 @@ def _stamp_enforced(table: dict[str, Any], dicts: list[Any] | None, *, dest_db: 
     from services.reversibility_enforce import stamp
 
     by_source = {str(m.get("source") or "").strip().lower(): m for m in dicts or [] if isinstance(m, dict)}
+    unmarked = False
     for column in table["columns"]:
         if not enforced(column):
             continue
         mapping = by_source.get(str(column.get("source") or "").lower())
-        stamp(mapping, table=table["name"], column=str(column.get("source") or column.get("target") or ""),
-              code=str(column.get("reason_code") or ""), transform=", ".join(column.get("transforms") or []),
-              target_type=str(column.get("target_type") or ""), dest_db=dest_db)
+        if not stamp(mapping, table=table["name"], column=str(column.get("source") or column.get("target") or ""),
+                     code=str(column.get("reason_code") or ""), transform=", ".join(column.get("transforms") or []),
+                     target_type=str(column.get("target_type") or ""), dest_db=dest_db,
+                     transform_names=[str(t).split(":", 1)[0] for t in column.get("transforms") or []]):
+            # The writer cannot be told about this column: it is not enforced, so it stays open (review 4).
+            from services.reversibility import UNAVAILABLE
+
+            column["check"] = {**dict(column.get("check") or {}), "enforcement": UNAVAILABLE}
+            column["reason"] = (str(column.get("reason") or "").rstrip(".")
+                                + "; the writer's mapping for it could not be marked, so it is not enforced while "
+                                  "writing.")
+            unmarked = True
+    if unmarked:
+        from services.reversibility import REVERSIBLE, table_of
+
+        rebuilt = table_of(table["name"], table["columns"])
+        if table.get("verdict") == REVERSIBLE:
+            table.update({k: rebuilt[k] for k in ("verdict", "reason", "rollback", "rollback_note")})
 
 
 def preflight_gate(report: Mapping[str, Any]) -> dict[str, Any]:

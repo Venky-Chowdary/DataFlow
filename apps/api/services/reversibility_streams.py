@@ -33,15 +33,21 @@ from services.reversibility import UNAVAILABLE, analyze_table, not_analysed_tabl
 logger = logging.getLogger(__name__)
 
 
+def named_contracts(contracts: Any) -> list[dict[str, Any]]:
+    """The contracts with the name the writer gives each (``name``, else ``stream``: ``SyncContract``)."""
+    return [{**raw, "name": str(raw.get("name") or raw.get("stream") or "stream").strip()}
+            for raw in contracts or [] if isinstance(raw, Mapping)]
+
+
 def selected_stream_names(contracts: Any) -> list[str]:
-    """Names of the selected streams, in contract order (one name: a single-table run)."""
-    out: list[str] = []
-    for raw in contracts or []:
-        if isinstance(raw, Mapping) and raw.get("selected", True) is not False:
-            name = str(raw.get("name") or "").strip()
-            if name:
-                out.append(name)
-    return out
+    """Names of the selected streams, in contract order (one name: a single-table run).
+
+    Exactly the writer's selection (``resolve_selected_sync_contracts``): a
+    truthy ``selected``, a stream named by ``name`` or ``stream`` (review 4).
+    """
+    from services.sync_cursor import resolve_selected_sync_contracts
+
+    return [c.name for c in resolve_selected_sync_contracts(named_contracts(contracts)) if c.name]
 
 
 def stream_keys(raw: Mapping[str, Any]) -> list[str]:
