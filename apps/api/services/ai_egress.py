@@ -14,6 +14,13 @@ this module writes; this module is the gate.
   customer boundary; local / Ollama are recorded and not claimed as "no
   model".
 
+* **Pilot** (the chat assistant) sends prompts the mapper patterns never
+  matched: a narrated draft holding sampled rows, and tool results serialised
+  for a model's tool loop. Two more signals cover them — a JSON payload with a
+  non-empty row key (``rows``, ``samples``…), and the cell values the caller
+  *declares* for the call (:func:`declared_cells`). Under metadata-only both
+  are withheld; with cells allowed the manifest records that they were sent.
+
 ``is_lossy_coercion`` and mapping confidence floors are untouched. ITEM 1
 still holds: the LLM does not decide source→target.
 """
@@ -61,6 +68,162 @@ _SAMPLE_VALUES = re.compile(
 _COLUMNS_AND_SAMPLES = re.compile(
     r"(?is)Columns and Samples:.*?(?=For each column:|\Z)"
 )
+
+
+# ---- Pilot: declared cells and row payloads ---------------------------------
+
+WITHHELD = "[withheld: metadata-only]"
+#: Keys under which a tool result carries row cells.
+ROW_KEYS = frozenset({
+    "rows", "sample_rows", "samples", "sample", "quarantine_samples", "top_values",
+    "preview_rows", "examples", "distinct_values", "groups", "mismatches",
+})
+_ROW_KEY_JSON = re.compile(
+    r'"(?:' + "|".join(sorted(ROW_KEYS)) + r')"\s*:\s*(?:\[\s*[^\]\s]|\{\s*[^\}\s])'
+)
+#: Shortest declared value matched in free text. Shorter cells ("1", "ok")
+#: would match half the prompt; they leave only inside a row block, which is
+#: withheld as a block.
+_MIN_DECLARED_LEN = 4
+_declared: ContextVar[frozenset[str]] = ContextVar("ai_egress_declared_cells", default=frozenset())
+
+
+def _cell_strings(values: Any) -> set[str]:
+    out: set[str] = set()
+    stack = [values]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, Mapping):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            stack.extend(item)
+        elif item is not None and not isinstance(item, bool):
+            text = str(item).strip()
+            if len(text) >= _MIN_DECLARED_LEN:
+                out.add(text)
+    return out
+
+
+def declare_cells(values: Any) -> None:
+    """Add cell values to the ones this context's outbound calls must account for."""
+    cells = _cell_strings(values)
+    if cells:
+        _declared.set(_declared.get() | cells)
+
+
+@contextmanager
+def declared_cells(values: Any) -> Iterator[None]:
+    """Scope in which ``values`` (any nesting of rows) are known cell values."""
+    token = _declared.set(_declared.get() | _cell_strings(values))
+    try:
+        yield
+    finally:
+        _declared.reset(token)
+
+
+#: Set once this turn has read free text that carries values (a job's error
+#: text, a validation blocker). Such text cannot be told apart from the cells
+#: it quotes, so a turn that read it is not narrated under metadata-only.
+_free_text: ContextVar[bool] = ContextVar("ai_egress_free_text", default=False)
+_in_turn: ContextVar[bool] = ContextVar("ai_egress_in_turn", default=False)
+#: The marker every metadata-only withholding leaves in the text it rewrote.
+#: Text Pilot withheld *before* the gate still counts as withheld here.
+_WITHHELD_MARK = re.compile(r"\[(?:rows )?withheld: metadata-only")
+
+
+def declare_free_text(values: Any) -> None:
+    """Declare free text that quotes cell values (error text, blockers).
+
+    Only inside an :func:`egress_turn`: outside one (an MCP call, a script) no
+    turn scope would ever clear it.
+    """
+    cells = _cell_strings(values)
+    if cells and _in_turn.get():
+        _declared.set(_declared.get() | cells)
+        _free_text.set(True)
+
+
+def declare_turn_cells(values: Any) -> None:
+    """Declare cell values a tool read in this turn (an aggregate scalar, group keys).
+
+    Only inside an :func:`egress_turn`, for the same reason as free text: outside
+    one nothing would ever clear the declaration.
+    """
+    cells = _cell_strings(values)
+    if cells and _in_turn.get():
+        _declared.set(_declared.get() | cells)
+
+
+def free_text_declared() -> bool:
+    """True when this turn has read value-carrying free text."""
+    return _free_text.get()
+
+
+@contextmanager
+def egress_turn() -> Iterator[None]:
+    """One chat turn: what it declares does not outlive it.
+
+    Without this scope a value declared in one turn stayed declared for every
+    later call on the same thread, so the manifest of an unrelated turn said
+    "withheld" for text it never carried.
+    """
+    t_declared = _declared.set(frozenset())
+    t_free = _free_text.set(False)
+    t_turn = _in_turn.set(True)
+    try:
+        yield
+    finally:
+        _declared.reset(t_declared)
+        _free_text.reset(t_free)
+        _in_turn.reset(t_turn)
+
+
+def _has_declared_cell(text: str) -> bool:
+    return any(cell in text for cell in _declared.get())
+
+
+def _strip_declared(text: str) -> tuple[str, bool]:
+    out = text
+    # Longest first, so a value that contains another is replaced whole.
+    for cell in sorted(_declared.get(), key=len, reverse=True):
+        if cell in out:
+            out = out.replace(cell, WITHHELD)
+    return out, out != text
+
+
+def withhold_row_values(payload: Any) -> tuple[Any, bool]:
+    """A copy of a tool payload with every row block replaced by its size."""
+    withheld = False
+
+    def walk(node: Any) -> Any:
+        nonlocal withheld
+        if isinstance(node, Mapping):
+            out: dict[str, Any] = {}
+            for key, value in node.items():
+                if str(key) in ROW_KEYS and isinstance(value, (list, tuple, dict)) and value:
+                    withheld = True
+                    out[str(key)] = f"{WITHHELD[:-1]}; {len(value)} item(s)]"
+                else:
+                    out[str(key)] = walk(value)
+            return out
+        if isinstance(node, (list, tuple)):
+            return [walk(item) for item in node]
+        return node
+
+    return walk(payload), withheld
+
+
+def _strip_row_json(text: str) -> tuple[str, bool]:
+    """Withhold row blocks in a JSON payload; an unparseable one is withheld whole."""
+    if not _ROW_KEY_JSON.search(text):
+        return text, False
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        # Clipped or embedded JSON: there is no safe partial strip.
+        return WITHHELD, True
+    cleaned, withheld = withhold_row_values(parsed)
+    return (json.dumps(cleaned, default=json_default), True) if withheld else (text, False)
 
 
 def metadata_only_enabled() -> bool:
@@ -112,6 +275,8 @@ def _looks_numeric(value: str) -> bool:
 def contains_cell_values(text: str) -> bool:
     """True when a prompt still carries interpolated sample cells."""
     raw = text or ""
+    if _ROW_KEY_JSON.search(raw) or _has_declared_cell(raw):
+        return True
     if _SAMPLE_LINE.search(raw):
         # ``samples[email]: ['a@x.com']`` vs empty ``samples[email]: []``
         for match in _SAMPLE_LINE.finditer(raw):
@@ -145,8 +310,9 @@ def strip_cell_sections(text: str) -> tuple[str, bool]:
     """Remove interpolated sample blocks. Schema / type lines stay."""
     if not text:
         return text, False
-    out = text
-    stripped = False
+    out, stripped = _strip_row_json(text)
+    out, stripped_declared = _strip_declared(out)
+    stripped = stripped or stripped_declared
     replacements = (
         (_SOURCE_SAMPLES, "Source Samples: [withheld: metadata-only]\n"),
         (_SAMPLE_VALUES, "Sample Values: [withheld: metadata-only]\n"),
@@ -196,7 +362,11 @@ def gate_outbound_prompt(prompt: str, system: str, *, provider: str) -> Outbound
     if meta_only:
         out_prompt, stripped_p = strip_cell_sections(prompt)
         out_system, stripped_s = strip_cell_sections(system)
-        withheld = bool(had_cells or stripped_p or stripped_s)
+        # Values Pilot already replaced (tool payloads, transcript lines) are
+        # withheld too: the manifest records what was asked, not just what
+        # the gate itself had to strip.
+        prewithheld = bool(_WITHHELD_MARK.search(prompt or "") or _WITHHELD_MARK.search(system or ""))
+        withheld = bool(had_cells or stripped_p or stripped_s or prewithheld)
         if contains_cell_values(out_prompt) or contains_cell_values(out_system):
             out_prompt = (
                 "Metadata-only policy refused this prompt: residual cell values "
@@ -237,47 +407,86 @@ def prepare_generate(prompt: str, system: str, *, provider: str) -> tuple[str, s
     return outbound.prompt, outbound.system
 
 
+def _message_strings(content: Any) -> list[str]:
+    """Every string a message carries, including Anthropic-style content blocks."""
+    if isinstance(content, str):
+        return [content]
+    out: list[str] = []
+    if isinstance(content, Mapping):
+        for value in content.values():
+            out.extend(_message_strings(value))
+    elif isinstance(content, (list, tuple)):
+        for item in content:
+            out.extend(_message_strings(item))
+    return out
+
+
+def _gate_content(content: Any, metadata_only: bool) -> Any:
+    """``content`` with cell sections stripped from every string it holds."""
+    if isinstance(content, str):
+        stripped, _ = strip_cell_sections(content)
+        if metadata_only and contains_cell_values(stripped):
+            return WITHHELD
+        return stripped
+    if isinstance(content, Mapping):
+        # Block metadata (type, ids, tool names) is structure, not prompt text.
+        return {
+            key: _gate_content(value, metadata_only) if key in ("content", "text", "input") else value
+            for key, value in content.items()
+        }
+    if isinstance(content, (list, tuple)):
+        return [_gate_content(item, metadata_only) for item in content]
+    return content
+
+
 def prepare_messages(
     messages: list[dict[str, Any]],
     system: str,
     *,
     provider: str,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Choke point for ``generate_agent``. Strips string contents; records a manifest."""
+    """Choke point for ``generate_agent``. Strips cell content; records a manifest.
+
+    Message content is a string (OpenAI, tool results) or a list of blocks
+    (Anthropic ``tool_result`` / ``text``); both are gated, so a tool payload
+    cannot ride past the gate inside a block.
+    """
     combined_parts: list[str] = [system or ""]
     gated_messages: list[dict[str, Any]] = []
     for item in messages or []:
         row = dict(item)
-        content = row.get("content")
-        if isinstance(content, str):
-            combined_parts.append(content)
+        combined_parts.extend(_message_strings(row.get("content")))
         gated_messages.append(row)
     joined = "\n".join(combined_parts)
     outbound = gate_outbound_prompt(joined, "", provider=provider)
     if outbound.cells_withheld or outbound.metadata_only:
+        withheld = outbound.cells_withheld
         new_messages: list[dict[str, Any]] = []
         for item in gated_messages:
             row = dict(item)
-            content = row.get("content")
-            if isinstance(content, str):
-                stripped, _ = strip_cell_sections(content)
-                if outbound.metadata_only and contains_cell_values(stripped):
-                    row["content"] = "[withheld: metadata-only]"
-                else:
-                    row["content"] = stripped
+            if "content" in row:
+                row["content"] = _gate_content(row["content"], outbound.metadata_only)
             new_messages.append(row)
         gated_messages = new_messages
         system_out, _ = strip_cell_sections(system)
         if outbound.metadata_only and contains_cell_values(system_out):
             system_out = ""
-        outbound = gate_outbound_prompt(
+        regated = gate_outbound_prompt(
             "\n".join(
-                str(m.get("content") or "")
-                for m in gated_messages
-                if isinstance(m.get("content"), str)
+                text for m in gated_messages for text in _message_strings(m.get("content"))
             ),
             system_out,
             provider=provider,
+        )
+        # The digest commits to what is sent; "withheld" is about what was asked.
+        outbound = OutboundPrompt(
+            prompt=regated.prompt,
+            system=regated.system,
+            cell_values_included=regated.cell_values_included,
+            cells_withheld=bool(withheld or regated.cells_withheld),
+            metadata_only=regated.metadata_only,
+            payload_sha256=regated.payload_sha256,
+            byte_count=regated.byte_count,
         )
     else:
         system_out = system

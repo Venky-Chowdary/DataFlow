@@ -56,7 +56,7 @@ def test_polish_falls_back_to_ollama(monkeypatch):
 
         def generate(self, prompt, system="", max_tokens=900):
             return prov.LLMResponse(
-                content="You have three recent transfer jobs ready to review.",
+                content="The customers table has an id column and an email column.",
                 success=True,
                 provider="ollama",
                 model="llama3.2",
@@ -67,16 +67,19 @@ def test_polish_falls_back_to_ollama(monkeypatch):
     monkeypatch.setattr(prov, "DataTransferOllamaProvider", lambda: _Ollama())
 
     agent = DataPilotAgent()
+    # A documentation answer: count and status answers are not narrated (review
+    # H5), and since review 2 (H1) no tool-derived answer is, schema included.
     local = CopilotResponse(
-        answer="3 jobs listed.",
-        intent="jobs",
+        answer="Table customers has columns id and email.",
+        intent="product",
         confidence=0.9,
         method="pilot_local_engine",
-        tools_used=[{"name": "list_jobs", "success": True, "summary": "3 jobs"}],
+        sources=[{"title": "Schema basics", "href": "/help/schema"}],
+        tools_used=[{"name": "explain_product", "success": True, "summary": "ok"}],
     )
-    out = agent._polish_with_llm("show jobs", [], local, "system")
+    out = agent._polish_with_llm("what columns are in customers", [], local, "system")
     assert out.method == "ollama_polish"
-    assert "three" in out.answer.lower() or "jobs" in out.answer.lower()
+    assert "column" in out.answer.lower()
 
 
 def test_hybrid_footnote_only_on_greeting_method(monkeypatch):

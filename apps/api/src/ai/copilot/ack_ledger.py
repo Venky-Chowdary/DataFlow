@@ -2,9 +2,17 @@
 
 Create-connector drafts (with secrets) stay on the server. The UI only
 receives an ack_id + safe preview; Confirm consumes the ledger once.
+
+At rest (the ledger file, or the shared Mongo collection) a pending payload is
+sealed by the connector-secret vault — never plaintext. Each approval records
+the workspace it was staged in and who staged it; a caller bound to a
+workspace that may not read that one is told the approval does not exist
+(audit L4).
 """
 
 from __future__ import annotations
+
+import re
 
 import json
 import logging
@@ -16,13 +24,33 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .sealed_state import owner_stamp, readable_by_caller, seal, unseal
+
 _log = logging.getLogger(__name__)
 
 _DEFAULT_TTL_SEC = 15 * 60  # 15 minutes
-_SECRET_KEYS = frozenset({
-    "password", "passwd", "pwd", "api_key", "token", "private_key",
-    "connection_string", "service_account", "secret",
-})
+def _secret_keys() -> frozenset[str]:
+    # The connector store's own list is the authority (secret_access_key,
+    # client_secret, refresh_token, ...): one list, not two that drift.
+    from services.connector_store import _CONNECTOR_SECRET_KEYS
+
+    return frozenset(_CONNECTOR_SECRET_KEYS) | {"passwd", "pwd", "secret"}
+
+
+_SECRET_KEYS = _secret_keys()
+#: Secret-shaped names beyond the list: aws_secret_access_key, sas_token,
+#: ssh_password, passphrase, access_token, bearer, a DSN or a URI that may
+#: carry userinfo (review, low: the list was narrower than real payloads).
+_SECRET_NAME = re.compile(
+    r"(?:pass(?:word|wd|phrase)|pwd|secret|token|bearer|credential|private_key|api_?key|"
+    r"access_key|sas|^dsn$|^uri$|_uri$|^url$|connection_string)",
+    re.I,
+)
+
+
+def _secret_name(key: str) -> bool:
+    low = str(key).lower()
+    return low in _SECRET_KEYS or bool(_SECRET_NAME.search(low))
 _OBJECT_STORE_TYPES = frozenset({
     "s3", "amazon_s3", "aws_s3", "minio", "s3_compatible",
     "gcs", "google_cloud_storage", "adls", "azure_blob_storage",
@@ -83,14 +111,125 @@ def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in (payload or {}).items():
         key = k.lower()
-        if key in _SECRET_KEYS or (hide_access_key and key == "username"):
+        if _secret_name(key) or (hide_access_key and key == "username"):
             out[k] = "***" if v else ""
             out[f"has_{k}"] = bool(v)
         elif isinstance(v, dict):
             out[k] = redact_payload(v)
+        elif isinstance(v, str):
+            # A host or endpoint written as a URL carries its password in the
+            # userinfo; "host" is not secret-named (review 2, low).
+            from services.secret_config import mask_secrets_in_text
+
+            out[k] = mask_secrets_in_text(v)
         else:
             out[k] = v
     return out
+
+
+def _staged_by() -> dict[str, str]:
+    """Where and by whom an approval is being staged (from the bound request)."""
+    stamp = owner_stamp()
+    return {"workspace_id": stamp["workspace_id"], "staged_by": stamp["actor"]}
+
+
+def _visible(doc: dict[str, Any] | None) -> bool:
+    """Whether the bound caller's workspace scope covers this approval."""
+    return bool(doc) and readable_by_caller(doc or {}, same_actor=False)
+
+
+_SEALED = "__sealed__"
+
+
+def _is_secret_key(payload: dict[str, Any], key: str) -> bool:
+    """The keys ``redact_payload`` hides from a client are the ones sealed at rest."""
+    low = str(key).lower()
+    return _secret_name(low) or (low == "username" and _object_store_payload(payload))
+
+
+def _seal_secrets(node: Any) -> Any:
+    """``node`` with every secret value replaced by ``{"__sealed__": ciphertext}``.
+
+    Field-level on purpose: the rest of a staged payload (mappings, statistics,
+    Decimal and datetime values) keeps its exact types in the store.
+    Raises ``LookupError`` when the vault cannot seal.
+    """
+    if isinstance(node, dict):
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if value and _is_secret_key(node, key) and not (isinstance(value, dict) and _SEALED in value):
+                token = seal(value)
+                if token is None:
+                    raise LookupError("vault unavailable")
+                out[key] = {_SEALED: token}
+            else:
+                out[key] = _seal_secrets(value)
+        return out
+    if isinstance(node, list):
+        return [_seal_secrets(item) for item in node]
+    return node
+
+
+def _open_secrets(node: Any) -> Any:
+    """Inverse of :func:`_seal_secrets`. Raises ``LookupError`` for an unopenable value."""
+    if isinstance(node, dict):
+        if set(node) == {_SEALED}:
+            value = unseal(node[_SEALED])
+            if value is None:
+                raise LookupError("sealed under another key")
+            return value
+        return {key: _open_secrets(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_open_secrets(item) for item in node]
+    return node
+
+
+def _has_plain_secret(node: Any) -> bool:
+    """Whether a stored payload holds a secret in clear (written before sealing)."""
+    if isinstance(node, dict):
+        return any(
+            (value and _is_secret_key(node, key) and not (isinstance(value, dict) and _SEALED in value))
+            or _has_plain_secret(value)
+            for key, value in node.items()
+        )
+    if isinstance(node, list):
+        return any(_has_plain_secret(item) for item in node)
+    return False
+
+
+def _sealed_at_rest(doc: dict[str, Any]) -> dict[str, Any] | None:
+    """The stored form of an approval: every secret in its payload sealed.
+
+    None when the vault cannot seal — the caller must not store that record.
+    """
+    try:
+        return {**doc, "payload": _seal_secrets(doc.get("payload") or {})}
+    except LookupError:
+        return None
+
+
+def _opened(doc: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A stored approval with its secrets unsealed (None if they cannot be opened)."""
+    if not doc:
+        return doc
+    try:
+        return {**doc, "payload": _open_secrets(doc.get("payload") or {})}
+    except LookupError:
+        return None
+
+
+def _safe_peek(doc: dict[str, Any]) -> dict[str, Any]:
+    """What a caller may see of an approval before confirming — no secrets."""
+    return {
+        "ack_id": doc["ack_id"],
+        "kind": doc["kind"],
+        "preview": dict(doc.get("preview") or {}),
+        "expires_at": doc.get("expires_at"),
+        "consumed": bool(doc.get("consumed_at")),
+        "consumed_at": doc.get("consumed_at"),
+        "workspace_id": str(doc.get("workspace_id") or ""),
+        "staged_by": str(doc.get("staged_by") or ""),
+    }
 
 
 class PilotAckLedger:
@@ -101,6 +240,8 @@ class PilotAckLedger:
         self.ttl_sec = max(60, int(ttl_sec))
         self._lock = threading.RLock()
         self._entries: dict[str, dict[str, Any]] = {}
+        #: Approvals another worker wrote to the same file, kept as stored.
+        self._carried: dict[str, dict[str, Any]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -109,7 +250,12 @@ class PilotAckLedger:
                 return
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             now = _now()
+            legacy = False
             for aid, doc in (raw.get("entries") or {}).items():
+                legacy = legacy or _has_plain_secret((doc or {}).get("payload") if isinstance(doc, dict) else None)
+                doc = _opened(doc)
+                if doc is None:
+                    continue  # sealed under a key this process does not hold
                 consumed = float(doc.get("consumed_at") or 0)
                 exp = float(doc.get("expires_at") or 0)
                 if consumed:
@@ -121,17 +267,56 @@ class PilotAckLedger:
                     self._entries[str(aid)] = doc
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             _log.warning("pilot ack ledger load failed: %s", exc)
+            return
+        if legacy:
+            # A secret an earlier release wrote in clear is sealed now, not at
+            # the next write, which may never come (review 2, low).
+            self._persist()
 
     def _persist(self) -> None:
+        from .spill_lock import read_spill, spill_lock
+
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            # Keep recently consumed for idempotent replay window
-            payload = {"entries": self._entries}
-            tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
-            tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
-            tmp.replace(self.path)
+            with spill_lock(self.path):
+                self._merge_disk_locked(read_spill(self.path))
+                # Keep recently consumed for idempotent replay window. A pending
+                # payload is sealed; one the vault cannot seal stays in memory only.
+                entries = {
+                    aid: stored
+                    for aid, doc in self._entries.items()
+                    if (stored := _sealed_at_rest(doc)) is not None
+                }
+                for aid, stored in self._carried.items():
+                    entries.setdefault(aid, stored)
+                tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+                tmp.write_text(json.dumps({"entries": entries}, default=str), encoding="utf-8")
+                tmp.replace(self.path)
         except OSError as exc:
             _log.warning("pilot ack ledger persist failed: %s", exc)
+
+    def _merge_disk_locked(self, disk: dict[str, Any]) -> None:
+        """Fold in another worker's approvals and consumes (review 2, low).
+
+        An approval only this file knows is carried through as stored. A consume
+        is one-way: when the file says an approval was used, this worker's
+        pending copy takes that, so a later write cannot make it pending again.
+        """
+        now = _now()
+        self._carried = {}
+        for aid, stored in (disk.get("entries") or {}).items():
+            if not isinstance(stored, dict):
+                continue
+            consumed = float(stored.get("consumed_at") or 0)
+            if (consumed and consumed + 3600 < now) or (not consumed and float(stored.get("expires_at") or 0) <= now):
+                continue
+            mine = self._entries.get(aid)
+            if mine is None:
+                self._carried[aid] = stored
+            elif consumed and not mine.get("consumed_at"):
+                opened = _opened(stored)
+                if opened is not None:
+                    self._entries[aid] = opened
 
     def _gc_locked(self) -> None:
         now = _now()
@@ -165,6 +350,7 @@ class PilotAckLedger:
             "created_at": now,
             "expires_at": now + ttl,
             "actor_hint": (actor_hint or "").strip(),
+            **_staged_by(),
             "consumed_at": None,
             "consumed_by": None,
             "consume_reason": None,
@@ -181,18 +367,11 @@ class PilotAckLedger:
         with self._lock:
             self._gc_locked()
             doc = self._entries.get((ack_id or "").strip())
-            if not doc:
+            if not _visible(doc):
                 return None
             if float(doc.get("expires_at") or 0) <= _now() and not doc.get("consumed_at"):
                 return None
-            return {
-                "ack_id": doc["ack_id"],
-                "kind": doc["kind"],
-                "preview": dict(doc.get("preview") or {}),
-                "expires_at": doc.get("expires_at"),
-                "consumed": bool(doc.get("consumed_at")),
-                "consumed_at": doc.get("consumed_at"),
-            }
+            return _safe_peek(doc)
 
     def _expired_message_locked(self, aid: str) -> str:
         """Drop one expired unused ack and name the action to stage again.
@@ -220,7 +399,7 @@ class PilotAckLedger:
             if expired:
                 return expired
             doc = self._entries.get(aid)
-        if not doc:
+        if not _visible(doc):
             return approval_restage_message(None, expired=False)
         return ""
 
@@ -235,7 +414,7 @@ class PilotAckLedger:
                 return None, expired
             self._gc_locked()
             doc = self._entries.get(aid)
-            if not doc:
+            if not _visible(doc):
                 return None, approval_restage_message(None, expired=False)
             if doc.get("consumed_at"):
                 prior = doc.get("result")
@@ -273,7 +452,7 @@ class PilotAckLedger:
                 return None, expired
             self._gc_locked()
             doc = self._entries.get(aid)
-            if not doc:
+            if not _visible(doc):
                 return None, approval_restage_message(None, expired=False)
             if doc.get("consumed_at"):
                 # Any stamped result means the mutation already happened. Replaying
@@ -420,13 +599,21 @@ class MongoAckLedger:
             "created_at": now,
             "expires_at": now + ttl,
             "actor_hint": (actor_hint or "").strip(),
+            **_staged_by(),
             "consumed_at": None,
             "consumed_by": None,
             "consume_reason": None,
             "result": None,
         }
+        stored = _sealed_at_rest(doc)
+        if stored is None:
+            # A shared collection must never hold a staged secret in plaintext.
+            raise RuntimeError(
+                "This approval could not be staged: the secret vault is unavailable, "
+                "so its payload cannot be stored encrypted."
+            )
         self._gc()
-        self._coll.insert_one(doc)
+        self._coll.insert_one(stored)
         return aid
 
     def unusable_reason(self, ack_id: str) -> str:
@@ -449,8 +636,9 @@ class MongoAckLedger:
         aid = (ack_id or "").strip()
         if not aid:
             return None
-        doc = self._coll.find_one({"_id": aid})
-        return dict(doc) if doc else None
+        doc = _opened(self._coll.find_one({"_id": aid}))
+        # Another workspace's approval does not exist for this caller.
+        return dict(doc) if doc and _visible(doc) else None
 
     def peek(self, ack_id: str) -> dict[str, Any] | None:
         self._gc()
@@ -459,14 +647,7 @@ class MongoAckLedger:
             return None
         if doc.get("consumed_at") is None and float(doc.get("expires_at") or 0) <= _now():
             return None
-        return {
-            "ack_id": doc["ack_id"],
-            "kind": doc["kind"],
-            "preview": dict(doc.get("preview") or {}),
-            "expires_at": doc.get("expires_at"),
-            "consumed": bool(doc.get("consumed_at")),
-            "consumed_at": doc.get("consumed_at"),
-        }
+        return _safe_peek(doc)
 
     def _idempotent(self, doc: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str] | None:
         if not doc or not doc.get("consumed_at"):
@@ -555,7 +736,7 @@ class MongoAckLedger:
             if replay is not None:
                 return replay
             return None, "This approval is already being confirmed. Wait a moment and retry."
-        return dict(updated.get("payload") or {}), ""
+        return dict((_opened(dict(updated)) or {}).get("payload") or {}), ""
 
     def release_claim(self, ack_id: str) -> None:
         aid = (ack_id or "").strip()

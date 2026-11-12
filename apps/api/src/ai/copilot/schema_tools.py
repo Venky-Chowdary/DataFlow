@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from .md_safe import md_text
 from .example_phrases import (
     example_connector_name,
     example_dest_connector_name,
@@ -261,7 +262,7 @@ def _pick_connector(
                 shown = f"{label} ({cid})" if cid else label
                 if shown and shown not in names:
                     names.append(shown)
-            listed = ", ".join(f"**{n}**" for n in names)
+            listed = ", ".join(f"**{md_text(n)}**" for n in names)
             raise AmbiguousConnectorError(
                 f"“{needle}” matches {len(ties)} connectors. Pass the connector id. {listed}",
                 candidates=names,
@@ -276,7 +277,7 @@ def _pick_connector(
         name = str(d.get("name") or "").strip()
         if name and name not in names:
             names.append(name)
-    listed = ", ".join(f"**{n}**" for n in names)
+    listed = ", ".join(f"**{md_text(n)}**" for n in names)
     engine = _engine_word(needle)
     question = (
         f"“{needle}” is a database type, so it names more than one saved {engine} "
@@ -292,7 +293,7 @@ def _no_match_message(needle: str, candidates: list[dict[str, Any]]) -> str:
     engine = _engine_word(needle)
     saved = [str(d.get("name") or "").strip() for d in candidates]
     saved = [n for n in saved if n]
-    listed = ", ".join(f"**{n}**" for n in saved[:6]) or "none yet"
+    listed = ", ".join(f"**{md_text(n)}**" for n in saved[:6]) or "none yet"
     # Keep "no connector matched" in every branch: the agent's recovery step and
     # the client both read it to offer the saved list instead of a dead end.
     head = f"No connector matched “{needle}”"
