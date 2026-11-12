@@ -12,6 +12,8 @@ workspace that may not read that one is told the approval does not exist
 
 from __future__ import annotations
 
+import re
+
 import json
 import logging
 import os
@@ -36,6 +38,19 @@ def _secret_keys() -> frozenset[str]:
 
 
 _SECRET_KEYS = _secret_keys()
+#: Secret-shaped names beyond the list: aws_secret_access_key, sas_token,
+#: ssh_password, passphrase, access_token, bearer, a DSN or a URI that may
+#: carry userinfo (review, low: the list was narrower than real payloads).
+_SECRET_NAME = re.compile(
+    r"(?:pass(?:word|wd|phrase)|pwd|secret|token|bearer|credential|private_key|api_?key|"
+    r"access_key|sas|^dsn$|^uri$|_uri$|^url$|connection_string)",
+    re.I,
+)
+
+
+def _secret_name(key: str) -> bool:
+    low = str(key).lower()
+    return low in _SECRET_KEYS or bool(_SECRET_NAME.search(low))
 _OBJECT_STORE_TYPES = frozenset({
     "s3", "amazon_s3", "aws_s3", "minio", "s3_compatible",
     "gcs", "google_cloud_storage", "adls", "azure_blob_storage",
@@ -96,7 +111,7 @@ def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in (payload or {}).items():
         key = k.lower()
-        if key in _SECRET_KEYS or (hide_access_key and key == "username"):
+        if _secret_name(key) or (hide_access_key and key == "username"):
             out[k] = "***" if v else ""
             out[f"has_{k}"] = bool(v)
         elif isinstance(v, dict):
@@ -123,7 +138,7 @@ _SEALED = "__sealed__"
 def _is_secret_key(payload: dict[str, Any], key: str) -> bool:
     """The keys ``redact_payload`` hides from a client are the ones sealed at rest."""
     low = str(key).lower()
-    return low in _SECRET_KEYS or (low == "username" and _object_store_payload(payload))
+    return _secret_name(low) or (low == "username" and _object_store_payload(payload))
 
 
 def _seal_secrets(node: Any) -> Any:

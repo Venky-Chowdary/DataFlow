@@ -114,3 +114,26 @@ def test_masking_still_hides_uri_passwords(text, secret):
     from services.secret_config import mask_secrets_in_text
 
     assert secret not in mask_secrets_in_text(text)
+
+
+def test_secret_shaped_ack_fields_are_sealed_and_redacted(tmp_path, monkeypatch):
+    from src.ai.copilot import ack_ledger
+
+    monkeypatch.setenv("DATAFLOW_PILOT_ACK_PATH", str(tmp_path / "pilot_acks.json"))
+    monkeypatch.setattr(ack_ledger, "_ledger", None)
+    payload = {
+        "name": "S3 lake", "type": "s3",
+        "config": {"secret_access_key": "s3cr3t-FAKE-1", "sas_token": "sig=FAKE-2",
+                   "aws_secret_access_key": "s3cr3t-FAKE-1", "client_secret": "client-FAKE-3"},
+        "uri": "postgresql://svc:pw-FAKE-4@db.example/x", "dsn": "host=db password=pw-FAKE-4",
+        "ssh_password": "pw-FAKE-4", "passphrase": "pw-FAKE-4", "access_token": "pw-FAKE-4",
+        "auth": {"bearer": "pw-FAKE-4"},
+    }
+    ack_id = ack_ledger.get_ack_ledger().put(kind="create_connector", payload=payload)
+    on_disk = (tmp_path / "pilot_acks.json").read_text(encoding="utf-8")
+    shown = json.dumps(ack_ledger.redact_payload(payload))
+    for secret in ("s3cr3t-FAKE-1", "sig=FAKE-2", "client-FAKE-3", "pw-FAKE-4"):
+        assert secret not in on_disk, f"{secret} in clear in pilot_acks.json"
+        assert secret not in shown, f"{secret} in the client preview"
+    payload_back, error = ack_ledger.get_ack_ledger().claim(ack_id)
+    assert not error and payload_back["auth"]["bearer"] == "pw-FAKE-4"
