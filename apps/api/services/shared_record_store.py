@@ -28,6 +28,12 @@ once; a duplicate already in the database keeps working, loses the claim and
 is reported in the store's status (``duplicate_records``). The per-partition
 fence documents an earlier build wrote are ignored.
 
+A save that writes more than one record runs in one multi-document
+transaction when the database supports them (a replica set, DocumentDB,
+Atlas), so readers see all of it or none of it (a BYOK rotation: the new key
+in and the old one retired together). On a standalone server the writes are
+applied in order: retired first, then added.
+
 The store's status document (``control_plane_docs`` ``_id: <store>``) holds
 the import claim of a node's file (only while the store is empty, see
 :mod:`services.shared_doc_store`). A whole-store document written by an
@@ -84,6 +90,23 @@ class ReadToken:
         self.bodies = bodies
         self.revs = revs
         self.parts = parts
+
+
+def _transaction_client(coll: Any) -> Any | None:
+    """The MongoDB client when this deployment supports multi-document transactions (a replica set)."""
+    raw = getattr(coll, "_coll", coll)
+    client = getattr(getattr(raw, "database", None), "client", None)
+    kind = getattr(getattr(client, "topology_description", None), "topology_type_name", "")
+    return client if kind in ("ReplicaSetWithPrimary", "Sharded", "LoadBalanced") else None
+
+
+def _abort(session: Any) -> None:
+    if not getattr(session, "in_transaction", False):
+        return
+    try:
+        session.abort_transaction()
+    except Exception:  # noqa: BLE001 - the server aborts an unfinished transaction on its own
+        logger.debug("control-plane transaction abort failed", exc_info=True)
 
 
 def _claim_index_hit(exc: Exception) -> bool:
@@ -168,7 +191,8 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         return data
 
     # -- reads ---------------------------------------------------------
-    def load(self) -> Any:
+    def load(self, *, fresh: bool = False) -> Any:
+        """The store in its file shape. ``fresh`` reads the database even inside the cache window."""
         coll = _sds._collection(ITEMS_COLLECTION)
         if coll is None:
             return tracked(self._file_load(), None)
@@ -177,6 +201,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         cached = self._cache
         if (
             cached is not None
+            and not fresh
             and ttl > 0
             and not getattr(self._scope, "depth", 0)
             and _sds._clock() - cached[0] < ttl
@@ -248,13 +273,51 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         removed = [k for k in token.bodies if k not in new]
         if not (changed or added or removed):
             return
+        plan = (new, changed, removed, added, blind)
+        client = _transaction_client(coll) if len(changed) + len(removed) + len(added) > 1 else None
+        if client is None:
+            self._apply(coll, token, plan, {})
+        else:
+            self._apply_atomically(client, coll, token, plan)
+        if hasattr(data, "rev"):
+            data.rev = token
+
+    def _apply_atomically(self, client: Any, coll: Any, token: ReadToken, plan: tuple[Any, ...]) -> None:
+        """All of one save's writes in one transaction: readers see all of them or none.
+
+        A BYOK rotation (new key in, old key out) has no moment without an
+        active key, and a save that fails part-way changes nothing.
+        """
+        from pymongo.errors import PyMongoError
+
+        from services.control_plane_bounds import deadline
+
+        session = client.start_session()
+        try:
+            session.start_transaction()
+            self._apply(coll, token, plan, {"session": session})
+            with deadline():
+                session.commit_transaction()
+        except PyMongoError as exc:
+            _abort(session)
+            if exc.has_error_label("TransientTransactionError") or getattr(exc, "code", None) == 112:
+                raise SharedDocConflict(f"{self.name}: a concurrent transaction wrote the same records") from exc
+            raise
+        except BaseException:
+            _abort(session)
+            raise
+        finally:
+            session.end_session()
+
+    def _apply(self, coll: Any, token: ReadToken, plan: tuple[Any, ...], kw: dict[str, Any]) -> None:
+        new, changed, removed, added, blind = plan
         seq = time.time_ns()
         for key in changed:
             flt: dict[str, Any] = {"_id": self._item_id(key)}
             if not blind:
                 flt["rev"] = token.revs[key]
             try:
-                result = coll.update_one(flt, self._record_update(new[key]))
+                result = coll.update_one(flt, self._record_update(new[key]), **kw)
             except Exception as exc:
                 self._raise_if_claim_lost(exc, key)
                 raise
@@ -265,7 +328,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             flt = {"_id": self._item_id(key)}
             if not blind:
                 flt["rev"] = token.revs[key]
-            result = coll.delete_one(flt)
+            result = coll.delete_one(flt, **kw)
             if not blind and not getattr(result, "deleted_count", 0):
                 raise SharedDocConflict(f"{self.name}:{key}")
             for table in (token.bodies, token.revs, token.parts):
@@ -273,7 +336,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
         for index, key in enumerate(added):
             doc = self._record_doc(key, new[key], seq + index)
             try:
-                coll.insert_one(doc)
+                coll.insert_one(doc, **kw)
             except Exception as exc:
                 self._raise_if_claim_lost(exc, key)
                 if not _is_duplicate(exc):
@@ -281,7 +344,7 @@ class SharedRecordSet(LeasedImport, SharedDoc):
                 if not blind:
                     raise SharedDocConflict(f"{self.name}:{key}") from exc
                 try:
-                    coll.update_one({"_id": doc["_id"]}, self._record_update(new[key]))
+                    coll.update_one({"_id": doc["_id"]}, self._record_update(new[key]), **kw)
                 except Exception as again:
                     self._raise_if_claim_lost(again, key)
                     raise
@@ -289,8 +352,6 @@ class SharedRecordSet(LeasedImport, SharedDoc):
             token.parts[key] = new[key][0]
         for key in changed + added:
             token.bodies[key] = new[key][1]
-        if hasattr(data, "rev"):
-            data.rev = token
 
     def _record_doc(self, key: str, row: tuple[str, str, list[str]], seq: int) -> dict[str, Any]:
         doc = {"_id": self._item_id(key), "store": self.name, "key": key, "part": row[0], "rev": 1,

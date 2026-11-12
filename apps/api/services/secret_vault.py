@@ -334,13 +334,24 @@ def tenant_id_from_workspace(workspace_id: str | None) -> str | None:
 
 
 def _byok_active_for_tenant(tenant_id: str | None) -> bool:
-    """Whether the tenant's own key wraps its secrets. A key store error propagates (fail closed)."""
+    """Whether the tenant's own key wraps its secrets. A key store error propagates (fail closed).
+
+    A tenant that uses BYOK but has no active key is refused: its secret is
+    never stored under the platform key instead (ops review round 2, High 4).
+    """
     tid = (tenant_id or "").strip()
     if not tid:
         return False
-    from services.byok_key_manager import get_active_key_for_tenant
+    from services.byok_key_manager import get_active_key_for_tenant, tenant_uses_byok
 
-    return get_active_key_for_tenant(tid) is not None
+    if get_active_key_for_tenant(tid) is not None:
+        return True
+    if tenant_uses_byok(tid):
+        raise SecretVaultError(
+            f"Tenant {tid} encrypts its secrets with its own key (BYOK) and has no active key, so the "
+            "secret was not saved. Create or rotate the tenant's encryption key, then try again."
+        )
+    return False
 
 
 def encrypt_secret(plain: str, *, tenant_id: str | None = None, label: str = "") -> str:
