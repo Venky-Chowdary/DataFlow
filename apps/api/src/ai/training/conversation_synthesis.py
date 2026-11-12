@@ -6,12 +6,14 @@ Generate customer-facing Q&A pairs from universal data schemas.
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass, field
 
 from ..knowledge.copilot_knowledge import CONVERSATION_TEMPLATES
 from ..knowledge.industry_schemas import INDUSTRY_SCHEMAS
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
+from .training_runtime import raise_if_stopped
 
 
 @dataclass
@@ -294,16 +296,27 @@ class ConversationSynthesizer:
 
         return examples
 
-    def synthesize_full(self, universal_schemas: list[dict] | None = None) -> list[ConversationExample]:
-        """Generate complete conversation training set."""
+    def synthesize_full(
+        self,
+        universal_schemas: list[dict] | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> list[ConversationExample]:
+        """Generate complete conversation training set.
+
+        ``stop_event`` set (API shutdown) raises ``TrainingStopped`` between steps.
+        """
         examples = []
         examples.extend(self.synthesize_base_templates())
+        raise_if_stopped(stop_event)
         examples.extend(self.synthesize_from_industry_schemas())
+        raise_if_stopped(stop_event)
         examples.extend(self.synthesize_from_semantic_patterns(50))
         examples.extend(self.synthesize_agent_actions(universal_schemas))
+        raise_if_stopped(stop_event)
         examples.extend(self.synthesize_from_catalog())
 
         for schema in universal_schemas or []:
+            raise_if_stopped(stop_event)
             examples.extend(self.synthesize_from_schema(
                 schema_name=schema.get("name", "upload"),
                 columns=schema.get("columns", []),

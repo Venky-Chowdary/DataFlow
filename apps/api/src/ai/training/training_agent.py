@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -19,6 +20,7 @@ from ..knowledge.copilot_knowledge import get_copilot_documents
 from .conversation_synthesis import ConversationSynthesizer
 from .data_synthesis import DataTransferDataSynthesizer
 from .fine_tuning import DataTransferFineTuningPipeline
+from .training_runtime import TrainingStopped, atomic_text_file, raise_if_stopped
 from .universal_data_feeder import UniversalDataFeeder
 
 CHECKPOINT_FILE = "training_checkpoint.json"
@@ -79,9 +81,22 @@ class DataTransferTrainingAgent:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return False
 
-    def run_full_training(self, include_embedding_tune: bool = False, force: bool = False) -> TrainingRun:
-        """Execute complete training pipeline from universal data."""
+    def run_full_training(
+        self,
+        include_embedding_tune: bool = False,
+        force: bool = False,
+        stop_event: threading.Event | None = None,
+    ) -> TrainingRun:
+        """Execute complete training pipeline from universal data.
+
+        ``stop_event`` (set by API shutdown) is checked between phases and inside
+        the long loops; a stopped run ends ``status="stopped"`` before Phase 5,
+        so it writes no artifacts and no checkpoint.
+        """
         import uuid
+
+        def _check() -> None:
+            raise_if_stopped(stop_event)
 
         if not force and self.should_skip_training():
             skip = TrainingRun(
@@ -104,6 +119,7 @@ class DataTransferTrainingAgent:
 
         try:
             # Phase 1: Collect universal data (620+ connector profiles + industry + uploads)
+            _check()
             schemas = self.feeder.feed_all()
             schema_dicts = self.feeder.to_training_dicts(schemas)
             run.metrics["universal_schemas"] = len(schemas)
@@ -118,13 +134,15 @@ class DataTransferTrainingAgent:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
             # Phase 2: Synthesize conversation training (includes all 620 connector Q&A)
-            conversations = self.conversation_synth.synthesize_full(schema_dicts)
+            _check()
+            conversations = self.conversation_synth.synthesize_full(schema_dicts, stop_event=stop_event)
             run.metrics["conversation_examples"] = len(conversations)
             run.metrics["agent_action_examples"] = sum(
                 1 for c in conversations if c.context.get("tool")
             )
 
             # Phase 2b: Data-grounded NL from real analysis (uploads + industry, capped)
+            _check()
             from ..copilot.data_analyst import get_data_analyst
             analyst = get_data_analyst()
             grounded_schemas = [
@@ -138,6 +156,7 @@ class DataTransferTrainingAgent:
 
             data_grounded = []
             for schema in grounded_schemas:
+                _check()
                 insight = analyst.analyze_schema(schema)
                 for q in [
                     f"Analyze the {schema.name} data",
@@ -155,23 +174,28 @@ class DataTransferTrainingAgent:
             run.metrics["data_grounded_examples"] = len(data_grounded)
 
             # Phase 2c: Full 620+ connector catalog → RAG
+            _check()
             from ...services.catalog_service import catalog_training_docs
             catalog_docs = catalog_training_docs()
             run.metrics["catalog_docs_total"] = len(catalog_docs)
 
             # Phase 3: Semantic training data
-            semantic_datasets = self.data_synth.synthesize_full_dataset()
+            _check()
+            semantic_datasets = self.data_synth.synthesize_full_dataset(stop_event=stop_event)
             semantic_count = sum(len(d.examples) for d in semantic_datasets.values())
             run.metrics["semantic_examples"] = semantic_count
 
             # Phase 4: Batch ingest into RAG vector store
+            _check()
             copilot_docs = get_copilot_documents()
             all_docs = copilot_docs + catalog_docs + conv_docs
-            ingested = self._ingest_training_documents_batched(all_docs)
+            ingested = self._ingest_training_documents_batched(all_docs, stop_event=stop_event)
             run.metrics["rag_documents_ingested"] = ingested
             run.metrics["catalog_docs_ingested"] = len(catalog_docs)
 
-            # Phase 5: Save artifacts + LLM fine-tune exports
+            # Phase 5: Save artifacts + LLM fine-tune exports (last stop point:
+            # each file is written atomically, so no half-written artifacts)
+            _check()
             saved_paths = self._save_artifacts(conversations, conv_docs)
             ft_paths = self.fine_tune.export_llm_finetune_datasets(conversations)
             saved_paths.update(ft_paths)
@@ -192,6 +216,10 @@ class DataTransferTrainingAgent:
             run.completed_at = datetime.now(timezone.utc).isoformat()
             self._save_checkpoint(run)
 
+        except TrainingStopped:
+            run.status = "stopped"
+            run.completed_at = datetime.now(timezone.utc).isoformat()
+
         except Exception as e:
             run.status = "failed"
             run.errors.append(str(e))
@@ -199,13 +227,16 @@ class DataTransferTrainingAgent:
 
         return run
 
-    def _ingest_training_documents_batched(self, docs: list[dict]) -> int:
+    def _ingest_training_documents_batched(
+        self, docs: list[dict], stop_event: threading.Event | None = None,
+    ) -> int:
         """Ingest documents in batches to avoid memory spikes."""
         from ..rag.vector_store import get_vector_store
 
         store = get_vector_store()
         total = 0
         for i in range(0, len(docs), BATCH_SIZE):
+            raise_if_stopped(stop_event)
             batch = docs[i : i + BATCH_SIZE]
             texts = [d["text"] for d in batch]
             metadatas = [d["metadata"] for d in batch]
@@ -236,7 +267,7 @@ class DataTransferTrainingAgent:
             "completed_at": run.completed_at,
             "metrics": run.metrics,
         }
-        with open(self._checkpoint_path(), "w", encoding="utf-8") as f:
+        with atomic_text_file(self._checkpoint_path()) as f:
             json.dump(payload, f, indent=2, default=json_default)
 
     def _save_artifacts(
@@ -248,7 +279,7 @@ class DataTransferTrainingAgent:
         paths = {}
 
         conv_path = os.path.join(self.OUTPUT_DIR, "conversations.jsonl")
-        with open(conv_path, "w", encoding="utf-8") as f:
+        with atomic_text_file(conv_path) as f:
             for ex in conversations:
                 f.write(json.dumps({
                     "user": ex.user_message,
@@ -259,14 +290,14 @@ class DataTransferTrainingAgent:
         paths["conversations"] = conv_path
 
         docs_path = os.path.join(self.OUTPUT_DIR, "vector_documents.jsonl")
-        with open(docs_path, "w", encoding="utf-8") as f:
+        with atomic_text_file(docs_path) as f:
             for doc in conv_docs:
                 f.write(json.dumps(doc, default=json_default) + "\n")
         paths["vector_documents"] = docs_path
 
         feeder_status = self.feeder.get_status()
         status_path = os.path.join(self.OUTPUT_DIR, "feeder_status.json")
-        with open(status_path, "w", encoding="utf-8") as f:
+        with atomic_text_file(status_path) as f:
             json.dump(feeder_status, f, indent=2, default=json_default)
         paths["feeder_status"] = status_path
 
