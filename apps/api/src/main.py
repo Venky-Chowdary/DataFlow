@@ -50,6 +50,7 @@ from .middleware.proxy_fix_middleware import ProxyFixMiddleware
 from .middleware.own_host_redirect_middleware import OwnHostRedirectMiddleware
 from .middleware.workspace_ip_allowlist_middleware import WorkspaceIpAllowlistMiddleware
 from .middleware.tenant_scope_middleware import TenantScopeMiddleware
+from .middleware.connector_access_middleware import ConnectorAccessMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
 from .routers.auth_router import router as auth_router
@@ -138,6 +139,21 @@ async def lifespan(app: FastAPI):
     from services.brand_env import warn_brand_flag_conflicts
 
     warn_brand_flag_conflicts(logger)
+    from services.local_file_policy import local_file_settings, warn_if_local_file_confinement_off
+
+    warn_if_local_file_confinement_off(logging.getLogger("datawrap.security"))
+    from services.platform_aws_credentials import (
+        platform_aws_settings,
+        warn_if_platform_aws_credentials_allowed,
+    )
+
+    warn_if_platform_aws_credentials_allowed(logging.getLogger("datawrap.security"))
+    from services.platform_gcp_azure_credentials import (
+        platform_gcp_azure_settings,
+        warn_if_platform_gcp_azure_credentials_allowed,
+    )
+
+    warn_if_platform_gcp_azure_credentials_allowed(logging.getLogger("datawrap.security"))
     from services.sso_authorization import warn_sso_auto_provision_without_domains
 
     warn_sso_auto_provision_without_domains(logging.getLogger("datawrap.security"))
@@ -178,6 +194,9 @@ async def lifespan(app: FastAPI):
                     "audit_retention_days": audit_retention_days,
                     "docs_enabled": bool(docs_enabled()),
                     "config_error_count": len(config_errors),
+                    **local_file_settings(),
+                    **platform_aws_settings(),
+                    **platform_gcp_azure_settings(),
                 },
             )
         except Exception as exc:
@@ -488,6 +507,9 @@ _cors_origins = cors_origins()
 # (an operator may still set CORS_ORIGIN_REGEX deliberately).
 _cors_origin_regex = cors_origin_regex()
 
+# Innermost: binds the authenticated caller for saved-connector resolution
+# (services.connector_access.current_caller), inside the tenant scope it narrows.
+app.add_middleware(ConnectorAccessMiddleware)
 app.add_middleware(TenantScopeMiddleware)
 app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)

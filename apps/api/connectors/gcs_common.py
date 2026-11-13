@@ -40,6 +40,13 @@ def _credentials(creds_ref: str, project: str | None):
     if creds_ref.endswith(".json") or "/" in creds_ref:
         from google.oauth2 import service_account
 
+        from services.google_credentials_policy import gcs_credentials_refusal
+
+        # Never a key file on the API host outside the connector areas (follow-up review 2, BQ).
+        refusal = gcs_credentials_refusal(creds_ref)
+        if refusal:
+            raise ValueError(refusal)
+
         return service_account.Credentials.from_service_account_file(creds_ref)
 
     return AnonymousCredentials()

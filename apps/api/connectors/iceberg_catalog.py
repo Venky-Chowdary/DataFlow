@@ -106,7 +106,8 @@ def iceberg_local_root() -> Path | None:
     ``DATAFLOW_ICEBERG_ROOT`` wins. With ``DATAFLOW_CONFINE_LOCAL_FILES`` on, the
     production jail defaults to ``<data_dir>/iceberg`` (the persistent volume),
     so a tenant cannot point a warehouse at an arbitrary worker path. Without
-    the variable and the flag (the default) nothing is jailed, as before.
+    the variable and with the flag off (the default outside production) nothing
+    is jailed, as before.
     """
     raw = (getenv_brand("ICEBERG_ROOT") or "").strip()
     if raw:
@@ -137,8 +138,9 @@ def _jail_local_path(path_str: str, label: str) -> Path:
         candidate = root / candidate
     resolved = candidate.resolve()
     if not is_within(resolved, root):
-        raise ValueError(
-            f"Iceberg {label} must be under the Iceberg warehouse root {root} (DATAFLOW_ICEBERG_ROOT)"
+        raise ValueError(  # no host path in the message (security follow-up 1)
+            f"Iceberg {label} must be under the Iceberg warehouse folder (DATAFLOW_ICEBERG_ROOT, "
+            "else the data folder's iceberg area)"
         )
     return resolved
 
@@ -488,19 +490,28 @@ def _ensure_pyiceberg() -> None:
 def load_catalog(endpoint: Any) -> Any:
     """Load or create a pyiceberg Catalog from endpoint configuration."""
     _ensure_pyiceberg()
+    from connectors.iceberg_credential_guard import check_catalog_properties, guarded_catalog
+    from services.iceberg_class_properties import connector_class_refusal
+
+    # No class a tenant names, even one the parse would drop (follow-up review 1).
+    named_class = connector_class_refusal(endpoint)
+    if named_class:
+        raise ValueError(named_class)
     config = parse_iceberg_catalog_config(endpoint)
     catalog_type = config["catalog_type"]
     name = config["catalog_name"]
     props = config["properties"]
+    # Never the platform's AWS credentials (follow-up review 1, H2).
+    check_catalog_properties(catalog_type, props)
 
     if catalog_type == "rest":
         from pyiceberg.catalog.rest import RestCatalog
 
-        return RestCatalog(name, **props)
+        return guarded_catalog(RestCatalog)(name, **props)
     if catalog_type == "glue":
         from pyiceberg.catalog.glue import GlueCatalog
 
-        return GlueCatalog(name, **props)
+        return guarded_catalog(GlueCatalog)(name, **props)
     if catalog_type == "hadoop":
         try:
             from pyiceberg.catalog.hadoop import HadoopCatalog
@@ -510,11 +521,11 @@ def load_catalog(endpoint: Any) -> Any:
                 "use REST, Hive, Glue, or SQL. Refusing SqlCatalog fallback "
                 "that would invent a second catalog for leftover MERGE."
             ) from exc
-        return HadoopCatalog(name, **props)
+        return guarded_catalog(HadoopCatalog)(name, **props)
     if catalog_type == "hive":
         from pyiceberg.catalog.hive import HiveCatalog
 
-        return HiveCatalog(name, **props)
+        return guarded_catalog(HiveCatalog)(name, **props)
     if catalog_type == "filesystem":
         raise RuntimeError(
             "Iceberg filesystem CoW is not a pyiceberg SqlCatalog; "
@@ -523,7 +534,7 @@ def load_catalog(endpoint: Any) -> Any:
     # Default SQL catalog (SQLite, PostgreSQL, etc.).
     from pyiceberg.catalog.sql import SqlCatalog
 
-    return SqlCatalog(name, **props)
+    return guarded_catalog(SqlCatalog)(name, **props)
 
 
 def _namespace_exists(catalog: Any, namespace: tuple[str, ...]) -> bool:
