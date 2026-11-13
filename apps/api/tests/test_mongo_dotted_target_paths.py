@@ -212,3 +212,27 @@ def test_scalar_and_subdocument_collision_refused_before_write(mongo_db):
     assert res.ok is False
     assert "address.city" in (res.error or "") and "address" in (res.error or "")
     assert client[db]["customers"].count_documents({}) == 0
+
+
+@live
+def test_skip_duplicates_upsert_keeps_stored_docs_and_nests_new_ones(mongo_db):
+    """PR 420's skip_duplicates ($setOnInsert) and PR1's field paths together."""
+    from services.duplicate_policy import reset_match_action, set_match_action
+
+    client, db = mongo_db
+    coll = client[db]["customers"]
+    coll.insert_one({"id": 1, "name": "kept", "address": {"city": "Lyon", "geo": {"lat": 1}}})
+    token = set_match_action("skip")
+    try:
+        res = _write(
+            db, "customers",
+            [["1", "Ada", "Paris", "75001"], ["3", "Cy", "Rome", "00100"]],
+            mode="upsert", create=False, conflict=["id"],
+        )
+    finally:
+        reset_match_action(token)
+    assert res.ok, res.error
+    assert (res.rows_written, res.rows_skipped) == (1, 1)
+    docs = {d["id"]: d for d in coll.find({}, {"_id": 0})}
+    assert docs[1] == {"id": 1, "name": "kept", "address": {"city": "Lyon", "geo": {"lat": 1}}}
+    assert docs[3] == {"id": 3, "name": "Cy", "address": {"city": "Rome", "zip": "00100"}}
