@@ -329,3 +329,46 @@ def test_legacy_document_of_the_same_id_is_still_refused_beside_a_raw_neighbour(
     assert r.ok, r.error  # prefix:A_1 holds id A_1, not A-1
     r = _write(prefix, [["7", "new"]], write_mode="upsert", key_format="raw")
     assert not r.ok and "legacy" in (r.error or "")
+
+
+# ------------------------------------- append: an identical stored row is present
+def test_append_of_an_identical_stored_json_document_is_already_present(prefix):
+    """A second append run of an unchanged source into a key-addressed store
+    (the sync-mode matrix contract): no write, rows_skipped + Gate-8 marker."""
+    c = _client()
+    r1 = _write(prefix, [["1", "one"], ["2", "two"]], write_mode="insert")
+    assert r1.ok and r1.rows_written == 2
+    r2 = _write(prefix, [["1", "one"], ["2", "two"]], write_mode="insert")
+    assert r2.ok, r2.error
+    assert (r2.rows_written, r2.rows_skipped, r2.rejected_rows) == (0, 2, 0), r2
+    assert sorted(r2.meta.get("skipped_identity_keys") or []) == ["1", "2"]
+    assert json.loads(c.get(_key(prefix, "1"))) == {"id": "1", "name": "one"}
+
+
+def test_append_of_a_changed_stored_json_document_is_still_rejected(prefix):
+    c = _client()
+    c.set(_key(prefix, "1"), json.dumps({"id": "1", "name": "one"}))
+    r = _write(prefix, [["1", "CHANGED"]], write_mode="insert")
+    assert r.ok, r.error
+    assert (r.rows_written, r.rejected_rows) == (0, 1)
+    assert json.loads(c.get(_key(prefix, "1")))["name"] == "one"
+
+
+def test_append_compares_parsed_json_values_not_bytes(prefix):
+    c = _client()
+    # Same values, different JSON spelling (key order, whitespace) plus an
+    # unmapped field the mapping does not write.
+    c.set(_key(prefix, "1"), '{ "name" : "one", "extra": 5, "id": "1" }')
+    r = _write(prefix, [["1", "one"]], write_mode="insert")
+    assert (r.ok, r.rows_written, r.rows_skipped, r.rejected_rows) == (True, 0, 1, 0), r
+
+
+def test_append_onto_an_identical_hash_is_already_present_and_a_changed_one_rejected(prefix):
+    c = _client()
+    c.hset(_key(prefix, "1"), mapping={"id": "1", "name": "one", "app_meta": "keep"})
+    c.hset(_key(prefix, "2"), mapping={"id": "2", "name": "old"})
+    r = _write(prefix, [["1", "one"], ["2", "two"]], write_mode="insert")
+    assert r.ok, r.error
+    assert (r.rows_written, r.rows_skipped, r.rejected_rows) == (0, 1, 1), r
+    assert r.meta.get("skipped_identity_keys") == ["1"]
+    assert c.hgetall(_key(prefix, "2"))[b"name"] == b"old"

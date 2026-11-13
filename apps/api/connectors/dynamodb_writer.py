@@ -606,8 +606,19 @@ def _sparse_update_item(
 _ITEM_WRITE_WORKERS = 8
 
 
-def _put_if_absent(client: Any, table: str, key_attrs: dict[str, Any], item: dict) -> bool:
-    """PutItem only when no item holds this key. False when the key is stored."""
+#: ``_put_if_absent`` outcome: the key is stored with this row's content already.
+PRESENT = "present"
+
+
+def _put_if_absent(
+    client: Any, table: str, key_attrs: dict[str, Any], item: dict
+) -> bool | str:
+    """PutItem only when no item holds this key.
+
+    ``True`` written; :data:`PRESENT` when the stored item already holds this
+    row (an unchanged source re-run into a key-addressed table); ``False`` when
+    the key is stored with different content.
+    """
     from botocore.exceptions import ClientError
 
     names = {f"#k{i}": name for i, name in enumerate(key_attrs)}
@@ -617,21 +628,42 @@ def _put_if_absent(client: Any, table: str, key_attrs: dict[str, Any], item: dic
             Item=item,
             ConditionExpression=" AND ".join(f"attribute_not_exists({a})" for a in names),
             ExpressionAttributeNames=names,
+            ReturnValuesOnConditionCheckFailure="ALL_OLD",
         )
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
             raise
-        return False
+        old = exc.response.get("Item")
+        if old is None:
+            old = client.get_item(TableName=table, Key=key_attrs, ConsistentRead=True).get("Item")
+        return PRESENT if _same_item(old or {}, item) else False
     return True
+
+
+def _same_item(stored: dict[str, Any], item: dict[str, Any]) -> bool:
+    """Every attribute of ``item`` is stored with the same typed value
+    (numbers compared as numbers: ``1.50`` is ``1.5``)."""
+    from decimal import Decimal, InvalidOperation
+
+    def same(a: Any, b: Any) -> bool:
+        if isinstance(a, dict) and isinstance(b, dict) and set(a) == set(b) == {"N"}:
+            try:
+                return Decimal(str(a["N"])) == Decimal(str(b["N"]))
+            except (InvalidOperation, ValueError):
+                return a == b
+        return a == b
+
+    return all(name in stored and same(stored[name], value) for name, value in item.items())
 
 
 def _apply_item_writes(
     client: Any, table: str, ops: list[tuple[dict, dict]], *, new_keys_only: bool
-) -> tuple[list[bool | None], list[BaseException]]:
+) -> tuple[list[bool | str | None], list[BaseException]]:
     """Per-item writes BatchWriteItem cannot express; an outcome per position.
 
-    ``True`` applied, ``False`` key already stored (conditional put), ``None``
-    not applied because a write for that key raised. Every error is returned,
+    ``True`` applied, ``False`` key already stored with other content
+    (conditional put), :data:`PRESENT` already stored with this content,
+    ``None`` not applied because a write for that key raised. Every error is returned,
     not raised: a throttled key must not hide the items the other workers
     already stored, so the caller counts what was applied and then fails.
 
@@ -648,7 +680,7 @@ def _apply_item_writes(
     for pos, (key_attrs, _item) in enumerate(ops):
         ident = json.dumps(key_attrs, sort_keys=True, default=str)
         groups.setdefault(ident, []).append(pos)
-    applied: list[bool | None] = [None] * len(ops)
+    applied: list[bool | str | None] = [None] * len(ops)
     errors: list[BaseException] = []
 
     def _run(positions: list[int]) -> None:
@@ -1368,13 +1400,13 @@ def write_mapped_rows(
                 client, table, item_ops, new_keys_only=item_mode == "new_only"
             )
             for (row_number, row), applied in zip(item_rows, outcomes):
-                if applied:
+                if applied is True:
                     chunk_written += 1
                     applied_rows.append(row)
                     continue
                 if applied is None:
                     continue  # its write raised: reported by the error below
-                if skip_stored:
+                if skip_stored or applied == PRESENT:
                     marker_cols = [
                         c for c in (conflict_columns or list(key_types)) if c in target_cols
                     ] or list(key_types)

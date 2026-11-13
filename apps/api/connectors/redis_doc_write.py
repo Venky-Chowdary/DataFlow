@@ -136,6 +136,9 @@ def apply_redis_docs(
         if not pending:
             break
         stored = _prefetch(client, [plans[i].key for i in pending], id_cols)
+        held = (
+            _stored_hash_fields(client, plans, pending, stored) if mode == "append" else {}
+        )
         pipe = client.pipeline(transaction=False)
         sent: list[tuple[int, str]] = []
         for pos, (kind, raw, owner) in zip(pending, stored):
@@ -153,7 +156,7 @@ def apply_redis_docs(
                 if exists:
                     outcomes[pos] = (
                         (SKIPPED, "")
-                        if mode == "skip"
+                        if mode == "skip" or _same_document(plan, kind, raw, held.get(pos))
                         else (
                             REJECTED,
                             f"Redis key {plan.key!r} already stored — append never "
@@ -242,6 +245,51 @@ def legacy_layout_refusal(
         "the connector's key_format to legacy to continue those keys, or migrate them "
         "to the raw layout first. Nothing in this batch was written."
     )
+
+
+def _stored_hash_fields(
+    client: Any, plans: list[RedisDocPlan], pending: list[int], stored: list[tuple]
+) -> dict[int, list[Any]]:
+    """Append: the mapped fields of stored hashes, one pipelined HMGET."""
+    hashes = [pos for pos, (kind, _r, _o) in zip(pending, stored) if kind == "hash"]
+    if not hashes:
+        return {}
+    pipe = client.pipeline(transaction=False)
+    for pos in hashes:
+        pipe.hmget(plans[pos].key, list(plans[pos].doc))
+    return dict(zip(hashes, pipe.execute(raise_on_error=False)))
+
+
+def _same_document(plan: RedisDocPlan, kind: str, raw: Any, hash_values: Any) -> bool:
+    """Append: the stored document already holds this row (its mapped fields).
+
+    A key-addressed store re-run with an unchanged source must not be a
+    rejected row. JSON compares parsed values (key order, spacing and unmapped
+    fields do not matter); a hash compares the mapped fields with the text the
+    writer would store. Different content stays a rejected row.
+    """
+    import json
+
+    from connectors.redis_reader import load_redis_json_doc
+    from services.value_serializer import json_dumps_exact_text, sanitize_json_value
+
+    if kind == "string":
+        existing = load_redis_json_doc(raw)
+        incoming = json.loads(_doc_text(plan.doc))
+        return isinstance(existing, dict) and all(
+            name in existing and existing[name] == value for name, value in incoming.items()
+        )
+    if kind != "hash" or not isinstance(hash_values, list):
+        return False
+    for (name, value), held in zip(sanitize_json_value(plan.doc).items(), hash_values):
+        if value is None:
+            if held is not None:
+                return False
+            continue
+        text = value if isinstance(value, str) else json_dumps_exact_text(value)
+        if held is None or _decode(held) != text:
+            return False
+    return True
 
 
 def _hash_has_deletes(plan: RedisDocPlan) -> bool:

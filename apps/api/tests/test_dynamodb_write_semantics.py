@@ -204,3 +204,18 @@ def test_a_failed_item_write_still_counts_the_rows_applied(ddb, monkeypatch, mod
     assert not r.ok
     assert "ProvisionedThroughputExceeded" in (r.error or "")
     assert r.rows_written == 9, r
+
+
+def test_append_of_an_identical_stored_item_is_already_present(ddb):
+    """Key-addressed append re-run of an unchanged source: present, not rejected."""
+    r = _write([["2", "keepme"], ["7", "new"]], write_mode="insert")
+    assert r.ok, r.error
+    assert (r.rows_written, r.rows_skipped, r.rejected_rows) == (1, 1, 0), r
+    assert r.meta.get("skipped_identity_keys") == ["2"]
+
+
+def test_append_of_a_changed_stored_item_is_still_rejected(ddb):
+    r = _write([["1", "CHANGED"]], write_mode="insert")
+    assert r.ok, r.error
+    assert (r.rows_written, r.rejected_rows) == (0, 1), r
+    assert _items(ddb)["1"]["name"] == "old"
