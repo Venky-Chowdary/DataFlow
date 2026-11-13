@@ -182,6 +182,9 @@ def load_manifest(path: Path = MANIFEST) -> dict[str, Any]:
             if missing:
                 raise ValueError(f"{path}: job {name!r} expected_skips entry {entry!r} lacks {missing}")
             re.compile(entry["reason"])
+            unknown_jobs = set(entry.get("only_jobs") or []) - set(data.get("jobs") or {})
+            if unknown_jobs:
+                raise ValueError(f"{path}: job {name!r} entry {entry['test']!r} names unknown only_jobs {sorted(unknown_jobs)}")
     return data
 
 
@@ -284,6 +287,9 @@ def check(
     allow = list(spec.get("expected_skips") or [])
     for other in spec.get("inherit_expected_skips") or []:
         allow += list((jobs.get(other) or {}).get("expected_skips") or [])
+    # ``only_jobs``: e.g. a SQL Server partner leg is expected where SQL Server
+    # is absent (api-tests) but must run where it is up (the nightly).
+    allow = [e for e in allow if job in (e.get("only_jobs") or [job])]
     used = [False] * len(allow)
     tokens = manifest.get("engine_tokens") or {}
     for case in cases:
@@ -297,12 +303,11 @@ def check(
             continue
         if result.mode == "engine_scoped" or result.mode == "report":
             named = names_engine(case.message, result.engines, tokens)
-            # "MySQL 3306 or Oracle 1521 not reachable" skips because of the
-            # engine this job does not start: it is that engine's skip.
-            elsewhere = names_engine(
-                case.message, [e for e in tokens if e not in result.engines], tokens
-            )
-            if not named or elsewhere:
+            # A message that names an engine this job starts counts, even when
+            # it also names one the job lacks ("PostgreSQL or MariaDB not
+            # listening" was the job's own MySQL). Genuine two-engine skips
+            # ("MySQL 3306 or Oracle 1521") are allowlisted one by one.
+            if not named:
                 result.ignored.append(row)
                 continue
             row["engines"] = ",".join(named)

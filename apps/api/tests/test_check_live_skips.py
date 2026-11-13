@@ -217,28 +217,72 @@ def test_labels_record_which_variant_of_a_job_ran(junit: Path, tmp_path: Path, m
         main(["--job", "j", "--junit", str(junit), "--manifest", str(manifest), "--label", "pymssql"])
 
 
-def test_a_skip_that_also_names_an_engine_the_job_lacks_is_not_this_jobs(tmp_path: Path) -> None:
-    """"MySQL 3306 or Oracle 1521 not reachable" skips because Oracle is absent."""
+REVIEW_JUNIT = Path(
+    "/tmp/claude-0/-home-user-DataFlow/bf71655b-4a5d-5975-beb8-f06ec2244960/scratchpad/rev_t1/j1.xml"
+)
+REVIEW_CASES = {  # the reviewer's junit (PR 424 review), inlined so CI needs no scratch file
+    "tests/test_execute_tracked_mysql_to_mysql_backfill_new_fields.py::test_x": "MySQL/MariaDB not reachable on localhost:3306",
+    "tests/test_redshift_named_sku.py::test_y": "Postgres :5432 unreachable — Redshift PG-wire dest COUNT unmeasured",
+    "tests/test_property9_row_conservation.py::test_z": "PostgreSQL or MariaDB not listening",
+    "tests/test_a.py::test_plain": "MySQL not reachable on localhost:3306",
+}
+
+
+def test_a_skip_naming_a_job_engine_counts_even_if_it_names_another() -> None:
+    """Review of PR 424: a message that also named a missing engine used to be
+    waved through ("MySQL/MariaDB not reachable", "Postgres ... Redshift
+    PG-wire", "PostgreSQL or MariaDB not listening"). Every one names an engine
+    the job starts, so every one is a real skip unless explicitly allowlisted."""
     from scripts.check_live_skips import Case
 
-    manifest = _manifest(mode="engine_scoped", engines=["postgresql"])
-    manifest["engine_tokens"]["mysql"] = ["mysql"]
-    manifest["jobs"]["j"]["engines"] = ["postgresql", "mysql"]
-    cases = [
-        Case("tests/a.py::t1", "skipped", "MySQL 3306 or Oracle 1521 not reachable"),
-        Case("tests/a.py::t2", "skipped", "live MySQL / PostgreSQL not reachable"),
-        Case("tests/a.py::t3", "skipped", "PostgreSQL 5432 or SQL Server 1433 not reachable"),
-        Case("tests/a.py::t4", "passed"),
-    ]
-    result = check("j", cases, manifest)
-    assert [r["test"] for r in result.unexpected] == ["tests/a.py::t2"]
-    assert {r["test"] for r in result.ignored} == {"tests/a.py::t1", "tests/a.py::t3"}
-
-
-def test_mariadb_is_its_own_engine_not_mysql() -> None:
     manifest = load_manifest(MANIFEST)
-    assert "mariadb" not in manifest["engine_tokens"]["mysql"]
-    assert "mariadb" in manifest["engine_tokens"]
+    if REVIEW_JUNIT.is_file():
+        cases = read_junit([REVIEW_JUNIT])
+    else:
+        cases = [Case(t, "skipped", m) for t, m in REVIEW_CASES.items()]
+    assert {c.test: c.message for c in cases} == REVIEW_CASES
+    result = check("api-tests", cases, manifest)
+    assert {r["test"] for r in result.unexpected} == set(REVIEW_CASES)
+    assert not result.ignored and not result.expected
+
+
+def test_mariadb_is_an_alias_of_mysql_and_pg_wire_of_postgresql() -> None:
+    manifest = load_manifest(MANIFEST)
+    tokens = manifest["engine_tokens"]
+    assert "mariadb" in tokens["mysql"] and "mariadb" not in tokens
+    assert names_engine("MariaDB not listening", ["mysql"], tokens) == ["mysql"]
+    assert names_engine("Redshift PG-wire engine unavailable", ["postgresql"], tokens) == ["postgresql"]
+
+
+@pytest.mark.parametrize(
+    ("test", "message", "allowed_in_nightly"),
+    [
+        ("tests/test_mysql_oracle_copy.py::test_x", "MySQL 3306 or Oracle 1521 not reachable", True),
+        ("tests/test_pg_sqlserver_copy.py::test_x", "PostgreSQL 5432 or SQL Server 1433 not reachable", False),
+        ("tests/test_r4_upsert_identity_e2e.py::test_x", "MariaDB not configured (DATAFLOW_TEST_MARIADB_*, :3307)", True),
+    ],
+)
+def test_genuine_two_engine_skips_are_allowlisted_explicitly(test, message, allowed_in_nightly) -> None:
+    """Oracle, MariaDB-on-3307 and (in api-tests) SQL Server are not started, so
+    those legs are expected; SQL Server runs in the nightly, so there it counts."""
+    from scripts.check_live_skips import Case
+
+    manifest = load_manifest(MANIFEST)
+    cases = [Case(test, "skipped", message), Case("tests/a.py::ok", "passed")]
+    api = check("api-tests", cases, manifest)
+    assert [r["test"] for r in api.expected] == [test] and not api.unexpected
+    nightly = check("engine-suite", cases, manifest)
+    if allowed_in_nightly:
+        assert [r["test"] for r in nightly.expected] == [test]
+    else:
+        assert [r["test"] for r in nightly.unexpected + nightly.reported] == [test]
+
+
+def test_every_allowlist_entry_names_a_test_file_and_a_reason() -> None:
+    for job, spec in load_manifest(MANIFEST)["jobs"].items():
+        for entry in spec.get("expected_skips") or []:
+            assert entry["test"].startswith("tests/test_") and "::" in entry["test"], (job, entry)
+            assert entry["why"].strip(), (job, entry)
 
 
 def test_report_engines_are_counted_but_do_not_fail_the_job() -> None:
