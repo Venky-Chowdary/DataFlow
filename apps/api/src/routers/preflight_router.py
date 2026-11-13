@@ -840,7 +840,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             },
             # G11: an existing table's columns / collection's fields.
             destination_columns=list((dest_meta.get("column_types") or {}).keys()),
-            destination_config=dest_meta.get("_probe_cfg") or None,
+            destination_config=(dest_meta.get("_probe_cfg") or None) if dest_meta.get("connected") else None,
         ),
         validation_mode=body.validation_mode,
     )

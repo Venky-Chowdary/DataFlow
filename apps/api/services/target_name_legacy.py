@@ -10,6 +10,12 @@ writing to that column. Validate shows an info note
 anything reads or writes, so the writer, Gate-8 and the read-back all use that
 column. A new table gets the full name. A name past the engine's limit is
 refused only when no existing column matches.
+
+MongoDB / Elasticsearch: a target ``a.b`` / ``@timestamp`` whose old
+flattened spelling (``a_b`` / ``_timestamp``) is already a field of the
+existing collection or index gets a Validate warning
+(``target_path_legacy_flat_field``) naming both spellings and the remedies,
+so a run does not silently mix two shapes.
 """
 
 from __future__ import annotations
@@ -21,6 +27,8 @@ from typing import Any
 from connectors.destination_naming import (
     SQL_NAME_LIMITS,
     SQL_UNLIMITED,
+    DOCUMENT_STORES,
+    SEARCH_STORES,
     _NO_CUT,
     _as_dict,
     dest_kind,
@@ -181,6 +189,103 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
     return notes
 
 
+# -- document / search stores: warn about the old flattened spelling ---------
+
+
+def legacy_flat_field_warnings(
+    dest_type: str | None, mappings: Iterable[Any] | None, existing_fields: Iterable[str]
+) -> list[dict[str, str]]:
+    """``target_path_legacy_flat_field`` for each target whose old spelling exists."""
+    kind = dest_kind(dest_type)
+    if kind not in DOCUMENT_STORES and kind not in SEARCH_STORES:
+        return []
+    fields = {str(f) for f in existing_fields if str(f or "")}
+    if not fields:
+        return []
+    store = "collection" if kind in DOCUMENT_STORES else "index"
+    out: list[dict[str, str]] = []
+    for m in mappings or []:
+        target = str(_as_dict(m).get("target") or "").strip()
+        old = sanitize_identifier(target, preserve_case=True)
+        if not target or old == target or old not in fields or target in fields:
+            continue
+        rename = (
+            f"updateMany({{}}, {{$rename: {{{old!r}: {target!r}}}}})"
+            if kind in DOCUMENT_STORES
+            else "a reindex that renames the field"
+        )
+        out.append({
+            "code": "target_path_legacy_flat_field",
+            "target": target,
+            "other": old,
+            "message": (
+                f"The existing {store} already holds {old!r}, the name earlier runs "
+                f"wrote for {target!r}; this run writes {target!r}, so the {store} "
+                f"would mix both shapes. Rename the Map target to {old!r} to keep the "
+                f"old layout, run one overwrite, or migrate first with {rename}."
+            ),
+        })
+    return out
+
+
+def mongo_top_level_fields(cfg: Mapping[str, Any], collection: str, sample: int = 20) -> set[str]:
+    """Top-level field names in a few documents of an existing collection."""
+    from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
+
+    conn = normalize_mongodb_connection_string(
+        str(cfg.get("connection_string") or ""),
+        database=str(cfg.get("database") or ""),
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 27017),
+        username=str(cfg.get("username") or ""),
+        password=str(cfg.get("password") or ""),
+        ssl=bool(cfg.get("ssl", False)),
+        auth_source=str(cfg.get("auth_source") or ""),
+    )
+    coll = _mongo_client(conn)[str(cfg.get("database") or "test")][collection]
+    fields: set[str] = set()
+    for doc in coll.find({}).limit(int(sample)):
+        fields.update(str(k) for k in doc)
+    return fields
+
+
+def es_mapping_fields(cfg: Mapping[str, Any], index: str) -> set[str]:
+    """Dotted field paths an existing Elasticsearch index mapping declares."""
+    from connectors.elasticsearch_reader import _client
+
+    raw = _client(dict(cfg)).indices.get_mapping(index=index)
+    body = raw.body if hasattr(raw, "body") else raw
+    fields: set[str] = set()
+
+    def walk(props: Mapping[str, Any], prefix: str) -> None:
+        for name, spec in (props or {}).items():
+            path = f"{prefix}.{name}" if prefix else str(name)
+            fields.add(path)
+            if isinstance(spec, Mapping) and isinstance(spec.get("properties"), Mapping):
+                walk(spec["properties"], path)
+
+    for entry in (body or {}).values():
+        walk(((entry or {}).get("mappings") or {}).get("properties") or {}, "")
+    return fields
+
+
+def existing_document_fields(
+    dest_type: str | None, cfg: Mapping[str, Any] | None, table: str
+) -> set[str]:
+    """Fields an existing collection / index holds; empty when new, empty or unreadable."""
+    kind = dest_kind(dest_type)
+    if not cfg or not table:
+        return set()
+    try:
+        if kind in DOCUMENT_STORES:
+            return mongo_top_level_fields(cfg, table)
+        if kind in SEARCH_STORES:
+            return es_mapping_fields(cfg, table)
+    except Exception as exc:  # noqa: BLE001 - a warning only; never blocks Validate
+        logger.info("legacy field sample skipped: %s", exc)
+    return set()
+
+
 def target_name_gates(
     dest_type: str | None,
     mappings: Iterable[Any] | None,
@@ -193,7 +298,9 @@ def target_name_gates(
 
     ``g23c_target_names`` (block) holds names the destination refuses, judged
     after targets adopt an existing table's legacy columns;
-    ``g23d_existing_target_columns`` (info) lists those adoptions.
+    ``g23d_existing_target_columns`` (info) lists those adoptions;
+    ``g23e_target_legacy_fields`` (warn) lists MongoDB / Elasticsearch targets
+    whose old flattened spelling the existing collection or index holds.
     """
     from connectors.destination_naming import _mapped_targets, target_name_issues
 
@@ -234,6 +341,16 @@ def target_name_gates(
             "duration_ms": 0,
             "details": {"dest_type": kind, "notes": notes},
         })
+    fields = existing_document_fields(dest_type, destination_config, destination_table)
+    warnings = legacy_flat_field_warnings(dest_type, mappings, fields)
+    if warnings:
+        gates.append({
+            "id": "g23e_target_legacy_fields",
+            "status": "warn",
+            "message": " ".join(w["message"] for w in warnings[:3]),
+            "duration_ms": 0,
+            "details": {"dest_type": kind, "issues": warnings},
+        })
     return gates
 
 
@@ -241,6 +358,10 @@ __all__ = [
     "adopt_existing_columns",
     "adopt_for_request",
     "existing_column_for",
+    "es_mapping_fields",
+    "existing_document_fields",
+    "legacy_flat_field_warnings",
     "legacy_spelling",
+    "mongo_top_level_fields",
     "target_name_gates",
 ]

@@ -534,7 +534,7 @@ def run_plan_preflight(
             destination_table=dest_table,
             # G11: an existing table's columns / collection's fields.
             destination_columns=list((dest_meta.get("column_types") or {}).keys()),
-            destination_config=dest_meta.get("_probe_cfg") or None,
+            destination_config=(dest_meta.get("_probe_cfg") or None) if dest_meta.get("connected") else None,
         ),
         validation_mode=validation_mode,
         destination_db_type=dest_db_type,
