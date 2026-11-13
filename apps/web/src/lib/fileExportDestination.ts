@@ -23,7 +23,7 @@ export const FILE_EXPORT_FORMULA_PROTECTION_HELP =
 export const QUERY_EXPORT_FORMULA_PROTECTION_HELP =
   "Cells starting with = + - @ get a ' prefix so spreadsheets don't execute them. The prefix is "
   + "reversible (drop the leading ' to get the exact value). Numbers such as -2 are untouched. "
-  + "Turn off for exact values.";
+  + "Also applies to Copy as CSV. Turn off for exact values.";
 
 // ── TSV NULL marker (G7-F3) ────────────────────────────────────────────────
 

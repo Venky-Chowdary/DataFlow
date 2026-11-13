@@ -876,6 +876,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                 truncated={result.truncated}
                 durationMs={result.duration_ms}
                 onCopied={(what) => toast({ title: "Copied", message: what, tone: "success" })}
+                formulaProtection={formulaProtection}
               />
             ) : (
               <div className="df2-qw-placeholder">
