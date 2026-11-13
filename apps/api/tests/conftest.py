@@ -101,6 +101,14 @@ os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
 # var, like DATAFLOW_DATA_DIR above, so a test setting either name wins.
 # Tests that need training call run_full_training directly or set it "on".
 os.environ.setdefault("DATAFLOW_TRAINING", "off")
+# The app's pipeline cadence loop is off under pytest: tests fire scheduler
+# beats themselves, and the TestClient lifespan's loop raced them (CI PR 426,
+# test_d119: the test's beat was skipped as "already in progress"). A test
+# that needs the real loop requests ``schedule_loop_on``; a value the
+# operator set is kept.
+SCHEDULE_LOOP_DEFAULT = "0"
+if not (os.environ.get("DATAFLOW_SCHEDULE_LOOP") or os.environ.get("DATAWRAP_SCHEDULE_LOOP")):
+    os.environ["DATAFLOW_SCHEDULE_LOOP"] = SCHEDULE_LOOP_DEFAULT
 
 # Hermetic env: Railway markers exported by `railway run`, a linked dev
 # shell or CI agents with the CLI installed must not flip the suite into
@@ -643,45 +651,11 @@ def pg_test_cfg(port: int | None = None) -> dict:
     }
 
 
-#: Test module path -> whether its source fires scheduler beats itself.
-_BEAT_DRIVERS: dict[str, bool] = {}
-
-
-def _drives_schedule_beats(module: object) -> bool:
-    """Whether a test module calls ``_run_due_schedules(`` (fires beats itself)."""
-    path = str(getattr(module, "__file__", "") or "")
-    if path not in _BEAT_DRIVERS:
-        try:
-            source = Path(path).read_text(encoding="utf-8") if path else ""
-        except OSError:
-            source = ""
-        _BEAT_DRIVERS[path] = "_run_due_schedules(" in source
-    return _BEAT_DRIVERS[path]
-
-
-def _schedule_loop_off(monkeypatch) -> None:
-    for prefix in ("DATAFLOW", "DATAWRAP"):
-        monkeypatch.setenv(f"{prefix}_SCHEDULE_LOOP", "0")
-
-
 @pytest.fixture
-def manual_schedule_beats(monkeypatch):
-    """The test fires scheduler beats itself: the app's cadence loop stays off.
-
-    Under a TestClient the lifespan starts the loop, which fired a schedule
-    the instant a test made it due; the test's own beat was then skipped as
-    "already in progress" (CI PR 426, test_d119).
-    """
-    _schedule_loop_off(monkeypatch)
-
-
-@pytest.fixture(autouse=True)
-def _beat_driving_tests_own_the_beat(request, monkeypatch):
-    """``manual_schedule_beats`` for every module that calls ``_run_due_schedules(``."""
-    module = getattr(request, "module", None)
-    if module is not None and _drives_schedule_beats(module):
-        _schedule_loop_off(monkeypatch)
-    yield
+def schedule_loop_on(monkeypatch):
+    """Opt in to the app's cadence loop (off for the session: SCHEDULE_LOOP_DEFAULT)."""
+    for prefix in ("DATAFLOW", "DATAWRAP"):
+        monkeypatch.setenv(f"{prefix}_SCHEDULE_LOOP", "1")
 
 
 # Leaked CDC slots: ``tests.pg_slot_guard`` (registered in pytest_configure)

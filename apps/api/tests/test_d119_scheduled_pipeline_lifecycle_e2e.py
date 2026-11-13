@@ -39,8 +39,8 @@ pytestmark = pytest.mark.timeout(300)
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    # The test fires every beat itself: tests/conftest.py keeps the app's
-    # cadence loop off for it (_beat_driving_tests_own_the_beat).
+    # The test fires every beat itself: under pytest the app's cadence loop
+    # is off (tests/conftest.py SCHEDULE_LOOP_DEFAULT).
     h.isolate(tmp_path, monkeypatch)
     from fastapi.testclient import TestClient
     from src.main import app
