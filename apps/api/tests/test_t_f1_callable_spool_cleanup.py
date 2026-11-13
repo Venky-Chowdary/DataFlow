@@ -49,7 +49,10 @@ def _root_files() -> set[str]:
 
 
 def _unscoped_spools() -> set[str]:
-    """Paths of the unscoped (no job id) spools this process holds right now."""
+    """Paths of the unscoped (no job id) spools this process holds right now.
+
+    Assertions compare a snapshot taken before the action with one after it:
+    another test's live spool is not this action's leak (CI shard 3/6)."""
     from services import procedure_source
 
     return {str(s.path) for s in list(procedure_source._SPOOLS.values()) if not s.job_id}
@@ -79,13 +82,14 @@ def _run(monkeypatch, tmp_path, job_id: str):
 def test_successful_query_source_job_leaves_no_spool(monkeypatch, tmp_path):
     job_id = "tf1spool" + uuid.uuid4().hex[:10]
     before = _root_files()
+    unscoped_before = _unscoped_spools()
     result = _run(monkeypatch, tmp_path, job_id)
     assert result.success is True, result.error
     assert result.records_transferred == 50
     assert _job_files(job_id) == []
     # Nothing anywhere under the spool root either (a peek used to spool unscoped).
     assert _root_files() - before == set()
-    assert _unscoped_spools() == set()
+    assert _unscoped_spools() - unscoped_before == set()
 
 
 def test_a_reread_after_the_stream_closed_is_released_by_the_job_scope(monkeypatch, tmp_path):
@@ -120,6 +124,7 @@ def test_a_new_column_reaches_the_next_job(monkeypatch, tmp_path):
 
     monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: _FakeMongo())
     src, _dst = _db(tmp_path)
+    unscoped_before = _unscoped_spools()
 
     def job(dst: str):
         sqlite3.connect(dst).close()
@@ -151,7 +156,7 @@ def test_a_new_column_reaches_the_next_job(monkeypatch, tmp_path):
         conn.close()
     assert cols == ["id", "note", "extra_col"]
     assert first_row == (1, "n1", "E1")
-    assert _unscoped_spools() == set()
+    assert _unscoped_spools() - unscoped_before == set()
 
 
 def test_an_unscoped_read_from_offset_zero_never_reuses_an_old_extract(tmp_path):
