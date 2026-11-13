@@ -962,7 +962,9 @@ jobs:
       - name: Install audit tools and default API deps
         run: |
           python -m pip install --upgrade pip pip-audit bandit ruff mypy
-          python -m pip install -r apps/api/requirements-dev.txt
+          # Locked like the image, so the licence gate's bundled-library scan
+          # sees exactly the wheels Dockerfile.api installs.
+          python -m pip install -r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt
 
       - name: Ruff baseline (Phase B8 allowlist)
         # Start narrow — BLE001/S110/DTZ001/F401 on Decision Kernel + Phase A/B paths.

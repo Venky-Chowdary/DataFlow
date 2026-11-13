@@ -144,8 +144,17 @@ string. It is libxcrypt, not glibc, because it exports the `crypt_gensalt`
 family under glibc-compatible symbol versions, which is how the manylinux2014
 image builds it. It was compiled by clang 22.1.8, which points to a 2026
 manylinux image, and those pin libxcrypt 4.5.2. That mapping is recorded per
-wheel version (`WHEEL_LIB_VERSIONS`), so a new psycopg2-binary release fails
-the build until it is reviewed.
+bundled file, keyed by its auditwheel name `libcrypt-bc2db45e.so.1`
+(`WHEEL_LIB_VERSIONS`). The hash suffix follows the library's content, so a
+rebuilt libcrypt fails the build with "review bundled libraries" until it is
+reviewed, whichever wheel version carries it.
+
+The review is hermetic. `apps/api/constraints-image.txt` locks every package
+the image installs, and `REVIEWED_WHEELS` in `scripts/bundled_libraries.py`
+records the version of each bundling wheel that was reviewed. A wheel that
+bundles libraries at any other version fails both the image build and the CI
+licence gate with "review bundled libraries". A test also requires the lock
+and `REVIEWED_WHEELS` to agree, so a lock bump cannot skip the review.
 
 libgfortran's GCC Runtime Library Exception does not itself require source,
 but it is covered by the same GCC tarball as libquadmath.

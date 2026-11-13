@@ -168,15 +168,34 @@ UPSTREAM: dict[tuple[str, str], Upstream] = {
     ),
 }
 
-#: Libraries whose binary carries no version: the reviewed version per wheel.
-#: psycopg2-binary's manylinux2014 wheels link libcrypt.so.1 from libxcrypt,
-#: which the manylinux2014 image builds from source (glibc-compatible API:
-#: GLIBC_2.2.5 symbol versions plus libxcrypt's ``crypt_gensalt`` family). The
-#: wheel's copy was compiled by clang 22.1.8, i.e. a 2026 manylinux image, whose
-#: libxcrypt pin is 4.5.2 (sha256 above, same as the manylinux pin).
-WHEEL_LIB_VERSIONS: dict[tuple[str, str, str], str] = {
-    ("psycopg2-binary", "2.9.13", "libcrypt"): "4.5.2",
+#: Libraries whose binary carries no version: the reviewed version, keyed by
+#: the bundled file's auditwheel name. Its hash suffix is derived from the
+#: library's content, so a rebuilt library arrives under a new name and fails
+#: closed ("review bundled libraries") whatever the wheel's own version is.
+#: libcrypt-bc2db45e.so.1 (seen in psycopg2-binary 2.9.13) is libxcrypt
+#: (glibc-compatible API: GLIBC_2.2.5 symbol versions plus libxcrypt's
+#: ``crypt_gensalt`` family), built by the manylinux2014 image from source. It
+#: was compiled by clang 22.1.8, i.e. a 2026 manylinux image, whose libxcrypt
+#: pin is 4.5.2 (sha256 above, same as the manylinux pin).
+WHEEL_LIB_VERSIONS: dict[str, str] = {
+    "libcrypt-bc2db45e.so.1": "4.5.2",
 }
+
+#: The wheels whose ``.libs/`` were reviewed, at the reviewed version (the
+#: inventory above). apps/api/constraints-image.txt pins the image's install to
+#: these versions (tests/test_lgpl_source_shipping.py checks both agree), and a
+#: bundling wheel at any other version fails the image build and the CI licence
+#: gate with "review bundled libraries".
+REVIEWED_WHEELS: dict[str, str] = {
+    "google-crc32c": "1.9.0",
+    "ijson": "3.6.0",
+    "numpy": "2.5.4",
+    "pillow": "13.0.0",
+    "psycopg2-binary": "2.9.13",
+    "pymssql": "2.4.6",
+}
+
+_REVIEW = "review bundled libraries"
 
 _BASENAME = re.compile(r"^(?P<base>.+?)-[0-9a-f]{8}(?:-[0-9a-f]{8})?\.so(?:\.|$)")
 _KEYUTILS = re.compile(rb"keyutils-(\d+\.\d+\.\d+)")
@@ -207,11 +226,16 @@ def source_key(dist: str, dist_version: str, path: Path, lib: str, entry: Bundle
             raise BundledLibraryError(
                 f"{dist} {dist_version}: {path.name} is not libxcrypt (no crypt_gensalt); review it"
             )
-        version = WHEEL_LIB_VERSIONS.get((_canon(dist), dist_version, lib))
+        version = WHEEL_LIB_VERSIONS.get(path.name)
         if version:
             return ("libxcrypt", version)
+        raise BundledLibraryError(
+            f"{_REVIEW}: {dist} {dist_version} bundles {path.name}, a {entry.component} build that was not "
+            f"reviewed (reviewed: {', '.join(sorted(WHEEL_LIB_VERSIONS)) or 'none'}); identify its version "
+            "and add the file name to WHEEL_LIB_VERSIONS in scripts/bundled_libraries.py"
+        )
     raise BundledLibraryError(
-        f"{dist} {dist_version}: cannot tell which {entry.component} version {path.name} is; "
+        f"{_REVIEW}: {dist} {dist_version}: cannot tell which {entry.component} version {path.name} is; "
         "review the wheel and add it to WHEEL_LIB_VERSIONS / UPSTREAM in scripts/bundled_libraries.py"
     )
 
@@ -221,6 +245,14 @@ def inventory(dists: list[tuple[str, str, list[Path]]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     problems: list[str] = []
     for dist, version, paths in dists:
+        reviewed = REVIEWED_WHEELS.get(_canon(dist))
+        if reviewed != version:
+            problems.append(
+                f"{_REVIEW}: {dist} {version} bundles native libraries and "
+                + (f"was reviewed at {reviewed} only" if reviewed else "was never reviewed")
+                + ": review its .libs/ and update REVIEWED_WHEELS (scripts/bundled_libraries.py) and "
+                "apps/api/constraints-image.txt together"
+            )
         for path in paths:
             lib = lib_basename(path.name)
             entry = BUNDLED.get(lib)
@@ -238,7 +270,10 @@ def inventory(dists: list[tuple[str, str, list[Path]]]) -> list[dict[str, Any]]:
                     problems.append(str(exc))
                     continue
                 if key not in UPSTREAM:
-                    problems.append(f"{dist} {version}: no source mapped for {key[0]} {key[1]} ({path.name})")
+                    problems.append(
+                        f"{_REVIEW}: {dist} {version}: no source mapped for {key[0]} {key[1]} ({path.name}); "
+                        "add it to UPSTREAM in scripts/bundled_libraries.py"
+                    )
                     continue
             rows.append({
                 "dist": dist,

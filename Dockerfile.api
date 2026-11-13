@@ -20,8 +20,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# The runtime install is locked: constraints-image.txt pins every package (and
+# so every wheel whose bundled libraries were reviewed; see
+# scripts/bundled_libraries.py REVIEWED_WHEELS). Regenerate it with the command
+# in its header when requirements.txt changes. Every pip install below uses it.
 COPY apps/api/requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+COPY apps/api/constraints-image.txt /app/constraints-image.txt
+RUN pip install --upgrade pip && pip install -r /app/requirements.txt -c /app/constraints-image.txt
 
 # LGPL corresponding source (owner decision, 2026-11-13: accepted with
 # attribution). The source of exactly the installed versions ships in the
@@ -45,7 +50,7 @@ RUN python /tmp/lgpl/fetch_lgpl_sources.py --dest /usr/share/doc/datawrap/third-
 ARG INSTALL_VENDOR_DRIVERS=0
 COPY apps/api/requirements-vendor-drivers.txt /app/requirements-vendor-drivers.txt
 RUN if [ "$INSTALL_VENDOR_DRIVERS" = "1" ]; then \
-      pip install -r /app/requirements-vendor-drivers.txt; \
+      pip install -r /app/requirements-vendor-drivers.txt -c /app/constraints-image.txt; \
     else \
       echo "Vendor drivers not installed (INSTALL_VENDOR_DRIVERS=0)"; \
     fi
@@ -53,7 +58,7 @@ RUN if [ "$INSTALL_VENDOR_DRIVERS" = "1" ]; then \
 COPY packages/preflight /app/packages/preflight
 # Runtime only: preflight's dev extra is pytest, which the image must not ship
 # (test tools live in the API dev requirements file, which CI installs).
-RUN pip install -e /app/packages/preflight
+RUN pip install -e /app/packages/preflight -c /app/constraints-image.txt
 
 COPY apps/api /app/apps/api
 COPY scripts/start-api.sh /app/scripts/start-api.sh

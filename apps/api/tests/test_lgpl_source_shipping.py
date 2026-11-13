@@ -242,12 +242,98 @@ def test_an_unknown_bundled_library_fails_the_build(tmp_path: Path) -> None:
 
 
 def test_a_copyleft_library_with_an_unidentifiable_version_fails_the_build(tmp_path: Path) -> None:
+    # libcrypt carries no version string. The review is keyed by the bundled
+    # file's auditwheel name (its hash suffix changes with its content), not by
+    # the wheel's version: the reviewed file maps to libxcrypt 4.5.2 ...
     libs = _fake_dist(tmp_path, "psycopg2_binary", {"libcrypt-bc2db45e.so.1": b"_crypt_gensalt_sha1crypt_rn"})
-    # libcrypt carries no version string; only a reviewed (wheel, version) entry names it.
-    with pytest.raises(fetch.SourceError, match="libcrypt"):
-        fetch.inventory([("psycopg2-binary", "9.9.9", libs)])
     rows = fetch.inventory([("psycopg2-binary", "2.9.13", libs)])
     assert rows[0]["source"] == ["libxcrypt", "4.5.2"]
+    # ... and a rebuilt one (new hash) fails closed with a clear message.
+    new = _fake_dist(tmp_path / "next", "psycopg2_binary", {"libcrypt-0badc0de.so.1": b"_crypt_gensalt_sha1crypt_rn"})
+    with pytest.raises(fetch.SourceError, match=r"review bundled libraries.*libcrypt-0badc0de\.so\.1"):
+        fetch.inventory([("psycopg2-binary", "2.9.13", new)])
+
+
+# ── review 3: the bundled-library review is hermetic ───────────────────────
+
+bundled = sys.modules["bundled_libraries"]
+CONSTRAINTS = API / "constraints-image.txt"
+
+
+def _pins() -> dict[str, str]:
+    pins = {}
+    for raw in CONSTRAINTS.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            name, sep, version = line.partition("==")
+            assert sep and version and ";" not in version, f"not an exact pin: {raw!r}"
+            pins[bundled._canon(name)] = version.strip()
+    return pins
+
+
+def test_reviewed_library_versions_are_keyed_by_the_bundled_file_name() -> None:
+    assert bundled.WHEEL_LIB_VERSIONS, "the libcrypt review must be recorded"
+    for filename in bundled.WHEEL_LIB_VERSIONS:
+        assert bundled._BASENAME.match(filename), f"{filename} is not an auditwheel name (<lib>-<hash>.so...)"
+
+
+def test_a_wheel_version_that_was_not_reviewed_fails_with_review_bundled_libraries(tmp_path: Path) -> None:
+    libs = _fake_dist(tmp_path, "numpy", {"libscipy_openblas64_-f48b354e.so": b"openblas"})
+    assert fetch.inventory([("numpy", bundled.REVIEWED_WHEELS["numpy"], libs)])
+    with pytest.raises(fetch.SourceError, match=r"review bundled libraries: numpy 99\.0 .*reviewed at 2\."):
+        fetch.inventory([("numpy", "99.0", libs)])
+    with pytest.raises(fetch.SourceError, match=r"review bundled libraries: brandnew 1\.0 .*never reviewed"):
+        fetch.inventory([("brandnew", "1.0", _fake_dist(tmp_path, "brandnew", {"libssl-7f59e8e2.so.3": b"ssl"}))])
+
+
+def test_a_new_copyleft_library_version_says_review_bundled_libraries(tmp_path: Path) -> None:
+    libs = _fake_dist(tmp_path, "pymssql", {"libkeyutils-1234abcd.so.1.6": b"keyutils-1.6.3"})
+    with pytest.raises(fetch.SourceError, match=r"review bundled libraries.*keyutils 1\.6\.3"):
+        fetch.inventory([("pymssql", bundled.REVIEWED_WHEELS["pymssql"], libs)])
+
+
+def test_the_image_install_is_locked_by_a_constraints_file() -> None:
+    from packaging.requirements import Requirement
+
+    pins = _pins()
+    header = CONSTRAINTS.read_text(encoding="utf-8")
+    assert "uv pip compile apps/api/requirements.txt" in header and "--python-version 3.12" in header
+    for raw in (API / "requirements.txt").read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        req = Requirement(line)
+        pin = pins.get(bundled._canon(req.name))
+        assert pin, f"{req.name} is not pinned in {CONSTRAINTS.name}: regenerate it (command in its header)"
+        assert req.specifier.contains(pin, prereleases=True), f"{req.name}=={pin} violates {line!r}"
+
+
+def test_the_lock_pins_exactly_the_reviewed_wheels() -> None:
+    pins = _pins()
+    for dist, version in bundled.REVIEWED_WHEELS.items():
+        assert pins.get(dist) == version, (
+            f"review bundled libraries: {CONSTRAINTS.name} pins {dist}=={pins.get(dist)}, but its bundled "
+            f"libraries were reviewed at {version} (scripts/bundled_libraries.py REVIEWED_WHEELS)"
+        )
+
+
+def test_every_pip_install_in_the_image_uses_the_lock() -> None:
+    text = (REPO / "Dockerfile.api").read_text(encoding="utf-8").replace("\\\n", " ")
+    assert "COPY apps/api/constraints-image.txt /app/constraints-image.txt" in text
+    runs = "\n".join(line for line in text.splitlines() if line.startswith("RUN "))
+    installs = [seg for seg in runs.split("pip install")[1:] if not seg.lstrip().startswith("--upgrade pip")]
+    assert len(installs) >= 3  # runtime requirements, vendor drivers, preflight
+    for seg in installs:
+        head = seg.split("&&")[0].split(";")[0]
+        assert "-c /app/constraints-image.txt" in head, f"pip install{head} is not constrained"
+
+
+def test_the_ci_licence_gate_scans_the_locked_versions() -> None:
+    import yaml
+
+    jobs = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+    runs = "\n".join(str(step.get("run", "")) for step in jobs["security"]["steps"])
+    assert "-r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt" in runs
 
 
 def test_libcrypt_must_really_be_libxcrypt(tmp_path: Path) -> None:
@@ -281,6 +367,7 @@ def test_ship_fetches_bundled_copyleft_sources_once_with_checksums(tmp_path: Pat
         sha512=hashlib.sha512(tarball).hexdigest(),
     )
     monkeypatch.setitem(fetch.UPSTREAM, ("keyutils", "1.5.10"), upstream)
+    monkeypatch.setitem(bundled.REVIEWED_WHEELS, "other", "1.0")
     net = FakeNet({"https://mirror.example/keyutils-1.5.10.tar.bz2": tarball})
     dest = tmp_path / "out"
     rows = fetch.ship([], dest, get=net, bundled=[("pymssql", "2.4.6", a), ("other", "1.0", b)])
