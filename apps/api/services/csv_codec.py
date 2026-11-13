@@ -21,7 +21,7 @@ interpretation.
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import IO, Any
 
 _QUOTE = '"'
@@ -39,7 +39,10 @@ def decode_cell(value: str, was_quoted: bool | None, empty_cell: str = "null") -
     treated as unquoted, matching the historical reader's behaviour of
     landing an empty field as absent data.
     """
-    if value == LEGACY_CSV_NULL:
+    if value == LEGACY_CSV_NULL and was_quoted is not True:
+        # A *quoted* "\\N" is the two-character text (PostgreSQL CSV rule: a
+        # quoted NULL string is not NULL); the G7-F3 TSV ``\\N`` convention
+        # writes a literal ``\\N`` value that way.
         return None
     if value != "":
         return value
@@ -170,15 +173,38 @@ def _tsv_quote_cell(cell: str) -> str:
     return cell
 
 
-def format_csv_row(cells: list[str], delimiter: str = ",") -> str:
+def text_null_cell(cell: str, marker: str, quote: Callable[[str], str]) -> str:
+    """One encoded cell in the MySQL/PostgreSQL text NULL convention (G7-F3, opt-in).
+
+    NULL is ``marker`` (``\\N``) unquoted, ``''`` an empty unquoted cell, and a
+    text value equal to the marker is quoted so it reads back as that text.
+    Every other cell is quoted exactly as ``quote`` (the writer's own rule) does.
+    """
+    if cell == _CSV_NULL:
+        return marker
+    if cell == "":
+        return ""
+    if cell == marker:
+        return _QUOTE + cell.replace(_QUOTE, _QUOTE * 2) + _QUOTE
+    return quote(cell)
+
+
+def format_csv_row(cells: list[str], delimiter: str = ",", *, null_marker: str = "") -> str:
     """One encoded row as CSV text (no trailing newline).
 
     A cell holding the row's own delimiter, a quote, CR or LF is quoted for
     every delimiter (G7-F1: ``;``/``|`` rows used to quote only on ``,``).
+    ``null_marker`` (``\\N``) opts into :func:`text_null_cell`; empty keeps
+    the default codec (NULL and ``''`` as above).
     """
     if delimiter == "\t":
-        return "\t".join(_tsv_quote_cell(c) for c in cells)
-    return delimiter.join(csv_quote_cell(c, delimiter) for c in cells)
+        quote: Callable[[str], str] = _tsv_quote_cell
+    else:
+        def quote(cell: str) -> str:
+            return csv_quote_cell(cell, delimiter)
+    if null_marker:
+        return delimiter.join(text_null_cell(c, null_marker, quote) for c in cells)
+    return delimiter.join(quote(c) for c in cells)
 
 
 def csv_null_sentinel() -> str:

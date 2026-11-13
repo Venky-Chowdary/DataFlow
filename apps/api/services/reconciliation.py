@@ -2992,6 +2992,7 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             file_format=str(dest.get("file_format") or ""),
+            tsv_null=str(dest.get("tsv_null") or ""),
         )
     elif db_type == "gcs":
         count, chk = verify_gcs_blob(
@@ -3004,6 +3005,7 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             file_format=str(dest.get("file_format") or ""),
+            tsv_null=str(dest.get("tsv_null") or ""),
         )
     elif db_type in {
         "adls",
@@ -3024,6 +3026,7 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             file_format=str(dest.get("file_format") or ""),
+            tsv_null=str(dest.get("tsv_null") or ""),
         )
     elif db_type == "sftp":
         from connectors.sftp_common import host_key_settings
@@ -3040,6 +3043,7 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             file_format=str(dest.get("file_format") or ""),
+            tsv_null=str(dest.get("tsv_null") or ""),
             **host_key_settings(dest),
         )
     elif db_type in {

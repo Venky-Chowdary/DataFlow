@@ -306,19 +306,25 @@ class EndpointDTO(BaseModel):
             "Writer options. file_export CSV/TSV: formula_protection = \"off\" (default: "
             "the file is data, byte-exact) | \"prefix\" (text cells starting with = + - @ "
             "tab or CR get a leading ' so a spreadsheet never runs them; numbers are "
-            "untouched). Also accepted as a top-level destination key."
+            "untouched). file_export and object-store (S3/GCS/ADLS/SFTP) TSV: tsv_null = "
+            "\"empty\" (default: SQL NULL is an empty cell) | \"\\\\N\" (the MySQL/PostgreSQL "
+            "text convention: NULL is \\N, an empty string an empty cell, a literal \\N text "
+            "quoted; Gate-8 and the TSV readers read it back the same way; refused for "
+            "non-TSV files). Both are also accepted as top-level destination keys."
         ),
     )
 
     @model_validator(mode="after")
     def _formula_protection_vocabulary(self) -> "EndpointDTO":
-        """G7: an unknown formula_protection is a 422, never silently ignored."""
+        """G7: an unknown formula_protection or tsv_null is a 422, never silently ignored."""
         from services.csv_safety import formula_protection_mode
+        from services.export_dialect import tsv_null_mode
 
-        nested = self.extra.get("formula_protection") if isinstance(self.extra, dict) else None
-        for value in ((self.model_extra or {}).get("formula_protection"), nested):
-            if value is not None:
-                formula_protection_mode(value)
+        for key, check in (("formula_protection", formula_protection_mode), ("tsv_null", tsv_null_mode)):
+            nested = self.extra.get(key) if isinstance(self.extra, dict) else None
+            for value in ((self.model_extra or {}).get(key), nested):
+                if value is not None:
+                    check(value)
         return self
 
 

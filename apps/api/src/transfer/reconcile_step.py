@@ -421,7 +421,10 @@ def _proof_file_dest_batches(
     stream, closer = opened
     try:
         batch: list[dict[str, Any]] = []
-        for rec in _iter_artifact_records(stream, name=name, fmt=fmt, written_here=written_here):
+        # G7-F3: a TSV written with the opt-in ``\\N`` NULL convention is read with it.
+        tsv_null = dest_summary.get("tsv_null") if written_here else dst_cfg.get("tsv_null")
+        for rec in _iter_artifact_records(stream, name=name, fmt=fmt, written_here=written_here,
+                                          tsv_null=tsv_null):
             batch.append(rec)
             if len(batch) >= page:
                 yield batch
@@ -9070,7 +9073,8 @@ def _file_export_cell_readback(
         else:
             with open(path, "rb") as fh:
                 # The file this run just wrote: read with the writer's own dialect, never a sniffer.
-                rows = list(_iter_artifact_records(fh, name=os.path.basename(path), fmt=fmt, written_here=True))
+                rows = list(_iter_artifact_records(fh, name=os.path.basename(path), fmt=fmt, written_here=True,
+                                                   tsv_null=summary.get("tsv_null")))
     except (UnmeasuredArtifact, FixedWidthError, OSError, ValueError) as exc:
         return {"passed": False, "mismatches": [f"written file could not be re-read: {exc}"]}
     if str(summary.get("formula_protection") or "") == "prefix":
