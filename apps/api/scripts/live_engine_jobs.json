@@ -18,6 +18,20 @@
     "`required_labels`: every listed variant (check_live_skips.py --label key=value) must",
     "run green before the job counts, e.g. both SQL Server drivers."
   ],
+  "display_aliases_about": "How docs, READMEs and the web UI name each engine. tests/test_connector_ci_claims.py matches the id and these names case-insensitively, so a live-verified claim is caught however the engine is spelled.",
+  "display_aliases": {
+    "postgresql": ["PostgreSQL", "Postgres", "PG", "pgvector"],
+    "mysql": ["MySQL", "MariaDB"],
+    "mongodb": ["MongoDB", "Mongo"],
+    "redis": ["Redis"],
+    "kafka": ["Kafka", "Apache Kafka"],
+    "sqlserver": ["SQL Server", "SQLServer", "Microsoft SQL Server", "MSSQL", "MS SQL", "Azure SQL"],
+    "oracle": ["Oracle", "Oracle Database"],
+    "bigquery": ["BigQuery", "Google BigQuery", "BQ"],
+    "snowflake": ["Snowflake"],
+    "gcs": ["GCS", "Google Cloud Storage"],
+    "adls": ["ADLS", "ADLS Gen2", "Azure Data Lake Storage", "Azure Blob Storage"]
+  },
   "engine_tokens": {
     "postgresql": ["postgres", "postgresql", "pg", "pgvector", "psycopg", "psycopg2", "libpq", "pg-wire", "df-pg"],
     "mysql": ["mysql", "pymysql", "mariadb"],

@@ -150,9 +150,47 @@ _LIVE_CLAIM = re.compile(r"live[- ]verified|verified (?:live )?in CI|CI[- ]verif
 _CONFIG_CLAIM = re.compile(r"\blive container\b", re.IGNORECASE)
 
 
-def _doc_files() -> list[Path]:
+def _claim_files() -> list[Path]:
+    """Where a reader sees connector status: docs, every README, and the web UI's strings."""
     docs = REPO / "docs"
-    return sorted(docs.rglob("*.md")) if docs.is_dir() else []
+    files = sorted(docs.rglob("*.md")) if docs.is_dir() else []
+    files += sorted(
+        p for p in REPO.rglob("README*")
+        if p.is_file() and not {"node_modules", ".git"} & set(p.relative_to(REPO).parts)
+    )
+    web = REPO / "apps" / "web" / "src"
+    files += sorted(
+        p for p in web.rglob("*") if p.suffix in {".ts", ".tsx"} and ".test." not in p.name
+    ) if web.is_dir() else []
+    return files
+
+
+def _engine_patterns(manifest) -> dict[str, re.Pattern[str]]:
+    """Engine id plus its display aliases (manifest ``display_aliases``), case-insensitive."""
+    aliases = manifest.get("display_aliases") or {}
+    out = {}
+    for engine in engine_evidence(manifest, []):
+        names = [engine, *aliases.get(engine, [])]
+        alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+        out[engine] = re.compile(rf"(?<![A-Za-z0-9_])(?:{alt})(?![A-Za-z0-9_])", re.IGNORECASE)
+    return out
+
+
+def _claims(manifest, files: list[Path], verified: set[str]) -> list[str]:
+    patterns = _engine_patterns(manifest)
+    problems = []
+    for path in files:
+        rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
+        for n, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            named = {e for e, pat in patterns.items() if pat.search(line)}
+            if not named:
+                continue
+            if _CONFIG_CLAIM.search(line):
+                problems.append(f"{rel}:{n}: CI configuration shown as a live claim")
+            if _LIVE_CLAIM.search(line):
+                for engine in sorted(named - verified):
+                    problems.append(f"{rel}:{n}: {engine} called live-verified without CI evidence")
+    return problems
 
 
 def test_docs_never_call_an_engine_live_without_ci_evidence(manifest) -> None:
@@ -160,19 +198,45 @@ def test_docs_never_call_an_engine_live_without_ci_evidence(manifest) -> None:
     if EVIDENCE_SNAPSHOT.is_file():
         snap = json.loads(EVIDENCE_SNAPSHOT.read_text(encoding="utf-8"))
         verified = set(snap.get("live_verified") or [])
-    engines = set(engine_evidence(manifest, []))
-    problems = []
-    for path in _doc_files():
-        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            named = {e for e in engines if re.search(rf"`{re.escape(e)}`|\b{re.escape(e)}\b", line)}
-            if not named:
-                continue
-            if _CONFIG_CLAIM.search(line):
-                problems.append(f"{path.relative_to(REPO)}:{n}: CI configuration shown as a live claim")
-            if _LIVE_CLAIM.search(line):
-                for engine in sorted(named - verified):
-                    problems.append(f"{path.relative_to(REPO)}:{n}: {engine} called live-verified without CI evidence")
+    files = _claim_files()
+    assert any(p.name.startswith("README") for p in files)
+    assert any(p.suffix == ".tsx" for p in files), "the web UI strings are scanned"
+    problems = _claims(manifest, files, verified)
     assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize(
+    ("line", "engine"),
+    [
+        ("SQL Server: live-verified in CI", "sqlserver"),
+        ("**MSSQL** is CI-verified", "sqlserver"),
+        ("Microsoft SQL Server — verified in CI", "sqlserver"),
+        ("Postgres is live verified", "postgresql"),
+        ("POSTGRESQL: verified live in CI", "postgresql"),
+        ("Mongo (live-verified)", "mongodb"),
+        ("MongoDB: CI-verified", "mongodb"),
+        ("mysql / MariaDB live-verified", "mysql"),
+        ("Apache Kafka: live-verified", "kafka"),
+        ("Oracle Database: CI verified", "oracle"),
+        ("Google BigQuery is live verified", "bigquery"),
+        ('label: "Live-verified", engine: "SqlServer"', "sqlserver"),
+    ],
+)
+def test_a_claim_is_caught_whatever_the_engine_is_called(manifest, tmp_path: Path, line: str, engine: str) -> None:
+    page = tmp_path / "README.md"
+    page.write_text(f"# Connectors\n\n{line}\n", encoding="utf-8")
+    problems = _claims(manifest, [page], verified=set())
+    assert any(f"{engine} called live-verified" in p for p in problems), problems
+    # Once CI evidence verifies the engine, the same line is a fair claim.
+    assert not [p for p in _claims(manifest, [page], verified={engine}) if f"{engine} called" in p]
+
+
+def test_every_started_engine_has_display_aliases(manifest) -> None:
+    aliases = manifest.get("display_aliases") or {}
+    for engine in engine_evidence(manifest, []):
+        assert aliases.get(engine), f"live_engine_jobs.json display_aliases lacks {engine}"
+    assert {"SQL Server", "MSSQL"} <= set(aliases["sqlserver"])
+    assert "Postgres" in aliases["postgresql"] and "Mongo" in aliases["mongodb"]
 
 
 def test_capability_matrix_report_claims_nothing_without_ci_evidence() -> None:
