@@ -455,6 +455,43 @@ describe("Map step: remap onto existing destination columns", () => {
     assert.match(dialog.textContent ?? "", /unsupported domain jump/);
   });
 
+  it("touch: a tap or a jitter picks nothing up; a hold does; a cancelled drag never drops on lift", async () => {
+    await render([m("first_name", "", "VARCHAR(40)"), m("last_name", "", "VARCHAR(60)")]);
+    const fire = (el: Element, type: string, x = 10, y = 10) => {
+      const Ctor = (dom.window as unknown as { PointerEvent?: typeof MouseEvent }).PointerEvent ?? dom.window.MouseEvent;
+      const ev = new Ctor(type, { bubbles: true, cancelable: true, clientX: x, clientY: y });
+      Object.defineProperty(ev, "pointerType", { value: "touch" });
+      Object.defineProperty(ev, "pointerId", { value: 9 });
+      el.dispatchEvent(ev);
+    };
+    let under: Element | null = null;
+    document.elementFromPoint = () => under;
+    const grip = q<HTMLButtonElement>('button[aria-label="Move first_name to a destination column"]');
+    const given = () => q('[data-dest-column="given_name"]').querySelector(".df2-ms-dest-name");
+
+    // A flick: down and up over a column at once, with a 3px jitter.
+    under = given();
+    await act(async () => fire(grip, "pointerdown", 10, 10));
+    assert.equal(grip.getAttribute("aria-pressed"), "false", "no pick-up on touch-down");
+    await act(async () => fire(grip, "pointermove", 12, 12));
+    await act(async () => fire(grip, "pointerup", 12, 12));
+    await settle(200);
+    assert.equal(latest.find((r) => r.source === "first_name")!.target, "", "a flick drops nothing");
+
+    // A hold picks up without moving.
+    under = null;
+    await act(async () => fire(grip, "pointerdown", 10, 10));
+    await settle(200);
+    assert.equal(grip.getAttribute("aria-pressed"), "true", "a 150 ms hold picks up");
+    // Escape cancels; lifting the finger over a column afterwards drops nothing.
+    await key(grip, "Escape");
+    under = given();
+    await act(async () => fire(grip, "pointermove", 20, 20));
+    await act(async () => fire(grip, "pointerup", 20, 20));
+    await settle(50);
+    assert.equal(latest.find((r) => r.source === "first_name")!.target, "", "a cancelled drag never drops");
+  });
+
   it("touch: a finger drags a source onto a destination column; lifting off a column cancels", async () => {
     await render([m("first_name", "", "VARCHAR(40)"), m("last_name", "", "VARCHAR(60)")]);
     const fire = (el: Element, type: string, pointerType: string, x = 10, y = 10) => {

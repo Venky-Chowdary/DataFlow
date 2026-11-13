@@ -60,10 +60,31 @@ function destRowAt(x: number, y: number): Element | null {
  * when it is not over a column). The mouse keeps native drag and drop and the
  * keyboard keeps its own path; all three end in the same drop.
  */
+/** A press becomes a drag after this much movement… */
+export const PICKUP_DISTANCE_PX = 8;
+/** …or after being held this long without lifting. */
+export const PICKUP_HOLD_MS = 150;
+
 export function useTouchDrag(studio: DragStudio, onStart: () => void) {
   const overRef = useRef<string | null>(null);
   const armedRef = useRef<Set<string>>(new Set());
+  // A press that has not become a drag yet: a tap or a flick never picks up.
+  const pressRef = useRef<{ source: string; x: number; y: number; timer: number } | null>(null);
   const [touching, setTouching] = useState<string | null>(null);
+
+  const clearPress = () => {
+    if (pressRef.current) window.clearTimeout(pressRef.current.timer);
+    pressRef.current = null;
+  };
+
+  const pickUp = (source: string) => {
+    clearPress();
+    overRef.current = null;
+    armedRef.current = new Set();
+    setTouching(source);
+    onStart();
+    studio.dispatchDnd({ type: "pickUp", source, via: "pointer" });
+  };
 
   const handlers = (source: string) => ({
     onPointerDown(e: PointerEvent<HTMLElement>) {
@@ -74,14 +95,21 @@ export function useTouchDrag(studio: DragStudio, onStart: () => void) {
       } catch {
         /* A synthetic pointer may not be capturable; hit-testing still works. */
       }
-      overRef.current = null;
-      armedRef.current = new Set();
-      setTouching(source);
-      onStart();
-      studio.dispatchDnd({ type: "pickUp", source, via: "pointer" });
+      clearPress();
+      const timer = window.setTimeout(() => {
+        if (pressRef.current?.source === source) pickUp(source);
+      }, PICKUP_HOLD_MS);
+      pressRef.current = { source, x: e.clientX, y: e.clientY, timer };
     },
     onPointerMove(e: PointerEvent<HTMLElement>) {
-      if (e.pointerType === "mouse" || touching !== source) return;
+      if (e.pointerType === "mouse") return;
+      const press = pressRef.current;
+      if (press?.source === source) {
+        if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < PICKUP_DISTANCE_PX) return;
+        pickUp(source);
+      } else if (touching !== source) {
+        return;
+      }
       edgeScroll(e.clientY, destRowAt(e.clientX, e.clientY), armedRef.current);
       // Hit-test after any scroll: the row under the finger is the drop target.
       const name = destRowAt(e.clientX, e.clientY)?.getAttribute("data-dest-column") ?? null;
@@ -89,15 +117,24 @@ export function useTouchDrag(studio: DragStudio, onStart: () => void) {
       studio.pointerOver(name);
     },
     onPointerUp(e: PointerEvent<HTMLElement>) {
-      if (e.pointerType === "mouse" || touching !== source) return;
+      if (e.pointerType === "mouse") return;
+      if (pressRef.current?.source === source) {
+        clearPress(); // a tap: nothing was picked up
+        return;
+      }
+      if (touching !== source) return;
       setTouching(null);
       const name = overRef.current;
       overRef.current = null;
+      // pointerDrop drops only while this pointer drag is still active: a drag
+      // cancelled meanwhile (Escape) drops nothing.
       if (name) studio.pointerDrop(source, name);
       else studio.dispatchDnd({ type: "cancel" });
     },
     onPointerCancel(e: PointerEvent<HTMLElement>) {
-      if (e.pointerType === "mouse" || touching !== source) return;
+      if (e.pointerType === "mouse") return;
+      clearPress();
+      if (touching !== source) return;
       setTouching(null);
       overRef.current = null;
       studio.dispatchDnd({ type: "cancel" });
