@@ -109,6 +109,22 @@ def existing_column_for(
     return hits[0]
 
 
+def strip_client_map_targets(mappings: Any) -> Any:
+    """Drop ``map_target`` from inbound Map rows (final review B1).
+
+    Only ``adopt_for_request`` / ``adopt_existing_columns`` may set it; a row
+    arriving with one would otherwise steer ``operator_rows`` and the
+    approval fallback.
+    """
+    if not isinstance(mappings, list):
+        return mappings
+    return [
+        {k: v for k, v in m.items() if k != MAP_TARGET}
+        if isinstance(m, dict) and MAP_TARGET in m else m
+        for m in mappings
+    ]
+
+
 def operator_rows(mappings: Iterable[Any] | None) -> list[dict[str, Any]]:
     """Map rows with any earlier adoption undone (the operator's own targets)."""
     rows = [dict(_as_dict(m)) for m in (mappings or [])]
@@ -377,6 +393,10 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
     rows, notes = adopt_existing_columns(kind, mappings, existing)
     if notes:
         request.mappings = rows
+        try:  # the server's proof of this adoption (engine_identity.verified_identity_maps)
+            request._g11_adoption = {"dest": kind, "live": list(existing)}
+        except (AttributeError, TypeError):
+            pass
         for note in notes:
             logger.info("G11: %s", note["message"])
     return notes
@@ -1097,6 +1117,7 @@ __all__ = [
     "MAP_TARGET",
     "LegacyFieldsUnverified",
     "operator_rows",
+    "strip_client_map_targets",
     "prepare_stream_targets",
     "selected_streams",
     "stream_existing_columns",

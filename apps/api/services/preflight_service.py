@@ -414,11 +414,11 @@ def run_file_preflight(
     # G11: a target an earlier run stored under its legacy spelling (cut at 63,
     # lowercased on BigQuery) IS that existing column, for every gate and for
     # the approval hashes; Execute applies the same rename (adopt_for_request).
-    from services.target_name_legacy import adopt_rows_for_run
+    from services.target_name_legacy import adopt_rows_for_run, strip_client_map_targets
 
     existing = destination_live_column_types or destination_column_types or {}
-    mappings = adopt_rows_for_run(
-        destination_db_type, mappings,
+    mappings = adopt_rows_for_run(  # a client's map_target never steers adoption (B1)
+        destination_db_type, strip_client_map_targets(mappings),
         [] if destination_table_exists is False else list(existing), sync_mode,
         destination_config=destination_config, destination_table=destination_table,
     )

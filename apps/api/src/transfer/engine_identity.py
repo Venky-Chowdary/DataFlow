@@ -146,7 +146,8 @@ def _operator_contract_maps(request, mappings: list) -> list:
     )
     if not supplied:
         return mappings
-    return list(getattr(request, "mappings", None) or []) or mappings
+    rows = list(getattr(request, "mappings", None) or []) or mappings
+    return verified_identity_maps(rows, getattr(request, "_g11_adoption", None))
 
 
 def decision_artifact_source(src, fallback_format: str = "") -> dict[str, str]:
@@ -323,15 +324,47 @@ def execute_preflight_progress_message(request) -> str:
 # -- G11: approvals stamped over the operator's Map before legacy adoption -------
 
 
-def _operator_contract_retry(mappings: list) -> tuple[list, list[dict]] | None:
-    """The operator's rows behind adopted ones, and the adoptions; None if none."""
-    from services.target_name_legacy import MAP_TARGET, operator_rows
+class IdentityMaps(list):
+    """Map rows for the identity checks, with the adoption the server proved."""
 
-    adopted = [
-        {"column": str(m.get("target") or ""), "target": str(m.get(MAP_TARGET) or "")}
-        for m in mappings or []
-        if isinstance(m, dict) and m.get(MAP_TARGET)
-    ]
+    verified_adoption: list[dict] | None = None
+
+
+def verified_identity_maps(rows: list, adoption: dict | None) -> IdentityMaps:
+    """``rows`` plus the legacy-column adoption Execute made and can prove.
+
+    ``adoption`` is the server's record (``request._g11_adoption``: the
+    destination and the live columns adopt_for_request read). The adoption
+    counts only when re-running ``adopt_existing_columns`` over the
+    operator's rows and those live columns reproduces ``rows`` exactly;
+    a ``map_target`` the server did not produce never does (final review B1).
+    """
+    from services.target_name_legacy import MAP_TARGET, adopt_existing_columns, operator_rows
+
+    out = IdentityMaps(rows or [])
+    marked = [m for m in out if isinstance(m, dict) and m.get(MAP_TARGET)]
+    if not marked or not isinstance(adoption, dict):
+        return out
+    again, _notes = adopt_existing_columns(
+        adoption.get("dest"), operator_rows(out), list(adoption.get("live") or []))
+
+    def shape(items: list) -> list[tuple[str, str]]:
+        return [(str(m.get("target") or ""), str(m.get(MAP_TARGET) or ""))
+                for m in items if isinstance(m, dict)]
+
+    if shape(again) == shape(list(out)):
+        out.verified_adoption = [
+            {"column": str(m.get("target") or ""), "target": str(m.get(MAP_TARGET) or "")}
+            for m in marked
+        ]
+    return out
+
+
+def _operator_contract_retry(mappings: list) -> tuple[list, list[dict]] | None:
+    """The operator's rows behind a proven adoption, and the adoptions; None if none."""
+    from services.target_name_legacy import operator_rows
+
+    adopted = getattr(mappings, "verified_adoption", None)
     if not adopted:
         return None
     return operator_rows(mappings), adopted

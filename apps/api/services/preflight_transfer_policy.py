@@ -490,6 +490,9 @@ def run_transfer_policy_gates(
         target_name_gates,
     )
 
+    from services.target_name_legacy import strip_client_map_targets
+
+    mappings = strip_client_map_targets(mappings)  # final review B1
     policy = legacy_field_policy_of(destination_endpoint)
     streams = selected_streams(type("R", (), {"stream_contracts": contracts})())
     gates.extend(
