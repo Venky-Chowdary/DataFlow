@@ -5,9 +5,11 @@
 * An unparsable line of the on-disk transaction spill was skipped: a spilled
   insert, update or delete vanished from the committed transaction.
 
-Both now fail closed, the way the MySQL reader already refuses an unkeyed
-delete: the transaction stays open, nothing is emitted, and the cursor is not
-advanced past a change that was not applied.
+A corrupt spill line fails closed: the transaction stays open, nothing is
+emitted, and the cursor is not advanced past a change that was not applied.
+An unkeyed delete is never dropped either; since C2 it is parked with its row
+image and recorded (DLQ + audit) by the apply instead of stopping the stream
+(tests/test_c2_cdc_unkeyed_delete_parked.py).
 """
 
 from __future__ import annotations
@@ -24,36 +26,32 @@ from services.cdc_transaction_buffer import (
 
 
 @pytest.mark.parametrize("key", ["", None])
-def test_unkeyed_delete_is_refused_not_dropped(key):
+def test_unkeyed_delete_is_parked_not_dropped(key):
+    """Never dropped (audit 12) and, since C2, never fatal: parked with its image."""
     buf = TransactionBuffer()
     buf.begin("x1")
     buf.insert({"id": 1, "v": "a"}, pk="1")
-
-    with pytest.raises(CdcUnkeyedDelete) as raised:
-        buf.delete(key)
-
-    assert "no resolvable key" in str(raised.value)
-    # The transaction is still open and intact: nothing was emitted or lost.
-    assert buf.open_xid == "x1"
+    buf.delete(key, row={"v": "gone"})
     batch = buf.commit()
     assert [r["id"] for r in batch.inserts] == [1] and batch.deletes == []
+    assert [d["row"] for d in batch.unkeyed_deletes] == [{"v": "gone"}]
 
 
-def test_unkeyed_delete_is_refused_by_the_multi_table_buffer():
+def test_unkeyed_delete_is_parked_by_the_multi_table_buffer():
     buf = MultiTableTransactionBuffer()
     buf.begin("x1")
     buf.insert("orders", {"id": 1}, pk="1")
-    with pytest.raises(CdcUnkeyedDelete) as raised:
-        buf.delete("orders", "")
-    assert "orders" in str(raised.value)
-    assert buf.open_xid == "x1" and buf.open_event_count == 1
+    buf.delete("orders", "")
+    assert buf.open_xid == "x1" and buf.open_event_count == 2
+    (batch,) = buf.commit()
+    assert batch.table == "orders" and batch.unkeyed_deletes[0]["table"] == "orders"
 
 
 def test_drain_surfaces_an_unkeyed_delete():
     buf = TransactionBuffer()
     events = [("begin", {"xid": "x"}), ("delete", {"pk": None}), ("commit", {})]
-    with pytest.raises(CdcUnkeyedDelete):
-        list(buf.drain(iter(events)))
+    (batch,) = list(buf.drain(iter(events)))
+    assert len(batch.unkeyed_deletes) == 1 and batch.deletes == []
 
 
 def test_a_keyed_delete_still_flows():
