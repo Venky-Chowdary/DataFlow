@@ -88,10 +88,8 @@ def test_validate_then_execute_into_an_existing_legacy_column(client, dest_kind,
         assert CUT in str(note.get("message")), sorted(flow.gates_of(pf))
 
         run = flow.execute(
-            client, plan_id=plan_id, pf=pf, src_id=src.id, dst_id=dst.id,
-            src_kind="postgresql", dst_kind=dest_kind, database=h.PG["database"],
-            source_table=src_table, dest_table=dest_table, mappings=mappings,
-            sync_mode="full_refresh_append", schema_policy=policy,
+            client, plan_id=plan_id, pf=pf, source=source, destination=destination,
+            mappings=mappings, sync_mode="full_refresh_append", schema_policy=policy,
         )
         assert run.get("success") is True, (run.get("error"), run.get("error_details"))
         assert (run.get("reconciliation") or {}).get("passed") is True, run.get("reconciliation")
