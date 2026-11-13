@@ -215,6 +215,26 @@ def test_score_pair_tiers(src, tgt, kind):
     assert hit is not None and hit[1] == kind, hit
 
 
+@pytest.mark.parametrize(
+    ("src", "tgt"),
+    [("customer_email", "email_address"), ("order_amt", "total_amount"), ("order_status", "status")],
+)
+def test_concept_tier_matches_the_same_head_concept(src, tgt):
+    hit = score_pair(src, tgt)
+    assert hit is not None and hit[1] in {"concept", "synonym"}, hit
+    assert hit[0] >= 0.7
+
+
+@pytest.mark.parametrize(
+    ("src", "tgt"),
+    [("start_date", "end_date"), ("first_name", "last_name"), ("customer_id", "order_id"),
+     ("billing_address", "shipping_address")],
+)
+def test_concept_tier_refuses_false_friends(src, tgt):
+    hit = score_pair(src, tgt)
+    assert hit is None or hit[0] < 0.7, hit
+
+
 def test_learned_pair_outranks_synonym_but_not_a_normalized_match():
     learned = {"cust_fname": {"given_name": 3}}
     conf, kind, reason = score_pair("cust_fname", "given_name", learned=learned)
@@ -292,3 +312,32 @@ def test_memory_feeds_the_learned_tier(memory):
         learned=memory.learned_index(workspace_id="ws-a"),
     )
     assert out[0]["target"] == "given_name" and out[0]["kind"] == "learned"
+
+
+def test_the_reported_orders_table_maps_onto_other_destination_columns():
+    """MySQL orders (order_id, name, total_balance, first_name, last_name) onto an
+    existing table whose columns are named differently — the case that started this."""
+    out = suggest_assignments(
+        ["order_id", "name", "total_balance", "first_name", "last_name"],
+        ["id", "given_name", "surname", "full_name", "amount", "created_at", "tenant_id"],
+        source_table="orders",
+        dest_table="customers",
+    )
+    pairs = {s["source"]: (s["target"], s["kind"]) for s in out}
+    assert pairs == {
+        "order_id": ("id", "key_suffix"),
+        "name": ("full_name", "synonym"),
+        "total_balance": ("amount", "concept"),
+        "first_name": ("given_name", "synonym"),
+        "last_name": ("surname", "synonym"),
+    }
+    assert all(s["selected"] for s in out)
+
+
+@pytest.mark.parametrize(
+    ("src", "tgt"),
+    [("created_at", "updated_at"), ("work_email", "personal_email"), ("order_status", "payment_status")],
+)
+def test_qualified_siblings_in_one_synonym_group_are_not_synonyms(src, tgt):
+    hit = score_pair(src, tgt)
+    assert hit is None or hit[1] not in {"synonym", "concept"}, hit

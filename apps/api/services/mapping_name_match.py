@@ -19,6 +19,9 @@ Tiers, strongest first (the confidence is the tier's, never a model score):
                      dictionary (``src.ai.knowledge.synonyms``) after
                      abbreviation expansion (``given_name`` ≡ ``first_name``,
                      ``surname`` ≡ ``last_name``, ``total`` ≡ ``amount``).
+``concept``          the same head concept once abbreviations expand
+                     (``customer_email`` ≈ ``email_address``, ``order_amt`` ≈
+                     ``total_amount``).
 ``key_suffix``       ``<entity>_id`` against a bare ``id`` (``order_id`` ≡
                      ``id``), stronger when ``<entity>`` names the table.
 ``token``            shared words only — a hint the preview leaves unchecked.
@@ -26,6 +29,14 @@ Tiers, strongest first (the confidence is the tier's, never a model score):
 Assignment is one-to-one and global: the highest-scoring pair claims both its
 source and its target first, so one strong match is never stolen by a weaker
 one that happened to be listed earlier.
+
+False friends. The dictionary groups qualified variants under one canonical
+(``billing_address`` and ``shipping_address`` are both "address";
+``created_at`` and ``updated_at`` both "timestamp"). Two names of one group
+are a match only when at most one of them carries a qualifier — a word that
+is neither the concept, a one-word synonym of it, nor a generic kind word
+(``address``, ``at``, ``code``…). ``order_status`` ≈ ``status``, but
+``order_status`` ≠ ``payment_status`` and ``start_date`` ≠ ``end_date``.
 """
 
 from __future__ import annotations
@@ -39,6 +50,7 @@ CASE_INSENSITIVE = "case_insensitive"
 NORMALIZED = "normalized"
 LEARNED = "learned"
 SYNONYM = "synonym"
+CONCEPT = "concept"
 KEY_SUFFIX = "key_suffix"
 TOKEN = "token"
 
@@ -48,6 +60,7 @@ TIER_CONFIDENCE: dict[str, float] = {
     NORMALIZED: 0.95,
     LEARNED: 0.9,
     SYNONYM: 0.86,
+    CONCEPT: 0.78,
     KEY_SUFFIX: 0.72,
     TOKEN: 0.6,
 }
@@ -55,6 +68,14 @@ _TIER_RANK = {kind: i for i, kind in enumerate(TIER_CONFIDENCE)}
 
 #: Below this the preview lists a suggestion but leaves it unselected.
 DEFAULT_SELECT_THRESHOLD = 0.7
+
+#: Words that name a value's kind, not which entity it belongs to.
+_KIND_WORDS = frozenset({
+    "address", "addr", "id", "no", "number", "num", "code", "name", "value", "val",
+    "at", "on", "ts", "flag", "ind", "text", "desc", "field", "col", "column", "dt",
+})
+#: Key concepts never match by head word: customer_id is not order_id.
+_NO_CONCEPT = frozenset({"id", "identifier"})
 
 #: Abbreviation tokens that are also ordinary words or ambiguous on their own.
 _NO_EXPAND = frozenset({"id", "no", "item", "val", "cat", "co", "cls", "min", "max"})
@@ -78,14 +99,19 @@ def normalize_name(name: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def _dictionaries() -> tuple[dict[str, frozenset[str]], dict[str, str]]:
+def _dictionaries() -> tuple[dict[str, frozenset[str]], dict[str, str], dict[str, tuple[frozenset[str], frozenset[str]]]]:
+    """(name → groups, abbreviation → word, group → (canonical words, one-word synonyms))."""
     try:
         from src.ai.knowledge.synonyms import SYNONYM_DICTIONARY, TOKEN_ABBREVIATIONS
     except ImportError:  # pragma: no cover - alternate import root
         from ai.knowledge.synonyms import SYNONYM_DICTIONARY, TOKEN_ABBREVIATIONS
     index: dict[str, set[str]] = {}
+    words: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
     for canonical, synonyms in SYNONYM_DICTIONARY.items():
         canon = normalize_name(canonical)
+        singles = {normalize_name(w) for w in (canonical, *synonyms) if "_" not in normalize_name(w)}
+        prior = words.get(canon, (frozenset(), frozenset()))
+        words[canon] = (frozenset(canon.split("_")) | prior[0], frozenset(singles) | prior[1])
         for word in (canonical, *synonyms):
             index.setdefault(normalize_name(word), set()).add(canon)
     abbreviations = {
@@ -93,23 +119,55 @@ def _dictionaries() -> tuple[dict[str, frozenset[str]], dict[str, str]]:
         for k, v in TOKEN_ABBREVIATIONS.items()
         if str(k).lower() not in _NO_EXPAND
     }
-    return {k: frozenset(v) for k, v in index.items()}, abbreviations
+    return {k: frozenset(v) for k, v in index.items()}, abbreviations, words
 
 
 def _expanded(norm: str) -> str:
-    _, abbreviations = _dictionaries()
+    _, abbreviations, _ = _dictionaries()
     return "_".join(abbreviations.get(t, t) for t in norm.split("_") if t)
 
 
+@lru_cache(maxsize=65536)
 def synonym_groups(name: str) -> frozenset[str]:
     """Canonical synonym groups a name belongs to (empty when none)."""
-    index, _ = _dictionaries()
+    index, _, _ = _dictionaries()
     norm = normalize_name(name)
     groups = set(index.get(norm, frozenset()))
     groups |= index.get(_expanded(norm), frozenset())
     compact = norm.replace("_", "")
     groups |= index.get(compact, frozenset())
     return frozenset(groups)
+
+
+def _qualifiers(name: str, group: str) -> frozenset[str]:
+    """Words of ``name`` that say *which* ``group`` value it is (billing, created…)."""
+    _, _, words = _dictionaries()
+    canon, singles = words.get(group, (frozenset(), frozenset()))
+    norm = normalize_name(name)
+    if norm == group or norm in singles:
+        return frozenset()
+    return frozenset(
+        t for t in norm.split("_")
+        if t and t not in canon and t not in singles
+        and _expanded(t) not in canon and t not in _KIND_WORDS
+    )
+
+
+def _same_value(group: str, a: str, b: str) -> bool:
+    """Both names denote the same value of ``group`` (not two qualified siblings)."""
+    qa, qb = _qualifiers(a, group), _qualifiers(b, group)
+    return not (qa and qb and qa != qb)
+
+
+@lru_cache(maxsize=65536)
+def concept_groups(name: str) -> frozenset[str]:
+    """Groups of the whole name plus of its head (last) word, keys excluded."""
+    norm = normalize_name(name)
+    head = norm.split("_")[-1] if norm else ""
+    found = set(synonym_groups(name))
+    if head:
+        found |= synonym_groups(head) | synonym_groups(_expanded(head))
+    return frozenset(found - _NO_CONCEPT)
 
 
 def _singular(word: str) -> str:
@@ -168,12 +226,20 @@ def score_pair(
             f"This workspace confirmed {source} → {target} "
             f"{count} time{'s' if count != 1 else ''} before."
         ))
-    shared = synonym_groups(source) & synonym_groups(target)
+    shared = sorted(
+        g for g in synonym_groups(source) & synonym_groups(target) if _same_value(g, source, target)
+    )
     if shared and (best is None or best[0] < TIER_CONFIDENCE[SYNONYM]):
-        group = sorted(shared)[0]
-        best = (TIER_CONFIDENCE[SYNONYM], SYNONYM, f"Synonyms in the '{group}' group.")
+        best = (TIER_CONFIDENCE[SYNONYM], SYNONYM, f"Synonyms in the '{shared[0]}' group.")
     if best is not None:
         return best
+    concepts = sorted(
+        g for g in concept_groups(source) & concept_groups(target) if _same_value(g, source, target)
+    )
+    if concepts:
+        return TIER_CONFIDENCE[CONCEPT], CONCEPT, (
+            f"Both name the same concept ({concepts[0]})."
+        )
     key = _key_suffix_match(source, target, set(entities))
     if key is not None:
         return key, KEY_SUFFIX, "An entity-qualified key against the table's bare id."
@@ -197,13 +263,15 @@ class _TargetIndex:
     name, so candidates come from dictionaries and only those are scored.
     """
 
-    #: A word shared by more targets than this is too common to suggest from.
+    #: A word (or head concept) shared by more targets than this is too common
+    #: to suggest from: it no longer tells one column from another.
     TOKEN_FANOUT = 40
 
     def __init__(self, targets: list[str]) -> None:
         self.by_lower: dict[str, list[str]] = {}
         self.by_norm: dict[str, list[str]] = {}
         self.by_group: dict[str, list[str]] = {}
+        self.by_concept: dict[str, list[str]] = {}
         self.by_token: dict[str, list[str]] = {}
         self.keys: list[str] = []
         for tgt in targets:
@@ -212,6 +280,8 @@ class _TargetIndex:
             self.by_norm.setdefault(norm, []).append(tgt)
             for group in synonym_groups(tgt):
                 self.by_group.setdefault(group, []).append(tgt)
+            for group in concept_groups(tgt):
+                self.by_concept.setdefault(group, []).append(tgt)
             for token in {_expanded(t) for t in norm.split("_") if t} - {"id"}:
                 self.by_token.setdefault(token, []).append(tgt)
             if norm == "id" or norm.endswith("_id"):
@@ -226,6 +296,10 @@ class _TargetIndex:
             found += self.by_norm.get(t_norm, [])
         for group in synonym_groups(src):
             found += self.by_group.get(group, [])
+        for group in concept_groups(src):
+            bucket = self.by_concept.get(group, [])
+            if len(bucket) <= self.TOKEN_FANOUT:
+                found += bucket
         if norm == "id" or norm.endswith("_id"):
             found += self.keys
         for token in {_expanded(t) for t in norm.split("_") if t} - {"id"}:
