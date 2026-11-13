@@ -125,6 +125,24 @@ def strip_client_map_targets(mappings: Any) -> Any:
     ]
 
 
+def proven_adoptions(dest_type: str | None, mappings: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """Rows whose ``map_target`` an adoption could have produced; others lose it.
+
+    A real adoption retargets the operator's name to its legacy spelling, so
+    ``existing_column_for(map_target, [target])`` is ``target``. A row whose
+    ``target`` is not the legacy spelling of its ``map_target`` was not
+    adopted by the server: undoing it (``operator_rows``) would write a column
+    the approval never named (security re-check F1b). Its own ``target`` stands.
+    """
+    rows = [dict(_as_dict(m)) for m in (mappings or [])]
+    for row in rows:
+        claimed = str(row.get(MAP_TARGET) or "")
+        if claimed and existing_column_for(
+                dest_type, claimed, [str(row.get("target") or "")]) != row.get("target"):
+            row.pop(MAP_TARGET, None)
+    return rows
+
+
 def strip_contract_map_targets(contracts: Any) -> Any:
     """``strip_client_map_targets`` inside every stream contract's own Map rows."""
     if not isinstance(contracts, list):
@@ -475,7 +493,7 @@ def prepare_stream_targets(
 
         dest = copy.deepcopy(destination)
         bind_endpoint_to_stream(dest, stream_name)
-    rows = operator_rows(mappings)
+    rows = operator_rows(proven_adoptions(getattr(dest, "format", ""), mappings))
     req = SimpleNamespace(destination=dest, mappings=rows, sync_mode=sync_mode)
     label = stream_name or str(getattr(dest, "table", "") or getattr(dest, "collection", ""))
     try:
@@ -1173,6 +1191,7 @@ __all__ = [
     "MAP_TARGET",
     "LegacyFieldsUnverified",
     "operator_rows",
+    "proven_adoptions",
     "strip_client_map_targets",
     "strip_contract_map_targets",
     "strip_request_map_targets",

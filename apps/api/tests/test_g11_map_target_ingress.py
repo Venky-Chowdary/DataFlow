@@ -194,3 +194,36 @@ def test_live_multistream_reverse_crafted_writes_no_unapproved_column(client):
         assert _column(schema, (s1, s2), "v_evil") == []
     finally:
         drop_world(s1, s2, schema)
+
+
+# -- F1(b): the stream loop never undoes a map_target it cannot prove ---------
+
+
+def test_prepare_stream_targets_keeps_the_callers_target_without_proof():
+    """The reviewer's unit probe: {target: ssn_secure, map_target: public_notes}."""
+    from types import SimpleNamespace
+
+    from services.target_name_legacy import prepare_stream_targets
+
+    crafted = [{"source": "id", "target": "id"},
+               {"source": "ssn", "target": "ssn_secure", "map_target": "public_notes"}]
+    dest = SimpleNamespace(format="postgresql", table="t", collection="", database="d",
+                           schema="", extra={}, connector_id="")
+    rows, _ack = prepare_stream_targets(dest, crafted, "full_refresh_append")
+    assert [m["target"] for m in rows] == ["id", "ssn_secure"]
+
+
+def test_prepare_stream_targets_still_resolves_a_real_adoption_per_stream():
+    """A server adoption (the legacy spelling of the operator's target) re-resolves."""
+    from types import SimpleNamespace
+
+    from services.target_name_legacy import prepare_stream_targets
+
+    long = "customer_lifetime_value_after_discounts_and_refunds_in_euro_cents_x"
+    adopted = [{"source": "v", "target": long[:63], "map_target": long}]
+    dest = SimpleNamespace(format="postgresql", table="t2", collection="", database="d",
+                           schema="", extra={}, connector_id="")
+    with patch("services.target_name_legacy._memo_probe",
+               return_value={"table_exists": True, "schema": {long[:63]: "bigint"}}):
+        rows, _ack = prepare_stream_targets(dest, adopted, "full_refresh_append")
+    assert [(m["target"], m.get("map_target")) for m in rows] == [(long[:63], long)]
