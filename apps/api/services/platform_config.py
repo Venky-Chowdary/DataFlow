@@ -128,15 +128,19 @@ def persistent_storage_warnings() -> list[str]:
     ]
 
 
-def upload_dir() -> Path:
+def upload_dir_path() -> Path:
+    """Where uploads are kept, without creating it (path checks)."""
     vol = _railway_volume_root()
     raw = getenv_brand("UPLOAD_DIR", "").strip()
     if raw:
-        path = Path(raw)
-    elif vol:
-        path = vol / "uploads"
-    else:
-        path = _API_ROOT / "uploads"
+        return Path(raw)
+    if vol:
+        return vol / "uploads"
+    return _API_ROOT / "uploads"
+
+
+def upload_dir() -> Path:
+    path = upload_dir_path()
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -486,7 +486,9 @@ def resolve_connector_config(
 
     cfg["role"] = engine_login_role(endpoint.auth_role)
     cfg["auth_role"] = cfg["role"]
-    cfg.update(endpoint.extra)
+    from services.endpoint_extra_guard import engine_extra  # ``extra`` never picks the engine
+
+    cfg.update(engine_extra(endpoint, workspace_id))
     connector_id = endpoint.connector_id or _find_implicit_connector_id(
         endpoint, cfg, fmt, workspace_id=workspace_id
     )

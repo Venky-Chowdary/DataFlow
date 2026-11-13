@@ -35,7 +35,7 @@ import socket
 import threading
 import urllib.parse
 from contextlib import contextmanager
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from services.brand_env import getenv_brand
 from services.would_apply_audit import audit_would_apply
@@ -100,6 +100,29 @@ _EMBEDDED_METADATA_NAME = re.compile(
 )
 _EMBEDDED_V6_META = re.compile(r"(?i)(?<![0-9a-f:])fd00:ec2::254(?![0-9a-f:])")
 _BRACKET_V6 = re.compile(r"\[([0-9a-fA-F:]+)\]")
+#: URL query keys whose value the driver dials as the host: libpq ``host`` /
+#: ``hostaddr`` (a comma list, replacing the authority) and the ODBC-style
+#: ``server`` / ``address`` spellings; the keys residency judges
+#: (``data_residency._URL_HOST_PARAMS``) (follow-up review 1, H1).
+_QUERY_HOST_KEYS = frozenset({
+    "host", "hostaddr", "server", "address", "addr", "data source", "network address",
+})
+#: A query value that is a whole ODBC connection string (``mssql+pyodbc:///?odbc_connect=``).
+_QUERY_CONNECT_STRING_KEYS = frozenset({"odbc_connect"})
+#: URL schemes (before ``+driver``) whose driver is libpq: no host anywhere is its default socket.
+_LIBPQ_SCHEMES = frozenset({"postgresql", "postgres", "redshift", "cockroachdb"})
+#: What the guard judges for libpq's default Unix socket (a URL that names no host).
+DEFAULT_SOCKET = "/<default local socket>"
+#: What the guard judges for an authority that yields no host once decoded (encoded twice).
+UNREADABLE_HOST = "<unreadable host>"
+_SOCKET_PHRASE = "local socket"
+#: MySQL / MariaDB ``unix_socket`` (URL query key, connector field, ``extra``):
+#: PyMySQL opens that socket on this host instead of dialling the URL's host.
+_SOCKET_KEYS = frozenset({"unix_socket"})
+_KEYWORD_SOCKET = re.compile(r"(?i)(?:^|[;\s])unix_socket\s*=\s*([^\s;]+)")
+#: What the guard judges for a socket named by a relative path.
+LOCAL_SOCKET = "/<local socket>"
+_UNREADABLE_PHRASE = "unreadable host"
 
 _PIN_LOCK = threading.RLock()
 
@@ -252,6 +275,13 @@ def classify_host(
     A connector preview that cannot resolve a name is not a private hit —
     the dial rechecks and fail-closes before any socket.
     """
+    if host == UNREADABLE_HOST:
+        return _UNREADABLE_PHRASE
+    if is_socket_target(host):
+        # A Unix socket on this host: loopback, so the loopback allowlist admits it.
+        nets = _configured_networks(allowlist, workspace_id)
+        loopback = ipaddress.ip_address("127.0.0.1")
+        return None if _ip_refusal_phrase(loopback, nets) is None else _SOCKET_PHRASE
     raw = _normalize_host(host)
     if not raw:
         return "empty"
@@ -296,7 +326,46 @@ def classify_host(
     return phrase
 
 
+def is_socket_target(host: str) -> bool:
+    """A Unix-socket path (``/run/postgresql``, libpq's ``@abstract``), not a host name."""
+    return str(host or "").startswith(("/", "@"))
+
+
+def _socket_host(value: str) -> str:
+    """A socket path as the guard judges it: the path, or :data:`LOCAL_SOCKET` for a relative one."""
+    return value if is_socket_target(value) else LOCAL_SOCKET
+
+
+def _dials_mysql_sockets(db_type: str) -> bool:
+    if not str(db_type or "").strip():
+        return False
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    return str(resolve_driver_type(str(db_type).strip()) or "").lower() == "mysql"
+
+
+def mysql_socket_values(data: Any) -> list[str]:
+    """A MySQL-family connector's ``unix_socket`` field and ``extra.unix_socket``, as
+    ``unix_socket=`` keyword values the guard judges as a local socket (follow-up review 1).
+
+    Judged at save. At the dial only a URL's ``?unix_socket=`` reaches PyMySQL
+    (through SQLAlchemy), and :func:`_query_hosts` judges it there."""
+    def get(source: Any, key: str) -> Any:
+        return source.get(key) if isinstance(source, Mapping) else getattr(source, key, None)
+
+    if not _dials_mysql_sockets(str(get(data, "type") or get(data, "format") or "")):
+        return []
+    extra = get(data, "extra")
+    values = (get(data, "unix_socket"), extra.get("unix_socket") if isinstance(extra, Mapping) else None)
+    return [f"unix_socket={text}" for text in (str(v or "").strip() for v in values) if text]
+
+
 def _refusal_text(host: str, phrase: str) -> str:
+    if phrase == _UNREADABLE_PHRASE:
+        return (
+            "Refused connector URL: its host cannot be read as one host name (it is "
+            "percent-encoded more than once). Write the host name plainly."
+        )
     if phrase.startswith("DNS"):
         return f"Refused connector host {host}: {phrase}."
     return (
@@ -329,6 +398,10 @@ def _real_getaddrinfo() -> Any:
 
 def _host_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Every address ``host`` is or resolves to, through the unguarded resolver."""
+    if is_socket_target(host):
+        return [ipaddress.ip_address("127.0.0.1")]  # a socket on this host
+    if host == UNREADABLE_HOST:
+        return []
     raw = _normalize_host(host)
     try:
         return [_unwrap(ipaddress.ip_address(raw))]
@@ -352,8 +425,10 @@ def _is_always_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> 
 
 
 def is_always_blocked_target(host: str) -> bool:
-    """Cloud metadata, link-local and multicast: refused at every site, flag or not."""
-    if _normalize_host(host) in _METADATA_NAMES:
+    """Cloud metadata, link-local and multicast: refused at every site, flag or not.
+
+    So is a URL whose authority cannot be read (it fails closed)."""
+    if host == UNREADABLE_HOST or _normalize_host(host) in _METADATA_NAMES:
         return True
     return any(_is_always_blocked_ip(ip) for ip in _host_addresses(host))
 
@@ -496,6 +571,22 @@ def assert_connector_dial_allowed(
         )
     if refusal:
         raise EgressRefused(refusal)
+    from connectors.mysql_options import url_option_refusal
+
+    # A MySQL URL hands PyMySQL its query keys; only the ones the product uses
+    # (follow-up review 2, H3 + H4: an option file or LOCAL INFILE on this host).
+    mysql_family = _dials_mysql_sockets(db_type)
+    for value in values:
+        if mysql_family or _is_mysql_url(value):
+            refusal = url_option_refusal(value)
+            if refusal:
+                raise EgressRefused(refusal)
+
+
+def _is_mysql_url(value: str) -> bool:
+    from connectors.mysql_options import is_mysql_url
+
+    return is_mysql_url(value)
 
 
 # Engines whose ``host`` field is a label, not a dial target: the connection
@@ -587,6 +678,15 @@ def _skipped_region_labels(
     }
 
 
+def _dials_unix_sockets(db_type: str) -> bool:
+    """libpq engines: a ``/``-prefixed ``host`` is a Unix socket on this host."""
+    if not str(db_type or "").strip():
+        return False
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    return str(resolve_driver_type(str(db_type).strip()) or "").lower() in {"postgresql", "redshift"}
+
+
 def iter_refusals(
     *values: str,
     allowlist: Sequence[str] | None = None,
@@ -609,7 +709,7 @@ def iter_refusals(
     if (db_type or "").strip().lower() in FILE_ENGINE_TYPES:
         return
     skipped = _skipped_region_labels(values, db_type, aws_endpoint)
-    for host in _hosts_from_values(*values):
+    for host in _hosts_from_values(*values, socket_values=_dials_unix_sockets(db_type)):
         if host in skipped:
             continue
         phrase = classify_host(
@@ -680,14 +780,48 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     loopback host, flag or no flag: only metadata and link-local still are. A
     new or changed target is audited, or refused under the enforce flag.
     """
+    from connectors.aws_common import default_credentials_refusal
+    from services.iceberg_class_properties import iceberg_connector_class_refusal
+    from services.platform_aws_credentials import iceberg_connector_refusal
+    from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
+
+    from connectors.mysql_options import connector_option_refusal
+    from connectors.mongodb_auth_mechanism import settings_refusal as mongo_auth_refusal
+    from connectors.oracle_dsn_guard import settings_refusal as oracle_dsn_refusal
+    from connectors.tls_file_options import connector_refusal as tls_files_refusal
+    from services.google_credentials_policy import google_connector_refusal
+
+    platform_credentials = (
+        default_credentials_refusal(data)
+        or iceberg_connector_class_refusal(data)
+        or iceberg_connector_refusal(data)
+        or iceberg_gcp_azure_connector_refusal(data)
+        # No PyMySQL option that reads a host file or socket (follow-up review 2, H3 + H4).
+        or connector_option_refusal(
+            data, mysql_family=_dials_mysql_sockets(str(data.get("type") or data.get("format") or ""))
+        )
+        # BigQuery / GCS: never the host's Google identity or key files (follow-up review 2, BQ).
+        or google_connector_refusal(data)
+        # No TLS certificate / key / wallet file on this host (follow-up review 2, TLS files).
+        or tls_files_refusal(data)
+        # No Oracle config provider / LDAP DSN or pyo. wallet (follow-up review 3, M3 + M4).
+        or oracle_dsn_refusal(data)
+        # No MongoDB auth mechanism that uses this host's identity (follow-up review 3).
+        or mongo_auth_refusal(data)
+    )
+    if platform_credentials:
+        return platform_credentials
     values = [str(data.get(key) or "") for key in _SAVE_TARGET_KEYS]
+    sockets = mysql_socket_values(data)
     workspace_id = str(data.get("workspace_id") or "")
     db_type = str(data.get("type") or "")
     # The endpoint an S3/DynamoDB client dials (``host`` + ``port`` may be it).
     aws_endpoint = aws_sdk_endpoint(data, db_type)
-    if existing is not None and values == [
+    unchanged = existing is not None and values == [
         str(getattr(existing, key, "") or "") for key in _SAVE_TARGET_KEYS
-    ]:
+    ] and sockets == mysql_socket_values(existing)
+    values += sockets
+    if unchanged:
         for host, phrase in iter_refusals(
             *values, workspace_id=workspace_id, db_type=db_type, aws_endpoint=aws_endpoint
         ):
@@ -711,11 +845,18 @@ def egress_url_allowed(
     workspace_id: str = "",
 ) -> bool:
     """True when ``url`` is http(s) and its host survives the egress policy."""
-    parsed = urllib.parse.urlparse((url or "").strip())
+    try:
+        parsed = urllib.parse.urlparse((url or "").strip())
+        host = parsed.hostname or ""
+    except ValueError:  # a bracketed name urlparse rejects; HTTP clients read it otherwise
+        return False
     if parsed.scheme not in _ALLOWED_SCHEMES:
         return False
-    host = parsed.hostname or ""
-    return classify_host(host, allowlist=allowlist, workspace_id=workspace_id) is None
+    # urllib3 (requests) dials the percent-decoded host (security follow-up 7).
+    return all(
+        classify_host(name, allowlist=allowlist, workspace_id=workspace_id) is None
+        for name in {host, urllib.parse.unquote(host)}
+    )
 
 
 def redirect_target_allowed(url: str) -> bool:
@@ -757,16 +898,98 @@ def _authority_host(text: str) -> str:
     """
     if "://" not in text:
         return ""
-    parsed = urllib.parse.urlparse(text)
-    if parsed.hostname:
-        return parsed.hostname
-    path = parsed.path or ""
-    if "://" in path:
-        return urllib.parse.urlparse(path).hostname or ""
+    try:
+        parsed = urllib.parse.urlparse(text)
+        if parsed.hostname:
+            return parsed.hostname
+        path = parsed.path or ""
+        if "://" in path:
+            return urllib.parse.urlparse(path).hostname or ""
+    except ValueError:  # ``[name]``: judged by :func:`_driver_authority_hosts`
+        return ""
     return ""
 
 
-def _hosts_from_values(*values: str) -> list[str]:
+def _driver_authority_hosts(text: str) -> list[str]:
+    """The authority hosts as the drivers read them (security follow-up 7).
+
+    The last-``@`` parse (``connectors.url_authority``), percent-decoded the
+    way redis-py, libpq URIs and urllib3 decode it, each seed-list member, a
+    bracketed name unwrapped. ``urlparse`` alone judged
+    ``%31%36%39.254.169.254`` as nothing (or as an embedded ``39.254.169.254``)
+    and raised on ``[metadata.google.internal]``.
+    """
+    from connectors.url_authority import parse_url_authority
+
+    try:
+        authority = parse_url_authority(text).host
+    except (TypeError, ValueError):
+        return []
+    hosts: list[str] = []
+    for part in authority.split(","):
+        part = part.strip()
+        if part.startswith("[") and "]" in part:
+            part = part[1 : part.index("]")]
+        elif part.count(":") == 1:
+            part = part.rsplit(":", 1)[0]
+        if part:
+            hosts.append(part)
+    return hosts
+
+
+def _query_hosts(text: str) -> list[str]:
+    """The hosts a URL's query hands the driver, read as residency reads them.
+
+    ``residency_addressing.url_query_pairs`` keeps a ``#`` inside the query as
+    SQLAlchemy does; each value is unquoted and comma-split (libpq's host
+    list). An empty ``host=`` is libpq's default socket (follow-up review 1, H1).
+    """
+    from services.residency_addressing import url_query_pairs
+
+    hosts: list[str] = []
+    for key, value in url_query_pairs(text):
+        name = key.strip().lower()
+        if name in _QUERY_CONNECT_STRING_KEYS:
+            hosts.extend(_KEYWORD_HOST.findall(value))
+        elif name in _QUERY_HOST_KEYS:
+            parts = [part.strip() for part in value.split(",")]
+            if name in ("host", "hostaddr") and not any(parts):
+                hosts.append(DEFAULT_SOCKET)
+            hosts.extend(part for part in parts if part)
+        elif name in _SOCKET_KEYS and value.strip():
+            hosts.append(_socket_host(value.strip()))
+    return hosts
+
+
+def _url_hosts(text: str) -> tuple[list[str], bool]:
+    """``(hosts, file_url)`` for one URL: its authority as urlparse and the drivers
+    read it, and its query hosts. ``file_url`` is an embedded file URL
+    (``sqlite:///abs/file``) whose path is not scanned."""
+    try:
+        path = urllib.parse.urlparse(text).path or ""
+    except ValueError:
+        path = ""
+    found: list[str] = []
+    host = _authority_host(text)
+    if host:
+        found.append(host)
+    seen = {_normalize_host(name) for name in found}
+    found.extend(
+        name for name in _driver_authority_hosts(text) if _normalize_host(name) not in seen
+    )
+    query = _query_hosts(text)
+    if found and not any(_normalize_host(name) for name in found):
+        found = [UNREADABLE_HOST]  # e.g. ``%2531...``: nothing to judge fails closed
+    scheme = text.split("://", 1)[0].split("+", 1)[0].strip().lower()
+    if not found and not query and scheme in _LIBPQ_SCHEMES:
+        found = [DEFAULT_SOCKET]  # ``postgresql:///db``: libpq dials its default socket
+    file_url = not found and not query and path.startswith("/") and "://" not in path
+    return found + query, file_url
+
+
+def _hosts_from_values(*values: str, socket_values: bool = False) -> list[str]:
+    """Every host the values name. ``socket_values``: a plain ``/``-prefixed value is a
+    Unix socket the driver dials (libpq's ``host``), not a file path."""
     hosts: list[str] = []
     for raw in values:
         text = str(raw or "").strip()
@@ -776,17 +999,17 @@ def _hosts_from_values(*values: str) -> list[str]:
         if text.startswith("/") and "://" not in text:
             # A filesystem path (sqlite database=/tmp/lab.db). Not a host,
             # even when a directory name looks like an address.
+            if socket_values:
+                hosts.append(text)
             continue
         if "://" in text:
-            parsed = urllib.parse.urlparse(text)
-            host = _authority_host(text)
-            if host:
-                found.append(host)
-            elif (parsed.path or "").startswith("/") and "://" not in (parsed.path or ""):
+            found, file_url = _url_hosts(text)
+            if file_url:
                 # Embedded file URL. Do not scan the path for addresses and
                 # do not DNS the URL string (IDNA: label empty or too long).
                 continue
         found.extend(_KEYWORD_HOST.findall(text))
+        found.extend(_socket_host(value) for value in _KEYWORD_SOCKET.findall(text))
         found.extend(_EMBEDDED_IPV4.findall(text))
         found.extend(_EMBEDDED_METADATA_NAME.findall(text))
         found.extend(_EMBEDDED_V6_META.findall(text))
@@ -801,6 +1024,9 @@ def _hosts_from_values(*values: str) -> list[str]:
                     host = left
             found.append(host)
         for host in found:
+            if host == UNREADABLE_HOST or is_socket_target(host):
+                hosts.append(host)
+                continue
             host = _normalize_host(host)
             if host:
                 hosts.append(host)
@@ -1176,11 +1402,17 @@ def follow_url_allowed(url: str, origin: str) -> bool:
     (``egress.would_block``) and followed unless ``DATAFLOW_EGRESS_ENFORCE_NEW``
     is set.
     """
-    target = urllib.parse.urlparse((url or "").strip())
-    if target.scheme not in _ALLOWED_SCHEMES or not target.hostname:
+    try:
+        target = urllib.parse.urlparse((url or "").strip())
+        if target.scheme not in _ALLOWED_SCHEMES or not target.hostname:
+            return False
+        base = urllib.parse.urlparse((origin or "").strip())
+        base_host = base.hostname
+    except ValueError:  # a bracketed name urlparse rejects (security follow-up 7)
         return False
-    base = urllib.parse.urlparse((origin or "").strip())
-    if base.scheme in _ALLOWED_SCHEMES and base.hostname:
+    if target.hostname != urllib.parse.unquote(target.hostname):
+        return False  # urllib3 dials the decoded host; never follow an encoded one
+    if base.scheme in _ALLOWED_SCHEMES and base_host:
         try:
             same = (
                 target.scheme == base.scheme
@@ -1209,9 +1441,7 @@ def redirect_guard_hook(origin: str = ""):
             location = str(resp.headers.get("Location") or "")
             target = urllib.parse.urljoin(str(getattr(resp, "url", "") or origin), location)
             if not follow_url_allowed(target, origin or str(getattr(resp, "url", "") or "")):
-                raise EgressRefused(
-                    _refusal_text(urllib.parse.urlparse(target).hostname or target, "redirect target")
-                )
+                raise EgressRefused(_refusal_text(target, "redirect target"))
         return resp
 
     return _hook

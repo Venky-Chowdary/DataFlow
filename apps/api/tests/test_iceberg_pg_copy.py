@@ -288,7 +288,10 @@ def test_arrow_s3_snapshot_uses_catalog_fileio_and_redacts_secrets(
         assert result.to_pydict() == {"id": [1, 2]}
         assert secret not in repr(result)
     assert opened == ["s3://bucket/data.parquet"]
-    assert loaded_properties == ([] if has_table_io else [properties])
+    from connectors.iceberg_credential_guard import file_io_properties
+
+    # Built through the guard: the properties name the guarded FileIO (secfu21).
+    assert loaded_properties == ([] if has_table_io else [file_io_properties(properties)])
     assert secret not in caplog.text
 
 
