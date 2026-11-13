@@ -153,8 +153,11 @@ def patch_plan(plan_id: str, data: dict[str, Any]) -> TransferPlanRecord:
     return plan
 
 
-def sync_plan_mappings(plan_id: str, mappings: list[dict[str, Any]]) -> TransferPlanRecord:
-    plan = sync_ui_mappings(plan_id, mappings)
+def sync_plan_mappings(
+    plan_id: str, mappings: list[dict[str, Any]], *, base_version: int | None = None
+) -> TransferPlanRecord:
+    """Save UI mapping edits as a new revision (``PlanVersionConflict`` when stale)."""
+    plan = sync_ui_mappings(plan_id, mappings, base_version=base_version)
     if not plan:
         raise ValueError(f"Plan '{plan_id}' not found")
     append_audit_event(

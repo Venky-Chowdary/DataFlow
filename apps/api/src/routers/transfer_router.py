@@ -734,6 +734,18 @@ class UpdatePlanRequest(BaseModel):
 
 class SyncMappingsRequest(BaseModel):
     mappings: list[dict] = Field(default_factory=list)
+    #: Optimistic concurrency (PS-1): the newest revision version the edit
+    #: started from. Omitted, the save is appended as a new revision.
+    base_version: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Version of the plan's newest mapping revision this edit was based on "
+            "(0 for a plan with no revisions). When the plan has a newer revision, "
+            "the save is refused with 409 and the current version; omit it to "
+            "always append a new revision."
+        ),
+    )
 
     @field_validator("mappings")
     @classmethod
@@ -813,11 +825,33 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
 
 @router.post("/plans/{plan_id}/mappings")
 async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
+    """Save edited mappings as a new plan revision.
+
+    With ``base_version``, a save based on an older revision than the plan now
+    holds answers 409 with ``current_version`` instead of replacing it.
+    """
     from services.transfer_plan_service import sync_plan_mappings
+    from services.transfer_plan_store import PlanStoreBusy, PlanVersionConflict
 
     try:
-        plan = sync_plan_mappings(plan_id, body.mappings)
+        plan = sync_plan_mappings(plan_id, body.mappings, base_version=body.base_version)
         return {"plan": plan.to_dict()}
+    except PlanVersionConflict as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "plan_version_conflict",
+                "message": "The plan changed since this edit was loaded. Reload it and re-apply the edit.",
+                "base_version": e.base_version,
+                "current_version": e.current_version,
+            },
+        ) from e
+    except PlanStoreBusy as e:
+        raise HTTPException(
+            status_code=503,
+            detail="The plan is being saved by another request. Try again.",
+            headers={"Retry-After": "2"},
+        ) from e
     except ValueError as e:
         raise safe_http_exception(
             e,

@@ -1,9 +1,26 @@
-"""Persisted transfer plans — immutable mapping revisions for map → preflight → run."""
+"""Persisted transfer plans — immutable mapping revisions for map → preflight → run.
+
+Concurrency (PS-1): every change to a plan is one read-modify-write of the
+store file, made while holding the store exclusively — a thread lock for this
+process and an ``fcntl`` lock on ``<store>.lock`` for other processes (API
+workers, or replicas sharing one data volume) — and written by atomic replace.
+So two edits that overlap are applied one after the other and neither is lost;
+a writer that cannot get the store within ``LOCK_TIMEOUT_SECONDS`` raises
+:class:`PlanStoreBusy` and writes nothing. Each plan carries ``doc_version``,
+bumped by every write (a legacy plan without one reads as 0 and gets one on
+its first write). A UI save may name the mapping revision it was based on
+(``base_version``); when the plan has gained a newer revision since, the save
+raises :class:`PlanVersionConflict` instead of replacing that revision.
+"""
 
 from __future__ import annotations
 
+import contextlib
 import json
+import threading
+import time
 import uuid
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -15,6 +32,28 @@ from services.value_serializer import json_default
 from services.workspace_filter import WorkspaceFilter, bound_allows, current_workspace_stamp
 
 STORE_PATH = data_dir() / "transfer_plans.json"
+#: How long a plan write waits for another writer to finish before it gives up.
+LOCK_TIMEOUT_SECONDS = 30.0
+_LOCK_POLL_SECONDS = 0.005
+_PROCESS_LOCK = threading.RLock()
+_HELD = threading.local()
+
+
+class PlanStoreBusy(TimeoutError):
+    """Another writer held the plan store past ``LOCK_TIMEOUT_SECONDS``; nothing was written."""
+
+
+class PlanVersionConflict(RuntimeError):
+    """A save was based on an older mapping revision than the plan now holds."""
+
+    def __init__(self, plan_id: str, *, base_version: int, current_version: int) -> None:
+        super().__init__(
+            f"Plan {plan_id} changed: it is at mapping version {current_version}, "
+            f"this save was based on version {base_version}"
+        )
+        self.plan_id = plan_id
+        self.base_version = base_version
+        self.current_version = current_version
 
 
 def _resolve_endpoint_in_plan(endpoint: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -137,6 +176,8 @@ class TransferPlanRecord:
     updated_at: str = field(default_factory=_now)
     #: Owning workspace (D154); "" = unscoped legacy plan.
     workspace_id: str = ""
+    #: Bumped by every write of this plan (PS-1); 0 = stored before it existed.
+    doc_version: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -167,7 +208,12 @@ class TransferPlanRecord:
             created_at=data.get("created_at", _now()),
             updated_at=data.get("updated_at", _now()),
             workspace_id=str(data.get("workspace_id") or ""),
+            doc_version=int(data.get("doc_version") or 0),
         )
+
+    def head_version(self) -> int:
+        """Version of the newest revision (0 for a plan with none)."""
+        return self.revisions[-1].version if self.revisions else 0
 
     def active_revision(self) -> PlanRevision | None:
         if not self.revisions:
@@ -197,6 +243,79 @@ def _save_all(plans: list[TransferPlanRecord]) -> None:
     )
 
 
+@contextlib.contextmanager
+def _store_file_lock(deadline: float) -> Iterator[None]:
+    """Exclusive ``fcntl`` lock on ``<store>.lock``, waited for until ``deadline``."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX: the process lock only
+        yield
+        return
+    lock_path = STORE_PATH.with_name(STORE_PATH.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as fh:
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise PlanStoreBusy(f"plan store {STORE_PATH} is busy") from None
+                time.sleep(_LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _exclusive() -> Iterator[None]:
+    """Hold the plan store for one read-modify-write (re-entrant per thread)."""
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    if not _PROCESS_LOCK.acquire(timeout=LOCK_TIMEOUT_SECONDS):
+        raise PlanStoreBusy(f"plan store {STORE_PATH} is busy")
+    try:
+        depth = getattr(_HELD, "depth", 0)
+        _HELD.depth = depth + 1
+        try:
+            if depth:
+                yield
+            else:
+                with _store_file_lock(deadline):
+                    yield
+        finally:
+            _HELD.depth = depth
+    finally:
+        _PROCESS_LOCK.release()
+
+
+def _commit(plans: list[TransferPlanRecord], *changed: TransferPlanRecord) -> None:
+    """Write ``plans`` (inside :func:`_exclusive`), bumping each changed plan's version."""
+    for plan in changed:
+        plan.doc_version += 1
+    _save_all(plans)
+
+
+def _mutate(
+    plan_id: str, change: Callable[[TransferPlanRecord], None]
+) -> TransferPlanRecord | None:
+    """Apply ``change`` to the caller's plan ``plan_id`` and save it, atomically.
+
+    The plan is read, changed and written while the store is held, so a
+    concurrent edit is never overwritten by a stale copy. ``change`` may raise
+    to abandon the write; nothing is then saved.
+    """
+    with _exclusive():
+        plans = _load_all()
+        for plan in plans:
+            if not _in_scope(plan, plan_id):
+                continue
+            change(plan)
+            _commit(plans, plan)
+            return plan
+    return None
+
+
 def list_plans(*, limit: int = 50) -> list[TransferPlanRecord]:
     visible = [p for p in _load_all() if bound_allows(p.workspace_id)]
     return sorted(visible, key=lambda p: p.updated_at, reverse=True)[:limit]
@@ -224,21 +343,23 @@ def assign_unscoped_workspaces(workspace_for, *, apply: bool) -> dict[str, int]:
     """Stamp legacy unscoped plans with ``workspace_for(plan.to_dict())`` (D154 backfill)."""
     unscoped = WorkspaceFilter.only("")
     counts = {"assigned": 0, "skipped": 0}
-    plans = _load_all()
-    for plan in plans:
-        if not unscoped.matches(plan.workspace_id):
-            continue
-        ws = (workspace_for(plan.to_dict()) or "").strip()
-        counts["assigned" if ws else "skipped"] += 1
-        if ws:
-            plan.workspace_id = ws
-    if apply and counts["assigned"]:
-        _save_all(plans)
+    with _exclusive():
+        plans = _load_all()
+        assigned: list[TransferPlanRecord] = []
+        for plan in plans:
+            if not unscoped.matches(plan.workspace_id):
+                continue
+            ws = (workspace_for(plan.to_dict()) or "").strip()
+            counts["assigned" if ws else "skipped"] += 1
+            if ws:
+                plan.workspace_id = ws
+                assigned.append(plan)
+        if apply and assigned:
+            _commit(plans, *assigned)
     return counts
 
 
 def create_plan(data: dict[str, Any]) -> TransferPlanRecord:
-    plans = _load_all()
     source = _resolve_endpoint_in_plan(data.get("source")) or {}
     destination = _resolve_endpoint_in_plan(data.get("destination")) or {}
     plan = TransferPlanRecord(
@@ -256,8 +377,10 @@ def create_plan(data: dict[str, Any]) -> TransferPlanRecord:
         policies=dict(data.get("policies") or {}),
         workspace_id=current_workspace_stamp(),
     )
-    plans.append(plan)
-    _save_all(plans)
+    with _exclusive():
+        plans = _load_all()
+        plans.append(plan)
+        _commit(plans, plan)
     return plan
 
 
@@ -271,17 +394,14 @@ def add_mapping_revision(
     target_schema: dict[str, str] | None = None,
     document_model: dict[str, Any] | None = None,
 ) -> TransferPlanRecord | None:
-    plans = _load_all()
-    for i, plan in enumerate(plans):
-        if not _in_scope(plan, plan_id):
-            continue
+    def change(plan: TransferPlanRecord) -> None:
         model, model_digest = _revision_document_model(plan, document_model)
         src_cols = source_columns or plan.source_columns
         src_schema = source_schema or plan.source_schema
         tgt_cols = target_columns or plan.target_columns
         tgt_schema = target_schema or plan.target_schema
         mappings = list(pipeline_result.get("mappings") or [])
-        version = (plan.revisions[-1].version + 1) if plan.revisions else 1
+        version = plan.head_version() + 1
         from services.mapping_proof import mapping_proof_or_build
 
         dest = plan.destination or {}
@@ -324,17 +444,12 @@ def add_mapping_revision(
         plan.target_schema = tgt_schema
         plan.status = "mapped" if mappings else "draft"
         plan.updated_at = _now()
-        plans[i] = plan
-        _save_all(plans)
-        return plan
-    return None
+
+    return _mutate(plan_id, change)
 
 
 def add_preflight_run(plan_id: str, preflight_result: dict[str, Any]) -> TransferPlanRecord | None:
-    plans = _load_all()
-    for i, plan in enumerate(plans):
-        if not _in_scope(plan, plan_id):
-            continue
+    def change(plan: TransferPlanRecord) -> None:
         run = {
             # Reuse the caller's run id when it carries one, so the id the
             # operator was handed is the id in plan history.
@@ -353,24 +468,25 @@ def add_preflight_run(plan_id: str, preflight_result: dict[str, Any]) -> Transfe
         plan.preflight_runs.append(run)
         plan.status = "preflight_passed" if run["passed"] else "preflight_failed"
         plan.updated_at = _now()
-        plans[i] = plan
-        _save_all(plans)
-        return plan
-    return None
+
+    return _mutate(plan_id, change)
 
 
 def update_plan(plan_id: str, data: dict[str, Any]) -> TransferPlanRecord | None:
     """Merge destination, policies, and schema snapshots onto an existing plan."""
-    plans = _load_all()
-    for i, plan in enumerate(plans):
-        if not _in_scope(plan, plan_id):
-            continue
+    # Canonicalize endpoints before taking the store: it may look up connectors.
+    source = (_resolve_endpoint_in_plan(data["source"]) or {}) if "source" in data else None
+    destination = (
+        (_resolve_endpoint_in_plan(data["destination"]) or {}) if "destination" in data else None
+    )
+
+    def change(plan: TransferPlanRecord) -> None:
         if "name" in data and data["name"]:
             plan.name = str(data["name"])
-        if "source" in data:
-            plan.source = _resolve_endpoint_in_plan(data["source"]) or {}
-        if "destination" in data:
-            plan.destination = _resolve_endpoint_in_plan(data["destination"]) or {}
+        if source is not None:
+            plan.source = source
+        if destination is not None:
+            plan.destination = destination
         if "source_columns" in data:
             plan.source_columns = list(data["source_columns"] or [])
         if "source_schema" in data:
@@ -386,10 +502,8 @@ def update_plan(plan_id: str, data: dict[str, Any]) -> TransferPlanRecord | None
         if "policies" in data:
             plan.policies = {**plan.policies, **dict(data["policies"] or {})}
         plan.updated_at = _now()
-        plans[i] = plan
-        _save_all(plans)
-        return plan
-    return None
+
+    return _mutate(plan_id, change)
 
 
 def sync_ui_mappings(
@@ -398,19 +512,27 @@ def sync_ui_mappings(
     *,
     transforms: list[dict[str, Any]] | None = None,
     document_model: dict[str, Any] | None = None,
+    base_version: int | None = None,
 ) -> TransferPlanRecord | None:
     """Persist user-approved mapping edits as a new revision.
 
     ``document_model`` is stored with the revision, so each model edit is a
     revision of its own; ``None`` keeps the current model (see
     :func:`_revision_document_model`).
+
+    ``base_version`` is the newest revision version the edit started from.
+    When the plan has gained a newer revision since, the edit would replace
+    work the caller never saw: :class:`PlanVersionConflict` is raised and
+    nothing is written. ``None`` (callers that do not track it) appends.
     """
-    plans = _load_all()
-    for i, plan in enumerate(plans):
-        if not _in_scope(plan, plan_id):
-            continue
+
+    def change(plan: TransferPlanRecord) -> None:
+        if base_version is not None and base_version != plan.head_version():
+            raise PlanVersionConflict(
+                plan_id, base_version=base_version, current_version=plan.head_version()
+            )
         model, model_digest = _revision_document_model(plan, document_model)
-        version = (plan.revisions[-1].version + 1) if plan.revisions else 1
+        version = plan.head_version() + 1
         from services.mapping_proof import mapping_proof_or_build
 
         dest = plan.destination or {}
@@ -446,39 +568,27 @@ def sync_ui_mappings(
         plan.active_version = version
         plan.status = "mapped"
         plan.updated_at = _now()
-        plans[i] = plan
-        _save_all(plans)
-        return plan
-    return None
+
+    return _mutate(plan_id, change)
 
 
 def approve_plan_version(plan_id: str, version: int | None = None) -> TransferPlanRecord | None:
-    plans = _load_all()
-    for i, plan in enumerate(plans):
-        if not _in_scope(plan, plan_id):
-            continue
+    def change(plan: TransferPlanRecord) -> None:
         target_version = version or plan.active_version
         for rev in plan.revisions:
             rev.approved = rev.version == target_version
         plan.active_version = target_version
         plan.status = "approved"
         plan.updated_at = _now()
-        plans[i] = plan
-        _save_all(plans)
-        return plan
-    return None
+
+    return _mutate(plan_id, change)
 
 
 def attach_job(plan_id: str, job_id: str, *, status: str = "running") -> TransferPlanRecord | None:
-    plans = _load_all()
-    for i, plan in enumerate(plans):
-        if not _in_scope(plan, plan_id):
-            continue
+    def change(plan: TransferPlanRecord) -> None:
         if job_id not in plan.job_ids:
             plan.job_ids.append(job_id)
         plan.status = status
         plan.updated_at = _now()
-        plans[i] = plan
-        _save_all(plans)
-        return plan
-    return None
+
+    return _mutate(plan_id, change)
