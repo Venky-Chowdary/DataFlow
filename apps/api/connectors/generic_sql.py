@@ -57,6 +57,7 @@ from connectors.merge_dialects import (  # noqa: F401  (re-exported for callers)
     _vertica_merge_upsert,
     clickhouse_final_table_sql,
 )
+from connectors.upsert_fallback import note_native_upsert_failed, upsert_fallback_warnings
 from connectors.schema_drift import (
     _build_widen_ddl,
     add_missing_columns,
@@ -4163,35 +4164,35 @@ def _upsert_batch(
       * PostgreSQL, SQLite, MySQL/MariaDB: native ``ON CONFLICT`` /
         ``ON DUPLICATE KEY`` upsert.
       * SQL Server (mssql): native ``MERGE … WITH (HOLDLOCK)`` + NULL-safe ON;
-        falls back to delete+insert if MERGE fails (missing unique key, etc.).
+        falls back to UPDATE+INSERT if MERGE fails (missing unique key, etc.).
       * Oracle: native ``MERGE INTO`` + NULL-safe ON via private/global temp
-        stage; falls back to delete+insert if MERGE fails.
+        stage; falls back to UPDATE+INSERT if MERGE fails.
       * DuckDB: native ``MERGE INTO`` + NULL-safe ON (no unique index required);
-        falls back to delete+insert if MERGE fails.
+        falls back to UPDATE+INSERT if MERGE fails.
       * ClickHouse: ``INSERT`` into ``ReplacingMergeTree`` (engine-level lazy
         dedupe — Airbyte class). Never delete+insert.
       * DB2 (``ibm_db_sa``): native ``MERGE INTO`` + NULL-safe ON via DGTT;
-        falls back to delete+insert if MERGE fails.
+        falls back to UPDATE+INSERT if MERGE fails.
       * Teradata (``teradatasql``): native ``MERGE INTO`` via VOLATILE stage;
         PI equality ON only (engine forbids NULL equate); never UPDATE PI cols.
       * Trino/Presto/Athena/Hive/Impala: native ``MERGE INTO`` + NULL-safe ON
         via VALUES chunks (Hive ACID / Impala Iceberg / Athena MoR). Query
         engines fall back to append-only INSERT — never invent delete+insert.
       * SAP HANA (``hana``): native ``MERGE INTO`` + NULL-safe ON via local
-        temporary column table; falls back to delete+insert if MERGE fails.
+        temporary column table; falls back to UPDATE+INSERT if MERGE fails.
       * Vertica: native ``MERGE INTO`` + NULL-safe ON via local temp stage;
-        falls back to delete+insert if MERGE fails.
+        falls back to UPDATE+INSERT if MERGE fails.
       * Netezza / IBM NPS (``nzpsql``, 7.2.1+): native ``MERGE INTO`` +
-        NULL-safe ON via TEMP stage; falls back to delete+insert if MERGE fails.
+        NULL-safe ON via TEMP stage; falls back to UPDATE+INSERT if MERGE fails.
       * Informix: native ``MERGE INTO`` + NULL-safe ON via TEMP ``WITH NO LOG``;
-        falls back to delete+insert if MERGE fails.
+        falls back to UPDATE+INSERT if MERGE fails.
       * Firebird: native ``MERGE INTO`` + NULL-safe ON via ``RDB$DATABASE``
-        row stage; falls back to delete+insert if MERGE fails.
+        row stage; falls back to UPDATE+INSERT if MERGE fails.
       * Sybase ASE / SAP ASE (15.7+): native ``MERGE`` + NULL-safe ON via
-        ``#temp`` stage; falls back to delete+insert if MERGE fails.
-      * Everyone else: chunked DELETE by equality keys followed by INSERT,
-        except when dest-owned lattice columns (mirror ``_deleted``) are
-        present — then portable UPDATE+INSERT (never DELETE).
+        ``#temp`` stage; falls back to UPDATE+INSERT if MERGE fails.
+      * Everyone else: portable UPDATE of matched keys then INSERT of new
+        keys (``merge_dialects.update_insert_upsert``) — never DELETE, so
+        unmapped columns, cascades and identities stay (G15).
 
     Returns the number of destination rows actually written in this batch.
     """
@@ -4341,7 +4342,7 @@ def _upsert_batch(
 
                 # MySQL ON DUPLICATE KEY UPDATE reports affected_rows as 2 for
                 # updates and 1 for inserts, so rowcount cannot be trusted for
-                # per-source-row accounting. Use the delete+insert fallback when
+                # per-source-row accounting. Use the UPDATE+INSERT fallback when
                 # an LSN guard is required so the skip count is exact.
                 if lsn_guarded:
                     return None
@@ -4501,13 +4502,11 @@ def _upsert_batch(
                     target_cols,
                     update_cols,
                 )
-        except (sa.exc.SQLAlchemyError, OSError, ValueError):
+        except (sa.exc.SQLAlchemyError, OSError, ValueError) as exc:
             # Native upsert can fail if the table lacks the required unique
-            # index/constraint.  Roll back the aborted transaction so the
-            # delete+insert fallback can run cleanly.
-            logger.debug(
-                "native upsert unavailable; using delete+insert fallback", exc_info=True
-            )
+            # index/constraint. Roll back the aborted transaction so the
+            # UPDATE-then-INSERT fallback can run cleanly; it is a job warning.
+            note_native_upsert_failed(table_obj, dialect_name, exc)
             try:
                 conn.rollback()
             except (sa.exc.SQLAlchemyError, OSError) as exc:
@@ -4519,7 +4518,7 @@ def _upsert_batch(
     if native_count is not None:
         return native_count
 
-    # delete+insert: drop stale CDC rows before deleting so redelivery
+    # UPDATE+INSERT: drop stale CDC rows before writing so redelivery
     # cannot regress state when ``_df_lsn`` is present.
     apply_rows = rows
     if lsn_guarded:
@@ -4569,16 +4568,10 @@ def _upsert_batch(
             return _insert_rows_written(result, len(apply_rows), dialect_name)
         return 0
 
-    if apply_rows:
-        if lattice:
-            from connectors.merge_dialects import update_insert_upsert
+    if apply_rows:  # UPDATE matched keys, INSERT new keys — never DELETE.
+        from connectors.merge_dialects import update_insert_upsert
 
-            return update_insert_upsert(
-                conn, table_obj, apply_rows, conflict_cols, target_cols
-            )
-        _delete_by_keys(conn, table_obj, apply_rows, conflict_cols)
-        result = conn.execute(table_obj.insert(), apply_rows)
-        return _insert_rows_written(result, len(apply_rows), dialect_name)
+        return update_insert_upsert(conn, table_obj, apply_rows, conflict_cols, target_cols)
     return 0
 
 
@@ -6368,7 +6361,7 @@ def write_mapped_rows(
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
             rows_skipped=rows_skipped,
-            warnings=transform_errors,
+            warnings=[*upsert_fallback_warnings(table_obj), *transform_errors],
         )
     except TransferCancelled:
         # D168: cancel is control flow, not a write failure. The chunks already

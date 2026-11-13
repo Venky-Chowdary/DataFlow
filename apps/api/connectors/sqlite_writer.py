@@ -24,7 +24,6 @@ from connectors.writer_common import (
     reject_on_strict_policy,
     CHUNK_SIZE,
     _coerced_null_row_count,
-    _conflict_key_identity,
     _rejected_row_count,
     bind_sql_mapped_rows_with_quarantine,
     filter_stale_lsn_rows,
@@ -596,8 +595,9 @@ def _sqlite_upsert_batch(
 ) -> tuple[int, int]:
     """Upsert with optional ``_df_lsn`` monotonic guard (at-least-once CDC).
 
-    Prefetch existing LSNs for the batch, drop stale rows, then either use
-    ``INSERT … ON CONFLICT DO UPDATE WHERE`` or delete+insert fallback. Returns
+    Prefetch existing LSNs for the batch, drop stale rows, then
+    ``INSERT … ON CONFLICT DO UPDATE`` (UPDATE-then-INSERT when the key has
+    no unique index; never DELETE). Returns
     (rows_written, rows_skipped) for accurate reconciliation accounting.
     """
     from connectors.writer_common import (
@@ -637,7 +637,6 @@ def _sqlite_upsert_batch(
     if not rows:
         return 0, empty_pk_skipped
 
-    original_count = len(rows)
     lsn_guarded = DF_LSN_COL in target_cols and conflict_cols
     if lsn_guarded:
         rows, skipped = filter_stale_lsn_rows(
@@ -688,58 +687,42 @@ def _sqlite_upsert_batch(
             )
             return written, empty_pk_skipped + skipped + max(0, len(rows) - written)
 
-    if lsn_guarded and update_cols:
-        where_sql = sqlite_lsn_update_guard_sql(
-            table_name, allow_equal_lsn=allow_equal_lsn
-        )
-        set_sql = ", ".join(
-            f"{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}"
-            for c in update_cols
-        )
-        insert_sql = (
-            f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders}) "  # nosec B608
-            f"ON CONFLICT ({conflict_sql}) DO UPDATE SET {set_sql} WHERE {where_sql}"
-        )
-        try:
-            cur.executemany(
-                insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows]
-            )
-            return len(rows), empty_pk_skipped + skipped
-        except Exception as exc:
-            logger.debug("sqlite ON CONFLICT unavailable: %s", exc)
-
-    if lattice:
-        written = _sqlite_update_insert_upsert(
-            cur,
-            table_quoted,
-            target_cols,
-            conflict_cols,
-            update_cols,
-            insert_cols,
-            rows,
-        )
-        return written, empty_pk_skipped + skipped
-
-    # delete+insert fallback when the dest has no dest-owned lattice columns.
-    indices = [target_cols.index(c) for c in conflict_cols]
-    deduped = {
-        tuple(_conflict_key_identity(row[i]) for i in indices): row for row in rows
-    }
-    rows = list(deduped.values())
-    col_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
-    del_placeholders = ", ".join(
-        "(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in deduped
+    # Every upsert is INSERT … ON CONFLICT DO UPDATE SET <mapped non-key
+    # columns>: the matched row keeps every column the mapping does not
+    # write (G15), its rowid, and its ON DELETE CASCADE children. The old
+    # delete+insert fallback reset unmapped columns and cascaded deletes.
+    set_sql = ", ".join(
+        f"{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}"
+        for c in update_cols
     )
-    delete_sql = f"DELETE FROM {table_quoted} WHERE ({col_sql}) IN ({del_placeholders})"  # nosec B608
-    delete_params = [v for key in deduped.keys() for v in key]
-    cur.execute(delete_sql, delete_params)
-
+    where_sql = (
+        " WHERE " + sqlite_lsn_update_guard_sql(table_name, allow_equal_lsn=allow_equal_lsn)
+        if lsn_guarded and update_cols
+        else ""
+    )
+    action_sql = f"DO UPDATE SET {set_sql}{where_sql}" if update_cols else "DO NOTHING"
     insert_sql = (
-        f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"  # nosec B608
+        f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders}) "  # nosec B608
+        f"ON CONFLICT ({conflict_sql}) {action_sql}"
     )
-    cur.executemany(insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows])
-    dedup_skipped = original_count - len(rows) - skipped
-    return len(rows), empty_pk_skipped + skipped + max(0, dedup_skipped)
+    try:
+        cur.executemany(insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows])
+        return len(rows), empty_pk_skipped + skipped
+    except sqlite3.OperationalError as exc:
+        # No PRIMARY KEY / UNIQUE index on the key (an operator's table —
+        # never silently altered): UPDATE-then-INSERT below, never DELETE.
+        logger.info("sqlite ON CONFLICT unavailable on %s: %s", table_name, exc)
+
+    written = _sqlite_update_insert_upsert(
+        cur,
+        table_quoted,
+        target_cols,
+        conflict_cols,
+        update_cols,
+        insert_cols,
+        rows,
+    )
+    return written, empty_pk_skipped + skipped
 
 
 def _sqlite_physical_lattice(cur: Any, table_name: str) -> tuple[str, ...]:
