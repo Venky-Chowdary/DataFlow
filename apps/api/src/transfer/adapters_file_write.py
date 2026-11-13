@@ -183,6 +183,7 @@ def write_destination_file(
             grid,
             source_format="csv" if container else src_fmt,
             target_format=fmt,
+            column_types=export_dest_types,
         )
         ext = (
             "tsv"
