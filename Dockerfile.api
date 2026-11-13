@@ -29,10 +29,13 @@ RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 # pymssql from PyPI, plus FreeTDS, which pymssql's wheel links statically.
 # The package list must equal the approved LGPL entries in licence-policy.json
 # (CI: fetch_lgpl_sources.py --verify-dockerfile; tests/test_lgpl_source_shipping.py).
-COPY scripts/fetch_lgpl_sources.py /tmp/fetch_lgpl_sources.py
-RUN python /tmp/fetch_lgpl_sources.py --dest /usr/share/doc/datawrap/third-party-source \
+# --bundled adds the source of the LGPL/GPL libraries the wheels bundle in
+# their <pkg>.libs/ (keyutils, libxcrypt, GCC libquadmath/libgfortran); an
+# unreviewed bundled library fails the build (scripts/bundled_libraries.py).
+COPY scripts/fetch_lgpl_sources.py scripts/bundled_libraries.py /tmp/lgpl/
+RUN python /tmp/lgpl/fetch_lgpl_sources.py --dest /usr/share/doc/datawrap/third-party-source --bundled \
       paramiko psycopg2-binary=psycopg2 pymssql+freetds \
-    && rm /tmp/fetch_lgpl_sources.py
+    && rm -rf /tmp/lgpl
 
 # Proprietary vendor drivers (SAP HANA hdbcli, Teradata teradatasql and their
 # SQLAlchemy dialects) are NOT shipped by default. An operator who has accepted

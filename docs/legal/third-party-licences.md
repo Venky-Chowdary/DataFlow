@@ -96,15 +96,10 @@ allows bundling as long as the copyright and licence travel with the fonts;
 
      The versions cannot drift: the step reads them from the installed
      packages.
-   - **Known gap, not yet resolved.** Besides FreeTDS, the manylinux wheels
-     bundle further LGPL system libraries:
-     - `psycopg2-binary` bundles `libkeyutils` (keyutils 1.5.8) and
-       `libcrypt`;
-     - `pymssql` bundles `libkeyutils` (keyutils 1.5.10).
-
-     Their source is not shipped yet. Options: ship the matching upstream
-     source too, or build these drivers against the image's system
-     libraries instead of using the manylinux wheels.
+   - **Libraries bundled inside the wheels.** With `--bundled`, the same
+     step also ships the source of the LGPL/GPL native libraries that the
+     installed manylinux wheels carry in `<package>.libs/`. See the next
+     section.
 3. **Proprietary drivers** (`hdbcli`, `teradatasql`). Decided 2026-11-13:
    operator-installed. They are no longer in `apps/api/requirements.txt` or
    the production image, and no longer in `licence-policy.json` (Datawrap
@@ -112,6 +107,60 @@ allows bundling as long as the copyright and licence travel with the fonts;
 
 No owner decision is pending (`owner_decision: true` appears nowhere in
 `licence-policy.json`).
+
+## Native libraries bundled inside the wheels
+
+Every manylinux wheel in the runtime set was inventoried on 2026-11-13. The
+list was read from the cp312 wheels on PyPI, and it matches the wheels
+installed here. `scripts/bundled_libraries.py` maps each bundled library to
+its licence. An unreviewed library fails the image build, the CI drift check
+and the licence gate, and so does a copyleft library whose source cannot be
+named.
+
+| Wheel | Bundled libraries | Licences |
+|---|---|---|
+| psycopg2-binary 2.9.13 | libpq, OpenSSL 3 (libssl, libcrypto), MIT Kerberos (krb5, k5crypto, gssapi, krb5support, com_err), OpenLDAP (ldap, lber), Cyrus SASL, PCRE, libselinux, **keyutils 1.5.8**, **libcrypt (libxcrypt 4.5.2)** | PostgreSQL, Apache-2.0, MIT, OLDAP-2.8, CMU, BSD-3-Clause, public domain, **LGPL-2.1+** |
+| pymssql 2.4.6 | OpenSSL 1.1.1k, MIT Kerberos, PCRE2, libselinux, **keyutils 1.5.10**; FreeTDS 1.5.19 linked statically | OpenSSL/SSLeay, MIT, BSD-3-Clause, public domain, **LGPL-2.1+**, **LGPL-2.0+** |
+| ibm_db 3.3.0 | OpenSSL 3.5.1, MIT Kerberos, libxml2, liblzma, PCRE2, libselinux, **keyutils 1.6.3** | Apache-2.0, MIT, 0BSD, BSD-3-Clause, public domain, **LGPL-2.1+** |
+| numpy 2.5.4 | OpenBLAS, **GCC 8.5.0 libquadmath**, **libgfortran** | BSD-3-Clause, **LGPL-2.1+**, **GPL-3.0+ with the GCC Runtime Library Exception** |
+| pillow 13.0.0 | FreeType, HarfBuzz, libjpeg-turbo, Little CMS, OpenJPEG, libpng, libtiff, libwebp/sharpyuv, libavif, Brotli, Zstandard, liblzma, libXau, libxcb | FTL, MIT, IJG/BSD/Zlib, BSD-2/3-Clause, libpng-2.0, libtiff, 0BSD |
+| ijson 3.6.0 | YAJL | ISC |
+| google-crc32c 1.9.0 | crc32c | BSD-3-Clause |
+
+**Copyleft (bold).** Their corresponding source ships in
+`/usr/share/doc/datawrap/third-party-source/`, with `BUNDLED_LIBRARIES.json`
+listing every bundled library:
+
+| Source | Covers | Verified against |
+|---|---|---|
+| keyutils 1.5.10, 1.6.3 | the pymssql and ibm_db copies | CentOS Stream dist-git SHA-512 (lookaside cache), pinned |
+| keyutils 1.5.8 | the psycopg2-binary copy | no published checksum found for 1.5.8, so the SHA-256 is recorded at download and labelled as such |
+| libxcrypt 4.5.2 | psycopg2-binary's libcrypt | pinned SHA-256, the same value manylinux pins |
+| GCC 8.5.0 (el8 tarball, about 65 MB) | numpy's libquadmath and libgfortran | pinned SHA-512 from CentOS Stream c8s |
+
+How the libxcrypt version was identified: the library carries no version
+string. It is libxcrypt, not glibc, because it exports the `crypt_gensalt`
+family under glibc-compatible symbol versions, which is how the manylinux2014
+image builds it. It was compiled by clang 22.1.8, which points to a 2026
+manylinux image, and those pin libxcrypt 4.5.2. That mapping is recorded per
+wheel version (`WHEEL_LIB_VERSIONS`), so a new psycopg2-binary release fails
+the build until it is reviewed.
+
+libgfortran's GCC Runtime Library Exception does not itself require source,
+but it is covered by the same GCC tarball as libquadmath.
+
+The shipped tarballs are upstream / RPM sources. The Red Hat build patches
+live in the CentOS Stream dist-git repositories.
+
+**Permissive.** Attribution, including the OpenSSL, CMU (Cyrus SASL),
+FreeType and IJG notices, is in `NOTICE` under "Libraries bundled inside the
+shipped Python wheels".
+
+**Not covered by this scan:** libraries linked statically into an extension
+module. FreeTDS is handled explicitly; others would need their own review.
+The `ibm_db` wheel also ships IBM's proprietary `clidriver` (about 120 MB,
+not in `.libs/`), which needs an owner decision like the SAP and Teradata
+drivers.
 
 ## Operator-installed vendor drivers (SAP HANA, Teradata)
 

@@ -450,7 +450,27 @@ def upstream_notices(packages: Iterable[Package]) -> list[tuple[str, str]]:
     return out
 
 
-def notice(packages: list[Package], policy: dict[str, Any], not_installed: Iterable[str] = ()) -> str:
+def bundled_inventory(packages: Iterable[Package]) -> tuple[list[dict[str, Any]], str]:
+    """Libraries the shipped (runtime) wheels bundle, and an error text if any is unreviewed."""
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from bundled_libraries import BundledLibraryError, installed_bundles, inventory
+
+    shipped = {_canon(p.name) for p in packages if p.ecosystem == "pypi" and p.scope == "runtime"}
+    bundles = [b for b in installed_bundles() if _canon(b[0]) in shipped]
+    try:
+        return inventory(bundles), ""
+    except BundledLibraryError as exc:
+        return [], str(exc)
+
+
+def notice(
+    packages: list[Package],
+    policy: dict[str, Any],
+    not_installed: Iterable[str] = (),
+    bundled: Iterable[dict[str, Any]] = (),
+) -> str:
     """The NOTICE file: attributions for what the API image and web bundle ship."""
     shipped = sorted(
         (p for p in packages if p.scope == "runtime" and p.status != "first_party"),
@@ -494,6 +514,28 @@ def notice(packages: list[Package], policy: dict[str, Any], not_installed: Itera
                 f"{name}: licence not scanned (not installed where this file was generated)"
                 for name in sorted(not_installed)
             ]
+        lines.append("")
+    bundled = sorted(bundled, key=lambda r: (r["dist"].lower(), r["library"]))
+    if bundled:
+        title = "Libraries bundled inside the shipped Python wheels"
+        lines += [
+            "=" * 72,
+            title,
+            "=" * 72,
+            "",
+            "manylinux wheels carry these native libraries in their <package>.libs/",
+            "directory (scripts/bundled_libraries.py). For the LGPL/GPL ones the",
+            f"corresponding source is shipped in the image at {LGPL_SOURCE_DIR}/",
+            "(BUNDLED_LIBRARIES.json, MANIFEST.json, SHA256SUMS).",
+            "",
+        ]
+        for row in bundled:
+            text = f"{row['dist']} {row['dist_version']}: {row['file']} - {row['component']}, {row['licence']}"
+            if row["copyleft"]:
+                text += f"; source shipped in image at {LGPL_SOURCE_DIR}/"
+            lines.append(text)
+            if row["attribution"]:
+                lines.append(f"  {row['attribution']}")
         lines.append("")
     notices = upstream_notices(shipped)
     if notices:
@@ -580,10 +622,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.markdown:
         Path(args.markdown).write_text(markdown(packages, missing), encoding="utf-8")
 
+    bundled, bundled_error = bundled_inventory(packages) if not args.skip_python else ([], "")
     if args.notice:
-        Path(args.notice).write_text(notice(packages, policy, missing), encoding="utf-8")
+        Path(args.notice).write_text(notice(packages, policy, missing, bundled), encoding="utf-8")
 
     problems = violations(packages, policy)
+    if bundled_error:
+        problems.append(bundled_error)
     if args.check_notice:
         gaps = notice_gaps(
             direct_dependencies(Path(args.runtime_reqs), Path(args.lockfile)),

@@ -198,3 +198,109 @@ def test_freetds_without_a_published_checksum_is_labelled_not_claimed(tmp_path: 
     rows = fetch.ship([fetch.parse_spec("pymssql+freetds")], tmp_path, get=net, version_of=lambda d: "2.4.6")
     label = next(r for r in rows if r["file"].startswith("freetds"))["verified_against"]
     assert "publishes no checksum" in label
+
+
+# ── libraries bundled inside the wheels (auditwheel ``<pkg>.libs/``) ────────
+
+
+def _fake_dist(tmp_path: Path, name: str, libs: dict[str, bytes]) -> tuple[str, str, list[Path]]:
+    libdir = tmp_path / f"{name}.libs"
+    libdir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for filename, content in libs.items():
+        path = libdir / filename
+        path.write_bytes(content)
+        paths.append(path)
+    return paths
+
+
+def test_library_basename_strips_the_auditwheel_hash() -> None:
+    assert fetch.lib_basename("libkeyutils-dfe70bd6.so.1.5") == "libkeyutils"
+    assert fetch.lib_basename("libpcre2-8-516f4c9d.so.0.7.1") == "libpcre2-8"
+    assert fetch.lib_basename("libgfortran-83c28eba-468e71e5.so.5.0.0") == "libgfortran"
+    assert fetch.lib_basename("libscipy_openblas64_-f48b354e.so") == "libscipy_openblas64_"
+
+
+def test_inventory_classifies_every_bundled_library(tmp_path: Path) -> None:
+    libs = _fake_dist(tmp_path, "pymssql", {
+        "libkeyutils-2777d33d.so.1.6": b"\x00keyutils-1.5.10\x00",
+        "libssl-7f59e8e2.so.1.1.1k": b"openssl",
+        "libkrb5-d4b313c5.so.3.3": b"krb5",
+    })
+    rows = fetch.inventory([("pymssql", "2.4.6", libs)])
+    by_lib = {r["library"]: r for r in rows}
+    assert by_lib["libkeyutils"]["copyleft"] is True
+    assert by_lib["libkeyutils"]["source"] == ["keyutils", "1.5.10"]
+    assert by_lib["libssl"]["copyleft"] is False and by_lib["libssl"]["source"] is None
+    assert "OpenSSL" in by_lib["libssl"]["component"]
+
+
+def test_an_unknown_bundled_library_fails_the_build(tmp_path: Path) -> None:
+    libs = _fake_dist(tmp_path, "newwheel", {"libmystery-0123abcd.so.1": b"?"})
+    with pytest.raises(fetch.SourceError, match="libmystery"):
+        fetch.inventory([("newwheel", "1.0", libs)])
+
+
+def test_a_copyleft_library_with_an_unidentifiable_version_fails_the_build(tmp_path: Path) -> None:
+    libs = _fake_dist(tmp_path, "psycopg2_binary", {"libcrypt-bc2db45e.so.1": b"_crypt_gensalt_sha1crypt_rn"})
+    # libcrypt carries no version string; only a reviewed (wheel, version) entry names it.
+    with pytest.raises(fetch.SourceError, match="libcrypt"):
+        fetch.inventory([("psycopg2-binary", "9.9.9", libs)])
+    rows = fetch.inventory([("psycopg2-binary", "2.9.13", libs)])
+    assert rows[0]["source"] == ["libxcrypt", "4.5.2"]
+
+
+def test_libcrypt_must_really_be_libxcrypt(tmp_path: Path) -> None:
+    libs = _fake_dist(tmp_path, "psycopg2_binary", {"libcrypt-bc2db45e.so.1": b"glibc libcrypt"})
+    with pytest.raises(fetch.SourceError, match="libxcrypt"):
+        fetch.inventory([("psycopg2-binary", "2.9.13", libs)])
+
+
+def test_gcc_runtime_libraries_map_to_the_gcc_source_of_their_build(tmp_path: Path) -> None:
+    libs = _fake_dist(tmp_path, "numpy", {
+        "libquadmath-2284e583-a9307bba.so.0.0.0": b"libquadmath.so.0.0.0-8.5.0-28.el8_10.alma.1.x86_64.debug",
+        "libgfortran-83c28eba-468e71e5.so.5.0.0": b"libgfortran.so.5.0.0-8.5.0-28.el8_10.alma.1.x86_64.debug",
+    })
+    rows = fetch.inventory([("numpy", "2.5.4", libs)])
+    assert {tuple(r["source"]) for r in rows} == {("gcc", "8.5.0-el8")}
+
+
+def test_every_mapped_copyleft_source_has_a_pinned_checksum_or_says_why_not() -> None:
+    for key, upstream in fetch.UPSTREAM.items():
+        assert upstream.urls and all(u.startswith("https://") for u in upstream.urls), key
+        assert upstream.sha256 or upstream.sha512 or upstream.note, key
+
+
+def test_ship_fetches_bundled_copyleft_sources_once_with_checksums(tmp_path: Path, monkeypatch) -> None:
+    src = tmp_path / "site"
+    a = _fake_dist(src, "pymssql", {"libkeyutils-2777d33d.so.1.6": b"keyutils-1.5.10"})
+    b = _fake_dist(src, "other", {"libkeyutils-1111aaaa.so.1.6": b"keyutils-1.5.10"})
+    tarball = b"keyutils 1.5.10 source"
+    upstream = fetch.Upstream(
+        "keyutils-1.5.10.tar.bz2", ("https://mirror.example/keyutils-1.5.10.tar.bz2",),
+        sha512=hashlib.sha512(tarball).hexdigest(),
+    )
+    monkeypatch.setitem(fetch.UPSTREAM, ("keyutils", "1.5.10"), upstream)
+    net = FakeNet({"https://mirror.example/keyutils-1.5.10.tar.bz2": tarball})
+    dest = tmp_path / "out"
+    rows = fetch.ship([], dest, get=net, bundled=[("pymssql", "2.4.6", a), ("other", "1.0", b)])
+    assert (dest / "keyutils-1.5.10.tar.bz2").read_bytes() == tarball
+    assert len(rows) == 1 and rows[0]["verified_against"] == "pinned SHA-512"
+    assert "pymssql 2.4.6" in rows[0]["for"] and "other 1.0" in rows[0]["for"]
+    inventory = json.loads((dest / "BUNDLED_LIBRARIES.json").read_text(encoding="utf-8"))
+    assert {r["dist"] for r in inventory["libraries"]} == {"pymssql", "other"}
+
+
+def test_a_bundled_source_checksum_mismatch_fails_the_build(tmp_path: Path, monkeypatch) -> None:
+    a = _fake_dist(tmp_path / "site", "pymssql", {"libkeyutils-2777d33d.so.1.6": b"keyutils-1.5.10"})
+    monkeypatch.setitem(fetch.UPSTREAM, ("keyutils", "1.5.10"), fetch.Upstream(
+        "k.tar.bz2", ("https://mirror.example/k.tar.bz2",), sha512="0" * 128))
+    net = FakeNet({"https://mirror.example/k.tar.bz2": b"tampered"})
+    with pytest.raises(fetch.SourceError, match="SHA-512"):
+        fetch.ship([], tmp_path / "out", get=net, bundled=[("pymssql", "2.4.6", a)])
+
+
+def test_dockerfile_asks_for_the_bundled_scan() -> None:
+    text = (REPO / "Dockerfile.api").read_text(encoding="utf-8").replace("\\\n", " ")
+    run = next(line for line in text.splitlines() if "fetch_lgpl_sources.py --dest" in line)
+    assert "--bundled" in run

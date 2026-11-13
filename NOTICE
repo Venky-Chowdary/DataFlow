@@ -308,6 +308,83 @@ yargs-parser: ISC
 zustand: MIT
 
 ========================================================================
+Libraries bundled inside the shipped Python wheels
+========================================================================
+
+manylinux wheels carry these native libraries in their <package>.libs/
+directory (scripts/bundled_libraries.py). For the LGPL/GPL ones the
+corresponding source is shipped in the image at /usr/share/doc/datawrap/third-party-source/
+(BUNDLED_LIBRARIES.json, MANIFEST.json, SHA256SUMS).
+
+google-crc32c 1.9.0: libcrc32c-7ebc40c5.so.1.1.0 - google/crc32c, BSD-3-Clause
+ibm_db 3.3.0: libcom_err-d6076f24.so.2.1 - com_err (MIT Kerberos / e2fsprogs), MIT
+ibm_db 3.3.0: libcrypto-7a1514b3.so.3.5.1 - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
+  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+ibm_db 3.3.0: libgssapi_krb5-82e569d3.so.2.2 - MIT Kerberos (krb5), MIT
+ibm_db 3.3.0: libk5crypto-188823b6.so.3.1 - MIT Kerberos (krb5), MIT
+ibm_db 3.3.0: libkeyutils-81e5c457.so.1.10 - keyutils, LGPL-2.1-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/
+ibm_db 3.3.0: libkrb5-68b134bf.so.3.3 - MIT Kerberos (krb5), MIT
+ibm_db 3.3.0: libkrb5support-28787768.so.0.1 - MIT Kerberos (krb5), MIT
+ibm_db 3.3.0: liblzma-270e41f3.so.5.2.5 - XZ Utils liblzma, 0BSD / public domain
+ibm_db 3.3.0: libpcre2-8-b77f698a.so.0.11.0 - PCRE2, BSD-3-Clause WITH PCRE2-exception
+ibm_db 3.3.0: libselinux-a1ff09bf.so.1 - libselinux, public domain
+ibm_db 3.3.0: libxml2-a0a916ee.so.2.9.13 - libxml2, MIT
+ijson 3.6.0: libyajl-9393e5bd.so.2.1.1 - YAJL, ISC
+numpy 2.5.4: libgfortran-83c28eba-468e71e5.so.5.0.0 - GCC libgfortran, GPL-3.0-or-later WITH GCC-exception-3.1; source shipped in image at /usr/share/doc/datawrap/third-party-source/
+numpy 2.5.4: libquadmath-2284e583-a9307bba.so.0.0.0 - GCC libquadmath, LGPL-2.1-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/
+numpy 2.5.4: libscipy_openblas64_-f48b354e.so - OpenBLAS (scipy-openblas), BSD-3-Clause
+pillow 13.0.0: libXau-154567c4.so.6.0.0 - libXau, MIT
+pillow 13.0.0: libavif-c6062d5f.so.16.4.2 - libavif, BSD-2-Clause
+pillow 13.0.0: libbrotlicommon-53534446.so.1.2.0 - Brotli, MIT
+pillow 13.0.0: libbrotlidec-7e5462ba.so.1.2.0 - Brotli, MIT
+pillow 13.0.0: libfreetype-57f805ba.so.6.20.6 - FreeType, FTL
+  Portions of this software are copyright (c) The FreeType Project (www.freetype.org). All rights reserved.
+pillow 13.0.0: libharfbuzz-fb49c9fc.so.0.61450.0 - HarfBuzz, MIT-Modern-Variant
+pillow 13.0.0: libjpeg-6dc8d115.so.62.4.0 - libjpeg-turbo, IJG AND BSD-3-Clause AND Zlib
+  This software is based in part on the work of the Independent JPEG Group.
+pillow 13.0.0: liblcms2-88eaba2f.so.2.0.19 - Little CMS, MIT
+pillow 13.0.0: liblzma-de26b416.so.5.8.4 - XZ Utils liblzma, 0BSD / public domain
+pillow 13.0.0: libopenjp2-e530e1bf.so.2.5.4 - OpenJPEG, BSD-2-Clause
+pillow 13.0.0: libpng16-1d1ba958.so.16.58.0 - libpng, libpng-2.0
+pillow 13.0.0: libsharpyuv-0066295b.so.0.1.2 - libwebp, BSD-3-Clause
+pillow 13.0.0: libtiff-20b7e810.so.6.3.0 - libtiff, libtiff
+pillow 13.0.0: libwebp-51b0b3f7.so.7.2.0 - libwebp, BSD-3-Clause
+pillow 13.0.0: libwebpdemux-9fe2abcc.so.2.0.17 - libwebp, BSD-3-Clause
+pillow 13.0.0: libwebpmux-8fb1c9f6.so.3.1.2 - libwebp, BSD-3-Clause
+pillow 13.0.0: libxcb-9065bb12.so.1.1.0 - libxcb, MIT
+pillow 13.0.0: libzstd-40ad5e7e.so.1.5.7 - Zstandard, BSD-3-Clause (dual-licensed; BSD terms used)
+psycopg2-binary 2.9.13: libcom_err-2abe824b.so.2.1 - com_err (MIT Kerberos / e2fsprogs), MIT
+psycopg2-binary 2.9.13: libcrypt-bc2db45e.so.1 - libxcrypt, LGPL-2.1-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/
+psycopg2-binary 2.9.13: libcrypto-fb8d5b21.so.3 - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
+  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+psycopg2-binary 2.9.13: libgssapi_krb5-497db0c6.so.2.2 - MIT Kerberos (krb5), MIT
+psycopg2-binary 2.9.13: libk5crypto-b1f99d5c.so.3.1 - MIT Kerberos (krb5), MIT
+psycopg2-binary 2.9.13: libkeyutils-dfe70bd6.so.1.5 - keyutils, LGPL-2.1-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/
+psycopg2-binary 2.9.13: libkrb5-fcafa220.so.3.3 - MIT Kerberos (krb5), MIT
+psycopg2-binary 2.9.13: libkrb5support-d0bcff84.so.0.1 - MIT Kerberos (krb5), MIT
+psycopg2-binary 2.9.13: liblber-2f335fb0.so.2.0.200 - OpenLDAP, OLDAP-2.8
+psycopg2-binary 2.9.13: libldap-d3931cbf.so.2.0.200 - OpenLDAP, OLDAP-2.8
+psycopg2-binary 2.9.13: libpcre-9513aab5.so.1.2.0 - PCRE, BSD-3-Clause
+psycopg2-binary 2.9.13: libpq-a17e3caa.so.5.17 - PostgreSQL libpq, PostgreSQL
+psycopg2-binary 2.9.13: libsasl2-84219a89.so.3.0.0 - Cyrus SASL, BSD-Attribution-HPND-disclaimer (CMU)
+  This product includes software developed by Computing Services at Carnegie Mellon University (http://www.cmu.edu/computing/).
+psycopg2-binary 2.9.13: libselinux-0922c95c.so.1 - libselinux, public domain
+psycopg2-binary 2.9.13: libssl-8bd944e8.so.3 - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
+  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+pymssql 2.4.6: libcom_err-730ca923.so.2.1 - com_err (MIT Kerberos / e2fsprogs), MIT
+pymssql 2.4.6: libcrypto-64b40125.so.1.1.1k - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
+  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+pymssql 2.4.6: libgssapi_krb5-abc338f9.so.2.2 - MIT Kerberos (krb5), MIT
+pymssql 2.4.6: libk5crypto-b242bd1e.so.3.1 - MIT Kerberos (krb5), MIT
+pymssql 2.4.6: libkeyutils-2777d33d.so.1.6 - keyutils, LGPL-2.1-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/
+pymssql 2.4.6: libkrb5-d4b313c5.so.3.3 - MIT Kerberos (krb5), MIT
+pymssql 2.4.6: libkrb5support-7177f7df.so.0.1 - MIT Kerberos (krb5), MIT
+pymssql 2.4.6: libpcre2-8-516f4c9d.so.0.7.1 - PCRE2, BSD-3-Clause WITH PCRE2-exception
+pymssql 2.4.6: libselinux-81bdf592.so.1 - libselinux, public domain
+pymssql 2.4.6: libssl-7f59e8e2.so.1.1.1k - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
+  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+
+========================================================================
 NOTICE files of redistributed packages
 ========================================================================
 

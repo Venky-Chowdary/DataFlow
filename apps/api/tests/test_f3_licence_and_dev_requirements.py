@@ -323,3 +323,11 @@ def test_mpl_packages_keep_a_source_availability_notice() -> None:
     for key in ("pypi:certifi", "pypi:orjson"):
         notice = policy["exceptions"][key]["notice"]
         assert "Source: https://" in notice and "unmodified" in notice, key
+
+
+def test_notice_attributes_the_libraries_bundled_inside_wheels() -> None:
+    text = (REPO / "NOTICE").read_text(encoding="utf-8")
+    assert "Libraries bundled inside the shipped Python wheels" in text
+    for needle in ("OpenSSL", "MIT Kerberos", "PostgreSQL libpq", "keyutils", "libxcrypt",
+                   "Carnegie Mellon University", "The FreeType Project", "Independent JPEG Group"):
+        assert needle in text, needle

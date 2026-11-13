@@ -12,7 +12,11 @@ requirements, so the versions are the ones actually in the image:
   ``psycopg2`` sdist of the same version, the same code);
 * FreeTDS, which pymssql's manylinux wheel links statically: its version is
   read from the linked binary, the tarball comes from freetds.org and is
-  verified against the SHA-256 file published next to it when there is one.
+  verified against the SHA-256 file published next to it when there is one;
+* with ``--bundled``, the LGPL / GPL libraries the installed wheels bundle in
+  their ``<pkg>.libs/`` directories (keyutils, libxcrypt, GCC's libquadmath /
+  libgfortran), mapped in ``scripts/bundled_libraries.py`` with pinned
+  checksums. An unreviewed bundled library fails the build.
 
 Everything lands in ``--dest`` with ``SHA256SUMS`` and ``MANIFEST.json``. Any
 failure (no sdist for the installed version, checksum mismatch, FreeTDS version
@@ -43,14 +47,26 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bundled_libraries import (
+    UPSTREAM,
+    BundledLibraryError,
+    Upstream,
+    installed_bundles,
+    inventory,
+    lib_basename,
+)
+
+__all__ = ["UPSTREAM", "Upstream", "installed_bundles", "inventory", "lib_basename"]
+
 PYPI_JSON = "https://pypi.org/pypi/{name}/{version}/json"
 FREETDS_URL = "https://www.freetds.org/files/stable/freetds-{version}.tar.gz"
 KNOWN_EXTRAS = ("freetds",)
 _FREETDS_RE = re.compile(rb"freetds v(\d+\.\d+(?:\.\d+)?)")
 
 
-class SourceError(RuntimeError):
-    """The image cannot carry the corresponding source it is required to."""
+#: The image cannot carry the corresponding source it is required to.
+SourceError = BundledLibraryError
 
 
 @dataclass(frozen=True)
@@ -85,6 +101,8 @@ def dockerfile_specs(dockerfile: str) -> list[Spec]:
                     continue
                 if word in {"&&", ";"}:
                     break
+                if word.startswith("--"):
+                    continue  # flags such as --bundled
                 specs.append(parse_spec(word))
             return specs
     raise SourceError("Dockerfile has no `RUN ... fetch_lgpl_sources.py --dest ...` step")
@@ -135,9 +153,7 @@ def _freetds(version: str, get: Callable[[str], bytes]) -> tuple[str, bytes, str
     payload = get(url)
     try:
         published = get(url + ".sha256").decode().split()[0].strip().lower()
-    except SourceError:
-        published = ""
-    except Exception:  # noqa: BLE001 - urllib HTTPError etc.: no published checksum
+    except (SourceError, OSError):  # urllib's HTTPError / URLError are OSErrors
         published = ""
     if published:
         if _sha256(payload) != published:
@@ -150,13 +166,59 @@ def _freetds(version: str, get: Callable[[str], bytes]) -> tuple[str, bytes, str
     )
 
 
+def _upstream(up: Upstream, get: Callable[[str], bytes]) -> tuple[bytes, str]:
+    errors = []
+    for url in up.urls:
+        try:
+            payload = get(url)
+        except (SourceError, OSError) as exc:  # try the next mirror, report all
+            errors.append(f"{url}: {type(exc).__name__}")
+            continue
+        if up.sha512:
+            if hashlib.sha512(payload).hexdigest() != up.sha512:
+                raise SourceError(f"{up.filename}: SHA-512 does not match the pinned value ({url})")
+            return payload, "pinned SHA-512"
+        if up.sha256:
+            if _sha256(payload) != up.sha256:
+                raise SourceError(f"{up.filename}: SHA-256 does not match the pinned value ({url})")
+            return payload, "pinned SHA-256"
+        return payload, f"recorded at download over HTTPS ({up.note})"
+    raise SourceError(f"{up.filename}: no mirror answered ({'; '.join(errors)})")
+
+
+def _bundled_rows(
+    bundles: list[tuple[str, str, list[Path]]], get: Callable[[str], bytes]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(source rows to ship, the full bundled-library inventory)."""
+    libraries = inventory(bundles)
+    users: dict[tuple[str, str], list[str]] = {}
+    for row in libraries:
+        if row["source"]:
+            users.setdefault(tuple(row["source"]), []).append(
+                f"{row['dist']} {row['dist_version']}: {row['file']}"
+            )
+    rows = []
+    for key in sorted(users):
+        up = UPSTREAM[key]
+        payload, how = _upstream(up, get)
+        rows.append({
+            "file": up.filename,
+            "for": f"{key[0]} {key[1]} (bundled in " + "; ".join(sorted(users[key])) + ")",
+            "data": payload,
+            "verified_against": how,
+        })
+    return rows, libraries
+
+
 def ship(
     specs: list[Spec],
     dest: Path,
     *,
     get: Callable[[str], bytes] = _http_get,
     version_of: Callable[[str], str] = metadata.version,
+    bundled: list[tuple[str, str, list[Path]]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Ship sdists for ``specs`` and, with ``bundled``, the copyleft libraries' source."""
     dest.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for spec in specs:
@@ -172,6 +234,15 @@ def ship(
                 "data": payload,
                 "verified_against": how,
             })
+    libraries: list[dict[str, Any]] = []
+    if bundled is not None:
+        extra, libraries = _bundled_rows(bundled, get)
+        rows += extra
+        (dest / "BUNDLED_LIBRARIES.json").write_text(
+            json.dumps({"purpose": "native libraries bundled inside the Python wheels in this image",
+                        "libraries": libraries}, indent=2) + "\n",
+            encoding="utf-8",
+        )
     for row in rows:
         (dest / row["file"]).write_bytes(row.pop("data"))
         row["sha256"] = _sha256((dest / row["file"]).read_bytes())
@@ -219,7 +290,7 @@ def verify_dockerfile(dockerfile: Path, policy: Path, requirements: Path) -> lis
             continue
         try:
             index = json.loads(_http_get(PYPI_JSON.format(name=spec.sdist, version=version)))
-        except Exception as exc:  # noqa: BLE001 - reported as a problem, not swallowed
+        except (SourceError, OSError, ValueError) as exc:
             problems.append(f"{spec.sdist} {version}: PyPI lookup failed ({type(exc).__name__})")
             continue
         if not any(u.get("packagetype") == "sdist" for u in index.get("urls") or []):
@@ -229,6 +300,14 @@ def verify_dockerfile(dockerfile: Path, policy: Path, requirements: Path) -> lis
                 freetds_version(linked_binaries(spec.dist))
             except SourceError as exc:
                 problems.append(str(exc))
+    if "--bundled" not in dockerfile.read_text(encoding="utf-8"):
+        problems.append("the Dockerfile step does not pass --bundled (wheel-bundled libraries)")
+    # Every library the installed wheels bundle is reviewed and, when copyleft,
+    # resolves to a mapped source.
+    try:
+        inventory(installed_bundles())
+    except BundledLibraryError as exc:
+        problems.append(str(exc))
     return problems
 
 
@@ -236,6 +315,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("specs", nargs="*")
     parser.add_argument("--dest")
+    parser.add_argument(
+        "--bundled",
+        action="store_true",
+        help="also ship the source of the LGPL/GPL libraries the installed wheels bundle",
+    )
     parser.add_argument("--verify-dockerfile")
     parser.add_argument("--policy", default="licence-policy.json")
     parser.add_argument("--requirements", default="apps/api/requirements.txt")
@@ -248,7 +332,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if problems else 0
     if not args.dest or not args.specs:
         parser.error("--dest and at least one spec are required")
-    rows = ship([parse_spec(s) for s in args.specs], Path(args.dest))
+    rows = ship(
+        [parse_spec(s) for s in args.specs],
+        Path(args.dest),
+        bundled=installed_bundles() if args.bundled else None,
+    )
     for row in rows:
         print(f"{row['sha256']}  {row['file']}  ({row['for']}; {row['verified_against']})")
     return 0

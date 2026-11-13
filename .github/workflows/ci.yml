@@ -1018,8 +1018,11 @@ jobs:
         # Dockerfile.api ships the corresponding source of the approved LGPL
         # packages. Fails when its package list differs from the approved
         # entries in licence-policy.json, when one is not a runtime
-        # requirement, when an installed version has no sdist on PyPI, or when
-        # pymssql no longer shows the FreeTDS version it links.
+        # requirement, when an installed version has no sdist on PyPI, when
+        # pymssql no longer shows the FreeTDS version it links, or when an
+        # installed wheel bundles a native library (<pkg>.libs/) that
+        # scripts/bundled_libraries.py has not reviewed or whose (L)GPL
+        # source it cannot name.
         run: python scripts/fetch_lgpl_sources.py --verify-dockerfile Dockerfile.api
 
       - name: Upload licence report
