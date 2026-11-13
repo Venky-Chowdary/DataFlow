@@ -44,7 +44,7 @@ from connectors.array_wire import (  # noqa: F401 — re-export canonical helper
     _pg_array_element,
     parse_array_wire_elements,
 )
-from connectors.destination_naming import writer_identifier
+from connectors.destination_naming import column_key, writer_identifier
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
     quote_column_list,
     quote_sql_identifier,
@@ -631,16 +631,14 @@ def desired_types_honoring_map_stamps(
     candidates = candidate_by_col or {}
     by_tgt: dict[str, dict[str, Any]] = {}
     for mapping in write_mappings(list(mappings or [])):
-        tgt = sanitize_identifier(
-            str(mapping.get("target") or ""), preserve_case=preserve_case
-        )
+        tgt = column_key(str(mapping.get("target") or ""))  # G11: the writer's own spelling
         if tgt and tgt not in by_tgt:
             by_tgt[tgt] = mapping
 
     desired: list[str] = []
     refusals: list[dict[str, Any]] = []
     for col, cur_type in zip(target_cols, current_target_types):
-        mapping = by_tgt.get(col) or {}
+        mapping = by_tgt.get(column_key(col)) or {}
         candidate = str(candidates.get(col) or cur_type or "").strip() or str(cur_type)
         ceiling = str(cur_type or "").strip() or candidate
         if explicit_columns is not None:

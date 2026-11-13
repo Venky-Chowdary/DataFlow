@@ -143,6 +143,16 @@ def capped(func: Callable[..., str], dest_type: str | None) -> Callable[..., str
     return call
 
 
+def column_key(name: Any) -> str:
+    """Lookup key for a target column, the same for the Map's and the writer's spelling.
+
+    Writers name a column with the destination's rule (case kept, cut only at
+    the engine's real limit); per-column lookups (Map≡ALTER ceilings, source
+    types) must not re-key it lowercased and cut at 63.
+    """
+    return sanitize_identifier(name, preserve_case=True, max_len=_NO_CUT).casefold()
+
+
 def _name_size(kind: str, name: str) -> int:
     return len(name.encode("utf-8")) if kind in _BYTE_LIMITED else len(name)
 
@@ -282,6 +292,7 @@ __all__ = [
     "SEARCH_STORES",
     "SQL_NAME_LIMITS",
     "SQL_UNLIMITED",
+    "column_key",
     "dest_kind",
     "keeps_exact_names",
     "name_limit",
