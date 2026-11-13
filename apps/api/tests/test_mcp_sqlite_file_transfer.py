@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from services.platform_config import data_dir
+from tests.r4_route_harness import use_upload_dir
 
 
 def test_drained_mcp_streamable_bucket_is_reset_before_next_test(monkeypatch):
@@ -111,9 +112,7 @@ def mcp_client(tmp_path, monkeypatch):
     import services.mongodb_service as mongo_mod
     import services.schedule_store as schedule_store
     import src.ai.copilot.ack_ledger as ack_mod
-    import src.ai.copilot.data_analyst as data_analyst
     from services.mongodb_service import MemoryMongoDBService
-    from src.ai.training.universal_data_feeder import UniversalDataFeeder
     from src.main import app
     from fastapi.testclient import TestClient
 
@@ -124,9 +123,7 @@ def mcp_client(tmp_path, monkeypatch):
     monkeypatch.setattr(schedule_store, "STORE_PATH", tmp_path / "schedules.json")
     monkeypatch.setattr(schedule_store, "_mongo_backend", lambda: None)
     monkeypatch.setattr(ack_mod, "_ledger", None)
-    analyst = data_analyst.CopilotDataAnalyst()
-    analyst.feeder = UniversalDataFeeder([str(uploads)])
-    monkeypatch.setattr(data_analyst, "_analyst", analyst)
+    use_upload_dir(monkeypatch, uploads)
 
     with TestClient(app) as client:
         yield client, sqlite_root / "payments.db"

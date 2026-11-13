@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from services.error_handling import TransferCancelled  # noqa: E402
 from services.decision_kernel import materialize_dest_ddl
+from services.reversibility_enforce import scan_pass
 from services.type_stamp_grammar import require_safe_type_stamp, require_safe_type_stamps
 
 from connectors.sqlite_common import sqlite_file_path, tune_sqlite_connection
@@ -393,6 +394,7 @@ def iter_sqlite_finished_bundles(
     )
 
 
+@scan_pass  # its rows are mapped again by the write: checked here, counted there (review 5, H-1)
 def _sqlite_scan_finished_bundles(**kwargs: Any) -> Any:
     """Map + finish every bundle, keep rejects, discard accepted tuples."""
     from connectors.sql_write_materialize import SqlWriteAccumulator

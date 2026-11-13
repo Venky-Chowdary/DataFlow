@@ -14,6 +14,7 @@ import {
   percentDomain,
   percentFraction,
   splitWidths,
+  valueDomain,
 } from "./chartScale.js";
 
 describe("linearScale", () => {
@@ -49,6 +50,24 @@ describe("percentDomain", () => {
   it("is null when nothing is known", () => {
     assert.equal(percentDomain([]), null);
     assert.equal(percentDomain([null, null]), null);
+  });
+});
+
+describe("valueDomain", () => {
+  it("pads the min..max span instead of starting at zero", () => {
+    const [lo, hi] = valueDomain([52, 55, 61, 63])!;
+    assert.ok(lo > 50 && lo < 52, `lo ${lo}`);
+    assert.ok(hi > 63 && hi < 65, `hi ${hi}`);
+  });
+
+  it("never goes below zero, skips unknown values, and gives a flat series a scale", () => {
+    assert.equal(valueDomain([0, 1])![0], 0);
+    assert.deepEqual(valueDomain([null, undefined]), null);
+    const [lo, hi] = valueDomain([0, 0, null])!;
+    assert.equal(lo, 0);
+    assert.ok(hi > 0);
+    const [flo, fhi] = valueDomain([100, 100])!;
+    assert.ok(flo < 100 && fhi > 100);
   });
 });
 

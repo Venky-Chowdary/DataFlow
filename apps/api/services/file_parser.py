@@ -317,7 +317,7 @@ def _jsonl_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
     raise TypeError("JSONL COUNT expects bytes, str, Path, or a readable stream")
 
 
-def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
+def _iter_jsonl_dicts_from_reader(reader: Any, *, keep_literals: bool = False) -> Any:
     """One JSON object per non-blank line. Poison / non-object is unmeasured."""
     from services.dest_precount import UnmeasuredArtifact
 
@@ -326,7 +326,7 @@ def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
         if not line:
             continue
         try:
-            obj = json_loads_exact(line)
+            obj = json_loads_exact(line, keep_literals=keep_literals)
         except json.JSONDecodeError as exc:
             raise UnmeasuredArtifact("jsonl_poison_line") from exc
         if not isinstance(obj, dict):
@@ -334,16 +334,17 @@ def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
         yield obj
 
 
-def iter_jsonl_dicts(content: bytes | str | Path) -> Any:
+def iter_jsonl_dicts(content: bytes | str | Path, *, keep_literals: bool = False) -> Any:
     """Same JSONL population as ``count_jsonl_records``, as dicts for Gate-8.
 
     A poison or non-object line raises ``UnmeasuredArtifact`` — never yield
     a prefix (truncated DISTINCT lesson). COUNT is ``sum`` of this walk.
+    ``keep_literals`` keeps each JSON fraction's own text (``JsonFraction``).
     """
     closer = None
     try:
         reader, closer = _jsonl_count_open(content)
-        yield from _iter_jsonl_dicts_from_reader(reader)
+        yield from _iter_jsonl_dicts_from_reader(reader, keep_literals=keep_literals)
     finally:
         if closer is not None:
             try:

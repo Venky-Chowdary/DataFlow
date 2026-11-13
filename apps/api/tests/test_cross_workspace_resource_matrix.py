@@ -146,3 +146,55 @@ def test_preflight_run_id_is_not_visible_cross_workspace(resource_matrix, monkey
     )
     assert response.status_code in {403, 404}
     assert "B_PREFLIGHT_SENTINEL" not in response.text
+
+
+def test_exit_listings_and_pack_verify_disclose_nothing_cross_workspace(resource_matrix, monkeypatch):
+    """Reversibility Proof checks the id registry does not express (its id routes are
+    declared in ``fixtures/route_tenancy_scoping.json``): the id-less exit reads are
+    scoped, and verify -- which takes a pack, not an id -- discloses nothing of the
+    workspace a forged pack names."""
+    from services import exit_inventory, exit_store
+
+    admin = _admin()
+    workspace_a = _workspace(admin, "Exit workspace A")
+    workspace_b = _workspace(admin, "Exit workspace B")
+    editor = _member(admin, workspace_a)
+    monkeypatch.setattr(exit_store, "STORE_PATH", resource_matrix / "exit_inventory.json")
+    monkeypatch.setattr(exit_store, "_db", lambda: None)
+    connector = connector_store.create_connector(
+        {"name": "B_SAVED_CONNECTOR_SENTINEL", "type": "postgresql", "host": "b.example.com", "port": 5432,
+         "database": "b", "workspace_id": workspace_b}
+    )
+    exit_system = exit_inventory.declare(
+        {
+            "name": "B_EXIT_SYSTEM_SENTINEL",
+            "source": {"connector_id": connector.id},
+            "tables": [{"name": "B_EXIT_TABLE_SENTINEL", "key_columns": ["id"]}],
+            "exit_window_hours": 24,
+        },
+        workspace_id=workspace_b,
+        actor="matrix",
+    )
+    # Owner control: B's own caller does see the system in the same listings.
+    for listing in ("/api/v1/exit/readiness", "/api/v1/exit/systems"):
+        owned = admin.get(listing, headers={"X-Workspace-Id": workspace_b})
+        assert owned.status_code == 200 and "B_EXIT_SYSTEM_SENTINEL" in owned.text, owned.text
+        listed = _request(editor, "GET", listing)
+        assert listed.status_code == 200, listed.text
+        assert "B_EXIT_SYSTEM_SENTINEL" not in listed.text and exit_system["id"] not in listed.text
+    forged = _request(
+        editor,
+        "POST",
+        "/api/v1/exit/evidence/verify",
+        body={
+            "kind": "exit_evidence",
+            "system_id": exit_system["id"],
+            "rehearsal_id": "exr_bmatrix00001",
+            "content_sha256": "0" * 64,
+            "signature": {"alg": "HMAC-SHA256", "key_id": "k", "value": "0" * 64},
+        },
+    )
+    assert forged.status_code == 200, forged.text
+    assert forged.json()["ok"] is False and forged.json()["signature_ok"] is False
+    for sentinel in ("B_EXIT_SYSTEM_SENTINEL", "B_EXIT_TABLE_SENTINEL", "B_SAVED_CONNECTOR_SENTINEL"):
+        assert sentinel not in forged.text

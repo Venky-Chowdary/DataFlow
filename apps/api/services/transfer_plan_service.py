@@ -500,11 +500,15 @@ def run_plan_preflight(
         on_fit_progress=_plan_fit_progress(plan_id, int(plan.row_count_estimate or 0)),
     )
     from services.mirror_delete_notice import attach_mirror_delete_notice
+    from services.reversibility_sources import plan_report, preflight_gate
 
     attach_mirror_delete_notice(pf, str(policies.get("sync_mode") or ""), stream_contracts)
+    # Reversibility (g24) is always analysed and shown; it blocks only a plan that requires it.
+    reversibility = plan_report(plan)
+    reversibility_gates = [preflight_gate(reversibility)] if reversibility["require_reversibility"] else []
     pf = apply_policy_gates(
         pf,
-        run_transfer_policy_gates(
+        reversibility_gates + run_transfer_policy_gates(
             sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
             schema_policy=policies.get("schema_policy", "manual_review"),
             validation_mode=validation_mode,
@@ -533,6 +537,7 @@ def run_plan_preflight(
         destination_db_type=dest_db_type,
     )
 
+    pf["reversibility"] = reversibility
     if pf.get("effective_mappings"):
         pf["mappings"] = pf["effective_mappings"]
     if shaped_image.applied:

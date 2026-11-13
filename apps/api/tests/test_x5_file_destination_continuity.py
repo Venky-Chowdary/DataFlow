@@ -141,18 +141,51 @@ def test_file_destinations_are_covered():
     assert {"sftp", "s3"} <= ac.CONTINUITY_ENGINES
 
 
+#: Ports an earlier ``s3`` fixture in this process served on. The destination's
+#: continuity identity is ``host:port`` + bucket + key, and its baseline lives
+#: in the test module's data dir for the whole module. Each fixture is a new,
+#: empty store, so it must never reuse an earlier fixture's port: the kernel
+#: does hand a recent port out again now and then, and the old baseline (10
+#: verified rows) then makes the fresh store's first append fail closed with
+#: "row count 10 → 0" — correctly, for what looks like the same destination.
+_USED_S3_PORTS: set[int] = set()
+
+
+def _os_assigned_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _fresh_s3_port(pick=_os_assigned_port) -> int:
+    """A free port no earlier ``s3`` fixture in this process served on."""
+    while True:
+        port = pick()
+        if port not in _USED_S3_PORTS:
+            _USED_S3_PORTS.add(port)
+            return port
+
+
+def test_each_s3_store_gets_a_port_no_earlier_store_had(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(sys.modules[__name__], "_USED_S3_PORTS", set())
+    handed_out = iter([47001, 47001, 47003])  # the kernel repeats a recent port
+    first = _fresh_s3_port(lambda: next(handed_out))
+    second = _fresh_s3_port(lambda: next(handed_out))
+    assert (first, second) == (47001, 47003)
+
+
 @pytest.fixture
 def s3(monkeypatch):
     """S3-compatible HTTP endpoint (moto server) — a real wire protocol, not a mock client."""
-    import socket
-
     import boto3
     from moto.server import ThreadedMotoServer
 
     monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8")
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
+    port = _fresh_s3_port()
     server = ThreadedMotoServer(ip_address="127.0.0.1", port=port)
     server.start()
     url = f"http://127.0.0.1:{port}"
