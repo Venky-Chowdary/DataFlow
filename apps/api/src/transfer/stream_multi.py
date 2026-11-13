@@ -314,12 +314,21 @@ def run_non_cdc_multi_stream_sequential(
 
             prior = finished_before.get(stream_name.lower())
             if prior and stream_name != last_selected:
-                rows = int(prior.get("rows") or 0)
-                total_rows += rows
-                # No ledger: this pass neither read nor wrote the table, and its
-                # pass's ledger was judged when it ran.
+                # No ledger and no rows of this pass: an earlier pass of the job
+                # read and wrote the table (its ledger was judged then). Its rows
+                # are named as carried, never as written by this pass, and its
+                # reversibility checks travel with it.
+                from services.reversibility_enforce import carry_checked
+
+                carry_checked(
+                    str(job_id or ""), str(prior.get("table") or stream_name),
+                    prior.get("reversibility_checked"),
+                )
                 stream_health.append({
-                    "name": stream_name, "status": "completed", "records_processed": rows,
+                    "name": stream_name, "status": "completed", "records_processed": 0,
+                    # This pass's (empty) tally holds none of the checkpoint's rows.
+                    "resumed_checkpoint_rows": 0,
+                    "rows_from_earlier_pass": int(prior.get("rows") or 0),
                     "resumed": skip_reason(prior), "sync_mode": prior.get("sync_mode"),
                 })
                 ddl_log.append(f"RESUME {stream_name}: {skip_reason(prior)}")
@@ -422,10 +431,15 @@ def run_non_cdc_multi_stream_sequential(
                 from services.multi_stream_undo import remember_stream_restore_point
 
                 remember_stream_restore_point(destination, stream_name, summary)
+                from services.reversibility_enforce import checked_for_table
+
                 record_stream_completed(
                     str(job_id or ""), stream_name, rows=rows,
                     sync_mode=str(summary.get("sync_mode") or sync_mode),
                     table=str((summary or {}).get("table") or ""),
+                    reversibility_checked=checked_for_table(
+                        str(job_id or ""), str((summary or {}).get("table") or stream_name)
+                    ),
                 )
                 last_stream_mappings = list(use_mappings or [])
                 _publish_stream_written(job_id, stream_name, rows)
@@ -494,6 +508,10 @@ def run_non_cdc_multi_stream_sequential(
                 count_source=source_patch is None,
             )
         streams_ok = True
+        # Every table finished: the job has no unfinished pass for a resume to
+        # continue, so a later resume reads every table again (C5 skips only
+        # tables of an interrupted pass).
+        forget_all_progress(str(job_id or ""))
     finally:
         if (
             run_session_after

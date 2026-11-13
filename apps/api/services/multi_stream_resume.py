@@ -60,7 +60,8 @@ def _write(job_id: str, progress: dict[str, Any]) -> None:
 
 
 def record_stream_completed(
-    job_id: str, stream_name: str, *, rows: int, sync_mode: str, table: str = ""
+    job_id: str, stream_name: str, *, rows: int, sync_mode: str, table: str = "",
+    reversibility_checked: dict[str, int] | None = None,
 ) -> None:
     """Record that ``stream_name`` finished in this pass (never raises).
 
@@ -79,6 +80,9 @@ def record_stream_completed(
             "rows": int(rows or 0),
             "sync_mode": str(sync_mode or ""),
             "at": datetime.now(timezone.utc).isoformat(),
+            # The pass's per-column reversibility check counts, carried if a
+            # resume skips the table (never credited to that resume's writing).
+            "reversibility_checked": dict(reversibility_checked or {}),
         }
         _write(job_id, progress)
     except Exception:  # noqa: BLE001 — see docstring
