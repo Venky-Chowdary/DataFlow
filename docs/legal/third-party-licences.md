@@ -4,6 +4,18 @@ This page covers the licences of the software Datawrap depends on: what was
 scanned, what needs attention, and how CI keeps it current. The attributions
 themselves are in [`NOTICE`](../../NOTICE) at the repository root.
 
+## Datawrap's own licence
+
+Datawrap is proprietary software: Copyright (c) 2026 Venky Chowdary. All
+rights reserved. The terms are in [`LICENSE`](../../LICENSE) at the repository
+root: no licence is granted without the copyright holder's written
+permission, and the software is provided as is. The project's own packages
+declare it too: `"license": "UNLICENSED"` with `"private": true` in every
+`package.json`, and `Proprietary` in `packages/preflight/pyproject.toml`.
+The licence gate lists them as first-party (`first_party` in
+`licence-policy.json`), so they are never scanned as dependencies, and fails
+if one of them declares any other licence.
+
 ## Scope and method
 
 - **Python.** Every distribution reachable from `apps/api/requirements.txt`
@@ -47,9 +59,8 @@ allows bundling as long as the copyright and licence travel with the fonts;
 
 ## Decisions for the owner
 
-1. **The project's own licence.** The repository has no `LICENSE` file, and
-   the root `package.json` declares none. `NOTICE` therefore says nothing
-   about the project's own terms. Choosing them is the owner's call.
+1. **The project's own licence.** Decided 2026-11-13: proprietary, all
+   rights reserved (see above).
 2. **LGPL drivers in the image** (`paramiko`, `psycopg2-binary`, `pymssql`).
    Using an unmodified LGPL library is normally compatible with proprietary
    distribution, as long as the licence text, a source pointer, and the
@@ -60,8 +71,8 @@ allows bundling as long as the copyright and licence travel with the fonts;
    options are to keep them with a confirmed right to redistribute, to make
    them drivers the operator installs, or to remove them.
 
-Each of these has `owner_decision: true` in `licence-policy.json`. The flag
-is there so CI stays green. It is not an approval.
+Items still pending carry `owner_decision: true` in `licence-policy.json`.
+That flag keeps CI green. It is not an approval.
 
 ## The CI gate
 

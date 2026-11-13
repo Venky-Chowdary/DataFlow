@@ -235,7 +235,20 @@ def scan_npm(lockfile: Path = LOCKFILE, node_modules: Path | None = None) -> lis
     lock = json.loads(lockfile.read_text(encoding="utf-8"))
     packages = []
     for path, entry in sorted((lock.get("packages") or {}).items()):
-        if not path or "node_modules/" not in path or entry.get("link"):
+        if entry.get("link"):
+            continue
+        if "node_modules/" not in path:
+            # The repository's own root package and workspaces.
+            packages.append(
+                Package(
+                    "npm",
+                    entry.get("name") or path or "(root)",
+                    entry.get("version", ""),
+                    normalise(str(entry.get("license") or "")),
+                    "first-party",
+                    "package-lock.json",
+                )
+            )
             continue
         name = entry.get("name") or path.rsplit("node_modules/", 1)[-1]
         licence = entry.get("license") or ""
@@ -271,6 +284,33 @@ def scan_npm(lockfile: Path = LOCKFILE, node_modules: Path | None = None) -> lis
     return list(unique.values())
 
 
+def scan_first_party_python(repo: Path = REPO) -> list[Package]:
+    """The repository's own Python packages (pyproject.toml), as first-party rows."""
+    import tomllib
+
+    rows = []
+    for pyproject in sorted(repo.glob("packages/*/pyproject.toml")):
+        project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project") or {}
+        licence = project.get("license")
+        if isinstance(licence, dict):
+            licence = licence.get("text") or licence.get("file") or ""
+        rows.append(
+            Package(
+                "pypi",
+                str(project.get("name") or pyproject.parent.name),
+                str(project.get("version") or ""),
+                str(licence or ""),
+                "first-party",
+                str(pyproject.relative_to(repo)),
+            )
+        )
+    return rows
+
+
+def _first_party(pkg: Package, policy: dict[str, Any]) -> bool:
+    return pkg.name in set((policy.get("first_party") or {}).get(pkg.ecosystem) or [])
+
+
 def _terms(expression: str) -> list[str]:
     cleaned = expression.replace("(", " ").replace(")", " ")
     return [t.strip() for t in re.split(r"\s+(?:OR|AND|WITH)\s+|/|,", cleaned) if t.strip()]
@@ -280,6 +320,10 @@ def classify(pkg: Package, policy: dict[str, Any]) -> Package:
     allowed = set(policy.get("allowed") or [])
     exceptions = policy.get("exceptions") or {}
     key = f"{pkg.ecosystem}:{pkg.name}"
+    if _first_party(pkg, policy):
+        # The project's own packages: proprietary (LICENSE), never a dependency.
+        pkg.status = "first_party"
+        return pkg
     if not pkg.licence or pkg.licence == "UNLICENSED":
         pkg.status = "unknown"
     else:
@@ -303,7 +347,15 @@ def classify(pkg: Package, policy: dict[str, Any]) -> Package:
 def violations(packages: Iterable[Package], policy: dict[str, Any]) -> list[str]:
     exceptions = policy.get("exceptions") or {}
     problems = []
+    own_terms = set(policy.get("first_party_licences") or [])
     for pkg in packages:
+        if pkg.status == "first_party":
+            if pkg.licence not in own_terms:
+                problems.append(
+                    f"{pkg.ecosystem}:{pkg.name} is first-party but declares {pkg.licence or 'no licence'}; "
+                    f"the project is proprietary (LICENSE): use one of {sorted(own_terms)}"
+                )
+            continue
         if pkg.status == "allowed":
             continue
         entry = exceptions.get(f"{pkg.ecosystem}:{pkg.name}")
@@ -333,7 +385,7 @@ def load_policy(path: Path = POLICY) -> dict[str, Any]:
 
 
 def markdown(packages: list[Package], missing: list[str]) -> str:
-    flagged = [p for p in packages if p.status != "allowed"]
+    flagged = [p for p in packages if p.status not in ("allowed", "first_party")]
     counts: dict[str, int] = {}
     for p in packages:
         counts[f"{p.ecosystem}/{p.scope}/{p.status}"] = counts.get(f"{p.ecosystem}/{p.scope}/{p.status}", 0) + 1
@@ -380,17 +432,19 @@ def upstream_notices(packages: Iterable[Package]) -> list[tuple[str, str]]:
 def notice(packages: list[Package], policy: dict[str, Any], not_installed: Iterable[str] = ()) -> str:
     """The NOTICE file: attributions for what the API image and web bundle ship."""
     shipped = sorted(
-        (p for p in packages if p.scope == "runtime"),
+        (p for p in packages if p.scope == "runtime" and p.status != "first_party"),
         key=lambda p: (p.ecosystem, p.name.lower()),
     )
     exceptions = policy.get("exceptions") or {}
     lines = [
         "Datawrap",
+        "Copyright (c) 2026 Venky Chowdary. All rights reserved.",
+        "Datawrap is proprietary software. See LICENSE.",
         "",
         "This product includes third-party software. This file lists it with its",
-        "licence and reproduces the NOTICE text its authors require. The",
-        "project's own licence terms are not stated in this repository (there is",
-        "no LICENSE file); this NOTICE does not grant or describe them.",
+        "licence and reproduces the NOTICE text its authors require. Those",
+        "components remain under their own licences; nothing here grants rights",
+        "in Datawrap itself.",
         "",
         "Generated by scripts/licence_scan.py --notice NOTICE from the installed",
         "runtime packages (apps/api/requirements.txt) and the runtime npm",
@@ -493,6 +547,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_npm:
         nm = Path(args.node_modules)
         packages += scan_npm(Path(args.lockfile), nm if nm.is_dir() else None)
+    packages += scan_first_party_python()
     for pkg in packages:
         classify(pkg, policy)
 
@@ -519,7 +574,7 @@ def main(argv: list[str] | None = None) -> int:
             )
     if missing and not args.allow_missing:
         problems.append("required distributions not installed, so unscanned: " + ", ".join(missing))
-    flagged = sum(1 for p in packages if p.status != "allowed")
+    flagged = sum(1 for p in packages if p.status not in ("allowed", "first_party"))
     print(f"scanned {len(packages)} packages; {flagged} copyleft/unknown; {len(problems)} unreviewed")
     for problem in problems:
         print(f"- {problem}")

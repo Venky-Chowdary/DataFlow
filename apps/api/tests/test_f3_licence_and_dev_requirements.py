@@ -198,3 +198,52 @@ def test_notice_names_every_direct_production_dependency() -> None:
     gaps = scan.notice_gaps(direct, (REPO / "NOTICE").read_text(encoding="utf-8"))
     assert not gaps, f"regenerate NOTICE (scripts/licence_scan.py --notice NOTICE): {gaps}"
     assert "pypi:fastapi" in direct and "npm:react" in direct
+
+
+# ── owner decision 1: the project is proprietary ───────────────────────────
+
+_FIRST_PARTY_NPM = ("package.json", "apps/web/package.json", "packages/design-system/package.json")
+
+
+def test_license_file_states_the_owner_and_all_rights_reserved() -> None:
+    text = (REPO / "LICENSE").read_text(encoding="utf-8")
+    assert "Copyright (c) 2026 Venky Chowdary. All rights reserved." in text
+    assert "written permission" in text and '"AS IS"' in text
+    assert "@" not in text, "no e-mail address in LICENSE"
+
+
+def test_first_party_package_metadata_is_proprietary() -> None:
+    for rel in _FIRST_PARTY_NPM:
+        data = json.loads((REPO / rel).read_text(encoding="utf-8"))
+        assert data.get("license") == "UNLICENSED", rel
+        assert data.get("private") is True, rel
+    lock = json.loads((REPO / "package-lock.json").read_text(encoding="utf-8"))["packages"]
+    for path in ("", "apps/web", "packages/design-system"):
+        assert lock[path].get("license") == "UNLICENSED", path or "<root>"
+    pyproject = (REPO / "packages" / "preflight" / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'license = { text = "Proprietary" }' in pyproject
+    assert "License :: Other/Proprietary License" in pyproject
+
+
+def test_the_gate_recognises_the_projects_own_packages_as_first_party() -> None:
+    policy = scan.load_policy(REPO / "licence-policy.json")
+    own = scan.classify(scan.Package("npm", "@dataflow/web", "0.1.0", "UNLICENSED", "first-party", "lock"), policy)
+    assert own.status == "first_party"
+    stranger = scan.classify(scan.Package("npm", "left-pad", "1.0.0", "UNLICENSED", "runtime", "lock"), policy)
+    assert stranger.status == "unknown"
+    assert scan.violations([own], policy) == []
+    rows = {p.name: p for p in scan.scan_npm(REPO / "package-lock.json")}
+    for name in ("dataflow", "@dataflow/web", "@dataflow/design-system"):
+        assert scan.classify(rows[name], policy).status == "first_party", name
+    assert scan.classify(
+        scan.Package("pypi", "dataflow-preflight", "0.1.0", "Proprietary", "first-party", "pyproject"), policy
+    ).status == "first_party"
+
+
+def test_notice_and_docs_point_at_the_licence() -> None:
+    notice_text = (REPO / "NOTICE").read_text(encoding="utf-8")
+    assert "Copyright (c) 2026 Venky Chowdary. All rights reserved." in notice_text
+    assert "See LICENSE" in notice_text
+    assert "not stated in this repository" not in notice_text
+    docs = (REPO / "docs" / "legal" / "third-party-licences.md").read_text(encoding="utf-8")
+    assert "LICENSE" in docs and "proprietary" in docs.lower()

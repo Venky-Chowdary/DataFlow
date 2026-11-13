@@ -1,5 +1,10 @@
 {
-  "about": "Licence policy for scripts/licence_scan.py --check (F3). `allowed`: SPDX ids a dependency may carry without review. `exceptions`: packages whose copyleft, proprietary or unknown licence was reviewed. Each records the licence it was reviewed under (a change fails the check) and why it is acceptable; `notice` is the text NOTICE carries for it; `owner_decision: true` marks an exception that is in place only so CI stays green and still needs the owner's sign-off. A new copyleft or unknown dependency fails CI until it is reviewed here.",
+  "about": "Licence policy for scripts/licence_scan.py --check (F3). The project itself is proprietary (LICENSE); `first_party` lists its own packages, which must declare one of `first_party_licences`. `allowed`: SPDX ids a dependency may carry without review. `exceptions`: packages whose copyleft, proprietary or unknown licence was reviewed. Each records the licence it was reviewed under (a change fails the check) and why it is acceptable; `notice` is the text NOTICE carries for it; `owner_decision: true` marks an exception that is in place only so CI stays green and still needs the owner's sign-off. A new copyleft or unknown dependency fails CI until it is reviewed here.",
+  "first_party": {
+    "npm": ["dataflow", "@dataflow/web", "@dataflow/design-system"],
+    "pypi": ["dataflow-preflight"]
+  },
+  "first_party_licences": ["UNLICENSED", "Proprietary"],
   "allowed": [
     "MIT", "MIT-0", "MIT-CMU", "Apache-2.0", "BSD", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "ISC",
     "PSF-2.0", "Python-2.0", "CNRI-Python", "Unlicense", "Zlib", "HPND", "CC0-1.0", "BlueOak-1.0.0",
