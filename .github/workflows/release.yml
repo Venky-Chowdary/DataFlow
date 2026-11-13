@@ -114,6 +114,48 @@ jobs:
           cache-to: type=gha,mode=max,scope=release-${{ matrix.image }}
           provenance: mode=max
 
+      - name: Require the companion source image to be published
+        # Before anything else is pushed: the companion must be in the
+        # registry, and its SHA256SUMS is what the release image must point at.
+        if: ${{ matrix.companion }}
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          ref="${IMAGE_NAME}:${GITHUB_REF_NAME}-sources"
+          docker buildx imagetools inspect "$ref" >/dev/null || { echo "::error::$ref is not published"; exit 1; }
+          docker pull -q "$ref" >/dev/null
+          cid=$(docker create "$ref" none)
+          docker cp "$cid":/SHA256SUMS "$RUNNER_TEMP/companion-SHA256SUMS"
+          docker rm "$cid" >/dev/null
+          test -s "$RUNNER_TEMP/companion-SHA256SUMS"
+
+      - name: Build the release image locally (not pushed yet)
+        if: ${{ matrix.companion }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: release
+          load: true
+          push: false
+          tags: datawrap-release-check:${{ github.ref_name }}
+          build-args: SOURCES_REF=${{ steps.image.outputs.name }}:${{ github.ref_name }}-sources
+          cache-from: type=gha,scope=release-${{ matrix.image }}
+
+      - name: The release image points at exactly the published companion
+        if: ${{ matrix.companion }}
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          ref="${IMAGE_NAME}:${GITHUB_REF_NAME}-sources"
+          img="datawrap-release-check:${GITHUB_REF_NAME}"
+          label=$(docker inspect -f '{{ index .Config.Labels "io.datawrap.sources" }}' "$img")
+          [ "$label" = "$ref" ] || { echo "::error::the release image points at '$label', not $ref"; exit 1; }
+          docker run --rm "$img" grep -q "$ref" /usr/share/doc/datawrap/SOURCES.md
+          docker run --rm "$img" cat /usr/share/doc/datawrap/companion/SHA256SUMS \
+            | diff - "$RUNNER_TEMP/companion-SHA256SUMS" \
+            || { echo "::error::the release image's companion/SHA256SUMS differs from the published $ref"; exit 1; }
+
       - name: Build and push release image
         id: build
         uses: docker/build-push-action@v6
@@ -135,18 +177,6 @@ jobs:
           cache-to: type=gha,mode=max,scope=release-${{ matrix.image }}
           provenance: mode=max
           sbom: true
-
-      - name: Require the companion source image to be published
-        if: ${{ matrix.companion }}
-        env:
-          IMAGE_NAME: ${{ steps.image.outputs.name }}
-        run: |
-          ref="${IMAGE_NAME}:${GITHUB_REF_NAME}-sources"
-          docker buildx imagetools inspect "$ref" >/dev/null || { echo "::error::$ref is not published"; exit 1; }
-          docker pull -q "${IMAGE_NAME}:${GITHUB_REF_NAME}" >/dev/null
-          label=$(docker inspect -f '{{ index .Config.Labels "io.datawrap.sources" }}' "${IMAGE_NAME}:${GITHUB_REF_NAME}")
-          [ "$label" = "$ref" ] || { echo "::error::the runtime image points at '$label', not $ref"; exit 1; }
-          docker run --rm "${IMAGE_NAME}:${GITHUB_REF_NAME}" grep -q "$ref" /usr/share/doc/datawrap/SOURCES.md
 
       - name: Attest the companion source image
         if: ${{ matrix.companion }}

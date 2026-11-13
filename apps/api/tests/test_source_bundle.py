@@ -368,5 +368,27 @@ def test_the_oci_source_label_stays_the_repository() -> None:
         path.write_text(bad, encoding="utf-8")
         assert any("org.opencontainers.image.source" in p for p in bundle.verify_dockerfile(path))
     steps = _workflow("release.yml")["jobs"]["publish-images"]["steps"]
-    verify = next(s for s in steps if "imagetools inspect" in str(s.get("run", "")))
-    assert "io.datawrap.sources" in verify["run"]
+    assert any("io.datawrap.sources" in str(s.get("run", "")) for s in steps)
+
+
+def test_release_checks_the_companion_before_pushing_the_release_image() -> None:
+    """Final review L2: the companion check ran after the release image was
+    pushed. It now runs before, against a locally built release image, and
+    diffs that image's companion/SHA256SUMS with the published companion's."""
+    steps = _workflow("release.yml")["jobs"]["publish-images"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    push = names.index("Build and push release image")
+    verify = next(i for i, s in enumerate(steps) if "imagetools inspect" in str(s.get("run", "")))
+    local = next(
+        i for i, s in enumerate(steps)
+        if s.get("with", {}).get("target") == "release" and s.get("with", {}).get("push") is False
+    )
+    assert verify < push and local < push
+    assert steps[local]["with"]["load"] is True and steps[local]["if"] == "${{ matrix.companion }}"
+    check = next(
+        s for s in steps[local + 1:push]
+        if "companion/SHA256SUMS" in str(s.get("run", ""))
+    )
+    assert "diff" in check["run"] and "io.datawrap.sources" in check["run"]
+    assert check["if"] == "${{ matrix.companion }}"
+    assert "docker cp" in steps[verify]["run"] and "/SHA256SUMS" in steps[verify]["run"]
