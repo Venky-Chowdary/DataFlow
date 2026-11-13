@@ -65,19 +65,27 @@ def _load_delimited_into_mysql(
         mysql_load_data_session_ready,
     )
 
-    from services.copy_s3_common import s3_file_has_backslash
+    from services.copy_s3_common import scan_delimited_file
 
-    if s3_file_has_backslash(path):
+    csv_mode = ext != "tsv"
+    scan = scan_delimited_file(path, "," if csv_mode else "\t")
+    if scan.backslash:
         # LOAD DATA's ESCAPED BY '\\' would turn a\b into a backspace and \x
         # into x; the row path's C04 codec reads the value exactly (G7 B1).
         raise FastPathUnavailable(
             "source object holds a backslash; LOAD DATA escape processing would "
             "rewrite it, so the row path loads it"
         )
+    if scan.unquoted_null:
+        # With FIELDS ENCLOSED BY set, LOAD DATA reads an unenclosed field that
+        # is exactly NULL as SQL NULL; the row path keeps the text (G7 K1).
+        raise FastPathUnavailable(
+            "file holds an unquoted NULL field; LOAD DATA would store SQL NULL "
+            "for that text, so the row path loads it"
+        )
     ready, why = mysql_load_data_session_ready(dst_cur, dest_conn)
     if not ready:
         raise FastPathUnavailable(why)
-    csv_mode = ext != "tsv"
     execute_load_data_local(
         dst_cur,
         path=path,

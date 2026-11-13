@@ -10,7 +10,9 @@ endpoint+bucket+key declines. Cross-endpoint CopyObject declines
 from __future__ import annotations
 
 import csv
+import re
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
@@ -343,35 +345,58 @@ def s3_file_has_legacy_null(path: str, *, chunk_size: int = 1 << 20) -> bool:
             tail = chunk[-1:]
 
 
-def _file_has_byte(path: str, needle: bytes, chunk_size: int) -> bool:
+@dataclass(frozen=True)
+class DelimitedFileScan:
+    """What one streaming pass over a delimited file found (bulk-loader declines).
+
+    * ``backslash`` — any ``\\``: MySQL ``ESCAPED BY '\\\\'`` would rewrite it.
+    * ``legacy_null`` — a ``\\N`` (the C04 legacy NULL spelling).
+    * ``quote`` — any ``"``: PostgreSQL ``COPY (FORMAT csv)`` reads a mid-field
+      quote as quoting.
+    * ``unquoted_null`` — a field that is exactly ``NULL`` with no enclosing
+      quotes: MySQL ``LOAD DATA ... ENCLOSED BY`` loads it as SQL NULL. The scan
+      is conservative: ``NULL`` between separators inside a quoted multi-line
+      field also counts (a decline, never a wrong load); an enclosed
+      ``"NULL"`` does not.
+    """
+
+    backslash: bool = False
+    legacy_null: bool = False
+    quote: bool = False
+    unquoted_null: bool = False
+
+
+def scan_delimited_file(
+    path: str, delimiter: str, *, chunk_size: int = 1 << 20
+) -> DelimitedFileScan:
+    """One read of ``path`` in ``chunk_size`` chunks; patterns may span chunks."""
+    sep = re.escape(delimiter.encode("utf-8"))
+    field_null = re.compile(rb"[" + sep + rb"\r\n]NULL(?=[" + sep + rb"\r\n])")
+    null_at_end = re.compile(rb"[" + sep + rb"\r\n]NULL\Z")
+    backslash = legacy_null = quote = unquoted_null = False
+    # A virtual line break before byte 0: a first field "NULL" is a field.
+    carry = b"\n"
     with open(path, "rb") as handle:
         while True:
             chunk = handle.read(chunk_size)
             if not chunk:
-                return False
-            if needle in chunk:
-                return True
-
-
-def s3_file_has_backslash(path: str, *, chunk_size: int = 1 << 20) -> bool:
-    """True when the file holds any backslash.
-
-    MySQL ``LOAD DATA ... ESCAPED BY '\\'`` rewrites ``\\b``, ``\\t``, ``\\N``,
-    ``\\x`` …, while the product's CSV/TSV codec reads a backslash literally
-    (and only ``\\N`` as the legacy NULL). A loader with that escape rule
-    must decline such a file to the row path rather than change values.
-    """
-    return _file_has_byte(path, b"\\", chunk_size)
+                break
+            window = carry + chunk
+            backslash = backslash or b"\\" in chunk
+            legacy_null = legacy_null or b"\\N" in window
+            quote = quote or b'"' in chunk
+            unquoted_null = unquoted_null or field_null.search(window) is not None
+            # 5 bytes: one separator + "NULL" can straddle the next chunk.
+            carry = window[-5:]
+    unquoted_null = unquoted_null or null_at_end.search(carry) is not None
+    return DelimitedFileScan(
+        backslash=backslash, legacy_null=legacy_null, quote=quote, unquoted_null=unquoted_null
+    )
 
 
 def s3_file_has_quote(path: str, *, chunk_size: int = 1 << 20) -> bool:
-    """True when the file holds any ``"``.
-
-    A product TSV keeps a mid-field ``"`` raw (its readers take it literally);
-    PostgreSQL ``COPY (FORMAT csv)`` reads it as the start of a quoted section
-    and aborts or merges fields. A TSV COPY declines such a file to the row path.
-    """
-    return _file_has_byte(path, b'"', chunk_size)
+    """True when the file holds any ``"`` (see ``DelimitedFileScan.quote``)."""
+    return scan_delimited_file(path, "\t", chunk_size=chunk_size).quote
 
 
 def s3_iter_delimited_rows(

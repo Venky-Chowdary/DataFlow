@@ -111,3 +111,92 @@ def test_backslash_object_declines_to_the_row_path(monkeypatch, tmp_path, ext, b
     path.write_bytes(body)
     with pytest.raises(FastPathUnavailable, match="backslash"):
         _load(monkeypatch, path, ext)
+
+
+# ── K1: an unquoted NULL field would load as SQL NULL under ENCLOSED BY ──────
+
+
+@pytest.mark.parametrize("ext, body", [
+    ("tsv", b"id\tnote\n1\tNULL\n"),
+    ("tsv", b"id\tnote\n1\tNULL"),
+    ("tsv", b"id\tnote\nNULL\tx\n"),
+    ("tsv", b"id\tnote\n1\tNULL\r\n"),
+    ("csv", b"id,note\n1,NULL\n"),
+    ("csv", b'id,note\n"1",NULL,\n'),
+])
+def test_unquoted_null_field_declines_to_the_row_path(monkeypatch, tmp_path, ext, body):
+    """MySQL LOAD DATA with FIELDS ENCLOSED BY reads an unenclosed NULL as SQL NULL."""
+    from services.copy_fast_path import FastPathUnavailable
+
+    path = tmp_path / f"src.{ext}"
+    path.write_bytes(body)
+    with pytest.raises(FastPathUnavailable, match="NULL"):
+        _load(monkeypatch, path, ext)
+
+
+@pytest.mark.parametrize("ext, body", [
+    ("tsv", b'id\tnote\n1\t"NULL"\n'),
+    ("tsv", b"id\tnote\n1\tNULLx\n2\txNULL\n3\tnull\n"),
+    ("csv", b'id,note\n1,"NULL"\n2,NULLx\n3,xNULL\n'),
+])
+def test_quoted_or_partial_null_still_loads(monkeypatch, tmp_path, ext, body):
+    path = tmp_path / f"src.{ext}"
+    path.write_bytes(body)
+    calls, sql = _load(monkeypatch, path, ext)
+    assert len(calls) == 1 and "LOAD DATA" in sql[0]
+
+
+class _FakeConn:
+    def __init__(self) -> None:
+        self.cur = _Cursor()
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("ext, body", [
+    ("tsv", b"id\tnote\n1\tNULL\n"),
+    ("csv", b"id,note\n1,NULL\n"),
+])
+def test_local_csv_tsv_to_mysql_declines_unquoted_null(monkeypatch, tmp_path, ext, body):
+    """The local file → MySQL fast path shares the LOAD DATA loader."""
+    import connectors.mysql_load_data as mld
+    from services import copy_csv_local, copy_mysql_pg
+    from services.copy_fast_path import FastPathUnavailable
+
+    conn = _FakeConn()
+    conn.cur.fetchone = lambda: (0,)
+    monkeypatch.setattr(copy_mysql_pg, "_mysql_connect", lambda _cfg: conn)
+    monkeypatch.setattr(mld, "mysql_load_data_session_ready", lambda *_a, **_k: (True, ""))
+    loads: list[dict] = []
+    monkeypatch.setattr(mld, "execute_load_data_local", lambda _c, **kw: loads.append(kw))
+    path = tmp_path / f"mapped.{ext}"
+    path.write_bytes(body)
+    with pytest.raises(FastPathUnavailable, match="NULL"):
+        copy_csv_local.copy_csv_to_mysql(
+            mapped_path=str(path), ext=ext, dest_cfg={"host": "127.0.0.1"},
+            dest_table="t", pairs=[("id", "id"), ("note", "note")],
+            mysql_ddls=["BIGINT", "TEXT"], source_count=1, replace_destination=False,
+        )
+    assert loads == []
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7, 1 << 20])
+def test_scan_finds_null_field_across_chunk_boundaries(tmp_path, chunk_size):
+    from services.copy_s3_common import scan_delimited_file
+
+    hit = tmp_path / "hit.tsv"
+    hit.write_bytes(b"id\tnote\n11\tNULL\n22\tok\n")
+    miss = tmp_path / "miss.tsv"
+    miss.write_bytes(b'id\tnote\n11\t"NULL"\n22\tNULLx\n33\txNULL\n')
+    assert scan_delimited_file(str(hit), "\t", chunk_size=chunk_size).unquoted_null is True
+    assert scan_delimited_file(str(miss), "\t", chunk_size=chunk_size).unquoted_null is False
