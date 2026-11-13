@@ -6,9 +6,11 @@ case. A table an earlier run created still holds the old spelling, so a
 target whose new spelling is not a column there, but whose legacy spelling
 (sanitized, cut at 63, lowercased on BigQuery) is exactly one column, keeps
 writing to that column. Validate shows an info note
-(``g23d_existing_target_columns``); Execute retargets the mapping before
-anything reads or writes, so the writer, Gate-8 and the read-back all use that
-column. A new table gets the full name. A name past the engine's limit is
+(``g23d_existing_target_columns``). The rename is part of the canonical Map on
+both sides: Validate judges and hashes the adopted rows (``run_file_preflight``)
+and Execute retargets the mapping the same way before anything reads or
+writes, so the approved Decision Artifact / Map->DDL identity, the writer,
+Gate-8 and the read-back all name that column. A new table gets the full name. A name past the engine's limit is
 refused only when no existing column matches.
 
 MongoDB / Elasticsearch: a target ``a.b`` / ``@timestamp`` whose old
