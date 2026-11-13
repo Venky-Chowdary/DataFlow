@@ -115,18 +115,23 @@ def _backup_paths(path: Path) -> list[Path]:
     return [newest] + [newest.with_name(f"{newest.name}.{i}") for i in range(1, BACKUP_GENERATIONS)]
 
 
-#: store path -> ((name, mtime_ns, size) per backup generation, answer): a
-#: damaged store is refused on every request; its backups are parsed once
-#: per change, not per request.
-_READABLE_BACKUP_CACHE: dict[str, tuple[tuple[tuple[str, int, int] | None, ...], Path | None]] = {}
+#: One backup generation's identity: (name, inode, ctime_ns, mtime_ns, size).
+_BackupStat = tuple[str, int, int, int, int]
+
+#: store path -> (identity per backup generation, answer): a damaged store is
+#: refused on every request; its backups are parsed once per change, not per
+#: request.
+_READABLE_BACKUP_CACHE: dict[str, tuple[tuple[_BackupStat | None, ...], Path | None]] = {}
 
 
-def _backup_signature(path: Path) -> tuple[tuple[str, int, int] | None, ...]:
-    signature: list[tuple[str, int, int] | None] = []
+def _backup_signature(path: Path) -> tuple[_BackupStat | None, ...]:
+    # Inode and ctime as well as mtime/size: a replacement copied with
+    # ``cp -p`` (or within a coarse clock tick) can keep both of those.
+    signature: list[_BackupStat | None] = []
     for candidate in _backup_paths(path):
         try:
             st = candidate.stat()
-            signature.append((candidate.name, st.st_mtime_ns, st.st_size))
+            signature.append((candidate.name, st.st_ino, st.st_ctime_ns, st.st_mtime_ns, st.st_size))
         except OSError:
             signature.append(None)
     return tuple(signature)
@@ -135,8 +140,8 @@ def _backup_signature(path: Path) -> tuple[tuple[str, int, int] | None, ...]:
 def _newest_readable_backup(path: Path) -> Path | None:
     """The newest backup generation the store's own loader would accept, if any.
 
-    Cached on every generation's (mtime_ns, size): unchanged backups are not
-    parsed again for each refused request.
+    Cached on every generation's (inode, ctime_ns, mtime_ns, size): unchanged
+    backups are not parsed again for each refused request.
     """
     signature = _backup_signature(path)
     cached = _READABLE_BACKUP_CACHE.get(str(path))

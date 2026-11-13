@@ -629,3 +629,30 @@ def test_the_readable_backup_is_not_reparsed_on_every_refused_request(isolated_p
     with pytest.raises(PlanStoreUnreadable) as caught:
         get_plan(a)
     assert caught.value.readable_backup == "transfer_plans.json.bak.2"
+
+
+def test_a_backup_replaced_with_the_same_size_and_mtime_is_looked_at_again(isolated_plan_store):
+    """`cp -p`, a restore tool or a coarse clock can give a replacement file the
+    old size and mtime; its inode / ctime still tell it apart (review probe)."""
+    import os
+
+    a = create_plan({"name": "A"}).id
+    update_plan(a, {"name": "A1"})
+    _truncated(isolated_plan_store)
+    bak = isolated_plan_store.with_name("transfer_plans.json.bak")
+    good = bak.read_text(encoding="utf-8")
+    with pytest.raises(PlanStoreUnreadable) as caught:
+        get_plan(a)
+    assert caught.value.readable_backup == "transfer_plans.json.bak"
+
+    st = bak.stat()
+    keep = bak.with_name("keep-inode-busy")  # so the new file cannot reuse the inode
+    os.link(bak, keep)
+    os.unlink(bak)
+    bak.write_text("X" * len(good), encoding="utf-8")
+    os.utime(bak, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert (bak.stat().st_size, bak.stat().st_mtime_ns) == (st.st_size, st.st_mtime_ns)
+    with pytest.raises(PlanStoreUnreadable) as caught:
+        get_plan(a)
+    assert caught.value.readable_backup != "transfer_plans.json.bak"
+    keep.unlink()
