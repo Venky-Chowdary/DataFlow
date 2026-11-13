@@ -101,6 +101,11 @@ def main() -> int:
         "-q",
         "--tb=line",
     ]
+    # CI's live-engine skip checker (scripts/check_live_skips.py) reads the
+    # per-test outcomes and skip messages from this junit file.
+    junit = os.environ.get("CDC_MATRIX_JUNIT", "").strip()
+    if junit:
+        cmd.append(f"--junitxml={junit}")
     env = os.environ.copy()
     env.setdefault("DATAFLOW_JOB_STORE", "memory")
     proc = subprocess.run(

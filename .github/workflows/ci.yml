@@ -245,18 +245,23 @@ jobs:
           P2_MYSQL_PASSWORD: dataflow
           P2_MONGO_URI: mongodb://127.0.0.1:27017
         run: |
-          # Fail the job if any golden-path test is skipped (services must be up).
-          out="$(mktemp)"
+          # Any golden-path skip fails the job (services must be up): the
+          # shared live-engine checker, manifest entry `no-config-transfer`.
           set +e
-          python -m pytest tests/test_property2_golden_path_never_blocked.py -q --tb=short | tee "$out"
-          rc=${PIPESTATUS[0]}
+          python -m pytest tests/test_property2_golden_path_never_blocked.py -q --tb=short -rs \
+            --junitxml="$RUNNER_TEMP/live-junit/golden-path.xml"
+          rc=$?
           set -e
-          if grep -Eq '[1-9][0-9]* skipped' "$out"; then
-            echo "Property 2 golden path must not skip when CI services are present" >&2
-            cat "$out" >&2
-            exit 1
-          fi
+          python scripts/check_live_skips.py --job no-config-transfer --junit "$RUNNER_TEMP/live-junit/golden-path.xml" --out "$RUNNER_TEMP/live-engine/no-config-transfer.json"
           exit "$rc"
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-no-config-transfer
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
 
   # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
   gitops:
@@ -322,7 +327,8 @@ jobs:
         working-directory: apps/api
         run: |
           set -o pipefail
-          python -m pytest tests -v --timeout=900 2>&1 | tee "$RUNNER_TEMP/api_tests.log"
+          python -m pytest tests -v --timeout=900 \
+            --junitxml="$RUNNER_TEMP/live-junit/api-tests.xml" 2>&1 | tee "$RUNNER_TEMP/api_tests.log"
         env:
           DATAFLOW_TEST_SHARD: ${{ matrix.shard }}/6
           DATAFLOW_JOB_STORE: memory
@@ -350,6 +356,23 @@ jobs:
           echo "### Failing API tests (shard ${{ matrix.shard }}/6)" >> "$GITHUB_STEP_SUMMARY"
           grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP/api_tests.log" | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
           grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP/api_tests.log" | tail -2 || true
+
+      - name: Live-engine skip report (report mode, never fails)
+        # The general suite is not a live-engine proof job yet (manifest
+        # `api-tests`, mode report): its engine-attributed skips are
+        # published per shard so the backlog can be triaged and ratcheted.
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job api-tests --junit "$RUNNER_TEMP/live-junit/api-tests.xml" --out "$RUNNER_TEMP/live-engine/api-tests-${{ matrix.shard }}.json"
+
+      - name: Upload live-engine report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-api-tests-${{ matrix.shard }}
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
 
   api-and-web:
     runs-on: ubuntu-latest
@@ -393,6 +416,7 @@ jobs:
         if: ${{ !cancelled() && (success() || failure()) }}
         run: npm run test:cdc
         env:
+          CDC_MATRIX_JUNIT: ${{ runner.temp }}/live-junit/cdc-matrix.xml
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
           PGHOST: 127.0.0.1
@@ -408,6 +432,13 @@ jobs:
           DATAFLOW_CDC_LEASE_BACKEND: redis
           DATAFLOW_CDC_LEASE_REDIS_URL: redis://127.0.0.1:6379/15
 
+      - name: CDC matrix live-engine skips
+        id: cdc_skips
+        if: ${{ !cancelled() && (success() || failure()) }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job cdc-matrix --junit "$RUNNER_TEMP/live-junit/cdc-matrix.xml" --out "$RUNNER_TEMP/live-engine/cdc-matrix.json"
+
       - name: Warehouse SKU proof report
         id: warehouse_sku
         if: ${{ !cancelled() && (success() || failure()) }}
@@ -421,7 +452,7 @@ jobs:
             | sed 's/^/emulator panics logged during api slice: /' || true
           bash ../../.github/scripts/start_ci_databases.sh bigquery
           set +e
-          python scripts/warehouse_sku_report.py
+          WAREHOUSE_SKU_JUNIT="$RUNNER_TEMP/live-junit/warehouse-sku.xml" python scripts/warehouse_sku_report.py
           code=$?
           docker inspect dataflow-bigquery-emulator --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}' || true
           docker logs --tail 80 dataflow-bigquery-emulator || true
@@ -448,6 +479,21 @@ jobs:
           DATAFLOW_PII_HASH_KEY: test-pii-key
           DATAFLOW_ALLOW_STUB_WRITES: "1"
           DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
+
+      - name: Warehouse SKU live-engine skips
+        id: warehouse_skips
+        if: ${{ !cancelled() && (success() || failure()) }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job warehouse-sku --junit "$RUNNER_TEMP/live-junit/warehouse-sku.xml" --out "$RUNNER_TEMP/live-engine/warehouse-sku.json"
+
+      - name: Upload live-engine results (CDC matrix, warehouse SKU)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-api-and-web
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
 
       - name: TRANSFER_READY certification matrix
         id: transfer_ready_matrix
@@ -519,7 +565,9 @@ jobs:
           api="${{ needs.api-tests.result }}"
           pre="${{ steps.preflight_tests.outcome }}"
           cdc="${{ steps.cdc_matrix.outcome }}"
+          cdcskip="${{ steps.cdc_skips.outcome }}"
           wh="${{ steps.warehouse_sku.outcome }}"
+          whskip="${{ steps.warehouse_skips.outcome }}"
           trm="${{ steps.transfer_ready_matrix.outcome }}"
           fe="${{ steps.frontend_tests.outcome }}"
           web="${{ steps.web_build.outcome }}"
@@ -532,7 +580,8 @@ jobs:
           echo "bundle_brand=$brand"
           echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks important_budget=$imp a11y_hex=$a11y"
           fail=0
-          for name_out in "api_tests:$api" "preflight_tests:$pre" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y" "bundle_brand:$brand"; do
+          echo "cdc_live_skips=$cdcskip warehouse_live_skips=$whskip"
+          for name_out in "api_tests:$api" "preflight_tests:$pre" "cdc_matrix:$cdc" "cdc_live_skips:$cdcskip" "warehouse_sku:$wh" "warehouse_live_skips:$whskip" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y" "bundle_brand:$brand"; do
             name="${name_out%%:*}"
             out="${name_out##*:}"
             # skipped only acceptable when job cancelled mid-flight; otherwise require success
@@ -544,6 +593,8 @@ jobs:
           echo "- api_tests: \`$api\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- preflight_tests: \`$pre\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- cdc_matrix: \`$cdc\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- cdc_live_skips: \`$cdcskip\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- warehouse_live_skips: \`$whskip\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- warehouse_sku: \`$wh\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- transfer_ready_matrix: \`$trm\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- frontend_tests: \`$fe\`" >> "$GITHUB_STEP_SUMMARY"
@@ -708,29 +759,9 @@ jobs:
 
       - name: No SQL Server live test may skip
         if: ${{ !cancelled() }}
-        shell: bash
+        working-directory: apps/api
         run: |
-          python - "$RUNNER_TEMP/live-junit" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import sys
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
-
-          total = skipped = 0
-          print("### SQL Server live proof")
-          files = sorted(Path(sys.argv[1]).glob("sqlserver-*.xml"))
-          if len(files) != 3:
-              print(f"- **FAIL** expected 3 junit files, found {[f.name for f in files]}")
-              sys.exit(1)
-          for f in files:
-              for case in ET.parse(f).iter("testcase"):
-                  total += 1
-                  skip = case.find("skipped")
-                  if skip is not None and skip.get("type") != "pytest.xfail":
-                      skipped += 1
-                      print(f"- skipped: `{case.get('classname')}::{case.get('name')}` — {skip.get('message', '')[:200]}")
-          print(f"- {total} tests, {skipped} skipped")
-          sys.exit(1 if skipped or not total else 0)
-          PY
+          python scripts/check_live_skips.py --job cdc-sqlserver --junit "$RUNNER_TEMP/live-junit/sqlserver-cdc.xml" --junit "$RUNNER_TEMP/live-junit/sqlserver-cdc-eos.xml" --junit "$RUNNER_TEMP/live-junit/sqlserver-matrix.xml" --out "$RUNNER_TEMP/live-engine/cdc-sqlserver.json"
 
       - name: Upload SQL Server junit
         if: ${{ always() }}
@@ -738,6 +769,14 @@ jobs:
         with:
           name: sqlserver-live-junit
           path: ${{ runner.temp }}/live-junit/
+          if-no-files-found: warn
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-cdc-sqlserver
+          path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
   # Optional live IT: enable via repo variable ENABLE_ORACLE_CDC=true plus the
@@ -786,7 +825,8 @@ jobs:
           python -m pytest \
             tests/test_cdc_oracle_integration.py \
             tests/test_sqlserver_oracle_cdc.py \
-            -v --tb=short
+            -v --tb=short -rs \
+            --junitxml="$RUNNER_TEMP/live-junit/oracle-cdc.xml"
         env:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
@@ -797,6 +837,27 @@ jobs:
           DATAFLOW_ORACLE_USER: ${{ secrets.DATAFLOW_ORACLE_USER }}
           DATAFLOW_ORACLE_PASSWORD: ${{ secrets.DATAFLOW_ORACLE_PASSWORD }}
           DATAFLOW_ORACLE_SCHEMA: ${{ secrets.DATAFLOW_ORACLE_SCHEMA }}
+
+      - name: No Oracle live test may skip
+        if: ${{ !cancelled() && steps.oracle_creds.outputs.skip != 'true' }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job cdc-oracle --junit "$RUNNER_TEMP/live-junit/oracle-cdc.xml" --out "$RUNNER_TEMP/live-engine/cdc-oracle.json"
+
+      - name: Record that the opt-in Oracle job did not run
+        # Stdlib only, so the runner's python3 is enough. The evidence file
+        # then says "not_run", and the docs cannot call Oracle live-verified.
+        if: ${{ steps.oracle_creds.outputs.skip == 'true' }}
+        run: |
+          python3 apps/api/scripts/check_live_skips.py --job cdc-oracle --not-run "ENABLE_ORACLE_CDC is not 'true' or DATAFLOW_ORACLE_PASSWORD is unset" --out "$RUNNER_TEMP/live-engine/cdc-oracle.json"
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-cdc-oracle
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
 
   security:
     runs-on: ubuntu-latest

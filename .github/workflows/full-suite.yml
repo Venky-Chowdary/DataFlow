@@ -256,6 +256,24 @@ jobs:
           python -m pytest tests -q -rfEs -p no:cacheprovider -p randomly \
             --junitxml=/tmp/pytest-junit.xml
 
+      - name: No live-engine test may skip (engine-scoped)
+        # A skip whose message names an engine this job starts (postgres,
+        # mysql, mongo, redis, kafka, sqlserver) fails the job unless it is an
+        # expected skip in apps/api/scripts/live_engine_jobs.json (job
+        # `engine-suite`). SaaS / Oracle / cloud skips are not this job's claim.
+        if: ${{ !cancelled() }}
+        working-directory: apps/api
+        run: |
+          python scripts/check_live_skips.py --job engine-suite --junit /tmp/pytest-junit.xml --out "$RUNNER_TEMP/live-engine/engine-suite.json"
+
+      - name: Upload live-engine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-engine-engine-suite-${{ github.run_id }}
+          path: ${{ runner.temp }}/live-engine/
+          if-no-files-found: warn
+
       - name: Upload pytest junit
         if: always()
         uses: actions/upload-artifact@v4

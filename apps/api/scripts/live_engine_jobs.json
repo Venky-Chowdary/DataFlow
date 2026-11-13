@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "about": [
+    "Which CI job proves which live engine, and the only skips each job may report.",
+    "Read by scripts/check_live_skips.py (fails a job on an unexpected skip) and by",
+    "services/connector_ci_evidence.py (an engine is live-verified only when a job",
+    "listed here ran it green). Every expected_skips entry needs `test` (fnmatch on the",
+    "pytest node id), `reason` (regex the skip message must match) and `why`.",
+    "Modes: strict = every skip must be expected; engine_scoped = a skip whose message",
+    "names one of the job's engines must be expected (whole-suite jobs); report = counted",
+    "and published, never fails the job."
+  ],
+  "engine_tokens": {
+    "postgresql": ["postgres", "postgresql", "pg", "pgvector", "psycopg", "psycopg2", "libpq"],
+    "mysql": ["mysql", "pymysql", "mariadb"],
+    "mongodb": ["mongo", "mongodb", "pymongo"],
+    "redis": ["redis"],
+    "kafka": ["kafka", "confluent_kafka"],
+    "sqlserver": ["sqlserver", "sql server", "mssql", "pymssql", "pyodbc"],
+    "oracle": ["oracle", "oracledb", "logminer"],
+    "bigquery": ["bigquery"],
+    "snowflake": ["snowflake", "fakesnow"],
+    "gcs": ["gcs", "fake-gcs"],
+    "adls": ["adls", "azurite"]
+  },
+  "jobs": {
+    "no-config-transfer": {
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["postgresql", "mysql", "mongodb"],
+      "min_executed": 20,
+      "expected_skips": []
+    },
+    "cdc-sqlserver": {
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["sqlserver", "postgresql", "mysql"],
+      "min_executed": 100,
+      "expected_skips": []
+    },
+    "cdc-oracle": {
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["oracle"],
+      "opt_in": "repo variable ENABLE_ORACLE_CDC=true plus the DATAFLOW_ORACLE_* secrets; without them the job records not_run",
+      "min_executed": 8,
+      "expected_skips": []
+    },
+    "cdc-matrix": {
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["postgresql", "mysql", "mongodb", "redis"],
+      "min_executed": 250,
+      "expected_skips": [
+        {
+          "test": "tests/test_cdc_sqlserver_ct_integration.py::*",
+          "reason": "SQL Server with Change Tracking not reachable",
+          "why": "api-and-web starts no SQL Server; the cdc-sqlserver job runs this module live with zero skips."
+        },
+        {
+          "test": "tests/test_cdc_sqlserver_native_integration.py::*",
+          "reason": "SQL Server native CDC .* not reachable",
+          "why": "api-and-web starts no SQL Server; the cdc-sqlserver job runs this module live with zero skips."
+        },
+        {
+          "test": "tests/test_cdc_oracle_integration.py::*",
+          "reason": "(?i)oracle",
+          "why": "Oracle is opt-in (ENABLE_ORACLE_CDC + DATAFLOW_ORACLE_* secrets); the cdc-oracle job runs it when enabled."
+        }
+      ]
+    },
+    "warehouse-sku": {
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["bigquery", "snowflake"],
+      "min_executed": 10,
+      "expected_skips": []
+    },
+    "engine-suite": {
+      "workflow": ".github/workflows/full-suite.yml",
+      "mode": "engine_scoped",
+      "engines": ["postgresql", "mysql", "mongodb", "redis", "kafka", "sqlserver"],
+      "min_executed": 1000,
+      "expected_skips": []
+    },
+    "api-tests": {
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "report",
+      "engines": ["postgresql", "mysql", "mongodb", "redis", "bigquery", "gcs", "adls"],
+      "report_only_why": "The general API suite (six shards, ~3,350 skips on 2026-11-13, e.g. 73 PostgreSQL tests gated on DATAFLOW_PG_TEST_DSN, which the shards do not set). Published per shard so the backlog is measurable; promote to engine_scoped once the owner triages it.",
+      "min_executed": 1000,
+      "expected_skips": []
+    }
+  }
+}
