@@ -882,6 +882,8 @@ def update_insert_upsert(
     rows: list[dict[str, Any]],
     conflict_cols: list[str],
     target_cols: list[str],
+    *,
+    update_cols: list[str] | None = None,
 ) -> int:
     """Portable MERGE: UPDATE matched keys, INSERT missing. Never DELETE.
 
@@ -902,13 +904,23 @@ def update_insert_upsert(
     as "absent". A stored row keeps its own key spelling. A new key that one
     batch carries under two collation-equal spellings inserts its first image
     once; the later spelling is not inserted again.
+
+    ``update_cols`` is the caller's SET list (``upsert_set_columns``: lattice
+    and, under skip_duplicates, nothing). Under skip there is no UPDATE; each
+    row inserts only when its key is absent, the count returned is the rows
+    inserted, and every kept key's marker is left for :func:`pop_skip_kept`.
     """
     if not rows or not conflict_cols:
         return 0
-    from connectors.writer_common import assert_dense_upsert_keys_present
+    from connectors.writer_common import assert_dense_upsert_keys_present, identity_marker
+    from services.duplicate_policy import current_match_action
 
     assert_dense_upsert_keys_present(rows, conflict_cols)
-    update_cols = [c for c in target_cols if c not in conflict_cols]
+    skip = current_match_action() == "skip"
+    if skip:
+        update_cols = []
+    elif update_cols is None:
+        update_cols = [c for c in target_cols if c not in conflict_cols]
     key_match = sa.and_(
         *(table_obj.c[c] == sa.bindparam(f"_k_{c}", type_=table_obj.c[c].type) for c in conflict_cols)
     )
@@ -929,8 +941,29 @@ def update_insert_upsert(
     absent = sa.select(
         *(sa.bindparam(f"_v_{c}", type_=table_obj.c[c].type) for c in target_cols)
     ).where(~sa.exists().where(key_match))
-    conn.execute(table_obj.insert().from_select(list(target_cols), absent), params)
-    return len(rows)
+    insert_absent = table_obj.insert().from_select(list(target_cols), absent)
+    if not skip:
+        conn.execute(insert_absent, params)
+        return len(rows)
+    inserted = 0
+    kept: list[str] = []
+    for row, one in zip(rows, params):
+        if conn.execute(insert_absent, one).rowcount == 1:
+            inserted += 1
+        else:
+            kept.append(identity_marker(tuple(row[c] for c in conflict_cols)))
+    if kept and isinstance(getattr(table_obj, "info", None), dict):
+        table_obj.info.setdefault(_SKIP_KEPT_INFO, []).extend(kept)
+    return inserted
+
+
+_SKIP_KEPT_INFO = "df_skip_kept_markers"
+
+
+def pop_skip_kept(table_obj: Any) -> list[str]:
+    """Kept-key markers the fallback left on ``table_obj`` under skip_duplicates."""
+    info = getattr(table_obj, "info", None)
+    return list(info.pop(_SKIP_KEPT_INFO, None) or []) if isinstance(info, dict) else []
 
 
 # --------------------------------------------------------------------------- #

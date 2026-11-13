@@ -34,6 +34,7 @@ from connectors.oracle_tstz import (
 )
 from connectors.merge_dialects import (  # noqa: F401  (re-exported for callers)
     _clickhouse_replacing_upsert,
+    pop_skip_kept,
     _db2_merge_upsert,
     _duckdb_merge_upsert,
     _firebird_merge_upsert,
@@ -4574,7 +4575,9 @@ def _upsert_batch(
     if apply_rows:  # UPDATE matched keys, INSERT new keys — never DELETE.
         from connectors.merge_dialects import update_insert_upsert
 
-        return update_insert_upsert(conn, table_obj, apply_rows, conflict_cols, target_cols)
+        return update_insert_upsert(
+            conn, table_obj, apply_rows, conflict_cols, target_cols, update_cols=update_cols
+        )
     return 0
 
 
@@ -6099,7 +6102,9 @@ def write_mapped_rows(
                                 rejected_details=rejected_details,
                                 policy=policy,
                             )
-                            if DF_LSN_COL in target_cols:
+                            kept_now = pop_skip_kept(table_obj)  # skip_duplicates fallback
+                            write_acc.skipped_identity_keys.extend(kept_now)
+                            if DF_LSN_COL in target_cols or kept_now:
                                 rows_skipped += len(batch) - chunk_written
                             else:
                                 chunk_written = len(batch)
