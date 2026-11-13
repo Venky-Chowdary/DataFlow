@@ -643,6 +643,47 @@ def pg_test_cfg(port: int | None = None) -> dict:
     }
 
 
+#: Test module path -> whether its source fires scheduler beats itself.
+_BEAT_DRIVERS: dict[str, bool] = {}
+
+
+def _drives_schedule_beats(module: object) -> bool:
+    """Whether a test module calls ``_run_due_schedules(`` (fires beats itself)."""
+    path = str(getattr(module, "__file__", "") or "")
+    if path not in _BEAT_DRIVERS:
+        try:
+            source = Path(path).read_text(encoding="utf-8") if path else ""
+        except OSError:
+            source = ""
+        _BEAT_DRIVERS[path] = "_run_due_schedules(" in source
+    return _BEAT_DRIVERS[path]
+
+
+def _schedule_loop_off(monkeypatch) -> None:
+    for prefix in ("DATAFLOW", "DATAWRAP"):
+        monkeypatch.setenv(f"{prefix}_SCHEDULE_LOOP", "0")
+
+
+@pytest.fixture
+def manual_schedule_beats(monkeypatch):
+    """The test fires scheduler beats itself: the app's cadence loop stays off.
+
+    Under a TestClient the lifespan starts the loop, which fired a schedule
+    the instant a test made it due; the test's own beat was then skipped as
+    "already in progress" (CI PR 426, test_d119).
+    """
+    _schedule_loop_off(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _beat_driving_tests_own_the_beat(request, monkeypatch):
+    """``manual_schedule_beats`` for every module that calls ``_run_due_schedules(``."""
+    module = getattr(request, "module", None)
+    if module is not None and _drives_schedule_beats(module):
+        _schedule_loop_off(monkeypatch)
+    yield
+
+
 # Leaked CDC slots: ``tests.pg_slot_guard`` (registered in pytest_configure)
 # drops, at session end, only the slots this session provably created. The
 # prefix sweep that stood here dropped every inactive ``df_dataflow_mt_%`` slot
