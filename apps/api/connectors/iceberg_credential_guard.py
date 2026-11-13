@@ -52,6 +52,7 @@ from services.iceberg_class_properties import (
     TABLE_METADATA,
     check_class_properties,
 )
+from connectors.iceberg_hdfs_guard import NAMENODES, own_namenodes
 from connectors.iceberg_pyarrow_io import LOCAL_FILES, REFUSE
 from connectors.iceberg_server_hosts import check_server_oauth_uri, check_storage_hosts
 from services.platform_aws_credentials import iceberg_credentials_refusal, s3_fileio_refusal
@@ -167,6 +168,8 @@ def guarded_catalog(base: type) -> type:
             super().__init__(name, *args, **properties)
             # pyiceberg also builds a FileIO from these alone (SqlCatalog's metadata file).
             self.properties.update(file_io_properties(self.properties))
+            # The HDFS namenodes the connector named, never a server's (follow-up review 4).
+            self.properties[NAMENODES] = own_namenodes(self._df_own)
 
         def _fetch_config(self) -> None:  # REST: the server's defaults and overrides
             own = dict(self.properties)
@@ -195,6 +198,7 @@ def guarded_catalog(base: type) -> type:
             # A table's storage hosts, when the catalog did not already carry them.
             check_storage_hosts({**self._df_own, **self.properties}, properties or {}, TABLE_CONFIG)
             merged = file_io_properties({**self.properties, **(properties or {})})  # what pyiceberg hands it
+            merged[NAMENODES] = own_namenodes(self._df_own)  # last: no table or server adds one
             if remote_catalog(base.__name__, {**self.properties, **self._df_own}):
                 # The tenant's catalog names every file: none on this host (follow-up review 2, 3).
                 merged[LOCAL_FILES] = REFUSE

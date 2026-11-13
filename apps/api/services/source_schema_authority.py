@@ -172,7 +172,7 @@ def append_declares_no_key(
     )
 
 
-def append_identity_source_key(
+def _append_identity_source_key(
     *,
     sync_mode: str,
     stream_contracts: list[dict[str, Any]] | None,
@@ -210,7 +210,7 @@ def append_identity_source_key(
     return list(groups[0]) if groups else []
 
 
-def live_source_primary_key_columns(
+def _live_source_primary_key_columns(
     *,
     source_connector_id: str = "",
     source_table: str = "",
@@ -249,7 +249,7 @@ def live_source_primary_key_columns(
     return endpoint_primary_key_columns(endpoint)
 
 
-def live_source_column_types(
+def _live_source_column_types(
     *,
     source_connector_id: str = "",
     source_table: str = "",
@@ -286,6 +286,33 @@ def live_source_column_types(
     if endpoint is None:
         return {}
     return endpoint_source_column_types(endpoint)
+
+
+def _owner_bound(fn: Any) -> Any:
+    """``fn`` run as the saved source connector's own workspace (follow-up review 5, H1).
+
+    Callers reach these from request threads, schedule probes and worker threads
+    alike; a stored connector's files (an Iceberg warehouse, a SQLite volume) are
+    its workspace's, whatever is bound around the call.
+    """
+
+    def bound(**kwargs: Any) -> Any:
+        connector_id = str(kwargs.get("source_connector_id") or "").strip()
+        if not connector_id:
+            return fn(**kwargs)
+        from services.export_paths import stored_connector_export_scope
+
+        with stored_connector_export_scope(connector_id):
+            return fn(**kwargs)
+
+    bound.__name__ = fn.__name__.lstrip("_")
+    bound.__doc__ = fn.__doc__
+    return bound
+
+
+append_identity_source_key = _owner_bound(_append_identity_source_key)
+live_source_primary_key_columns = _owner_bound(_live_source_primary_key_columns)
+live_source_column_types = _owner_bound(_live_source_column_types)
 
 
 def _saved_source_endpoint(

@@ -156,6 +156,9 @@ async def lifespan(app: FastAPI):
     )
 
     warn_if_platform_gcp_azure_credentials_allowed(logging.getLogger("datawrap.security"))
+    from connectors.kafka_sasl_policy import platform_kerberos_settings, warn_if_platform_kerberos_allowed
+
+    warn_if_platform_kerberos_allowed(logging.getLogger("datawrap.security"))
     from services.sso_authorization import warn_sso_auto_provision_without_domains
 
     warn_sso_auto_provision_without_domains(logging.getLogger("datawrap.security"))
@@ -199,6 +202,7 @@ async def lifespan(app: FastAPI):
                     **local_file_settings(),
                     **platform_aws_settings(),
                     **platform_gcp_azure_settings(),
+                    **platform_kerberos_settings(),
                 },
             )
         except Exception as exc:
