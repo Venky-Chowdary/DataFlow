@@ -160,22 +160,37 @@ def test_type_grade_kinds(src, tgt, verdict, kind):
     assert kind in {r["kind"] for r in grade["reasons"]}, grade
 
 
-def test_type_grade_agrees_with_validate_fidelity_verdict():
-    """Lossy here ⇔ mapping_fidelity (G4's verdict) says lossy/cast for the same pair."""
-    from services.mapping_proof import mapping_fidelity
+def _validate_calls_it_lossy(src: str, tgt: str) -> bool:
+    """Run the real Validate (run_file_preflight) on one column and read G3."""
+    from services.preflight_service import run_file_preflight
 
-    pairs = [
+    result = run_file_preflight(
+        columns=["c"], column_types={"c": src}, row_count=2,
+        mappings=[{"source": "c", "target": "c", "source_type": src, "target_type": tgt,
+                   "confidence": 0.99, "approved": True, "user_override": True}],
+        destination_connected=True, source_connected=True, source_kind="database",
+        source_format="postgresql", sync_mode="full_refresh_append", sample_rows=[],
+        destination_column_types={"c": tgt}, destination_table_exists=True,
+        destination_db_type="postgresql", destination_column_nullability={"c": True},
+        validation_mode="strict",
+    )
+    g3 = next((g for g in result.get("gates") or [] if g.get("id") == "g3_schema_contract"), {})
+    return g3.get("status") == "block" and "Lossy coercion" in str(g3.get("message") or "")
+
+
+@pytest.mark.parametrize(
+    ("src", "tgt"),
+    [
         ("INTEGER", "BIGINT"), ("BIGINT", "INTEGER"), ("VARCHAR(50)", "TEXT"),
-        ("DECIMAL(12,2)", "DECIMAL(10,2)"), ("DATE", "TIMESTAMP"), ("DOUBLE", "REAL"),
-    ]
-    for src, tgt in pairs:
-        fid = mapping_fidelity(
-            {"source_type": src, "target_type": tgt, "transform": "none"},
-            declared_source_type=src, declared_target_type=tgt,
-            destination_db_type="postgresql", dest_table_exists=True,
-        )
-        ours = grade_type_pair(src, tgt, dest_db="postgresql")["verdict"]
-        assert (ours == "lossy") == (fid["verdict"] in {"lossy_cast", "cast"}), (src, tgt, fid)
+        ("VARCHAR(255)", "VARCHAR(50)"), ("DECIMAL(12,2)", "DECIMAL(10,2)"),
+        ("DECIMAL(10,2)", "DECIMAL(12,2)"), ("DATE", "TIMESTAMP"), ("DOUBLE", "REAL"),
+        ("TIMESTAMPTZ", "TIMESTAMP"), ("VARCHAR(40)", "VARCHAR(40)"),
+    ],
+)
+def test_type_grade_agrees_with_a_real_validate_run(src, tgt):
+    """The Map chip says lossy exactly when Validate's G3 blocks the same pair."""
+    ours = grade_type_pair(src, tgt, dest_db="postgresql")["verdict"]
+    assert (ours == "lossy") == _validate_calls_it_lossy(src, tgt), (src, tgt, ours)
 
 
 def test_type_grades_dedupe_identical_pairs():
