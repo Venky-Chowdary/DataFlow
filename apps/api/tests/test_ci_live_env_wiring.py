@@ -226,3 +226,52 @@ def test_keyed_readback_live_tests_take_both_engines_from_the_environment(monkey
     mod = importlib.import_module("test_keyed_readback_scope")
     assert (mod.PG["host"], mod.PG["port"], mod.PG["username"]) == ("127.0.0.1", 5432, "dataflow")
     assert (mod.MYSQL["host"], mod.MYSQL["port"], mod.MYSQL["username"]) == ("127.0.0.1", 3306, "dataflow")
+
+
+def test_the_rule_compiler_catalog_tests_reach_the_postgres_the_environment_names(monkeypatch) -> None:
+    """PR 424 CI, api-tests 2/6 (run 43447695514): 3 skips "Postgres is not
+    accepting connections". The module ran `sudo -u postgres psql` and a bare
+    `pg_isready` against a host-local server; CI's PostgreSQL is the container
+    at PGHOST:PGPORT."""
+    env = {"PGHOST": "127.0.0.1", "PGPORT": "5432", "PGUSER": "dataflow",
+           "PGPASSWORD": "dataflow", "PGDATABASE": "dataflow"}
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    seen: dict = {}
+
+    class _Cur:
+        description = [("?column?",)]
+
+        def execute(self, sql):
+            seen["sql"] = sql
+
+        def fetchall(self):
+            return [(1,)]
+
+        def close(self):
+            pass
+
+    class _Conn:
+        autocommit = False
+
+        def cursor(self):
+            return _Cur()
+
+        def close(self):
+            pass
+
+    def _connect(**kwargs):
+        seen["kwargs"] = kwargs
+        return _Conn()
+
+    import psycopg2
+
+    monkeypatch.setattr(psycopg2, "connect", _connect)
+    sys.modules.pop("test_rule_compiler_postgres_catalog", None)
+    mod = importlib.import_module("test_rule_compiler_postgres_catalog")
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)))
+    assert mod._postgres_up()
+    out = mod._psql("SELECT 1")
+    assert (out.returncode, out.stdout.strip()) == (0, "1")
+    assert {k: seen["kwargs"][k] for k in ("host", "port", "user", "dbname")} == {
+        "host": "127.0.0.1", "port": 5432, "user": "dataflow", "dbname": "dataflow"}
