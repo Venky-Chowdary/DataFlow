@@ -35,6 +35,27 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _revision_document_model(
+    plan: TransferPlanRecord, document_model: dict[str, Any] | None
+) -> tuple[dict[str, Any], str]:
+    """The model a new revision stores, and its hash.
+
+    ``None`` keeps the active revision's model, so a mapping edit never drops
+    it; ``{}`` clears it. A malformed model raises ``DocumentModelError``
+    before anything is written.
+    """
+    if document_model is None:
+        active = plan.active_revision()
+        if active is None:
+            return {}, ""
+        return dict(active.document_model), active.document_model_hash
+    if not document_model:
+        return {}, ""
+    from services.document_model import model_hash
+
+    return dict(document_model), model_hash(document_model)
+
+
 @dataclass
 class PlanRevision:
     version: int
@@ -53,6 +74,10 @@ class PlanRevision:
     # Snapshot at revision time — required for additive vs breaking classify.
     source_columns: list[str] = field(default_factory=list)
     source_schema: dict[str, str] = field(default_factory=dict)
+    # Document model at this revision (services.document_model payload) and its
+    # identity; empty for plans that do not nest tables into documents.
+    document_model: dict[str, Any] = field(default_factory=dict)
+    document_model_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -77,6 +102,16 @@ class PlanRevision:
             source_schema={
                 str(k): str(v) for k, v in (data.get("source_schema") or {}).items()
             },
+            document_model=(
+                dict(data["document_model"])
+                if isinstance(data.get("document_model"), dict)
+                else {}
+            ),
+            document_model_hash=(
+                data["document_model_hash"]
+                if isinstance(data.get("document_model_hash"), str)
+                else ""
+            ),
         )
 
 
@@ -234,11 +269,13 @@ def add_mapping_revision(
     source_schema: dict[str, str] | None = None,
     target_columns: list[str] | None = None,
     target_schema: dict[str, str] | None = None,
+    document_model: dict[str, Any] | None = None,
 ) -> TransferPlanRecord | None:
     plans = _load_all()
     for i, plan in enumerate(plans):
         if not _in_scope(plan, plan_id):
             continue
+        model, model_digest = _revision_document_model(plan, document_model)
         src_cols = source_columns or plan.source_columns
         src_schema = source_schema or plan.source_schema
         tgt_cols = target_columns or plan.target_columns
@@ -276,6 +313,8 @@ def add_mapping_revision(
             llm=dict(pipeline_result.get("llm") or {}),
             source_columns=list(src_cols),
             source_schema={k: str(v) for k, v in (src_schema or {}).items()},
+            document_model=model,
+            document_model_hash=model_digest,
         )
         plan.revisions.append(rev)
         plan.active_version = version
@@ -358,12 +397,19 @@ def sync_ui_mappings(
     mappings: list[dict[str, Any]],
     *,
     transforms: list[dict[str, Any]] | None = None,
+    document_model: dict[str, Any] | None = None,
 ) -> TransferPlanRecord | None:
-    """Persist user-approved mapping edits as a new revision."""
+    """Persist user-approved mapping edits as a new revision.
+
+    ``document_model`` is stored with the revision, so each model edit is a
+    revision of its own; ``None`` keeps the current model (see
+    :func:`_revision_document_model`).
+    """
     plans = _load_all()
     for i, plan in enumerate(plans):
         if not _in_scope(plan, plan_id):
             continue
+        model, model_digest = _revision_document_model(plan, document_model)
         version = (plan.revisions[-1].version + 1) if plan.revisions else 1
         from services.mapping_proof import mapping_proof_or_build
 
@@ -393,6 +439,8 @@ def sync_ui_mappings(
             agents_used=["user_review"],
             plan_summary={"edited_in_ui": True, "mapping_count": len(mapping_rows)},
             mapping_proof=mapping_proof,
+            document_model=model,
+            document_model_hash=model_digest,
         )
         plan.revisions.append(rev)
         plan.active_version = version

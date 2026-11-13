@@ -138,6 +138,13 @@ class TransferRequest:
     # Recipe identity approved at Validate. Execute refuses when the recipe it was
     # handed hashes to anything else (Validate≡Execute).
     approved_shape_recipe_hash: str = ""
+    # Document model (services.document_model payload): how several source
+    # tables nest into one MongoDB document. None for every other route.
+    document_model: dict | None = None
+    # Model identity approved at Validate (services.document_model.model_hash).
+    # Execute refuses a model that hashes to anything else, and a model that
+    # was never approved (services.execute_document_route).
+    approved_document_model_hash: str = ""
     # Transform Library provenance: which library recipe produced shape_recipe,
     # at what version, and under which parameters. Proof-pack material — the
     # engine executes shape_recipe; it never re-reads the library mid-run.
@@ -353,6 +360,12 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "read_options": request.read_options,
         "shape_recipe": dict(request.shape_recipe or {}),
         "approved_shape_recipe_hash": request.approved_shape_recipe_hash or "",
+        "document_model": (
+            dict(request.document_model)
+            if isinstance(request.document_model, dict)
+            else request.document_model or None
+        ),
+        "approved_document_model_hash": request.approved_document_model_hash or "",
         "transform_recipe_id": request.transform_recipe_id or "",
         "transform_recipe_version": int(request.transform_recipe_version or 0),
         "transform_recipe_version_mode": request.transform_recipe_version_mode
@@ -589,6 +602,12 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         shape_recipe=data.get("shape_recipe") or {},
         approved_shape_recipe_hash=str(
             data.get("approved_shape_recipe_hash") or ""
+        ).strip(),
+        # Any non-empty stored value is kept, even a malformed one: Execute's
+        # approval check then refuses it, instead of it reading as "no model".
+        document_model=data.get("document_model") or None,
+        approved_document_model_hash=str(
+            data.get("approved_document_model_hash") or ""
         ).strip(),
         transform_recipe_id=str(data.get("transform_recipe_id") or "").strip(),
         transform_recipe_version=int(data.get("transform_recipe_version") or 0),
