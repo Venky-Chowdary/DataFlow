@@ -403,7 +403,7 @@ def get_audit_tip(request: Request):
     (D220): anchors seal the platform head, and the failure count is the
     whole deployment's.
     """
-    from services.audit_anchor import latest_anchor, list_anchors
+    from services.audit_anchor import latest_anchor, list_anchors, verify_receipt
     from services.audit_coverage import audit_access_failure_count
     from services.audit_log import latest_event_hash, list_audit_events
     from services.workspace_filter import WorkspaceFilter
@@ -418,6 +418,7 @@ def get_audit_tip(request: Request):
             "workspace_id": workspace_id,
             "tip_hash": head,
             "anchor": None,
+            "anchor_verification": None,
             "anchors_recent": [],
             "matched": False,
             "audit_access_failures": None,
@@ -428,17 +429,22 @@ def get_audit_tip(request: Request):
         }
     tip = latest_event_hash()
     anchor = latest_anchor()
+    # Verify-on-read: the receipt alone is not the anchor; the write-once object is.
+    # (This handler runs on the thread pool, so the read-back does not block the loop.)
+    verification = verify_receipt(anchor) if anchor else None
     return {
         "scope": "platform",
         "workspace_id": None,
         "tip_hash": tip,
         "anchor": anchor,
+        "anchor_verification": verification,
         "anchors_recent": list_anchors(limit=5),
         "matched": bool(tip and anchor and anchor.get("tip_hash") == tip),
         "audit_access_failures": audit_access_failure_count(),
         "honesty": (
-            "Tip is HMAC-SHA256 chain head. Anchor is a diligence seal "
-            "(stub by default — not auditor WORM / TSA until provider configured)."
+            "Tip is HMAC-SHA256 chain head. The anchor is write-once only with the S3 Object "
+            "Lock provider, and only while anchor_verification reads anchored; the default "
+            "local stub is not anchored."
         ),
     }
 
@@ -764,5 +770,7 @@ def force_anchor_tip(request: Request):
     tip = latest_event_hash()
     if not tip:
         return {"ok": False, "error": "No audit events yet", "anchor": None}
-    receipt = anchor_tip(tip)
-    return {"ok": bool(receipt), "tip_hash": tip, "anchor": receipt or latest_anchor()}
+    receipt = anchor_tip(tip, force=True)
+    # ``ok``: a receipt was recorded. ``anchored``: it is a confirmed write-once anchor.
+    return {"ok": bool(receipt), "anchored": bool(receipt and receipt.get("anchored")), "tip_hash": tip,
+            "anchor": receipt or latest_anchor()}

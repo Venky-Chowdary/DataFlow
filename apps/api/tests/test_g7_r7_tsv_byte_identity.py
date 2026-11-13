@@ -50,7 +50,12 @@ def test_format_converter_tsv_is_byte_identical_for_ordinary_values():
     assert content == ORDINARY_TSV
 
 
-def test_transfer_file_export_tsv_default_is_byte_identical():
+def test_transfer_file_export_tsv_default_is_the_export_dialect():
+    """The transfer file export writes PR 402's export dialect (services.export_dialect).
+
+    "off" adds nothing to it: CRLF rows, NULL an empty cell, '' quoted "",
+    and any cell holding the delimiter, a quote or a line break quoted.
+    """
     from src.transfer.adapters import write_destination_file
     from src.transfer.models import EndpointConfig
 
@@ -60,7 +65,12 @@ def test_transfer_file_export_tsv_default_is_byte_identical():
         list(COLS),
         source_format="csv",
     )
-    assert content == ORDINARY_TSV
+    assert content == (
+        "id\tnote\tpath\tquote\r\n"
+        '1\t"5"" pipe"\ta\\b\t"say ""hi"""\r\n'
+        '2\t=1+1\ta,b\t"x""""y"\r\n'
+        '3\tcafé\t""\t-5\r\n'
+    ).encode("utf-8")
 
 
 def test_object_store_tsv_is_byte_identical_for_ordinary_values():
@@ -132,3 +142,40 @@ def test_product_tsv_readers_read_the_exact_values(tmp_path, rows):
     assert result.success, result.error
     got = [[("" if rec.get(c) is None else str(rec.get(c))) for c in COLS] for rec in result.data]
     assert got == rows
+
+
+@pytest.mark.parametrize("fmt", ["csv", "tsv"])
+@pytest.mark.parametrize("protection", ["off", "prefix"])
+def test_export_dialect_round_trips_null_empty_and_guard_through_gate8(tmp_path, fmt, protection):
+    """PR 402's dialect keeps NULL and '' apart; the G7 guard is restored on read-back."""
+    from services.dest_precount import _iter_artifact_records
+    from src.transfer.adapters import write_destination_file
+    from src.transfer.models import EndpointConfig
+    from src.transfer.reconcile_step import _file_export_cell_readback
+
+    cols = ["id", "=hdr", "v"]
+    records = [
+        {"id": "1", "=hdr": None, "v": ""},
+        {"id": "2", "=hdr": "", "v": None},
+        {"id": "3", "=hdr": "=HYPERLINK(\"x\")", "v": "a\tb\nc"},
+        {"id": "4", "=hdr": "'=q", "v": '"lead'},
+        {"id": "5", "=hdr": "-5", "v": "@SUM(A1)"},
+    ]
+    content, _name, summary = write_destination_file(
+        EndpointConfig(kind="file_export", format=fmt, extra={"formula_protection": protection}),
+        [dict(r) for r in records], list(cols), source_format="csv",
+    )
+    path = tmp_path / f"export.{fmt}"
+    path.write_bytes(content)
+    with open(path, "rb") as fh:
+        rows = list(_iter_artifact_records(fh, name=path.name, fmt=fmt, written_here=True))
+    header = "'=hdr" if protection == "prefix" else "=hdr"
+    assert [r[header] for r in rows][:2] == [None, ""]
+    assert [r["v"] for r in rows][:2] == ["", None]
+    mappings = [{"source": c, "target": c, "target_type": "text"} for c in cols]
+    compare = _file_export_cell_readback(
+        [dict(r) for r in records], list(cols), mappings,
+        {**summary, "path": str(path), "primary_key_columns": ["id"]}, fmt=fmt,
+    )
+    assert compare is not None and compare.get("passed") is True, compare
+    assert compare.get("rows_compared") == len(records), compare

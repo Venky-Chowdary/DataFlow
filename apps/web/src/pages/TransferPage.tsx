@@ -49,6 +49,8 @@ import { destExistsPrimaryCta, shapeContractFromPreflight } from "../lib/destExi
 import { jobDestinationPath, jobEndpointLabels } from "../lib/jobEvidence";
 import { launchStageState, stagePercent } from "../lib/progressRing";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
+import { PlanReversibilityCard } from "../components/reversibility/ReversibilityPanels";
+import { reversibilityFromPreflight } from "../lib/reversibility";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
 import {
@@ -518,6 +520,8 @@ export function TransferPage({
   const [savingContract, setSavingContract] = useState(false);
   const [boundContractId, setBoundContractId] = useState("");
   const [requireSignedContract, setRequireSignedContract] = useState(false);
+  /** Plan policy: Execute is blocked (g24_reversibility) until every table is reversible. */
+  const [requireReversibility, setRequireReversibility] = useState(false);
   const [contractBlockReason, setContractBlockReason] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -1552,6 +1556,7 @@ export function TransferPage({
           require_signed_contract: bind.requireSigned,
         };
       })(),
+      require_reversibility: requireReversibility,
     },
   }), [
     file,
@@ -1607,6 +1612,7 @@ export function TransferPage({
     destProcedureParamMap,
     boundContractId,
     requireSignedContract,
+    requireReversibility,
   ]);
 
   const ensurePersistedPlan = useCallback(async (
@@ -6182,6 +6188,7 @@ export function TransferPage({
         approvedDdlIdentityHash: approvedDdlIdentityHash || undefined,
         contractId: boundContractId.trim() || undefined,
         requireSignedContract: Boolean(boundContractId.trim() && requireSignedContract),
+        requireReversibility,
         decisionArtifact:
           preflight?.proof_bundle?.decision_artifact
           && typeof preflight.proof_bundle.decision_artifact === "object"
@@ -8988,6 +8995,13 @@ export function TransferPage({
                 tone: "success",
               });
             }}
+          />
+          <PlanReversibilityCard
+            planId={persistedPlanId}
+            preflightReport={reversibilityFromPreflight(preflight)}
+            requireReversibility={requireReversibility}
+            onRequireChange={setRequireReversibility}
+            onRevalidate={() => void executePreflight()}
           />
           </div>
           <ValidateActionsRail

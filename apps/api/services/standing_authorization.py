@@ -130,7 +130,12 @@ _BINDING_LABELS = {
     "contract_id": "the bound contract",
     "require_signed_contract": "the signed-contract requirement",
     "backfill_new_fields": "the backfill setting",
+    "require_reversibility": "the reversibility requirement",
 }
+
+# Bound only when on: a grant signed before the field existed keeps its hash
+# while the field is off, and turning it on or off moves the binding (review 2, N6).
+_BINDING_FLAGS_WHEN_SET = ("require_reversibility",)
 
 
 class AuthorizationRefused(ValueError):
@@ -261,6 +266,7 @@ def compute_binding(
     contract_id: str = "",
     require_signed_contract: bool = False,
     backfill_new_fields: bool = False,
+    require_reversibility: bool = False,
 ) -> dict[str, Any]:
     """Describe the artifact an authorization is signed against.
 
@@ -295,8 +301,10 @@ def compute_binding(
         "contract_id": str(contract_id or "").strip(),
         "require_signed_contract": bool(require_signed_contract),
         "backfill_new_fields": bool(backfill_new_fields),
+        "require_reversibility": bool(require_reversibility),
     }
-    binding["binding_hash"] = _hash({k: binding[k] for k in _BINDING_FIELDS})
+    binding["binding_hash"] = _hash({**{k: binding[k] for k in _BINDING_FIELDS},
+                                     **{k: True for k in _BINDING_FLAGS_WHEN_SET if binding[k]}})
     return binding
 
 
@@ -325,6 +333,7 @@ def binding_from_schedule(sched: Any) -> dict[str, Any]:
         contract_id=getattr(sched, "contract_id", "") or "",
         require_signed_contract=bool(getattr(sched, "require_signed_contract", False)),
         backfill_new_fields=bool(getattr(sched, "backfill_new_fields", False)),
+        require_reversibility=bool(getattr(sched, "require_reversibility", False)),
     )
 
 
@@ -347,6 +356,12 @@ def binding_differences(
             "approved": "" if before is None else str(before),
             "current": "" if after is None else str(after),
         })
+    for key in _BINDING_FLAGS_WHEN_SET:
+        # Absent on a grant signed before the field existed: that grant was signed with it off.
+        before, after = bool(was.get(key)), bool(now.get(key))
+        if before != after:
+            out.append({"field": key, "label": _BINDING_LABELS[key], "approved": str(before),
+                        "current": str(after)})
     return out
 
 

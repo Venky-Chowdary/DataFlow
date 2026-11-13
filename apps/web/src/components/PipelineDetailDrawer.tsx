@@ -491,6 +491,12 @@ export function PipelineDetailDrawer({
               : "None"}
           </strong>
         </div>
+        <div className="df2-drawer-fact">
+          <span>Reversibility</span>
+          <strong title={sched.require_reversibility ? "Each run is blocked unless every table it writes is reversible (gate G24R)." : undefined}>
+            {sched.require_reversibility ? "Required · enforced" : "Not required"}
+          </strong>
+        </div>
         {sched.contract_id && (
           <div className="df2-drawer-fact">
             <span>Breaker</span>

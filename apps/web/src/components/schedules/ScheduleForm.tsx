@@ -172,6 +172,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const [requireSigned, setRequireSigned] = useState(
     initial?.require_signed_contract ?? Boolean(initial?.contract_id),
   );
+  const [requireReversibility, setRequireReversibility] = useState(Boolean(initial?.require_reversibility));
 
   const [sourceObjectNames, setSourceObjectNames] = useState<string[]>([]);
   const [destObjectNames, setDestObjectNames] = useState<string[]>([]);
@@ -380,6 +381,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       notify_on_success: notifySuccess,
       contract_id: contractId.trim(),
       require_signed_contract: requireSigned && Boolean(contractId.trim()),
+      require_reversibility: requireReversibility,
       ...(isEdit || !missingValidateMappings ? {} : { enabled: false }),
       // Never PATCH empty Validate hashes — "" is not None and wipes Studio stamps.
     });
@@ -925,8 +927,8 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         <div className="df2-sched-panel-head">
           <DtIcon name="shield" size={15} />
           <div>
-            <strong>Data contract</strong>
-            <span>Bind a signed schema agreement so unattended runs stay fail-closed.</span>
+            <strong>Data contract &amp; reversibility</strong>
+            <span>Fail-closed requirements for unattended runs: a signed schema agreement, and a reversible write.</span>
           </div>
         </div>
         <ContractBindField
@@ -937,6 +939,19 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           onRequireSignedChange={setRequireSigned}
           onBlockReasonChange={setContractBlock}
         />
+        <label className="df2-sched-check">
+          <input
+            type="checkbox"
+            checked={requireReversibility}
+            onChange={(e) => setRequireReversibility(e.target.checked)}
+            aria-describedby="sched-require-reversibility-hint"
+          />
+          Require reversibility before each run (fail-closed)
+        </label>
+        <span id="sched-require-reversibility-hint" className="df2-field-hint">
+          Blocks a scheduled run unless every table it writes can give the source data back (gate G24R). A lossy
+          mapping, a row cap, a source filter or a recipe step that changes rows blocks it.
+        </span>
       </section>
 
       {/* Panel: Retry & notifications */}

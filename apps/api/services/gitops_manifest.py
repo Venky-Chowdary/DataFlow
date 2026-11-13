@@ -110,6 +110,8 @@ _SCHEDULE_DECLARATIVE_KEYS = frozenset(
         "workspace_id",
         "contract_id",
         "require_signed_contract",
+        # Review 2 (N6): an export / re-apply must not switch the g24 requirement off.
+        "require_reversibility",
         "date_locale",
         "number_locale",
         "shape_recipe",

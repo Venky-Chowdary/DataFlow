@@ -651,6 +651,7 @@ def build_schedule_request(
         contract_id=contract_id,
         enforce_contract=bool(contract_id),
         require_signed_contract=require_signed,
+        require_reversibility=bool(getattr(sched, "require_reversibility", False)),
         compliance_acknowledged=(
             acks.compliance
             or bool(getattr(sched, "compliance_acknowledged", False))
@@ -2655,7 +2656,8 @@ def _clear_stale_running_schedules() -> None:
 
 async def _run_maintenance() -> None:
     """Housekeeping on the beat: scheduled job retention, expired sandboxes,
-    expired file exports in the export bucket.
+    expired file exports in the export bucket, and exit rehearsals (settle
+    finished ones, start scheduled ones that are due).
 
     The beat can tick every second on every replica; each step first claims
     its period in Mongo (``services.maintenance_claim``: retention once a day,
@@ -2663,11 +2665,12 @@ async def _run_maintenance() -> None:
     returns at once when off or not due. A failure is logged, never raised into
     the beat.
     """
+    from services.exit_rehearsal import run_due_rehearsals
     from services.export_object_store import sweep_expired_exports
     from services.job_retention_schedule import run_due_retention
     from services.sandbox_workspaces import sweep_expired_sandboxes
 
-    for step in (run_due_retention, sweep_expired_sandboxes, sweep_expired_exports):
+    for step in (run_due_retention, sweep_expired_sandboxes, sweep_expired_exports, run_due_rehearsals):
         try:
             await asyncio.get_running_loop().run_in_executor(
                 _executor, functools.partial(contextvars.copy_context().run, step)
