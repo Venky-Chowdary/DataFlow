@@ -29,10 +29,12 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from connectors.destination_naming import (
+    DOCUMENT_STORES,
+    KEY_VALUE_STORES,
+    SAAS_APPS,
+    SEARCH_STORES,
     SQL_NAME_LIMITS,
     SQL_UNLIMITED,
-    DOCUMENT_STORES,
-    SEARCH_STORES,
     _NO_CUT,
     _as_dict,
     dest_kind,
@@ -58,13 +60,18 @@ def legacy_spelling(dest_type: str | None, name: Any) -> str:
     )
 
 
-def _full_spelling(name: Any) -> str:
-    """The name without the old cut (what Validate measures against the limit)."""
+def _full_spelling(name: Any, kind: str = "") -> str:
+    """The name without the old cut (what Validate measures against the limit).
+
+    A SaaS app's field name is kept exactly as mapped (G11)."""
+    if kind in SAAS_APPS:
+        return str(name or "").strip()
     return sanitize_identifier(str(name or ""), preserve_case=True, max_len=_NO_CUT)
 
 
 def _applies(kind: str) -> bool:
-    return kind in SQL_NAME_LIMITS or kind in SQL_UNLIMITED
+    """Destinations whose existing columns / fields a target may adopt."""
+    return kind in SQL_NAME_LIMITS or kind in SQL_UNLIMITED or kind in SAAS_APPS
 
 
 def existing_column_for(
@@ -82,7 +89,7 @@ def existing_column_for(
     if not cols:
         return None
     fold = kind in _CASE_INSENSITIVE
-    full = _full_spelling(target)
+    full = _full_spelling(target, kind)
     if full in cols:
         return None
     if fold and kind != "bigquery" and any(c.casefold() == full.casefold() for c in cols):
@@ -141,7 +148,7 @@ def adopt_existing_columns(
 def _needs_probe(kind: str, mappings: list[dict[str, Any]]) -> bool:
     for m in mappings:
         target = str(m.get("target") or "")
-        if target and legacy_spelling(kind, target) != _full_spelling(target):
+        if target and legacy_spelling(kind, target) != _full_spelling(target, kind):
             return True
     return False
 
@@ -409,6 +416,57 @@ def mongo_fields_present(cfg: Mapping[str, Any], collection: str, names: Iterabl
     }
 
 
+#: Stores holding named fields per record, where an old renamed field can sit
+#: stale beside the new one.
+_FIELD_STORES = DOCUMENT_STORES | SEARCH_STORES | KEY_VALUE_STORES
+_SAMPLE_RECORDS = 200
+
+
+def redis_fields_present(cfg: Mapping[str, Any], prefix: str, names: Iterable[str]) -> set[str]:
+    """Which of ``names`` a sample of the prefix's stored documents holds."""
+    from itertools import islice
+
+    from connectors.redis_reader import _redis_client, keys_for_prefix, redis_json_row
+
+    client = _redis_client(dict(cfg))
+    wanted = set(names)
+    keys = keys_for_prefix(
+        [k.decode() if isinstance(k, bytes) else str(k)
+         for k in islice(client.scan_iter(match=f"{prefix}:*", count=_SAMPLE_RECORDS),
+                         _SAMPLE_RECORDS)],
+        prefix,
+    )
+    found: set[str] = set()
+    for key in keys:
+        found.update(wanted & set(redis_json_row(client.get(key))))
+        if found == wanted:
+            break
+    return found
+
+
+def dynamodb_fields_present(cfg: Mapping[str, Any], table: str, names: Iterable[str]) -> set[str]:
+    """Which of ``names`` a sample of the table's items holds."""
+    from connectors.aws_common import boto3_client
+    from connectors.dynamodb_writer import dynamodb_client_cfg
+
+    client = boto3_client("dynamodb", dynamodb_client_cfg(dict(cfg)))
+    wanted = list(dict.fromkeys(names))
+    try:
+        page = client.scan(
+            TableName=table, Limit=_SAMPLE_RECORDS,
+            ProjectionExpression=", ".join(f"#n{i}" for i in range(len(wanted))),
+            ExpressionAttributeNames={f"#n{i}": n for i, n in enumerate(wanted)},
+        )
+    except Exception as exc:  # noqa: BLE001 - a missing table holds no old fields
+        if "ResourceNotFoundException" in type(exc).__name__ + str(exc):
+            return set()
+        raise
+    found: set[str] = set()
+    for item in page.get("Items") or []:
+        found.update(set(item) & set(wanted))
+    return found
+
+
 def es_mapping_fields(cfg: Mapping[str, Any], index: str) -> set[str]:
     """Dotted field paths an existing Elasticsearch index mapping declares."""
     from connectors.elasticsearch_reader import _client
@@ -439,13 +497,18 @@ def existing_legacy_fields(
     collection / index, or when nothing was renamed.
     """
     kind = dest_kind(dest_type)
-    if kind not in DOCUMENT_STORES and kind not in SEARCH_STORES:
+    if kind not in _FIELD_STORES:
         return []
     pairs = _renamed_pairs(mappings)
     if not pairs or not cfg or not table:
         return []
+    olds = [old for _t, old in pairs]
     if kind in DOCUMENT_STORES:
-        present = mongo_fields_present(cfg, table, (old for _t, old in pairs))
+        present = mongo_fields_present(cfg, table, olds)
+    elif kind == "redis":
+        present = redis_fields_present(cfg, table, olds)
+    elif kind == "dynamodb":
+        present = dynamodb_fields_present(cfg, table, olds)
     else:
         present = es_mapping_fields(cfg, table)
     return [(t, old) for t, old in pairs if old in present]
@@ -456,14 +519,15 @@ def legacy_field_issues(
 ) -> list[dict[str, str]]:
     """``target_path_legacy_flat_field`` per target whose old field exists."""
     kind = dest_kind(dest_type)
-    store = "collection" if kind in DOCUMENT_STORES else "index"
+    store = {"mongodb": "collection", "redis": "key prefix", "dynamodb": "table"}.get(
+        kind, "index")
     out: list[dict[str, str]] = []
     for target, old in found:
-        rename = (
-            f"updateMany({{}}, {{$rename: {{{old!r}: {target!r}}}}})"
-            if kind in DOCUMENT_STORES
-            else "a reindex that renames the field"
-        )
+        rename = {
+            "mongodb": f"updateMany({{}}, {{$rename: {{{old!r}: {target!r}}}}})",
+            "redis": "a rewrite of the stored documents under the new field name",
+            "dynamodb": "an UpdateItem pass that renames the attribute",
+        }.get(kind, "a reindex that renames the field")
         ack = (
             f" To write {target!r} anyway, set {LEGACY_FIELD_POLICY}={WRITE_NEW!r} on the "
             "destination; the run records it."
@@ -528,7 +592,7 @@ def legacy_fields_refusal(request: Any) -> str:
     """
     dest = getattr(request, "destination", None)
     kind = dest_kind(str(getattr(dest, "format", "") or ""))
-    if dest is None or (kind not in DOCUMENT_STORES and kind not in SEARCH_STORES):
+    if dest is None or kind not in _FIELD_STORES:
         return ""
     mappings = list(getattr(request, "mappings", None) or [])
     if not _renamed_pairs(mappings):
@@ -658,7 +722,9 @@ __all__ = [
     "legacy_field_verdict",
     "legacy_fields_refusal",
     "legacy_spelling",
+    "dynamodb_fields_present",
     "mongo_fields_present",
+    "redis_fields_present",
     "old_field_spellings",
     "target_name_gates",
 ]

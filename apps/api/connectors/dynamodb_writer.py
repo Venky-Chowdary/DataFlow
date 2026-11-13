@@ -788,7 +788,13 @@ def write_mapped_rows(
         "endpoint_url": endpoint_url,
         "ssl": ssl,
     })
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    # G11: dynamodb stores field / attribute names exactly as mapped.
+    from connectors.destination_naming import writer_identifier
+
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True,
+        identifier=writer_identifier("dynamodb"),
+    )
     live_dest = _kwargs.get("destination_column_types")
 
     # Connect + describe before Map bind — AttributeDefinitions / sample must

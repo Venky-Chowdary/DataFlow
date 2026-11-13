@@ -52,6 +52,17 @@ _NO_CUT = 1 << 20
 
 DOCUMENT_STORES = frozenset({"mongodb"})
 SEARCH_STORES = frozenset({"elasticsearch", "opensearch"})
+#: Key-value / stream / SaaS destinations: a field, attribute or property name
+#: is stored exactly as mapped (SQL rules renamed ``First Name`` to
+#: ``First_Name``, a property Airtable or Notion does not have).
+KEY_VALUE_STORES = frozenset({"dynamodb", "redis"})
+STREAM_SINKS = frozenset({"kafka", "redpanda"})
+SAAS_APPS = frozenset(
+    {"salesforce", "hubspot", "zendesk", "airtable", "notion", "stripe", "shopify"}
+)
+EXACT_NAME_STORES = (
+    DOCUMENT_STORES | SEARCH_STORES | KEY_VALUE_STORES | STREAM_SINKS | SAAS_APPS
+)
 FILE_EXPORTS = frozenset({
     "csv", "tsv", "json", "jsonl", "ndjson", "excel", "xlsx", "xls", "parquet",
     "avro", "orc", "xml", "yaml", "fixed_width", "file", "file_export",
@@ -80,8 +91,7 @@ def dest_kind(dest_type: str | None) -> str:
 
 def keeps_exact_names(dest_type: str | None) -> bool:
     """True for stores whose field names are kept exactly as mapped."""
-    kind = dest_kind(dest_type)
-    return kind in DOCUMENT_STORES or kind in SEARCH_STORES
+    return dest_kind(dest_type) in EXACT_NAME_STORES
 
 
 def name_limit(dest_type: str | None) -> int | None:
@@ -102,7 +112,7 @@ def writer_identifier(
     63) so callers that do not say where they write are unchanged.
     """
     kind = dest_kind(dest_type)
-    if kind in DOCUMENT_STORES or kind in SEARCH_STORES:
+    if kind in EXACT_NAME_STORES:
         return _exact
     keep_case = preserve_case or kind == "bigquery" or kind in FILE_EXPORTS
     if kind in SQL_NAME_LIMITS or kind in SQL_UNLIMITED or kind in FILE_EXPORTS:
@@ -127,7 +137,7 @@ def name_cap(dest_type: str | None) -> int:
     kind = dest_kind(dest_type)
     if kind in SQL_NAME_LIMITS:
         return SQL_NAME_LIMITS[kind]
-    if kind in SQL_UNLIMITED or kind in FILE_EXPORTS or keeps_exact_names(kind):
+    if kind in SQL_UNLIMITED or kind in FILE_EXPORTS or kind in EXACT_NAME_STORES:
         return _NO_CUT
     return 63
 
@@ -288,6 +298,10 @@ def target_name_gate(dest_type: str | None, mappings: Iterable[Any] | None) -> d
 
 __all__ = [
     "DOCUMENT_STORES",
+    "EXACT_NAME_STORES",
+    "KEY_VALUE_STORES",
+    "SAAS_APPS",
+    "STREAM_SINKS",
     "FILE_EXPORTS",
     "SEARCH_STORES",
     "SQL_NAME_LIMITS",
