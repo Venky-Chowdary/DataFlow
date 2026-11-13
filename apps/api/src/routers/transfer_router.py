@@ -8,7 +8,7 @@ import logging
 from services.threadpool_handler import off_event_loop
 from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
-from services.plan_store_offload import run_plan_write
+from services.plan_store_offload import compute_then_commit, run_plan_write
 from services.safe_errors import safe_http_exception
 from services.shape_preflight import ShapePreflightRefused
 from services.upload_limits import PayloadTooLarge, read_upload
@@ -922,7 +922,9 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
     from services.transfer_plan_store import PlanVersionConflict
 
     try:
-        return await asyncio.to_thread(
+        # The pipeline on the default executor; its plan write (which can wait
+        # on the store lock) on the plan-write pool.
+        return await compute_then_commit(
             run_plan_mapping,
             plan_id,
             validation_mode=body.validation_mode,
@@ -1018,7 +1020,9 @@ async def preflight_transfer_plan(
     try:
         # Even the sync path leaves the event loop — /health must answer while
         # a warehouse probe or file walk runs.
-        return await asyncio.to_thread(
+        # The gates on the default executor; the run record (and the
+        # acknowledgments) wait for the store lock on the plan-write pool.
+        return await compute_then_commit(
             run_plan_preflight,
             plan_id,
             acknowledgments=ack,

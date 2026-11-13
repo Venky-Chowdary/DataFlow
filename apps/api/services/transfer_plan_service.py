@@ -55,7 +55,21 @@ def run_plan_mapping(
     validation_mode: str = "balanced",
     use_llm: bool = True,
     source_samples: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
+    deferred: bool | None = None,
+) -> Any:
+    """Run the mapping pipeline for a plan and store its result as a revision.
+
+    ``deferred=True`` runs the pipeline only and returns ``commit()``, the
+    plan write (which can wait on the store lock) for the caller to run
+    elsewhere — the API runs the pipeline on the default executor and the
+    commit on the plan-write pool (``plan_store_offload.compute_then_commit``,
+    which asks for it with ``deferred=None``). Otherwise the result is
+    committed here.
+    """
+    if deferred is None:
+        from services.plan_store_offload import take_plan_write_deferral
+
+        deferred = take_plan_write_deferral()
     from services.mapping_pipeline import run_mapping_pipeline
     from services.value_serializer import evidence_text
 
@@ -123,27 +137,31 @@ def run_plan_mapping(
         schema_policy=str(policies.get("schema_policy", "manual_review")),
         table_exists=table_exists,
     )
-    # Appended only onto the plan state Map read: a UI save, approval or revert
-    # made while the pipeline ran stays as it is and the caller gets
-    # PlanVersionConflict (409).
-    updated = add_mapping_revision(
-        plan_id, result, base_version=plan.head_version(), base_selection=plan.selection()
-    )
-    append_audit_event(
-        action="transfer_plan.mapped",
-        resource=f"plan/{plan_id}",
-        details={
+
+    def commit() -> dict[str, Any]:
+        # Appended only onto the plan state Map read: a UI save, approval or
+        # revert made while the pipeline ran stays as it is and the caller
+        # gets PlanVersionConflict (409).
+        updated = add_mapping_revision(
+            plan_id, result, base_version=plan.head_version(), base_selection=plan.selection()
+        )
+        append_audit_event(
+            action="transfer_plan.mapped",
+            resource=f"plan/{plan_id}",
+            details={
+                "version": updated.active_version if updated else None,
+                "mapped_count": len(result.get("mappings") or []),
+                "validation_passed": result.get("validation", {}).get("passed"),
+            },
+        )
+        return {
+            "plan_id": plan_id,
             "version": updated.active_version if updated else None,
-            "mapped_count": len(result.get("mappings") or []),
-            "validation_passed": result.get("validation", {}).get("passed"),
-        },
-    )
-    return {
-        "plan_id": plan_id,
-        "version": updated.active_version if updated else None,
-        "mapping_hash": (updated.active_revision().mapping_hash if updated and updated.active_revision() else ""),
-        **result,
-    }
+            "mapping_hash": (updated.active_revision().mapping_hash if updated and updated.active_revision() else ""),
+            **result,
+        }
+
+    return commit if deferred else commit()
 
 
 def patch_plan(plan_id: str, data: dict[str, Any]) -> TransferPlanRecord:
@@ -204,8 +222,15 @@ def run_plan_preflight(
     *,
     acknowledgments: Acknowledgments | None = None,
     shape_recipe: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    deferred: bool | None = None,
+) -> Any:
     """Run preflight for a persisted plan, honouring operator acknowledgments.
+
+    ``deferred=True`` runs the gates only and returns ``commit()``: the plan
+    writes (the acknowledgments, then the run record), which can wait on the
+    store lock, for the caller to run on the plan-write pool. The gates see the
+    acknowledgments in memory either way. ``deferred=None`` asks
+    ``plan_store_offload.compute_then_commit`` (the API route).
 
     ``acknowledgments`` is what the operator just attested on Validate. It is
     recorded on the plan (stamped with the mapping revision it was granted for)
@@ -217,6 +242,10 @@ def run_plan_preflight(
     values — a control character, an unrounded decimal — that the writer never
     sees. Raises :class:`ShapePreflightRefused` when the recipe cannot run.
     """
+    if deferred is None:
+        from services.plan_store_offload import take_plan_write_deferral
+
+        deferred = take_plan_write_deferral()
     try:
         from services.plan_preflight_job import report_plan_preflight_progress
 
@@ -278,20 +307,25 @@ def run_plan_preflight(
         live_target_schema = {}
 
     ack = acknowledgments or Acknowledgments()
+    writes: list[Any] = []
     if ack.any_claimed:
-        updated = update_plan(
-            plan_id,
-            {"policies": ack.as_policies(mapping_version=plan.active_version)},
-        )
-        plan = updated or plan
-        audit_acknowledgments(
-            ack,
-            resource=f"plan/{plan_id}",
-            details={
-                "mapping_version": plan.active_version,
-                "destination_table": dest.get("table") or dest.get("collection") or "",
-            },
-        )
+        ack_policies = ack.as_policies(mapping_version=plan.active_version)
+        ack_details = {
+            "mapping_version": plan.active_version,
+            "destination_table": dest.get("table") or dest.get("collection") or "",
+        }
+
+        def record_acknowledgments() -> Any:
+            updated = update_plan(plan_id, {"policies": ack_policies})
+            audit_acknowledgments(ack, resource=f"plan/{plan_id}", details=ack_details)
+            return updated
+
+        if deferred:
+            # The same merge update_plan makes, so the gates below see it now.
+            plan.policies = {**plan.policies, **ack_policies}
+            writes.append(record_acknowledgments)
+        else:
+            plan = record_acknowledgments() or plan
     else:
         ack = acknowledgments_from_policies(
             plan.policies, mapping_version=plan.active_version
@@ -594,24 +628,30 @@ def run_plan_preflight(
     # Execute is unlocked against, so it travels back with the result instead of
     # leaving the caller to infer a run that has no identity.
     pf["run_id"] = str(pf.get("run_id") or f"pf_{uuid.uuid4().hex[:12]}")
-    # Recorded against the revision this run checked, not whatever is active
-    # by the time it finishes (a UI save may have landed meanwhile).
-    add_preflight_run(plan_id, pf, mapping_version=rev.version, mapping_hash=rev.mapping_hash)
-    drift = pf.get("schema_drift") or {}
-    append_audit_event(
-        action="transfer_plan.preflight",
-        resource=f"plan/{plan_id}",
-        level="success" if pf.get("passed") else "warn",
-        details={
-            "passed": pf.get("passed"),
-            "readiness_score": pf.get("readiness_score"),
-            "run_id": pf["run_id"],
-            "mapping_version": rev.version,
-            "mapping_hash": rev.mapping_hash,
-            "drift_detected": drift.get("drift_detected"),
-        },
-    )
-    return {"plan_id": plan_id, "mapping_version": rev.version, **pf}
+
+    def commit() -> dict[str, Any]:
+        for write in writes:
+            write()
+        # Recorded against the revision this run checked, not whatever is active
+        # by the time it finishes (a UI save may have landed meanwhile).
+        add_preflight_run(plan_id, pf, mapping_version=rev.version, mapping_hash=rev.mapping_hash)
+        drift = pf.get("schema_drift") or {}
+        append_audit_event(
+            action="transfer_plan.preflight",
+            resource=f"plan/{plan_id}",
+            level="success" if pf.get("passed") else "warn",
+            details={
+                "passed": pf.get("passed"),
+                "readiness_score": pf.get("readiness_score"),
+                "run_id": pf["run_id"],
+                "mapping_version": rev.version,
+                "mapping_hash": rev.mapping_hash,
+                "drift_detected": drift.get("drift_detected"),
+            },
+        )
+        return {"plan_id": plan_id, "mapping_version": rev.version, **pf}
+
+    return commit if deferred else commit()
 
 
 def build_run_payload(plan_id: str) -> dict[str, Any]:

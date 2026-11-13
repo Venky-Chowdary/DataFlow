@@ -445,3 +445,81 @@ def test_plan_writes_waiting_on_the_lock_do_not_starve_reads_or_the_shared_threa
     assert shared_seconds < 1.0, f"the shared thread pool was starved for {shared_seconds:.2f}s"
     assert health_seconds < 1.0
     assert statuses == [200] * 8, statuses
+
+
+def test_map_and_validate_final_writes_wait_for_the_lock_on_the_plan_pool(plan_store, monkeypatch):
+    """Map's and sync Validate's long work runs on the default executor; their final
+    plan write waits for a held lock on the plan-write pool, not on a shared thread."""
+    import concurrent.futures
+    import fcntl
+    from unittest.mock import patch
+
+    from services import transfer_plan_store as plans
+    from services.route_table_warmup import warm_route_table
+    from src.main import app
+
+    monkeypatch.setattr(plans, "LOCK_TIMEOUT_SECONDS", 20.0)
+    plan = plans.create_plan(
+        {
+            "name": "pool",
+            "source": {"kind": "file", "format": "csv"},
+            "destination": {"kind": "database", "format": "postgresql", "table": "people"},
+            "source_columns": ["id"],
+            "source_schema": {"id": "INTEGER"},
+            "target_columns": ["id"],
+            "target_schema": {"id": "INTEGER"},
+            "sample_rows": [{"id": 1}],
+        }
+    )
+    plans.sync_ui_mappings(plan.id, [{"source": "id", "target": "id", "confidence": 1.0}])
+    lock_path = plans.STORE_PATH.with_name(plans.STORE_PATH.name + ".lock")
+    mapped = {"mappings": [{"source": "id", "target": "id", "confidence": 1.0}], "validation": {"passed": True, "issues": []}}
+    engines = (
+        lambda pf, *_a, **_k: pf,
+        lambda mode: 0.85,
+        lambda **_k: {"connected": True, "table_exists": True, "can_create_table": True,
+                      "db_type": "postgresql", "column_types": {"id": "INTEGER"}, "message": "ok"},
+        lambda **_k: {"passed": True, "passed_count": 1, "total_gates": 1, "gates": [], "blockers": []},
+        lambda **_k: [],
+    )
+
+    async def scenario():
+        asyncio.get_running_loop().set_default_executor(
+            concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="test-default")
+        )
+        await asyncio.to_thread(warm_route_table, app)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1", timeout=60) as client:
+            await client.get("/api/v1/transfer/plans")
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)  # "another process" holds the plan store
+                base = f"/api/v1/transfer/plans/{plan.id}"
+                writers = asyncio.gather(
+                    *[client.post(f"{base}/map", json={"use_llm": False}) for _ in range(3)],
+                    *[client.post(f"{base}/preflight", json={}) for _ in range(3)],
+                )
+                await asyncio.sleep(0.5)  # their compute is done; the final writes are parked
+                started = time.perf_counter()
+                listed = await client.get("/api/v1/transfer/plans")
+                read_seconds = time.perf_counter() - started
+                started = time.perf_counter()
+                await asyncio.wait_for(asyncio.to_thread(lambda: None), timeout=10)
+                shared_seconds = time.perf_counter() - started
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            responses = await writers
+        return listed.status_code, read_seconds, shared_seconds, [(r.request.url.path, r.status_code) for r in responses]
+
+    with patch("services.mapping_pipeline.run_mapping_pipeline", return_value=mapped), patch(
+        "services.transfer_plan_service._preflight", return_value=engines
+    ), patch("src.transfer.adapters.read_source_database", side_effect=Exception("skip")):
+        listed, read_seconds, shared_seconds, statuses = asyncio.run(scenario())
+    assert listed == 200
+    assert read_seconds < 1.0, f"GET /plans waited {read_seconds:.2f}s behind parked Map/Validate writes"
+    assert shared_seconds < 1.0, f"the shared thread pool was starved for {shared_seconds:.2f}s"
+    # Map and Validate ran against the same head, so only one Map may append;
+    # the others answer 409 (the plan changed while they ran) — none fails.
+    assert all(code in (200, 409) for _path, code in statuses), statuses
+    assert sum(1 for path, code in statuses if path.endswith("/preflight") and code == 200) == 3

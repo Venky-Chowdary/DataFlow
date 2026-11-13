@@ -21,6 +21,11 @@ from typing import Any, TypeVar
 
 T = TypeVar("T")
 
+#: Set only inside the worker thread of :func:`compute_then_commit`.
+_DEFER_PLAN_WRITES: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "defer_plan_writes", default=False
+)
+
 #: Plan writes serialize on one store lock, so more threads would only wait.
 PLAN_WRITE_WORKERS = 4
 
@@ -38,3 +43,36 @@ async def run_plan_write(fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> 
     """
     call = functools.partial(contextvars.copy_context().run, fn, *args, **kwargs)
     return await asyncio.get_running_loop().run_in_executor(_pool(), call)
+
+
+def take_plan_write_deferral() -> bool:
+    """Whether the caller asked this service call to return its plan writes.
+
+    Read once at the top of a service function that supports it (Map, sync
+    Validate): it returns ``commit()`` instead of writing. Cleared on read, so
+    a nested service call in the same thread writes normally.
+    """
+    deferred = _DEFER_PLAN_WRITES.get()
+    if deferred:
+        _DEFER_PLAN_WRITES.set(False)
+    return deferred
+
+
+def _deferring(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    _DEFER_PLAN_WRITES.set(True)  # this worker's own copy of the context
+    return fn(*args, **kwargs)
+
+
+async def compute_then_commit(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run a long plan operation's compute on the default executor, its write on the plan pool.
+
+    ``fn`` runs via ``asyncio.to_thread`` with plan writes deferred: a service
+    that supports deferral returns ``commit()`` (its plan writes, which can
+    wait on the store lock), which then runs on the plan-write pool. A
+    function that returns a plain result (e.g. a test double) is passed
+    through.
+    """
+    outcome = await asyncio.to_thread(_deferring, fn, *args, **kwargs)
+    if callable(outcome):
+        return await run_plan_write(outcome)
+    return outcome
