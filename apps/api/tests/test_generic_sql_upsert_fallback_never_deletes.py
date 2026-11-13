@@ -179,3 +179,26 @@ def test_sqlite_lattice_probe_reports_only_a_real_deleted_column(tmp_path):
             assert _has_column(conn, '"ws_aux"."ws_plain"', "_deleted") is False
     finally:
         engine.dispose()
+
+
+def test_fallback_warning_log_carries_no_row_values(caplog):
+    """Review L2: SQLAlchemy errors print ``[parameters: …]`` — row values.
+
+    WARNING gets the exception type and first line; the full text is DEBUG only.
+    """
+    import logging
+
+    from connectors.upsert_fallback import note_native_upsert_failed
+
+    exc = sa.exc.OperationalError(
+        "MERGE INTO t USING s ON t.k = s.k", {"k": "ws-secret-cell"}, Exception("no unique index")
+    )
+    table = sa.Table("ws_logged", sa.MetaData(), sa.Column("k", sa.Text))
+    with caplog.at_level(logging.DEBUG, logger="connectors.upsert_fallback"):
+        note_native_upsert_failed(table, "mssql", exc)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert warnings and all("ws-secret-cell" not in m and "[parameters" not in m for m in warnings)
+    assert any("OperationalError" in m and "no unique index" in m for m in warnings), warnings
+    assert any("ws-secret-cell" in m for m in debug), debug
+    assert "ws-secret-cell" not in " ".join(upsert_fallback_warnings(table))

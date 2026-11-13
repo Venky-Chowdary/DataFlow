@@ -24,18 +24,27 @@ def note_native_upsert_failed(table_obj: Any, dialect_name: str, exc: BaseExcept
     """Record (once per table write) that native upsert failed on this table."""
     info = getattr(table_obj, "info", None)
     name = getattr(table_obj, "name", "table")
+    # SQLAlchemy errors carry ``[SQL: …]`` and ``[parameters: …]`` (row values)
+    # after the first line: WARNING gets the type and first line only.
+    reason = _first_line(exc)
     logger.warning(
-        "native %s upsert unavailable on %s; using UPDATE-then-INSERT: %s",
-        dialect_name, name, exc,
+        "native %s upsert unavailable on %s; using UPDATE-then-INSERT (%s: %s)",
+        dialect_name, name, type(exc).__name__, reason,
     )
+    logger.debug("native %s upsert failure on %s: %s", dialect_name, name, exc, exc_info=exc)
     if isinstance(info, dict) and _INFO_KEY not in info:
-        reason = str(exc).strip().splitlines()[0][:200] if str(exc).strip() else type(exc).__name__
         info[_INFO_KEY] = (
             f"Native {dialect_name} upsert (MERGE) was not available on {name} "
             f"({reason}); rows were written with UPDATE of matched keys then "
             "INSERT of new keys. Add a unique index on the key for a native, "
             "atomic upsert."
         )
+
+
+def _first_line(exc: BaseException) -> str:
+    orig = getattr(exc, "orig", None)  # the DB-API error, without SQL / parameters
+    text = str(orig if orig is not None else exc).strip()
+    return text.splitlines()[0][:200] if text else type(exc).__name__
 
 
 def upsert_fallback_warnings(table_obj: Any) -> list[str]:
