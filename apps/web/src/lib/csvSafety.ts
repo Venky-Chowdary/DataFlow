@@ -62,6 +62,11 @@ export interface DelimitedOptions {
   delimiter?: string;
   /** Quote every cell (the quarantine report's layout). */
   quoteAll?: boolean;
+  /**
+   * TSV NULL marker (`\N`, G7-F3): null/undefined is written as the marker, `''`
+   * as an empty cell, and a text equal to the marker is quoted (read back as text).
+   */
+  nullMarker?: string;
 }
 
 /**
@@ -71,8 +76,10 @@ export interface DelimitedOptions {
  */
 export function delimitedCell(value: unknown, options: DelimitedOptions = {}): string {
   const delimiter = options.delimiter ?? ",";
+  if (options.nullMarker && (value === null || value === undefined)) return options.nullMarker;
   const text = options.formulaProtection ? neutralizeExportCell(value) : cellText(value);
-  const needsQuotes = options.quoteAll || text.includes(delimiter) || /["\r\n]/.test(text);
+  const needsQuotes = options.quoteAll || text.includes(delimiter) || /["\r\n]/.test(text)
+    || (Boolean(options.nullMarker) && text === options.nullMarker);
   return needsQuotes ? `"${text.replace(/"/g, '""')}"` : text;
 }
 

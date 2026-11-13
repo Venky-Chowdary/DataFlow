@@ -1,5 +1,5 @@
 import { toDelimitedText } from "./csvSafety";
-import { FILE_EXPORT_FORMULA_PROTECTION_DEFAULT } from "./fileExportDestination";
+import { FILE_EXPORT_FORMULA_PROTECTION_DEFAULT, TSV_NULL_TEXT, type TsvNull } from "./fileExportDestination";
 import type { EditableMapping } from "./mapping";
 import { applyLocalTransform, requiresServerPreview } from "./localTransform";
 import type { NumberLocale } from "./numberLocale";
@@ -28,6 +28,8 @@ export interface SerializeOptions {
    * file_export writes it.
    */
   formulaProtection?: boolean;
+  /** TSV NULL marker (`\N`, G7-F3) — the destination's tsv_null; unset writes NULL as an empty cell. */
+  tsvNull?: TsvNull;
 }
 
 export function serializeRows(
@@ -51,7 +53,8 @@ export function serializeRows(
   const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
   // RFC 4180 for any delimiter (a CR, LF, quote or the delimiter is quoted) and, when
   // the destination opts in, the same formula guard the API applies.
-  const text = toDelimitedText(headers, rows, { delimiter, formulaProtection: options.formulaProtection });
+  const nullMarker = fmt === "tsv" && options.tsvNull === TSV_NULL_TEXT ? TSV_NULL_TEXT : undefined;
+  const text = toDelimitedText(headers, rows, { delimiter, formulaProtection: options.formulaProtection, nullMarker });
   const mime = fmt === "tsv" ? "text/tab-separated-values" : "text/csv";
   return { blob: new Blob([text], { type: mime }), mime, ext: fmt === "tsv" ? "tsv" : "csv" };
 }
@@ -68,6 +71,8 @@ export interface LocalFileExportInput {
    * Unset follows a new Studio job's default (on), as the server run would.
    */
   formulaProtection?: boolean;
+  /** The destination's TSV NULL marker. */
+  tsvNull?: TsvNull;
 }
 
 /** Export mapped rows in the browser when the transfer API is offline. */
@@ -84,6 +89,7 @@ export function runLocalFileExport(input: LocalFileExportInput): TransferResult 
   const mapped = input.rows.map((row) => mapRow(row, input.mappings, input.numberLocale));
   const { blob, ext } = serializeRows(mapped, input.format, {
     formulaProtection: input.formulaProtection ?? FILE_EXPORT_FORMULA_PROTECTION_DEFAULT,
+    tsvNull: input.tsvNull,
   });
   const base = (input.outputBasename || input.sourceFilename.replace(/\.[^/.]+$/, "") || "export").replace(/[^\w.-]+/g, "_");
   const filename = `${base}.${ext}`;

@@ -14,7 +14,12 @@ import {
   type QueryResult,
 } from "../lib/api";
 import { formulaGuardApplies } from "../lib/csvSafety";
-import { QUERY_EXPORT_FORMULA_PROTECTION_HELP } from "../lib/fileExportDestination";
+import {
+  QUERY_EXPORT_FORMULA_PROTECTION_HELP,
+  TSV_NULL_DEFAULT,
+  type TsvNull,
+} from "../lib/fileExportDestination";
+import { TsvNullMarkerField } from "../components/transfer/TsvNullMarkerField";
 import {
   firstExpanded,
   mergeExpandedObject,
@@ -107,6 +112,8 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
   const [exportFormat, setExportFormat] = useState("csv");
   // G7-F2: "Protect against spreadsheet formulas" — on by default, as the API.
   const [formulaProtection, setFormulaProtection] = useState(true);
+  // G7-F3: TSV NULL marker — "Empty cell" (default) or \N.
+  const [tsvNull, setTsvNull] = useState<TsvNull>(TSV_NULL_DEFAULT);
   const [outputPath, setOutputPath] = useState("");
   const [destConnectorId, setDestConnectorId] = useState("");
   const [destTarget, setDestTarget] = useState("");
@@ -399,6 +406,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
         full_population: !destConnectorId,
         format: exportFormat,
         formula_protection: formulaProtection ? "prefix" : "off",
+        tsv_null: exportFormat === "tsv" ? tsvNull : TSV_NULL_DEFAULT,
         output_path: outputPath,
         destination_connector_id: destConnectorId || undefined,
         destination: destTarget || undefined,
@@ -805,6 +813,15 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                             <small id="query-export-formula-hint">{QUERY_EXPORT_FORMULA_PROTECTION_HELP}</small>
                           </span>
                         </label>
+                      )}
+                      {exportFormat === "tsv" && (
+                        <TsvNullMarkerField
+                          id="query-export-tsv-null"
+                          value={tsvNull}
+                          onChange={setTsvNull}
+                          className="df2-field df2-qw-export-tsv-null"
+                          compact
+                        />
                       )}
                     </>
                   )}

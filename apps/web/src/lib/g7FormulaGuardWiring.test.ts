@@ -45,10 +45,10 @@ describe("export dialogs offer 'Protect against spreadsheet formulas'", () => {
   it("Studio file_export: the option rides the run, plan, route analysis, contract and offline export", () => {
     const page = src("pages/TransferPage.tsx");
     assert.match(page, /Protect against spreadsheet formulas/);
-    assert.match(page, /fileExportDestExtra\(\{ format: exportFormat, formulaProtection: exportFormulaProtection \}\)/);
+    assert.match(page, /fileExportDestExtra\(\{ format: exportFormat, formulaProtection: exportFormulaProtection,/);
     assert.equal((page.match(/fileExportEndpoint\(\{/g) || []).length, 3);
     assert.doesNotMatch(page, /\{ kind: "file_export", format: exportFormat, database: targetDb/);
-    assert.match(page, /formulaProtection: exportFormulaProtection,\n\s*\}\);/);
+    assert.match(page, /formulaProtection: exportFormulaProtection,\n\s*tsvNull: tsvNullMarker,\n\s*\}\);/);
     assert.match(page, /setExportFormulaProtection\(dst\.formulaProtection\)/);
     // New job: on; reset (New transfer): back to on; reopened job: what it stored.
     assert.match(page, /useState\(FILE_EXPORT_FORMULA_PROTECTION_DEFAULT\)/);

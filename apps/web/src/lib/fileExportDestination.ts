@@ -25,14 +25,63 @@ export const QUERY_EXPORT_FORMULA_PROTECTION_HELP =
   + "reversible (drop the leading ' to get the exact value). Numbers such as -2 are untouched. "
   + "Turn off for exact values.";
 
+// ── TSV NULL marker (G7-F3) ────────────────────────────────────────────────
+
+/** `tsv_null`: "empty" (default — SQL NULL is an empty cell) or `\N` (MySQL/PostgreSQL text format). */
+export type TsvNull = "empty" | "\\N";
+export const TSV_NULL_TEXT: TsvNull = "\\N";
+export const TSV_NULL_DEFAULT: TsvNull = "empty";
+export const TSV_NULL_CHOICES: ReadonlyArray<{ value: TsvNull; label: string }> = [
+  { value: "empty", label: "Empty cell — default" },
+  { value: "\\N", label: "\\N" },
+];
+export const TSV_NULL_HELP =
+  "Empty cell: NULL and an empty string are both written as an empty cell. \\N: NULL is written as \\N "
+  + "(MySQL/PostgreSQL text format) and an empty string stays an empty cell, so the two read back apart.";
+
+/** Object-store / file-server destinations whose file format follows the object name. */
+const OBJECT_FILE_DESTS = new Set([
+  "s3", "gcs", "adls", "azure_blob", "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
+  "minio", "r2", "sftp",
+]);
+
+/** Whether a destination writes a TSV file, so the NULL marker choice applies. */
+export function tsvNullApplies(
+  dest: { kind: "file_export"; format: string } | { kind: "database"; type: string; objectName: string },
+): boolean {
+  if (dest.kind === "file_export") return String(dest.format).trim().toLowerCase() === "tsv";
+  return OBJECT_FILE_DESTS.has(String(dest.type).trim().toLowerCase())
+    && /\.tsv$/i.test(String(dest.objectName).trim());
+}
+
+/** The NULL marker a saved destination was written with (absent = the default). */
+export function destTsvNull(destination: { extra?: unknown; tsv_null?: unknown }): TsvNull {
+  const extra = (destination.extra ?? {}) as Record<string, unknown>;
+  return String(extra.tsv_null ?? destination.tsv_null ?? "").trim() === TSV_NULL_TEXT ? TSV_NULL_TEXT : TSV_NULL_DEFAULT;
+}
+
+/** `{ tsv_null: "\\N" }` for an object-store TSV destination that asks for it, else `{}`. */
+export function objectStoreDestExtra(dest: { type: string; objectName: string; tsvNull: TsvNull }): Record<string, unknown> {
+  return dest.tsvNull === TSV_NULL_TEXT && tsvNullApplies({ kind: "database", type: dest.type, objectName: dest.objectName })
+    ? { tsv_null: TSV_NULL_TEXT }
+    : {};
+}
+
 export interface FileExportOptions {
   format: string;
   formulaProtection: boolean;
+  /** TSV only; the default writes NULL as an empty cell. */
+  tsvNull?: TsvNull;
 }
 
 /** The writer options (`extra`) a file_export destination carries; `{}` when none apply. */
 export function fileExportDestExtra(options: FileExportOptions): Record<string, unknown> {
-  return options.formulaProtection && formulaGuardApplies(options.format) ? { formula_protection: "prefix" } : {};
+  return {
+    ...(options.formulaProtection && formulaGuardApplies(options.format) ? { formula_protection: "prefix" } : {}),
+    ...(options.tsvNull === TSV_NULL_TEXT && tsvNullApplies({ kind: "file_export", format: options.format })
+      ? { tsv_null: TSV_NULL_TEXT }
+      : {}),
+  };
 }
 
 /** The file_export destination endpoint for plans, route analysis and contracts. */

@@ -4597,6 +4597,8 @@ export async function exportQuery(
      * header names a spreadsheet would run as a formula; "off" writes exact values.
      */
     formula_protection?: "prefix" | "off";
+    /** TSV file export NULL marker (G7-F3): "empty" (default) or "\\N". Refused for other formats. */
+    tsv_null?: "empty" | "\\N";
   },
 ): Promise<QueryExportResult> {
   const res = await apiFetch(`${API_BASE}/query/export`, {

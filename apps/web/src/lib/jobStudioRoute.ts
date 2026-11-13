@@ -8,7 +8,7 @@
  * type + host + port + database instead.
  */
 import type { Connector } from "./types";
-import { fileExportFormulaProtection } from "./fileExportDestination";
+import { destTsvNull, fileExportFormulaProtection, type TsvNull } from "./fileExportDestination";
 
 type Endpoint = Record<string, unknown>;
 
@@ -26,6 +26,8 @@ export type JobRouteDestination =
     database: string;
     /** The destination wrote CSV/TSV with formula_protection "prefix" (G7-F2). */
     formulaProtection: boolean;
+    /** The TSV NULL marker it was written with (G7-F3). */
+    tsvNull: TsvNull;
   }
   | {
     kind: "database";
@@ -36,6 +38,8 @@ export type JobRouteDestination =
     table: string;
     /** No saved connector and no replayable connection: the operator must pick one. */
     missingLabel: string;
+    /** An object-store TSV's NULL marker (G7-F3). */
+    tsvNull: TsvNull;
   };
 
 export interface JobStudioRoutePlan {
@@ -169,6 +173,7 @@ export function planJobStudioRoute(job: unknown, connectors: readonly Connector[
       outputPath: text(dst.output_path),
       database: text(dst.database),
       formulaProtection: fileExportFormulaProtection(dst),
+      tsvNull: destTsvNull(dst),
     };
   } else {
     const { connector, ambiguous } = matchSavedConnector(dst, connectors);
@@ -184,6 +189,7 @@ export function planJobStudioRoute(job: unknown, connectors: readonly Connector[
       missingLabel: connector || replayable
         ? ""
         : `${addressLabel(dst)}${ambiguous ? " (several saved connectors match)" : ""}`,
+      tsvNull: destTsvNull(dst),
     };
   }
 
