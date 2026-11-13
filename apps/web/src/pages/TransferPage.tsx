@@ -17,6 +17,8 @@ import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { MAPPING_TIMEOUT_MS, mappingErrorSummary, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
 import { countGateStatuses } from "../lib/preflightGates";
 import { PermissionNotice } from "../components/PermissionNotice";
+import { PlanChangedNotice } from "../components/transfer/PlanChangedNotice";
+import { headVersion, isPlanVersionConflict } from "../lib/planConcurrency";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
 import {
@@ -71,6 +73,7 @@ import {
   createSchedule,
   updateSchedule,
   createTransferPlan,
+  getTransferPlan,
   fetchJob,
   fetchSchedule,
   fetchTransferCapabilities,
@@ -543,6 +546,15 @@ export function TransferPage({
   const [exportFormat, setExportFormat] = useState("json");
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
   const [persistedPlanId, setPersistedPlanId] = useState<string | null>(null);
+  // The newest revision version of the persisted plan as this page last saw
+  // it: sent as base_version so a save never lands on a newer revision the
+  // user has not seen (the API answers 409 instead).
+  const planHeadRef = useRef<number | null>(null);
+  const [planConflictId, setPlanConflictId] = useState<string | null>(null);
+  const [planReloading, setPlanReloading] = useState(false);
+  useEffect(() => {
+    if (!persistedPlanId) planHeadRef.current = null;
+  }, [persistedPlanId]);
   const [planLoading, setPlanLoading] = useState(false);
   const [targetDb, setTargetDb] = useState("");
   const [targetCollection, setTargetCollection] = useState("");
@@ -1651,6 +1663,7 @@ export function TransferPage({
         return persistedPlanId;
       }
       const { plan } = await createTransferPlan(payload);
+      planHeadRef.current = headVersion(plan as { revisions?: Array<{ version?: number }> });
       setPersistedPlanId(plan.id);
       return plan.id;
     } catch (e) {
@@ -1846,6 +1859,8 @@ export function TransferPage({
               use_llm: true,
               source_samples: buildSourceSamples(),
             });
+            const mappedVersion = (result as { version?: unknown }).version;
+            if (typeof mappedVersion === "number") planHeadRef.current = mappedVersion;
           } else {
             result = await mapTransferColumns({
               source_columns: mapSourceCols,
@@ -1918,6 +1933,12 @@ export function TransferPage({
           (result as { mapping_proof?: import("../components/MappingProofDrawer").MappingProof }).mapping_proof ?? null,
         );
       } catch (e) {
+        if (isPlanVersionConflict(e)) {
+          // Map's result was not stored: the plan changed while it ran. Keep
+          // what is on screen; the notice offers a reload.
+          setPlanConflictId(persistedPlanId);
+          return columnMappingsRef.current;
+        }
         console.error("Mapping pipeline failed:", e);
         let fallback = reapplySeededTargets(
           buildMappingsFromSource(analysisCols, mapTargetCols),
@@ -5333,7 +5354,8 @@ export function TransferPage({
       const planId = await ensurePersistedPlan(activeValidation);
       if (planId) {
         try {
-          await syncTransferPlanMappings(planId, mappings);
+          const synced = await syncTransferPlanMappings(planId, mappings, { baseVersion: planHeadRef.current });
+          planHeadRef.current = headVersion(synced?.plan);
           // The plan transport must carry the attestation — a body-less call
           // cannot clear a PII/drift/FK gate, and Execute would stay locked.
           const pf = await preflightTransferPlan(
@@ -5377,6 +5399,12 @@ export function TransferPage({
           }
           return;
         } catch (planErr) {
+          if (isPlanVersionConflict(planErr)) {
+            // Not saved, not validated: someone else saved this plan since it
+            // was loaded. The edits stay on screen for a reload + re-apply.
+            setPlanConflictId(planId);
+            return;
+          }
           if (!(sourceKind === "file" && destKindMode === "file_export" && parsed)) {
             throw planErr;
           }
@@ -5984,17 +6012,23 @@ export function TransferPage({
       let runPlanId = persistedPlanId ?? undefined;
       if (runPlanId && transferMappings?.length) {
         try {
-          await syncTransferPlanMappings(runPlanId, transferMappings);
-        } catch {
-          // If sync fails, still send mappings_json; backend merge_plan_into_run recovers.
+          const synced = await syncTransferPlanMappings(runPlanId, transferMappings, { baseVersion: planHeadRef.current });
+          planHeadRef.current = headVersion(synced?.plan);
+        } catch (syncErr) {
+          // Someone saved this plan since it was loaded: never run a version the
+          // user has not seen. Otherwise still send mappings_json; the backend's
+          // merge_plan_into_run recovers.
+          if (isPlanVersionConflict(syncErr)) throw syncErr;
         }
       } else if (!runPlanId && transferMappings?.length) {
         const created = await ensurePersistedPlan();
         if (created) {
           try {
-            await syncTransferPlanMappings(created, transferMappings);
+            const synced = await syncTransferPlanMappings(created, transferMappings, { baseVersion: planHeadRef.current });
+            planHeadRef.current = headVersion(synced?.plan);
             runPlanId = created;
-          } catch {
+          } catch (syncErr) {
+            if (isPlanVersionConflict(syncErr)) throw syncErr;
             runPlanId = created;
           }
         }
@@ -6238,6 +6272,13 @@ export function TransferPage({
       setStep(STEP_RUN);
       if (data.success) onTransferComplete();
     } catch (transferErr) {
+      if (isPlanVersionConflict(transferErr)) {
+        // The plan changed since this page loaded it: nothing ran. The edits
+        // stay on screen; the notice offers a reload before running again.
+        setPlanConflictId(persistedPlanId);
+        setTransferring(false);
+        return;
+      }
       if (
         sourceKind === "file"
         && destKindMode === "file_export"
@@ -6269,6 +6310,30 @@ export function TransferPage({
       }
     }
     setTransferring(false);
+  };
+
+  const reloadConflictedPlan = async () => {
+    const planId = planConflictId;
+    if (!planId) return;
+    setPlanReloading(true);
+    try {
+      const { plan } = await getTransferPlan(planId);
+      planHeadRef.current = headVersion(plan);
+      setPlanConflictId(null);
+      toast({
+        title: "Plan reloaded",
+        message: `Now at mapping revision ${planHeadRef.current}. Your edits are still on screen — review them and Validate to save them on top of the latest version.`,
+        tone: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Could not reload the plan",
+        message: err instanceof Error ? err.message : "Try again in a moment.",
+        tone: "error",
+      });
+    } finally {
+      setPlanReloading(false);
+    }
   };
 
   const openJobTheater = () => {
@@ -7196,6 +7261,13 @@ export function TransferPage({
         reason={jobRun.reason}
         what="You can plan a transfer but not run one."
       />
+      {planConflictId && (
+        <PlanChangedNotice
+          reloading={planReloading}
+          onReload={() => void reloadConflictedPlan()}
+          onDismiss={() => setPlanConflictId(null)}
+        />
+      )}
       <header className="df2-transfer-studio-chrome">
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps
