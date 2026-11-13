@@ -186,6 +186,14 @@ def _write_batch(
         set_match_action,
     )
 
+    from services.duplicate_policy import enforce_dedupe_skip_destination
+
+    enforce_dedupe_skip_destination(
+        str((getattr(dest, "extra", None) or {}).get("duplicate_policy") or ""), dest_type,
+        connection_string=str(
+            cfg.get("connection_string") or getattr(dest, "connection_string", "") or ""
+        ),
+    )
     try:
         decided = resolve_duplicate_policy(
             duplicate_policy=str((getattr(dest, "extra", None) or {}).get("duplicate_policy") or ""),
@@ -571,10 +579,13 @@ def _write_batch(
             if isinstance(extra, dict):
                 kwargs["destination_extra"] = dict(extra)
         if dest_type == "redis":
+            from connectors.redis_reader import redis_key_format
+
             kwargs["write_mode"] = write_mode
             kwargs["conflict_columns"] = conflict_columns
             kwargs["sync_mode"] = sync_mode
             kwargs["file_batch_idx"] = chunk_idx
+            kwargs["key_format"] = redis_key_format(cfg, getattr(dest, "extra", None))
         if dest_type == "dynamodb":
             # Create-table needs HASH[/RANGE] from conflict_columns; without
             # them Dynamo invents nothing and refuses, or (worse) operators

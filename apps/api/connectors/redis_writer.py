@@ -14,13 +14,22 @@ from services.primary_key import (
     pick_redis_identity_column,
 )
 from services.sync_cursor import is_overwrite_sync
-from services.value_serializer import json_dumps_exact_text, sanitize_json_value
 
+from connectors.redis_doc_write import (
+    FAILED,
+    SKIPPED,
+    WRITTEN,
+    RedisDocPlan,
+    apply_redis_docs,
+    legacy_layout_refusal,
+    identity_parts,
+)
 from connectors.redis_reader import _redis_client, load_redis_json_doc, redis_key_for
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
     gate8_writer_meta,
+    identity_marker,
     resolve_target_columns,
     row_checksum,
     transform_error_policy,
@@ -366,6 +375,10 @@ def _clear_redis_prefix(client: Any, prefix: str) -> None:
         client.delete(*batch)
 
 
+#: Rows per prefetch + write round trip in ``apply_redis_docs``.
+_REDIS_WRITE_BATCH = 500
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -440,6 +453,10 @@ def write_mapped_rows(
         "replace",
         "truncate",
     }
+    # upsert merges onto the stored document; insert/append is SET NX (a stored
+    # key is a rejected row). Keys: see ``redis_reader.REDIS_KEY_FORMATS``.
+    is_upsert = str(write_mode or "").strip().lower() in {"upsert", "merge"}
+    key_format = "raw" if str(_kwargs.get("key_format") or "").lower() == "raw" else "legacy"
 
     # Connect before Map bind — sample existing JSON docs under prefix so live
     # INTEGER/BOOL carriers win over Map VARCHAR (empty→null invent cliff).
@@ -686,7 +703,42 @@ def write_mapped_rows(
             _clear_redis_prefix(client, prefix)
 
         written = 0
-        seen_keys: dict[str, int] = {}
+        seen_keys: dict[str, tuple[int, str, tuple[str, ...]]] = {}
+        plans: list[RedisDocPlan] = []
+        plan_rows: list[tuple[Any, str]] = []
+        applied_rows: list[Any] = []
+        skipped_keys: list[str] = []
+        id_cols = list(conflict or []) or [
+            c for c in [pick_redis_identity_column(list(target_cols))] if c
+        ]
+
+        def _refuse(row_no: int, col: str, value: Any, reason: str) -> None:
+            rejected_details.append(
+                {
+                    "row": row_no,
+                    "column": col or "",
+                    "target": col or "",
+                    "value": str(value or "")[:120],
+                    "reason": reason,
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "chars": [],
+                }
+            )
+
+        def _fail(reason: str) -> WriteResult:
+            return WriteResult(
+                ok=False,
+                rows_written=written,
+                table_name=prefix,
+                target_schema=f"db{database or 0}",
+                checksum="",
+                chunks_completed=0,
+                error=reason,
+                warnings=errors[:10],
+                rejected_rows=len({d["row"] for d in rejected_details}),
+                rejected_details=list(rejected_details),
+            )
+
         for i, row in enumerate(mapped_rows):
             # DF_MISSING omit vs explicit SQL NULL → JSON null (no stale merge invent).
             doc = _redis_row_to_doc(target_cols, row)
@@ -775,9 +827,22 @@ def write_mapped_rows(
                 )
                 continue
 
-            key = redis_key_for(prefix, key_id)
+            key = redis_key_for(prefix, key_id, key_format=key_format)
+            parts = identity_parts([doc.get(c) for c in id_cols]) or (key_id,)
             if key in seen_keys:
-                prev = seen_keys[key]
+                prev, prev_id, prev_parts = seen_keys[key]
+                if prev_parts != parts:
+                    # Two distinct ids, one key (legacy sanitize / 63-char cut,
+                    # or a ``|`` inside a composite part): refuse the later row.
+                    _refuse(i + 1, id_col, key_id, (
+                        f"Redis key collision: id {key_id!r} (row {i + 1}) and id "
+                        f"{prev_id!r} (row {prev + 1}) map to key {key!r} — refused, "
+                        "never overwritten. Set the connector key_format to raw to "
+                        "key documents by their exact id text."
+                    ))
+                    if policy == "fail":
+                        return _fail(rejected_details[-1]["reason"])
+                    continue
                 msg = (
                     f"Duplicate Redis key '{key}' for rows {prev + 1} and {i + 1} "
                     f"(conflict on '{id_col}'). Use a unique primary key or deduplicate the source."
@@ -794,68 +859,35 @@ def write_mapped_rows(
                     rejected_rows=len({d["row"] for d in rejected_details}),
                     rejected_details=list(rejected_details),
                 )
-            seen_keys[key] = i
+            seen_keys[key] = (i, key_id, parts)
+            plans.append(RedisDocPlan(row=i + 1, key=key, identity=key_id, doc=doc, parts=parts))
+            plan_rows.append((row, id_col))
 
-            try:
-                # Pre-sanitize so extreme Decimals never raise mid-dumps.
-                from connectors.writer_common import row_has_missing_sentinel
+        from services.duplicate_policy import current_match_action
 
-                # Sparse STOP_COLUMN / CDC / NULL omit: merge onto existing JSON so
-                # omitted fields are not wiped by a full-key SET.
-                needs_merge = (
-                    not replaces_keyspace
-                    and (
-                        row_has_missing_sentinel(row)
-                        or len(doc) < len(target_cols)
-                    )
-                )
-                if needs_merge:
-                    existing_raw = client.get(key)
-                    if existing_raw:
-                        existing = load_redis_json_doc(existing_raw)
-                        if isinstance(existing, dict):
-                            doc = {**existing, **doc}
-                safe_doc = sanitize_json_value(doc)
-                client.set(key, json_dumps_exact_text(safe_doc, ensure_ascii=True))
-                written += 1
-            except Exception as cell_exc:
-                msg = format_exception_message(cell_exc)
-                if policy == "fail":
-                    return WriteResult(
-                        ok=False,
-                        rows_written=written,
-                        table_name=prefix,
-                        target_schema=f"db{database or 0}",
-                        checksum="",
-                        chunks_completed=0,
-                        error=msg,
-                        warnings=errors[:10],
-                        rejected_rows=len({d["row"] for d in rejected_details}) + 1,
-                        rejected_details=list(rejected_details)
-                        + [
-                            {
-                                "row": i + 1,
-                                "column": id_col,
-                                "target": id_col,
-                                "value": str(key_id)[:120],
-                                "reason": msg,
-                                "policy": "write_fail",
-                                "chars": [],
-                            }
-                        ],
-                    )
-                rejected_details.append(
-                    {
-                        "row": i + 1,
-                        "column": id_col,
-                        "target": id_col,
-                        "value": str(key_id)[:120],
-                        "reason": msg,
-                        "policy": "write_quarantine",
-                        "chars": [],
-                    }
-                )
-                errors.append(msg)
+        doc_mode = "overwrite" if replaces_keyspace else ("upsert" if is_upsert else "append")
+        if doc_mode == "upsert" and current_match_action() == "skip":
+            doc_mode = "skip"  # skip_duplicates: SET NX, a stored key stays as stored
+        for start in range(0, len(plans), _REDIS_WRITE_BATCH):
+            part = plans[start : start + _REDIS_WRITE_BATCH]
+            if key_format == "raw" and doc_mode != "overwrite":
+                legacy_refusal = legacy_layout_refusal(client, prefix, part, id_cols)
+                if legacy_refusal:
+                    return _fail(legacy_refusal)
+            outcomes = apply_redis_docs(client, part, mode=doc_mode, id_cols=id_cols)
+            for offset, (plan, (outcome, reason)) in enumerate(zip(part, outcomes)):
+                row, id_col = plan_rows[start + offset]
+                if outcome == WRITTEN:
+                    written += 1
+                    applied_rows.append(row)
+                elif outcome == SKIPPED:
+                    skipped_keys.append(identity_marker(plan.parts))
+                else:
+                    _refuse(plan.row, id_col, plan.identity, reason)
+                    if outcome == FAILED:
+                        errors.append(reason)
+                    if policy == "fail":
+                        return _fail(reason)
         if on_checkpoint:
             on_checkpoint(1, 1, written)
         # Re-check FAIL_JOB / strict after mid-write identity/type rejects.
@@ -877,10 +909,11 @@ def write_mapped_rows(
         return WriteResult(
             ok=True,
             rows_written=written,
+            rows_skipped=len(skipped_keys),
             table_name=prefix,
             target_schema=f"db{database or 0}",
             checksum=row_checksum(
-                mapped_rows,
+                applied_rows,
                 target_cols,
                 dest_db_type="redis",
             ),
@@ -893,9 +926,12 @@ def write_mapped_rows(
             # whole prefix against the source and reported every pre-existing
             # key as a mismatch — the same keyed scope every other identity
             # destination already uses.
-            meta=gate8_writer_meta(
-                mapped_rows, target_cols, conflict_columns=list(conflict or [])
-            ),
+            meta={
+                **gate8_writer_meta(
+                    applied_rows, target_cols, conflict_columns=list(conflict or [])
+                ),
+                **({"skipped_identity_keys": skipped_keys} if skipped_keys else {}),
+            },
         )
     except Exception as exc:
         return WriteResult(
