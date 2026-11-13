@@ -9156,7 +9156,7 @@ def run_reconciliation(
         recon, endpoint=endpoint, source_endpoint=source_endpoint,
         mappings=mappings, dest_summary=dest_summary,
         records=records if isinstance(records, list) else None,
-        rows_written=int(rows_written or 0),
+        rows_written=int(rows_written or 0), validation_mode=validation_mode,
     )
     if isinstance(dest_summary, dict) and dest_summary.get("shape_recipe_hash"):
         # G-1: on a shaped run both digests derive from the same stream — a
