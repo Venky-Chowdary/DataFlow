@@ -343,6 +343,16 @@ def s3_file_has_legacy_null(path: str, *, chunk_size: int = 1 << 20) -> bool:
             tail = chunk[-1:]
 
 
+def _file_has_byte(path: str, needle: bytes, chunk_size: int) -> bool:
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                return False
+            if needle in chunk:
+                return True
+
+
 def s3_file_has_backslash(path: str, *, chunk_size: int = 1 << 20) -> bool:
     """True when the file holds any backslash.
 
@@ -351,13 +361,17 @@ def s3_file_has_backslash(path: str, *, chunk_size: int = 1 << 20) -> bool:
     (and only ``\\N`` as the legacy NULL). A loader with that escape rule
     must decline such a file to the row path rather than change values.
     """
-    with open(path, "rb") as handle:
-        while True:
-            chunk = handle.read(chunk_size)
-            if not chunk:
-                return False
-            if b"\\" in chunk:
-                return True
+    return _file_has_byte(path, b"\\", chunk_size)
+
+
+def s3_file_has_quote(path: str, *, chunk_size: int = 1 << 20) -> bool:
+    """True when the file holds any ``"``.
+
+    A product TSV keeps a mid-field ``"`` raw (its readers take it literally);
+    PostgreSQL ``COPY (FORMAT csv)`` reads it as the start of a quoted section
+    and aborts or merges fields. A TSV COPY declines such a file to the row path.
+    """
+    return _file_has_byte(path, b'"', chunk_size)
 
 
 def s3_iter_delimited_rows(
