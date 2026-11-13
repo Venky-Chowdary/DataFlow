@@ -200,11 +200,13 @@ def test_the_test_jobs_install_the_versions_the_image_ships() -> None:
         ("test_privilege_probe_grant_signals", "ADMIN", "user"),
         ("test_widen_respects_existing_carrier", "PG", "username"),
         ("test_row_contract_quarantine_accounting", "PG", "username"),
+        ("test_auto_create_rollback_never_drops_existing", "PG", "username"),
     ],
 )
 def test_shard4_live_pg_modules_take_the_postgres_from_the_environment(module, attr, user_key, monkeypatch) -> None:
     """api-tests 4/6 (run 43447695514): 5 skips "local postgres unavailable" —
-    both modules hard-coded the compose lab's localhost:5433 as postgres."""
+    both modules hard-coded the compose lab's localhost:5433 as postgres.
+    The same in 1/6 (row_contract_quarantine_accounting, auto_create_rollback)."""
     for name, value in {"PGHOST": "127.0.0.1", "PGPORT": "5432", "PGUSER": "dataflow",
                         "PGPASSWORD": "dataflow", "PGDATABASE": "dataflow"}.items():
         monkeypatch.setenv(name, value)
