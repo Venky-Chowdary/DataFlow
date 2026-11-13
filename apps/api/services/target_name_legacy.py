@@ -154,22 +154,29 @@ def adopt_rows_for_run(
     return adopt_existing_columns(dest_type, mappings, existing)[0]
 
 
-def _kafka_fields(cfg: Any, endpoint: Any, topic: str, mappings: Any, run_scope: Any = None
-                  ) -> list[str]:
-    """``kafka_field_names.kafka_existing_fields``; a registry read once per run and topic."""
-    from services.kafka_field_names import kafka_existing_fields, kafka_registry_url
+def _kafka_naming(cfg: Any, endpoint: Any, topic: str, mappings: Any, run_scope: Any = None
+                  ) -> dict[str, Any]:
+    """``kafka_field_names.kafka_naming`` on the operator's rows, once per run and topic."""
+    from services.kafka_field_names import kafka_naming, renamed_targets
 
     rows = operator_rows(mappings)
-    if not kafka_registry_url(cfg, endpoint):
-        return kafka_existing_fields(cfg, endpoint, topic, rows)  # key_format only, no I/O
-    key = _run_key(run_scope, "kafka-registry", topic) if run_scope is not None else None
+    key = (_run_key(run_scope, "kafka-naming", topic, tuple(renamed_targets(rows)))
+           if run_scope is not None else None)
     hit = _INTROSPECT_MEMO.get(key) if key else None
     if hit and time.monotonic() - hit[0] < _PROBE_MEMO_SECONDS:
-        return list(hit[1]["fields"])
-    fields = kafka_existing_fields(cfg, endpoint, topic, rows, timeout=_probe_seconds())
+        return hit[1]
+    naming = kafka_naming(cfg, endpoint, topic, rows, timeout=_probe_seconds())
     if key:
-        _INTROSPECT_MEMO[key] = (time.monotonic(), {"fields": list(fields)})
-    return fields
+        _INTROSPECT_MEMO[key] = (time.monotonic(), naming)
+    return naming
+
+
+def _kafka_fields(cfg: Any, endpoint: Any, topic: str, mappings: Any, run_scope: Any = None
+                  ) -> list[str]:
+    """The fields a Kafka run's targets adopt (registry subject / old spellings)."""
+    from services.kafka_field_names import adopted_fields
+
+    return adopted_fields(_kafka_naming(cfg, endpoint, topic, mappings, run_scope))
 
 
 def adopted_collision_issues(dest_type: str | None, rows: Iterable[Any]) -> list[dict[str, str]]:
@@ -899,31 +906,26 @@ def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
 
 
 def _kafka_check(request: Any) -> tuple[str, list[str]]:
-    """Execute's form of the Kafka rule (``kafka_field_names.kafka_name_verdict``)."""
-    from services.kafka_field_names import kafka_ack, kafka_name_verdict, renamed_targets
+    """Execute: the Kafka naming decision's run evidence (never a refusal once adopted).
+
+    The upgrade default (``key_format=legacy`` on a topic with earlier runs)
+    and exact names chosen on such a topic are recorded on the run; history
+    that cannot be read with no ``key_format`` set refuses it.
+    """
+    from services.kafka_field_names import KafkaHistoryUnverified, kafka_evidence
 
     dest = request.destination
     mappings = list(getattr(request, "mappings", None) or [])
-    if not renamed_targets(mappings):
-        return "", []
-    policy = _policy_of(dict(getattr(dest, "extra", None) or {}))
     try:
         from src.transfer.adapters import resolve_connector_config
 
         topic = writer_object_name(dest, getattr(request, "source", None))
-        issues, blocking = kafka_name_verdict(
-            mappings, resolve_connector_config(dest), dest, topic, policy=policy)
-    except Exception as exc:  # noqa: BLE001 - fail closed: unread history is not "new topic"
-        if policy == WRITE_NEW:
-            return "", [f"topic history not verified ({exc}); {LEGACY_FIELD_POLICY}={WRITE_NEW}"]
-        return (
-            f"Could not verify the topic's earlier field names ({exc}). Set "
-            f"{LEGACY_FIELD_POLICY}={WRITE_NEW!r} to write the new names anyway (recorded "
-            "on the run), or key_format='legacy' to keep the old ones.", [])
-    if blocking:
-        return "Topic holds the old field names: " + " ".join(
-            i["message"] for i in issues[:3]), []
-    return "", kafka_ack(issues, topic) if issues else []
+        naming = _kafka_naming(resolve_connector_config(dest), dest, topic, mappings, dest)
+    except KafkaHistoryUnverified as exc:
+        return str(exc), []
+    except Exception as exc:  # noqa: BLE001 - fail closed: the registry could not be read
+        return f"Could not read the topic's field names ({exc}).", []
+    return "", kafka_evidence(naming, topic)[1]
 
 
 def set_run_ack(dest: Any, ack: list[str]) -> None:
@@ -998,13 +1000,23 @@ def target_name_gates(
 
     kind = dest_kind(dest_type)
     unread: Exception | None = None
+    naming: dict[str, Any] = {}
     if kind in STREAM_SINKS and not list(existing_columns or []):
-        try:  # the topic's Schema Registry subject / key_format=legacy
-            existing_columns = _kafka_fields(
+        try:  # the topic's Schema Registry subject / key_format / its earlier runs
+            from services.kafka_field_names import adopted_fields
+
+            naming = _kafka_naming(
                 destination_config, destination_endpoint, destination_table, mappings)
+            existing_columns = adopted_fields(naming)
         except Exception as exc:  # noqa: BLE001 - reported in g23e, never "no fields"
             unread = exc
     rows, notes = adopt_existing_columns(dest_type, mappings, existing_columns)
+    if naming.get("default"):
+        from services.kafka_field_names import default_legacy_note
+
+        # One note for the upgrade default, naming the exact-name option.
+        notes = [{"code": "kafka_key_format_legacy_default", "target": "", "column": "",
+                  "message": default_legacy_note(naming, destination_table)}] + notes
     if recreated_by_overwrite(dest_type, sync_mode):
         rows = operator_rows(rows)  # the table is recreated: full names (re-review L3)
         notes = [{**n, "code": "target_replaces_existing_column", "message": (
@@ -1047,11 +1059,9 @@ def target_name_gates(
         if unread is not None:
             raise unread
         if kind in STREAM_SINKS:
-            from services.kafka_field_names import kafka_name_verdict
+            from services.kafka_field_names import kafka_evidence
 
-            warnings, blocking = kafka_name_verdict(
-                rows, destination_config, destination_endpoint, destination_table,
-                policy=legacy_field_policy)
+            warnings, blocking = kafka_evidence(naming, destination_table)[0], False
         else:
             warnings, blocking = legacy_field_verdict(
                 dest_type, mappings, destination_config, destination_table,

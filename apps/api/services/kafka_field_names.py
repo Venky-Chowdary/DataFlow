@@ -10,11 +10,16 @@ holds the old names made the write fail with "physical DDL missing".
 * Schema Registry subject: its fields are the topic's existing columns. A
   target whose old spelling is a subject field keeps writing that field, as a
   SaaS app's existing field is adopted (``target_name_legacy``).
-* No registry, ``key_format=legacy`` on the destination: every target keeps
-  its old spelling (the operator's opt-out, like Redis ``key_format``).
-* No registry, topic with earlier runs (job history for that topic): a target
-  whose spelling changed is refused at Validate (``g23e``) and Execute, with
-  the remedies, unless ``legacy_field_policy=write_new`` (recorded on the run).
+* No registry, ``key_format`` unset: a topic with earlier runs (job history
+  for that topic on the same cluster) keeps the old spellings by default
+  (``key_format=legacy``, the Redis precedent), so an existing or scheduled
+  job does not change shape on upgrade. The run records the default and
+  Validate shows an info note naming ``key_format=exact``. A new topic (no
+  history) gets the exact names. History that cannot be read refuses the run
+  until ``key_format`` is set.
+* ``key_format=legacy``: every target keeps its old spelling.
+* ``key_format=exact`` or ``legacy_field_policy=write_new``: the exact names on
+  purpose; on a topic with earlier runs the run records what changed.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from typing import Any
 
 KEY_FORMAT = "key_format"
 LEGACY = "legacy"
+EXACT = "exact"
 
 #: Destination options this module reads (Validate merges them into its probe config).
 NAMING_OPTIONS = (KEY_FORMAT, "schema_registry_url", "registry_url", "legacy_field_policy")
@@ -48,9 +54,14 @@ def _options(cfg: Mapping[str, Any] | None, endpoint: Any = None) -> dict[str, A
 
 
 def kafka_key_format(cfg: Mapping[str, Any] | None, endpoint: Any = None) -> str:
-    """``legacy`` when the destination keeps the pre-G11 field names, else ``exact``."""
-    raw = str(_options(cfg, endpoint).get(KEY_FORMAT) or "").strip().lower()
-    return LEGACY if raw == LEGACY else "exact"
+    """The operator's choice: ``legacy``, ``exact`` (also ``write_new``), or ``""`` (unset)."""
+    opts = _options(cfg, endpoint)
+    raw = str(opts.get(KEY_FORMAT) or "").strip().lower()
+    if raw in (LEGACY, EXACT):
+        return raw
+    from services.target_name_legacy import LEGACY_FIELD_POLICY, WRITE_NEW
+
+    return EXACT if str(opts.get(LEGACY_FIELD_POLICY) or "").strip() == WRITE_NEW else ""
 
 
 def kafka_registry_url(cfg: Mapping[str, Any] | None, endpoint: Any = None) -> str:
@@ -99,19 +110,6 @@ def renamed_targets(mappings: Iterable[Any] | None) -> list[tuple[str, str]]:
     return out
 
 
-def kafka_existing_fields(
-    cfg: Mapping[str, Any] | None, endpoint: Any, topic: str, mappings: Iterable[Any] | None,
-    *, timeout: float = 5.0,
-) -> list[str]:
-    """The fields a topic's targets adopt (see the module docstring)."""
-    url = kafka_registry_url(cfg, endpoint)
-    if url and topic:
-        return list(registry_subject_fields(url, topic, timeout=timeout) or [])
-    if kafka_key_format(cfg, endpoint) == LEGACY:
-        return [old for _target, old in renamed_targets(mappings)]
-    return []
-
-
 def _same_cluster(job: Mapping[str, Any], connector_id: str, host: str) -> bool:
     theirs_id = str(job.get("dest_connector_id") or "")
     if connector_id and theirs_id:
@@ -142,52 +140,100 @@ def topic_has_prior_runs(topic: str, cfg: Mapping[str, Any] | None, endpoint: An
     )
 
 
-def kafka_name_verdict(
-    mappings: Iterable[Any] | None, cfg: Mapping[str, Any] | None, endpoint: Any, topic: str,
-    *, policy: str = "",
-) -> tuple[list[dict[str, str]], bool]:
-    """``(issues, blocking)`` for targets whose spelling changed on a used topic.
+class KafkaHistoryUnverified(RuntimeError):
+    """The topic's job history could not be read and no ``key_format`` was set."""
 
-    Nothing to judge with a Schema Registry (its subject is adopted) or with
-    ``key_format=legacy`` (the old names are kept).
+
+def kafka_naming(
+    cfg: Mapping[str, Any] | None, endpoint: Any, topic: str, mappings: Iterable[Any] | None,
+    *, timeout: float = 5.0,
+) -> dict[str, Any]:
+    """How this run names the topic's fields.
+
+    ``mode``: ``registry`` (adopt the subject's ``fields``), ``legacy`` (every
+    target keeps its old spelling) or ``exact``. ``default`` is True when
+    ``legacy`` was chosen because the topic has earlier runs and no
+    ``key_format`` was set; ``history`` says the topic has earlier runs (only
+    looked up when a target's spelling differs). ``pairs`` are the operator's
+    ``(target, old spelling)``.
     """
-    from services.target_name_legacy import LEGACY_FIELD_POLICY, WRITE_NEW
-
-    if kafka_registry_url(cfg, endpoint) or kafka_key_format(cfg, endpoint) == LEGACY:
-        return [], False
     pairs = renamed_targets(mappings)
-    if not pairs or not topic or not topic_has_prior_runs(topic, cfg, endpoint):
-        return [], False
-    blocking = policy != WRITE_NEW
-    issues = []
-    for target, old in pairs:
-        ack = (
-            f" To write {target!r} anyway, set {LEGACY_FIELD_POLICY}={WRITE_NEW!r} on the "
-            "destination; the run records it." if blocking else ""
-        )
-        issues.append({
+    url = kafka_registry_url(cfg, endpoint)
+    if url and topic:
+        return {"mode": "registry", "fields": list(
+            registry_subject_fields(url, topic, timeout=timeout) or []),
+            "pairs": pairs, "default": False, "history": False}
+    chosen = kafka_key_format(cfg, endpoint)
+    out = {"mode": chosen or EXACT, "fields": [], "pairs": pairs, "default": False,
+           "history": False}
+    if not pairs or not topic or chosen == LEGACY:
+        return out
+    try:
+        out["history"] = topic_has_prior_runs(topic, cfg, endpoint)
+    except Exception as exc:  # noqa: BLE001 - fail closed only when nothing was chosen
+        if chosen == EXACT:
+            out["unverified"] = str(exc)
+            return out
+        raise KafkaHistoryUnverified(
+            f"Could not read the run history of topic {topic!r} ({exc}), so Datawrap "
+            "cannot tell whether earlier runs wrote the old field names. Set "
+            f"{KEY_FORMAT}={LEGACY!r} to keep them or {KEY_FORMAT}={EXACT!r} to send the "
+            "mapped names exactly.") from exc
+    if not chosen and out["history"]:
+        out.update(mode=LEGACY, default=True)
+    return out
+
+
+def adopted_fields(naming: Mapping[str, Any]) -> list[str]:
+    """The fields a run's targets adopt under ``naming``."""
+    if naming.get("mode") == "registry":
+        return list(naming.get("fields") or [])
+    if naming.get("mode") == LEGACY:
+        return [old for _target, old in naming.get("pairs") or []]
+    return []
+
+
+def default_legacy_note(naming: Mapping[str, Any], topic: str) -> str:
+    """Validate's info note / the run's evidence for the upgrade default."""
+    names = ", ".join(f"{t!r} -> {o!r}" for t, o in list(naming.get("pairs") or [])[:5])
+    return (
+        f"Topic {topic!r} has earlier runs, so it keeps the field names they wrote "
+        f"({KEY_FORMAT}=legacy by default): {names}; set {KEY_FORMAT}=exact to send the "
+        "mapped names exactly."
+    )
+
+
+def kafka_evidence(naming: Mapping[str, Any], topic: str) -> tuple[list[dict[str, str]], list[str]]:
+    """``(warnings, run evidence)`` for a naming decision.
+
+    The upgrade default is recorded; exact names on a topic with earlier runs
+    are a warning at Validate and recorded on the run.
+    """
+    if naming.get("default"):
+        return [], [default_legacy_note(naming, topic)]
+    if naming.get("mode") != EXACT or not naming.get("pairs"):
+        return [], []
+    if naming.get("unverified"):
+        return [], [f"topic history not verified ({naming['unverified']}); {KEY_FORMAT}=exact"]
+    if not naming.get("history"):
+        return [], []
+    warnings, evidence = [], []
+    for target, old in naming["pairs"]:
+        warnings.append({
             "code": "target_topic_legacy_field",
             "target": target,
             "other": old,
             "message": (
-                f"Topic {topic!r} has earlier runs that wrote {old!r} for {target!r}; this "
-                f"run writes {target!r}, so consumers (and a composite message key) would "
-                f"see a renamed field. Set {KEY_FORMAT}={LEGACY!r} on the destination to keep "
-                f"the old names, or rename the Map target to {old!r}.{ack}"
+                f"Topic {topic!r} has earlier runs that wrote {old!r} for {target!r}; with "
+                f"{KEY_FORMAT}=exact this run writes {target!r}, so consumers (and a "
+                f"composite message key) see a renamed field. Set {KEY_FORMAT}=legacy to "
+                "keep the old names."
             ),
         })
-    return issues, blocking
-
-
-def kafka_ack(issues: Iterable[Mapping[str, str]], topic: str) -> list[str]:
-    """What an acknowledged run records: each old name it no longer writes."""
-    from services.target_name_legacy import LEGACY_FIELD_POLICY, WRITE_NEW
-
-    return [
-        f"{i['other']} written by earlier runs of topic {topic}; this run writes "
-        f"{i['target']} ({LEGACY_FIELD_POLICY}={WRITE_NEW})"
-        for i in issues
-    ]
+        evidence.append(
+            f"{old} written by earlier runs of topic {topic}; this run writes {target} "
+            f"({KEY_FORMAT}=exact)")
+    return warnings, evidence
 
 
 def with_kafka_name_options(probe_cfg: Any, *extras: Any) -> Any:
@@ -211,12 +257,15 @@ def with_kafka_name_options(probe_cfg: Any, *extras: Any) -> Any:
 
 
 __all__ = [
+    "EXACT",
     "KEY_FORMAT",
     "LEGACY",
-    "kafka_ack",
-    "kafka_existing_fields",
+    "KafkaHistoryUnverified",
+    "adopted_fields",
+    "default_legacy_note",
+    "kafka_evidence",
     "kafka_key_format",
-    "kafka_name_verdict",
+    "kafka_naming",
     "kafka_registry_url",
     "registry_subject_fields",
     "renamed_targets",
