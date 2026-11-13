@@ -135,10 +135,6 @@ _KNOWN_LOSSY_CREATE_NEW: set[tuple[str, str, str]] = {
     ("oracle", "NUMBER(10)", "sqlserver"),
     ("oracle", "NUMBER(10)", "oracle"),
     ("oracle", "NUMBER(10)", "snowflake"),
-    # Graded lossy before C3 too: create-new stamps FSP 6 on a bare MySQL
-    # TIMESTAMP (an invented fractional precision), unrelated to the C3 pairs.
-    ("mysql", "timestamp", "mysql"),
-    ("mysql", "timestamp(3)", "mysql"),
 }
 
 
