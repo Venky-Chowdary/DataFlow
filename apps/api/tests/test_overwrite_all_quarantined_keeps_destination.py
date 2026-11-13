@@ -93,6 +93,17 @@ class _Dest:
             (str(i), int(a)) for i, a in self._query(f"SELECT id, age FROM {self.quoted(table)}")  # nosec B608
         )
 
+    def table_names(self) -> set[str]:
+        if self.kind == "sqlite":
+            sql = "SELECT name FROM sqlite_master WHERE type = 'table'"
+        elif self.kind == "mysql":
+            sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()"
+        elif self.kind == "postgresql":
+            sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+        else:
+            sql = "SELECT table_name FROM information_schema.tables"
+        return {str(r[0]) for r in self._query(sql)}
+
     def drop(self, *tables: str) -> None:
         if self.kind in ("postgresql", "mysql"):
             from tests import r4_route_harness as h
@@ -101,6 +112,10 @@ class _Dest:
                 # The pre-ingestion stage is retained when rows were held back.
                 for suffix in ("", "_df_quarantine", "_df_staging", "__df_bak"):
                     h.drop_table(self.kind, f"{t}{suffix}")
+            # A backup a failed assertion left behind (run-scoped names).
+            for name in self.table_names():
+                if any(name.startswith(f"{t}__df_bak") for t in tables):
+                    h.drop_table(self.kind, name)
 
 
 def _sqlite_exec(path: Path, sql: str) -> None:
@@ -216,32 +231,97 @@ def test_empty_source_keeps_its_current_behaviour(dest_factory, tmp_path):
     assert db_dest.rows() == [], "an empty source table overwrites to empty, as before"
 
 
-@pytest.mark.parametrize("kind", ["sqlite", "mysql"])
-def test_multi_stream_overwrite_keeps_the_refused_streams_table(tmp_path, kind):
+MULTI_MAPS = [
+    {"source": "id", "target": "id", "source_type": "TEXT", "target_type": "VARCHAR(10)"},
+    {"source": "age", "target": "age", "source_type": "TEXT", "target_type": "INTEGER"},
+]
+#: Engines whose overwrite clear keeps a backup until the run's outcome is known.
+BACKED_UP = {"mysql", "duckdb"}
+
+
+def _two_stream_overwrite(tmp_path: Path, kind: str):
+    """Stream 1 (good rows) lands; stream 2 (every row unfit) is refused."""
     tag = uuid.uuid4().hex[:6]
     good, bad = f"msg_{tag}", f"msb_{tag}"
     dest = _Dest(kind, tmp_path, good)
-    src = tmp_path / "multi.db"
+    src = tmp_path / f"multi_{tag}.db"
     with sqlite3.connect(src) as conn:
         for table, rows in ((good, [("1", "5"), ("2", "6")]), (bad, ALL_BAD)):
             conn.execute(f"CREATE TABLE {table} (id TEXT, age TEXT)")
             conn.executemany(f"INSERT INTO {table} VALUES (?, ?)", rows)  # noqa: S608
+    for table in (good, bad):
+        dest.seed(table)
+    result = UniversalTransferEngine().execute(TransferRequest(
+        source=EndpointConfig(kind="database", format="sqlite", database=str(src), table=good),
+        destination=dest.endpoint, sync_mode="full_refresh_overwrite",
+        validation_mode="balanced", skip_preflight=True,
+        stream_contracts=[{"name": n, "selected": True, "mappings": MULTI_MAPS} for n in (good, bad)],
+    ))
+    return dest, good, bad, tag, result
+
+
+@pytest.mark.parametrize("kind", ["sqlite", "postgresql", "mysql", "duckdb"])
+def test_multi_stream_overwrite_keeps_the_refused_streams_table(tmp_path, kind):
+    """The failing stream restores its own cleared table, never another's.
+
+    A table the run reached before the failure is undone by the multi-table
+    undo (C4): restored from its overwrite backup where the engine keeps one
+    until the run's outcome is known; where an overwrite commits for good
+    (SQLite stage publish, PostgreSQL held TRUNCATE) it is kept and named.
+    """
+    dest, good, bad, _tag, result = _two_stream_overwrite(tmp_path, kind)
     try:
-        for table in (good, bad):
-            dest.seed(table)
-        maps = [
-            {"source": "id", "target": "id", "source_type": "TEXT", "target_type": "VARCHAR(10)"},
-            {"source": "age", "target": "age", "source_type": "TEXT", "target_type": "INTEGER"},
-        ]
-        result = UniversalTransferEngine().execute(TransferRequest(
-            source=EndpointConfig(kind="database", format="sqlite", database=str(src), table=good),
-            destination=dest.endpoint, sync_mode="full_refresh_overwrite",
-            validation_mode="balanced", skip_preflight=True,
-            stream_contracts=[{"name": n, "selected": True, "mappings": maps} for n in (good, bad)],
-        ))
         assert result.success is False
         assert "were quarantined, so nothing was written" in str(result.error)
         assert dest.rows(bad) == PRIOR, "the refused stream's table is intact"
-        assert dest.rows(good) == [("1", 5), ("2", 6)], "the landed stream is not rolled back"
+        if kind in BACKED_UP:
+            assert dest.rows(good) == PRIOR, "the landed stream is undone with the run"
+            assert f"{good}: restored from its pre-run backup" in str(result.error)
+        else:
+            assert dest.rows(good) == [("1", 5), ("2", 6)]
+            assert f"{good}: kept as is (held 1 row(s) before" in str(result.error)
     finally:
         dest.drop(good, bad)
+
+
+@pytest.mark.parametrize("kind", sorted(BACKED_UP))
+def test_landed_overwrite_is_restored_when_a_later_stream_fails(tmp_path, kind):
+    """Stream 1 overwrites and lands, stream 2 fails: stream 1 is back to its
+    pre-run rows, stream 2 is unchanged, and no backup is left behind."""
+    dest, good, bad, tag, result = _two_stream_overwrite(tmp_path, kind)
+    try:
+        assert result.success is False
+        assert dest.rows(good) == PRIOR
+        assert dest.rows(bad) == PRIOR
+        orphans = {t for t in dest.table_names() if tag in t and "__df_bak" in t}
+        assert not orphans, orphans
+    finally:
+        dest.drop(good, bad)
+
+
+@pytest.mark.parametrize("kind", sorted(BACKED_UP))
+def test_multi_stream_overwrite_success_discards_every_backup(tmp_path, kind):
+    tag = uuid.uuid4().hex[:6]
+    first, second = f"msg_{tag}", f"msh_{tag}"
+    dest = _Dest(kind, tmp_path, first)
+    src = tmp_path / f"multi_{tag}.db"
+    with sqlite3.connect(src) as conn:
+        for table in (first, second):
+            conn.execute(f"CREATE TABLE {table} (id TEXT, age TEXT)")
+            conn.executemany(f"INSERT INTO {table} VALUES (?, ?)", [("1", "5")])  # noqa: S608
+    try:
+        for table in (first, second):
+            dest.seed(table)
+        result = UniversalTransferEngine().execute(TransferRequest(
+            source=EndpointConfig(kind="database", format="sqlite", database=str(src), table=first),
+            destination=dest.endpoint, sync_mode="full_refresh_overwrite",
+            validation_mode="balanced", skip_preflight=True,
+            stream_contracts=[
+                {"name": n, "selected": True, "mappings": MULTI_MAPS} for n in (first, second)
+            ],
+        ))
+        assert result.success, result.error
+        assert dest.rows(first) == dest.rows(second) == [("1", 5)]
+        assert not {t for t in dest.table_names() if tag in t and "__df_bak" in t}
+    finally:
+        dest.drop(first, second)

@@ -117,6 +117,7 @@ def _table_view(destination: Any, table: str, pin: dict[str, Any]) -> Any:
             "dest_rows_before", "dest_table_existed_before", "overwrite_rows_before",
             "cancel_rows_before", "route_backups", "overwrite_backup",
             "overwrite_backup_engine", ROWS_BEFORE_KEY, UNDO_PINS_KEY,
+            "stream_overwrite_backups",
         }
     }
     if isinstance(pin.get("rows_before"), int):
@@ -137,7 +138,10 @@ def _restore_own_backup(destination: Any, table: str) -> bool | None:
     backups = dict((extra or {}).get("route_backups") or {})
     key = next((k for k, pair in backups.items() if str((pair or {}).get("table") or k) == table), None)
     if key is None:
-        return None
+        # An overwrite stream that landed parked its backup under its table.
+        from src.transfer.engine_finish import settle_parked_overwrite_backups
+
+        return settle_parked_overwrite_backups(destination, restore=True, only_table=table)
     from connectors.table_manager import restore_pg_route_backups
     from src.transfer.adapters import resolve_connector_config
 

@@ -55,11 +55,28 @@ def _publish_stream_written(job_id: str | None, stream_name: str, rows: int) -> 
         logger.warning("stream write note failed for %s", stream_name, exc_info=True)
 
 
-def _settle_stream_overwrite(destination: EndpointConfig, *, restore: bool) -> None:
-    """Restore or discard the overwrite backup of the stream just written."""
-    from .engine_finish import _settle_overwrite_backup
+def _restore_failed_stream_overwrite(destination: EndpointConfig) -> None:
+    """Put back the cleared table of the stream that just failed — only that one.
 
-    _settle_overwrite_backup(destination, restore=restore)
+    Earlier streams' backups stay parked for the multi-table undo (C4), and the
+    run's strict-keyed ``route_backups`` are the undo's to restore.
+    """
+    from .engine_finish import settle_single_overwrite_backup
+
+    settle_single_overwrite_backup(destination, restore=True)
+
+
+def _park_landed_stream_overwrite(destination: EndpointConfig) -> None:
+    """Keep the landed stream's backup, under its table, until the run's outcome.
+
+    Discarding it here left nothing to restore when a later stream failed:
+    the multi-table undo then reported the overwritten table as restored
+    while it still held this run's rows. The run's own settle (success:
+    discard, failure: restore) takes every parked backup.
+    """
+    from .engine_finish import park_stream_overwrite_backup
+
+    park_stream_overwrite_backup(destination)
 
 
 def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
@@ -432,9 +449,10 @@ def run_non_cdc_multi_stream_sequential(
                             mappings_inherited=not declared_maps,
                             workspace_id=workspace_id,
                         )
-                # The stream landed: its overwrite backup is no longer needed,
-                # and the next stream's clear must not inherit it.
-                _settle_stream_overwrite(destination, restore=False)
+                # The stream landed: park its overwrite backup under its table
+                # (the next stream's clear must not inherit it, and a later
+                # failure must still be able to restore this table).
+                _park_landed_stream_overwrite(destination)
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
                 last_summary = summary
@@ -462,7 +480,7 @@ def run_non_cdc_multi_stream_sequential(
                 # This stream's cleared table goes back now, while the endpoint
                 # still names it; the engine's settle would put the backup on
                 # the request's table instead (and leave this one empty).
-                _settle_stream_overwrite(destination, restore=True)
+                _restore_failed_stream_overwrite(destination)
                 # C4: undo every table this run reached before the failing one,
                 # each against its own pre-run facts (the failing stream already
                 # undid its own batch).
