@@ -104,6 +104,12 @@ def _driver_refusal(value: Any, where: str, *, installed_only: bool) -> str:
     installed = installed_odbc_drivers() if installed_only else None
     # unixODBC finds an odbcinst.ini section in any letter case, but not with other spacing
     # (follow-up review 6): compare case-insensitively, nothing more.
+    if installed is not None and not installed:
+        return (  # an availability error, reported after every security check (PR 421 CI)
+            f"No ODBC driver is installed on this server, so ODBC option Driver {where} cannot be "
+            "loaded. Ask the operator to install the driver (for SQL Server: Microsoft ODBC Driver 18 "
+            "for SQL Server), or use a connector that does not need ODBC."
+        )
     if installed is not None and name.casefold() not in {driver.casefold() for driver in installed}:
         return (
             f"ODBC option Driver {where} is not an ODBC driver installed on this server. Use one of: "
@@ -244,8 +250,25 @@ def _families(data: Mapping[str, Any]) -> tuple[bool, bool]:
     return libpq, odbc
 
 
-def settings_refusal(data: Any) -> str:
-    """At save: an option in the connector's strings, fields, ``extra`` or ``connect_args``."""
+def settings_refusal(data: Any, *, availability: bool = True) -> str:
+    """At save: an option in the connector's strings, fields, ``extra`` or ``connect_args``.
+
+    Every security refusal first; then, with ``availability``, a driver that is
+    not installed (an availability error, not a security finding: PR 421 CI).
+    ``egress_guard.connector_save_refusal`` asks for the latter only after its
+    whole security chain (:func:`driver_availability_refusal`).
+    """
+    return _settings_pass(data, installed_only=False) or (
+        _settings_pass(data, installed_only=True) if availability else ""
+    )
+
+
+def driver_availability_refusal(data: Any) -> str:
+    """At save, after every security check: an ODBC driver this server does not have."""
+    return _settings_pass(data, installed_only=True)
+
+
+def _settings_pass(data: Any, *, installed_only: bool) -> str:
     if not isinstance(data, Mapping):
         return ""
     libpq, odbc = _families(data)
@@ -255,7 +278,7 @@ def settings_refusal(data: Any) -> str:
         scheme = _scheme(str(text or ""))
         libpq = libpq or scheme.split("+", 1)[0] in LIBPQ
         odbc = odbc or _odbc_scheme(scheme)
-    flags = {"libpq": libpq, "odbc": odbc, "installed_only": True}
+    flags = {"libpq": libpq, "odbc": odbc, "installed_only": installed_only}
     for source, where in ((data, "in this connector's connection settings"), (extra, "in this connector's extra settings")):
         for field in _TEXT_FIELDS:
             if field == "host" and source is data:
@@ -272,12 +295,23 @@ def settings_refusal(data: Any) -> str:
 
 
 def check_guarded(dialect: Any, cargs: Any, cparams: Any) -> None:
-    """Raise before a guarded engine's driver receives such an option (``do_connect``)."""
+    """Raise before a guarded engine's driver receives such an option (``do_connect``).
+
+    Security refusals first; the installed-driver rule (follow-up review 5, L4)
+    last, as an availability error (PR 421 CI).
+    """
+    refusal = _guarded_pass(dialect, cargs, cparams, installed_only=False) or _guarded_pass(
+        dialect, cargs, cparams, installed_only=True
+    )
+    if refusal:
+        raise HostConfigRefused(refusal)
+
+
+def _guarded_pass(dialect: Any, cargs: Any, cparams: Any, *, installed_only: bool) -> str:
     where = "for this connection"
     name = str(getattr(dialect, "name", "") or "").lower()
     odbc = str(getattr(dialect, "driver", "") or "").lower() == "pyodbc"
-    # The installed-driver rule applies at the dial too (follow-up review 5, L4).
-    flags = {"libpq": name in LIBPQ, "odbc": odbc, "installed_only": True}
+    flags = {"libpq": name in LIBPQ, "odbc": odbc, "installed_only": installed_only}
     refusal = mapping_refusal(
         {k: v for k, v in (cparams or {}).items() if _fold(k) != "dsn"}, where, **flags
     )
@@ -287,8 +321,7 @@ def check_guarded(dialect: Any, cargs: Any, cparams: Any) -> None:
         texts.append(dsn)
     for text in texts:
         refusal = refusal or text_refusal(text, where, **flags)
-    if refusal:
-        raise HostConfigRefused(refusal)
+    return refusal
 
 
 def check_libpq_kwargs(kwargs: Mapping[str, Any]) -> None:

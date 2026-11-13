@@ -786,6 +786,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     from services.platform_aws_credentials import iceberg_connector_refusal
     from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
 
+    from connectors.host_config_selectors import driver_availability_refusal as host_config_availability
     from connectors.host_config_selectors import settings_refusal as host_config_refusal
     from connectors.kafka_sasl_policy import settings_refusal as kafka_settings_refusal
     from connectors.mysql_options import connector_option_refusal
@@ -808,7 +809,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         # BigQuery / GCS: never the host's Google identity or key files (follow-up review 2, BQ).
         or google_connector_refusal(data)
         # No libpq service, ODBC DSN / DSN file or driver library of this host (review 4).
-        or host_config_refusal(data)
+        or host_config_refusal(data, availability=False)
         # No TLS certificate / key / wallet file on this host (follow-up review 2, TLS files).
         or tls_files_refusal(data)
         # No Oracle config provider / LDAP DSN or pyo. wallet (follow-up review 3, M3 + M4).
@@ -836,7 +837,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         ):
             if is_always_blocked_target(host):
                 return _refusal_text(host, phrase)
-        return ""
+        return host_config_availability(data)
     return new_point_refusal(
         "connector_save",
         *values,
@@ -844,7 +845,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         db_type=db_type,
         connector=str(data.get("name") or ""),
         aws_endpoint=aws_endpoint,
-    )
+    ) or host_config_availability(data)  # an uninstalled ODBC driver, after every security check
 
 
 def egress_url_allowed(
