@@ -50,7 +50,9 @@ export function AutoMapDialog({
   const [picked, setPicked] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    setPicked(new Set(suggestions.filter((s) => s.selected).map((s) => s.source)));
+    setPicked(new Set(
+      suggestions.filter((s) => s.selected && s.compat?.verdict !== "incompatible").map((s) => s.source),
+    ));
   }, [suggestions]);
 
   const changes = useMemo(
@@ -154,8 +156,9 @@ export function AutoMapDialog({
                         <span className="df2-ms-automap-target">{s.target}</span>
                         {was ? <span className="df2-ms-automap-was">was {was}</span> : null}
                       </td>
-                      <td title={s.reason}>
+                      <td>
                         <span className={`df2-ms-match is-${s.kind}`}>{MATCH_KIND_LABEL[s.kind] ?? s.kind}</span>
+                        <span className="df2-ms-automap-why">{s.reason}</span>
                       </td>
                       <td>
                         <span className="df2-ms-confidence" aria-label={`${pct} percent`}>
@@ -167,12 +170,14 @@ export function AutoMapDialog({
                       </td>
                       <td>
                         {s.compat ? (
-                          <span
-                            className={`df2-ms-compat is-${s.compat.verdict}`}
-                            title={s.compat.reasons.map((r) => r.message).join(" ")}
-                          >
-                            {s.compat.verdict}
-                          </span>
+                          <>
+                            <span className={`df2-ms-compat is-${s.compat.verdict}`}>{s.compat.verdict}</span>
+                            {s.compat.verdict !== "safe" && s.compat.reasons.length ? (
+                              <span className="df2-ms-automap-why">
+                                {s.compat.reasons.map((r) => r.message).join(" ")}
+                              </span>
+                            ) : null}
+                          </>
                         ) : null}
                       </td>
                     </tr>

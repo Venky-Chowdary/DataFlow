@@ -160,22 +160,37 @@ def test_type_grade_kinds(src, tgt, verdict, kind):
     assert kind in {r["kind"] for r in grade["reasons"]}, grade
 
 
-def test_type_grade_agrees_with_validate_fidelity_verdict():
-    """Lossy here ⇔ mapping_fidelity (G4's verdict) says lossy/cast for the same pair."""
-    from services.mapping_proof import mapping_fidelity
+def _validate_calls_it_lossy(src: str, tgt: str) -> bool:
+    """Run the real Validate (run_file_preflight) on one column and read G3."""
+    from services.preflight_service import run_file_preflight
 
-    pairs = [
+    result = run_file_preflight(
+        columns=["c"], column_types={"c": src}, row_count=2,
+        mappings=[{"source": "c", "target": "c", "source_type": src, "target_type": tgt,
+                   "confidence": 0.99, "approved": True, "user_override": True}],
+        destination_connected=True, source_connected=True, source_kind="database",
+        source_format="postgresql", sync_mode="full_refresh_append", sample_rows=[],
+        destination_column_types={"c": tgt}, destination_table_exists=True,
+        destination_db_type="postgresql", destination_column_nullability={"c": True},
+        validation_mode="strict",
+    )
+    g3 = next((g for g in result.get("gates") or [] if g.get("id") == "g3_schema_contract"), {})
+    return g3.get("status") == "block" and "Lossy coercion" in str(g3.get("message") or "")
+
+
+@pytest.mark.parametrize(
+    ("src", "tgt"),
+    [
         ("INTEGER", "BIGINT"), ("BIGINT", "INTEGER"), ("VARCHAR(50)", "TEXT"),
-        ("DECIMAL(12,2)", "DECIMAL(10,2)"), ("DATE", "TIMESTAMP"), ("DOUBLE", "REAL"),
-    ]
-    for src, tgt in pairs:
-        fid = mapping_fidelity(
-            {"source_type": src, "target_type": tgt, "transform": "none"},
-            declared_source_type=src, declared_target_type=tgt,
-            destination_db_type="postgresql", dest_table_exists=True,
-        )
-        ours = grade_type_pair(src, tgt, dest_db="postgresql")["verdict"]
-        assert (ours == "lossy") == (fid["verdict"] in {"lossy_cast", "cast"}), (src, tgt, fid)
+        ("VARCHAR(255)", "VARCHAR(50)"), ("DECIMAL(12,2)", "DECIMAL(10,2)"),
+        ("DECIMAL(10,2)", "DECIMAL(12,2)"), ("DATE", "TIMESTAMP"), ("DOUBLE", "REAL"),
+        ("TIMESTAMPTZ", "TIMESTAMP"), ("VARCHAR(40)", "VARCHAR(40)"),
+    ],
+)
+def test_type_grade_agrees_with_a_real_validate_run(src, tgt):
+    """The Map chip says lossy exactly when Validate's G3 blocks the same pair."""
+    ours = grade_type_pair(src, tgt, dest_db="postgresql")["verdict"]
+    assert (ours == "lossy") == _validate_calls_it_lossy(src, tgt), (src, tgt, ours)
 
 
 def test_type_grades_dedupe_identical_pairs():
@@ -228,25 +243,63 @@ def test_concept_tier_matches_the_same_head_concept(src, tgt):
 @pytest.mark.parametrize(
     ("src", "tgt"),
     [("start_date", "end_date"), ("first_name", "last_name"), ("customer_id", "order_id"),
-     ("billing_address", "shipping_address")],
+     ("billing_address", "shipping_address"),
+     # review H2: family members are not each other's synonyms
+     ("is_active", "is_deleted"), ("height", "width"), ("subtotal", "total"),
+     ("state", "status"), ("revenue", "fee"),
+     # contrastive qualifiers differ even from the plain name
+     ("prev_status", "status"), ("max_qty", "qty"), ("min_qty", "quantity"),
+     ("old_price", "unit_price"), ("new_email", "email")],
 )
 def test_concept_tier_refuses_false_friends(src, tgt):
     hit = score_pair(src, tgt)
     assert hit is None or hit[0] < 0.7, hit
 
 
-def test_learned_pair_outranks_synonym_but_not_a_normalized_match():
-    learned = {"cust_fname": {"given_name": 3}}
-    conf, kind, reason = score_pair("cust_fname", "given_name", learned=learned)
-    assert kind == "learned" and "3 times" in reason
-    assert conf > score_pair("first_name", "given_name")[0]
-    assert conf < score_pair("firstName", "first_name")[0]
+def test_learned_pair_outranks_synonym_only_when_confirmed_twice_for_this_destination():
+    """Review M4: one confirmation is a hint; it outranks the dictionary only at count >= 2."""
+    once = score_pair("cust_fname", "given_name", learned={"cust_fname": {"given_name": (1, True)}})
+    twice = score_pair("cust_fname", "given_name", learned={"cust_fname": {"given_name": (3, True)}})
+    synonym = score_pair("first_name", "given_name")[0]
+    assert once[1] == "learned" and once[0] < synonym
+    assert twice[1] == "learned" and "3 times" in twice[2]
+    assert twice[0] > synonym
+    assert twice[0] < score_pair("firstName", "first_name")[0]
+
+
+def test_a_pair_learned_on_another_destination_is_a_weaker_fallback():
+    here = score_pair("cust_fname", "given_name", learned={"cust_fname": {"given_name": (2, True)}})[0]
+    elsewhere = score_pair("cust_fname", "given_name", learned={"cust_fname": {"given_name": (2, False)}})
+    assert elsewhere[1] == "learned" and elsewhere[0] < here
+    assert "another destination" in elsewhere[2]
+
+
+def test_a_learned_pair_that_disagrees_with_a_built_in_match_is_not_preselected():
+    out = suggest_assignments(
+        ["first_name"], ["given_name", "nickname"],
+        learned={"first_name": {"nickname": (2, True)}},
+    )
+    assert out[0]["target"] == "nickname" and out[0]["kind"] == "learned"
+    assert out[0]["selected"] is False
+    assert "given_name" in out[0]["reason"]
 
 
 def test_key_suffix_is_stronger_when_entity_names_the_table():
     plain = score_pair("order_id", "id")[0]
     entity = score_pair("order_id", "id", entities={"order"})[0]
     assert entity > plain
+
+
+@pytest.mark.parametrize("src", ["customer_id", "product_id", "parent_id"])
+def test_a_foreign_key_never_preselects_onto_another_tables_id(src):
+    """Review H2: customer_id → orders.id is a foreign key into the PK."""
+    out = suggest_assignments([src], ["id"], source_table="orders", dest_table="orders")
+    assert out == [] or (out[0]["selected"] is False and out[0]["confidence"] < 0.7), out
+
+
+def test_the_tables_own_key_preselects_onto_its_id():
+    out = suggest_assignments(["order_id"], ["id"], source_table="legacy", dest_table="orders")
+    assert out[0]["target"] == "id" and out[0]["selected"] is True
 
 
 def test_assignment_is_one_to_one_and_best_first():
@@ -295,23 +348,32 @@ def memory(tmp_path, monkeypatch):
     return mapping_memory
 
 
-def test_memory_counts_confirmations_per_workspace_and_isolates_tenants(memory):
-    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a")
-    memory.record_confirmed([{"source": "CustFname", "target": "GivenName"}], workspace_id="ws-a")
-    assert memory.learned_index(workspace_id="ws-a") == {"cust_fname": {"given_name": 2}}
-    assert memory.learned_index(workspace_id="ws-b") == {}
+DEST_A = {"connector_id": "c-1", "database": "app", "schema": "public", "table": "customers"}
+DEST_B = {"connector_id": "c-1", "database": "app", "schema": "public", "table": "orders"}
+
+
+def test_memory_is_scoped_per_destination_and_per_workspace(memory):
+    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a", destination=DEST_A)
+    memory.record_confirmed([{"source": "CustFname", "target": "GivenName"}], workspace_id="ws-a", destination=DEST_A)
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {"cust_fname": {"given_name": (2, True)}}
+    # Another destination of the same workspace sees it only as a fallback.
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_B) == {"cust_fname": {"given_name": (2, False)}}
+    assert memory.learned_index(workspace_id="ws-b", destination=DEST_A) == {}
     assert memory.list_learned(workspace_id="ws-b") == []
+    listed = memory.list_learned(workspace_id="ws-a")
+    assert listed[0]["destination"] == "c-1/app/public/customers" and listed[0]["count"] == 2
     assert memory.forget_all(workspace_id="ws-a") == 1
-    assert memory.learned_index(workspace_id="ws-a") == {}
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {}
 
 
 def test_memory_feeds_the_learned_tier(memory):
-    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a")
+    for _ in range(2):
+        memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a", destination=DEST_A)
     out = suggest_assignments(
-        ["cust_fname"], ["given_name", "first_name"],
-        learned=memory.learned_index(workspace_id="ws-a"),
+        ["cust_fname"], ["given_name", "surname"],
+        learned=memory.learned_index(workspace_id="ws-a", destination=DEST_A),
     )
-    assert out[0]["target"] == "given_name" and out[0]["kind"] == "learned"
+    assert out[0]["target"] == "given_name" and out[0]["kind"] == "learned" and out[0]["selected"]
 
 
 def test_the_reported_orders_table_maps_onto_other_destination_columns():
@@ -331,7 +393,9 @@ def test_the_reported_orders_table_maps_onto_other_destination_columns():
         "first_name": ("given_name", "synonym"),
         "last_name": ("surname", "synonym"),
     }
-    assert all(s["selected"] for s in out)
+    # order_id → customers.id is suggested but not pre-selected: the entity
+    # (order) does not name the destination table (review H2).
+    assert {s["source"] for s in out if s["selected"]} == {"name", "total_balance", "first_name", "last_name"}
 
 
 @pytest.mark.parametrize(
@@ -341,3 +405,54 @@ def test_the_reported_orders_table_maps_onto_other_destination_columns():
 def test_qualified_siblings_in_one_synonym_group_are_not_synonyms(src, tgt):
     hit = score_pair(src, tgt)
     assert hit is None or hit[1] not in {"synonym", "concept"}, hit
+
+
+# --------------------------------------------------------------------------- generated targets (M3)
+
+
+def test_catalog_marks_generated_and_always_identity_columns_unwritable():
+    info = {**_INFO, "columns": [*_INFO["columns"], "total_with_tax"],
+            "schema": {**_INFO["schema"], "total_with_tax": "DECIMAL(12,2)"},
+            "schema_nullability": {**_INFO["schema_nullability"], "total_with_tax": True},
+            "generated_columns": ["total_with_tax", "id"]}
+    by = {c["name"]: c for c in build_destination_column_catalog(info, dest_type="postgresql")["columns"]}
+    assert by["total_with_tax"]["writable"] is False and by["total_with_tax"]["fill"] == "generated"
+    assert by["id"]["writable"] is False and by["id"]["fill"] == "generated"
+    assert by["given_name"]["writable"] is True and by["given_name"]["fill"] is None
+
+
+def test_g14_refuses_a_mapping_onto_a_generated_column():
+    gate = build_destination_requirements_gate(
+        destination_table_exists=True,
+        column_nullability={"id": False, "full_name": True, "total_with_tax": True},
+        column_defaults={},
+        identity_columns=["id"],
+        generated_columns=["id", "total_with_tax"],
+        mappings=[{"source": "order_id", "target": "ID"},
+                  {"source": "amount", "target": "total_with_tax"},
+                  {"source": "name", "target": "full_name"}],
+        dest_columns=["id", "full_name", "total_with_tax"],
+    )
+    assert gate["status"] == "block"
+    assert sorted(gate["details"]["generated_targets"]) == ["ID", "total_with_tax"]
+    assert "cannot be written" in gate["message"]
+    assert gate["details"]["rule_id"] == "g14_destination_requirements.generated_target"
+
+
+def test_g14_generated_target_check_does_not_need_a_nullability_reading():
+    gate = build_destination_requirements_gate(
+        destination_table_exists=True, column_nullability={}, column_defaults={},
+        identity_columns=[], generated_columns=["total_with_tax"],
+        mappings=[{"source": "amount", "target": "total_with_tax"}], dest_columns=["total_with_tax"],
+    )
+    assert gate["status"] == "block"
+
+
+def test_g14_allows_an_omitted_row_whose_old_target_was_generated():
+    gate = build_destination_requirements_gate(
+        destination_table_exists=True, column_nullability={"x": True}, column_defaults={},
+        identity_columns=[], generated_columns=["x"],
+        mappings=[{"source": "a", "target": "x", "transform": "omit", "intentional_omit": True}],
+        dest_columns=["x"],
+    )
+    assert gate is None or gate["status"] != "block"

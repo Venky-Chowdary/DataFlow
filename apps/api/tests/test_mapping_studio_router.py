@@ -98,6 +98,17 @@ def test_destination_columns_refuses_another_workspaces_connector(tenancy_world)
     assert world.a.post(f"{BASE}/destination-columns", json=_body(cid)).status_code == 200
 
 
+def test_destination_columns_applies_the_hosts_local_destination_refusal(tenancy_world, monkeypatch):
+    """Same refusal as the transfer routes (services.local_file_policy): a host
+    that refuses SQLite destinations does not open one to read its columns."""
+    world = tenancy_world
+    cid = _connector(world.workspace_a, _dest_db(world.data_dir, world.workspace_a))
+    monkeypatch.setenv("DATAFLOW_SQLITE_DESTINATION", "off")
+    r = world.a.post(f"{BASE}/destination-columns", json=_body(cid))
+    assert r.status_code == 422, r.text
+    assert "sqlite" in r.text.lower()
+
+
 def test_destination_columns_error_carries_no_path(tenancy_world, monkeypatch):
     world = tenancy_world
     db = _dest_db(world.data_dir, world.workspace_a)
@@ -118,34 +129,72 @@ def test_viewer_cannot_read_destination_columns_or_record_memory(tenancy_world):
     cid = _connector(world.workspace_a, _dest_db(world.data_dir, world.workspace_a))
     viewer = world.member("viewer-map@tenancy.example.com", world.workspace_a, "viewer")
     assert viewer.post(f"{BASE}/destination-columns", json=_body(cid)).status_code == 403
-    assert viewer.post(f"{BASE}/memory", json={"pairs": [{"source": "a", "target": "b"}]}).status_code == 403
+    assert viewer.post(f"{BASE}/memory", json={"destination": _body(cid)["destination"],
+                                                "pairs": [{"source": "a", "target": "b"}]}).status_code == 403
     assert viewer.get(f"{BASE}/memory").status_code == 200
 
 
-def test_memory_is_per_workspace_and_feeds_auto_map(tenancy_world):
+def test_memory_records_only_confirmed_pairs_onto_real_destination_columns(tenancy_world):
+    """Review M4: POST /memory reads the stated destination's catalog and refuses
+    pairs whose target it does not have; another workspace's connector is refused."""
     world = tenancy_world
-    pairs = {"pairs": [{"source": "cust_fname", "target": "given_name"}]}
-    assert world.a.post(f"{BASE}/memory", json=pairs).status_code == 200
+    cid = _connector(world.workspace_a, _dest_db(world.data_dir, world.workspace_a))
+    dest = _body(cid)["destination"]
+    pairs = {"destination": dest, "pairs": [{"source": "cust_fname", "target": "given_name"},
+                                            {"source": "x", "target": "not_a_column"}]}
+    first = world.a.post(f"{BASE}/memory", json=pairs)
+    assert first.status_code == 200, first.text
+    assert first.json()["recorded"] == 1 and first.json()["refused"] == ["not_a_column"]
     assert world.a.post(f"{BASE}/memory", json=pairs).json()["total"] == 1
     listed = world.a.get(f"{BASE}/memory").json()["pairs"]
-    assert listed[0]["count"] == 2
+    assert listed[0]["count"] == 2 and listed[0]["target"] == "given_name"
     assert world.b.get(f"{BASE}/memory").json()["pairs"] == []
+    assert world.b.post(f"{BASE}/memory", json=pairs).status_code in (403, 404)
 
     body = {
         "source_columns": [{"name": "cust_fname", "type": "VARCHAR(40)"}, {"name": "order_id", "type": "BIGINT"}],
         "destination_columns": [{"name": "given_name", "type": "VARCHAR(40)"},
                                 {"name": "first_name", "type": "VARCHAR(40)"},
                                 {"name": "id", "type": "INTEGER"}],
-        "dest_table": "orders", "dest_type": "postgresql",
+        "dest_table": "orders", "dest_type": "postgresql", "destination": dest,
     }
     mine = {s["source"]: s for s in world.a.post(f"{BASE}/auto-map", json=body).json()["suggestions"]}
     assert mine["cust_fname"]["target"] == "given_name" and mine["cust_fname"]["kind"] == "learned"
     assert mine["order_id"]["target"] == "id" and mine["order_id"]["compat"]["verdict"] == "lossy"
-    theirs = {s["source"]: s for s in world.b.post(f"{BASE}/auto-map", json=body).json()["suggestions"]}
+    theirs = {s["source"]: s for s in world.b.post(f"{BASE}/auto-map", json={**body, "destination": {"kind": "database", "table": "orders_dest"}}).json()["suggestions"]}
     assert theirs.get("cust_fname", {}).get("kind") != "learned"
 
     assert world.a.delete(f"{BASE}/memory").json()["removed"] == 1
     assert world.a.get(f"{BASE}/memory").json()["pairs"] == []
+
+
+def test_memory_post_is_capped(tenancy_world):
+    world = tenancy_world
+    cid = _connector(world.workspace_a, _dest_db(world.data_dir, world.workspace_a))
+    too_many = {"destination": _body(cid)["destination"],
+                "pairs": [{"source": f"s{i}", "target": "given_name"} for i in range(201)]}
+    assert world.a.post(f"{BASE}/memory", json=too_many).status_code == 422
+
+
+def test_auto_map_never_suggests_an_unwritable_destination_column(tenancy_world):
+    body = {
+        "source_columns": [{"name": "total", "type": "DECIMAL(12,2)"}],
+        "destination_columns": [{"name": "total", "type": "DECIMAL(12,2)", "writable": False},
+                                {"name": "amount", "type": "DECIMAL(12,2)"}],
+    }
+    out = tenancy_world.a.post(f"{BASE}/auto-map", json=body).json()["suggestions"]
+    assert [(s["source"], s["target"]) for s in out] == [("total", "amount")]
+
+
+def test_auto_map_never_preselects_an_incompatible_pair(tenancy_world):
+    body = {
+        "source_columns": [{"name": "photo", "type": "BLOB"}],
+        "destination_columns": [{"name": "photo", "type": "INTEGER"}],
+        "dest_type": "postgresql",
+    }
+    out = tenancy_world.a.post(f"{BASE}/auto-map", json=body).json()["suggestions"]
+    assert out[0]["kind"] == "exact" and out[0]["compat"]["verdict"] == "incompatible"
+    assert out[0]["selected"] is False
 
 
 def test_type_compatibility_grades_with_validate_rules(tenancy_world):

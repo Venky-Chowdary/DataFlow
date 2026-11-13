@@ -16,6 +16,7 @@ type PanelFilter = "all" | "unmapped" | "required" | "conflicts";
 const STATUS_LABEL: Record<DestColumnState["status"], string> = {
   mapped: "Mapped",
   conflict: "Conflict",
+  generated_target: "Generated",
   required_unmapped: "Required",
   default_unmapped: "Default",
   engine_unmapped: "Generated",
@@ -39,6 +40,8 @@ interface DestinationColumnsPanelProps {
   dragging: boolean;
   onPointerDrop: (source: string, target: string) => void;
   onPointerOver: (target: string | null) => void;
+  /** The names this panel shows after its search and filter (keyboard drag walks them). */
+  onVisibleChange?: (names: string[]) => void;
 }
 
 /**
@@ -64,16 +67,11 @@ export function DestinationColumnsPanel({
   dragging,
   onPointerDrop,
   onPointerOver,
+  onVisibleChange,
 }: DestinationColumnsPanelProps) {
   const [filter, setFilter] = useState<PanelFilter>("all");
   const [query, setQuery] = useState("");
 
-  // A drag targets every column: show them all while one is in flight.
-  useEffect(() => {
-    if (!dragging) return;
-    setFilter("all");
-    setQuery("");
-  }, [dragging]);
 
   const visible = useMemo(() => {
     const byName = new Map(states.map((s) => [s.column.name, s]));
@@ -87,6 +85,11 @@ export function DestinationColumnsPanel({
       return true;
     });
   }, [states, query, filter]);
+
+  const visibleKey = visible.map((s) => s.column.name).join("\u0000");
+  useEffect(() => {
+    onVisibleChange?.(visible.map((s) => s.column.name));
+  }, [visibleKey]);
 
   const win = useVirtualWindow(visible.length, PANEL_ROW_PX, 480);
   const overIndex = dragOver ? visible.findIndex((s) => s.column.name === dragOver) : -1;

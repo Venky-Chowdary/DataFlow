@@ -141,8 +141,14 @@ def build_destination_column_catalog(
                 "primary_key": key in pk,
                 "identity": key in identity_l,
                 "generated": key in generated_l,
-                # None = unmeasured: never claim "optional" without a reading.
-                "required": (key in required) if nullable is not None else None,
+                # generated / GENERATED ALWAYS: the engine refuses a written value.
+                "writable": key not in generated_l,
+                "fill": "generated" if key in generated_l else ("identity" if key in identity_l else None),
+                # None = unmeasured. G14 judges only a complete nullability
+                # reading, so a partial one makes no column "required" here either.
+                "required": (key in required) if (nullable is not None and measured) else None,
+                # The one name rule (ci_get, as the DDL gate): Map compares on it.
+                "match_key": key,
             }
         )
     can_add, add_reason = add_column_decision(

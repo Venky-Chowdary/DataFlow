@@ -8,6 +8,7 @@ import { applyImportedMappings, documentRows } from "../../lib/mappingCode";
 import type { ShapeStepWire } from "../../lib/shape";
 import { DestinationColumnsPanel, DND_MIME } from "../../components/mapping/DestinationColumnsPanel";
 import { MappingToolbar } from "../../components/mapping/MappingToolbar";
+import { useTouchDrag } from "../../components/mapping/useTouchDrag";
 import {
   useDestinationCatalog,
   useMappingStudio,
@@ -247,7 +248,13 @@ export function TransferMapStep({
     },
     [onChangeMappings],
   );
-  const studio = useMappingStudio({ mappings: columnMappings, onChange: onOperatorEdit, catalog });
+  const [visibleTargets, setVisibleTargets] = useState<string[] | null>(null);
+  const studio = useMappingStudio({
+    mappings: columnMappings,
+    onChange: onOperatorEdit,
+    catalog,
+    visibleTargets: panelOpen ? visibleTargets : null,
+  });
   const grades = useTypeGrades(remapEnabled ? columnMappings : [], destType, destTableExists);
   const tableRecreated = liveCarrierIsDoomedOnThisRun({ syncMode, destDbType: destType, destTableExists });
   const targetIssues = useMemo(
@@ -353,7 +360,7 @@ export function TransferMapStep({
         sourceColumns: columnMappings
           .filter((m) => !isIntentionalOmit(m))
           .map((m) => ({ name: m.source, type: m.inferredType })),
-        destinationColumns: (catalog?.columns ?? []).map((c) => ({ name: c.name, type: c.type })),
+        destinationColumns: (catalog?.columns ?? []).map((c) => ({ name: c.name, type: c.type, writable: c.writable })),
         mapped: columnMappings
           .filter((m) => !isIntentionalOmit(m) && m.target)
           .map((m) => ({ source: m.source, target: m.target })),
@@ -361,6 +368,7 @@ export function TransferMapStep({
         sourceTable: sourceObjectName,
         destTable: targetCollection,
         destType,
+        destination: destEndpoint,
       });
       setAutoMap({ open: true, mode, loading: false, error: "", suggestions });
     } catch (e) {
@@ -385,6 +393,8 @@ export function TransferMapStep({
     setFocusSource(source);
   };
 
+  const touch = useTouchDrag(studio, () => setPanelOpen(true));
+
   const renderGrip = (m: MapRow) => {
     const active = studio.dnd.mode === "dragging" && studio.dnd.source === m.source;
     return (
@@ -392,6 +402,7 @@ export function TransferMapStep({
         type="button"
         className={`df2-ms-grip${active ? " is-grabbed" : ""}`}
         draggable
+        {...touch.handlers(m.source)}
         aria-roledescription="draggable source column"
         aria-label={`Move ${m.source} to a destination column`}
         aria-describedby={gripHelpId}
@@ -439,8 +450,8 @@ export function TransferMapStep({
       .filter((m) => m.approved && !isIntentionalOmit(m) && m.target)
       .filter((m) => normalizeColumnName(m.source) !== normalizeColumnName(m.target))
       .map((m) => ({ source: m.source, target: m.target }));
-    if (remapEnabled && learned.length) {
-      void recordMappingMemory(learned).catch(() => {
+    if (remapEnabled && learned.length && destEndpoint) {
+      void recordMappingMemory(learned, destEndpoint).catch(() => {
         /* Memory is a suggestion source; Validate never depends on it. */
       });
     }
@@ -806,6 +817,8 @@ export function TransferMapStep({
             </div>
           </div>
         )}
+        {/* Toolbar and split scroll inside the Map body: the classic view is a fixed-height card. */}
+        <div className="df2-ms-scroll">
         {remapControls && (
           <MappingToolbar
             canUndo={studio.canUndo}
@@ -868,10 +881,10 @@ export function TransferMapStep({
             ) : null}
           </p>
         )}
-        {studio.dnd.mode === "dragging" && studio.dnd.via === "keyboard" && (
+        {studio.dnd.mode === "dragging" && (studio.dnd.via === "keyboard" || touch.touching) && (
           <p className="df2-ms-drag-status" aria-hidden="true">
             Moving <strong>{studio.dnd.source}</strong> → <strong>{studio.dragOver ?? "…"}</strong>.
-            Arrow keys choose, Enter drops, Escape cancels.
+            {touch.touching ? "Lift your finger on a destination column to drop it there." : "Arrow keys choose, Enter drops, Escape cancels."}
           </p>
         )}
         <div className={`df2-ms-split${remapControls && panelOpen ? " has-panel" : ""}`}>
@@ -924,8 +937,10 @@ export function TransferMapStep({
               dragging={studio.dnd.mode === "dragging"}
               onPointerDrop={studio.pointerDrop}
               onPointerOver={studio.pointerOver}
+              onVisibleChange={setVisibleTargets}
             />
           )}
+        </div>
         </div>
         <span id={gripHelpId} className="df2-sr-only">
           Press Space or Enter to pick up, arrow keys to move over destination columns, Enter to drop, Escape to cancel.

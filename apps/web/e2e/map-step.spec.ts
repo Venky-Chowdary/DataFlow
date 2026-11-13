@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { installHermeticStubs } from "./hermetic";
+import { expectStudioShellClear } from "./layout";
 import { openStudio, settleToasts } from "./support";
 
 /**
@@ -184,6 +185,7 @@ test.describe("Map step: remap onto existing destination columns", () => {
     await expect(amtRow).toContainText("Concept");
     await expect(amtRow).toContainText("78%");
     expect(captured.autoMap[0]?.dest_table).toBe("orders_dest");
+    expect((captured.autoMap[0]?.destination as { table?: string })?.table).toBe("orders_dest");
     await dialog.getByRole("button", { name: /^Apply \d+ mappings?$/ }).click();
     await expect(dialog).toBeHidden();
     await expect(picker(page, "order_amt")).toHaveValue("total_amount");
@@ -192,6 +194,72 @@ test.describe("Map step: remap onto existing destination columns", () => {
     await expect(page.getByTestId("map-target-issues")).toContainText("tenant_id");
     await expect(page.getByRole("button", { name: /Continue to Validate/ })).toBeDisabled();
     await expect(destRow(page, "tenant_id")).toContainText("Required");
+  });
+
+  test("the Map step stays clear of clipping and overlap at laptop, desktop and phone sizes", async ({ browser }) => {
+    test.setTimeout(300_000);
+    const views = [
+      { width: 1366, height: 768 }, { width: 1440, height: 900 }, { width: 390, height: 844 },
+    ];
+    for (const view of views) {
+      for (const theme of ["light", "dark"] as const) {
+        const context = await browser.newContext({ viewport: view });
+        const page = await context.newPage();
+        await stubMapStudio(page);
+        await reachMap(page);
+        await page.evaluate((t) => {
+          localStorage.setItem("df2.theme", t);
+          document.documentElement.setAttribute("data-theme", t);
+        }, theme);
+        if (view.width < 1024) {
+          await page.getByRole("button", { name: "Show destination columns" }).click();
+        }
+        await showAllRows(page);
+        // The grid's "Why" text is a deliberate 3-line clamp with a More toggle.
+        // Open every one, as a reader would: the check then covers the longest layout.
+        const more = page.getByRole("button", { name: /^Show full reason for / });
+        for (let i = 0; i < 20 && (await more.count()) > 0; i += 1) {
+          await more.first().scrollIntoViewIfNeeded();
+          await more.first().click();
+        }
+        await expectStudioShellClear(page, `map ${view.width}x${view.height} ${theme}`);
+        await context.close();
+      }
+    }
+  });
+
+  test("touch: a finger drags a source onto a destination column (tablet)", async ({ browser }) => {
+    const context = await browser.newContext({
+      viewport: { width: 1180, height: 820 }, hasTouch: true, isMobile: true,
+    });
+    const page = await context.newPage();
+    await stubMapStudio(page);
+    await reachMap(page);
+    await showAllRows(page);
+    const row = destRow(page, "email_address");
+    await grip(page, "customer_email").scrollIntoViewIfNeeded();
+    // Away from the list's edges, where a resting finger scrolls it.
+    await row.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    const from = await grip(page, "customer_email").boundingBox();
+    const to = await row.boundingBox();
+    expect(from && to).toBeTruthy();
+    // Real touch input: Chromium turns it into pointer events with pointerType "touch".
+    const cdp = await context.newCDPSession(page);
+    const at = (x: number, y: number) => [{ x: Math.round(x), y: Math.round(y), id: 1 }];
+    const start = { x: from!.x + from!.width / 2, y: from!.y + from!.height / 2 };
+    const end = { x: to!.x + to!.width / 2, y: to!.y + to!.height / 2 };
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: at(start.x, start.y) });
+    for (let i = 1; i <= 8; i += 1) {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: at(start.x + ((end.x - start.x) * i) / 8, start.y + ((end.y - start.y) * i) / 8),
+      });
+    }
+    await expect(row).toHaveClass(/is-drop-over/);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await expect(picker(page, "customer_email")).toHaveValue("email_address");
+    await expect(live(page)).toContainText("customer_email now writes email_address");
+    await context.close();
   });
 
   test("the picker offers 'will create column' for a new name, labelled as such", async ({ page }) => {

@@ -30,7 +30,9 @@ interface DestColumnComboboxProps {
 }
 
 function selectable(o: ComboOption | undefined): boolean {
-  return Boolean(o) && o!.kind !== "refused";
+  if (!o || o.kind === "refused") return false;
+  // A generated column is listed (so the operator sees it exists) but never written.
+  return o.kind !== "column" || o.column.writable;
 }
 
 /**
@@ -218,9 +220,15 @@ export function DestColumnCombobox({
                   const note = claimNote(o.column.name);
                   const selected = o.column.name.toLowerCase() === value.toLowerCase();
                   return (
-                    <li key={o.key} {...common} aria-selected={selected}>
+                    <li
+                      key={o.key}
+                      {...common}
+                      aria-selected={selected}
+                      aria-disabled={o.column.writable ? undefined : "true"}
+                    >
                       <span className="df2-ms-combo-name">
                         {o.column.name}
+                        {!o.column.writable ? <span className="df2-ms-tag is-claimed">engine-filled · cannot be written</span> : null}
                         {o.column.required ? <span className="df2-ms-tag is-required">required</span> : null}
                         {note ? <span className="df2-ms-tag is-claimed">{note}</span> : null}
                       </span>
@@ -299,11 +307,17 @@ export function DestColumnCombobox({
         {current
           ? `${current.name}: ${destColumnFacts(current).join(", ")}.`
           : isNew
-            ? `${value} is not in the destination table: it will be created.`
+            ? catalog.canAddColumns
+              ? `${value} is not in the destination table: it will be created.`
+              : `${value} is not a destination column and cannot be created here: ${catalog.addColumnsReason}`
             : ""}
         {" "}Type to search {catalog.columns.length} destination columns; arrow keys choose, Enter maps, Escape cancels.
       </span>
-      {isNew ? <span className="df2-ms-tag is-create" title={catalog.addColumnsReason}>new column</span> : null}
+      {isNew ? (
+        catalog.canAddColumns
+          ? <span className="df2-ms-tag is-create">new column</span>
+          : <span className="df2-ms-tag is-conflict">not a destination column</span>
+      ) : null}
       {menu}
     </div>
   );

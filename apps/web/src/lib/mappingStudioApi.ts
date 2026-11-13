@@ -88,33 +88,48 @@ export async function fetchTypeCompatibility(
 
 export async function fetchAutoMap(body: {
   sourceColumns: Array<{ name: string; type?: string }>;
-  destinationColumns: Array<{ name: string; type?: string }>;
+  destinationColumns: Array<{ name: string; type?: string; writable?: boolean }>;
   mapped: Array<{ source: string; target: string }>;
   mode: "all" | "remaining";
   sourceTable?: string;
   destTable?: string;
   destType?: string;
+  /** Scopes the learned tier to this destination. */
+  destination?: Record<string, unknown> | null;
 }): Promise<AutoMapSuggestion[]> {
   const out = await postJson<{ suggestions: AutoMapSuggestion[] }>(
     `${API_BASE}/transfer/mapping/auto-map`,
     {
       source_columns: body.sourceColumns.map((c) => ({ name: c.name, type: c.type ?? "" })),
-      destination_columns: body.destinationColumns.map((c) => ({ name: c.name, type: c.type ?? "" })),
+      destination_columns: body.destinationColumns.map((c) => ({
+        name: c.name, type: c.type ?? "", writable: c.writable !== false,
+      })),
       mapped: body.mapped,
       mode: body.mode,
       source_table: body.sourceTable ?? "",
       dest_table: body.destTable ?? "",
       dest_type: body.destType ?? "",
+      ...(body.destination ? { destination: body.destination } : {}),
     },
     "Auto-map failed",
   );
   return out.suggestions ?? [];
 }
 
-/** Remember confirmed pairs for this workspace's learned auto-map tier. */
-export async function recordMappingMemory(pairs: Array<{ source: string; target: string }>): Promise<void> {
+/**
+ * Remember pairs confirmed for this destination (the learned auto-map tier).
+ * The API reads the destination's catalog and keeps only pairs onto real columns.
+ */
+export async function recordMappingMemory(
+  pairs: Array<{ source: string; target: string }>,
+  destination: Record<string, unknown>,
+): Promise<void> {
   if (pairs.length === 0) return;
-  await postJson(`${API_BASE}/transfer/mapping/memory`, { pairs: pairs.slice(0, 2000) }, "Could not record confirmed mappings");
+  await postJson(
+    `${API_BASE}/transfer/mapping/memory`,
+    { destination, pairs: pairs.slice(0, 200) },
+    "Could not record confirmed mappings",
+  );
 }
 
 export interface MappingTemplateSummary {
