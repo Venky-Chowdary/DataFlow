@@ -48,6 +48,7 @@ def _load(monkeypatch, path: Path, ext: str):
                 field_terminator=kwargs["field_terminator"],
                 optionally_enclosed=kwargs["optionally_enclosed"],
                 ignore_lines=kwargs["ignore_lines"],
+                **({"line_terminator": kwargs["line_terminator"]} if "line_terminator" in kwargs else {}),
             )
         )
 
@@ -120,7 +121,7 @@ def test_backslash_object_declines_to_the_row_path(monkeypatch, tmp_path, ext, b
     ("tsv", b"id\tnote\n1\tNULL\n"),
     ("tsv", b"id\tnote\n1\tNULL"),
     ("tsv", b"id\tnote\nNULL\tx\n"),
-    ("tsv", b"id\tnote\n1\tNULL\r\n"),
+    ("tsv", b"id\tnote\r\n1\tNULL\r\n"),
     ("csv", b"id,note\n1,NULL\n"),
     ("csv", b'id,note\n"1",NULL,\n'),
 ])
@@ -200,3 +201,107 @@ def test_scan_finds_null_field_across_chunk_boundaries(tmp_path, chunk_size):
     miss.write_bytes(b'id\tnote\n11\t"NULL"\n22\tNULLx\n33\txNULL\n')
     assert scan_delimited_file(str(hit), "\t", chunk_size=chunk_size).unquoted_null is True
     assert scan_delimited_file(str(miss), "\t", chunk_size=chunk_size).unquoted_null is False
+
+
+
+# ── line endings: the loader's LINES TERMINATED BY matches the file ──────────
+
+
+@pytest.mark.parametrize("ext, body, terminator", [
+    ("csv", b"id,note\r\n1,a\r\n2,b\r\n", "\\r\\n"),
+    ("tsv", b"id\tnote\r\n1\ta\r\n2\tb", "\\r\\n"),
+    ("csv", b"id,note\n1,a\n2,b\n", "\\n"),
+    ("tsv", b"id\tnote\n1\ta\n", "\\n"),
+])
+def test_load_statement_matches_the_file_line_endings(monkeypatch, tmp_path, ext, body, terminator):
+    """CRLF files loaded with LINES TERMINATED BY '\\n' kept a \\r on every last column."""
+    path = tmp_path / f"src.{ext}"
+    path.write_bytes(body)
+    _calls, sql = _load(monkeypatch, path, ext)
+    assert f"LINES TERMINATED BY '{terminator}'" in sql[0], sql[0]
+
+
+@pytest.mark.parametrize("ext, body", [
+    ("csv", b"id,note\r\n1,a\n2,b\r\n"),
+    ("tsv", b"id\tnote\n1\ta\r\n"),
+    ("csv", b"id,note\r1,a\r"),
+    ("csv", b'id,note\r\n1,"a\nb"\r\n'),
+])
+def test_mixed_or_bare_cr_line_endings_decline(monkeypatch, tmp_path, ext, body):
+    from services.copy_fast_path import FastPathUnavailable
+
+    path = tmp_path / f"src.{ext}"
+    path.write_bytes(body)
+    with pytest.raises(FastPathUnavailable, match="line endings"):
+        _load(monkeypatch, path, ext)
+
+
+def test_crlf_null_field_is_still_declined(monkeypatch, tmp_path):
+    from services.copy_fast_path import FastPathUnavailable
+
+    path = tmp_path / "src.csv"
+    path.write_bytes(b"id,note\r\n1,NULL\r\n")
+    with pytest.raises(FastPathUnavailable, match="NULL"):
+        _load(monkeypatch, path, "csv")
+
+
+def test_row_path_reads_mixed_line_endings_exactly(tmp_path):
+    from services.copy_s3_common import s3_iter_delimited_rows
+
+    path = tmp_path / "mixed.csv"
+    path.write_bytes(b"id,note\r\n1,a\n2,b\r\n3,c")
+    assert list(s3_iter_delimited_rows(str(path), ",")) == [["1", "a"], ["2", "b"], ["3", "c"]]
+
+
+@pytest.mark.parametrize("ext, body", [
+    ("csv", b"id,note\r\n1,a\r\n"),
+    ("tsv", b"id\tnote\n1\ta\n"),
+])
+def test_local_to_mysql_uses_the_detected_terminator(monkeypatch, tmp_path, ext, body):
+    import connectors.mysql_load_data as mld
+    from services import copy_csv_local, copy_mysql_pg
+
+    conn = _FakeConn()
+    rows = iter([(0,), (1,)])
+    conn.cur.fetchone = lambda: next(rows)
+    monkeypatch.setattr(copy_mysql_pg, "_mysql_connect", lambda _cfg: conn)
+    monkeypatch.setattr(mld, "mysql_load_data_session_ready", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(mld, "fetch_load_data_warnings", lambda _cur: [])
+    loads: list[dict] = []
+    monkeypatch.setattr(mld, "execute_load_data_local", lambda _c, **kw: loads.append(kw))
+    path = tmp_path / f"mapped.{ext}"
+    path.write_bytes(body)
+    copy_csv_local.copy_csv_to_mysql(
+        mapped_path=str(path), ext=ext, dest_cfg={"host": "127.0.0.1"},
+        dest_table="t", pairs=[("id", "id"), ("note", "note")],
+        mysql_ddls=["BIGINT", "TEXT"], source_count=1, replace_destination=False,
+    )
+    expected = "\r\n" if b"\r\n" in body else "\n"
+    assert loads and loads[0].get("line_terminator", "\n") == expected
+
+
+# ── encoding: LOAD DATA reads utf8mb4 bytes ──────────────────────────────────
+
+
+@pytest.mark.parametrize("body", [
+    "id,note\n1,é\n".encode("utf-16"),
+    "id,note\n1,é\n".encode("utf-16-be"),
+    "id,note\n1,é\n".encode("utf-32"),
+    b"id,note\n1,a\x00b\n",
+])
+def test_wide_encodings_and_nul_bytes_decline(monkeypatch, tmp_path, body):
+    from services.copy_fast_path import FastPathUnavailable
+
+    path = tmp_path / "src.csv"
+    path.write_bytes(body)
+    with pytest.raises(FastPathUnavailable, match="UTF-8"):
+        _load(monkeypatch, path, "csv")
+
+
+def test_utf8_bom_rides_on_the_skipped_header_line(monkeypatch, tmp_path):
+    """Every loader file has a header row (IGNORE 1 LINES); a UTF-8 BOM is part of it."""
+    path = tmp_path / "src.csv"
+    path.write_bytes(b"\xef\xbb\xbfid,note\n1,a\n")
+    calls, sql = _load(monkeypatch, path, "csv")
+    assert calls[0]["ignore_lines"] == 1
+    assert "IGNORE 1 LINES" in sql[0]

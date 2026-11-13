@@ -76,6 +76,19 @@ def _load_delimited_into_mysql(
             "source object holds a backslash; LOAD DATA escape processing would "
             "rewrite it, so the row path loads it"
         )
+    if scan.not_utf8_text:
+        # LOAD DATA ... CHARACTER SET utf8mb4 reads the bytes as UTF-8; a
+        # UTF-16/32 object would load garbage. The row path decodes it.
+        raise FastPathUnavailable(
+            "file is not UTF-8 text (UTF-16/32 byte-order mark or NUL bytes); "
+            "the row path decodes it"
+        )
+    if scan.line_ending == "mixed":
+        # One LINES TERMINATED BY for the whole file: mixed \n/\r\n or a bare
+        # \r would leave \r in values or merge rows.
+        raise FastPathUnavailable(
+            "file mixes line endings (\\n, \\r\\n or a bare \\r); the row path reads each"
+        )
     if scan.unquoted_null:
         # With FIELDS ENCLOSED BY set, LOAD DATA reads an unenclosed field that
         # is exactly NULL as SQL NULL; the row path keeps the text (G7 K1).
@@ -96,7 +109,9 @@ def _load_delimited_into_mysql(
         # or a leading quote is enclosed in quotes. MySQL reads an enclosed
         # field up to its closing quote ("" -> ") and a mid-field '"' literally.
         optionally_enclosed=True,
+        # Every loader file has a header row; a UTF-8 BOM rides on that line.
         ignore_lines=1,
+        line_terminator="\r\n" if scan.line_ending == "crlf" else "\n",
     )
     blocked = fetch_load_data_warnings(dst_cur)
     if blocked:
