@@ -1,4 +1,5 @@
 import { toDelimitedText } from "./csvSafety";
+import { FILE_EXPORT_FORMULA_PROTECTION_DEFAULT } from "./fileExportDestination";
 import type { EditableMapping } from "./mapping";
 import { applyLocalTransform, requiresServerPreview } from "./localTransform";
 import type { NumberLocale } from "./numberLocale";
@@ -62,7 +63,10 @@ export interface LocalFileExportInput {
   format: string;
   outputBasename?: string;
   numberLocale?: NumberLocale | string;
-  /** The destination's formula_protection is "prefix" (see SerializeOptions). */
+  /**
+   * The destination's formula_protection is "prefix" (see SerializeOptions).
+   * Unset follows a new Studio job's default (on), as the server run would.
+   */
   formulaProtection?: boolean;
 }
 
@@ -78,7 +82,9 @@ export function runLocalFileExport(input: LocalFileExportInput): TransferResult 
     };
   }
   const mapped = input.rows.map((row) => mapRow(row, input.mappings, input.numberLocale));
-  const { blob, ext } = serializeRows(mapped, input.format, { formulaProtection: input.formulaProtection });
+  const { blob, ext } = serializeRows(mapped, input.format, {
+    formulaProtection: input.formulaProtection ?? FILE_EXPORT_FORMULA_PROTECTION_DEFAULT,
+  });
   const base = (input.outputBasename || input.sourceFilename.replace(/\.[^/.]+$/, "") || "export").replace(/[^\w.-]+/g, "_");
   const filename = `${base}.${ext}`;
   const downloadUrl = URL.createObjectURL(blob);

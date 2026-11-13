@@ -14,6 +14,7 @@ import {
   type QueryResult,
 } from "../lib/api";
 import { formulaGuardApplies } from "../lib/csvSafety";
+import { QUERY_EXPORT_FORMULA_PROTECTION_HELP } from "../lib/fileExportDestination";
 import {
   firstExpanded,
   mergeExpandedObject,
@@ -801,11 +802,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                           />
                           <span>
                             <strong>Protect against spreadsheet formulas</strong>
-                            <small id="query-export-formula-hint">
-                              {formulaProtection
-                                ? "Text starting with = + - @ gets a leading ' so Excel never runs it. Numbers stay numbers."
-                                : "Off: exact values — a cell such as =HYPERLINK(…) runs when the file is opened."}
-                            </small>
+                            <small id="query-export-formula-hint">{QUERY_EXPORT_FORMULA_PROTECTION_HELP}</small>
                           </span>
                         </label>
                       )}

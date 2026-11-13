@@ -36,6 +36,7 @@ describe("export dialogs offer 'Protect against spreadsheet formulas'", () => {
   it("Query console: on by default and sent to the API as formula_protection", () => {
     const page = src("pages/QueryPage.tsx");
     assert.match(page, /useState\(true\)/);
+    assert.match(page, /\{QUERY_EXPORT_FORMULA_PROTECTION_HELP\}/);
     assert.match(page, /Protect against spreadsheet formulas/);
     assert.match(page, /formula_protection: formulaProtection \? "prefix" : "off"/);
     assert.match(page, /formulaGuardApplies\(exportFormat\)/);
@@ -49,6 +50,10 @@ describe("export dialogs offer 'Protect against spreadsheet formulas'", () => {
     assert.doesNotMatch(page, /\{ kind: "file_export", format: exportFormat, database: targetDb/);
     assert.match(page, /formulaProtection: exportFormulaProtection,\n\s*\}\);/);
     assert.match(page, /setExportFormulaProtection\(dst\.formulaProtection\)/);
+    // New job: on; reset (New transfer): back to on; reopened job: what it stored.
+    assert.match(page, /useState\(FILE_EXPORT_FORMULA_PROTECTION_DEFAULT\)/);
+    assert.match(page, /setExportFormulaProtection\(FILE_EXPORT_FORMULA_PROTECTION_DEFAULT\)/);
+    assert.match(page, /\{FILE_EXPORT_FORMULA_PROTECTION_HELP\}/);
   });
 
   it("step-preview.csv and copy-as-CSV use the shared guard", () => {

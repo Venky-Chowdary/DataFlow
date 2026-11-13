@@ -2,12 +2,28 @@
  * The Studio file_export destination as the API receives it (G7-F2).
  *
  * `formulaProtection` is the destination's "Protect against spreadsheet formulas"
- * option. The API default for a transfer job's file_export is "off": the file is
- * data (Gate-8 re-reads it, downstream loads ingest it) and stays byte-exact. On,
- * a CSV/TSV is written with `formula_protection: "prefix"` (csv_safety), which
- * Gate-8 reverses on read-back. Other formats ignore it.
+ * option. A NEW Studio job starts with it on: a CSV/TSV is written with
+ * `formula_protection: "prefix"` (csv_safety), which Gate-8 reverses on read-back,
+ * so the proof still compares the exact values. A saved job keeps what it stored —
+ * no field means the API default "off" (byte-exact) — so reopening or re-running
+ * an existing job never changes its output. Other formats ignore it.
  */
 import { formulaGuardApplies } from "./csvSafety";
+
+/** A new Studio file_export (and the offline browser export) protects by default. */
+export const FILE_EXPORT_FORMULA_PROTECTION_DEFAULT = true;
+
+/** The toggle's trade-off, shown under it in Studio. */
+export const FILE_EXPORT_FORMULA_PROTECTION_HELP =
+  "Cells starting with = + - @ get a ' prefix so spreadsheets don't execute them. The prefix is "
+  + "reversible: Gate-8 strips it and proves the exact values. Numbers such as -2 are untouched. "
+  + "Turn off for a byte-exact file that only machines read.";
+
+/** The same trade-off for the Query console download. */
+export const QUERY_EXPORT_FORMULA_PROTECTION_HELP =
+  "Cells starting with = + - @ get a ' prefix so spreadsheets don't execute them. The prefix is "
+  + "reversible (drop the leading ' to get the exact value). Numbers such as -2 are untouched. "
+  + "Turn off for exact values.";
 
 export interface FileExportOptions {
   format: string;

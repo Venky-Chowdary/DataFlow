@@ -250,7 +250,12 @@ import {
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { formulaGuardApplies } from "../lib/csvSafety";
-import { fileExportDestExtra, fileExportEndpoint } from "../lib/fileExportDestination";
+import {
+  FILE_EXPORT_FORMULA_PROTECTION_DEFAULT,
+  FILE_EXPORT_FORMULA_PROTECTION_HELP,
+  fileExportDestExtra,
+  fileExportEndpoint,
+} from "../lib/fileExportDestination";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
 import { localizeServerEventLog, readJobEventLog } from "../lib/jobEventLog";
 import {
@@ -543,9 +548,9 @@ export function TransferPage({
   const mapSourceKind = sourceKind === "cloud" ? "object_store" : sourceKind;
   const destSelected = destKindMode === "file_export" || Boolean(destType);
   const [exportFormat, setExportFormat] = useState("json");
-  // G7-F2: file_export "Protect against spreadsheet formulas" — off by default (the
-  // API's file_export default: the file is data, byte-exact for Gate-8).
-  const [exportFormulaProtection, setExportFormulaProtection] = useState(false);
+  // G7-F2: file_export "Protect against spreadsheet formulas" — on for a new job
+  // (Gate-8 reverses the prefix); a reopened job restores what it stored.
+  const [exportFormulaProtection, setExportFormulaProtection] = useState(FILE_EXPORT_FORMULA_PROTECTION_DEFAULT);
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
   const [persistedPlanId, setPersistedPlanId] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
@@ -7140,6 +7145,7 @@ export function TransferPage({
     setDestType("");
     setDestKindMode("database");
     setExportFormat("json");
+    setExportFormulaProtection(FILE_EXPORT_FORMULA_PROTECTION_DEFAULT);
     setTransferPlan(null);
     setPersistedPlanId(null);
     setPlanLoading(false);
@@ -8101,11 +8107,7 @@ export function TransferPage({
                       />
                       <span>
                         <strong>Protect against spreadsheet formulas</strong>
-                        <small id="dest-export-formula-hint">
-                          {exportFormulaProtection
-                            ? "Text starting with = + - @ gets a leading ' so Excel never runs it. Numbers stay numbers; Gate-8 reads the exact values back."
-                            : "Off: the file is data, byte-exact. Turn on when people open it in a spreadsheet."}
-                        </small>
+                        <small id="dest-export-formula-hint">{FILE_EXPORT_FORMULA_PROTECTION_HELP}</small>
                       </span>
                     </label>
                   )}
