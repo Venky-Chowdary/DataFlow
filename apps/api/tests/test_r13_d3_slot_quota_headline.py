@@ -9,6 +9,8 @@ with the same remedy ``cdc_capability`` gives, and real gaps stay gaps.
 
 from __future__ import annotations
 
+from tests.pg_slot_guard import track_created_slot
+
 import pytest
 
 from services.cdc_capability import CAUSE_SLOT_QUOTA, classify_log_capture_failure
@@ -102,6 +104,7 @@ def test_live_postgres_slot_exhaustion_headline():
                     "SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (name,)
                 )
                 made.append(name)
+                track_created_slot(name)  # dropped at session end if a kill skips finally
             except psycopg2.Error as exc:
                 err = exc
                 break

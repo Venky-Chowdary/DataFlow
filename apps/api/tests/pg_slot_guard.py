@@ -6,14 +6,24 @@ slot was still held by an open replication connection at teardown, so the
 test's ``WHERE NOT active`` drop skipped it) left ``df_dataflow_cdcord_*``
 holding 1.76 GB of WAL on the shared server until the disk filled.
 
-The guard records every slot this process creates through the engine's single
-creation site (``postgresql_change_stream._create_logical_slot``), turns
-SIGTERM into ``KeyboardInterrupt`` so pytest still unwinds (``finally`` blocks
-and ``pytest_sessionfinish`` run), and at session end drops each recorded slot
-that still exists, ending the backend that holds it first. It only touches
-slots this process created: other sessions' slots on the shared server are
-never dropped. A SIGKILL cannot be intercepted; that is the one case left to
-the operator.
+What the guard records, and why it is safe on a shared server:
+
+* only slots this process really created: the engine's creation site
+  (``postgresql_change_stream._create_logical_slot``) on a real psycopg2
+  connection, confirmed in ``pg_replication_slots`` right after; a fake
+  cursor records nothing. Tests that create slots with raw SQL call
+  :func:`track_created_slot`.
+* the slot's identity at creation (database, plugin, restart LSN). At drop
+  time the slot must still have that database and plugin and a restart LSN
+  no lower than recorded; a foreign slot that merely shares the name is
+  left alone.
+* an active slot is ended only when its holder is a connection this process
+  opened (its client port is one of this process's sockets); another
+  process's backend is never terminated.
+
+SIGTERM unwinds the session (``finally`` and ``pytest_sessionfinish`` run);
+a second SIGTERM while slots are being dropped is ignored. SIGKILL cannot be
+intercepted.
 """
 
 from __future__ import annotations
@@ -26,18 +36,59 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-#: ``(slot name, connection parameters)`` for every slot this process created.
+#: slot name -> {"params": dsn parameters, "database", "plugin", "restart_lsn"}
 CREATED: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 
 
-def _record(cur: Any, slot_name: str) -> None:
+def _is_real_connection(conn: Any) -> bool:
     try:
-        params = dict(cur.connection.get_dsn_parameters())
-    except Exception:  # noqa: BLE001 - fall back to the test server's env
-        params = {}
+        import psycopg2.extensions
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(conn, psycopg2.extensions.connection)
+
+
+def _identity(cur: Any, slot_name: str) -> dict[str, Any] | None:
+    cur.execute(
+        "SELECT database, plugin, restart_lsn::text FROM pg_replication_slots "
+        "WHERE slot_name = %s", (slot_name,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {"database": row[0], "plugin": row[1], "restart_lsn": row[2]}
+
+
+def _record_from_connection(conn: Any, slot_name: str) -> None:
+    if not _is_real_connection(conn):
+        return  # a fake cursor in a unit test: nothing was created
+    try:
+        ident = _identity(conn.cursor(), slot_name)
+        params = dict(conn.get_dsn_parameters())
+    except Exception as exc:  # noqa: BLE001 - recording must never break the test
+        logger.debug("slot guard: could not read %s: %s", slot_name, exc)
+        return
+    if ident is None:
+        return
     with _lock:
-        CREATED[str(slot_name)] = params
+        CREATED[str(slot_name)] = {**ident, "params": params}
+
+
+def track_created_slot(slot_name: str) -> None:
+    """Record a slot a test created with raw SQL on the test server."""
+    try:
+        conn = _connect({})
+    except Exception as exc:  # noqa: BLE001 - no server: nothing to track
+        logger.debug("slot guard: cannot track %s: %s", slot_name, exc)
+        return
+    try:
+        conn.autocommit = True
+        ident = _identity(conn.cursor(), slot_name)
+        if ident is not None:
+            with _lock:
+                CREATED[str(slot_name)] = {**ident, "params": {}}
+    finally:
+        conn.close()
 
 
 def install() -> None:
@@ -52,7 +103,7 @@ def install() -> None:
 
     def recording(cur: Any, slot_name: str, plugin: str):
         out = real(cur, slot_name, plugin)
-        _record(cur, slot_name)
+        _record_from_connection(getattr(cur, "connection", None), slot_name)
         return out
 
     recording._slot_guard = True  # type: ignore[attr-defined]
@@ -78,34 +129,84 @@ def _connect(params: dict[str, Any]):
     )
 
 
+def _own_client_ports() -> set[int]:
+    """Local TCP ports of this process's sockets (Linux /proc)."""
+    inodes: set[str] = set()
+    try:
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{fd}")
+            except OSError:
+                continue
+            if target.startswith("socket:["):
+                inodes.add(target[8:-1])
+    except OSError:
+        return set()
+    ports: set[int] = set()
+    for table in ("/proc/self/net/tcp", "/proc/self/net/tcp6"):
+        try:
+            with open(table, encoding="ascii") as fh:
+                next(fh, None)
+                for line in fh:
+                    cols = line.split()
+                    if len(cols) > 9 and cols[9] in inodes:
+                        ports.add(int(cols[1].rsplit(":", 1)[1], 16))
+        except OSError:
+            continue
+    return ports
+
+
 def drop_created_slots() -> list[str]:
-    """Drop every slot this process created that still exists; return their names."""
+    """Drop every slot this process created that is still provably its own."""
+    main = threading.current_thread() is threading.main_thread()
+    previous = signal.getsignal(signal.SIGTERM) if main else None
+    if main:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # a second SIGTERM must not stop this
+    try:
+        return _drop_all()
+    finally:
+        if main:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _drop_all() -> list[str]:
     with _lock:
         pending = dict(CREATED)
     dropped: list[str] = []
-    for name, params in pending.items():
+    for name, rec in pending.items():
         try:
-            conn = _connect(params)
+            conn = _connect(rec.get("params") or {})
         except Exception as exc:  # noqa: BLE001 - report, the server may be down
             logger.warning("slot guard: cannot connect to drop %s: %s", name, exc)
             continue
         try:
             conn.autocommit = True
             cur = conn.cursor()
-            cur.execute("SELECT active_pid FROM pg_replication_slots WHERE slot_name = %s",
-                        (name,))
+            cur.execute(
+                "SELECT database, plugin, active_pid, restart_lsn >= %s::pg_lsn "
+                "FROM pg_replication_slots WHERE slot_name = %s",
+                (rec.get("restart_lsn") or "0/0", name))
             row = cur.fetchone()
+            with _lock:
+                CREATED.pop(name, None)
             if row is None:
-                with _lock:
-                    CREATED.pop(name, None)
                 continue
-            if row[0]:
-                cur.execute("SELECT pg_terminate_backend(%s)", (row[0],))
+            database, plugin, active_pid, lsn_ok = row
+            if (database, plugin) != (rec.get("database"), rec.get("plugin")) or not lsn_ok:
+                logger.warning("slot guard: %s is not the slot this session created; kept", name)
+                continue
+            if active_pid:
+                cur.execute("SELECT client_port FROM pg_stat_activity WHERE pid = %s",
+                            (active_pid,))
+                port = (cur.fetchone() or [None])[0]
+                if port is None or int(port) not in _own_client_ports():
+                    logger.warning("slot guard: %s is held by another process (pid %s); kept",
+                                   name, active_pid)
+                    continue
+                cur.execute("SELECT pg_terminate_backend(%s)", (active_pid,))
                 cur.execute("SELECT pg_sleep(0.2)")
             cur.execute("SELECT pg_drop_replication_slot(%s)", (name,))
             dropped.append(name)
-            with _lock:
-                CREATED.pop(name, None)
         except Exception as exc:  # noqa: BLE001 - one slot must not stop the rest
             logger.warning("slot guard: could not drop %s: %s", name, exc)
         finally:

@@ -26,6 +26,8 @@ from a PostgreSQL with logical decoding (``R11_PG_LOGICAL_*``) into ``PG*``.
 
 from __future__ import annotations
 
+from tests.pg_slot_guard import track_created_slot
+
 import json
 import os
 import socket
@@ -407,6 +409,7 @@ def _plain_slot(world, plugin: str = "pgoutput") -> str:
     """A Datawrap-named slot on the route's table with no publication on record."""
     name = f"df_dataflow_{world.table}_{uuid.uuid4().hex[:8]}"
     _sql("SELECT pg_create_logical_replication_slot(%s, %s)", (name, plugin))
+    track_created_slot(name)  # dropped at session end if a failure skips teardown
     return name
 
 

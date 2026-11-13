@@ -129,3 +129,42 @@ def test_sigterm_mid_run_still_drops_the_slot(tmp_path: Path):
         if proc.poll() is None:
             proc.kill()
         _drop(name)
+
+
+def test_a_fake_cursor_records_nothing():
+    """Re-review M2: test_pg_slot_create_savepoint drives the creation site
+    with a fake cursor named "df_slot"; the guard recorded it and later
+    dropped the real df_slot on the shared server."""
+    from unittest.mock import MagicMock
+
+    import connectors.postgresql_change_stream as stream
+    from tests.pg_slot_guard import CREATED
+
+    cur = MagicMock()
+    cur.fetchone.return_value = ("0/16B3748",)
+    stream._create_logical_slot(cur, "df_slot_fake_g11", "pgoutput")
+    assert "df_slot_fake_g11" not in CREATED
+
+
+def test_a_foreign_slot_with_the_same_name_survives():
+    """Our slot is dropped by its test; another process re-creates the name
+    (another plugin). Session end must keep the foreign slot."""
+    import connectors.postgresql_change_stream as stream
+    from tests.pg_slot_guard import CREATED, drop_created_slots
+
+    name = f"df_g11same_{uuid.uuid4().hex[:8]}"
+    conn = _conn()
+    try:
+        conn.autocommit = False
+        cur = conn.cursor()
+        stream._create_logical_slot(cur, name, "pgoutput")
+        conn.commit()
+        conn.autocommit = True
+        assert name in CREATED
+        cur.execute("SELECT pg_drop_replication_slot(%s)", (name,))  # our test's teardown
+        cur.execute("SELECT pg_create_logical_replication_slot(%s, 'test_decoding')", (name,))
+        assert name not in drop_created_slots()
+        assert _slot_exists(name), "a foreign slot sharing the name was dropped"
+    finally:
+        conn.close()
+        _drop(name)
