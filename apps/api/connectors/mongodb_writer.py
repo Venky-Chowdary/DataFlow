@@ -73,9 +73,22 @@ def bind_mongo_json_document(value: Any) -> Any:
     )
 
 
+def _key_value(doc: Mapping[str, Any], col: str) -> Any:
+    """A key value from an outgoing flat row (``"key.id"``) or a stored nested doc."""
+    if col in doc:
+        return doc[col]
+    from connectors.mongo_field_paths import path_view
+
+    return path_view(doc, [col]).get(col)
+
+
 def _mongo_conflict_key(doc: Mapping[str, Any], pk_cols: list[str]) -> tuple[Any, ...]:
-    """Canonical PK tuple so extract reader-null matches dest None."""
-    return tuple(_conflict_key_identity(doc.get(c)) for c in pk_cols)
+    """Canonical PK tuple so extract reader-null matches dest None.
+
+    A dotted key (``key.id``) is a field path: the stored document the CDC
+    LSN prefetch reads back holds it nested, so it is read by path (G11).
+    """
+    return tuple(_conflict_key_identity(_key_value(doc, c)) for c in pk_cols)
 
 
 def _mongo_incomplete_pk_cols(doc: Mapping[str, Any], pk_cols: list[str]) -> list[str]:
