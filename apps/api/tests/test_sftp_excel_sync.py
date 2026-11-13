@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import tempfile
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -155,7 +156,9 @@ def test_sftp_dest_xlsx_is_a_workbook_not_csv(local_sftp) -> None:
     assert count_excel_rows(path) == 2
     rows = list(iter_excel_dicts(path))
     assert [r["flag"] for r in rows] == ["yes", "no"]
-    assert [r["amount"] for r in rows] == ["10.50", "20.25"]
+    # G7: a decimal column is a numeric cell now (never text a formula could
+    # hide in); the workbook holds the number, so it reads back as 10.5.
+    assert [Decimal(r["amount"]) for r in rows] == [Decimal("10.50"), Decimal("20.25")]
 
 
 def test_sftp_dest_empty_xlsx_is_still_a_workbook(local_sftp) -> None:

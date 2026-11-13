@@ -151,10 +151,29 @@ def csv_quote_cell(cell: str, delimiter: str = ",") -> str:
     return cell
 
 
+def _tsv_quote_cell(cell: str) -> str:
+    """A TSV cell, quoted only when an unquoted cell would split or misparse.
+
+    A tab, CR or LF inside an unquoted TSV cell splits the cell or the row
+    (G7 review H1: ``x<TAB>=HYPERLINK(...)`` became a second, formula cell),
+    and a leading ``"`` opens a quoted field in every RFC-4180 reader. Those
+    cells are quoted (``"`` doubled). A mid-field ``"`` stays raw: the
+    product's TSV readers take it literally, and loaders that read TSV
+    without quote handling must keep receiving the same bytes (G7 re-review
+    B1). Every other cell — NULL and ``''`` included, both empty — is
+    byte-identical to the writer before H1.
+    """
+    if cell == _CSV_NULL:
+        return ""
+    if cell.startswith('"') or any(c in cell for c in "\t\n\r"):
+        return '"' + cell.replace('"', '""') + '"'
+    return cell
+
+
 def format_csv_row(cells: list[str], delimiter: str = ",") -> str:
     """One encoded row as CSV text (no trailing newline)."""
     if delimiter == "\t":
-        return "\t".join("" if c == _CSV_NULL else c for c in cells)
+        return "\t".join(_tsv_quote_cell(c) for c in cells)
     return delimiter.join(csv_quote_cell(c) for c in cells)
 
 

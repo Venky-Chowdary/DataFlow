@@ -25,7 +25,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from services.rbac import require_admin_for_endpoints
 from services.workspace_access import assert_connector_accessible, resolve_write_workspace, tenant_scope
 from services.transfer_policy_values import (
@@ -300,7 +300,26 @@ class EndpointDTO(BaseModel):
     api_key: str = ""
     service_account: str = ""
     # Vector / CDC / writer options (content_column, embedding_model, allow_append_only, …).
-    extra: dict = Field(default_factory=dict)
+    extra: dict = Field(
+        default_factory=dict,
+        description=(
+            "Writer options. file_export CSV/TSV: formula_protection = \"off\" (default: "
+            "the file is data, byte-exact) | \"prefix\" (text cells starting with = + - @ "
+            "tab or CR get a leading ' so a spreadsheet never runs them; numbers are "
+            "untouched). Also accepted as a top-level destination key."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _formula_protection_vocabulary(self) -> "EndpointDTO":
+        """G7: an unknown formula_protection is a 422, never silently ignored."""
+        from services.csv_safety import formula_protection_mode
+
+        nested = self.extra.get("formula_protection") if isinstance(self.extra, dict) else None
+        for value in ((self.model_extra or {}).get("formula_protection"), nested):
+            if value is not None:
+                formula_protection_mode(value)
+        return self
 
 
 class AnalyzeRequest(BaseModel):

@@ -33,8 +33,9 @@ def format_written_row(cells: list[Any], delimiter: str) -> str:
 
     Anything else is quoted only when it holds the delimiter, a quote or a line
     break. Unlike :func:`services.csv_codec.format_csv_row`'s TSV branch (bulk
-    COPY payloads, never quoted), a TSV export quotes too, so a tab or a line
-    break inside a value stays one cell.
+    COPY payloads, quoted only when a cell would split: a tab, CR, LF or a
+    leading quote), a TSV export quotes like CSV, so a tab or a line break
+    inside a value stays one cell and can never start a new (formula) cell.
     """
     from services.csv_codec import csv_cell_encode, csv_quote_cell
 
