@@ -203,3 +203,98 @@ def test_session_end_never_drops_another_sessions_slots(tmp_path: Path):
         conn.close()
         for name in foreign:
             _drop(name)
+
+
+def _killed_session(tmp_path: Path, name: str, ledger_dir: Path) -> None:
+    """A pytest session that creates ``name`` at the engine site and is SIGKILLed."""
+    test_file = tmp_path / "test_killed.py"
+    test_file.write_text(textwrap.dedent(f"""
+        import os, signal
+        import psycopg2
+        import connectors.postgresql_change_stream as stream
+
+        def test_creates_a_slot_then_is_killed():
+            conn = psycopg2.connect(host=os.environ.get("PGHOST", "127.0.0.1"),
+                                    port=int(os.environ.get("PGPORT", "5432")),
+                                    dbname=os.environ.get("PGDATABASE", "dataflow"),
+                                    user=os.environ.get("PGUSER", "dataflow"),
+                                    password=os.environ.get("PGPASSWORD", ""))
+            cur = conn.cursor()
+            stream._create_logical_slot(cur, {name!r}, "pgoutput")
+            conn.commit()
+            conn.close()
+            os.kill(os.getpid(), signal.SIGKILL)  # no finally, no session end
+    """))
+    env = {**os.environ, "PYTHONPATH": str(_API), "DATAFLOW_TEST_SLOT_LEDGER": str(ledger_dir)}
+    subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p",
+         "tests.pg_slot_guard", str(test_file), "--rootdir", str(tmp_path),
+         "--basetemp", str(tmp_path / "bt")],
+        cwd=str(_API), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300,
+    )
+
+
+def test_slots_of_a_sigkilled_session_are_dropped_by_the_next_session(tmp_path: Path,
+                                                                      monkeypatch):
+    """Final review: with the prefix sweep gone, SIGKILLed sessions' slots piled up.
+
+    Each session writes a ledger (session id, pid and start time, and each
+    slot's identity). A later session drops a ledger's slots only when that
+    pid is gone AND the slot still has the recorded identity and is inactive.
+    """
+    import tests.pg_slot_guard as guard
+
+    _conn().close()
+    ledger = tmp_path / "ledger"
+    ours, foreign = f"df_g11kill_{uuid.uuid4().hex[:8]}", f"df_dataflow_cdcord_g11k{uuid.uuid4().hex[:6]}"
+    conn = _conn()
+    try:
+        conn.cursor().execute(
+            "SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (foreign,))
+        _killed_session(tmp_path, ours, ledger)
+        assert _slot_exists(ours), "the killed session's slot should still be there"
+        files = list(ledger.glob("*.json"))
+        assert len(files) == 1 and ours in files[0].read_text()
+        monkeypatch.setenv("DATAFLOW_TEST_SLOT_LEDGER", str(ledger))
+        dropped = guard.sweep_dead_sessions()
+        assert ours in dropped and not _slot_exists(ours)
+        assert _slot_exists(foreign), "an unrecorded slot must never be touched"
+        assert not list(ledger.glob("*.json")), "the dead session's ledger is done"
+    finally:
+        conn.close()
+        _drop(ours)
+        _drop(foreign)
+
+
+def test_a_live_or_foreign_ledger_entry_is_never_dropped(tmp_path: Path, monkeypatch):
+    import json
+
+    import tests.pg_slot_guard as guard
+
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    monkeypatch.setenv("DATAFLOW_TEST_SLOT_LEDGER", str(ledger))
+    alive, renamed = f"df_g11live_{uuid.uuid4().hex[:8]}", f"df_g11same_{uuid.uuid4().hex[:8]}"
+    conn = _conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (alive,))
+        cur.execute("SELECT pg_create_logical_replication_slot(%s, 'test_decoding')", (renamed,))
+        cur.execute("SELECT current_database()")
+        db = cur.fetchone()[0]
+        # This very process (alive) recorded ``alive``; a dead process recorded
+        # ``renamed`` with another plugin: neither proof holds.
+        (ledger / "live.json").write_text(json.dumps({
+            "session": "live", "pid": os.getpid(), "start": guard._start_time(os.getpid()),
+            "host": guard._host(), "slots": {alive: {"database": db, "plugin": "pgoutput",
+                                                       "restart_lsn": "0/0"}}}))
+        (ledger / "dead.json").write_text(json.dumps({
+            "session": "dead", "pid": 2_000_000_000, "start": "1", "host": guard._host(),
+            "slots": {renamed: {"database": db, "plugin": "pgoutput", "restart_lsn": "0/0"}}}))
+        assert guard.sweep_dead_sessions() == []
+        assert _slot_exists(alive) and _slot_exists(renamed)
+        assert (ledger / "live.json").exists()
+    finally:
+        conn.close()
+        _drop(alive)
+        _drop(renamed)

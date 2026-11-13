@@ -23,15 +23,27 @@ What the guard records, and why it is safe on a shared server:
 
 SIGTERM unwinds the session (``finally`` and ``pytest_sessionfinish`` run);
 a second SIGTERM while slots are being dropped is ignored. SIGKILL cannot be
-intercepted.
+intercepted, so each session also keeps a ledger file named by its session
+id (``DATAFLOW_TEST_SLOT_LEDGER``, default ``<tmp>/dataflow-pg-slot-guard``)
+holding its pid, the pid's start time and each recorded slot's identity. A
+later session drops a ledger's slots only when that process is gone (no such
+pid, or a pid reused by another process) AND the slot still has the recorded
+database, plugin and restart LSN and is inactive. A slot in no ledger is
+never touched. (Slot names stay the engine's own: tests and the capture
+inventory derive them, so the session id lives in the ledger, not the name.)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
+import socket
+import tempfile
 import threading
+import uuid
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -39,6 +51,51 @@ logger = logging.getLogger(__name__)
 #: slot name -> {"params": dsn parameters, "database", "plugin", "restart_lsn"}
 CREATED: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
+#: This pytest session; names its ledger file.
+SESSION_ID = uuid.uuid4().hex
+
+
+def _ledger_dir() -> Path:
+    return Path(os.environ.get("DATAFLOW_TEST_SLOT_LEDGER")
+                or Path(tempfile.gettempdir()) / "dataflow-pg-slot-guard")
+
+
+def _host() -> str:
+    return socket.gethostname()
+
+
+def _start_time(pid: int) -> str:
+    """The process start time (/proc), so a reused pid is not mistaken for ours."""
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="ascii") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError, ValueError):
+        return ""
+
+
+def _alive(pid: int, start: str) -> bool:
+    now = _start_time(pid)
+    return bool(now) and (not start or now == str(start))
+
+
+def _write_ledger() -> None:
+    """This session's ledger: pid, start time and each recorded slot's identity."""
+    with _lock:
+        slots = {n: {k: r.get(k) for k in ("database", "plugin", "restart_lsn")}
+                 for n, r in CREATED.items()}
+    path = _ledger_dir() / f"{SESSION_ID}.json"
+    try:
+        if not slots:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"session": SESSION_ID, "pid": os.getpid(),
+                                   "start": _start_time(os.getpid()), "host": _host(),
+                                   "slots": slots}))
+        tmp.replace(path)
+    except OSError as exc:  # pragma: no cover - the ledger is best effort
+        logger.debug("slot guard: ledger not written: %s", exc)
 
 
 def _is_real_connection(conn: Any) -> bool:
@@ -72,6 +129,7 @@ def _record_from_connection(conn: Any, slot_name: str) -> None:
         return
     with _lock:
         CREATED[str(slot_name)] = {**ident, "params": params}
+    _write_ledger()
 
 
 def track_created_slot(slot_name: str) -> None:
@@ -89,6 +147,7 @@ def track_created_slot(slot_name: str) -> None:
                 CREATED[str(slot_name)] = {**ident, "params": {}}
     finally:
         conn.close()
+    _write_ledger()
 
 
 def install() -> None:
@@ -165,6 +224,7 @@ def drop_created_slots() -> list[str]:
     try:
         return _drop_all()
     finally:
+        _write_ledger()
         if main:
             signal.signal(signal.SIGTERM, previous)
 
@@ -216,11 +276,70 @@ def _drop_all() -> list[str]:
     return dropped
 
 
+def sweep_dead_sessions() -> list[str]:
+    """Drop the slots of ledgers whose session process is gone (SIGKILL), with proof.
+
+    Per slot: the ledger's pid is not running (or was reused), the slot still
+    has the recorded database and plugin and a restart LSN no lower than
+    recorded, and it is inactive. A ledger is removed once none of its slots
+    is ours any more; one that cannot be checked now stays for later.
+    """
+    dropped: list[str] = []
+    folder = _ledger_dir()
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        try:
+            ledger = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if ledger.get("session") == SESSION_ID or ledger.get("host") != _host():
+            continue
+        if _alive(int(ledger.get("pid") or 0), str(ledger.get("start") or "")):
+            continue
+        pending = dict(ledger.get("slots") or {})
+        try:
+            conn = _connect({})
+        except Exception as exc:  # noqa: BLE001 - no server now: try next session
+            logger.debug("slot guard: ledger sweep skipped: %s", exc)
+            return dropped
+        try:
+            conn.autocommit = True
+            cur = conn.cursor()
+            for name, rec in list(pending.items()):
+                cur.execute(
+                    "SELECT database, plugin, active, restart_lsn >= %s::pg_lsn "
+                    "FROM pg_replication_slots WHERE slot_name = %s",
+                    (rec.get("restart_lsn") or "0/0", name))
+                row = cur.fetchone()
+                if row is None or (row[0], row[1]) != (rec.get("database"), rec.get("plugin")) \
+                        or not row[3]:
+                    pending.pop(name)  # gone, or not the slot that session made
+                    continue
+                if row[2]:
+                    continue  # held right now: keep it and the ledger
+                cur.execute("SELECT pg_drop_replication_slot(%s)", (name,))
+                dropped.append(name)
+                pending.pop(name)
+        except Exception as exc:  # noqa: BLE001 - one ledger must not stop the session
+            logger.warning("slot guard: could not sweep %s: %s", path.name, exc)
+            continue
+        finally:
+            conn.close()
+        if not pending:
+            path.unlink(missing_ok=True)
+    if dropped:
+        logger.warning("slot guard dropped CDC slots of killed sessions: %s", ", ".join(dropped))
+    return dropped
+
+
 # -- pytest hooks (registered by tests/conftest.py, or ``-p tests.pg_slot_guard``) --
 
 
 def pytest_configure(config):
     install()
+    try:
+        sweep_dead_sessions()
+    except Exception as exc:  # noqa: BLE001 - never stop a session over cleanup
+        logger.debug("slot guard: dead-session sweep failed: %s", exc)
 
 
 def pytest_sessionfinish(session, exitstatus):
