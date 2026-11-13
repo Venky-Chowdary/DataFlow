@@ -178,3 +178,29 @@ def test_live_mysql_literal_key_delete_is_applied_and_a_null_key_delete_parked(m
     images = [d.get("row") for e in dlq for d in e["details"]["deletes"]]
     # Only the NULL-key row was parked; neither literal key was.
     assert [str(i.get("qty")) for i in images] == ["9"], images
+
+
+# --------------------------------------------------------------------------
+# A literal ``__DF_MISSING__`` key: its delete is applied, not a crash
+# --------------------------------------------------------------------------
+
+
+def test_the_delete_key_census_keeps_a_marker_spelling_key():
+    """``coerce_pk_part`` read ``__DF_MISSING__`` as an integer and raised."""
+    from services.row_conservation import coerce_pk_part, parse_delete_keys
+
+    assert coerce_pk_part("__DF_MISSING__") == "__DF_MISSING__"
+    assert parse_delete_keys(["__DF_MISSING__", "7"], 1) == [("__DF_MISSING__",), (7,)]
+
+
+def test_live_pg_delete_of_a_missing_marker_key_does_not_stop_the_stream(pg_route, stores):
+    src, dst, pg_cfg = pg_route
+    _pg_exec(pg_cfg, f"INSERT INTO public.{src} VALUES ('__DF_MISSING__', 4)")
+    job = "mkx" + uuid.uuid4().hex[:10]
+    _run_pg(src, dst, pg_cfg, job)
+    _pg_exec(pg_cfg, f"DELETE FROM public.{src} WHERE sku = '__DF_MISSING__'")
+    _r, _d, summary, _h = _run_pg(src, dst, pg_cfg, job)
+    cdc = summary.get("cdc") or {}
+    # Applied as a keyed delete, never parked as a NULL key. (The row itself
+    # landed as '' on the first run: a pre-existing writer issue, filed apart.)
+    assert cdc.get("delete_events") == 1 and not cdc.get("unkeyed_deletes_parked"), cdc

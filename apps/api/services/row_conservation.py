@@ -534,7 +534,10 @@ def coerce_pk_part(value: Any) -> Any:
         parsed = coerce_integer_wire(text, ddl_type="BIGINT")
     except ValueError:
         return value
-    if parsed is None:
+    if parsed is None or isinstance(parsed, str):
+        # ``None`` / text back: not an integer (the absent-marker spelling
+        # ``__DF_MISSING__`` passes through the binder as text). A key that
+        # spells a marker is a text key (review F1).
         return value
     return int(parsed)
 
