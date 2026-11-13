@@ -21,7 +21,7 @@
   "DELETE /api/v1/team/workspaces/{workspace_id}": "workspace.read",
   "DELETE /api/v1/team/workspaces/{workspace_id}/invites/{invite_id}": "workspace.read",
   "DELETE /api/v1/team/workspaces/{workspace_id}/members/{email}": "workspace.read",
-  "DELETE /api/v1/transfer/mapping/memory": "job.plan",
+  "DELETE /api/v1/transfer/mapping/memory": "connector.write",
   "DELETE /api/v1/transform-library/{recipe_id}": "connector.write",
   "DELETE /api/v1/transforms/{project_id}": "connector.write",
   "DELETE /api/v1/workspace/ai-providers/{provider}/key": "workspace.manage",
