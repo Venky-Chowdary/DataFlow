@@ -57,3 +57,17 @@ def test_a_child_spawned_from_a_large_parent_reports_its_own_peak(mod: str, fn: 
     assert out.returncode == 0, out.stderr
     peak_mb = int(out.stdout.strip())
     assert peak_mb < 200, f"{mod}.{fn} reported {peak_mb} MB: the parent's RSS, not the child's"
+
+
+def test_the_g1h_probe_measures_its_own_peak() -> None:
+    """g1h's probe subprocess read ru_maxrss: 314 MB standalone, 2075 MB in CI."""
+    import ast
+
+    src = (API / "tests" / "test_scd2_pg_live.py").read_text(encoding="utf-8")
+    fn = next(
+        n for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.FunctionDef) and n.name == "test_g1h_shaped_memory_bounded_subprocess_pg"
+    )
+    body = ast.get_source_segment(src, fn) or ""
+    assert "getrusage" not in body
+    assert "own_peak_rss_bytes()" in body

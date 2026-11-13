@@ -1953,8 +1953,10 @@ def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
     """G-1h: the shaped write+proof path must stay memory-bounded — the
     multiset/pin/oracle state lives on disk, not in Counters/dicts.
 
-    Runs a 120k-row keyed overwrite in a subprocess (ru_maxrss is
-    per-process), asserting peak RSS stays under a ceiling that the old
+    Runs a 120k-row keyed overwrite in a subprocess and reads its own peak
+    (VmHWM, not ru_maxrss: on Linux a child's ru_maxrss starts at the parent's
+    RSS, which read 2075 MB in CI after ~7000 tests grew the pytest process;
+    services.process_peak_rss), asserting it stays under a ceiling that the old
     O(rows) structures blew past (~1.6 KB/row -> ~190 MB at 120k). The
     ceiling is generous for CI variance but far below the defect's cost.
     """
@@ -1963,7 +1965,7 @@ def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
     import os
     probe = tmp_path / "probe.py"
     probe.write_text(
-        "import os, sys, resource, uuid\n"
+        "import os, sys, uuid\n"
         "sys.path.insert(0, 'tests')\n"
         "import psycopg2\n"
         "from urllib.parse import urlparse\n"
@@ -2000,8 +2002,8 @@ def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
         "res = engine_mod.UniversalTransferEngine().execute_tracked(req, job)\n"
         "proof = (res.reconciliation or {}).get('transform_applied') or {}\n"
         "assert res.success and proof.get('status') == 'verified'\n"
-        "print('peakMB', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss"
-        " // 1024)\n"
+        "from services.process_peak_rss import own_peak_rss_bytes\n"
+        "print('peakMB', own_peak_rss_bytes() // (1024 * 1024))\n"
     )
     env = dict(os.environ)
     _api_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
