@@ -425,11 +425,15 @@ def write_mapped_rows(
         and str(m.get("assignment_strategy") or "") == "pending_dest_schema"
         for m in (mappings or [])
     )
+    # G11: redis stores field / attribute names exactly as mapped.
+    from connectors.destination_naming import writer_identifier
+
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
         preserve_case=True,
         table_exists=False if pending_doc else None,
+        identifier=writer_identifier("redis"),
     )
     from connectors.writer_common import resolve_studio_or_map_dest_types
 
@@ -918,7 +922,8 @@ def write_mapped_rows(
                 dest_db_type="redis",
             ),
             chunks_completed=1,
-            warnings=errors[:10],
+            # G11: the operator's legacy_field_policy=write_new, on the run.
+            warnings=([str(a) for a in (_kwargs.get("legacy_field_ack") or [])] + errors)[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
             # Record the identities written so Gate-8 can re-read this batch.

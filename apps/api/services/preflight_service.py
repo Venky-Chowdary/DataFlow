@@ -411,6 +411,17 @@ def run_file_preflight(
     # with. Done once here because this is the single entry every caller
     # (Studio, Pilot, scheduled runs) goes through.
     column_types = declared_source_column_types(column_types, mappings)
+    # G11: a target an earlier run stored under its legacy spelling (cut at 63,
+    # lowercased on BigQuery) IS that existing column, for every gate and for
+    # the approval hashes; Execute applies the same rename (adopt_for_request).
+    from services.target_name_legacy import adopt_rows_for_run, strip_client_map_targets
+
+    existing = destination_live_column_types or destination_column_types or {}
+    mappings = adopt_rows_for_run(  # a client's map_target never steers adoption (B1)
+        destination_db_type, strip_client_map_targets(mappings),
+        [] if destination_table_exists is False else list(existing), sync_mode,
+        destination_config=destination_config, destination_table=destination_table,
+    )
 
     # Canonical sync vocabulary — G9/DDL/policy must match writers (insert→append).
     try:
@@ -1882,8 +1893,11 @@ def run_file_preflight(
             column_types,
             authoritative=source_types_are_authoritative(source_kind, source_format),
         )
+        from services.conversion_contract import bind_stream_maps
+
+        bound_maps = bind_stream_maps(mappings, stream_contracts, dest_db=dest_for_ddl)  # F1c
         decision_art = build_artifact_from_mappings(
-            list(mappings or []),
+            bound_maps,
             dest_db=dest_for_ddl,
             source_db=src_engine,
             route_id=f"validate:{dest_for_ddl or 'unknown'}",
@@ -1928,7 +1942,7 @@ def run_file_preflight(
         proof_bundle = {
             **proof_bundle,
             "ddl_identity": ddl_identity_report(
-                list(mappings or []),
+                bound_maps,
                 dest_db=dest_for_ddl,
             ),
             "decision_artifact": art_dict,

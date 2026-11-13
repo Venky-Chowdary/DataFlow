@@ -985,6 +985,8 @@ def verify_mongodb_collection(
                     pass
             query = {pk: {"$in": expanded}}
 
+        from connectors.mongo_field_paths import readback_record
+
         def _doc_iter():
             yielded = 0
             for doc in coll.find(query):
@@ -992,11 +994,13 @@ def verify_mongodb_collection(
                     break
                 # The digest reads cells as wire (the way a reader emits them);
                 # a stored text that spells a sentinel is escaped, not NULL.
-                yield payload_record_wire(doc)
+                # Mapped targets are field paths (``address.city``), read
+                # inside sub-documents; unmapped siblings are not compared.
+                yield payload_record_wire(readback_record(doc, target_columns))
                 yielded += 1
 
         columns = target_columns or sorted(
-            set(k for doc in coll.find(query).limit(100) for k in doc.keys())
+            set(k for doc in coll.find(query).limit(100) for k in readback_record(doc))
         )
         checksum = canonical_checksum_from_iter(
             _doc_iter(),

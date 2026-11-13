@@ -132,7 +132,10 @@ def build_artifact_from_mappings(
             )
         )
 
-    ddl_hash = approved_mapping_ddl_fingerprint(maps, dest_db=dest_db)
+    from services.conversion_contract import carry_stream_maps
+
+    ddl_hash = approved_mapping_ddl_fingerprint(  # each stream's own rows too (F1c)
+        carry_stream_maps(maps, mappings), dest_db=dest_db)
     src_engine = (source_db or "").strip().lower()
     dst_engine = (dest_db or "").strip().lower()
     return build_decision_artifact(

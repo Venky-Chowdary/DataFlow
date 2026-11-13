@@ -13,6 +13,7 @@ from services.error_handling import TransferCancelled  # noqa: E402
 from services.decision_kernel import materialize_dest_ddl
 from services.reversibility_enforce import scan_pass
 
+from connectors.destination_naming import column_key
 from connectors.mysql_conn import get_connection
 from connectors.schema_drift import widen_existing_columns_native
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
@@ -1251,13 +1252,14 @@ def write_mapped_rows(
 
             active_by_tgt: dict[str, dict] = {}
             for mapping in write_mappings(mappings):
-                tgt = sanitize_identifier(str(mapping.get("target") or ""), preserve_case=False)
+                # G11: keyed as the writer names columns (case, real length).
+                tgt = column_key(str(mapping.get("target") or ""))
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
             candidate_by_col: dict[str, str] = {}
             source_type_by_col: dict[str, str] = {}
             for col in target_cols:
-                mapping = active_by_tgt.get(col) or {}
+                mapping = active_by_tgt.get(column_key(col)) or {}
                 source = mapping.get("source") or ""
                 source_type = (
                     column_types.get(source)

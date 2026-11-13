@@ -79,6 +79,13 @@ class PlanRevision:
     document_model: dict[str, Any] = field(default_factory=dict)
     document_model_hash: str = ""
 
+    def __post_init__(self) -> None:
+        # map_target is Execute's own adoption record: a stored plan never
+        # carries one (written or read back; security re-check F1a).
+        from services.target_name_legacy import strip_client_map_targets
+
+        self.mappings = strip_client_map_targets(list(self.mappings or []))
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

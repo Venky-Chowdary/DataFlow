@@ -15,6 +15,7 @@ from services.acknowledgment_contract import (
     resolve_acknowledgments,
 )
 from services.duplicate_policy import with_duplicate_route_option
+from services.kafka_field_names import with_kafka_name_options
 from services.fk_parent_preflight import with_fk_route_option
 from services.preflight_cursor_gate import resolve_read_scope
 from services.shape_preflight import (
@@ -668,12 +669,12 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             destination_indexes_meta=dest_meta.get("indexes_meta"),
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
             destination_check_constraints=dest_meta.get("check_constraints") or [],
-            destination_config=with_duplicate_route_option(
+            destination_config=with_kafka_name_options(with_duplicate_route_option(
                 with_fk_route_option(
                     dest_meta.get("_probe_cfg"), (body.dest_extra or {}).get("foreign_keys_mode")
                 ),
                 dict(body.dest_extra or {}),
-            ),
+            ), dict(body.dest_extra or {})),
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
             number_locale=body.number_locale,
@@ -838,6 +839,9 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
                 "format": body.dest_type or "",
                 **dict(body.dest_extra or {}),
             },
+            # G11: an existing table's columns / collection's fields.
+            destination_columns=list((dest_meta.get("column_types") or {}).keys()),
+            destination_config=(dest_meta.get("_probe_cfg") or None) if dest_meta.get("connected") else None,
         ),
         validation_mode=body.validation_mode,
     )

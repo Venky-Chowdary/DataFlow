@@ -70,9 +70,11 @@ def tracked_job_scope(request: Any, job_id: str, *, store: Callable[[], Any]) ->
     from services.pii_hash_keys import transfer_job_scope
 
     from services.destination_write_lock import release_destination_write_lock
+    from services.naming_history import naming_job_scope
 
     try:
-        with keyed_write_witness_scope(job_id), egress_workspace(
+        with naming_job_scope(job_id, str(request.workspace_id or "")), \
+                keyed_write_witness_scope(job_id), egress_workspace(
             str(request.workspace_id or "")
         ), endpoint_session_scope(engines=("sftp",)), transfer_job_scope(
             request, job_id, store=store

@@ -337,6 +337,18 @@ class PipelineSchedule:
     #: resurrect a deleted schedule.
     version: int = 0
 
+    def __post_init__(self) -> None:
+        # map_target is Execute's own adoption record: a saved schedule never
+        # carries one, in its Map or a stream's (security re-check F1a; an
+        # older document loses it when read).
+        from services.target_name_legacy import (
+            strip_client_map_targets,
+            strip_contract_map_targets,
+        )
+
+        self.mappings = strip_client_map_targets(list(self.mappings or []))
+        self.stream_contracts = strip_contract_map_targets(list(self.stream_contracts or []))
+
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         from src.ai.copilot.schedule_cadence import describe_stored_cadence

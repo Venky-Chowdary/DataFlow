@@ -254,6 +254,9 @@ class _CopyInsertManySink:
     def _flush_batch(self) -> None:
         if not self._batch:
             return
+        from services.copy_mongo_sink import nest_copy_documents
+
+        self._batch = nest_copy_documents(self._batch)
         result = self._coll.insert_many(self._batch, ordered=False)
         inserted = len(result.inserted_ids)
         if inserted != len(self._batch):

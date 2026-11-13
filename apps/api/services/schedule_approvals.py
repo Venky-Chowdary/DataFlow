@@ -680,6 +680,11 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
     engine = dest_engine_from_schedule(sched, dest_db=dest_db)
     if not engine:
         return False
+    from services.conversion_contract import bind_stream_maps
+
+    # Each stream's own rows are part of the stamp, as at Execute (F1c).
+    maps = bind_stream_maps(maps, list(getattr(sched, "stream_contracts", None) or []),
+                            dest_db=engine)
     mode = str(getattr(sched, "sync_mode", "") or "").strip() or "full_refresh_overwrite"
     source_engine = ""
     source_connector_id = str(getattr(sched, "source_connector_id", "") or "").strip().lower()
