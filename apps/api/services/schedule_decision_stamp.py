@@ -51,6 +51,10 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
     dest, source = _engines(merged)
     if not maps or not dest:
         return set()
+    from services.conversion_contract import bind_stream_maps
+
+    # Each stream's own rows are part of the stamp, as at Execute (F1c).
+    maps = bind_stream_maps(maps, list(merged.get("stream_contracts") or []), dest_db=dest)
     mode = str(merged.get("sync_mode") or "").strip() or "full_refresh_overwrite"
     stored_fp = str(merged.get("source_schema_fingerprint") or "").strip()
     source_dbs = [source, ""]
@@ -94,8 +98,11 @@ def align_schedule_decision_hash(merged: dict[str, Any]) -> None:
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     mode = str(merged.get("sync_mode") or "").strip() or "full_refresh_overwrite"
+    from services.conversion_contract import bind_stream_maps
+
     art = build_artifact_from_mappings(
-        persisted_mapping_rows(merged.get("mappings")),
+        bind_stream_maps(persisted_mapping_rows(merged.get("mappings")),
+                         list(merged.get("stream_contracts") or []), dest_db=dest),
         dest_db=dest,
         source_db=source,
         source_fingerprint="",

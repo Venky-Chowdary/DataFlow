@@ -147,7 +147,15 @@ def _operator_contract_maps(request, mappings: list) -> list:
     if not supplied:
         return mappings
     rows = list(getattr(request, "mappings", None) or []) or mappings
-    return verified_identity_maps(rows, getattr(request, "_g11_adoption", None))
+    out = verified_identity_maps(rows, getattr(request, "_g11_adoption", None))
+    from services.conversion_contract import bind_stream_maps
+
+    # Every stream's own Map rows are part of the approval (security re-check F1c).
+    out.stream_maps = bind_stream_maps(
+        out, list(getattr(request, "stream_contracts", None) or []),
+        dest_db=str(getattr(getattr(request, "destination", None), "format", "") or ""),
+    ).stream_maps
+    return out
 
 
 def decision_artifact_source(src, fallback_format: str = "") -> dict[str, str]:
@@ -199,7 +207,7 @@ def _enforce_decision_artifact_once(
 
                 prior = decision_artifact_from_dict(stamped)
                 refreshed = build_artifact_from_mappings(
-                    list(mappings or []),
+                    mappings if isinstance(mappings, list) else list(mappings or []),
                     dest_db=dest_db or "",
                     source_db=source_format,
                     tenant_id=prior.tenant_id,
@@ -272,7 +280,7 @@ def _enforce_decision_artifact_once(
             str(k) for k in source_column_types.keys() if str(k).strip()
         ]
     err, art = enforce_decision_artifact(
-        mappings=list(mappings or []),
+        mappings=mappings if isinstance(mappings, list) else list(mappings or []),
         dest_db=dest_db or "",
         approved_content_hash=approved,
         artifact_payload=payload,
@@ -324,8 +332,12 @@ def execute_preflight_progress_message(request) -> str:
 # -- G11: approvals stamped over the operator's Map before legacy adoption -------
 
 
-class IdentityMaps(list):
-    """Map rows for the identity checks, with the adoption the server proved."""
+from services.conversion_contract import StreamBoundMaps  # noqa: E402
+
+
+class IdentityMaps(StreamBoundMaps):
+    """Map rows for the identity checks, with the adoption the server proved
+    and each stream's own rows (``stream_maps``, bound into both hashes)."""
 
     verified_adoption: list[dict] | None = None
 
@@ -367,7 +379,9 @@ def _operator_contract_retry(mappings: list) -> tuple[list, list[dict]] | None:
     adopted = getattr(mappings, "verified_adoption", None)
     if not adopted:
         return None
-    return operator_rows(mappings), adopted
+    from services.conversion_contract import carry_stream_maps
+
+    return carry_stream_maps(operator_rows(mappings), mappings), adopted
 
 
 def _note_operator_contract(pf: dict | None, adopted: list[dict], which: str) -> None:

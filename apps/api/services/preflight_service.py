@@ -1893,8 +1893,11 @@ def run_file_preflight(
             column_types,
             authoritative=source_types_are_authoritative(source_kind, source_format),
         )
+        from services.conversion_contract import bind_stream_maps
+
+        bound_maps = bind_stream_maps(mappings, stream_contracts, dest_db=dest_for_ddl)  # F1c
         decision_art = build_artifact_from_mappings(
-            list(mappings or []),
+            bound_maps,
             dest_db=dest_for_ddl,
             source_db=src_engine,
             route_id=f"validate:{dest_for_ddl or 'unknown'}",
@@ -1939,7 +1942,7 @@ def run_file_preflight(
         proof_bundle = {
             **proof_bundle,
             "ddl_identity": ddl_identity_report(
-                list(mappings or []),
+                bound_maps,
                 dest_db=dest_for_ddl,
             ),
             "decision_artifact": art_dict,
