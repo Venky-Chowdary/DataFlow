@@ -393,3 +393,35 @@ def test_columns_named_like_yaml_keywords_survive_export_and_import(fmt):
     doc = build_mapping_document(mappings=[{"source": "yes", "target": "123"}, {"source": "null", "target": "on"}])
     back = load_mapping_document(dump_mapping_document(doc, fmt=fmt))
     assert [(m["source"], m["target"]) for m in back["spec"]["mappings"]] == [("yes", "123"), ("null", "on")]
+
+
+@pytest.mark.parametrize("entry", [
+    "{source: a, source: b, target: c}",
+    "{source: a, target: b, target: c}",
+])
+def test_a_repeated_key_in_a_yaml_entry_is_refused_naming_it(entry):
+    with pytest.raises(MappingDocumentError) as err:
+        load_mapping_document(_H + "  - {source: x, target: y}\n  - " + entry + "\n")
+    message = str(err.value)
+    assert "spec.mappings[1]" in message and "repeats the key" in message
+    assert ("'source'" in message) or ("'target'" in message)
+
+
+def test_a_repeated_key_in_a_json_entry_is_refused_naming_it():
+    text = (
+        '{"apiVersion": "datawrap.io/mapping/v1", "kind": "ColumnMapping", "metadata": {"name": "x"},'
+        ' "spec": {"mappings": [{"source": "a", "source": "b", "target": "c"}]}}'
+    )
+    with pytest.raises(MappingDocumentError, match=r"spec\.mappings\[0\] repeats the key 'source'"):
+        load_mapping_document(text)
+
+
+def test_a_repeated_top_level_key_is_refused_too():
+    with pytest.raises(MappingDocumentError, match="repeats the key 'kind'"):
+        load_mapping_document("kind: ColumnMapping\n" + _H)
+
+
+def test_the_import_route_answers_422_for_a_repeated_key(tenancy_world):
+    r = tenancy_world.a.post(f"{BASE}/import", json={"document": _H + "  - {source: a, source: b, target: c}\n"})
+    assert r.status_code == 422, r.text
+    assert "spec.mappings[0] repeats the key 'source'" in r.text

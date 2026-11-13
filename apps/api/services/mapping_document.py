@@ -237,6 +237,45 @@ def dump_mapping_document(doc: dict[str, Any], *, fmt: str = "yaml") -> str:
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=120)
 
 
+class _Pairs(dict):
+    """A mapping as parsed, remembering keys it repeated (YAML/JSON keep the last)."""
+
+    duplicates: list[str]
+    line: int = 0
+
+
+def _json_pairs(pairs: list[tuple[Any, Any]]) -> _Pairs:
+    out = _Pairs()
+    out.duplicates = []
+    for key, value in pairs:
+        if key in out and key not in out.duplicates:
+            out.duplicates.append(key)
+        out[key] = value
+    return out
+
+
+def _refuse_repeated_keys(value: Any) -> None:
+    """Refuse any mapping that repeated a key, naming the key and where (iterative)."""
+    stack: list[tuple[Any, str]] = [(value, "")]
+    while stack:
+        node, path = stack.pop()
+        if isinstance(node, dict):
+            repeated = getattr(node, "duplicates", None)
+            if repeated:
+                where = path or "the document"
+                line = f" (line {node.line})" if getattr(node, "line", 0) else ""
+                raise MappingDocumentError(
+                    f"{where} repeats the key '{repeated[0]}'{line}: each key may appear once in an entry"
+                )
+            for key, child in node.items():
+                if isinstance(child, (dict, list)):
+                    stack.append((child, f"{path}.{key}" if path else str(key)))
+        elif isinstance(node, list):
+            for i, child in enumerate(node):
+                if isinstance(child, (dict, list)):
+                    stack.append((child, f"{path}[{i}]"))
+
+
 def _no_alias_loader():
     import yaml
 
@@ -261,6 +300,29 @@ def _no_alias_loader():
             finally:
                 self._depth -= 1
 
+        def construct_mapping(self, node, deep=False):  # noqa: ANN001 - PyYAML signature
+            # PyYAML keeps the last of a repeated key; remember the repeat so
+            # the import refuses it by name instead of guessing which was meant.
+            mapping = super().construct_mapping(node, deep=deep)
+            out = _Pairs(mapping)
+            out.duplicates = []
+            out.line = node.start_mark.line + 1
+            seen: set[Any] = set()
+            for key_node, _value in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                try:
+                    hashable = hash(key) is not None
+                except TypeError:
+                    hashable = False
+                if hashable and key in seen and key not in out.duplicates:
+                    out.duplicates.append(key)
+                if hashable:
+                    seen.add(key)
+            return out
+
+    NoAliasSafeLoader.add_constructor(
+        "tag:yaml.org,2002:map", NoAliasSafeLoader.construct_mapping
+    )
     return NoAliasSafeLoader
 
 
@@ -270,7 +332,7 @@ def _parse(text: str) -> Any:
         if stripped.startswith("{"):
             _json_depth_ok(text)
             try:
-                parsed = json.loads(text)
+                parsed = json.loads(text, object_pairs_hook=_json_pairs)
             except ValueError as exc:
                 raise MappingDocumentError(f"not valid JSON: {exc.msg} (line {exc.lineno})") from exc
         else:
@@ -291,6 +353,7 @@ def _parse(text: str) -> Any:
     except RecursionError as exc:
         raise MappingDocumentError(f"the document is nested deeper than {MAX_DEPTH} levels") from exc
     _check_structure(parsed, "the document")
+    _refuse_repeated_keys(parsed)
     return parsed
 
 
