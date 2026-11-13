@@ -20,7 +20,12 @@ Rules:
 
 ``flatten`` and ``nest`` convert between a document and its dotted leaf
 paths. Arrays are leaf values: their elements are compared per relationship,
-never by position through a dotted path.
+never by position through a dotted path. ``nest(flatten(doc)) == doc`` holds
+for documents whose paths pass :func:`path_issues` (exactly the documents
+``flatten(doc, strict=True)`` accepts). ``flatten`` itself stays total over
+keys the path rules refuse (a nested ``_id``, ``$x``, a blank key, NUL), so
+reading back a document an application wrote never crashes; ``strict=True``
+raises the :class:`PathError` that ``nest`` would.
 
 This module has no dependencies outside the standard library, on purpose:
 writers, the model, the builder and the reconciler all import it.
@@ -215,15 +220,29 @@ def check_paths(
     return issues
 
 
-def flatten(doc: Mapping[str, Any], *, prefix: str = "") -> dict[str, Any]:
+def flatten(
+    doc: Mapping[str, Any], *, prefix: str = "", strict: bool = False
+) -> dict[str, Any]:
     """``{dotted path: leaf value}`` for a document.
 
     Sub-documents are walked; arrays, scalars and empty sub-documents are
-    leaves. A key that would not survive the round trip (not text, empty, or
-    containing a dot) raises :class:`PathError`.
+    leaves. A key the flat form cannot represent at all (not text, empty, or
+    containing a dot, which would make its path ambiguous) raises
+    :class:`PathError`.
+
+    Otherwise ``flatten`` is total: keys the path rules refuse (``_id``
+    below the top, a ``$`` segment, a blank key, NUL, text that is not
+    UTF-8) are read as they are, because a document read back from MongoDB
+    may hold them and reading it must not fail. ``strict=True`` checks
+    every path the way :func:`nest` does and raises the same
+    :class:`PathError`, so ``nest(flatten(doc, strict=True)) == doc``.
     """
     out: dict[str, Any] = {}
     _flatten_into(doc, prefix, out)
+    if strict:
+        problems = check_paths((path, SCALAR) for path in out)
+        if problems:
+            raise PathError(problems[0])
     return out
 
 
@@ -257,8 +276,9 @@ def nest(flat: Mapping[str, Any]) -> dict[str, Any]:
     """The document a ``{dotted path: value}`` mapping describes.
 
     Paths are checked with :func:`check_paths`; the first problem raises
-    :class:`PathError`. ``nest(flatten(doc)) == doc`` for any document whose
-    keys contain no dots.
+    :class:`PathError`. ``nest(flatten(doc)) == doc`` for a document whose
+    paths pass :func:`path_issues` (see ``flatten(..., strict=True)``); for
+    any other document ``nest`` raises.
     """
     entries = [(path, SCALAR) for path in flat]
     problems = check_paths(entries)

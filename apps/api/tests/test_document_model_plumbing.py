@@ -460,3 +460,25 @@ def test_a_model_that_is_not_utf8_is_refused_before_a_revision_is_written(plan_s
         plan_store.sync_ui_mappings(plan.id, _MAPPINGS, document_model=bad)
     assert exc.value.code == "bad_value"
     assert plan_store.get_plan(plan.id).revisions == []
+
+
+def test_a_stored_falsy_non_object_reads_as_no_model():
+    # What transfer_request_from_dict does today, pinned so the PR text and
+    # the code agree: a falsy stored value ([], "", 0, false) reads as "no
+    # model"; any other non-object is kept, so Execute refuses it.
+    from services.execute_document_route import request_document_model_refusal
+    from src.transfer.models import transfer_request_from_dict, transfer_request_to_dict
+
+    for stored in ([], "", 0, False):
+        wire = transfer_request_to_dict(_request())
+        wire["document_model"] = stored
+        revived = transfer_request_from_dict(wire)
+        assert revived.document_model is None
+        assert request_document_model_refusal(revived) == ""
+        wire["approved_document_model_hash"] = "abcd1234abcd1234"
+        # With an approval on record, the missing model is still refused.
+        assert request_document_model_refusal(transfer_request_from_dict(wire))
+    for stored in ("x", [1]):
+        wire = transfer_request_to_dict(_request())
+        wire["document_model"] = stored
+        assert transfer_request_from_dict(wire).document_model == stored

@@ -233,3 +233,58 @@ def test_paths_that_are_not_valid_utf8_are_refused(path):
     assert exc.value.code == "invalid_utf8"
     # The message is printable whatever the path holds.
     exc.value.issue.message.encode("utf-8")
+
+
+# Keys that flatten reads but nest refuses (L7): a nested _id, an operator
+# name, a blank key, NUL, and text that is not UTF-8.
+_NOT_ROUND_TRIPPABLE = [
+    ({"a": {"_id": 1}}, "path_id_not_root"),
+    ({"$x": 1}, "path_dollar_segment"),
+    ({" ": 1}, "path_empty"),
+    ({"a": {"b\x00": 1}}, "path_nul"),
+    ({"a\ud800": 1}, "invalid_utf8"),
+]
+
+
+@pytest.mark.parametrize("doc, code", _NOT_ROUND_TRIPPABLE)
+def test_flatten_stays_total_for_keys_nest_refuses(doc, code):
+    # Gate-8 reads back documents an application may have written; reading
+    # one must not crash, so flatten does not apply the path rules.
+    flat = flatten(doc)
+    assert flat
+    with pytest.raises(PathError) as exc:
+        nest(flat)
+    assert exc.value.code == code
+
+
+@pytest.mark.parametrize("doc, code", _NOT_ROUND_TRIPPABLE)
+def test_strict_flatten_raises_what_nest_raises(doc, code):
+    with pytest.raises(PathError) as strict:
+        flatten(doc, strict=True)
+    with pytest.raises(PathError) as nested:
+        nest(flatten(doc))
+    assert strict.value.code == nested.value.code == code
+    assert strict.value.path == nested.value.path
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"_id": {"k1": 1, "k2": "x"}, "a": {"b": {"c": 1}, "d": [1, {"$x": 1}]}},
+        {"name": "Ada", "empty": {}, "none": None, "café": {"ville": "Paris"}},
+        {},
+    ],
+)
+def test_documents_whose_keys_pass_the_path_rules_round_trip(doc):
+    # The contract: nest(flatten(d)) == d when every path passes path_issues
+    # (array elements are leaves, so their keys are not paths).
+    flat = flatten(doc, strict=True)
+    assert all(path_issues(p) == [] for p in flat)
+    assert nest(flat) == doc
+
+
+def test_strict_flatten_checks_the_whole_path_under_a_prefix():
+    assert flatten({"city": "Paris"}, prefix="address", strict=True) == {"address.city": "Paris"}
+    with pytest.raises(PathError) as exc:
+        flatten({"_id": 1}, prefix="address", strict=True)
+    assert exc.value.code == "path_id_not_root"
