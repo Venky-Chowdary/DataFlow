@@ -233,10 +233,79 @@ def test_mysql_existing_cut_column_keeps_receiving_rows(tmp_path: Path):
         drop_mysql_table(table)
 
 
-def test_validate_routes_pass_destination_columns_and_config():
-    """The Validate route and the plan service hand the gates what they need."""
-    for rel in ("src/routers/preflight_router.py", "services/transfer_plan_service.py"):
-        src = (_API_ROOT / rel).read_text(encoding="utf-8")
-        call = src[src.index("run_transfer_policy_gates("):]
-        call = call[: call.index("\n        ),\n")]
-        assert "destination_columns=" in call and "destination_config=" in call, rel
+@pytest.fixture
+def api(tmp_path, monkeypatch):
+    from tests import r4_route_harness as h
+
+    h.isolate(tmp_path, monkeypatch)
+    from fastapi.testclient import TestClient
+    from src.main import app
+
+    with TestClient(app) as c:
+        yield c
+
+
+def test_validate_route_notes_the_existing_legacy_column(api):
+    """Behaviour, through ``/api/v1/preflight/run`` on live PostgreSQL: the route
+    hands the gates the destination's columns, so the existing 63-character
+    column is noted (g23d) and neither G6 nor g23c refuses the long target.
+    The plan route is covered end to end by ``test_g11_legacy_column_approval``."""
+    from tests import r4_route_harness as h
+
+    cfg = h.dest_config("postgresql")
+    table = f"g11v_{uuid.uuid4().hex[:8]}"
+    long = CUT_63 + "_more"
+    h.execute("postgresql", f'CREATE TABLE {table} (id bigint, "{CUT_63}" bigint)')
+    try:
+        resp = api.post("/api/v1/preflight/run", json={
+            "columns": ["id", "v"], "column_types": {"id": "INTEGER", "v": "INTEGER"},
+            "row_count": 1, "sample_rows": [{"id": 1, "v": 2}],
+            "source_kind": "database", "source_type": "postgresql",
+            "dest_kind": "database", "dest_type": "postgresql",
+            "dest_host": cfg["host"], "dest_port": cfg["port"],
+            "dest_database": cfg["database"], "dest_username": cfg["username"],
+            "dest_password": cfg["password"], "dest_schema": "public", "dest_table": table,
+            "sync_mode": "full_refresh_append",
+            "mappings": [{"source": "id", "target": "id", "confidence": 1.0},
+                         {"source": "v", "target": long, "confidence": 1.0}],
+        })
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        gates = {g.get("id"): g for g in body.get("gates") or []}
+        assert CUT_63 in str((gates.get("g23d_existing_target_columns") or {}).get("message"))
+        blockers = [b.get("id") or b.get("gate") for b in body.get("blockers") or []]
+        assert "g23c_target_names" not in blockers and "g6_target_ddl" not in blockers, blockers
+    finally:
+        h.drop_table("postgresql", table)
+
+
+def test_execute_retargets_onto_a_live_existing_column():
+    """Execute's rename against live PostgreSQL, nothing patched."""
+    from services.source_filter_gate import request_refusal
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from tests import r4_route_harness as h
+
+    cfg = h.dest_config("postgresql")
+    table = f"g11e_{uuid.uuid4().hex[:8]}"
+    long = CUT_63 + "_more"
+    h.execute("postgresql", f'CREATE TABLE {table} (id bigint, "{CUT_63}" bigint)')
+    try:
+        def request(tbl: str) -> TransferRequest:
+            return TransferRequest(
+                mappings=_maps("id", long),
+                source=EndpointConfig(kind="database", format="sqlite", database="/x.db",
+                                      table="t"),
+                destination=EndpointConfig(
+                    kind="database", format="postgresql", host=cfg["host"], port=cfg["port"],
+                    database=cfg["database"], username=cfg["username"],
+                    password=cfg["password"], schema="public", table=tbl),
+                sync_mode="full_refresh_append",
+            )
+
+        existing = request(table)
+        assert request_refusal(existing) == ""
+        assert [m["target"] for m in existing.mappings] == ["id", CUT_63]
+        new = request(f"g11new_{uuid.uuid4().hex[:8]}")
+        assert "at most 63" in request_refusal(new)
+    finally:
+        h.drop_table("postgresql", table)

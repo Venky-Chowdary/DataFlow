@@ -201,10 +201,23 @@ def test_writer_target_columns_are_not_cut_below_the_engine_limit(dest, length, 
 
 
 def test_generic_sql_writer_names_targets_for_its_engine():
-    """SQL Server / Oracle write through ``generic_sql``: it must say which."""
-    src = (_API_ROOT / "connectors" / "generic_sql.py").read_text(encoding="utf-8")
-    call = src[src.index("target_cols, logical_types = resolve_target_columns("):][:200]
-    assert "dest_db=" in call, call
+    """SQL Server / Oracle write through ``generic_sql``: a 100-character name is
+    kept for SQL Server (128) and cut at 63 only when no engine is named."""
+    from unittest.mock import MagicMock
+
+    from tests.test_g11_redshift_limit import _writer_target_cols
+
+    base = dict(
+        host="h", port=1433, database="d", username="u", password="p", schema="dbo",
+        connection_string="", ssl=False, table_name="t", headers=["v"],
+        data_rows=[["1"]], mappings=[{"source": "v", "target": "s" * 100}],
+        column_types={"v": "INTEGER"}, create_table=True,
+    )
+    offline = {"_engine": MagicMock(), "_resolve_physical_table_ident": ("t", "dbo")}
+    for engine in ("sqlserver", "oracle"):
+        assert _writer_target_cols(
+            "connectors.generic_sql", {**base, "type": engine},
+            "_resolve_physical_column_idents", offline) == ["s" * 100], engine
 
 
 def _mysql_up() -> bool:

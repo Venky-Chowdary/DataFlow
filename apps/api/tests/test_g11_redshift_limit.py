@@ -39,13 +39,58 @@ def test_redshift_limit_is_127_bytes():
     assert "g23c_target_names" in _gates("postgresql", ["r" * 64])
 
 
-def test_postgresql_writer_keeps_long_names_for_redshift_only():
-    from connectors.destination_naming import writer_identifier
+def test_postgresql_writer_names_redshift_columns_by_the_redshift_limit():
+    """Behaviour: the writer's resolved columns, Redshift vs PostgreSQL engine."""
+    base = dict(
+        host="h", port=5439, database="d", username="u", password="p", schema="public",
+        connection_string="", ssl=False, table_name="t", headers=["v"],
+        data_rows=[["1"]], mappings=[{"source": "v", "target": "r" * 100}],
+        column_types={"v": "INTEGER"}, create_table=True,
+    )
+    shift = _writer_target_cols("connectors.postgresql_writer", {**base, "engine": "redshift"},
+                                "get_connection")
+    pg = _writer_target_cols("connectors.postgresql_writer", {**base, "engine": "postgresql"},
+                             "get_connection")
+    assert shift == ["r" * 100]
+    assert pg == ["r" * 63]
 
-    assert writer_identifier("redshift")("r" * 100) == "r" * 100
-    assert writer_identifier("postgresql")("r" * 100) == "r" * 63
-    src = (_API_ROOT / "connectors" / "postgresql_writer.py").read_text(encoding="utf-8")
-    call = src[src.index("target_cols, logical_types = resolve_target_columns("):][:400]
-    assert "identifier=" in call, call
+
+class _Stop(RuntimeError):
+    """Raised where the writer would first touch a database."""
 
 
+def _writer_target_cols(
+    module: str, call_kwargs: dict, stop_at: str, offline: dict | None = None
+) -> list[str]:
+    """The target columns a writer resolved, stopped before it touches a database.
+
+    ``offline`` replaces module attributes that would connect before the
+    columns are resolved (name -> return value).
+    """
+    import contextlib
+    import importlib
+    from unittest.mock import patch
+
+    mod = importlib.import_module(module)
+    seen: list[list[str]] = []
+    real = mod.resolve_target_columns
+
+    def spy(*args, **kwargs):
+        cols, types = real(*args, **kwargs)
+        seen.append(list(cols))
+        return cols, types
+
+    def stop(*_a, **_k):
+        raise _Stop("stop before connecting")
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(mod, "resolve_target_columns", side_effect=spy))
+        stack.enter_context(patch.object(mod, stop_at, side_effect=stop))
+        for name, value in (offline or {}).items():
+            stack.enter_context(patch.object(mod, name, return_value=value))
+        try:
+            mod.write_mapped_rows(**call_kwargs)
+        except _Stop:
+            pass
+    assert seen, "writer did not resolve target columns"
+    return seen[0]
