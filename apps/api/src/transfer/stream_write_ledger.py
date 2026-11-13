@@ -97,8 +97,9 @@ def _arm_strict_keyed_backup(
 
     A failed verification then restores the exact prior state (DELETE + INSERT
     FROM ``__dfbak_<job>``) instead of leaving the rejected batch in place.
-    Armed once per run (a COPY attempt and the row path share it); returns the
-    ``route_backups`` stamp on ``destination.extra``. A backup that cannot be
+    Armed once per table (a COPY attempt and the row path share it; each table
+    of a multi-table run gets its own); returns the ``route_backups`` stamp on
+    ``destination.extra``. A backup that cannot be
     taken never aborts the write, but a table whose triggers this role cannot
     suspend is refused up front (D122) — that restore could never be exact.
     """
@@ -106,7 +107,9 @@ def _arm_strict_keyed_backup(
 
     extra = dict(getattr(destination, "extra", None) or {})
     backups = dict(extra.get("route_backups") or {})
-    if backups:
+    if any(str((pair or {}).get("table") or key) == str(dest_table) for key, pair in backups.items()):
+        # Armed once per table (C4): a multi-table run backs up each occupied
+        # table it writes, not only the first one.
         return backups
     try:
         pair = create_pg_table_backup(

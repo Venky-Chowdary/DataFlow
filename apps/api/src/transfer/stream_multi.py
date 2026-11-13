@@ -190,6 +190,9 @@ def run_non_cdc_multi_stream_sequential(
                 return list(steps)
         return None
 
+    from services.multi_stream_undo import begin_undo_pass
+
+    begin_undo_pass(destination)  # C4: undo facts belong to this pass only
     total_rows = 0
     shaped_out = 0
     ddl_log: list[str] = [
@@ -385,6 +388,9 @@ def run_non_cdc_multi_stream_sequential(
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
                 last_summary = summary
+                from services.multi_stream_undo import remember_stream_restore_point
+
+                remember_stream_restore_point(destination, stream_name, summary)
                 last_stream_mappings = list(use_mappings or [])
                 _publish_stream_written(job_id, stream_name, rows)
                 shaped_out += int((summary or {}).get("rows_shaped_out") or 0)
@@ -393,6 +399,20 @@ def run_non_cdc_multi_stream_sequential(
             except Exception as exc:
                 status = "failed"
                 error = str(exc)
+                # C4: undo every table this run reached before the failing one,
+                # each against its own pre-run facts (the failing stream already
+                # undid its own batch).
+                from services.multi_stream_undo import note_failed_multi_stream
+                from .adapters import resolve_dest_table
+
+                note_failed_multi_stream(
+                    exc, destination, sync_mode=sync_mode, job_id=str(job_id or ""),
+                    failed_table=str(
+                        resolve_dest_table(
+                            str(getattr(destination, "format", "") or ""), destination, stream_name
+                        ) or ""
+                    ),
+                )
                 record_stream_health(
                     stream_health,
                     name=stream_name,

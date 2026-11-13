@@ -661,6 +661,9 @@ def _stream_database_transfer_impl(
         # C16: a cancel is measured against this from the job record, per stream object.
         from services.multi_stream_cancel import pin_rows_before
         pin_rows_before(run.cfg, _source_name(run.cfg.source), int(pre_write_rows_before))
+    if not (checkpoint and (getattr(checkpoint, "rows_processed", 0) or getattr(checkpoint, "offset", 0))):
+        from services.multi_stream_undo import pin_stream_existence  # C4: each table's own undo facts
+        pin_stream_existence(run.cfg, _source_name(run.cfg.source), pre_write_rows_before)
     # Schema evolution (ADD COLUMN / widen under backfill_new_fields) is owned
     # by the destination writer; a server-to-server copy would write into the
     # destination's current shape and fail on the column the source just grew.
