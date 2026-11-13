@@ -1570,3 +1570,171 @@ def test_a_thousand_sibling_relationships_validate_quickly():
     issues: list = []
     assert _timed(lambda: issues.extend(validate_model(model, tables))) < 3.0
     assert issues == []
+
+
+# --- re-review of PR 417: BSON nesting, repeated columns, database name -------
+
+
+def _deep(n: int, leaf: str = "x") -> str:
+    """A dotted path of ``n`` segments."""
+    return ".".join(["d"] * (n - 1) + [leaf])
+
+
+@pytest.mark.parametrize(
+    "mutate, where, ok, too_deep",
+    [
+        # A top-level path of n segments is n levels deep.
+        (lambda m, n: m["root"]["fields"].append({"source": "name", "path": _deep(n)}), "root.fields[3].path", 100, 101),
+        # embed_object: its fields sit one level below its path.
+        (lambda m, n: _rel(m, "country")["fields"][0].update(path=_deep(n - 1)), "relationships[3].fields[0].path", 100, 101),
+        # embed_array adds two levels (the array and the element document).
+        (lambda m, n: _rel(m, "addresses")["fields"][0].update(path=_deep(n - 2)), "relationships[0].fields[0].path", 100, 101),
+        # ... at every level: items' elements sit inside orders' elements.
+        (lambda m, n: _rel(m, "items")["fields"][0].update(path=_deep(n - 4)), "relationships[2].fields[0].path", 100, 101),
+    ],
+)
+def test_mongodb_nesting_limit_of_100_levels(mutate, where, ok, too_deep):
+    # Re-review: a 101-segment root field validated clean, though MongoDB
+    # refuses documents nested more than 100 levels.
+    raw = _model()
+    mutate(raw, ok)
+    assert _validate(raw) == []
+    raw = _model()
+    mutate(raw, too_deep)
+    issues = _validate(raw)
+    assert [(i.code, i.severity, i.path) for i in issues] == [("nesting_too_deep", ERROR, where)]
+    assert "100" in issues[0].message
+
+
+def test_merged_fields_add_no_level():
+    raw = _model()
+    _rel(raw, "country").update(
+        path="", fields=[{"source": "name", "path": _deep(100, "cn")}], options={"merge_into_parent": True}
+    )
+    assert _validate(raw) == []
+    _rel(raw, "country")["fields"][0]["path"] = _deep(101, "cn")
+    assert _codes(_validate(raw)) == ["nesting_too_deep"]
+
+
+def test_an_object_path_with_no_room_for_its_fields_is_one_finding():
+    raw = _model()
+    _rel(raw, "country")["path"] = _deep(100, "country")
+    assert [(i.code, i.path) for i in _validate(raw)] == [("nesting_too_deep", "relationships[3].path")]
+
+
+def test_a_512_segment_path_is_refused_quickly():
+    raw = _model()
+    raw["root"]["fields"].append({"source": "name", "path": _deep(512)})
+    assert _codes(_validate(raw)) == ["nesting_too_deep"]
+
+
+def test_wide_models_with_deep_paths_validate_quickly():
+    # Re-review: collision and ownership checks were O(segments^2) per path
+    # (100 objects x 100 fields x 300 segments took ~37 s). Paths are now
+    # capped at 100 levels and prefixes are walked without re-joining.
+    cols = {f"c{j}": "text" for j in range(50)}
+    cols["id"] = "integer"
+    tables = {"p": {"columns": cols, "primary_key": ["id"]}}
+    rels = []
+    for i in range(1000):
+        tables[f"k{i}"] = {"columns": cols, "primary_key": ["id"]}
+        array = i % 2 == 0
+        rels.append(
+            {
+                "id": f"r{i}",
+                "parent": "root",
+                "source": f"k{i}",
+                "rule": "embed_array" if array else "embed_object",
+                "path": f"o{i}",
+                "child_key": ["id"] if array else [],
+                "join": [{"parent": "id", "child": "id"}],
+                # 100 levels exactly: the deepest a document may go.
+                "fields": [
+                    {"source": f"c{j}", "path": _deep(98 if array else 99, f"f{j}")}
+                    for j in range(50)
+                ],
+            }
+        )
+    model = {
+        "collection": "c",
+        "root": {
+            "source": "p",
+            "key": ["id"],
+            "fields": [{"source": f"c{j}", "path": _deep(99, f"r{j}")} for j in range(50)],
+        },
+        "relationships": rels,
+    }
+    issues: list = []
+    assert _timed(lambda: issues.extend(validate_model(model, tables))) < 20.0
+    assert issues == []
+
+
+@pytest.mark.parametrize(
+    "mutate, code, where",
+    [
+        (
+            lambda m: _rel(m, "orders")["options"].update(order_by=[["ordered_at", "desc"], ["ordered_at", "asc"]]),
+            "duplicate_order_by_column",
+            "relationships[1].options.order_by[1]",
+        ),
+        (
+            lambda m: _rel(m, "orders")["join"].append({"parent": "customer_id", "child": "customer_id"}),
+            "duplicate_join_pair",
+            "relationships[1].join[1]",
+        ),
+    ],
+)
+def test_repeated_columns_outside_keys_are_refused(mutate, code, where):
+    raw = _model()
+    mutate(raw)
+    with pytest.raises(DocumentModelError) as exc:
+        parse_model(raw)
+    assert (exc.value.code, exc.value.where) == (code, where)
+    assert _codes(_validate(raw)) == [code]
+
+
+@pytest.mark.parametrize(
+    "database",
+    ["a.b", "a$b", "a/b", "a\\b", 'a"b', "a b", "a*b", "a<b", "a>b", "a:b", "a|b", "a?b", "a\x00b",
+     " ", "   ", "d" * 64, "\ud800"],
+)
+def test_the_target_database_name_follows_mongodb_rules(database):
+    # Re-review: these passed, and a whitespace-only name was stripped to
+    # nothing, which skipped the namespace check.
+    issues = _validate(database=database)
+    assert [(i.code, i.severity, i.path) for i in issues] == [("database_name_invalid", ERROR, "database")]
+    issues[0].message.encode("utf-8")
+
+
+def test_valid_database_names_pass():
+    for database in ("shop", "d" * 63, "Sales_2026-eu", "café"):
+        assert _validate(database=database) == []
+    assert _validate(database="") == [] and _validate(database=None) == []
+
+
+def test_paths_far_over_the_nesting_limit_are_refused_quickly():
+    # Re-review probe (perf_obj 100 100 300 took ~37 s): many objects whose
+    # fields are 300 levels deep. Each is now one finding, found quickly.
+    cols = {f"c{j}": "text" for j in range(30)}
+    cols["id"] = "integer"
+    tables = {"p": {"columns": cols, "primary_key": ["id"]}}
+    deep = ".".join(["s"] * 300)
+    rels = []
+    for i in range(100):
+        tables[f"k{i}"] = {"columns": cols, "primary_key": ["id"]}
+        rels.append(
+            {
+                "id": f"r{i}",
+                "parent": "root",
+                "source": f"k{i}",
+                "rule": "embed_object",
+                "path": f"o{i}",
+                "join": [{"parent": "id", "child": "id"}],
+                "fields": [{"source": f"c{j}", "path": f"{deep}.f{j}"} for j in range(30)],
+            }
+        )
+    model = {"collection": "c", "root": {"source": "p", "key": ["id"]}, "relationships": rels}
+    issues: list = []
+    assert _timed(lambda: issues.extend(validate_model(model, tables))) < 2.0
+    assert set(_codes(issues)) == {"nesting_too_deep"}
+    assert len(issues) == 100 * 30

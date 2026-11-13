@@ -76,7 +76,37 @@ EMBEDDING_RULES = ("embed_array", "embed_object")
 NAMESPACE_MAX_BYTES = 255
 #: MongoDB database names are shorter than 64 bytes, so a collection name up
 #: to 255 - 1 - 63 bytes fits whatever the database is called.
-_NAMESPACE_SAFE_BYTES = NAMESPACE_MAX_BYTES - 1 - 63
+DATABASE_NAME_MAX_BYTES = 63
+_NAMESPACE_SAFE_BYTES = NAMESPACE_MAX_BYTES - 1 - DATABASE_NAME_MAX_BYTES
+#: Characters MongoDB refuses in a database name.
+_DATABASE_NAME_FORBIDDEN = frozenset('/\\. "$*<>:|?\x00')
+#: MongoDB refuses documents nested more than 100 levels. A path of n
+#: segments is n levels deep in its container; an embed_array's elements sit
+#: two levels below its path's parent (the array, then the element
+#: document), an embed_object's fields one level below its path, and merged
+#: fields add none.
+MAX_NESTING_LEVELS = 100
+
+
+def _segments(path: str) -> int:
+    return path.count(".") + 1 if path else 0
+
+
+def _database_name_problem(name: Any) -> str:
+    """Why ``name`` cannot be a MongoDB database name, or ``""``."""
+    if not isinstance(name, str):
+        return "it must be text"
+    try:
+        size = len(name.encode("utf-8"))
+    except UnicodeEncodeError:
+        return "it is not valid UTF-8 text"
+    bad = sorted({c for c in name if c in _DATABASE_NAME_FORBIDDEN})
+    if bad:
+        shown = ", ".join("NUL" if c == "\x00" else repr(c) for c in bad)
+        return f"it contains {shown}; a database name may not contain /\\. \"$*<>:|? or NUL"
+    if size > DATABASE_NAME_MAX_BYTES:
+        return f"it is {size} bytes; a database name is at most {DATABASE_NAME_MAX_BYTES} bytes"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -220,7 +250,10 @@ class _Checker:
     containers: dict[str, list[_Entry]] = field(default_factory=dict)
     container_names: dict[str, str] = field(default_factory=dict)
     objects: dict[str, list[_Object]] = field(default_factory=dict)
-    database: str = ""
+    #: Nesting levels above each container's own fields (root document: 0).
+    levels: dict[str, int] = field(default_factory=dict)
+    #: The target database as the caller gave it; None or "" when unknown.
+    database: Any = ""
     #: Tables whose description could not be read (``bad_source_schema``):
     #: already reported, so they are not reported as missing too.
     unreadable: tuple[str, ...] = ()
@@ -346,7 +379,16 @@ class _Checker:
             or "" in name.split(".")
             or size > NAMESPACE_MAX_BYTES
         )
-        database = self.database.strip()
+        database = self.database if self.database not in (None, "") else ""
+        if database:
+            problem = _database_name_problem(database)
+            if problem:
+                self.add(
+                    "database_name_invalid",
+                    ERROR,
+                    "database",
+                    f"{database!r} cannot be a MongoDB database name: {problem}.",
+                )
         if bad:
             self.add(
                 "collection_name_invalid",
@@ -356,7 +398,7 @@ class _Checker:
                 "'$' or a NUL character, start with 'system.', start or end with "
                 "'.', have an empty part ('..'), or exceed 255 bytes.",
             )
-        elif database:
+        elif database and not _database_name_problem(database):
             namespace = len(f"{database}.{name}".encode("utf-8", "surrogatepass"))
             if namespace > NAMESPACE_MAX_BYTES:
                 self.add(
@@ -367,7 +409,7 @@ class _Checker:
                     f"at most {NAMESPACE_MAX_BYTES} bytes for the database name, a "
                     "dot and the collection name together. Shorten the collection name.",
                 )
-        elif size > _NAMESPACE_SAFE_BYTES:
+        elif not database and size > _NAMESPACE_SAFE_BYTES:
             self.add(
                 "namespace_length_unchecked",
                 WARNING,
@@ -441,6 +483,7 @@ class _Checker:
             prefix="",
         )
         self.containers[ROOT_ID] = [_Entry("_id", dp.SCALAR, "root.id")]
+        self.levels[ROOT_ID] = 0
         self.container_names[ROOT_ID] = "the document"
         for f, where in self.expanded_fields(root.source, root.fields, "root", set()):
             self.place(ROOT_ID, "", f.path, dp.SCALAR, where)
@@ -787,8 +830,14 @@ class _Checker:
 
     # -- paths -----------------------------------------------------------------
 
-    def valid_piece(self, container: str, prefix: str, path: str, where: str) -> bool:
-        """Report every rule ``path`` breaks when placed at ``prefix`` in ``container``."""
+    def valid_piece(
+        self, container: str, prefix: str, path: str, where: str, *, holds: int = 0
+    ) -> bool:
+        """Report every rule ``path`` breaks when placed at ``prefix`` in ``container``.
+
+        ``holds`` is the levels the value itself adds below its path: 1 for
+        an array or an embedded object, 0 for a single value.
+        """
         top = container == ROOT_ID and prefix == ""
         if top and path.split(".")[0] == dp.ID_FIELD:
             self.add(
@@ -802,7 +851,22 @@ class _Checker:
         problems = dp.path_issues(path, allow_id=top)
         for problem in problems:
             self.add(problem.code, ERROR, where, problem.message)
-        return not problems
+        if problems:
+            return False
+        full = prefix + path
+        depth = self.levels.get(container, 0) + _segments(full) + holds
+        if depth > MAX_NESTING_LEVELS:
+            shown = full if len(full) <= 60 else full[:57] + "..."
+            self.add(
+                "nesting_too_deep",
+                ERROR,
+                where,
+                f"{shown!r} would be {depth} levels deep in the document; MongoDB "
+                f"allows at most {MAX_NESTING_LEVELS} levels of nesting. Use a "
+                "shorter path or nest the relationship less deeply.",
+            )
+            return False
+        return True
 
     def place(
         self,
@@ -816,7 +880,8 @@ class _Checker:
         lineage: tuple[int, ...] = (),
     ) -> bool:
         """Add ``prefix + path`` to a container when ``path`` is valid there."""
-        if not self.valid_piece(container, prefix, path, where):
+        holds = 1 if kind == dp.ARRAY else 0
+        if not self.valid_piece(container, prefix, path, where, holds=holds):
             return False
         self.containers[container].append(
             _Entry(prefix + path, kind, where, merged_from=merged_from, lineage=lineage)
@@ -853,6 +918,11 @@ class _Checker:
             # arrays' element namespaces (the duplicate is reported already).
             elements = at
             self.containers[elements] = []
+            # The array, then the element document: two levels below the
+            # array path's parent.
+            self.levels[elements] = (
+                self.levels.get(container, 0) + _segments(prefix + rel.path) + 1
+            )
             self.container_names[elements] = f"each {rel.id!r} element"
             node.nests_children = True
             node.container, node.prefix = elements, ""
@@ -872,7 +942,9 @@ class _Checker:
                     container, prefix, f.path, dp.SCALAR, where, merged_from=rel.id, lineage=mine
                 )
             return
-        if not rel.path or not self.valid_piece(container, prefix, rel.path, f"{at}.path"):
+        if not rel.path or not self.valid_piece(
+            container, prefix, rel.path, f"{at}.path", holds=1
+        ):
             return
         inner = f"{prefix}{rel.path}."
         node.nests_children = True
@@ -949,12 +1021,11 @@ class _Checker:
         for path, lineage, where, merged_from, item, is_object in items:
             if path in reported:
                 continue
-            parts = path.split(".")
-            # Another object at the very same path is a clash too; a field
-            # exactly at the object's path is a plain collision already.
-            last = len(parts) + 1 if is_object else len(parts)
-            for cut in range(1, last):
-                owner = owners.get(".".join(parts[:cut]))
+            # Every proper prefix of the path, then (for an object) the path
+            # itself: another object at the very same path is a clash too,
+            # and a field exactly at an object's path is a plain collision.
+            for prefix in _prefixes(path, include_self=is_object):
+                owner = owners.get(prefix)
                 if owner is None or owner is item or owner.owner in lineage:
                     continue
                 placer = lineage[-1] if lineage else -1
@@ -984,13 +1055,24 @@ class _Checker:
                 break
 
 
+def _prefixes(path: str, *, include_self: bool = False) -> Iterable[str]:
+    """``a``, ``a.b`` for ``a.b.c`` (and ``a.b.c`` with ``include_self``),
+    by slicing at each dot rather than re-joining the segments."""
+    cut = path.find(".")
+    while cut != -1:
+        yield path[:cut]
+        cut = path.find(".", cut + 1)
+    if include_self:
+        yield path
+
+
 def run_checks(
     model: DocumentModel,
     source_schemas: Mapping[str, SourceTable | Mapping[str, Any]],
     fks: Any,
     *,
     cdc: bool = False,
-    database: str = "",
+    database: Any = "",
 ) -> list:
     if source_schemas and not isinstance(source_schemas, Mapping):
         return [
@@ -1026,7 +1108,7 @@ def run_checks(
         cdc=cdc,
         issues=schema_issues,
         unreadable=tuple(unreadable),
-        database=str(database or ""),
+        database=database,
     )
     checker.check_collection_and_limits()
     checker.check_root()

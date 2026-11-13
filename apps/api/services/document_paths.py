@@ -169,9 +169,11 @@ def collision_issues(entries: Iterable[tuple[str, str]]) -> list[PathIssue]:
         seen[path] = kind
         ordered.append((path, kind))
     for path, _kind in ordered:
-        parts = path.split(".")
-        for cut in range(1, len(parts)):
-            prefix = ".".join(parts[:cut])
+        # Each proper prefix, sliced at each dot (no re-joining of segments).
+        cut = path.find(".")
+        while cut != -1:
+            prefix = path[:cut]
+            cut = path.find(".", cut + 1)
             prefix_kind = seen.get(prefix)
             if prefix_kind is None:
                 continue

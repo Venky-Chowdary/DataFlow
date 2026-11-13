@@ -443,12 +443,18 @@ def _parse_join(value: Any, where: str) -> tuple[JoinPair, ...]:
         at = f"{where}[{i}]"
         raw = _obj(item, at)
         _only(raw, _JOIN_KEYS, at)
-        out.append(
-            JoinPair(
-                parent=_text(_get(raw, "parent", at, required=True), f"{at}.parent"),
-                child=_text(_get(raw, "child", at, required=True), f"{at}.child"),
-            )
+        pair = JoinPair(
+            parent=_text(_get(raw, "parent", at, required=True), f"{at}.parent"),
+            child=_text(_get(raw, "child", at, required=True), f"{at}.child"),
         )
+        if pair in out:
+            raise DocumentModelError(
+                "duplicate_join_pair",
+                at,
+                f"{at} repeats the join {pair.parent!r} = {pair.child!r}; list each "
+                "pair once.",
+            )
+        out.append(pair)
     return tuple(out)
 
 
@@ -472,6 +478,12 @@ def _parse_order_by(value: Any, where: str) -> tuple[tuple[str, str], ...]:
                 "wrong_type", at, f"{at} must be a pair: [column, \"asc\" or \"desc\"]."
             )
         col = _text(item[0], at)
+        if any(col == seen for seen, _ in out):
+            raise DocumentModelError(
+                "duplicate_order_by_column",
+                at,
+                f"{at} sorts by {col!r} again; each column sorts the elements once.",
+            )
         direction = item[1].lower() if isinstance(item[1], str) else item[1]
         out.append((col, _choice(direction, ORDER_DIRECTIONS, at, "asc")))
     return tuple(out)
@@ -738,7 +750,7 @@ def validate_model(
     fks: Any = None,
     *,
     cdc: bool = False,
-    database: str = "",
+    database: str | None = "",
 ) -> list[Issue]:
     """Every rule the model breaks, given the source tables and foreign keys.
 
@@ -751,7 +763,9 @@ def validate_model(
     ``database`` is the target database when known: MongoDB's 255-byte
     namespace limit counts ``<database>.<collection>``, so with it the limit
     is checked exactly; without it a collection name long enough that a
-    database name could push it over the limit is a warning.
+    database name could push it over the limit is a warning. A database name
+    MongoDB would refuse (``/\\. "$*<>:|?``, NUL, over 63 bytes, a name of
+    spaces) is the error ``database_name_invalid``.
 
     A payload that does not parse comes back as one error issue.
     """
