@@ -653,7 +653,11 @@ def _redshift_merge_upsert(
         rows_out.append(
             tuple(row[i] if i < len(row) else None for i in range(len(target_cols)))
         )
-    if copy_config is not None:
+    from connectors.redshift_copy import redshift_text_stage_safe
+
+    if copy_config is not None and (
+        str(stage_format or "tsv").lower() == "parquet" or redshift_text_stage_safe(rows_out)
+    ):
         from connectors.redshift_copy import copy_redshift_rows_from_s3
 
         copy_redshift_rows_from_s3(
@@ -1242,6 +1246,13 @@ def _copy_text_value(value: Any) -> str:
         raw = str(value)
     return _escape_copy_text(raw)
 
+
+
+def _redshift_text_stage_safe(rows: list) -> bool:
+    """See :func:`connectors.redshift_copy.redshift_text_stage_safe` (imported lazily: no cycle)."""
+    from connectors.redshift_copy import redshift_text_stage_safe
+
+    return redshift_text_stage_safe(rows)
 
 
 def _copy_buffer():
@@ -2734,7 +2745,10 @@ def write_mapped_rows(
                                 # reconcile checksum disagree with the table.
                                 chunk_written = already
                                 break
-                        if use_redshift_s3_copy:
+                        if use_redshift_s3_copy and (
+                            str(redshift_stage_format or "tsv").lower() == "parquet"
+                            or _redshift_text_stage_safe(batch)
+                        ):
                             from connectors.redshift_copy import copy_redshift_rows_from_s3
 
                             copy_redshift_rows_from_s3(

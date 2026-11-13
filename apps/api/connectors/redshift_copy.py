@@ -131,10 +131,37 @@ def should_use_redshift_s3_copy_for_insert(
     return int(row_count) >= max(0, limit)
 
 
+def redshift_text_stage_safe(rows: list[tuple] | list[list]) -> bool:
+    """Whether every cell's TSV stage text is the value itself (no backslash escape).
+
+    The stage text uses PostgreSQL COPY TEXT escaping (``\\`` for a backslash,
+    ``\\t`` / ``\\n`` / ``\\r`` for tab / LF / CR, ``\\N`` for NULL), but the
+    Redshift ``COPY … DELIMITER '\\t' NULL AS '\\N'`` it runs takes a backslash
+    literally (no ``ESCAPE``): a text ``\\N`` (staged ``\\\\N``) loaded as two
+    backslashes and an N, a tab as ``\\t``. A batch holding such a cell takes
+    the exact INSERT path; Parquet staging carries any value.
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    for row in rows:
+        for value in row:
+            if is_reader_null_cell(value):
+                continue
+            if "\\" in _copy_text_value(value):
+                return False
+    return True
+
+
 def render_redshift_copy_text(rows: list[tuple] | list[list]) -> bytes:
     """Same COPY TEXT bytes PostgreSQL ``COPY FROM STDIN`` would send."""
     if not rows:
         return b""
+    if not redshift_text_stage_safe(rows):
+        raise ValueError(
+            "Redshift TSV stage refused a cell that needs a backslash escape "
+            "(\\, tab, CR, LF or a text \\N); Redshift COPY would load the escape "
+            "literally — the INSERT path keeps the value"
+        )
     lines = ["\t".join(_copy_text_value(v) for v in row) for row in rows]
     return ("\n".join(lines) + "\n").encode("utf-8")
 
