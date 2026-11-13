@@ -92,7 +92,7 @@ def _post(route: str):
     ids=["busy", "unreadable", "enospc", "reentry", "runtime"],
 )
 def test_a_plan_store_refusal_does_not_fail_a_run_that_was_already_created(
-    started_runs, monkeypatch, caplog, route, refusal
+    started_runs, monkeypatch, caplog, request, route, refusal
 ):
     def refuse(*_args, **_kwargs):
         raise refusal()
@@ -105,7 +105,11 @@ def test_a_plan_store_refusal_does_not_fail_a_run_that_was_already_created(
     assert started_runs.created == ["job-link"]
     logged = [r for r in caplog.records if "job-link" in r.getMessage() and "plan-link" in r.getMessage()]
     assert logged, "the skipped link is logged with the job and plan ids"
-    assert all("/srv/secret-volume" not in r.getMessage() and not r.exc_info for r in logged)
+    assert all("/srv/secret-volume" not in r.getMessage() for r in logged)
+    assert "/srv/secret-volume" not in res.text, "no error text reaches the client"
+    expected_traceback = request.node.callspec.id.startswith("runtime")
+    # A programming error keeps its traceback in the log; disk / store refusals do not need one.
+    assert all(bool(r.exc_info) == expected_traceback for r in logged)
 
 
 @pytest.mark.parametrize("route", ["execute", "run"])

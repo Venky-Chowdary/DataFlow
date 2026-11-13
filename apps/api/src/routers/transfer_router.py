@@ -860,16 +860,25 @@ async def _link_job_to_plan(plan_id: str, job_id: str) -> None:
     disk, a lock file it may not open — is logged and skipped. The log names
     the error class and the ids only: the error text can carry store paths.
     """
-    from services.transfer_plan_store import attach_job
+    from services.transfer_plan_store import (
+        PlanStoreBusy,
+        PlanStoreReentry,
+        PlanStoreUnreadable,
+        attach_job,
+    )
 
     try:
         await run_plan_write(attach_job, plan_id, job_id, status="running")
     except Exception as exc:  # noqa: BLE001 - the job exists; the link is optional
+        # Disk and store refusals are expected operating conditions; anything
+        # else is a bug and keeps its traceback in the log (never the client).
+        expected = isinstance(exc, (OSError, PlanStoreBusy, PlanStoreUnreadable, PlanStoreReentry))
         logging.getLogger(__name__).warning(
             "Run %s started but was not linked to plan %s: %s",
             job_id,
             plan_id,
             type(exc).__name__,
+            exc_info=None if expected else exc,
         )
 
 
