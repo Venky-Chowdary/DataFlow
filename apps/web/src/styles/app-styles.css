@@ -36,6 +36,7 @@
 @import "./benchmarks.css";
 /* Parity Studio: Trust Report tab, sign-off, Migration health (.df2-parity namespace). */
 @import "./parity.css";
+@import "./reversibility.css";
 /* Responsive patches (component rules only; tokens stay in tokens.css) */
 @import "./responsive-fixes.css";
 @import "./responsive-shell-fixes.css";

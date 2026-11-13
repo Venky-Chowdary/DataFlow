@@ -208,8 +208,11 @@ def write_via_pre_ingestion_staging(
     # Staging diagnose may coerce_null so the landing table retains every row;
     # primary promote still uses validation_mode policy (never invent silent NULL).
     from connectors.writer_common import allow_job_coerce_null_writes
+    from services.reversibility_enforce import uncounted
 
-    with allow_job_coerce_null_writes(True):
+    # The stage is not the primary table: its rows are checked as written, but only the promote counts them
+    # (review 6), so the backstop compares the primary's own write with its written count.
+    with allow_job_coerce_null_writes(True), uncounted():
         staged_n, stage_ddl, stage_summary = write_destination_database(
             stage_ep,
             records,

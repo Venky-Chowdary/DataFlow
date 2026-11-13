@@ -1078,9 +1078,11 @@ def format_wire_value(value: Any, source_type: str, *, engine: str = "") -> str 
         # was gone even though the value had one.
         if coerced.tzinfo is not None and coerced.utcoffset() is not None:
             return coerced.isoformat(sep=" ")
+        # ``isoformat`` pads the year to four digits; ``strftime("%Y")`` writes year 1 as "1", which a
+        # reader takes for 2001 (a pre-1000 timestamp did not survive its own export).
         if coerced.microsecond:
-            return coerced.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
-        return coerced.strftime("%Y-%m-%d %H:%M:%S")
+            return coerced.isoformat(sep=" ", timespec="microseconds").rstrip("0").rstrip(".")
+        return coerced.isoformat(sep=" ", timespec="seconds")
     if isinstance(coerced, date) and not isinstance(coerced, datetime):
         return coerced.isoformat()
     if isinstance(coerced, time):

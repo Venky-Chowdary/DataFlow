@@ -3314,6 +3314,8 @@ export async function runUniversalTransfer(options: {
   /** Bound data contract — same fail-closed SIGNED gate as scheduled runs. */
   contractId?: string;
   requireSignedContract?: boolean;
+  /** The run must be reversible (g24_reversibility); also stamped from the plan policy. */
+  requireReversibility?: boolean;
   /** Declared source read window (sheet, header row, skips, encoding, delimiter). */
   readOptions?: SourceReadOptions;
   /** Ordered row-local shaping applied on the read, before mapping. */
@@ -3412,6 +3414,7 @@ export async function runUniversalTransfer(options: {
   }
   if (options.planId) formData.append("plan_id", options.planId);
   if (options.contractId) formData.append("contract_id", options.contractId);
+  if (options.requireReversibility) formData.append("require_reversibility", "true");
   formData.append(
     "require_signed_contract",
     options.requireSignedContract === true ? "true" : "false",

@@ -226,6 +226,8 @@ class PipelineSchedule:
     # Data contract — when set, scheduled runs enforce the signed contract.
     contract_id: str = ""
     require_signed_contract: bool = False
+    # Reversibility gate (g24): scheduled runs block unless every table is reversible.
+    require_reversibility: bool = False
     # Validate≡Execute identity — scheduled runs must replay the same locales,
     # pre-load recipe, and approved hashes the operator signed in Studio.
     date_locale: str = ""
@@ -346,6 +348,9 @@ class PipelineSchedule:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PipelineSchedule:
+        # The reversibility rule reads its own flag (one parser for plans, requests and schedules).
+        from services.reversibility_sources import flag as _reversibility_flag
+
         cdc_extras = _schedule_cdc_extras(data)
         return cls(
             id=data["id"],
@@ -408,6 +413,7 @@ class PipelineSchedule:
                     bool((data.get("contract_id") or "").strip()),
                 )
             ),
+            require_reversibility=_reversibility_flag(data.get("require_reversibility")),
             date_locale=str(data.get("date_locale") or "").strip(),
             number_locale=str(data.get("number_locale") or "").strip(),
             shape_recipe=dict(data.get("shape_recipe") or {})
@@ -2290,7 +2296,7 @@ _PLAN_FIX_KEYS = frozenset({
     "source_table", "dest_table", "source_connector_id", "dest_connector_id",
     "source_read_mode", "source_query", "procedure_call", "procedure_params",
     "schema_policy", "validation_mode", "delivery_guarantee", "backfill_new_fields",
-    "contract_id", "require_signed_contract",
+    "contract_id", "require_signed_contract", "require_reversibility",
 })
 
 
