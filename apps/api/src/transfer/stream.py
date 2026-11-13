@@ -3330,26 +3330,6 @@ def _stream_database_transfer_impl(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
         )
         run.tally.dest_summary["reread_pagination"] = reread_plan.get("mode")
-        if run.tally.route_fp_acc:
-            # Per-route write-pass digests — the value-level expectation
-            # Gate-8 compares against each route table's independent
-            # read-back (route_verification). Keyed by route name.
-            run.tally.dest_summary["route_expected"] = {
-                _rn: {
-                    "rows": _acc.total,
-                    "checksum": _acc.digest(),
-                    # Additive multiset digest — proves an append into an
-                    # occupied route table: post-read-back sum minus the
-                    # pre-write sum must equal this value (RT-6).
-                    "additive": _acc.additive_digest(),
-                    # The columns the fingerprint covers — the read-back is
-                    # projected to exactly these so customer-owned extra
-                    # columns (defaults, generated) never enter the digest.
-                    "columns": run.tally.route_fp_cols.get(_rn) or [],
-                }
-                for _rn, _acc in run.tally.route_fp_acc.items()
-                if _acc.total > 0
-            }
         if run.tally.route_backup_state.get("backups"):
             # Failed-Gate-8 restore guard armed: the renamed-aside route
             # tables land on the job summary so a failed post-write proof
@@ -3404,6 +3384,11 @@ def _stream_database_transfer_impl(
         run.tally.dest_summary["source_independently_reread"] = False
         run.tally.dest_summary["identity_hash_aligned"] = False
 
+    # Per-route write-pass digests, whichever checksum branch ran: a
+    # write-pass (incremental) routed run needs them as much as a re-read one.
+    from src.transfer.stream_routes import stamp_route_expected
+
+    stamp_route_expected(run.tally)
     run.tally.dest_summary["checksum"] = (
         final_checksum
         if run.tally.dest_summary.get("checksum_mode") == "source_reread_unavailable"
