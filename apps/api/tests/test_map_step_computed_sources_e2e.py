@@ -54,7 +54,7 @@ def _seed(dst: str) -> str:
         "postgresql",
         f'CREATE TABLE public."{dst}" (id bigint PRIMARY KEY, full_name text NOT NULL, '  # nosec B608
         "source_system varchar(20) NOT NULL, amount numeric(12,2), "
-        "loaded_at timestamp DEFAULT now())",
+        "loaded_at timestamptz DEFAULT now())",
     )
     return src
 
@@ -311,6 +311,27 @@ def test_validate_types_run_start_time_as_an_instant(client):
         assert "stamped_at" in (image.get("columns") or []), image
         blockers = [str(b) for b in (res.json().get("blockers") or [])]
         assert not any("stamped_at" in b for b in blockers), blockers
+    finally:
+        h.drop_table("postgresql", src)
+        h.drop_table("postgresql", dst)
+
+
+def test_validate_refuses_run_start_time_into_a_zoneless_column(client):
+    """The Map dialog refuses it; Validate refuses it identically, naming the remedy."""
+    cfg = h.dest_config("postgresql")
+    dst = f"mapc_dst_{uuid.uuid4().hex[:8]}"
+    src = _seed(dst)
+    h.execute("postgresql", f'ALTER TABLE public."{dst}" ADD COLUMN stamped_at timestamp')  # nosec B608
+    try:
+        recipe = {"steps": COMPUTED["steps"] + [{"op": "run_timestamp", "options": {"to": "stamped_at"}}]}
+        mappings = _mappings() + [{"source": "stamped_at", "target": "stamped_at", "target_type": "TIMESTAMP",
+                                   "approved": True, "confidence": 0.99, "user_override": True}]
+        res = _validate(client, cfg, src, dst, recipe, mappings)
+        assert res.status_code == 200, res.text
+        blockers = {b["id"]: b for b in res.json().get("blockers") or []}
+        gate = blockers.get("run_timestamp_zoneless_target")
+        assert gate, sorted(blockers)
+        assert "stamped_at" in gate["message"] and "DEFAULT CURRENT_TIMESTAMP" in gate["message"]
     finally:
         h.drop_table("postgresql", src)
         h.drop_table("postgresql", dst)

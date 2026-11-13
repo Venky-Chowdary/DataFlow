@@ -103,15 +103,21 @@ describe("computed columns are Transform steps", () => {
     });
   });
 
-  it("run start time advice names the run's fixed value and the destination default", () => {
-    const plain = runTimeAdvice({ name: "batch_ts", type: "TIMESTAMPTZ", hasDefault: false, default: null });
-    assert.equal(plain.ok, true);
-    assert.match(plain.message, /fixed once when the run starts/);
-    assert.match(plain.message, /resume and Gate-8 reuse it/);
+  it("run start time is offered only for a column with a time zone, as Validate decides", () => {
+    const aware = runTimeAdvice({ name: "batch_ts", type: "TIMESTAMPTZ", hasDefault: false, default: null });
+    assert.equal(aware.ok, true);
+    assert.match(aware.message, /fixed once when the run starts/);
+    assert.match(aware.message, /resume and Gate-8 reuse it/);
+    assert.equal(runTimeAdvice(undefined).ok, true, "a new column is created with a time zone");
+    for (const type of ["TIMESTAMP", "DATETIME2(7)", "DATE", "TIME", "DATETIME"]) {
+      const naive = runTimeAdvice({ name: "loaded_at", type, hasDefault: false, default: null });
+      assert.equal(naive.ok, false, type);
+      assert.match(naive.message, new RegExp(`loaded_at is ${type.replace(/[()]/g, "\\$&")} \\(no time zone\\)`));
+      assert.match(naive.message, /DEFAULT CURRENT_TIMESTAMP and leave it unmapped/);
+    }
     const withDefault = runTimeAdvice({ name: "loaded_at", type: "TIMESTAMP", hasDefault: true, default: "now()" });
-    assert.equal(withDefault.ok, true);
-    assert.match(withDefault.message, /or leave loaded_at unmapped: the destination stamps now\(\) on each insert/i);
-    assert.match(withDefault.message, /UTC/);
+    assert.equal(withDefault.ok, false);
+    assert.match(withDefault.message, /Leave loaded_at unmapped: the destination stamps now\(\) on each insert/);
     const notATime = runTimeAdvice({ name: "batch_no", type: "BIGINT", hasDefault: false, default: null });
     assert.equal(notATime.ok, false);
     assert.match(notATime.message, /batch_no is BIGINT/);

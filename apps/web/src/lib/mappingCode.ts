@@ -117,12 +117,18 @@ export function computedStep(c: ComputedSource): ShapeStepWire {
 }
 
 const TIME_TYPE = /time|date/i;
+/** Mirrors ``services.run_clock.zoneless_temporal`` (Validate's gate). */
+const ZONE_AWARE = /timestamptz|with time zone|datetimeoffset|timestamp_tz|timestamp_ltz/i;
 
 /**
  * "Run start time" is a ``run_timestamp`` Transform step, not a per-row clock:
  * the run fixes one value when it starts and records it, a resume and Gate-8
- * reuse it, and preview / Validate show a stand-in of the same type. A
- * destination column with its own clock default can instead be left unmapped.
+ * reuse it, and preview / Validate show a stand-in of the same type.
+ *
+ * It is an instant, so it is offered only for a column with a time zone (or a
+ * new one, which is created with one). A zoneless TIMESTAMP / DATETIME2 /
+ * DATE / TIME column is refused here exactly as Validate refuses it
+ * (``run_timestamp_zoneless_target``), pointing to the destination's default.
  */
 export function runTimeAdvice(
   column: { name: string; type?: string; hasDefault: boolean; default: string | null } | undefined,
@@ -131,15 +137,20 @@ export function runTimeAdvice(
   if (column && type && !TIME_TYPE.test(type)) {
     return { ok: false, message: `${column.name} is ${type}: a run start time needs a timestamp column.` };
   }
-  const base = "Every row gets the run's start time (UTC), fixed once when the run starts and recorded with "
-    + "the run; a resume and Gate-8 reuse it. Preview and Validate show a stand-in time.";
-  if (column?.hasDefault) {
+  if (column && type && !ZONE_AWARE.test(type)) {
+    const lead = `${column.name} is ${type} (no time zone): Validate refuses a run start time there, since the stored value would depend on a session setting.`;
     return {
-      ok: true,
-      message: `${base} Or leave ${column.name} unmapped: the destination stamps ${column.default ?? "its default"} on each insert.`,
+      ok: false,
+      message: column.hasDefault
+        ? `Leave ${column.name} unmapped: the destination stamps ${column.default ?? "its default"} on each insert. ${lead}`
+        : `${lead} Give it a DEFAULT CURRENT_TIMESTAMP and leave it unmapped, or use a timestamp-with-time-zone column.`,
     };
   }
-  return { ok: true, message: base };
+  return {
+    ok: true,
+    message: "Every row gets the run's start time (UTC), fixed once when the run starts and recorded with "
+      + "the run; a resume and Gate-8 reuse it. Preview and Validate show a stand-in time.",
+  };
 }
 
 export function destColumnForAdvice(catalog: DestColumnCatalog | null, name: string) {

@@ -249,3 +249,30 @@ def test_two_replicas_stamping_at_once_agree_on_one_value():
     assert len(seen) == 2 and seen[0] == seen[1], seen
     assert store.jobs["j4"]["run_clock"]["started_at"] == seen[0]
     assert store.writes == 1
+
+
+# --------------------------------------------------------------------------- zone-aware targets only
+
+RUN_RECIPE = {"steps": [{"op": "run_timestamp", "options": {"to": "loaded_at"}}]}
+MAPPED = [{"source": "loaded_at", "target": "stamped"}]
+
+
+@pytest.mark.parametrize("dest_type", ["TIMESTAMP", "timestamp without time zone", "DATETIME", "DATETIME2(7)",
+                                       "DATE", "TIME", "SMALLDATETIME"])
+def test_a_run_start_time_into_a_zoneless_column_is_refused(dest_type):
+    gate = run_clock.run_timestamp_target_gate(RUN_RECIPE, MAPPED, {"stamped": dest_type})
+    assert gate and gate["status"] == "block", gate
+    assert gate["details"]["targets"] == [{"column": "stamped", "type": dest_type}]
+    assert "stamped" in gate["message"] and "time zone" in gate["message"]
+    assert "DEFAULT" in gate["message"]
+
+
+@pytest.mark.parametrize("dest_type", ["TIMESTAMPTZ", "timestamp with time zone", "DATETIMEOFFSET",
+                                       "TIMESTAMP_TZ", "TIMESTAMP_LTZ"])
+def test_a_run_start_time_into_a_zone_aware_column_passes(dest_type):
+    assert run_clock.run_timestamp_target_gate(RUN_RECIPE, MAPPED, {"stamped": dest_type}) is None
+
+
+def test_a_new_column_or_no_step_needs_no_gate():
+    assert run_clock.run_timestamp_target_gate(RUN_RECIPE, MAPPED, {}) is None
+    assert run_clock.run_timestamp_target_gate({"steps": []}, MAPPED, {"stamped": "TIMESTAMP"}) is None

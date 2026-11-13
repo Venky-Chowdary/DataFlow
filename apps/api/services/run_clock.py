@@ -21,6 +21,7 @@ every resumed pass and in the proof. This module is that value.
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -139,3 +140,62 @@ def recorded_run_started_at(record: Any) -> str:
         if value:
             return str(value)
     return ""
+
+
+_ZONE_AWARE = re.compile(r"timestamptz|with time zone|datetimeoffset|timestamp_tz|timestamp_ltz", re.I)
+_TEMPORAL = re.compile(r"^\s*(timestamp|datetime2?|smalldatetime|date|time)\b", re.I)
+
+#: The Validate gate a run start time aimed at a zoneless column fails.
+GATE_ID = "run_timestamp_zoneless_target"
+
+
+def zoneless_temporal(type_name: str) -> bool:
+    """A date/time carrier with no time zone (TIMESTAMP, DATETIME2, DATE, TIME…)."""
+    text = str(type_name or "")
+    return bool(_TEMPORAL.match(text)) and not _ZONE_AWARE.search(text)
+
+
+def run_timestamp_target_gate(
+    shape_recipe: Any,
+    mappings: Any,
+    destination_column_types: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    """Refuse a ``run_timestamp`` step whose destination column has no time zone.
+
+    The run start is an instant (UTC). A zoneless column would store a wall
+    clock that depends on a session setting, and Validate's type path already
+    reads TIMESTAMPTZ → TIMESTAMP as a fidelity collapse; this names the cause
+    and the remedy the Map step's dialog gives. A column the run creates is
+    created zone-aware, so only existing destination columns are checked.
+    """
+    steps = (shape_recipe or {}).get("steps") if isinstance(shape_recipe, dict) else None
+    stamped = {
+        str((s.get("options") or {}).get("to") or "")
+        for s in steps or []
+        if isinstance(s, dict) and s.get("op") == "run_timestamp" and s.get("enabled", True) is not False
+    } - {""}
+    if not stamped:
+        return None
+    types = {str(k).lower(): str(v) for k, v in (destination_column_types or {}).items()}
+    bad: list[dict[str, str]] = []
+    for m in mappings or []:
+        if not isinstance(m, dict) or str(m.get("source") or "") not in stamped:
+            continue
+        target = str(m.get("target") or "")
+        declared = types.get(target.lower(), "")
+        if target and declared and zoneless_temporal(declared):
+            bad.append({"column": target, "type": declared})
+    if not bad:
+        return None
+    named = ", ".join(f"{b['column']} ({b['type']})" for b in bad)
+    return {
+        "id": GATE_ID,
+        "status": "block",
+        "message": (
+            f"Run start time is an instant, but {named} has no time zone: the stored value would "
+            "depend on a session setting. Give the column a DEFAULT CURRENT_TIMESTAMP and leave it "
+            "unmapped, or write the run start to a timestamp-with-time-zone column."
+        ),
+        "duration_ms": 0,
+        "details": {"targets": bad, "remediation_kind": "review_mappings"},
+    }
