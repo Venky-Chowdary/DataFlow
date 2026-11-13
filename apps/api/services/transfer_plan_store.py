@@ -570,8 +570,30 @@ def add_mapping_revision(
     return _mutate(plan_id, change)
 
 
-def add_preflight_run(plan_id: str, preflight_result: dict[str, Any]) -> TransferPlanRecord | None:
+def add_preflight_run(
+    plan_id: str,
+    preflight_result: dict[str, Any],
+    *,
+    mapping_version: int | None = None,
+    mapping_hash: str | None = None,
+) -> TransferPlanRecord | None:
+    """Record a Validate run against the revision it checked.
+
+    ``mapping_version`` / ``mapping_hash`` are the revision Validate read (the
+    plan can gain a newer one while it runs). The plan's status becomes
+    ``preflight_passed`` / ``preflight_failed`` only while that revision is
+    still the active one; a verdict on an older revision is history, not the
+    plan's state. Without them (legacy callers) the active revision is used.
+    """
+
     def change(plan: TransferPlanRecord) -> None:
+        active = plan.active_revision()
+        version = plan.active_version if mapping_version is None else int(mapping_version)
+        if mapping_hash is not None:
+            digest = mapping_hash
+        else:
+            checked = next((r for r in plan.revisions if r.version == version), None)
+            digest = checked.mapping_hash if checked else (active.mapping_hash if active else "")
         run = {
             # Reuse the caller's run id when it carries one, so the id the
             # operator was handed is the id in plan history.
@@ -581,14 +603,16 @@ def add_preflight_run(plan_id: str, preflight_result: dict[str, Any]) -> Transfe
             "readiness_score": preflight_result.get("readiness_score"),
             "gates": preflight_result.get("gates", []),
             "blockers": preflight_result.get("blockers", []),
-            "mapping_version": plan.active_version,
-            "mapping_hash": (plan.active_revision() or PlanRevision(
-                version=0, mappings=[], transforms=[], validation={},
-                mapping_hash="", source_schema_hash="", target_schema_hash="", agents_used=[],
-            )).mapping_hash,
+            "mapping_version": version,
+            "mapping_hash": digest,
         }
         plan.preflight_runs.append(run)
-        plan.status = "preflight_passed" if run["passed"] else "preflight_failed"
+        still_active = (
+            version == plan.active_version
+            and (active.mapping_hash if active else "") == digest
+        )
+        if still_active:
+            plan.status = "preflight_passed" if run["passed"] else "preflight_failed"
         plan.updated_at = _now()
 
     return _mutate(plan_id, change)

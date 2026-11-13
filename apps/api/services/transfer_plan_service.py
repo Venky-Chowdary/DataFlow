@@ -583,7 +583,9 @@ def run_plan_preflight(
     # Execute is unlocked against, so it travels back with the result instead of
     # leaving the caller to infer a run that has no identity.
     pf["run_id"] = str(pf.get("run_id") or f"pf_{uuid.uuid4().hex[:12]}")
-    add_preflight_run(plan_id, pf)
+    # Recorded against the revision this run checked, not whatever is active
+    # by the time it finishes (a UI save may have landed meanwhile).
+    add_preflight_run(plan_id, pf, mapping_version=rev.version, mapping_hash=rev.mapping_hash)
     drift = pf.get("schema_drift") or {}
     append_audit_event(
         action="transfer_plan.preflight",
