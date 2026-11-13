@@ -616,6 +616,8 @@ class MongoDBService:
 
         job_data["status"] = "pending"
         job_data["created_at"] = datetime.now(timezone.utc)
+        # G11: a job created after the naming upgrade is never pre-G11 history.
+        job_data.setdefault("naming_scheme", 1)
         job_data["started_at"] = None
         job_data["completed_at"] = None
         job_data["records_processed"] = 0
@@ -1297,25 +1299,45 @@ class MongoDBService:
         result = collection.update_one(query, {"$set": updates})
         return result.matched_count > 0
 
-    def destination_job_history(
-        self, destination_collection: str, *, workspace_filter: WorkspaceFilter | None = None,
-        limit: int = 50,
+    def naming_history_jobs(
+        self, destination_object: str, *, workspace_id: str, limit: int = 50,
+        max_time_ms: int = 2000,
     ) -> list[dict]:
-        """Jobs that wrote rows to ``destination_collection`` (G11 Kafka topic history).
+        """Jobs of ``workspace_id`` that wrote rows to ``destination_object``, newest first.
 
-        Only the fields that identify the destination and say rows were written.
+        G11 naming history (``services.naming_history``): only the fields that
+        identify the destination, its naming stamps, and that rows were
+        written. Index-backed (workspace + object) and time-bounded.
         """
         db = self.get_database()
+        jobs = db["transfer_jobs"]
+        self._ensure_naming_history_indexes(jobs)
+        obj = str(destination_object)
         query = {"$and": [
-            self._job_scope_query(None, workspace_filter),
-            {"destination_collection": str(destination_collection)},
+            {"workspace_id": str(workspace_id or "")},
+            {"$or": [{"destination_collection": obj}, {"naming.object": obj}]},
             {"$or": [{"records_processed": {"$gt": 0}},
                      {"status": {"$in": sorted(COMPLETED_STATUSES)}}]},
         ]}
         projection = {"destination_type": 1, "dest_connector_id": 1, "status": 1,
-                      "records_processed": 1, "transfer_request.destination.host": 1}
-        return [dict(doc, _id=str(doc["_id"])) for doc in
-                db["transfer_jobs"].find(query, projection).limit(max(1, int(limit)))]
+                      "records_processed": 1, "created_at": 1, "naming": 1,
+                      "naming_scheme": 1, "transfer_request.destination.host": 1,
+                      "transfer_request.destination.port": 1,
+                      "transfer_request.destination.connector_id": 1}
+        cursor = (jobs.find(query, projection).sort([("created_at", -1), ("_id", -1)])
+                  .limit(max(1, int(limit))).max_time_ms(int(max_time_ms)))
+        return [dict(doc, _id=str(doc["_id"])) for doc in cursor]
+
+    def _ensure_naming_history_indexes(self, jobs: Any) -> None:
+        """(workspace_id, destination_collection) and (workspace_id, naming.object), once."""
+        if getattr(self, "_naming_history_indexes_ready", False):
+            return
+        try:
+            jobs.create_index([("workspace_id", 1), ("destination_collection", 1)])
+            jobs.create_index([("workspace_id", 1), ("naming.object", 1)])
+        except Exception as exc:  # noqa: BLE001 - an index is an optimisation
+            logger.debug("transfer_jobs naming-history indexes skipped: %s", exc)
+        self._naming_history_indexes_ready = True
 
     def list_unscoped_jobs(self) -> list[dict]:
         """Every job with no workspace — the legacy rows the D154 backfill assigns.
@@ -1872,6 +1894,7 @@ class MemoryMongoDBService:
         job["_id"] = oid
         job.setdefault("status", "pending")
         job.setdefault("created_at", datetime.now(timezone.utc))
+        job.setdefault("naming_scheme", 1)  # G11 naming history (see MongoDBService)
         job.setdefault("started_at", None)
         job.setdefault("completed_at", None)
         job.setdefault("records_processed", 0)
@@ -2145,17 +2168,24 @@ class MemoryMongoDBService:
                 rec["updated_at"] = datetime.now(timezone.utc)
         return True
 
-    def destination_job_history(
-        self, destination_collection: str, *, workspace_filter: WorkspaceFilter | None = None,
-        limit: int = 50,
+    def naming_history_jobs(
+        self, destination_object: str, *, workspace_id: str, limit: int = 50,
+        max_time_ms: int = 2000,
     ) -> list[dict]:
-        scope = job_workspace_filter(None, workspace_filter)
+        obj = str(destination_object)
+
+        def stamped(job: dict) -> bool:
+            return any(isinstance(n, dict) and n.get("object") == obj
+                       for n in (job.get("naming") or []))
+
         out = [
             dict(j) for j in list(self._jobs.values())
-            if scope.matches(j.get("workspace_id"))
-            and str(j.get("destination_collection") or "") == str(destination_collection)
+            if str(j.get("workspace_id") or "") == str(workspace_id or "")
+            and (str(j.get("destination_collection") or "") == obj or stamped(j))
             and (int(j.get("records_processed") or 0) > 0 or j.get("status") in COMPLETED_STATUSES)
         ]
+        out.sort(key=lambda j: (_created_sort_stamp(j.get("created_at")), str(j.get("_id"))),
+                 reverse=True)
         return out[: max(1, int(limit))]
 
     def list_unscoped_jobs(self) -> list[dict]:

@@ -170,10 +170,14 @@ def adopt_rows_for_run(
     return adopt_existing_columns(dest_type, mappings, existing)[0]
 
 
-def _kafka_naming(cfg: Any, endpoint: Any, topic: str, mappings: Any, run_scope: Any = None
-                  ) -> dict[str, Any]:
-    """``kafka_field_names.kafka_naming`` on the operator's rows, once per run and topic."""
+def _kafka_naming(cfg: Any, endpoint: Any, topic: str, mappings: Any, run_scope: Any = None,
+                  request: Any = None) -> dict[str, Any]:
+    """``kafka_field_names.kafka_naming`` on the operator's rows, once per run and topic.
+
+    History is read in the run's own workspace (``naming_history.run_workspace``).
+    """
     from services.kafka_field_names import kafka_naming, renamed_targets
+    from services.naming_history import run_workspace
 
     rows = operator_rows(mappings)
     key = (_run_key(run_scope, "kafka-naming", topic, tuple(renamed_targets(rows)))
@@ -181,18 +185,19 @@ def _kafka_naming(cfg: Any, endpoint: Any, topic: str, mappings: Any, run_scope:
     hit = _INTROSPECT_MEMO.get(key) if key else None
     if hit and time.monotonic() - hit[0] < _PROBE_MEMO_SECONDS:
         return hit[1]
-    naming = kafka_naming(cfg, endpoint, topic, rows, timeout=_probe_seconds())
+    naming = kafka_naming(cfg, endpoint, topic, rows, timeout=_probe_seconds(),
+                          workspace_id=run_workspace(request))
     if key:
         _INTROSPECT_MEMO[key] = (time.monotonic(), naming)
     return naming
 
 
-def _kafka_fields(cfg: Any, endpoint: Any, topic: str, mappings: Any, run_scope: Any = None
-                  ) -> list[str]:
+def _kafka_fields(cfg: Any, endpoint: Any, topic: str, mappings: Any, run_scope: Any = None,
+                  request: Any = None) -> list[str]:
     """The fields a Kafka run's targets adopt (registry subject / old spellings)."""
     from services.kafka_field_names import adopted_fields
 
-    return adopted_fields(_kafka_naming(cfg, endpoint, topic, mappings, run_scope))
+    return adopted_fields(_kafka_naming(cfg, endpoint, topic, mappings, run_scope, request))
 
 
 def adopted_collision_issues(dest_type: str | None, rows: Iterable[Any]) -> list[dict[str, str]]:
@@ -375,7 +380,8 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
 
             existing = _kafka_fields(
                 resolve_connector_config(dest), dest,
-                writer_object_name(dest, getattr(request, "source", None)), mappings, dest)
+                writer_object_name(dest, getattr(request, "source", None)), mappings, dest,
+                request)
             info: dict[str, Any] = {}
         else:
             info = _memo_probe(dest)
@@ -455,6 +461,9 @@ def prepare_stream_targets(
         refusal, ack = legacy_fields_check(req)
     if refusal:
         raise ValueError(f"Stream {label!r}: {refusal}")
+    from services.naming_history import record_request_naming
+
+    record_request_naming(req, writer_object_name(dest))  # G11: per stream, on the job
     return list(req.mappings), ack
 
 
@@ -741,13 +750,16 @@ def es_mapping_fields(cfg: Mapping[str, Any], index: str) -> set[str]:
 
 def existing_legacy_fields(
     dest_type: str | None, cfg: Mapping[str, Any] | None, table: str, mappings: Iterable[Any] | None,
-    run_scope: Any = None,
+    run_scope: Any = None, *, endpoint: Any = None, request: Any = None,
 ) -> list[tuple[str, str]]:
     """``(target, old field)`` pairs whose old field the destination already holds.
 
     MongoDB: any stored document holding the old name (``$exists``);
     Elasticsearch: the index mapping declares it. Empty for a new or empty
-    collection / index, or when nothing was renamed.
+    collection / index, or when nothing was renamed. Probed only when earlier
+    runs of this object wrote the pre-G11 names (``naming_history``: a
+    pre-upgrade job in the same workspace and cluster, and no later stamped
+    run): a new collection or prefix is never scanned (final review M-d).
     """
     kind = dest_kind(dest_type)
     if kind not in _FIELD_STORES:
@@ -760,6 +772,13 @@ def existing_legacy_fields(
     hit = _PROBE_MEMO.get(key) if key else None
     if hit and time.monotonic() - hit[0] < _PROBE_MEMO_SECONDS:
         return [p for p in hit[1] if p in pairs]
+    from services.naming_history import LEGACY as HISTORY_LEGACY
+    from services.naming_history import object_history, run_workspace
+
+    if object_history(kind, table, cfg, endpoint, run_workspace(request)) != HISTORY_LEGACY:
+        if key:
+            _PROBE_MEMO[key] = (time.monotonic(), [])
+        return []
     if kind in DOCUMENT_STORES:
         present = mongo_fields_present(cfg, table, olds)
     elif kind == "redis":
@@ -830,6 +849,8 @@ def legacy_field_verdict(
     sync_mode: str | None,
     policy: str = "",
     run_scope: Any = None,
+    endpoint: Any = None,
+    request: Any = None,
 ) -> tuple[list[dict[str, str]], bool]:
     """The one rule Validate and Execute share: ``(issues, blocking)``.
 
@@ -838,7 +859,8 @@ def legacy_field_verdict(
     """
     from services.sync_cursor import is_overwrite_sync
 
-    found = existing_legacy_fields(dest_type, cfg, table, mappings, run_scope)
+    found = existing_legacy_fields(dest_type, cfg, table, mappings, run_scope,
+                                   endpoint=endpoint, request=request)
     blocking = bool(found) and not is_overwrite_sync(str(sync_mode or "")) and policy != WRITE_NEW
     return legacy_field_issues(dest_type, found, blocking=blocking), blocking
 
@@ -875,6 +897,17 @@ def writer_object_name(destination: Any, source: Any = None) -> str:
         resolve_driver_type(str(getattr(dest, "format", "") or "")), dest, fallback) or "")
 
 
+def unverified_message(exc: BaseException) -> str:
+    """Why an old-field check that could not finish refuses the run, and the ways on."""
+    return (
+        f"Could not verify the destination's old field names ({exc}). Earlier runs of this "
+        "object wrote the pre-G11 names, so Datawrap checks for them before writing. Raise "
+        "DATAFLOW_LEGACY_FIELD_PROBE_SECONDS, add an index on the old field names so the "
+        f"check is fast, set {LEGACY_FIELD_POLICY}={WRITE_NEW!r} on the destination to write "
+        "the new names anyway (recorded on the run), or run an overwrite."
+    )
+
+
 def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
     """``(refusal, acknowledgement)`` for one request; nothing is mutated.
 
@@ -904,15 +937,13 @@ def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
         table = writer_object_name(dest, getattr(request, "source", None))
         issues, blocking = legacy_field_verdict(
             kind, mappings, cfg, table, sync_mode=sync_mode, policy=policy, run_scope=dest,
+            endpoint=dest, request=request,
         )
     except Exception as exc:  # noqa: BLE001 - fail closed: an unchecked store is not "no old fields"
         if policy == WRITE_NEW:
             return "", [f"old field names not verified ({exc}); "
                         f"{LEGACY_FIELD_POLICY}={WRITE_NEW}"]
-        return (
-            f"Could not verify the destination's old field names ({exc}). Set "
-            f"{LEGACY_FIELD_POLICY}={WRITE_NEW!r} on the destination to write the new "
-            "names anyway (recorded on the run), or run an overwrite.", [])
+        return (unverified_message(exc), [])
     if blocking:
         return "Destination holds the old field names: " + " ".join(
             i["message"] for i in issues[:3]), []
@@ -940,7 +971,8 @@ def _kafka_check(request: Any) -> tuple[str, list[str]]:
         from src.transfer.adapters import resolve_connector_config
 
         topic = writer_object_name(dest, getattr(request, "source", None))
-        naming = _kafka_naming(resolve_connector_config(dest), dest, topic, mappings, dest)
+        naming = _kafka_naming(resolve_connector_config(dest), dest, topic, mappings, dest,
+                               request)
     except KafkaHistoryUnverified as exc:
         return str(exc), []
     except Exception as exc:  # noqa: BLE001 - fail closed: the registry could not be read
@@ -1094,11 +1126,7 @@ def target_name_gates(
         warnings = [{
             "code": "target_path_legacy_fields_unchecked",
             "target": "",
-            "message": (
-                f"Could not verify the destination's old field names ({exc}). Set "
-                f"{LEGACY_FIELD_POLICY}={WRITE_NEW!r} to write the new names anyway, or "
-                "run an overwrite."
-            ),
+            "message": unverified_message(exc),
         }]
     if warnings:
         gates.append({

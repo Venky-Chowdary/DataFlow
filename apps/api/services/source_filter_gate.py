@@ -138,7 +138,7 @@ def request_refusal(request: Any) -> str:
         adopt_for_request(request)
     except AdoptionUnverified as exc:  # fail closed (re-review L2)
         return str(exc)
-    return (
+    refusal = (
         local_destination_refusal(dest)
         or legacy_field_policy_refusal(dest)
         or unsafe_destination_identifier_reason(
@@ -159,3 +159,11 @@ def request_refusal(request: Any) -> str:
         )
         or ""
     )
+    if not refusal and not selected_streams(request):
+        # G11: this run's naming decision on its job (multi-stream: per stream).
+        from services.naming_history import record_request_naming
+        from services.target_name_legacy import writer_object_name
+
+        record_request_naming(
+            request, writer_object_name(dest, getattr(request, "source", None)))
+    return refusal

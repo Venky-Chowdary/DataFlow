@@ -14,7 +14,20 @@ Execute alike.
 
 from __future__ import annotations
 
+import pytest
+
 from unittest.mock import patch
+
+
+@pytest.fixture(autouse=True)
+def _written_before_g11(monkeypatch):
+    """These collections / indexes / prefixes / tables were written by runs
+    before the G11 upgrade, so the old-field check applies to them
+    (``naming_history.object_history``; final review M-d)."""
+    import services.naming_history as naming_history
+
+    monkeypatch.setattr(naming_history, "object_history",
+                        lambda *a, **k: naming_history.LEGACY)
 
 MAPPINGS = [{"source": "a", "target": "full name"}, {"source": "b", "target": "id"}]
 

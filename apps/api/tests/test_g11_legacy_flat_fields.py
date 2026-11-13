@@ -24,6 +24,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _written_before_g11(monkeypatch):
+    """These collections / indexes / prefixes / tables were written by runs
+    before the G11 upgrade, so the old-field check applies to them
+    (``naming_history.object_history``; final review M-d)."""
+    import services.naming_history as naming_history
+
+    monkeypatch.setattr(naming_history, "object_history",
+                        lambda *a, **k: naming_history.LEGACY)
+
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))

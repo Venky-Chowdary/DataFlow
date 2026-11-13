@@ -10,8 +10,9 @@ holds the old names made the write fail with "physical DDL missing".
 * Schema Registry subject: its fields are the topic's existing columns. A
   target whose old spelling is a subject field keeps writing that field, as a
   SaaS app's existing field is adopted (``target_name_legacy``).
-* No registry, ``key_format`` unset: a topic with earlier runs (job history
-  for that topic on the same cluster) keeps the old spellings by default
+* No registry, ``key_format`` unset: a topic whose earlier runs wrote the old
+  names (``services.naming_history``: a pre-upgrade job to the same topic,
+  workspace and cluster, or the latest stamped run) keeps them by default
   (``key_format=legacy``, the Redis precedent), so an existing or scheduled
   job does not change shape on upgrade. The run records the default and
   Validate shows an info note naming ``key_format=exact``. A new topic (no
@@ -110,53 +111,27 @@ def renamed_targets(mappings: Iterable[Any] | None) -> list[tuple[str, str]]:
     return out
 
 
-def _same_cluster(job: Mapping[str, Any], connector_id: str, host: str) -> bool:
-    theirs_id = str(job.get("dest_connector_id") or "")
-    if connector_id and theirs_id:
-        return theirs_id == connector_id
-    theirs_host = str(((job.get("transfer_request") or {}).get("destination") or {}).get(
-        "host") or "")
-    return not (host and theirs_host) or theirs_host == host
-
-
-def topic_has_prior_runs(topic: str, cfg: Mapping[str, Any] | None, endpoint: Any = None) -> bool:
-    """Whether a job (in the caller's workspace scope) already wrote rows to ``topic``.
-
-    Raises when the job history cannot be read: callers fail closed.
-    """
-    from connectors.destination_naming import STREAM_SINKS, dest_kind
-    from services.mongodb_service import get_mongodb_service
-    from services.workspace_filter import current_workspace_filter
-
-    opts = _options(cfg, endpoint)
-    connector_id = str(getattr(endpoint, "connector_id", "") or opts.get("connector_id") or "")
-    host = str(getattr(endpoint, "host", "") or opts.get("host") or "")
-    jobs = get_mongodb_service().destination_job_history(
-        topic, workspace_filter=current_workspace_filter())
-    return any(
-        dest_kind(str(job.get("destination_type") or "")) in STREAM_SINKS
-        and _same_cluster(job, connector_id, host)
-        for job in jobs
-    )
-
-
 class KafkaHistoryUnverified(RuntimeError):
     """The topic's job history could not be read and no ``key_format`` was set."""
 
 
 def kafka_naming(
     cfg: Mapping[str, Any] | None, endpoint: Any, topic: str, mappings: Iterable[Any] | None,
-    *, timeout: float = 5.0,
+    *, workspace_id: str, timeout: float = 5.0,
 ) -> dict[str, Any]:
     """How this run names the topic's fields.
 
     ``mode``: ``registry`` (adopt the subject's ``fields``), ``legacy`` (every
     target keeps its old spelling) or ``exact``. ``default`` is True when
-    ``legacy`` was chosen because the topic has earlier runs and no
-    ``key_format`` was set; ``history`` says the topic has earlier runs (only
-    looked up when a target's spelling differs). ``pairs`` are the operator's
+    ``legacy`` was chosen because earlier runs of the topic wrote the old
+    names (``naming_history``: a pre-upgrade job, or the latest stamped run)
+    and no ``key_format`` was set; ``history`` says they did (only looked up
+    when a target's spelling differs). ``pairs`` are the operator's
     ``(target, old spelling)``.
     """
+    from services.naming_history import LEGACY as HISTORY_LEGACY
+    from services.naming_history import object_history
+
     pairs = renamed_targets(mappings)
     url = kafka_registry_url(cfg, endpoint)
     if url and topic:
@@ -169,7 +144,8 @@ def kafka_naming(
     if not pairs or not topic or chosen == LEGACY:
         return out
     try:
-        out["history"] = topic_has_prior_runs(topic, cfg, endpoint)
+        out["history"] = object_history(
+            "kafka", topic, cfg, endpoint, workspace_id) == HISTORY_LEGACY
     except Exception as exc:  # noqa: BLE001 - fail closed only when nothing was chosen
         if chosen == EXACT:
             out["unverified"] = str(exc)
@@ -269,6 +245,5 @@ __all__ = [
     "kafka_registry_url",
     "registry_subject_fields",
     "renamed_targets",
-    "topic_has_prior_runs",
     "with_kafka_name_options",
 ]

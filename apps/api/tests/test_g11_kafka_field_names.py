@@ -217,7 +217,7 @@ def test_key_format_legacy_keeps_the_old_names_without_history(jobs):
 def test_history_unreadable_fails_closed_unless_key_format_is_set(jobs):
     from services.source_filter_gate import request_refusal
 
-    with patch.object(jobs, "destination_job_history", side_effect=RuntimeError("down")):
+    with patch.object(jobs, "naming_history_jobs", side_effect=RuntimeError("down")):
         refusal = request_refusal(_request())
         assert "down" in refusal and "key_format" in refusal
         assert request_refusal(_request({"key_format": "exact"})) == ""

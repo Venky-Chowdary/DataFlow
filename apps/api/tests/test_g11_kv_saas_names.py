@@ -40,6 +40,17 @@ from tests import r4_route_harness as h
 
 pytestmark = pytest.mark.timeout(600)
 
+
+@pytest.fixture(autouse=True)
+def _written_before_g11(monkeypatch):
+    """These collections / indexes / prefixes / tables were written by runs
+    before the G11 upgrade, so the old-field check applies to them
+    (``naming_history.object_history``; final review M-d)."""
+    import services.naming_history as naming_history
+
+    monkeypatch.setattr(naming_history, "object_history",
+                        lambda *a, **k: naming_history.LEGACY)
+
 TARGETS = ["First Name", "address.city", "x" * 70]
 
 
