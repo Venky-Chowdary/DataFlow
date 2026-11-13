@@ -55,6 +55,14 @@ describe("keyboard drag and drop", () => {
     assert.match(r.announce!, /No destination columns/);
   });
 
+  it("a finger or mouse pick-up is over nothing until it reaches a column", () => {
+    const r = dndReduce(IDLE, { type: "pickUp", source: "order_id", via: "pointer" }, TARGETS);
+    assert.equal(r.state.mode === "dragging" && r.state.over, -1, "no column is highlighted (or scrolled to) yet");
+    const dropped = dndReduce(r.state, { type: "drop" }, TARGETS);
+    assert.equal(dropped.drop, undefined, "lifting off before reaching a column drops nothing");
+    assert.match(dropped.announce ?? "", /Cancelled/);
+  });
+
   it("other keys are not drag keys", () => {
     assert.equal(dndKeyAction("a"), null);
     assert.equal(dndKeyAction("Tab"), null);

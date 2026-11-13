@@ -10,8 +10,18 @@ interface DragStudio {
 const EDGE_PX = 48;
 const STEP_PX = 24;
 
-/** Scroll a container that the finger is holding near its top or bottom edge. */
-function autoScroll(clientY: number): void {
+/**
+ * Scroll a container the finger holds near its top or bottom edge.
+ *
+ * A finger over a destination row that is fully visible means "drop here", so
+ * nothing moves under it; a row the edge clips is revealed by exactly the
+ * hidden part. Only with no row under the finger does the edge scroll a step.
+ *
+ * ``armed`` (one set per drag) holds the containers the finger has been inside
+ * away from their edges: a drag picked up in an edge zone does not scroll the
+ * page out from under the finger until it has left that zone once.
+ */
+export function edgeScroll(clientY: number, row: Element | null, armed?: Set<string>): void {
   for (const sel of [".df2-ms-panel-list", ".df2-ms-scroll"]) {
     const el = document.querySelector<HTMLElement>(sel);
     if (!el || el.scrollHeight <= el.clientHeight) continue;
@@ -19,9 +29,25 @@ function autoScroll(clientY: number): void {
     if (clientY < r.top || clientY > r.bottom) continue;
     // A short list keeps most of its height as a drop zone.
     const edge = Math.min(EDGE_PX, r.height / 5);
-    if (clientY < r.top + edge) el.scrollTop -= STEP_PX;
-    else if (clientY > r.bottom - edge) el.scrollTop += STEP_PX;
+    const nearTop = clientY < r.top + edge;
+    const nearBottom = clientY > r.bottom - edge;
+    if (!nearTop && !nearBottom) {
+      armed?.add(sel);
+      continue;
+    }
+    if (armed && !armed.has(sel)) continue;
+    if (row && el.contains(row)) {
+      const rr = row.getBoundingClientRect();
+      if (nearBottom && rr.bottom > r.bottom) el.scrollTop += Math.min(STEP_PX, rr.bottom - r.bottom);
+      else if (nearTop && rr.top < r.top) el.scrollTop -= Math.min(STEP_PX, r.top - rr.top);
+      continue;
+    }
+    el.scrollTop += nearTop ? -STEP_PX : STEP_PX;
   }
+}
+
+function destRowAt(x: number, y: number): Element | null {
+  return document.elementFromPoint(x, y)?.closest?.("[data-dest-column]") ?? null;
 }
 
 /**
@@ -36,6 +62,7 @@ function autoScroll(clientY: number): void {
  */
 export function useTouchDrag(studio: DragStudio, onStart: () => void) {
   const overRef = useRef<string | null>(null);
+  const armedRef = useRef<Set<string>>(new Set());
   const [touching, setTouching] = useState<string | null>(null);
 
   const handlers = (source: string) => ({
@@ -48,17 +75,18 @@ export function useTouchDrag(studio: DragStudio, onStart: () => void) {
         /* A synthetic pointer may not be capturable; hit-testing still works. */
       }
       overRef.current = null;
+      armedRef.current = new Set();
       setTouching(source);
       onStart();
       studio.dispatchDnd({ type: "pickUp", source, via: "pointer" });
     },
     onPointerMove(e: PointerEvent<HTMLElement>) {
       if (e.pointerType === "mouse" || touching !== source) return;
-      const hit = document.elementFromPoint(e.clientX, e.clientY);
-      const name = hit?.closest?.("[data-dest-column]")?.getAttribute("data-dest-column") ?? null;
+      edgeScroll(e.clientY, destRowAt(e.clientX, e.clientY), armedRef.current);
+      // Hit-test after any scroll: the row under the finger is the drop target.
+      const name = destRowAt(e.clientX, e.clientY)?.getAttribute("data-dest-column") ?? null;
       overRef.current = name;
       studio.pointerOver(name);
-      autoScroll(e.clientY);
     },
     onPointerUp(e: PointerEvent<HTMLElement>) {
       if (e.pointerType === "mouse" || touching !== source) return;

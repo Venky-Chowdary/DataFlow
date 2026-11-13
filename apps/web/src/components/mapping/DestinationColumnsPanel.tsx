@@ -37,6 +37,8 @@ interface DestinationColumnsPanelProps {
   onFocusSource: (source: string) => void;
   /** Column under the keyboard/pointer drag, by name (null = none). */
   dragOver: string | null;
+  /** Scroll to the drag cursor (keyboard drags); off for pointer drags. */
+  followDrag?: boolean;
   dragging: boolean;
   onPointerDrop: (source: string, target: string) => void;
   onPointerOver: (target: string | null) => void;
@@ -64,6 +66,7 @@ export function DestinationColumnsPanel({
   onUnmap,
   onFocusSource,
   dragOver,
+  followDrag = true,
   dragging,
   onPointerDrop,
   onPointerOver,
@@ -94,7 +97,9 @@ export function DestinationColumnsPanel({
   const win = useVirtualWindow(visible.length, PANEL_ROW_PX, 480);
   const overIndex = dragOver ? visible.findIndex((s) => s.column.name === dragOver) : -1;
   useEffect(() => {
-    if (overIndex >= 0) win.scrollToIndex(overIndex);
+    // Follow the keyboard's drag cursor. A finger is already on its row:
+    // scrolling the list would move the row out from under it.
+    if (overIndex >= 0 && followDrag) win.scrollToIndex(overIndex);
   }, [overIndex]);
 
   const blocking = summary.requiredUnmapped.length + summary.conflicts.size + summary.refusedNewTargets.length;
