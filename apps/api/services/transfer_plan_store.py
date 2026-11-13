@@ -114,16 +114,33 @@ class PlanStoreReentry(RuntimeError):
 
 
 class PlanVersionConflict(RuntimeError):
-    """A save was based on an older mapping revision than the plan now holds."""
+    """A write was based on plan state that has changed since it was read.
 
-    def __init__(self, plan_id: str, *, base_version: int, current_version: int) -> None:
-        super().__init__(
-            f"Plan {plan_id}: the newest mapping revision is {current_version}, not "
-            f"{base_version} — a newer mapping revision exists (or {base_version} was never one)"
-        )
+    ``compared`` says which: ``"head"`` — the newest revision version
+    (``base_version``) — or ``"selection"`` — the active / approved revision an
+    internal caller read (``base_selection``). ``base_version`` and
+    ``current_version`` are the head versions, or the active versions for a
+    selection conflict.
+    """
+
+    def __init__(
+        self, plan_id: str, *, base_version: int, current_version: int, compared: str = "head"
+    ) -> None:
+        if compared == "head":
+            text = (
+                f"Plan {plan_id}: the newest mapping revision is {current_version}, not "
+                f"{base_version} — a newer mapping revision exists (or {base_version} was never one)"
+            )
+        else:
+            text = (
+                f"Plan {plan_id}: the active or approved mapping revision changed "
+                f"(active {base_version} -> {current_version}) since it was read"
+            )
+        super().__init__(text)
         self.plan_id = plan_id
         self.base_version = base_version
         self.current_version = current_version
+        self.compared = compared
 
 
 def _resolve_endpoint_in_plan(endpoint: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -284,6 +301,11 @@ class TransferPlanRecord:
     def head_version(self) -> int:
         """Version of the newest revision (0 for a plan with none)."""
         return self.revisions[-1].version if self.revisions else 0
+
+    def selection(self) -> tuple[int, int]:
+        """(active version, approved version or 0): what an approve/revert changes."""
+        approved = next((r.version for r in reversed(self.revisions) if r.approved), 0)
+        return self.active_version, approved
 
     def active_revision(self) -> PlanRevision | None:
         if not self.revisions:
@@ -530,11 +552,30 @@ def create_plan(data: dict[str, Any]) -> TransferPlanRecord:
     return plan
 
 
-def _check_base_version(plan_id: str, plan: TransferPlanRecord, base_version: int | None) -> None:
-    """Refuse a revision based on anything but the plan's newest revision (head)."""
+def _check_base_version(
+    plan_id: str,
+    plan: TransferPlanRecord,
+    base_version: int | None,
+    base_selection: tuple[int, int] | None = None,
+) -> None:
+    """Refuse a revision based on plan state that has changed since it was read.
+
+    ``base_version``: the newest revision version (head) the caller read — the
+    public ``/mappings`` contract. ``base_selection``: the
+    :meth:`TransferPlanRecord.selection` an internal caller read (Map,
+    Execute's recovery sync), so an approval or revert made meanwhile is not
+    displaced by the new revision becoming active.
+    """
     if base_version is not None and int(base_version) != plan.head_version():
         raise PlanVersionConflict(
             plan_id, base_version=int(base_version), current_version=plan.head_version()
+        )
+    if base_selection is not None and tuple(base_selection) != plan.selection():
+        raise PlanVersionConflict(
+            plan_id,
+            base_version=int(base_selection[0]),
+            current_version=plan.active_version,
+            compared="selection",
         )
 
 
@@ -548,6 +589,7 @@ def add_mapping_revision(
     target_schema: dict[str, str] | None = None,
     document_model: dict[str, Any] | None = None,
     base_version: int | None = None,
+    base_selection: tuple[int, int] | None = None,
 ) -> TransferPlanRecord | None:
     """Append a pipeline (Map) result as the new active revision.
 
@@ -558,7 +600,7 @@ def add_mapping_revision(
     """
 
     def change(plan: TransferPlanRecord) -> None:
-        _check_base_version(plan_id, plan, base_version)
+        _check_base_version(plan_id, plan, base_version, base_selection)
         model, model_digest = _revision_document_model(plan, document_model)
         src_cols = source_columns or plan.source_columns
         src_schema = source_schema or plan.source_schema
@@ -700,6 +742,7 @@ def sync_ui_mappings(
     transforms: list[dict[str, Any]] | None = None,
     document_model: dict[str, Any] | None = None,
     base_version: int | None = None,
+    base_selection: tuple[int, int] | None = None,
 ) -> TransferPlanRecord | None:
     """Persist user-approved mapping edits as a new revision.
 
@@ -715,7 +758,7 @@ def sync_ui_mappings(
     """
 
     def change(plan: TransferPlanRecord) -> None:
-        _check_base_version(plan_id, plan, base_version)
+        _check_base_version(plan_id, plan, base_version, base_selection)
         model, model_digest = _revision_document_model(plan, document_model)
         version = plan.head_version() + 1
         from services.mapping_proof import mapping_proof_or_build

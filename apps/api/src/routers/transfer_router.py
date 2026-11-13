@@ -882,6 +882,7 @@ def _plan_version_conflict(exc: Any, message: str) -> HTTPException:
             "message": message,
             "base_version": exc.base_version,
             "current_version": exc.current_version,
+            "compared": getattr(exc, "compared", "head"),
         },
     )
 
@@ -930,8 +931,9 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
         )
     except PlanVersionConflict as e:
         raise _plan_version_conflict(
-            e, "A newer mapping revision was saved while Map ran, so its result was not "
-            "stored. Reload the plan and run Map again."
+            e, "The plan changed while Map ran (a newer mapping revision was saved, or a "
+            "revision approved or reverted), so its result was not stored. Reload the plan "
+            "and run Map again."
         ) from e
     except ValueError as e:
         raise safe_http_exception(

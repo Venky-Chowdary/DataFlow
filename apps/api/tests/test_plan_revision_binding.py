@@ -317,3 +317,81 @@ def test_approve_route_answers_400_for_a_version_that_does_not_exist():
     ok = client.post(f"/api/v1/transfer/plans/{plan_id}/approve", params={"version": 1})
     assert ok.status_code == 200, ok.text
     assert get_plan(plan_id).status == "approved"
+
+
+# ---------------------------------------------------------------------------
+# Internal callers also keep an approval / revert made while they worked
+# ---------------------------------------------------------------------------
+
+
+def _map_while(plan_id: str, during):
+    from services.transfer_plan_service import run_plan_mapping
+
+    def pipeline(*_args, **_kwargs):
+        during()
+        return {"mappings": _maps("username"), "validation": {"passed": True, "issues": []}}
+
+    with patch("services.mapping_pipeline.run_mapping_pipeline", side_effect=pipeline):
+        return run_plan_mapping(plan_id, use_llm=False)
+
+
+@pytest.mark.parametrize("approved", [1, 2], ids=["revert_to_v1", "approve_active_v2"])
+def test_an_approval_made_while_map_ran_is_not_displaced(approved):
+    from services.transfer_plan_store import PlanVersionConflict, approve_plan_version
+
+    plan_id = _plan()
+    sync_ui_mappings(plan_id, _maps("login"))  # v2, active
+    with pytest.raises(PlanVersionConflict):
+        _map_while(plan_id, lambda: approve_plan_version(plan_id, approved))
+    plan = get_plan(plan_id)
+    assert [r.version for r in plan.revisions] == [1, 2], "Map's result was not stored"
+    assert plan.active_version == approved and plan.status == "approved"
+    assert [r.version for r in plan.revisions if r.approved] == [approved]
+
+
+def test_map_route_answers_409_when_an_approval_landed_while_it_ran():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from services.transfer_plan_store import approve_plan_version
+    from src.routers import transfer_router
+
+    plan_id = _plan()
+    sync_ui_mappings(plan_id, _maps("login"))
+    app = FastAPI()
+    app.include_router(transfer_router.router, prefix="/api/v1")
+
+    def pipeline(*_args, **_kwargs):
+        approve_plan_version(plan_id, 1)
+        return {"mappings": _maps("username"), "validation": {"passed": True, "issues": []}}
+
+    with patch("services.mapping_pipeline.run_mapping_pipeline", side_effect=pipeline):
+        res = TestClient(app).post(f"/api/v1/transfer/plans/{plan_id}/map", json={"use_llm": False})
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"]["code"] == "plan_version_conflict"
+    assert get_plan(plan_id).active_version == 1
+
+
+def test_a_revert_before_the_execute_recovery_sync_is_what_runs(monkeypatch):
+    import services.transfer_plan_service as service
+    from services.transfer_plan_store import approve_plan_version
+
+    plan_id = _plan()  # v1 has mappings
+    sync_ui_mappings(plan_id, [])  # v2: an empty save is active -> Execute would recover
+    real_get_plan = service.get_plan
+    calls = {"n": 0}
+
+    def stale_then_reverted(pid):
+        snapshot = real_get_plan(pid)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            approve_plan_version(pid, 1)  # the operator reverts to v1 just after the read
+        return snapshot
+
+    monkeypatch.setattr(service, "get_plan", stale_then_reverted)
+    payload = service.merge_plan_into_run(plan_id, request_mappings=_maps("login"))
+    plan = get_plan(plan_id)
+    assert [r.version for r in plan.revisions] == [1, 2], "request mappings were appended over the revert"
+    assert plan.active_version == 1
+    assert payload["mapping_version"] == 1
+    assert [m["target"] for m in payload["mappings"]] == ["username"]

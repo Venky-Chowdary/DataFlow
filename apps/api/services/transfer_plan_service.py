@@ -123,9 +123,12 @@ def run_plan_mapping(
         schema_policy=str(policies.get("schema_policy", "manual_review")),
         table_exists=table_exists,
     )
-    # Appended only onto the revision Map read: a UI save made while the
-    # pipeline ran stays active and the caller gets PlanVersionConflict (409).
-    updated = add_mapping_revision(plan_id, result, base_version=plan.head_version())
+    # Appended only onto the plan state Map read: a UI save, approval or revert
+    # made while the pipeline ran stays as it is and the caller gets
+    # PlanVersionConflict (409).
+    updated = add_mapping_revision(
+        plan_id, result, base_version=plan.head_version(), base_selection=plan.selection()
+    )
     append_audit_event(
         action="transfer_plan.mapped",
         resource=f"plan/{plan_id}",
@@ -156,10 +159,16 @@ def patch_plan(plan_id: str, data: dict[str, Any]) -> TransferPlanRecord:
 
 
 def sync_plan_mappings(
-    plan_id: str, mappings: list[dict[str, Any]], *, base_version: int | None = None
+    plan_id: str,
+    mappings: list[dict[str, Any]],
+    *,
+    base_version: int | None = None,
+    base_selection: tuple[int, int] | None = None,
 ) -> TransferPlanRecord:
-    """Save UI mapping edits as a new revision (``PlanVersionConflict`` when stale)."""
-    plan = sync_ui_mappings(plan_id, mappings, base_version=base_version)
+    """Save mapping edits as a new revision (``PlanVersionConflict`` when stale)."""
+    plan = sync_ui_mappings(
+        plan_id, mappings, base_version=base_version, base_selection=base_selection
+    )
     if not plan:
         raise ValueError(f"Plan '{plan_id}' not found")
     append_audit_event(
@@ -690,10 +699,12 @@ def merge_plan_into_run(
             )
 
         # Persist Studio mappings onto the empty draft. sync → status "mapped"
-        # (runnable). Only onto the revision just read: if a save landed in
-        # between, read again and run what was saved.
+        # (runnable). Only onto the plan state just read: if a save, approval
+        # or revert landed in between, read again and run what is active now.
         try:
-            synced = sync_plan_mappings(plan_id, maps, base_version=plan.head_version())
+            synced = sync_plan_mappings(
+                plan_id, maps, base_version=plan.head_version(), base_selection=plan.selection()
+            )
             break
         except PlanVersionConflict:
             continue
