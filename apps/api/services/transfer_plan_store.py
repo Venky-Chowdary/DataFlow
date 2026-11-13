@@ -48,7 +48,7 @@ STORE_PATH = data_dir() / "transfer_plans.json"
 #: How long a plan write waits for another writer to finish before it gives up.
 LOCK_TIMEOUT_SECONDS = 30.0
 _LOCK_POLL_SECONDS = 0.005
-_PROCESS_LOCK = threading.RLock()
+_PROCESS_LOCK = threading.Lock()
 _HELD = threading.local()
 
 
@@ -92,6 +92,14 @@ _REPORTED: dict[str, str] = {}
 
 def _backup_path(path: Path) -> Path:
     return path.with_name(path.name + ".bak")
+
+
+class PlanStoreReentry(RuntimeError):
+    """A plan-store write was started inside another on the same thread.
+
+    The outer write saves the plans it read before the inner one ran, so the
+    inner write would be silently overwritten; it is refused instead.
+    """
 
 
 class PlanVersionConflict(RuntimeError):
@@ -299,7 +307,8 @@ def _load_all() -> list[TransferPlanRecord]:
     """
     path = STORE_PATH
     try:
-        text = path.read_text(encoding="utf-8")
+        # utf-8-sig: a store re-saved by an editor that adds a BOM still reads.
+        text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return []
     except (OSError, UnicodeDecodeError) as exc:
@@ -316,32 +325,38 @@ def _load_all() -> list[TransferPlanRecord]:
     return plans
 
 
-def _keep_backup() -> None:
-    """Keep the store file about to be replaced as ``<store>.bak`` (inside :func:`_exclusive`).
-
-    The file was just read and parsed by this write, so the backup is a good
-    copy. A hard link costs no space; a copy is the fallback where links fail.
-    """
-    if not STORE_PATH.exists():
-        return
-    backup = _backup_path(STORE_PATH)
-    staging = backup.with_name(f".{backup.name}.{os.getpid()}.staging")
-    staging.unlink(missing_ok=True)
-    try:
-        os.link(STORE_PATH, staging)
-    except OSError:
-        shutil.copy2(STORE_PATH, staging)
-    os.replace(staging, backup)
-
-
 def _save_all(plans: list[TransferPlanRecord]) -> None:
-    _keep_backup()
-    write_json_atomic(
-        STORE_PATH,
-        {"plans": [p.to_dict() for p in plans]},
-        indent=2,
-        default=json_default,
-    )
+    """Replace the store file (inside :func:`_exclusive`), keeping the old one as ``.bak``.
+
+    The file being replaced was just read and parsed by this write, so it is a
+    good copy. It is hard-linked (copied where links fail) to a staging name
+    and becomes ``<store>.bak`` only once the new file has landed; a failed
+    write drops the staging name and leaves the backup as it was. The store is
+    always a new file from the atomic replace, so it never shares an inode
+    with its backup.
+    """
+    staging: Path | None = None
+    if STORE_PATH.exists():
+        backup = _backup_path(STORE_PATH)
+        staging = backup.with_name(f".{backup.name}.{os.getpid()}.staging")
+        staging.unlink(missing_ok=True)
+        try:
+            os.link(STORE_PATH, staging)
+        except OSError:
+            shutil.copy2(STORE_PATH, staging)
+    try:
+        write_json_atomic(
+            STORE_PATH,
+            {"plans": [p.to_dict() for p in plans]},
+            indent=2,
+            default=json_default,
+        )
+    except BaseException:
+        if staging is not None:
+            staging.unlink(missing_ok=True)
+        raise
+    if staging is not None:
+        os.replace(staging, _backup_path(STORE_PATH))
 
 
 @contextlib.contextmanager
@@ -354,10 +369,12 @@ def _store_file_lock(deadline: float) -> Iterator[None]:
         return
     lock_path = STORE_PATH.with_name(STORE_PATH.name + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+") as fh:
+    # Never written: read-only, created owner-only; flock works on any open fd.
+    fd = os.open(lock_path, os.O_RDONLY | os.O_CREAT, 0o600)
+    try:
         while True:
             try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
@@ -366,26 +383,30 @@ def _store_file_lock(deadline: float) -> Iterator[None]:
         try:
             yield
         finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 @contextlib.contextmanager
 def _exclusive() -> Iterator[None]:
-    """Hold the plan store for one read-modify-write (re-entrant per thread)."""
+    """Hold the plan store for one read-modify-write.
+
+    Not re-entrant: a write started inside another on the same thread raises
+    :class:`PlanStoreReentry` (the outer write would overwrite it).
+    """
+    if getattr(_HELD, "held", False):
+        raise PlanStoreReentry("a plan-store write cannot run inside another plan-store write")
     deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
     if not _PROCESS_LOCK.acquire(timeout=LOCK_TIMEOUT_SECONDS):
         raise PlanStoreBusy(STORE_PATH)
     try:
-        depth = getattr(_HELD, "depth", 0)
-        _HELD.depth = depth + 1
+        _HELD.held = True
         try:
-            if depth:
+            with _store_file_lock(deadline):
                 yield
-            else:
-                with _store_file_lock(deadline):
-                    yield
         finally:
-            _HELD.depth = depth
+            _HELD.held = False
     finally:
         _PROCESS_LOCK.release()
 

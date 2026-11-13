@@ -293,3 +293,41 @@ def test_plan_routes_answer_503_naming_the_file_when_the_store_is_unreadable(iso
         assert body["error"] == "plan_store_unreadable"
         assert "transfer_plans.json.bak" in body["detail"]
     assert isolated_plan_store.read_bytes() == damaged
+
+
+def test_a_failed_write_leaves_the_backup_alone_and_unlinked(isolated_plan_store, monkeypatch):
+    """The backup is only rotated by a write that landed, and never shares the store's inode."""
+    import os
+
+    a, _b = _two_plans()
+    bak = isolated_plan_store.with_name("transfer_plans.json.bak")
+    backup_before = bak.read_bytes()
+    store_before = isolated_plan_store.read_bytes()
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store, "write_json_atomic", disk_full)
+    with pytest.raises(OSError):
+        update_plan(a, {"name": "never written"})
+    monkeypatch.undo()
+    assert isolated_plan_store.read_bytes() == store_before
+    assert bak.read_bytes() == backup_before
+    assert os.stat(bak).st_ino != os.stat(isolated_plan_store).st_ino
+    assert not [p.name for p in isolated_plan_store.parent.iterdir() if p.name.endswith(".staging")]
+
+
+def test_backup_and_store_never_share_an_inode_after_a_write(isolated_plan_store):
+    import os
+
+    _two_plans()
+    bak = isolated_plan_store.with_name("transfer_plans.json.bak")
+    assert os.stat(bak).st_ino != os.stat(isolated_plan_store).st_ino
+
+
+def test_a_store_saved_with_a_utf8_bom_is_readable(isolated_plan_store):
+    a, b = _two_plans()
+    isolated_plan_store.write_bytes(b"\xef\xbb\xbf" + isolated_plan_store.read_bytes())
+    assert {p.id for p in list_plans()} == {a, b}
+    sync_ui_mappings(a, MAPPING)
+    assert len(get_plan(a).revisions) == 2

@@ -353,3 +353,33 @@ def test_mappings_route_answers_409_for_a_stale_base_version(tmp_path, monkeypat
     legacy = client.post(url, json={"mappings": mapping})
     assert legacy.status_code == 200, legacy.text
     assert legacy.json()["plan"]["active_version"] == 3
+
+
+def test_a_write_started_inside_another_write_is_refused():
+    """The outer write would overwrite whatever the nested one committed."""
+    plan_id = _plan()
+    before = get_plan(plan_id).doc_version
+    with pytest.raises(store.PlanStoreReentry):
+        store._mutate(plan_id, lambda _plan: attach_job(plan_id, "job-nested"))
+    with pytest.raises(store.PlanStoreReentry):
+        store._mutate(plan_id, lambda _plan: create_plan({"name": "nested"}))
+    plan = get_plan(plan_id)
+    assert "job-nested" not in plan.job_ids
+    assert plan.doc_version == before
+    assert [p.name for p in store._load_all()] == ["Transfer plan"]
+    # The store is usable afterwards (the refusal released everything).
+    attach_job(plan_id, "job-after")
+    assert get_plan(plan_id).job_ids == ["job-after"]
+
+
+def test_the_lock_file_is_private_and_opened_read_only(isolated_plan_store):
+    import os
+    import stat
+
+    plan_id = _plan()
+    sync_ui_mappings(plan_id, _mapping("x"))
+    lock = isolated_plan_store.with_name("transfer_plans.json.lock")
+    assert stat.S_IMODE(os.stat(lock).st_mode) & 0o077 == 0
+    lock.chmod(0o400)  # a read-only lock file still serializes writers
+    sync_ui_mappings(plan_id, _mapping("y"))
+    assert get_plan(plan_id).head_version() == 2
