@@ -8,6 +8,7 @@ table whose column names differ (fuzzy, by the auto-map tiers).
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -173,3 +174,69 @@ def test_viewer_can_list_but_not_save_templates(tenancy_world):
     viewer = tenancy_world.member("viewer-tpl@tenancy.example.com", tenancy_world.workspace_a, "viewer")
     assert viewer.get(f"{BASE}/templates").status_code == 200
     assert viewer.post(f"{BASE}/templates", json={"name": "x", "mappings": MAPPINGS}).status_code == 403
+
+
+# --------------------------------------------------------------------------- H1: resource bombs
+
+
+def _billion_laughs(levels: int = 9) -> str:
+    lines = ['a0: &a0 ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]']
+    for i in range(1, levels):
+        prev = f"*a{i - 1}"
+        lines.append(f"a{i}: &a{i} [{', '.join([prev] * 9)}]")
+    return "\n".join(lines) + f"\napiVersion: datawrap.io/mapping/v1\nkind: ColumnMapping\nspec: {{mappings: [{{source: x, target: *a{levels - 1}}}]}}\n"
+
+
+def test_a_yaml_alias_bomb_is_refused_fast_without_expanding():
+    import time
+
+    doc = _billion_laughs()
+    assert len(doc) < 1200
+    started = time.perf_counter()
+    with pytest.raises(MappingDocumentError, match="alias|anchor"):
+        load_mapping_document(doc)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_any_yaml_anchor_is_refused():
+    doc = "x: &a 1\ny: *a\napiVersion: datawrap.io/mapping/v1\n"
+    with pytest.raises(MappingDocumentError, match="alias|anchor"):
+        load_mapping_document(doc)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["[" * 5000, "{" + "a: {" * 3000, "[" * 100000, '{"a":' * 100000],
+    ids=["yaml_flow_5000", "yaml_map_3000", "json_list_100000", "json_object_100000"],
+)
+def test_deep_nesting_is_a_clean_refusal_not_a_recursion_error(text):
+    with pytest.raises(MappingDocumentError, match="nest"):
+        load_mapping_document(text)
+
+
+def test_a_document_with_too_many_nodes_is_refused():
+    body = json.dumps({"apiVersion": DOCUMENT_API_VERSION, "kind": "ColumnMapping",
+                       "spec": {"mappings": [], "pad": [0] * 300_000}})
+    with pytest.raises(MappingDocumentError, match="too many"):
+        load_mapping_document(body)
+
+
+def test_non_text_mapping_fields_are_refused_not_stringified():
+    deep = {"x": 1}
+    for _ in range(2000):
+        deep = {"x": deep}
+    with pytest.raises(MappingDocumentError):
+        build_mapping_document(mappings=[{"source": "a", "target": deep}])
+
+
+def test_template_create_refuses_a_bomb_shaped_body(tenancy_world):
+    deep: dict = {"x": 1}
+    for _ in range(60):
+        deep = {"x": deep}
+    r = tenancy_world.a.post(f"{BASE}/templates", json={
+        "name": "bomb", "mappings": [{"source": "a", "target": "b", "target_type": deep}],
+    })
+    assert r.status_code == 422, r.text
+    big = {"op": "constant_column", "options": {"to": "c", "value": "x" * 600_000}}
+    r = tenancy_world.a.post(f"{BASE}/templates", json={"name": "big", "mappings": MAPPINGS, "computed": [big]})
+    assert r.status_code in (413, 422), r.text

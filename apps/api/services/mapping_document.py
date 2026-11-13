@@ -26,7 +26,10 @@ Rules:
 * ``computed`` steps are Transform (shape) steps — the one expression engine.
   Each is parsed by :class:`services.shape_models.ShapeRecipe` on export and on
   import, so a document can never carry an expression the engine would refuse.
-* YAML is read with ``yaml.safe_load``: tags that construct objects are refused.
+* YAML is read with a ``SafeLoader`` that also refuses anchors and aliases
+  (an alias bomb expands exponentially in memory), and both YAML and JSON are
+  bounded in nesting depth and node count *before* anything is expanded or
+  converted, so a 600-byte document cannot exhaust memory or the stack.
 * Only known mapping fields travel; anything else is dropped, never executed.
 """
 
@@ -42,7 +45,13 @@ DOCUMENT_KIND = "ColumnMapping"
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 MAX_MAPPINGS = 5000
 MAX_COMPUTED = 200
+#: Structure bounds: a real document is ~10 shallow fields per mapping.
+MAX_DEPTH = 24
+MAX_NODES = 120_000
+#: The stored document (a template) may not exceed this when serialised.
+MAX_STORED_BYTES = 512 * 1024
 _NAME_LIMIT = 256
+_SCALARS = (str, int, float, bool, type(None))
 
 #: Mapping fields a document carries (everything else is UI or run state).
 _FIELDS = (
@@ -62,6 +71,47 @@ def _text(value: Any, limit: int = _NAME_LIMIT) -> str:
     return str(value if value is not None else "").strip()[:limit]
 
 
+def _check_structure(value: Any, what: str) -> None:
+    """Refuse a structure deeper than MAX_DEPTH or larger than MAX_NODES (iterative)."""
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    nodes = 0
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_NODES:
+            raise MappingDocumentError(f"{what} has too many values (more than {MAX_NODES})")
+        if depth > MAX_DEPTH:
+            raise MappingDocumentError(f"{what} is nested deeper than {MAX_DEPTH} levels")
+        if isinstance(item, dict):
+            stack.extend((v, depth + 1) for v in item.values())
+            nodes += len(item)
+        elif isinstance(item, (list, tuple)):
+            stack.extend((v, depth + 1) for v in item)
+
+
+def _json_depth_ok(text: str) -> None:
+    """Bound JSON nesting before the recursive decoder sees it."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > MAX_DEPTH:
+                raise MappingDocumentError(f"the document is nested deeper than {MAX_DEPTH} levels")
+        elif ch in "]}":
+            depth -= 1
+
+
 def _clean_mapping(raw: Any, index: int) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise MappingDocumentError(f"mappings[{index}] is not an object")
@@ -69,6 +119,9 @@ def _clean_mapping(raw: Any, index: int) -> dict[str, Any]:
     if not source:
         raise MappingDocumentError(f"mappings[{index}] has no source column")
     out: dict[str, Any] = {"source": source, "target": _text(raw.get("target"))}
+    for key in _FIELDS:
+        if not isinstance(raw.get(key), _SCALARS):
+            raise MappingDocumentError(f"mappings[{index}].{key} must be text, a number or true/false")
     for key in _FIELDS[2:]:
         value = raw.get(key)
         if value in (None, "", False):
@@ -126,6 +179,8 @@ def build_mapping_document(
     """Normalise, validate and checksum a mapping into the v1 document."""
     if len(mappings or []) > MAX_MAPPINGS:
         raise MappingDocumentError(f"{len(mappings)} mappings; a document holds at most {MAX_MAPPINGS}")
+    _check_structure(mappings or [], "mappings")
+    _check_structure(computed or [], "computed")
     clean = [_clean_mapping(m, i) for i, m in enumerate(mappings or [])]
     try:
         from services.type_stamp_grammar import validate_mapping_type_stamps
@@ -145,6 +200,12 @@ def build_mapping_document(
         "spec": {"mappings": clean, "computed": _clean_computed(computed)},
     }
     doc["checksum"] = _checksum(doc)
+    size = len(json.dumps(doc, ensure_ascii=False, default=str).encode("utf-8"))
+    if size > MAX_STORED_BYTES:
+        raise MappingDocumentError(
+            f"the mapping is {size // 1024} KB; a document may be at most {MAX_STORED_BYTES // 1024} KB "
+            "(computed step options count)"
+        )
     return doc
 
 
@@ -158,19 +219,53 @@ def dump_mapping_document(doc: dict[str, Any], *, fmt: str = "yaml") -> str:
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=120)
 
 
-def _parse(text: str) -> Any:
-    stripped = text.lstrip()
-    if stripped.startswith("{"):
-        try:
-            return json.loads(text)
-        except ValueError as exc:
-            raise MappingDocumentError(f"not valid JSON: {exc.msg} (line {exc.lineno})") from exc
+def _no_alias_loader():
     import yaml
 
+    class NoAliasSafeLoader(yaml.SafeLoader):
+        """SafeLoader that refuses anchors/aliases and bounds depth and size."""
+
+        _depth = 0
+        _nodes = 0
+
+        def compose_node(self, parent, index):  # noqa: ANN001 - PyYAML signature
+            event = self.peek_event()
+            if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
+                raise MappingDocumentError("YAML anchors and aliases are not allowed in a mapping document")
+            self._nodes += 1
+            if self._nodes > MAX_NODES:
+                raise MappingDocumentError(f"the document has too many values (more than {MAX_NODES})")
+            self._depth += 1
+            try:
+                if self._depth > MAX_DEPTH:
+                    raise MappingDocumentError(f"the document is nested deeper than {MAX_DEPTH} levels")
+                return super().compose_node(parent, index)
+            finally:
+                self._depth -= 1
+
+    return NoAliasSafeLoader
+
+
+def _parse(text: str) -> Any:
+    stripped = text.lstrip()
     try:
-        return yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise MappingDocumentError(f"not valid YAML: {str(exc).splitlines()[0]}") from exc
+        if stripped.startswith("{"):
+            _json_depth_ok(text)
+            try:
+                parsed = json.loads(text)
+            except ValueError as exc:
+                raise MappingDocumentError(f"not valid JSON: {exc.msg} (line {exc.lineno})") from exc
+        else:
+            import yaml
+
+            try:
+                parsed = yaml.load(text, Loader=_no_alias_loader())  # noqa: S506 - SafeLoader subclass
+            except yaml.YAMLError as exc:
+                raise MappingDocumentError(f"not valid YAML: {str(exc).splitlines()[0]}") from exc
+    except RecursionError as exc:
+        raise MappingDocumentError(f"the document is nested deeper than {MAX_DEPTH} levels") from exc
+    _check_structure(parsed, "the document")
+    return parsed
 
 
 def load_mapping_document(text: str) -> dict[str, Any]:
