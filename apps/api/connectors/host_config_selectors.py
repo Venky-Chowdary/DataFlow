@@ -34,7 +34,10 @@ from urllib.parse import urlsplit
 LIBPQ = frozenset({"postgresql", "postgres", "redshift", "cockroachdb"})
 _DSN_FILES = frozenset({"filedsn", "savefile"})
 _DRIVER_KEYS = frozenset({"driver", "odbcdriver"})
-_LIBRARY = re.compile(r"\.(so|dll|dylib)(\.[0-9]+)*$", re.IGNORECASE)
+#: Shared-library / libtool / archive names the driver manager could load (follow-up review 5, L4).
+_LIBRARY = re.compile(r"\.(so|la|a|sl|dll|dylib|bundle)(\.[0-9]+)*$", re.IGNORECASE)
+#: SQLAlchemy dialects whose default DBAPI is pyodbc (``mssql://`` is ``mssql+pyodbc://``).
+_ODBC_DEFAULT_DIALECTS = frozenset({"mssql", "sybase"})
 _TEXT_FIELDS = ("connection_string", "host", "endpoint_url", "dsn", "odbc_connect")
 
 
@@ -96,7 +99,7 @@ def _driver_refusal(value: Any, where: str, *, installed_only: bool) -> str:
             "installed ODBC driver."
         )
     installed = installed_odbc_drivers() if installed_only else None
-    if installed and name not in installed:
+    if installed is not None and name not in installed:
         return (
             f"ODBC option Driver {where} is not an ODBC driver installed on this server. Use one of: "
             + ", ".join(sorted(installed)) + "."
@@ -123,6 +126,12 @@ def _scheme(text: str) -> str:
     return head.strip().lower()
 
 
+def _odbc_scheme(scheme: str) -> bool:
+    """A URL scheme SQLAlchemy dials through pyodbc (``mssql`` / ``sybase`` default to it)."""
+    base, _, driver = scheme.partition("+")
+    return "odbc" in driver if driver else base in _ODBC_DEFAULT_DIALECTS or "odbc" in base
+
+
 def _odbc_url_refusal(text: str, where: str, *, installed_only: bool) -> str:
     """A ``+pyodbc`` URL as SQLAlchemy's pyodbc connector reads it."""
     from connectors.tls_file_options import _odbc_pairs, _query_pairs
@@ -143,7 +152,8 @@ def _odbc_url_refusal(text: str, where: str, *, installed_only: bool) -> str:
         host, database = parts.hostname, parts.path.strip("/")
     except ValueError:
         return ""
-    if host and not database:  # SQLAlchemy: ``dsn=<host>`` (no ``database`` key)
+    in_query = any(_fold(key) == "database" for key, _ in query)  # SQLAlchemy reads it as the database
+    if host and not database and not in_query:  # SQLAlchemy: ``dsn=<host>`` (no ``database`` key)
         return _dsn_message(where)
     return ""
 
@@ -175,7 +185,7 @@ def text_refusal(text: Any, where: str, *, libpq: bool, odbc: bool, installed_on
                     refusal = text_refusal(value, where, libpq=True, odbc=False, installed_only=installed_only)
                     if refusal:
                         return refusal
-    if "odbc" in scheme:
+    if _odbc_scheme(scheme):
         return _odbc_url_refusal(raw, where, installed_only=installed_only)
     if odbc or "://" not in raw:
         return _odbc_pairs_refusal(_odbc_pairs(raw), where, installed_only=installed_only)
@@ -235,6 +245,11 @@ def settings_refusal(data: Any) -> str:
         return ""
     libpq, odbc = _families(data)
     extra = data.get("extra") if isinstance(data.get("extra"), Mapping) else {}
+    # A generic SQL connector is judged by the URL it dials (follow-up review 5, L4).
+    for text in (data.get("connection_string"), extra.get("connection_string")):
+        scheme = _scheme(str(text or ""))
+        libpq = libpq or scheme.split("+", 1)[0] in LIBPQ
+        odbc = odbc or _odbc_scheme(scheme)
     flags = {"libpq": libpq, "odbc": odbc, "installed_only": True}
     for source, where in ((data, "in this connector's connection settings"), (extra, "in this connector's extra settings")):
         for field in _TEXT_FIELDS:
@@ -256,7 +271,8 @@ def check_guarded(dialect: Any, cargs: Any, cparams: Any) -> None:
     where = "for this connection"
     name = str(getattr(dialect, "name", "") or "").lower()
     odbc = str(getattr(dialect, "driver", "") or "").lower() == "pyodbc"
-    flags = {"libpq": name in LIBPQ, "odbc": odbc, "installed_only": False}
+    # The installed-driver rule applies at the dial too (follow-up review 5, L4).
+    flags = {"libpq": name in LIBPQ, "odbc": odbc, "installed_only": True}
     refusal = mapping_refusal(
         {k: v for k, v in (cparams or {}).items() if _fold(k) != "dsn"}, where, **flags
     )

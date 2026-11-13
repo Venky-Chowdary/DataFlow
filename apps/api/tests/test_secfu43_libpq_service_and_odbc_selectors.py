@@ -205,8 +205,11 @@ def test_the_products_own_odbc_string_passes():
 
     dialect = SimpleNamespace(name="mssql", driver="pyodbc", _dataflow_tls_file_guard=True)
     for odbc in (f"DRIVER={{{_INSTALLED}}};Server=db.example.com,1433;Database=app;UID=u;PWD=p",
-                 "DRIVER={ODBC Driver 17 for SQL Server};Server=db.example.com;Database=app"):
+                 f"DRIVER={{{_INSTALLED}}};Server=db.example.com;Database=app"):
         check_guarded_dial(dialect, (odbc,), {})
+    # Since follow-up review 5 (L4) a driver that is not installed is refused at the dial too.
+    with pytest.raises(ValueError, match="installed"):
+        check_guarded_dial(dialect, ("DRIVER={ODBC Driver 17 for SQL Server};Server=db.example.com;Database=app",), {})
 
 
 def test_a_real_engine_refuses_a_driver_library_before_pyodbc(monkeypatch):
