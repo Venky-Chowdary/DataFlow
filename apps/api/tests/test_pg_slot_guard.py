@@ -168,3 +168,38 @@ def test_a_foreign_slot_with_the_same_name_survives():
     finally:
         conn.close()
         _drop(name)
+
+
+def test_session_end_never_drops_another_sessions_slots(tmp_path: Path):
+    """Concurrent sessions keep their slots (test_d344 lost its slot mid-test).
+
+    ``conftest._drop_leaked_pg_replication_slots`` dropped every inactive
+    ``df_dataflow_mt_%`` slot on the shared server at each session end, so a
+    second pytest session finishing while test_d344 was between polls dropped
+    d344's shared slot ("replication slot ... does not exist" ->
+    CdcSlotGapError). A session now drops only slots it provably created
+    (``tests.pg_slot_guard``); another session's slot, and the owner's retained
+    ``df_dataflow_cdcord_*`` slot, are never touched.
+    """
+    token = uuid.uuid4().hex[:8]
+    foreign = [f"df_dataflow_mt_{token}", f"df_dataflow_cdcord_g11{token}"]
+    conn = _conn()
+    try:
+        cur = conn.cursor()
+        for name in foreign:  # another session's idle slots (raw SQL: untracked here)
+            cur.execute("SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (name,))
+        env = {**os.environ, "PYTHONPATH": str(_API)}
+        done = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+             "tests/test_pg_slot_guard.py::test_a_fake_cursor_records_nothing",
+             "--basetemp", str(tmp_path / "bt")],
+            cwd=str(_API), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=300,
+        )
+        assert done.returncode == 0, done.stdout.decode()[-2000:]
+        for name in foreign:
+            assert _slot_exists(name), f"another session's slot {name} was dropped"
+    finally:
+        conn.close()
+        for name in foreign:
+            _drop(name)

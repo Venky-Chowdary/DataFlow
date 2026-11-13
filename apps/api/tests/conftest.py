@@ -643,45 +643,11 @@ def pg_test_cfg(port: int | None = None) -> dict:
     }
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _drop_leaked_pg_replication_slots():
-    """CDC tests create logical replication slots on the local PG and do not
-    always drop them — 20 leaked ``df_dataflow_mt_*``/``s_probe`` slots once
-    filled ``max_replication_slots`` and failed unrelated CDC tests with
-    ``replication_slot_quota: all replication slots are in use``. Best-effort
-    session teardown: drop inactive slots matching the test prefixes.
-    """
-    yield
-    try:
-        import psycopg2
-
-        cfg = pg_test_cfg()
-        conn = psycopg2.connect(
-            host=cfg["host"],
-            port=cfg["port"],
-            dbname=cfg["database"],
-            user=cfg["username"],
-            password=cfg["password"],
-            connect_timeout=3,
-        )
-        try:
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT slot_name FROM pg_replication_slots "
-                    "WHERE NOT active AND ("
-                    "slot_name LIKE 'df_dataflow_mt_%' "
-                    "OR slot_name LIKE 's_probe%' "
-                    "OR slot_name LIKE 'x29_%' "
-                    "OR slot_name LIKE 'df_test_%')"
-                )
-                for (slot_name,) in cur.fetchall():
-                    cur.execute("SELECT pg_drop_replication_slot(%s)", (slot_name,))
-        finally:
-            conn.close()
-    except Exception:
-        # PG absent / creds differ — cleanup is best-effort hygiene.
-        pass
+# Leaked CDC slots: ``tests.pg_slot_guard`` (registered in pytest_configure)
+# drops, at session end, only the slots this session provably created. The
+# prefix sweep that stood here dropped every inactive ``df_dataflow_mt_%`` slot
+# on the shared server, including a concurrent session's slot between its
+# polls (test_d344: "replication slot ... does not exist" -> CdcSlotGapError).
 
 
 def _is_mongo_reachable() -> bool:
