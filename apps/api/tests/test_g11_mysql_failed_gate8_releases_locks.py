@@ -15,8 +15,13 @@ never happened):
   for a column the table does not have (``1054 Unknown column`` on a real
   connection, inside the read's transaction: the OPS-F1 shape).
 * ``fast_path``: the LOAD DATA fast path (needs the server's ``local_infile``;
-  skipped where it is off) and a row removed from the destination after the
-  write, so Gate-8's independent readback disagrees.
+  skipped where it is off). Its Gate-8 is a COUNT(*) proof plus the
+  cross-engine key census (``reconcile_step._generic_key_census``), which
+  reads the destination on its own MySQL connection. A mapped column is
+  dropped after the write, so that census read fails with ``1054 Unknown
+  column`` inside its read transaction: the same OPS-F1 shape on this route
+  (final review: the earlier variant removed a row, which never failed a
+  read, and passed with the fix reverted).
 
 Either way the run fails Gate-8; afterwards no transaction of this process is
 open on the server and ``DROP TABLE`` succeeds under a short
@@ -83,7 +88,7 @@ def _row_path(monkeypatch, table: str) -> None:
 
 
 def _fast_path(monkeypatch, table: str) -> None:
-    """The LOAD DATA fast path, then a row removed behind the run's back."""
+    """The LOAD DATA fast path, then a mapped column dropped behind the run's back."""
     import src.transfer.copy_route as copy_route
 
     real = copy_route._try_sqlite_mysql_copy_fast_path
@@ -94,7 +99,7 @@ def _fast_path(monkeypatch, table: str) -> None:
         db = _mysql()
         try:
             with db.cursor() as cur:
-                cur.execute(f"DELETE FROM `{table}` WHERE id = 2")  # nosec B608
+                cur.execute(f"ALTER TABLE `{table}` DROP COLUMN `{LONG_64}`")  # nosec B608
         finally:
             db.close()
         return out
