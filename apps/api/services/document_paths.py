@@ -10,6 +10,8 @@ Rules:
 * dots separate segments, and no segment is empty;
 * no segment starts with ``$`` (MongoDB reads those as operators);
 * no segment contains NUL;
+* the path is valid UTF-8 text (BSON keys are UTF-8, so a lone surrogate
+  such as ``"\\ud800"`` cannot be written);
 * ``_id`` is allowed only as the first segment of a top-level path; inside an
   array element or a nested container it is refused (``allow_id=False``);
 * two paths collide when they are the same path, when one is a scalar and the
@@ -79,6 +81,17 @@ def path_issues(path: Any, *, allow_id: bool = True) -> list[PathIssue]:
     if not path.strip():
         return [_issue("path_empty", path, "A field path cannot be empty.")]
     issues: list[PathIssue] = []
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        issues.append(
+            _issue(
+                "invalid_utf8",
+                path,
+                f"Field path {path!r} is not valid UTF-8 text (it holds a lone "
+                "surrogate); MongoDB field names must be UTF-8.",
+            )
+        )
     if "\x00" in path:
         issues.append(
             _issue("path_nul", path, f"Field path {path!r} contains a NUL character.")

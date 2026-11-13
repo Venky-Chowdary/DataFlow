@@ -219,3 +219,17 @@ def test_flatten_refuses_keys_that_cannot_round_trip():
 
 def test_flatten_with_prefix():
     assert flatten({"city": "Paris"}, prefix="address") == {"address.city": "Paris"}
+
+
+# --- review of PR 417 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["a\ud800", "a.\udfff.b", "\ud83d"])
+def test_paths_that_are_not_valid_utf8_are_refused(path):
+    # M2: BSON keys are UTF-8; a lone surrogate cannot be written.
+    assert "invalid_utf8" in _codes(path_issues(path))
+    with pytest.raises(PathError) as exc:
+        split_path(path)
+    assert exc.value.code == "invalid_utf8"
+    # The message is printable whatever the path holds.
+    exc.value.issue.message.encode("utf-8")

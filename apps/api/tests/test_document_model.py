@@ -1049,3 +1049,166 @@ def test_order_by_outside_an_array_is_ignored_with_a_warning():
     assert _codes(issues) == ["option_ignored"]
     assert issues[0].severity == WARNING
     assert issues[0].path == "relationships[3].options.order_by"
+
+
+# --- review of PR 417: parse strictness (M1, M2, L4, L5) ---------------------
+
+
+@pytest.mark.parametrize("rule", [None, "missing"])
+def test_a_null_or_missing_rule_is_refused_like_any_required_key(rule):
+    # M1: a null rule used to parse as "" and validate clean, with a hash of
+    # its own, so an approval of a rule-less model passed Execute.
+    raw = _model()
+    if rule == "missing":
+        _rel(raw, "country").pop("rule")
+    else:
+        _rel(raw, "country")["rule"] = rule
+    with pytest.raises(DocumentModelError) as exc:
+        parse_model(raw)
+    assert (exc.value.code, exc.value.where) == ("missing_key", "relationships[3].rule")
+    with pytest.raises(DocumentModelError):
+        model_hash(raw)
+    assert [(i.code, i.path) for i in _validate(raw)] == [
+        ("missing_key", "relationships[3].rule")
+    ]
+
+
+_SURROGATE = "x\ud800"
+
+
+@pytest.mark.parametrize(
+    "mutate, where",
+    [
+        (lambda m: m.update(collection=_SURROGATE), "model.collection"),
+        (lambda m: m.update(label=_SURROGATE), "model.label"),
+        (lambda m: m["root"].update(source=_SURROGATE), "root.source"),
+        (lambda m: m["root"].update(key=[_SURROGATE]), "root.key[0]"),
+        (lambda m: m["root"]["fields"][0].update(source=_SURROGATE), "root.fields[0].source"),
+        (lambda m: m["root"]["fields"][0].update(path=_SURROGATE), "root.fields[0].path"),
+        (lambda m: m["root"]["fields"][0].update(label=_SURROGATE), "root.fields[0].label"),
+        (lambda m: m["relationships"][1].update(id=_SURROGATE), "relationships[1].id"),
+        (lambda m: m["relationships"][1].update(parent=_SURROGATE), "relationships[1].parent"),
+        (lambda m: m["relationships"][1].update(source=_SURROGATE), "relationships[1].source"),
+        (lambda m: m["relationships"][1].update(path=_SURROGATE), "relationships[1].path"),
+        (lambda m: m["relationships"][1].update(label=_SURROGATE), "relationships[1].label"),
+        (lambda m: m["relationships"][1].update(child_key=[_SURROGATE]), "relationships[1].child_key[0]"),
+        (
+            lambda m: m["relationships"][1]["join"][0].update(child=_SURROGATE),
+            "relationships[1].join[0].child",
+        ),
+        (
+            lambda m: m["relationships"][1]["fields"][0].update(path=_SURROGATE),
+            "relationships[1].fields[0].path",
+        ),
+        (
+            lambda m: m["relationships"][1]["options"].update(order_by=[[_SURROGATE, "asc"]]),
+            "relationships[1].options.order_by[0]",
+        ),
+    ],
+)
+def test_text_that_is_not_valid_utf8_is_refused_where_it_is(mutate, where):
+    # M2: a lone surrogate cannot be written as BSON (or hashed); it used to
+    # crash model_hash, validate_model and the approval check.
+    raw = _model()
+    mutate(raw)
+    with pytest.raises(DocumentModelError) as exc:
+        parse_model(raw)
+    assert (exc.value.code, exc.value.where) == ("bad_value", where)
+    assert "UTF-8" in str(exc.value)
+    with pytest.raises(DocumentModelError):
+        model_hash(raw)
+    assert [(i.code, i.path) for i in _validate(raw)] == [("bad_value", where)]
+
+
+def test_a_parsed_model_built_by_hand_is_held_to_the_same_rules():
+    # validate_model and model_hash accept a DocumentModel; one built in code
+    # must not slip past the parser's rules.
+    model = parse_model(_model())
+    bad = DocumentModel(collection=_SURROGATE, root=model.root)
+    with pytest.raises(DocumentModelError) as exc:
+        model_hash(bad)
+    assert exc.value.code == "bad_value"
+    assert _codes(_validate(bad)) == ["bad_value"]
+
+
+@pytest.mark.parametrize(
+    "mutate, where",
+    [
+        (lambda m: m["root"].update(key=["customer_id", "customer_id"]), "root.key[1]"),
+        (
+            lambda m: _rel(m, "items").update(child_key=["order_id", "line_no", "order_id"]),
+            "relationships[2].child_key[2]",
+        ),
+    ],
+)
+def test_a_key_cannot_name_a_column_twice(mutate, where):
+    # L4
+    raw = _model()
+    mutate(raw)
+    with pytest.raises(DocumentModelError) as exc:
+        parse_model(raw)
+    assert (exc.value.code, exc.value.where) == ("duplicate_key_column", where)
+    assert _codes(_validate(raw)) == ["duplicate_key_column"]
+
+
+@pytest.mark.parametrize(
+    "table, where",
+    [
+        (None, ""),
+        ("customers", ""),
+        ({"columns": "customer_id"}, "columns"),
+        ({"columns": {"customer_id": 5}}, "columns"),
+        ({"columns": [1, 2]}, "columns"),
+        ({"columns": {"customer_id": "integer"}, "primary_key": "customer_id"}, "primary_key"),
+        ({"columns": {"customer_id": "integer"}, "primary_key": [1]}, "primary_key"),
+        ({"columns": {"customer_id": "integer"}, "unique_keys": ["customer_id"]}, "unique_keys"),
+        ({"columns": {"customer_id": "integer"}, "unique_keys": [[]]}, "unique_keys"),
+        ({"columns": {"customer_id": "integer"}, "unique_keys": "customer_id"}, "unique_keys"),
+        ({"columns": {"customer_id": "integer"}, "sampled_unique": ["customer_id"]}, "sampled_unique"),
+    ],
+)
+def test_source_table_shapes_are_read_strictly(table, where):
+    # L5: None crashed, a string primary key was split into characters and a
+    # flat unique_keys list became one key per character.
+    with pytest.raises(DocumentModelError) as exc:
+        SourceTable.from_dict(table)
+    assert exc.value.code == "bad_source_schema"
+    assert exc.value.where == where
+    schemas = _schemas()
+    schemas["public.customers"] = table
+    issues = _validate(schemas=schemas)
+    bad = [i for i in issues if i.code == "bad_source_schema"]
+    assert len(bad) == 1 and bad[0].severity == ERROR
+    assert bad[0].path.startswith("source_schemas['public.customers']")
+    # The table is not reported as missing too: one finding, one cause.
+    assert "root_source_unknown" not in _codes(issues)
+
+
+def test_a_flat_unique_key_list_is_never_a_proof():
+    # unique_keys=["ab"] used to read as the key ("a", "b") and prove it.
+    model = {"collection": "x", "root": {"source": "t", "key": ["a", "b"]}}
+    table = {"columns": {"a": "int", "b": "int", "ab": "int"}, "unique_keys": ["ab"]}
+    issues = validate_model(model, {"t": table})
+    assert has_errors(issues)
+    assert _codes(issues) == ["bad_source_schema"]
+
+
+def test_well_formed_source_tables_still_read():
+    table = SourceTable.from_dict(
+        {
+            "columns": {"a": "int", "b": None},
+            "primary_key": ("a",),
+            "unique_keys": [("a", "b")],
+            "sampled_unique": [],
+        }
+    )
+    assert table.columns == {"a": "int", "b": ""}
+    assert table.primary_key == ("a",)
+    assert table.unique_keys == (("a", "b"),)
+    assert SourceTable.from_dict({"columns": ["a", "b"]}).columns == {"a": "", "b": ""}
+    assert SourceTable.from_dict({}).columns == {}
+
+
+def test_source_schemas_that_are_not_a_mapping_are_one_issue():
+    issues = validate_model(_model(), [("public.customers", {})], _fks())
+    assert [(i.code, i.path) for i in issues] == [("bad_source_schema", "source_schemas")]

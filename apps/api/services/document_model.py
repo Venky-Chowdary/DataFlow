@@ -274,6 +274,25 @@ def _get(raw: Mapping[str, Any], key: str, where: str, *, required: bool = False
     return value
 
 
+def _utf8(value: str, where: str) -> str:
+    """``value`` when it is valid UTF-8 text, else ``bad_value`` at ``where``.
+
+    A lone surrogate (``"\\ud800"``) is a Python string but not UTF-8: it
+    cannot be stored as BSON, hashed, or shown in a JSON response, so it is
+    refused here rather than crashing whatever touches the model next.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise DocumentModelError(
+            "bad_value",
+            where,
+            f"{where} is not valid UTF-8 text (it holds a lone surrogate); "
+            "MongoDB stores text as UTF-8.",
+        ) from None
+    return value
+
+
 def _text(value: Any, where: str, *, default: str | None = None) -> str:
     if value is _MISSING or value is None:
         if default is not None:
@@ -281,11 +300,18 @@ def _text(value: Any, where: str, *, default: str | None = None) -> str:
         raise DocumentModelError("missing_key", where, f"{where} is required.")
     if not isinstance(value, str) or (default is None and not value.strip()):
         raise DocumentModelError("wrong_type", where, f"{where} must be non-empty text.")
+    _utf8(value, where)
     return value.strip() if default is None else value
 
 
-def _choice(value: Any, choices: Sequence[str], where: str, default: str) -> str:
+def _choice(
+    value: Any, choices: Sequence[str], where: str, default: str | None = None
+) -> str:
+    """One of ``choices``; missing or null gives ``default``, or is refused
+    as ``missing_key`` when the setting has no default."""
     if value is _MISSING or value is None:
+        if default is None:
+            raise DocumentModelError("missing_key", where, f"{where} is required.")
         return default
     if not isinstance(value, str) or value not in choices:
         raise DocumentModelError(
@@ -323,7 +349,18 @@ def _list(value: Any, where: str) -> list[Any]:
 
 
 def _columns(value: Any, where: str) -> tuple[str, ...]:
-    return tuple(_text(v, f"{where}[{i}]") for i, v in enumerate(_list(value, where)))
+    """A key's columns: text, each named once."""
+    out: list[str] = []
+    for i, v in enumerate(_list(value, where)):
+        col = _text(v, f"{where}[{i}]")
+        if col in out:
+            raise DocumentModelError(
+                "duplicate_key_column",
+                f"{where}[{i}]",
+                f"{where} names column {col!r} twice; list each column once.",
+            )
+        out.append(col)
+    return tuple(out)
 
 
 def _label(raw: Mapping[str, Any], where: str) -> str:
@@ -347,6 +384,8 @@ def _parse_fields(value: Any, where: str) -> tuple[FieldSpec, ...]:
             path = source
         elif not isinstance(path, str):
             raise DocumentModelError("wrong_type", f"{at}.path", f"{at}.path must be text.")
+        else:
+            _utf8(path, f"{at}.path")
         out.append(FieldSpec(source=source, path=path, label=_label(raw, at)))
     return tuple(out)
 
@@ -464,12 +503,15 @@ def _parse_relationship(value: Any, where: str) -> Relationship:
         path = ""
     elif not isinstance(path, str):
         raise DocumentModelError("wrong_type", f"{where}.path", f"{where}.path must be text.")
+    else:
+        _utf8(path, f"{where}.path")
+    # Required: a null rule is refused like a missing one (no default rule).
     rule = _get(raw, "rule", where, required=True)
     return Relationship(
         id=_text(_get(raw, "id", where, required=True), f"{where}.id"),
         parent=_text(_get(raw, "parent", where, required=True), f"{where}.parent"),
         source=_text(_get(raw, "source", where, required=True), f"{where}.source"),
-        rule=_choice(rule, RULES, f"{where}.rule", ""),
+        rule=_choice(rule, RULES, f"{where}.rule"),
         join=_parse_join(raw.get("join", _MISSING), f"{where}.join"),
         join_origin=_choice(
             raw.get("join_origin", _MISSING), JOIN_ORIGINS, f"{where}.join_origin", "declared"
@@ -512,9 +554,12 @@ def parse_model(raw: Any) -> DocumentModel:
     must not silently fall back to the default), every missing required
     setting is named, and every default is filled in. Rules that need the
     source tables (columns, keys, paths, the tree) are :func:`validate_model`'s.
+
+    A :class:`DocumentModel` built in code is read again from its
+    ``to_dict()``, so it is held to the same rules as a payload.
     """
     if isinstance(raw, DocumentModel):
-        return raw
+        raw = raw.to_dict()
     if not isinstance(raw, Mapping):
         raise DocumentModelError(
             "model_not_object", "model", "A document model must be an object."
@@ -590,23 +635,74 @@ class SourceTable:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any] | SourceTable) -> SourceTable:
+        """Read a table description strictly.
+
+        ``columns`` is ``{name: type}`` (a type may be ``None`` or ``""``
+        when unknown) or a list of names; ``primary_key`` is a list of
+        column names; ``unique_keys`` and ``sampled_unique`` are lists of
+        such lists. Anything else raises :class:`DocumentModelError` with
+        code ``bad_source_schema``: a loosely read shape (a string read as
+        its characters) could prove a key that the catalog never declared.
+        """
         if isinstance(raw, SourceTable):
             return raw
-        cols = raw.get("columns") or {}
-        if isinstance(cols, Mapping):
-            columns = {str(k): str(v or "") for k, v in cols.items()}
-        else:
-            columns = {str(c): "" for c in cols}
-
-        def _keys(value: Any) -> tuple[tuple[str, ...], ...]:
-            return tuple(tuple(str(c) for c in k) for k in (value or ()) if k)
-
+        if not isinstance(raw, Mapping):
+            raise _schema_error(
+                "",
+                "a source table must be an object with its columns and keys, "
+                f"not {type(raw).__name__}.",
+            )
         return cls(
-            columns=columns,
-            primary_key=tuple(str(c) for c in (raw.get("primary_key") or ())),
-            unique_keys=_keys(raw.get("unique_keys")),
-            sampled_unique=_keys(raw.get("sampled_unique")),
+            columns=_schema_columns(raw.get("columns")),
+            primary_key=_schema_key(raw.get("primary_key"), "primary_key", allow_empty=True),
+            unique_keys=_schema_keys(raw.get("unique_keys"), "unique_keys"),
+            sampled_unique=_schema_keys(raw.get("sampled_unique"), "sampled_unique"),
         )
+
+
+def _schema_error(where: str, message: str) -> DocumentModelError:
+    return DocumentModelError("bad_source_schema", where, message[0].upper() + message[1:])
+
+
+def _schema_columns(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        if all(isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in value.items()):
+            return {k: v or "" for k, v in value.items()}
+    elif isinstance(value, list | tuple) and all(isinstance(c, str) for c in value):
+        return {c: "" for c in value}
+    raise _schema_error(
+        "columns",
+        "columns must map each column name to its type (text), or list the names.",
+    )
+
+
+def _schema_key(value: Any, where: str, *, allow_empty: bool) -> tuple[str, ...]:
+    if value is None and allow_empty:
+        return ()
+    if (
+        isinstance(value, list | tuple)
+        and (value or allow_empty)
+        and all(isinstance(c, str) and c for c in value)
+    ):
+        return tuple(value)
+    raise _schema_error(
+        where,
+        f"{where} must be a list of column names, such as [\"customer_id\"].",
+    )
+
+
+def _schema_keys(value: Any, where: str) -> tuple[tuple[str, ...], ...]:
+    if value is None:
+        return ()
+    if isinstance(value, list | tuple) and all(isinstance(k, list | tuple) for k in value):
+        return tuple(_schema_key(k, where, allow_empty=False) for k in value)
+    raise _schema_error(
+        where,
+        f"{where} must be a list of keys, each a list of column names, such as "
+        '[["email"], ["region", "code"]].',
+    )
 
 
 def validate_model(

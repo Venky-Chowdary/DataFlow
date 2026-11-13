@@ -395,3 +395,68 @@ def test_request_level_refusal_reads_the_request():
         _request(document_model=model, approved_document_model_hash=model_hash(model))
     ) == ""
     assert request_document_model_refusal(_request(document_model=model))
+
+
+# --- review of PR 417: parse strictness ------------------------------------------
+
+
+def test_a_model_with_a_null_rule_is_never_approved():
+    # M1: a null rule parsed as "" and hashed, so its own approval passed.
+    from services.execute_document_route import approved_model_refusal
+
+    model = _model()
+    model["relationships"][0]["rule"] = None
+    reason = approved_model_refusal(model, "abcd1234abcd1234")
+    assert reason.startswith("the document model cannot be read")
+    assert "rule" in reason
+
+
+class _Hostile(dict):
+    """A mapping that fails when read, standing in for any unexpected input."""
+
+    def get(self, *_a, **_k):
+        raise RuntimeError("boom")
+
+    def items(self):
+        raise RuntimeError("boom")
+
+    def __iter__(self):
+        raise RuntimeError("boom")
+
+
+class _BadStr:
+    def __str__(self):
+        raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize(
+    "model, approved",
+    [
+        (_model(collection="c\ud800"), "abcd1234abcd1234"),
+        (_model(collection="c\ud800"), ""),
+        ({"collection": "c", "root": {"source": "t", "key": ["k\ud800"]}}, "x"),
+        (_Hostile(collection="c"), "abcd1234abcd1234"),
+        (_model(), _BadStr()),
+        (_model(), "abc\ud800"),
+        (object(), "abcd1234abcd1234"),
+    ],
+)
+def test_the_approval_check_never_raises(model, approved):
+    # M2: a lone surrogate crashed model_hash, and so the approval check, with
+    # UnicodeEncodeError. Execute must get a refusal, never an exception.
+    from services.execute_document_route import approved_model_refusal
+
+    reason = approved_model_refusal(model, approved)
+    assert reason
+    reason.encode("utf-8")
+    assert "DataFlow" not in reason
+
+
+def test_a_model_that_is_not_utf8_is_refused_before_a_revision_is_written(plan_store):
+    # M2: sync_ui_mappings raised UnicodeEncodeError from model_hash.
+    plan = _plan(plan_store)
+    bad = _model(collection="c\ud800")
+    with pytest.raises(DocumentModelError) as exc:
+        plan_store.sync_ui_mappings(plan.id, _MAPPINGS, document_model=bad)
+    assert exc.value.code == "bad_value"
+    assert plan_store.get_plan(plan.id).revisions == []

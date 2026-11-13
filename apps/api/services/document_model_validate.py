@@ -47,6 +47,7 @@ from services.document_model import (
     ROOT_ID,
     WARNING,
     DocumentModel,
+    DocumentModelError,
     FieldSpec,
     Issue,
     Relationship,
@@ -179,6 +180,9 @@ class _Checker:
     nodes: dict[str, _Node | None] = field(default_factory=dict)
     containers: dict[str, list[_Entry]] = field(default_factory=dict)
     container_names: dict[str, str] = field(default_factory=dict)
+    #: Tables whose description could not be read (``bad_source_schema``):
+    #: already reported, so they are not reported as missing too.
+    unreadable: tuple[str, ...] = ()
 
     # -- helpers ---------------------------------------------------------------
 
@@ -192,6 +196,9 @@ class _Checker:
             if _same_table(known, name):
                 return table
         return None
+
+    def is_unreadable(self, name: str) -> bool:
+        return any(_same_table(bad, name) for bad in self.unreadable)
 
     def columns_exist(self, source: str, cols: Iterable[str], where: str) -> bool:
         """Report every missing column; True when all exist (or the table is unknown)."""
@@ -315,7 +322,7 @@ class _Checker:
     def check_root(self) -> None:
         root = self.model.root
         table = self.table(root.source)
-        if table is None:
+        if table is None and not self.is_unreadable(root.source):
             self.add(
                 "root_source_unknown",
                 ERROR,
@@ -434,7 +441,7 @@ class _Checker:
                 "a table cannot be nested inside itself.",
             )
         child_table = self.table(rel.source)
-        if child_table is None:
+        if child_table is None and not self.is_unreadable(rel.source):
             self.add(
                 "source_unknown",
                 ERROR,
@@ -810,10 +817,41 @@ def run_checks(
     *,
     cdc: bool = False,
 ) -> list:
-    tables = {
-        str(name): SourceTable.from_dict(raw) for name, raw in (source_schemas or {}).items()
-    }
-    checker = _Checker(model=model, tables=tables, fks=normalize_foreign_keys(fks), cdc=cdc)
+    if source_schemas and not isinstance(source_schemas, Mapping):
+        return [
+            Issue(
+                code="bad_source_schema",
+                severity=ERROR,
+                path="source_schemas",
+                message="The source tables must be given as an object mapping each "
+                "table name to its columns and keys.",
+            )
+        ]
+    tables: dict[str, SourceTable] = {}
+    unreadable: list[str] = []
+    schema_issues: list[Issue] = []
+    for name, raw in (source_schemas or {}).items():
+        try:
+            tables[str(name)] = SourceTable.from_dict(raw)
+        except DocumentModelError as exc:
+            unreadable.append(str(name))
+            where = f"source_schemas[{str(name)!r}]" + (f".{exc.where}" if exc.where else "")
+            schema_issues.append(
+                Issue(
+                    code="bad_source_schema",
+                    severity=ERROR,
+                    path=where,
+                    message=f"The description of {name} cannot be used: {exc}",
+                )
+            )
+    checker = _Checker(
+        model=model,
+        tables=tables,
+        fks=normalize_foreign_keys(fks),
+        cdc=cdc,
+        issues=schema_issues,
+        unreadable=tuple(unreadable),
+    )
     checker.check_collection_and_limits()
     checker.check_root()
     seen: set[str] = set()
