@@ -1515,6 +1515,12 @@ def run_file_preflight(
         if _plan_duplicate_policy(source_config, destination_config) == "dedupe_skip"
         else None
     )
+    from services.duplicate_policy import keyed_append_cursor_gate
+
+    keyed_append_gate = keyed_append_cursor_gate(
+        dest_kind, sync_mode=sync_mode, cursor_column=read_scope.cursor_column or "",
+        duplicate_policy=_plan_duplicate_policy(source_config, destination_config),
+    )
     try:
         from services.sync_cursor import (
             normalize_sync_mode as _nsm,
@@ -2202,6 +2208,7 @@ def run_file_preflight(
         + ([null_cursor_gate] if null_cursor_gate else [])
         + ([upsert_ddl_gate] if upsert_ddl_gate else [])
         + ([dup_dest_gate] if dup_dest_gate else [])
+        + ([keyed_append_gate] if keyed_append_gate else [])
         + ([create_ddl_gate] if create_ddl_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])

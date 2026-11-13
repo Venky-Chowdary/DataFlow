@@ -21,6 +21,7 @@ from connectors.redis_doc_write import (
     WRITTEN,
     RedisDocPlan,
     apply_redis_docs,
+    legacy_layout_refusal,
     identity_parts,
 )
 from connectors.redis_reader import _redis_client, load_redis_json_doc, redis_key_for
@@ -869,6 +870,10 @@ def write_mapped_rows(
             doc_mode = "skip"  # skip_duplicates: SET NX, a stored key stays as stored
         for start in range(0, len(plans), _REDIS_WRITE_BATCH):
             part = plans[start : start + _REDIS_WRITE_BATCH]
+            if key_format == "raw" and doc_mode != "overwrite":
+                legacy_refusal = legacy_layout_refusal(client, prefix, part)
+                if legacy_refusal:
+                    return _fail(legacy_refusal)
             outcomes = apply_redis_docs(client, part, mode=doc_mode, id_cols=id_cols)
             for offset, (plan, (outcome, reason)) in enumerate(zip(part, outcomes)):
                 row, id_col = plan_rows[start + offset]

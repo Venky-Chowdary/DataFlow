@@ -694,3 +694,47 @@ def schedule_dedupe_skip_refusal(payload: Any) -> str:
             return ""
         dest_type = str(getattr(found, "type", "") or "") if found else ""
     return dedupe_skip_refusal(dest_type)
+
+
+#: Destinations whose append now refuses a stored key (``SET NX`` /
+#: conditional ``PutItem``) instead of overwriting it.
+_KEYED_APPEND_REFUSES = frozenset({"redis", "dynamodb"})
+
+
+def keyed_append_cursor_gate(
+    dest_type: str, *, sync_mode: str, duplicate_policy: str, cursor_column: str
+) -> dict[str, Any] | None:
+    """Validate warning: an append with an incremental cursor into Redis / DynamoDB.
+
+    The cursor re-reads changed rows; their keys are already stored, and append
+    there now rejects a stored key rather than overwriting it.
+    """
+    if not str(cursor_column or "").strip():
+        return None
+    from services.sync_cursor import is_overwrite_sync, requires_upsert
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    raw = str(dest_type or "").strip().lower()
+    if raw not in _KEYED_APPEND_REFUSES and resolve_driver_type(raw) not in _KEYED_APPEND_REFUSES:
+        return None
+    if normalize_duplicate_policy(duplicate_policy) in {"upsert", "dedupe_skip"}:
+        return None
+    if requires_upsert(sync_mode) or is_overwrite_sync(sync_mode):
+        return None
+    return {
+        "id": "g_keyed_append_changed_rows",
+        "status": "warn",
+        "message": (
+            f"Append into {raw} with the incremental cursor '{cursor_column}': a changed "
+            "row the cursor re-reads has a key that is already stored, and append never "
+            "overwrites a stored key, so it is rejected. Choose upsert to update changed rows."
+        ),
+        "duration_ms": 0,
+        "details": {
+            "rule_id": "g_keyed_append_changed_rows.append_rejects_stored_key",
+            "destination_type": raw,
+            "cursor_column": str(cursor_column),
+            "sync_mode": str(sync_mode or ""),
+        },
+        "suggested_actions": ["Set Duplicate rows to Update keys already stored (upsert)"],
+    }

@@ -272,3 +272,31 @@ def test_new_redis_connector_defaults_to_raw_existing_stays_legacy(tmp_path, mon
     resaved = store.create_connector({**base, "name": "ws_redis_old"})
     assert resaved.id == old.id
     assert "key_format" not in resaved.extra
+
+
+@pytest.mark.parametrize("mode", ["upsert", "insert"])
+def test_raw_write_onto_a_legacy_layout_prefix_is_refused(prefix, mode):
+    """Review M3: a new (raw) connector replacing a legacy one on the same prefix.
+
+    Raw writes ``prefix:7`` while the legacy document is ``prefix:col_7``: two
+    documents for one id, and precount / Gate-8 (raw) never see the legacy one.
+    """
+    c = _client()
+    legacy = _key(prefix, "7")
+    assert legacy != _key(prefix, "7", key_format="raw")
+    c.set(legacy, json.dumps({"id": "7", "name": "old"}))
+    r = _write(prefix, [["7", "new"], ["8", "eight"]], write_mode=mode, key_format="raw")
+    assert not r.ok
+    assert "legacy" in (r.error or "") and "key_format" in (r.error or "")
+    assert r.rows_written == 0
+    assert c.get(_key(prefix, "7", key_format="raw")) is None
+    assert c.get(_key(prefix, "8", key_format="raw")) is None
+    assert json.loads(c.get(legacy)) == {"id": "7", "name": "old"}
+
+
+def test_raw_write_onto_a_raw_prefix_is_not_refused(prefix):
+    c = _client()
+    c.set(_key(prefix, "7", key_format="raw"), json.dumps({"id": "7", "name": "old"}))
+    r = _write(prefix, [["7", "new"]], write_mode="upsert", key_format="raw")
+    assert r.ok, r.error
+    assert json.loads(c.get(_key(prefix, "7", key_format="raw")))["name"] == "new"
