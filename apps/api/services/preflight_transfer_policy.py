@@ -505,13 +505,26 @@ def run_transfer_policy_gates(
             mappings,
             existing_columns=list(destination_columns or []),
             destination_config=destination_config,
-            destination_table=destination_table or _endpoint_table(destination_endpoint),
+            destination_table=_legacy_probe_object(
+                destination_table, destination_endpoint, source_endpoint),
             sync_mode=sync,
             legacy_field_policy=policy,
         )
     )
 
     return gates
+
+
+def _legacy_probe_object(destination_table: str, destination: Any, source: Any) -> str:
+    """The object the writer will write: Validate probes what Execute probes."""
+    if destination_table:
+        return destination_table
+    try:
+        from services.target_name_legacy import writer_object_name
+
+        return writer_object_name(destination, source)
+    except Exception:  # noqa: BLE001 - an unnamed endpoint keeps the plain lookup
+        return _endpoint_table(destination)
 
 
 def _endpoint_table(endpoint: Any) -> str:

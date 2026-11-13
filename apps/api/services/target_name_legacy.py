@@ -773,6 +773,38 @@ def legacy_field_verdict(
     return legacy_field_issues(dest_type, found, blocking=blocking), blocking
 
 
+def writer_object_name(destination: Any, source: Any = None) -> str:
+    """The collection / index / key prefix / table the writer writes.
+
+    ``resolve_dest_table`` with the stream's own fallback (the source object,
+    ``import`` for a file): a destination that names its object only through
+    ``database`` (an Elasticsearch index) or not at all (``dt_<source>``) is
+    probed where the writer will write, never skipped.
+    """
+    if destination is None:
+        return ""
+    from types import SimpleNamespace
+
+    def _endpoint(ep: Any) -> Any:
+        if not isinstance(ep, Mapping):
+            return ep
+        return SimpleNamespace(**{k: str(ep.get(k) or "") for k in (
+            "kind", "format", "table", "collection", "database", "schema")})
+
+    from src.transfer.adapters import resolve_dest_table
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    dest, src = _endpoint(destination), _endpoint(source)
+    fallback = "import"
+    if src is not None and str(getattr(src, "kind", "") or "") != "file":
+        from src.transfer.stream import _source_name
+
+        fallback = _source_name(src) if getattr(src, "format", "") else str(
+            getattr(src, "table", "") or getattr(src, "collection", "") or "")
+    return str(resolve_dest_table(
+        resolve_driver_type(str(getattr(dest, "format", "") or "")), dest, fallback) or "")
+
+
 def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
     """``(refusal, acknowledgement)`` for one request; nothing is mutated.
 
@@ -797,7 +829,7 @@ def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
         from src.transfer.adapters import resolve_connector_config
 
         cfg = resolve_connector_config(dest)
-        table = str(getattr(dest, "table", "") or getattr(dest, "collection", "") or "")
+        table = writer_object_name(dest, getattr(request, "source", None))
         issues, blocking = legacy_field_verdict(
             kind, mappings, cfg, table, sync_mode=sync_mode, policy=policy, run_scope=dest,
         )
@@ -973,6 +1005,7 @@ __all__ = [
     "adopt_existing_columns",
     "adopt_for_request",
     "adopt_rows_for_run",
+    "writer_object_name",
     "recreated_by_overwrite",
     "adopted_collision_issues",
     "existing_column_for",
