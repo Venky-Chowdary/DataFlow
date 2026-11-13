@@ -627,8 +627,13 @@ def _put_if_absent(client: Any, table: str, key_attrs: dict[str, Any], item: dic
 
 def _apply_item_writes(
     client: Any, table: str, ops: list[tuple[dict, dict]], *, new_keys_only: bool
-) -> list[bool]:
-    """Per-item writes BatchWriteItem cannot express; ``True`` where applied.
+) -> tuple[list[bool | None], list[BaseException]]:
+    """Per-item writes BatchWriteItem cannot express; an outcome per position.
+
+    ``True`` applied, ``False`` key already stored (conditional put), ``None``
+    not applied because a write for that key raised. Every error is returned,
+    not raised: a throttled key must not hide the items the other workers
+    already stored, so the caller counts what was applied and then fails.
 
     BatchWriteItem carries only whole-item PutRequest / DeleteRequest — no
     UpdateItem and no ConditionExpression. TransactWriteItems is all-or-nothing
@@ -643,24 +648,29 @@ def _apply_item_writes(
     for pos, (key_attrs, _item) in enumerate(ops):
         ident = json.dumps(key_attrs, sort_keys=True, default=str)
         groups.setdefault(ident, []).append(pos)
-    applied = [False] * len(ops)
+    applied: list[bool | None] = [None] * len(ops)
+    errors: list[BaseException] = []
 
     def _run(positions: list[int]) -> None:
         for pos in positions:
             key_attrs, item = ops[pos]
-            if new_keys_only:
-                applied[pos] = _put_if_absent(client, table, key_attrs, item)
-                continue
-            set_attrs = {k: v for k, v in item.items() if k not in key_attrs}
-            _sparse_update_item(client, table, key_attrs=key_attrs, set_attrs=set_attrs)
-            applied[pos] = True
+            try:
+                if new_keys_only:
+                    applied[pos] = _put_if_absent(client, table, key_attrs, item)
+                    continue
+                set_attrs = {k: v for k, v in item.items() if k not in key_attrs}
+                _sparse_update_item(client, table, key_attrs=key_attrs, set_attrs=set_attrs)
+                applied[pos] = True
+            except Exception as exc:  # noqa: BLE001 — returned to the caller, which fails the write
+                errors.append(exc)
+                return  # later images of this key stay unapplied (order per key)
 
     if not ops:
-        return applied
+        return applied, errors
     with ThreadPoolExecutor(max_workers=min(_ITEM_WRITE_WORKERS, len(groups))) as pool:
         for fut in [pool.submit(_run, positions) for positions in groups.values()]:
             fut.result()
-    return applied
+    return applied, errors
 
 
 def dynamodb_client_cfg(dest: dict[str, Any]) -> dict[str, Any]:
@@ -1354,7 +1364,7 @@ def write_mapped_rows(
                     applied_rows.append(row)
             if request_items:
                 _batch_write_with_retry(client, table, request_items)
-            outcomes = _apply_item_writes(
+            outcomes, item_errors = _apply_item_writes(
                 client, table, item_ops, new_keys_only=item_mode == "new_only"
             )
             for (row_number, row), applied in zip(item_rows, outcomes):
@@ -1362,6 +1372,8 @@ def write_mapped_rows(
                     chunk_written += 1
                     applied_rows.append(row)
                     continue
+                if applied is None:
+                    continue  # its write raised: reported by the error below
                 if skip_stored:
                     marker_cols = [
                         c for c in (conflict_columns or list(key_types)) if c in target_cols
@@ -1386,6 +1398,9 @@ def write_mapped_rows(
                     }
                 )
             written += chunk_written
+            if item_errors:
+                # Count what the other workers stored, then fail the write.
+                raise item_errors[0]
             if policy == "fail" and not skip_stored and not all(outcomes):
                 break
             if on_checkpoint:

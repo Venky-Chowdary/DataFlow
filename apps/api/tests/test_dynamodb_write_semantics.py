@@ -159,3 +159,48 @@ def test_adapter_passes_write_mode_to_dynamodb_writer(monkeypatch):
     )
     assert seen.get("write_mode") == "upsert"
     assert seen.get("conflict_columns") == ["id"]
+
+
+@pytest.mark.parametrize("mode", ["upsert", "insert"])
+def test_a_failed_item_write_still_counts_the_rows_applied(ddb, monkeypatch, mode):
+    """Review M2: one throttled key must not hide the nine items already stored.
+
+    ``fut.result()`` re-raised the worker's error and the writer returned
+    ``rows_written`` without the current chunk (0 of 9 stored rows counted).
+    """
+    from botocore.exceptions import ClientError
+
+    import connectors.dynamodb_writer as dw
+
+    def throttle(*_a, **_k):
+        raise ClientError(
+            {"Error": {"Code": "ProvisionedThroughputExceededException", "Message": "x"}},
+            "UpdateItem" if mode == "upsert" else "PutItem",
+        )
+
+    if mode == "upsert":
+        orig = dw._sparse_update_item
+
+        def flaky(client, table, *, key_attrs, set_attrs):
+            if key_attrs["id"].get("S") == "13":
+                throttle()
+            return orig(client, table, key_attrs=key_attrs, set_attrs=set_attrs)
+
+        monkeypatch.setattr(dw, "_sparse_update_item", flaky)
+    else:
+        orig_put = dw._put_if_absent
+
+        def flaky_put(client, table, key_attrs, item):
+            if key_attrs["id"].get("S") == "13":
+                throttle()
+            return orig_put(client, table, key_attrs, item)
+
+        monkeypatch.setattr(dw, "_put_if_absent", flaky_put)
+
+    rows = [[str(i), f"n{i}"] for i in range(10, 20)]
+    r = _write(rows, write_mode=mode)
+    stored = [str(i) for i in range(10, 20) if str(i) in _items(ddb)]
+    assert len(stored) == 9
+    assert not r.ok
+    assert "ProvisionedThroughputExceeded" in (r.error or "")
+    assert r.rows_written == 9, r
