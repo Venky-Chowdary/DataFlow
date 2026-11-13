@@ -70,6 +70,7 @@ from .routers.exit_router import router as exit_router
 from .routers.resource_acl_router import router as resource_acl_router
 from .routers.cdc_mapping_review_router import router as cdc_mapping_review_router
 from .routers.transform_library_router import router as transform_library_router
+from .routers.mapping_studio_router import router as mapping_studio_router
 from .routers.transforms_router import router as transforms_router
 from .routers.copilot_router import router as copilot_router
 from .routers.mcp_router import oauth_resource_router, router as mcp_router
@@ -828,6 +829,8 @@ app.include_router(contact_router, prefix="/api/v1")
 app.include_router(preflight_router, prefix="/api/v1")
 app.include_router(copilot_router, prefix="/api/v1")
 app.include_router(training_agent_router, prefix="/api/v1")
+# Before transfer_router: its /transfer/{job_id}/… routes must not shadow /transfer/mapping/….
+app.include_router(mapping_studio_router, prefix="/api/v1")
 app.include_router(transfer_router, prefix="/api/v1")
 app.include_router(mcp_router, prefix="/api/v1")
 app.include_router(oauth_resource_router)
