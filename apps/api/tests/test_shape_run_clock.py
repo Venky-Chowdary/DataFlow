@@ -295,8 +295,7 @@ def test_the_parity_recheck_falls_back_to_the_runs_destination_summary(monkeypat
     monkeypatch.setattr(se.ShapeEngine, "__init__", spy)
     job = {"destination_summary": {"shape_run_clock": {"started_at": T0, "source": "run"}}}
     req = SimpleNamespace(shape_recipe=RUN_RECIPE, mappings=[])
-    try:
-        pe._expected_images(job, req, [{"id": 1}], ["id", "loaded_at"], {})
-    except Exception:  # noqa: BLE001 - only the engine's clock is under test
-        pass
+    # No swallowed error: the re-check must run to the end, one image per row.
+    images = pe._expected_images(job, req, [{"id": 1}], ["id", "loaded_at"], {})
+    assert len(images) == 1 and isinstance(images[0], dict), images
     assert seen.get("run_started_at") == T0
