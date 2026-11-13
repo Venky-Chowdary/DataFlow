@@ -124,6 +124,7 @@ def request_refusal(request: Any) -> str:
     from services.target_name_legacy import (
         AdoptionUnverified,
         adopt_for_request,
+        adopted_collision_refusal,
         legacy_field_policy_refusal,
         legacy_fields_refusal,
         selected_streams,
@@ -148,6 +149,7 @@ def request_refusal(request: Any) -> str:
             streams_refusal(request)
             if selected_streams(request)
             else target_names_refusal(str(dest.format or ""), getattr(request, "mappings", None))
+            or adopted_collision_refusal(str(dest.format or ""), getattr(request, "mappings", None))
             or legacy_fields_refusal(request)
         )
         or source_filter_refusal(

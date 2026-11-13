@@ -113,6 +113,41 @@ def operator_rows(mappings: Iterable[Any] | None) -> list[dict[str, Any]]:
     return rows
 
 
+def adopted_collision_issues(dest_type: str | None, rows: Iterable[Any]) -> list[dict[str, str]]:
+    """Map rows that would all write one existing column after adoption.
+
+    Judged over every final row - adopted and literal - so an adopted
+    ``Name`` and a literal ``name`` on BigQuery, or an adopted 65-character
+    MySQL target and a literal row on its 63-character column, are refused
+    (re-review L1). Validate and Execute call this same function.
+    """
+    from services.mapping_constraints import write_mappings
+
+    kind = dest_kind(dest_type)
+    fold = kind in _CASE_INSENSITIVE
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in write_mappings([dict(_as_dict(r)) for r in rows or []]):
+        target = str(row.get("target") or "").strip()
+        if target:
+            groups.setdefault(target.casefold() if fold else target, []).append(row)
+    issues: list[dict[str, str]] = []
+    for members in groups.values():
+        if len(members) < 2 or not any(m.get(MAP_TARGET) for m in members):
+            continue
+        names = [str(m.get(MAP_TARGET) or m.get("target")) for m in members]
+        column = str(members[0].get("target"))
+        issues.append({
+            "code": "target_name_collision",
+            "target": names[-1],
+            "other": names[0],
+            "message": (
+                "Map targets " + ", ".join(repr(n) for n in names)
+                + f" would all write the existing column {column!r}. Rename one in Map."
+            ),
+        })
+    return issues
+
+
 def adopt_existing_columns(
     dest_type: str | None, mappings: Iterable[Any] | None, existing: Iterable[str] | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -224,6 +259,12 @@ def _memo_probe(dest: Any) -> dict[str, Any]:
     return info
 
 
+def adopted_collision_refusal(dest_type: str | None, rows: Iterable[Any]) -> str:
+    """Execute's form of :func:`adopted_collision_issues` (``""`` when none)."""
+    issues = adopted_collision_issues(dest_type, rows)
+    return " ".join(i["message"] for i in issues[:3])
+
+
 def adopt_for_request(request: Any) -> list[dict[str, str]]:
     """Execute: retarget ``request.mappings`` onto an existing table's legacy columns.
 
@@ -310,7 +351,8 @@ def prepare_stream_targets(
         adopt_for_request(req)
     except AdoptionUnverified as exc:
         raise ValueError(f"Stream {label!r}: {exc}") from exc
-    refusal = target_names_refusal(str(getattr(dest, "format", "") or ""), req.mappings)
+    refusal = target_names_refusal(str(getattr(dest, "format", "") or ""), req.mappings) or (
+        adopted_collision_refusal(getattr(dest, "format", ""), req.mappings))
     ack: list[str] = []
     if not refusal:
         refusal, ack = legacy_fields_check(req)
@@ -822,20 +864,7 @@ def target_name_gates(
 
     rows, notes = adopt_existing_columns(dest_type, mappings, existing_columns)
     issues = target_name_issues(dest_type, _mapped_targets(rows))
-    seen: dict[str, str] = {}
-    for note in notes:
-        column = note["column"].casefold()
-        if column in seen:
-            issues.append({
-                "code": "target_name_collision",
-                "target": note["target"],
-                "other": seen[column],
-                "message": (
-                    f"Map targets {seen[column]!r} and {note['target']!r} would both "
-                    f"write the existing column {note['column']!r}. Rename one in Map."
-                ),
-            })
-        seen.setdefault(column, note["target"])
+    issues.extend(adopted_collision_issues(dest_type, rows))
     gates: list[dict[str, Any]] = []
     kind = dest_kind(dest_type)
     if issues:
@@ -909,6 +938,7 @@ __all__ = [
     "streams_refusal",
     "adopt_existing_columns",
     "adopt_for_request",
+    "adopted_collision_issues",
     "existing_column_for",
     "es_mapping_fields",
     "existing_legacy_fields",
