@@ -620,10 +620,25 @@ jobs:
   # native CDC readiness probe had no TLS trust for the self-signed lab
   # certificate under Driver 18, and `pytest | tee` without pipefail could
   # not fail the step.
+  #
+  # Two legs, one per SQL Server DBAPI. Production (Dockerfile.api) ships
+  # unixODBC but no Microsoft ODBC driver, so the product dials SQL Server
+  # through pymssql (FreeTDS) there; the pymssql leg reproduces that (no
+  # Microsoft driver registered) and asserts the product picked pymssql. The
+  # pyodbc leg proves the ODBC Driver 18 path operators can opt into.
   cdc-sqlserver:
+    name: cdc-sqlserver (${{ matrix.driver }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [pyodbc, pymssql]
     env:
+      SQLSERVER_LEG: ${{ matrix.driver }}
+      # FreeTDS cannot honour Encrypt=yes and the product refuses it rather
+      # than pretend, so the pymssql leg's matrix template declares none.
+      DATAFLOW_TEST_MSSQL_ENCRYPT: ${{ matrix.driver == 'pyodbc' && 'yes' || '' }}
       DATAFLOW_JOB_STORE: memory
       DATAFLOW_DISABLE_OBJECT_STORE: "1"
       DATAFLOW_PII_HASH_KEY: test-pii-key
@@ -702,7 +717,25 @@ jobs:
           python -m pip install -r apps/api/requirements-dev.txt
 
       - name: Install Microsoft ODBC Driver 18 (fails when pyodbc cannot see it)
+        if: ${{ matrix.driver == 'pyodbc' }}
         run: bash .github/scripts/install_msodbcsql18.sh
+
+      - name: Assert the product dials SQL Server through ${{ matrix.driver }}
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          from connectors.generic_sql import _mssql_drivername
+
+          want = "mssql+" + os.environ["SQLSERVER_LEG"]
+          got = _mssql_drivername()
+          print(f"SQL Server DBAPI in use: {got} (leg wants {want})")
+          sys.exit(0 if got == want else 1)
+          PY
 
       - name: SQL Server CDC — Change Tracking, native CDC, CDC transfers
         id: sqlserver_cdc
@@ -710,14 +743,23 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/live-junit"
+          # D196 / D203 seed their source rows through pyodbc + ODBC Driver 18
+          # (test fixtures, not the product path), so they run in the pyodbc
+          # leg; the product's CT / native CDC paths run in both legs.
+          odbc_fixture_tests=()
+          if [ "$SQLSERVER_LEG" = pyodbc ]; then
+            odbc_fixture_tests=(
+              tests/test_d196_sqlserver_change_tracking_cdc_live.py
+              tests/test_d203_sqlserver_native_cdc_null_live.py
+            )
+          fi
           python -m pytest \
             tests/test_cdc_sqlserver_ct_integration.py \
             tests/test_cdc_sqlserver_native_integration.py \
             tests/test_cdc_sqlserver_native_transfer_e2e.py \
             tests/test_cdc_sqlserver_capture_removal.py \
             tests/test_cdc_sqlserver_capture_switch.py \
-            tests/test_d196_sqlserver_change_tracking_cdc_live.py \
-            tests/test_d203_sqlserver_native_cdc_null_live.py \
+            "${odbc_fixture_tests[@]}" \
             tests/test_r12_d249_cdc_eos_sqlserver_fractional_bind.py \
             tests/test_cdc_sqlserver_connection_options.py \
             tests/test_cdc_sqlserver_live_helpers.py \
@@ -761,13 +803,13 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: apps/api
         run: |
-          python scripts/check_live_skips.py --job cdc-sqlserver --junit "$RUNNER_TEMP/live-junit/sqlserver-cdc.xml" --junit "$RUNNER_TEMP/live-junit/sqlserver-cdc-eos.xml" --junit "$RUNNER_TEMP/live-junit/sqlserver-matrix.xml" --out "$RUNNER_TEMP/live-engine/cdc-sqlserver.json"
+          python scripts/check_live_skips.py --job cdc-sqlserver --label driver=${{ matrix.driver }} --junit "$RUNNER_TEMP/live-junit/sqlserver-cdc.xml" --junit "$RUNNER_TEMP/live-junit/sqlserver-cdc-eos.xml" --junit "$RUNNER_TEMP/live-junit/sqlserver-matrix.xml" --out "$RUNNER_TEMP/live-engine/cdc-sqlserver-${{ matrix.driver }}.json"
 
       - name: Upload SQL Server junit
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: sqlserver-live-junit
+          name: sqlserver-live-junit-${{ matrix.driver }}
           path: ${{ runner.temp }}/live-junit/
           if-no-files-found: warn
 
@@ -775,7 +817,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: live-engine-cdc-sqlserver
+          name: live-engine-cdc-sqlserver-${{ matrix.driver }}
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 

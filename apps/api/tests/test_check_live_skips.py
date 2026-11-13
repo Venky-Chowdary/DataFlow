@@ -202,3 +202,16 @@ def test_every_live_engine_job_is_wired_to_the_checker() -> None:
     for path in (REPO / ".github" / "workflows").glob("*.yml"):
         unknown = _checker_jobs(path) - set(manifest["jobs"])
         assert not unknown, f"{path.name} checks jobs missing from the manifest: {sorted(unknown)}"
+
+
+def test_labels_record_which_variant_of_a_job_ran(junit: Path, tmp_path: Path, monkeypatch) -> None:
+    """cdc-sqlserver runs once per SQL Server driver; the result names the driver."""
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(_manifest(mode="report")), encoding="utf-8")
+    out = tmp_path / "j.json"
+    main(["--job", "j", "--junit", str(junit), "--manifest", str(manifest), "--out", str(out),
+          "--label", "driver=pymssql"])
+    assert json.loads(out.read_text(encoding="utf-8"))["labels"] == {"driver": "pymssql"}
+    with pytest.raises(SystemExit):
+        main(["--job", "j", "--junit", str(junit), "--manifest", str(manifest), "--label", "pymssql"])

@@ -60,7 +60,13 @@ def test_sqlserver_is_live_only_when_its_job_runs_green(manifest) -> None:
     skipped_everything = engine_evidence(manifest, [_result("cdc-sqlserver", "red", executed=0)])
     assert skipped_everything["sqlserver"]["status"] == "ci_red"
     assert not skipped_everything["sqlserver"]["live_verified"]
-    green = engine_evidence(manifest, [_result("cdc-sqlserver", "green")])
+    green = engine_evidence(
+        manifest,
+        [
+            {**_result("cdc-sqlserver", "green"), "labels": {"driver": d}}
+            for d in ("pyodbc", "pymssql")
+        ],
+    )
     assert green["sqlserver"]["live_verified"]
 
 
@@ -169,3 +175,27 @@ def test_capability_matrix_report_claims_nothing_without_ci_evidence() -> None:
     doc = _ci_evidence(None)
     assert doc["live_verified"] == []
     assert not any(ev["live_verified"] for ev in doc["engines"].values())
+
+
+def _driver_result(status: str, driver: str) -> dict:
+    return {**_result("cdc-sqlserver", status), "labels": {"driver": driver}}
+
+
+def test_sqlserver_evidence_names_the_drivers_that_proved_it(manifest) -> None:
+    ev = engine_evidence(
+        manifest, [_driver_result("green", "pyodbc"), _driver_result("green", "pymssql")]
+    )["sqlserver"]
+    assert ev["live_verified"]
+    assert ev["drivers"] == ["pymssql", "pyodbc"]
+
+
+def test_sqlserver_needs_the_production_driver_green(manifest) -> None:
+    # Production has no ODBC driver and dials SQL Server through pymssql, so a
+    # pyodbc-only green is not live-verified, and a red pymssql leg is red.
+    only_odbc = engine_evidence(manifest, [_driver_result("green", "pyodbc")])["sqlserver"]
+    assert only_odbc["status"] == "no_ci_result"
+    assert "cdc-sqlserver[driver=pymssql]" in only_odbc["missing_results"]
+    red = engine_evidence(
+        manifest, [_driver_result("green", "pyodbc"), _driver_result("red", "pymssql")]
+    )["sqlserver"]
+    assert red["status"] == "ci_red"

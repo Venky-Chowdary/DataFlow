@@ -11,7 +11,9 @@
     "and published, never fails the job.",
     "`proves` names the engines the job is the proof for; the others in `engines` are",
     "peers it needs. An engine is live-verified only by a green job that proves it, and a",
-    "red job that proves it makes it red. `emulated` engines ran against an emulator."
+    "red job that proves it makes it red. `emulated` engines ran against an emulator.",
+    "`required_labels`: every listed variant (check_live_skips.py --label key=value) must",
+    "run green before the job counts, e.g. both SQL Server drivers."
   ],
   "engine_tokens": {
     "postgresql": ["postgres", "postgresql", "pg", "pgvector", "psycopg", "psycopg2", "libpq"],
@@ -40,6 +42,7 @@
       "workflow": ".github/workflows/ci.yml",
       "mode": "strict",
       "engines": ["sqlserver", "postgresql", "mysql"],
+      "required_labels": {"driver": ["pymssql", "pyodbc"]},
       "min_executed": 100,
       "expected_skips": []
     },

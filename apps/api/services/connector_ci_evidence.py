@@ -54,6 +54,21 @@ def load_results(paths: Iterable[Path]) -> list[dict[str, Any]]:
     return found
 
 
+def _missing_variants(name: str, spec: dict[str, Any], runs: list[dict[str, Any]]) -> list[str]:
+    """``job[key=value]`` for each required variant with no green run.
+
+    cdc-sqlserver declares ``required_labels: {"driver": ["pymssql", "pyodbc"]}``:
+    production dials SQL Server through pymssql, so a pyodbc-only green does
+    not make SQL Server live-verified.
+    """
+    gaps = []
+    for key, values in (spec.get("required_labels") or {}).items():
+        for value in values:
+            if not any(r["status"] == "green" and r["labels"].get(key) == value for r in runs):
+                gaps.append(f"{name}[{key}={value}]")
+    return gaps
+
+
 def engine_evidence(
     manifest: dict[str, Any], results: Iterable[dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
@@ -87,14 +102,24 @@ def engine_evidence(
                         "sha": (result.get("run") or {}).get("sha", ""),
                         "run_id": (result.get("run") or {}).get("run_id", ""),
                         "not_run_reason": result.get("not_run_reason", ""),
+                        "labels": dict(result.get("labels") or {}),
                     }
                 )
         statuses = {r["status"] for r in runs}
+        missing = [n for n in proving if n not in by_job]
+        complete = []
+        for name in proving:
+            gaps = _missing_variants(name, jobs[name], [r for r in runs if r["job"] == name])
+            missing += gaps
+            if name in by_job and not gaps and all(
+                r["status"] == "green" for r in runs if r["job"] == name
+            ):
+                complete.append(name)
         if not proving:
             status = "no_ci_job"
         elif "red" in statuses:
             status = "ci_red"
-        elif "green" in statuses:
+        elif complete:
             status = LIVE_VERIFIED
         elif "not_run" in statuses:
             status = "not_run"
@@ -106,7 +131,10 @@ def engine_evidence(
             "live_verified": status == LIVE_VERIFIED,
             "emulated": emulated,
             "proving_jobs": proving,
-            "missing_results": [n for n in proving if n not in by_job],
+            "missing_results": missing,
+            "drivers": sorted(
+                {r["labels"]["driver"] for r in runs if r["status"] == "green" and r["labels"].get("driver")}
+            ),
             "runs": runs,
         }
     return out

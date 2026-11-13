@@ -75,6 +75,7 @@ class CheckResult:
     min_executed: int = 0
     opt_in: str = ""
     proves: list[str] = field(default_factory=list)
+    labels: dict[str, str] = field(default_factory=dict)
 
     def count(self, outcome: str) -> int:
         return sum(1 for c in self.cases if c.outcome == outcome)
@@ -113,6 +114,7 @@ class CheckResult:
             "enforced": self.enforced,
             "engines": list(self.engines),
             "proves": list(self.proves),
+            "labels": dict(self.labels),
             "status": self.status,
             "ran": self.ran,
             "not_run_reason": self.not_run_reason,
@@ -295,7 +297,8 @@ def summary_markdown(result: CheckResult, limit: int = 40) -> str:
     data = result.to_json()
     c = data["counts"]
     lines = [
-        f"### Live-engine skips: `{result.job}` ({result.mode})",
+        f"### Live-engine skips: `{result.job}` ({result.mode})"
+        + "".join(f" {k}={v}" for k, v in sorted(result.labels.items())),
         f"- status: **{result.status.upper()}** — engines: {', '.join(result.engines)}",
     ]
     if not result.ran:
@@ -324,7 +327,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", default=str(MANIFEST))
     parser.add_argument("--out", help="write the result JSON here")
     parser.add_argument("--not-run", default="", help="record that the job did not run, and why")
+    parser.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        help="key=value naming this run's variant, e.g. driver=pymssql (repeatable)",
+    )
     args = parser.parse_args(argv)
+    labels: dict[str, str] = {}
+    for item in args.label:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            parser.error(f"--label needs key=value, got {item!r}")
+        labels[key.strip()] = value.strip()
 
     manifest = load_manifest(Path(args.manifest))
     paths = [Path(p) for p in args.junit]
@@ -339,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         missing_junit=missing,
         not_run=args.not_run,
     )
+    result.labels = labels
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
