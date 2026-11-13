@@ -210,6 +210,34 @@ describe("sameFullMappings", () => {
   });
 });
 
+describe("planConflictRows (the dialog's table)", () => {
+  it("lists every target of the active, newest and unsaved mappings", async () => {
+    const { planConflictRows } = await import("./planConcurrency.js");
+    const active = [{ source: "a", target: "x" }];
+    const newest = [{ source: "a", target: "x" }, { source: "n", target: "only_newest" }];
+    const mine = [{ source: "b", target: "x" }, { source: "m", target: "only_mine" }];
+    const rows = planConflictRows(active, mine, newest);
+    const by = new Map(rows.map((r) => [r.target, r]));
+    assert.deepEqual([...by.keys()].sort(), ["only_mine", "only_newest", "x"]);
+    assert.equal(by.get("only_newest")!.newestSource, "n", "a target only the newest revision maps is shown");
+    assert.equal(by.get("only_newest")!.latestSource, null);
+    assert.equal(by.get("only_newest")!.mineSource, null);
+    assert.equal(by.get("x")!.newestSource, "a");
+    assert.equal(by.get("x")!.differs, true);
+    assert.equal(by.get("only_mine")!.newestSource, null);
+  });
+
+  it("is the plain active-vs-mine diff when the newest revision is the active one", async () => {
+    const { planConflictRows, diffPlanMappings } = await import("./planConcurrency.js");
+    const active = [{ source: "a", target: "X" }];
+    const mine = [{ source: "b", target: "x" }];
+    assert.deepEqual(
+      planConflictRows(active, mine, null).map(({ newestSource, ...row }) => [row, newestSource]),
+      diffPlanMappings(active, mine).map((row) => [row, null]),
+    );
+  });
+});
+
 describe("headAfterOwnMap", () => {
   it("adopts the head only when it is the revision this page's Map request created", async () => {
     const { headAfterOwnMap } = await import("./planConcurrency.js");

@@ -1,5 +1,5 @@
 import { Dialog } from "../ui/Dialog";
-import { diffPlanMappings } from "../../lib/planConcurrency";
+import { planConflictRows } from "../../lib/planConcurrency";
 import type { PlanConflictState } from "../../lib/usePlanConflict";
 
 const ORIGIN_COPY: Record<PlanConflictState["origin"], string> = {
@@ -27,12 +27,10 @@ export function PlanConflictDialog({
   onCancel: () => void;
 }) {
   const latest = conflict?.latest ?? null;
-  const rows = latest ? diffPlanMappings(latest.mappings, conflict?.mine ?? []) : [];
-  // Newest revision when it is not the active one: shown as its own column.
+  // Newest revision when it is not the active one: shown as its own column,
+  // with a row for every target any of the three maps.
+  const rows = latest ? planConflictRows(latest.mappings, conflict?.mine ?? [], latest.headMappings) : [];
   const headSplit = Boolean(latest?.headMappings);
-  const headByTarget = new Map(
-    (latest?.headMappings ? diffPlanMappings(latest.headMappings, []) : []).map((r) => [r.target.toLowerCase(), r.latestSource]),
-  );
   const keepMineLabel = !latest
     ? "Keep mine"
     : headSplit
@@ -106,7 +104,7 @@ export function PlanConflictDialog({
                     {row.latestSource ?? "— not mapped"}
                     {row.latestSources.length > 1 && <em> (duplicate: {row.latestSources.length} sources)</em>}
                   </td>
-                  {headSplit && <td>{headByTarget.get(row.target.toLowerCase()) ?? "— not mapped"}</td>}
+                  {headSplit && <td>{row.newestSource ?? "— not mapped"}</td>}
                   <td>
                     {row.mineSource ?? "— not mapped"}
                     {row.mineSources.length > 1 && <em> (duplicate: {row.mineSources.length} sources)</em>}

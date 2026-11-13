@@ -246,6 +246,46 @@ export function diffPlanMappings(latest: PlanMappingRow[], mine: PlanMappingRow[
   });
 }
 
+/** One row of the conflict dialog's table: the active-vs-mine diff plus the newest revision's source. */
+export interface PlanConflictRow extends PlanMappingDiffRow {
+  /** The newest revision's source(s) when it is not the active one; null when it maps nothing (or is the active one). */
+  newestSource: string | null;
+}
+
+/**
+ * The conflict dialog's rows: every destination column of the active
+ * revision, the unsaved mappings and — when the newest revision is not the
+ * active one — the newest revision, so a column only the newest maps is
+ * shown too. `differs` compares active with mine (what Keep mine replaces).
+ */
+export function planConflictRows(
+  active: PlanMappingRow[],
+  mine: PlanMappingRow[],
+  newest: PlanMappingRow[] | null,
+): PlanConflictRow[] {
+  const newestRows = newest ? diffPlanMappings(newest, []) : [];
+  const newestBy = new Map(newestRows.map((r) => [r.target.toLowerCase(), r.latestSource]));
+  const rows: PlanConflictRow[] = diffPlanMappings(active, mine).map((row) => ({
+    ...row,
+    newestSource: newestBy.get(row.target.toLowerCase()) ?? null,
+  }));
+  const seen = new Set(rows.map((r) => r.target.toLowerCase()));
+  for (const r of newestRows) {
+    if (seen.has(r.target.toLowerCase())) continue;
+    rows.push({
+      target: r.target,
+      latestSource: null,
+      mineSource: null,
+      latestSources: [],
+      mineSources: [],
+      duplicate: false,
+      differs: false,
+      newestSource: r.latestSource,
+    });
+  }
+  return rows;
+}
+
 /** True when both sides map every destination column from the same source(s) (display level). */
 export function sameMappings(a: PlanMappingRow[], b: PlanMappingRow[]): boolean {
   return diffPlanMappings(a, b).every((row) => !row.differs);
