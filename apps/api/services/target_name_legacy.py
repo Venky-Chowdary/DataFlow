@@ -278,8 +278,9 @@ def prepare_stream_targets(
     sync_mode: str | None,
     *,
     stream_name: str = "",
-) -> list[dict[str, Any]]:
-    """One stream's Map rows, adopted onto its own table, or ``ValueError``.
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """One stream's Map rows adopted onto its own table, and its write_new
+    acknowledgement (nothing is stamped on the shared endpoint), or ``ValueError``.
 
     ``destination`` is already bound to the stream, or is bound here (on a
     copy) when ``stream_name`` is given. Applies the same rules as a
@@ -300,13 +301,14 @@ def prepare_stream_targets(
     rows = operator_rows(mappings)
     req = SimpleNamespace(destination=dest, mappings=rows, sync_mode=sync_mode)
     adopt_for_request(req)
-    refusal = target_names_refusal(str(getattr(dest, "format", "") or ""), req.mappings) or (
-        legacy_fields_refusal(req)
-    )
+    refusal = target_names_refusal(str(getattr(dest, "format", "") or ""), req.mappings)
+    ack: list[str] = []
+    if not refusal:
+        refusal, ack = legacy_fields_check(req)
     if refusal:
         label = stream_name or str(getattr(dest, "table", "") or getattr(dest, "collection", ""))
         raise ValueError(f"Stream {label!r}: {refusal}")
-    return list(req.mappings)
+    return list(req.mappings), ack
 
 
 def stream_existing_columns(
@@ -689,28 +691,26 @@ def legacy_field_verdict(
     return legacy_field_issues(dest_type, found, blocking=blocking), blocking
 
 
-def legacy_fields_refusal(request: Any) -> str:
-    """Execute: refuse to write a new field beside its stale old spelling.
+def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
+    """``(refusal, acknowledgement)`` for one request; nothing is mutated.
 
-    Runs before any write, for every caller (Studio, API, schedules, CDC). An
-    acknowledged run (``legacy_field_policy=write_new``) proceeds; the
-    acknowledgement is stamped on the destination (``legacy_field_ack``) and
-    the writer records it in the run's warnings.
+    The refusal is ``""`` when the run may write. The acknowledgement lists,
+    for an operator's ``legacy_field_policy=write_new``, what the run keeps as
+    stored; the caller records it on the run (or on one stream of it).
     """
     dest = getattr(request, "destination", None)
     kind = dest_kind(str(getattr(dest, "format", "") or ""))
     if dest is None or kind not in _FIELD_STORES:
-        return ""
+        return "", []
     mappings = list(getattr(request, "mappings", None) or [])
     if not _renamed_pairs(mappings):
-        return ""
-    extra = dict(getattr(dest, "extra", None) or {})
-    policy = _policy_of(extra)
+        return "", []
+    policy = _policy_of(dict(getattr(dest, "extra", None) or {}))
     from services.sync_cursor import is_overwrite_sync
 
     sync_mode = str(getattr(request, "sync_mode", "") or "")
     if is_overwrite_sync(sync_mode):
-        return ""  # the collection / index is replaced: nothing can mix
+        return "", []  # the collection / index is replaced: nothing can mix
     try:
         from src.transfer.adapters import resolve_connector_config
 
@@ -720,29 +720,70 @@ def legacy_fields_refusal(request: Any) -> str:
             kind, mappings, cfg, table, sync_mode=sync_mode, policy=policy, run_scope=dest,
         )
     except Exception as exc:  # noqa: BLE001 - fail closed: an unchecked store is not "no old fields"
-        unchecked = (
+        if policy == WRITE_NEW:
+            return "", [f"old field names not verified ({exc}); "
+                        f"{LEGACY_FIELD_POLICY}={WRITE_NEW}"]
+        return (
             f"Could not verify the destination's old field names ({exc}). Set "
             f"{LEGACY_FIELD_POLICY}={WRITE_NEW!r} on the destination to write the new "
-            "names anyway (recorded on the run), or run an overwrite."
-        )
-        if policy == WRITE_NEW:
-            extra[LEGACY_FIELD_ACK] = [f"old field names not verified ({exc}); "
-                                       f"{LEGACY_FIELD_POLICY}={WRITE_NEW}"]
-            dest.extra = extra
-            return ""
-        return unchecked
+            "names anyway (recorded on the run), or run an overwrite.", [])
     if blocking:
         return "Destination holds the old field names: " + " ".join(
-            i["message"] for i in issues[:3]
-        )
+            i["message"] for i in issues[:3]), []
     if issues and policy == WRITE_NEW:
-        extra[LEGACY_FIELD_ACK] = [
+        return "", [
             f"{i['other']} kept as stored; this run writes {i['target']} "
             f"({LEGACY_FIELD_POLICY}={WRITE_NEW})"
             for i in issues
         ]
-        dest.extra = extra
-    return ""
+    return "", []
+
+
+def set_run_ack(dest: Any, ack: list[str]) -> None:
+    """Stamp (or clear) the acknowledgement the writer records for this run / stream.
+
+    Cleared when empty, so one stream's acknowledgement never carries over to
+    the next stream on the shared destination endpoint.
+    """
+    if dest is None:
+        return
+    extra = getattr(dest, "extra", None)
+    if not isinstance(extra, dict):
+        if ack:
+            dest.extra = {LEGACY_FIELD_ACK: list(ack)}
+        return
+    # In place: callers patch and restore the same extra dict around a stream.
+    if ack:
+        extra[LEGACY_FIELD_ACK] = list(ack)
+    else:
+        extra.pop(LEGACY_FIELD_ACK, None)
+
+
+def legacy_fields_refusal(request: Any) -> str:
+    """Execute: refuse to write a new field beside its stale old spelling.
+
+    Runs before any write, for every caller (Studio, API, schedules, CDC). An
+    acknowledged run (``legacy_field_policy=write_new``) proceeds; the
+    acknowledgement is stamped on the destination (``legacy_field_ack``) and
+    the writer records it in the run's warnings.
+    """
+    refusal, ack = legacy_fields_check(request)
+    if not refusal:
+        set_run_ack(getattr(request, "destination", None), ack)
+    return refusal
+
+
+#: Accepted ``legacy_field_policy`` values ("" = not set: refuse old fields).
+LEGACY_FIELD_POLICIES = frozenset({"", WRITE_NEW})
+
+
+def legacy_field_policy_refusal(endpoint: Any) -> str:
+    """Why an endpoint's ``legacy_field_policy`` is not a known value, or ``""``."""
+    value = legacy_field_policy_of(endpoint)
+    if value in LEGACY_FIELD_POLICIES:
+        return ""
+    return (f"Unknown {LEGACY_FIELD_POLICY} {value!r}: use {WRITE_NEW!r} "
+            "(or leave it unset to refuse a run beside old field names).")
 
 
 def target_name_gates(
@@ -804,6 +845,16 @@ def target_name_gates(
             "duration_ms": 0,
             "details": {"dest_type": kind, "notes": notes},
         })
+    if legacy_field_policy not in LEGACY_FIELD_POLICIES:
+        gates.append({
+            "id": "g23e_target_legacy_fields", "status": "block", "duration_ms": 0,
+            "message": legacy_field_policy_refusal({LEGACY_FIELD_POLICY: legacy_field_policy}),
+            "details": {"dest_type": kind, "issues": [{
+                "code": "legacy_field_policy_unknown", "target": "",
+                "message": legacy_field_policy_refusal(
+                    {LEGACY_FIELD_POLICY: legacy_field_policy})}]},
+        })
+        return gates
     try:
         warnings, blocking = legacy_field_verdict(
             dest_type, mappings, destination_config, destination_table,
@@ -851,7 +902,10 @@ __all__ = [
     "legacy_field_issues",
     "legacy_field_policy_of",
     "legacy_field_verdict",
+    "legacy_field_policy_refusal",
+    "legacy_fields_check",
     "legacy_fields_refusal",
+    "set_run_ack",
     "legacy_spelling",
     "dynamodb_fields_present",
     "mongo_fields_present",

@@ -922,7 +922,8 @@ def write_mapped_rows(
                 dest_db_type="redis",
             ),
             chunks_completed=1,
-            warnings=errors[:10],
+            # G11: the operator's legacy_field_policy=write_new, on the run.
+            warnings=([str(a) for a in (_kwargs.get("legacy_field_ack") or [])] + errors)[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
             # Record the identities written so Gate-8 can re-read this batch.

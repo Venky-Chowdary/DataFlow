@@ -123,6 +123,7 @@ def request_refusal(request: Any) -> str:
     from services.local_file_policy import local_destination_refusal
     from services.target_name_legacy import (
         adopt_for_request,
+        legacy_field_policy_refusal,
         legacy_fields_refusal,
         selected_streams,
         streams_refusal,
@@ -134,6 +135,7 @@ def request_refusal(request: Any) -> str:
     adopt_for_request(request)
     return (
         local_destination_refusal(dest)
+        or legacy_field_policy_refusal(dest)
         or unsafe_destination_identifier_reason(
             str(dest.format or ""), str(dest.table or dest.collection or "")
         )

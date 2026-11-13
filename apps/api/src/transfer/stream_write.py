@@ -581,6 +581,11 @@ def _write_batch(
             if isinstance(extra, dict):
                 kwargs["destination_extra"] = dict(extra)
                 kwargs["legacy_field_ack"] = list(extra.get("legacy_field_ack") or [])
+        if dest_type in ("redis", "dynamodb"):
+            # G11: an acknowledged legacy_field_policy=write_new, on the run.
+            kwargs["legacy_field_ack"] = list(
+                (getattr(dest, "extra", None) or {}).get("legacy_field_ack") or []
+            )
         if dest_type == "redis":
             from connectors.redis_reader import redis_key_format
 
