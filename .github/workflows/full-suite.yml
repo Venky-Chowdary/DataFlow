@@ -64,47 +64,24 @@ jobs:
       DATAFLOW_TRAINING: "off"
       # Engine credentials come only from env / CI secrets — never literals
       # in test code (CI-2). The SQL Server SA password is generated per run
-      # in the first step (GITHUB_ENV); a job-level value here would win over
-      # it, so none is set.
+      # by the "Generate a per-run SQL Server SA password" step and exported
+      # through GITHUB_ENV (it is not a job-level value: one source).
+      #
+      # Precedence: a value appended to $GITHUB_ENV replaces a job-level env
+      # value for every later step; only a step-level env outranks it. The
+      # PostgreSQL / MySQL / Mongo connection settings therefore live only in
+      # .github/ci-live-engines.vars (loaded right after checkout), and none of
+      # its keys is set here (tests/test_ci_live_env_wiring.py checks it). A
+      # step that needs another value sets it on the step: the suite's MySQL
+      # root password, below.
       KAFKA_SASL_CI_PASSWORD: "dataflow-ci-secret"
-      # Postgres (libpq standard — tests/helpers/live_env resolves these first)
-      PGHOST: 127.0.0.1
-      PGPORT: "5432"
-      PGUSER: dataflow
-      PGPASSWORD: dataflow
-      PGDATABASE: dataflow
-      DATAFLOW_PG_HOST: 127.0.0.1
-      # MySQL
-      MYSQL_HOST: 127.0.0.1
-      MYSQL_PORT: "3306"
-      MYSQL_DATABASE: dataflow
-      MYSQL_USER: dataflow
-      MYSQL_PASSWORD: dataflow
-      DATAFLOW_MYSQL_HOST: 127.0.0.1
-      DATAFLOW_MYSQL_PORT: "3306"
-      DATAFLOW_MYSQL_DB: dataflow
-      DATAFLOW_MYSQL_USER: dataflow
-      DATAFLOW_MYSQL_PASSWORD: dataflow
-      DATAFLOW_TEST_MYSQL_HOST: 127.0.0.1
-      DATAFLOW_TEST_MYSQL_PORT: "3306"
-      DATAFLOW_TEST_MYSQL_DB: dataflow
-      DATAFLOW_TEST_MYSQL_USER: dataflow
-      DATAFLOW_TEST_MYSQL_PASSWORD: dataflow
-      # This job's MySQL is started below with MYSQL_ROOT_PASSWORD=root_ci;
-      # overrides the ci-live-engines.vars value (which matches the PR jobs).
-      DATAFLOW_TEST_MYSQL_ROOT_PASSWORD: root_ci
-      # SQL Server (password: generated per run, see the first step)
+      # SQL Server (password: generated per run, see the steps)
       DATAFLOW_SQLSERVER_ENABLE: "1"
       DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
       DATAFLOW_TEST_MSSQL_PORT: "1433"
       DATAFLOW_TEST_MSSQL_DB: dataflow
       DATAFLOW_TEST_MSSQL_USER: sa
       DATAFLOW_SQLSERVER_USER: sa
-      # Mongo — replica-set URI so sessions/change streams work
-      MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
-      DATAFLOW_TEST_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
-      DATAFLOW_LIVE_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
-      P2_MONGO_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
       # Redis
       REDIS_URL: redis://127.0.0.1:6379
       DATAFLOW_REDIS_URL: redis://127.0.0.1:6379
@@ -121,6 +98,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Export live-engine connection settings (every name the suite reads)
+        # The one source of the PostgreSQL / MySQL / Mongo settings, under
+        # every spelling the suite reads (PGHOST, DATAFLOW_PG_TEST_DSN,
+        # DATAFLOW_TEST_PGVECTOR_PORT, R11_PG_LOGICAL_*, ...). GITHUB_ENV
+        # outranks job-level env, so the job sets none of these keys.
+        run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
 
       - name: Generate a per-run SQL Server SA password (masked)
         run: |
@@ -263,14 +247,13 @@ jobs:
           docker exec "$cid" mysql -uroot -proot_ci -e \
             "GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'; FLUSH PRIVILEGES;"
 
-      - name: Export live-engine connection settings (every name the suite reads)
-        # Job-level env above wins where both set a name (same values); the
-        # file adds the spellings the job never set (DATAFLOW_PG_TEST_DSN,
-        # DATAFLOW_TEST_PGVECTOR_PORT, R11_PG_LOGICAL_*, ...).
-        run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
-
       - name: Full suite (shard ${{ matrix.shard }}/6)
         working-directory: apps/api
+        env:
+          # This job's MySQL container is started with MYSQL_ROOT_PASSWORD=root_ci,
+          # unlike the PR jobs' (the vars file's value). Step-level env is the
+          # only level that outranks the GITHUB_ENV value from the vars file.
+          DATAFLOW_TEST_MYSQL_ROOT_PASSWORD: root_ci
         run: |
           python -m pytest tests -q -rfEs -p no:cacheprovider -p randomly \
             --junitxml=/tmp/pytest-junit.xml
