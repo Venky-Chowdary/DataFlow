@@ -111,3 +111,56 @@ def test_file_writer_dest_extra_merges_saved_inline_and_flattened():
         "tsv_null": "\\N", "file_format": "tsv",
     }
     assert file_writer_dest_extra({"extra": {"tsv_null": "empty"}}, _Dest())["tsv_null"] == "\\N"
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.mark.parametrize("engine, module", [("gcs", "connectors.gcs_writer"), ("adls", "connectors.adls_writer")])
+def test_gcs_and_adls_writers_receive_tsv_null_on_the_stream_path(monkeypatch, engine, module):
+    """The stream batch writer hands GCS / ADLS the dest_extra Gate-8 reads (fake: the
+    writer's encoder call is captured; no cloud client is built)."""
+    import importlib
+
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream_write import _write_batch
+
+    writer = importlib.import_module(module)
+    seen: list[dict] = []
+
+    def capture(**kwargs):
+        seen.append(kwargs)
+        raise _Stop("captured")
+
+    monkeypatch.setattr(writer, "materialize_object_store_export", capture)
+    dest = EndpointConfig(
+        kind="database", format=engine, database="g7f3container", table="out/notes.tsv",
+        extra={"tsv_null": "\\N"},
+    )
+    # The resolved cfg flattens the inline extra (resolve_connector_config) — no nested copy.
+    cfg = {"host": "", "port": 0, "database": "g7f3container", "tsv_null": "\\N", "extra": {}}
+    with pytest.raises(Exception):
+        _write_batch(
+            engine, dest, cfg, "out/notes.tsv", ["id", "note"], [["1", ""], ["2", None]],
+            [{"source": "id", "target": "id"}, {"source": "note", "target": "note"}],
+            {"id": "TEXT", "note": "TEXT"}, True, None, 0, 1, 0,
+            sync_mode="full_refresh_overwrite",
+        )
+    assert seen, "the writer's encoder was reached"
+    assert seen[0].get("tsv_null") == "\\N"
+
+
+def test_adapter_path_hands_the_s3_writer_tsv_null(monkeypatch, bucket):
+    """adapters._write_destination_database (the non-stream path) with an inline extra."""
+    from src.transfer.adapters import _write_destination_database
+
+    written, _ddl, _summary = _write_destination_database(
+        _s3_dest("out/adapter_notes.tsv", {"tsv_null": "\\N"}),
+        [{"id": i, "note": n} for i, n in ROWS],
+        ["id", "note"],
+        {"id": "INTEGER", "note": "TEXT"},
+        [{"source": "id", "target": "id"}, {"source": "note", "target": "note"}],
+    )
+    assert written == len(ROWS)
+    assert _get("out/adapter_notes.tsv") == EXPECTED_BODY
