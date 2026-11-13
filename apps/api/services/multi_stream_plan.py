@@ -240,8 +240,15 @@ def contract_for_stream(
     contracts: list[Mapping[str, Any]] | None,
     name: str,
 ) -> dict[str, Any]:
-    """The contract for this stream. Case and whitespace do not hide its CALL."""
-    rows = [dict(raw) for raw in (contracts or []) if isinstance(raw, Mapping)]
+    """The selected contract for this stream. Case and whitespace do not hide its CALL.
+
+    An unselected contract is never returned: the approval binds the selected
+    contracts only (``conversion_contract.bind_stream_maps``), so an
+    unselected twin sharing the name must not supply the stream's rows
+    (security check B1; Execute also refuses repeated names).
+    """
+    rows = [dict(raw) for raw in (contracts or [])
+            if isinstance(raw, Mapping) and raw.get("selected", True) is not False]
     want = str(name or "").strip()
     for raw in rows:
         if str(raw.get("name") or "").strip() == want:
@@ -253,6 +260,30 @@ def contract_for_stream(
         if fold(str(raw.get("name") or "")) == folded:
             return raw
     return {}
+
+
+#: The explicit name for the CDC loop and other callers that need the selected contract.
+selected_stream_contract = contract_for_stream
+
+
+def repeated_stream_name_refusal(contracts: Any) -> str:
+    """Why a request's stream contracts cannot run: a name used more than once.
+
+    Compared after strip and case-fold, over every contract, selected or not:
+    which twin a lookup found decided which Map rows a stream wrote.
+    """
+    seen: dict[str, str] = {}
+    for raw in contracts or []:
+        c = raw if isinstance(raw, Mapping) else getattr(raw, "__dict__", {}) or {}
+        name = str(c.get("name") or "").strip()
+        key = fold(name)
+        if not key:
+            continue
+        if key in seen:
+            return (f"Stream contracts name stream {seen[key]!r} more than once; each stream "
+                    "must appear once (selected or not). Remove the duplicate and re-validate.")
+        seen[key] = name
+    return ""
 
 
 def _contracts_by_name(

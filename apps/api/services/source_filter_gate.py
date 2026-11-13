@@ -137,6 +137,12 @@ def request_refusal(request: Any) -> str:
     from services.target_name_legacy import strip_request_map_targets
 
     strip_request_map_targets(request)
+    from services.multi_stream_plan import repeated_stream_name_refusal
+
+    # One contract per stream name: a twin decided which rows a stream wrote (B1).
+    repeated = repeated_stream_name_refusal(getattr(request, "stream_contracts", None))
+    if repeated:
+        return repeated
     # G11: an existing table keeps the columns an earlier run named; the
     # mapping is retargeted before any read, write or Gate-8 digest.
     try:

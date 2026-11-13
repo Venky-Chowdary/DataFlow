@@ -2371,7 +2371,10 @@ def _run_cdc_shared_multi_table(
         name = (contract.name or "").strip()
         if not name:
             continue
-        raw = next((c for c in stream_contracts if c.get("name") == name), {}) or {}
+        from services.multi_stream_plan import selected_stream_contract
+
+        # The selected contract only: the one the approval bound (security B1).
+        raw = selected_stream_contract(stream_contracts, name)
         stream_maps = raw.get("mappings")
         declared = isinstance(stream_maps, list) and bool(stream_maps)
         use_maps = stream_maps if declared else mappings
