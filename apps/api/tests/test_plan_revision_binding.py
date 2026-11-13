@@ -123,3 +123,140 @@ def test_validate_records_the_revision_it_read_when_a_ui_save_lands_meanwhile():
     run = plan.preflight_runs[-1]
     assert (run["mapping_version"], run["mapping_hash"]) == (1, v1_hash)
     assert plan.active_version == 2 and plan.status == "mapped"
+
+
+# ---------------------------------------------------------------------------
+# Map appends only onto the revision it started from
+# ---------------------------------------------------------------------------
+
+
+def _map_with_a_ui_save_during_the_pipeline(plan_id: str):
+    from services.transfer_plan_service import run_plan_mapping
+
+    def pipeline(*_args, **_kwargs):
+        sync_ui_mappings(plan_id, _maps("login"))  # the operator saves while Map runs
+        return {"mappings": _maps("username"), "validation": {"passed": True, "issues": []}}
+
+    with patch("services.mapping_pipeline.run_mapping_pipeline", side_effect=pipeline):
+        return run_plan_mapping(plan_id, use_llm=False)
+
+
+def test_map_does_not_replace_a_ui_save_made_while_it_ran():
+    from services.transfer_plan_store import PlanVersionConflict
+
+    plan_id = _plan()
+    with pytest.raises(PlanVersionConflict) as caught:
+        _map_with_a_ui_save_during_the_pipeline(plan_id)
+    assert (caught.value.base_version, caught.value.current_version) == (1, 2)
+    plan = get_plan(plan_id)
+    assert [r.version for r in plan.revisions] == [1, 2]
+    assert plan.active_version == 2
+    assert plan.active_revision().mappings == _maps("login")
+
+
+def test_map_route_answers_409_when_the_plan_changed_while_it_ran():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.routers import transfer_router
+
+    plan_id = _plan()
+    app = FastAPI()
+    app.include_router(transfer_router.router, prefix="/api/v1")
+
+    def pipeline(*_args, **_kwargs):
+        sync_ui_mappings(plan_id, _maps("login"))
+        return {"mappings": _maps("username"), "validation": {"passed": True, "issues": []}}
+
+    with patch("services.mapping_pipeline.run_mapping_pipeline", side_effect=pipeline):
+        res = TestClient(app).post(f"/api/v1/transfer/plans/{plan_id}/map", json={"use_llm": False})
+    assert res.status_code == 409, res.text
+    detail = res.json()["detail"]
+    assert detail["code"] == "plan_version_conflict"
+    assert (detail["base_version"], detail["current_version"]) == (1, 2)
+    assert "newer mapping revision" in detail["message"]
+    assert get_plan(plan_id).active_revision().mappings == _maps("login")
+
+
+def test_map_without_a_concurrent_edit_still_appends_and_activates():
+    from services.transfer_plan_service import run_plan_mapping
+
+    plan_id = _plan()
+    result = {"mappings": _maps("login"), "validation": {"passed": True, "issues": []}}
+    with patch("services.mapping_pipeline.run_mapping_pipeline", return_value=result):
+        out = run_plan_mapping(plan_id, use_llm=False)
+    assert out["version"] == 2
+    assert get_plan(plan_id).active_revision().mappings == _maps("login")
+
+
+# ---------------------------------------------------------------------------
+# Execute's recovery sync does not land over a save it did not see
+# ---------------------------------------------------------------------------
+
+
+def test_execute_recovery_sync_keeps_a_ui_save_made_after_it_read_the_plan(monkeypatch):
+    import services.transfer_plan_service as service
+
+    plan_id = _plan(mapped=False)
+    real_get_plan = service.get_plan
+    calls = {"n": 0}
+
+    def stale_then_saved(pid):
+        snapshot = real_get_plan(pid)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            sync_ui_mappings(pid, _maps("login"))  # the Studio save lands just after the read
+        return snapshot
+
+    monkeypatch.setattr(service, "get_plan", stale_then_saved)
+    payload = service.merge_plan_into_run(plan_id, request_mappings=_maps("username"))
+    plan = get_plan(plan_id)
+    assert [r.version for r in plan.revisions] == [1], "the request mappings were appended over the save"
+    assert plan.active_revision().mappings == _maps("login")
+    assert [m["target"] for m in payload["mappings"]] == ["login"]
+
+
+def test_execute_recovery_sync_still_saves_request_mappings_onto_an_empty_draft():
+    import services.transfer_plan_service as service
+
+    plan_id = _plan(mapped=False)
+    payload = service.merge_plan_into_run(plan_id, request_mappings=_maps("username"))
+    assert get_plan(plan_id).active_revision().mappings == _maps("username")
+    assert [m["target"] for m in payload["mappings"]] == ["username"]
+
+
+# ---------------------------------------------------------------------------
+# base_version is compared with the newest revision version (head), exactly
+# ---------------------------------------------------------------------------
+
+
+def test_a_base_version_ahead_of_the_newest_revision_is_a_conflict():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.routers import transfer_router
+
+    plan_id = _plan()
+    app = FastAPI()
+    app.include_router(transfer_router.router, prefix="/api/v1")
+    res = TestClient(app).post(
+        f"/api/v1/transfer/plans/{plan_id}/mappings",
+        json={"mappings": _maps("login"), "base_version": 5},
+    )
+    assert res.status_code == 409, res.text
+    assert (res.json()["detail"]["base_version"], res.json()["detail"]["current_version"]) == (5, 1)
+    # doc_version is not what base_version is compared with.
+    plan = get_plan(plan_id)
+    assert plan.doc_version != plan.head_version()
+    res = TestClient(app).post(
+        f"/api/v1/transfer/plans/{plan_id}/mappings",
+        json={"mappings": _maps("login"), "base_version": plan.doc_version},
+    )
+    assert res.status_code == 409
+
+
+def test_the_request_model_documents_what_base_version_is_compared_with():
+    from src.routers.transfer_router import SyncMappingsRequest
+
+    text = SyncMappingsRequest.model_fields["base_version"].description
+    assert "revisions" in text and "doc_version" in text and "409" in text

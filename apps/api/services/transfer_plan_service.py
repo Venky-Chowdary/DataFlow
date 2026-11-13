@@ -123,7 +123,9 @@ def run_plan_mapping(
         schema_policy=str(policies.get("schema_policy", "manual_review")),
         table_exists=table_exists,
     )
-    updated = add_mapping_revision(plan_id, result)
+    # Appended only onto the revision Map read: a UI save made while the
+    # pipeline ran stays active and the caller gets PlanVersionConflict (409).
+    updated = add_mapping_revision(plan_id, result, base_version=plan.head_version())
     append_audit_event(
         action="transfer_plan.mapped",
         resource=f"plan/{plan_id}",
@@ -669,23 +671,34 @@ def merge_plan_into_run(
     When the request already carries mappings, recover by syncing them onto the
     plan instead of hard-failing with "Plan has no mappings".
     """
-    plan = get_plan(plan_id)
-    if not plan:
-        raise ValueError(f"Plan '{plan_id}' not found")
-
-    rev = plan.active_revision()
-    if rev and rev.mappings:
-        return build_run_payload(plan_id)
+    from services.transfer_plan_store import PlanVersionConflict
 
     maps = list(request_mappings or [])
-    if not maps:
-        raise ValueError(
-            "Plan has no mapping revision — open Map / Validate so mappings are "
-            "synced before Execute (empty draft plans cannot run)"
-        )
+    for _attempt in range(3):
+        plan = get_plan(plan_id)
+        if not plan:
+            raise ValueError(f"Plan '{plan_id}' not found")
 
-    # Persist Studio mappings onto the empty draft. sync → status "mapped" (runnable).
-    synced = sync_plan_mappings(plan_id, maps)
+        rev = plan.active_revision()
+        if rev and rev.mappings:
+            return build_run_payload(plan_id)
+
+        if not maps:
+            raise ValueError(
+                "Plan has no mapping revision — open Map / Validate so mappings are "
+                "synced before Execute (empty draft plans cannot run)"
+            )
+
+        # Persist Studio mappings onto the empty draft. sync → status "mapped"
+        # (runnable). Only onto the revision just read: if a save landed in
+        # between, read again and run what was saved.
+        try:
+            synced = sync_plan_mappings(plan_id, maps, base_version=plan.head_version())
+            break
+        except PlanVersionConflict:
+            continue
+    else:
+        raise ValueError("Plan kept changing while Execute prepared it; retry the run")
     if synced and synced.active_revision() and synced.active_revision().mappings:
         return build_run_payload(plan_id)
 

@@ -107,8 +107,8 @@ class PlanVersionConflict(RuntimeError):
 
     def __init__(self, plan_id: str, *, base_version: int, current_version: int) -> None:
         super().__init__(
-            f"Plan {plan_id} changed: it is at mapping version {current_version}, "
-            f"this save was based on version {base_version}"
+            f"Plan {plan_id}: the newest mapping revision is {current_version}, not "
+            f"{base_version} — a newer mapping revision exists (or {base_version} was never one)"
         )
         self.plan_id = plan_id
         self.base_version = base_version
@@ -506,6 +506,14 @@ def create_plan(data: dict[str, Any]) -> TransferPlanRecord:
     return plan
 
 
+def _check_base_version(plan_id: str, plan: TransferPlanRecord, base_version: int | None) -> None:
+    """Refuse a revision based on anything but the plan's newest revision (head)."""
+    if base_version is not None and int(base_version) != plan.head_version():
+        raise PlanVersionConflict(
+            plan_id, base_version=int(base_version), current_version=plan.head_version()
+        )
+
+
 def add_mapping_revision(
     plan_id: str,
     pipeline_result: dict[str, Any],
@@ -515,8 +523,18 @@ def add_mapping_revision(
     target_columns: list[str] | None = None,
     target_schema: dict[str, str] | None = None,
     document_model: dict[str, Any] | None = None,
+    base_version: int | None = None,
 ) -> TransferPlanRecord | None:
+    """Append a pipeline (Map) result as the new active revision.
+
+    ``base_version`` is the newest revision version the pipeline started from;
+    when the plan has gained a revision since (a UI save while Map ran),
+    :class:`PlanVersionConflict` is raised and nothing is written, so the save
+    stays active. ``None`` appends unconditionally.
+    """
+
     def change(plan: TransferPlanRecord) -> None:
+        _check_base_version(plan_id, plan, base_version)
         model, model_digest = _revision_document_model(plan, document_model)
         src_cols = source_columns or plan.source_columns
         src_schema = source_schema or plan.source_schema
@@ -666,17 +684,15 @@ def sync_ui_mappings(
     revision of its own; ``None`` keeps the current model (see
     :func:`_revision_document_model`).
 
-    ``base_version`` is the newest revision version the edit started from.
-    When the plan has gained a newer revision since, the edit would replace
-    work the caller never saw: :class:`PlanVersionConflict` is raised and
-    nothing is written. ``None`` (callers that do not track it) appends.
+    ``base_version`` is the newest revision version the edit started from
+    (:meth:`TransferPlanRecord.head_version`, not ``doc_version``). Unless it
+    equals the plan's head now — a newer revision exists, or it names one that
+    never did — :class:`PlanVersionConflict` is raised and nothing is written.
+    ``None`` (callers that do not track it) appends.
     """
 
     def change(plan: TransferPlanRecord) -> None:
-        if base_version is not None and base_version != plan.head_version():
-            raise PlanVersionConflict(
-                plan_id, base_version=base_version, current_version=plan.head_version()
-            )
+        _check_base_version(plan_id, plan, base_version)
         model, model_digest = _revision_document_model(plan, document_model)
         version = plan.head_version() + 1
         from services.mapping_proof import mapping_proof_or_build

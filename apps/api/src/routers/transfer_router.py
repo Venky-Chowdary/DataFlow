@@ -759,10 +759,13 @@ class SyncMappingsRequest(BaseModel):
         default=None,
         ge=0,
         description=(
-            "Version of the plan's newest mapping revision this edit was based on "
-            "(0 for a plan with no revisions). When the plan has a newer revision, "
-            "the save is refused with 409 and the current version; omit it to "
-            "always append a new revision."
+            "The `version` of the newest entry in the plan's `revisions` when this "
+            "edit was loaded (0 for a plan with no revisions). It is compared with "
+            "the newest revision version only — not with `active_version` and not "
+            "with `doc_version`, which also changes on preflight runs, job links and "
+            "plan edits. Any other value — older (a newer mapping revision exists) "
+            "or ahead of it — is refused with 409 and the current version, and "
+            "nothing is saved. Omit it to always append a new revision."
         ),
     )
 
@@ -846,6 +849,19 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
         ) from e
 
 
+def _plan_version_conflict(exc: Any, message: str) -> HTTPException:
+    """409 for a revision based on anything but the plan's newest one."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "plan_version_conflict",
+            "message": message,
+            "base_version": exc.base_version,
+            "current_version": exc.current_version,
+        },
+    )
+
+
 @router.post("/plans/{plan_id}/mappings")
 async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
     """Save edited mappings as a new plan revision.
@@ -862,14 +878,9 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
         )
         return {"plan": plan.to_dict()}
     except PlanVersionConflict as e:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "plan_version_conflict",
-                "message": "The plan changed since this edit was loaded. Reload it and re-apply the edit.",
-                "base_version": e.base_version,
-                "current_version": e.current_version,
-            },
+        raise _plan_version_conflict(
+            e, "A newer mapping revision exists than the one this edit was based on. "
+            "Reload the plan and re-apply the edit."
         ) from e
     except ValueError as e:
         raise safe_http_exception(
@@ -883,6 +894,7 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
 @router.post("/plans/{plan_id}/map")
 async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
     from services.transfer_plan_service import run_plan_mapping
+    from services.transfer_plan_store import PlanVersionConflict
 
     try:
         return await asyncio.to_thread(
@@ -892,6 +904,11 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
             use_llm=body.use_llm,
             source_samples=body.source_samples or None,
         )
+    except PlanVersionConflict as e:
+        raise _plan_version_conflict(
+            e, "A newer mapping revision was saved while Map ran, so its result was not "
+            "stored. Reload the plan and run Map again."
+        ) from e
     except ValueError as e:
         raise safe_http_exception(
             e,
