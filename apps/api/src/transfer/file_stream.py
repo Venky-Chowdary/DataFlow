@@ -3113,6 +3113,18 @@ def stream_file_to_database(
             with OrderedChunkRunner(max_workers=max_workers) as runner:
                 for idx, result in runner.run(batch_enum, _process_file_chunk):
                     _apply_file_result(idx, result)
+        if not written and rejected_total and not dest_summary.get("skipped_identity_keys"):
+            # Every row was held out: refused inside the write so the undo
+            # below runs and a held overwrite rolls back instead of
+            # publishing an empty destination.
+            from .engine_destination import all_rows_quarantined_blocked
+
+            dest_summary["all_rows_held_out"] = True
+            if job_id:  # each batch's findings are already on the DLQ
+                dest_summary["quarantine_dlq_persisted_count"] = len(rejected_details)
+            raise all_rows_quarantined_blocked(
+                rejected_details, rejected_total, dest_summary, rows=rejected_total
+            )
         if snowflake_stage:
             from services.snowflake_file_manifest import commit_staged_snowflake_file
 
@@ -3228,8 +3240,7 @@ def stream_file_to_database(
     )
     if written == 0 and rejected_total == 0 and coerced_null_total == 0:
         raise ValueError("No records found in file")
-    # All rows may be quarantined (written == 0) — that is a real transfer with
-    # DLQ proof, not an empty file. Continue so rejected_details / checksum land.
+    # A run that held every row out was refused inside the write above.
 
     if fp_book.active:
         fp_book.flush(fp_accumulator)

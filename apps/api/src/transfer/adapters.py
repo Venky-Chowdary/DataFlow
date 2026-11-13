@@ -1510,6 +1510,7 @@ def write_destination_database(
     collect_mirror_keys = bool(options.pop("collect_mirror_keys", False))
     release_records = bool(options.pop("release_records", False))
     retain_engine_spill = bool(options.pop("retain_engine_spill", False))
+    refuse_all_held = bool(options.pop("refuse_all_quarantined", False))
     options.pop("source_spool", None)
     db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
     census_payload = None
@@ -1619,6 +1620,10 @@ def write_destination_database(
             spill.close()
     elif spill is not None:
         spill.close()
+    if refuse_all_held:
+        from .engine_destination import refuse_all_quarantined_write
+
+        refuse_all_quarantined_write(rows_written, summary)
     return rows_written, ddl_log, summary
 
 

@@ -2416,7 +2416,7 @@ class UniversalTransferEngine:
                                     request, "ddl_changes_acknowledged", False
                                 )
                             ),
-                            release_records=True,
+                            release_records=True, refuse_all_quarantined=True,
                             retain_engine_spill=True,
                             collect_mirror_keys=effective_sync_lower
                             in ("full_refresh_mirror", "mirror"),

@@ -2653,7 +2653,13 @@ def _stream_database_transfer_impl(
                 _apply_result(tail_idx, _process_db_chunk(run, tail_idx, tail_batch))
             # Winners can still hit a divert step downstream of the buffer.
             _persist_shape_diverts(run)
-        row_path_ok = True
+        # A run that held every row out wrote nothing: a held overwrite must
+        # roll back, not commit its TRUNCATE (the run then refuses itself).
+        row_path_ok = bool(
+            run.tally.written
+            or not run.tally.rejected_total
+            or run.tally.dest_summary.get("skipped_identity_keys")
+        )
     except BaseException as _row_exc:
         # X-9: same undo as the file path — a transform refusal / writer
         # reject must not leave committed batches.
@@ -2870,6 +2876,7 @@ def _stream_database_transfer_impl(
                     reasons.append(reason)
                 if len(reasons) >= 3:
                     break
+            run.tally.dest_summary["all_rows_held_out"] = True
             raise _undo_failed_write(
                 run,
                 _stamp_all_held_out_ledger(

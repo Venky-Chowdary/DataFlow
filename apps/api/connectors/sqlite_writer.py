@@ -922,6 +922,14 @@ def _sqlite_table_exists(path: str, table: str) -> bool:
         conn.close()
 
 
+def _stage_is_empty(conn: Any, stage_quoted: str) -> bool:
+    """True when the overwrite stage holds no row (a missing stage counts)."""
+    try:
+        return conn.execute(f"SELECT 1 FROM {stage_quoted} LIMIT 1").fetchone() is None  # nosec B608
+    except sqlite3.Error:
+        return True
+
+
 def _publish_sqlite_stage(
     conn: Any,
     *,
@@ -1839,6 +1847,20 @@ def write_mapped_rows(
                     warnings=transform_errors,
                 )
 
+            if (
+                publish_stage
+                and not written
+                and rejected_rows
+                and not skipped_identity_keys
+                and _stage_is_empty(conn, table_quoted)
+            ):
+                # Every row of this overwrite was held out to quarantine:
+                # publishing the empty stage would replace the live table with
+                # nothing. Keep the live snapshot; the run refuses itself.
+                conn.execute(f"DROP TABLE IF EXISTS {table_quoted}")  # nosec B608
+                conn.commit()
+                publish_stage = False
+                table_name = live_table_name
             if publish_stage:
                 _publish_sqlite_stage(
                     conn,

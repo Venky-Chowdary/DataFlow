@@ -144,6 +144,15 @@ def test_quarantine_replay_sqlite_edits_and_rewrites(tmp_path: Path):
 
 
 def test_quarantine_replay_empty_uses_stored_details(tmp_path: Path):
+    """An overwrite whose only row is quarantined now fails and keeps the table.
+
+    This test used to replay that run's quarantine: it relied on the parent
+    reporting success after replacing the destination with nothing (the
+    defect fixed with the all_rows_quarantined overwrite refusal). The parent
+    is a failed run now, and its stored quarantine is not replayed onto a
+    table that still holds the pre-run rows: the operator fixes the values
+    and re-runs the transfer, as the refusal's guidance says.
+    """
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest
 
@@ -173,22 +182,17 @@ def test_quarantine_replay_empty_uses_stored_details(tmp_path: Path):
     engine = UniversalTransferEngine()
     result = engine.execute(request)
     job_id = result.job_id
+    assert result.success is False
+    assert "were quarantined, so nothing was written" in str(result.error)
 
     client = _client()
-    # Empty body.rows → replay all stored quarantine rows (still bad — expect rejected or written with null).
+    # Empty body.rows would replay every stored quarantine row of the parent.
     replay = client.post(
         f"/api/v1/connectors/jobs/{job_id}/quarantine/replay",
         json={},
     )
-    assert replay.status_code == 200, replay.text
-    body = replay.json()
-    # Empty body replays the stored quarantine row. The value is still not an
-    # integer, so nothing lands. A replay that writes 0 rows is not a success
-    # (QA R2-061) — the attempt is still recorded.
-    assert body["rows_attempted"] >= 1
-    assert body["job_id"] != job_id
-    assert body["success"] is False
-    assert int(body.get("rows_written") or 0) == 0
+    assert replay.status_code == 409, replay.text
+    assert "Re-run the parent job first" in replay.json()["detail"]
 
 
 def test_quarantine_replay_no_details_400(tmp_path: Path):

@@ -55,6 +55,13 @@ def _publish_stream_written(job_id: str | None, stream_name: str, rows: int) -> 
         logger.warning("stream write note failed for %s", stream_name, exc_info=True)
 
 
+def _settle_stream_overwrite(destination: EndpointConfig, *, restore: bool) -> None:
+    """Restore or discard the overwrite backup of the stream just written."""
+    from .engine_finish import _settle_overwrite_backup
+
+    _settle_overwrite_backup(destination, restore=restore)
+
+
 def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
     """Clear one remapped destination the same way a single-stream overwrite does.
 
@@ -382,6 +389,9 @@ def run_non_cdc_multi_stream_sequential(
                             mappings_inherited=not declared_maps,
                             workspace_id=workspace_id,
                         )
+                # The stream landed: its overwrite backup is no longer needed,
+                # and the next stream's clear must not inherit it.
+                _settle_stream_overwrite(destination, restore=False)
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
                 last_summary = summary
@@ -393,6 +403,10 @@ def run_non_cdc_multi_stream_sequential(
             except Exception as exc:
                 status = "failed"
                 error = str(exc)
+                # This stream's cleared table goes back now, while the endpoint
+                # still names it; the engine's settle would put the backup on
+                # the request's table instead (and leave this one empty).
+                _settle_stream_overwrite(destination, restore=True)
                 record_stream_health(
                     stream_health,
                     name=stream_name,

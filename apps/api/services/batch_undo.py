@@ -372,6 +372,13 @@ def _decide(
             "Pre-write destination count was not measured, so the failed batch "
             "was left in place.",
         )
+    if before != 0 and dest_summary.get("all_rows_held_out"):
+        # Every row was quarantined: no row of this run reached the table.
+        return (
+            "retained",
+            f"No row of this run was written; the destination still holds the "
+            f"{before} row(s) it held before.",
+        )
     if before != 0:
         if store and _mode_merges_append(mode):
             # An occupied object-store append rewrote the live object with
