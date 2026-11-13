@@ -52,6 +52,38 @@ describe("mapping-as-code rows", () => {
   });
 });
 
+describe("mapping-as-code round trip", () => {
+  const catalog = catalogFromNames(
+    ["legacy_ref", "given_name", "surname"],
+    { legacy_ref: "BIGINT", given_name: "VARCHAR(40)", surname: "VARCHAR(40)" },
+    true,
+  );
+  const exported = [
+    row("order_id", "legacy_ref", { inferredType: "BIGINT", destType: "BIGINT", existsInDestination: true }),
+    row("first_name", "given_name", { transform: "trim", engineTransform: "trim", existsInDestination: true }),
+    row("last_name", "", { transform: "omit", engineTransform: "omit", omitReason: "dropped_redundant", omitReasonText: "In full_name" }),
+    row("note", "note_text", { existsInDestination: false, createNew: true, inferredType: "TEXT", destType: "TEXT" }),
+  ];
+
+  it("export then import into a differently edited editor gives the same document", () => {
+    const doc = documentRows(exported);
+    // The editor drifted since export: the omitted row is carried, the trimmed
+    // row is omitted with its own reason, the carried row has an upper-case.
+    const drifted = [
+      row("order_id", "order_id", { inferredType: "BIGINT", transform: "upper", engineTransform: "upper" }),
+      row("first_name", "", { transform: "omit", engineTransform: "omit", omitReason: "pii_minimization", omitReasonText: "old" }),
+      row("last_name", "surname", { existsInDestination: true }),
+      row("note", "note", { inferredType: "TEXT", destType: "TEXT" }),
+    ];
+    const out = applyImportedMappings(drifted, doc, catalog);
+    assert.deepEqual(documentRows(out.rows), doc);
+    assert.equal(out.rows[1].omitReason, undefined, "a carried row keeps no omit reason");
+    assert.equal(out.rows[1].transform, "trim");
+    assert.equal(out.rows[2].omitReasonText, "In full_name");
+    assert.ok(out.rows.every((r) => !r.approved), "every imported row still needs Approve");
+  });
+});
+
 describe("computed columns are Transform steps", () => {
   it("an expression becomes derive_column named after its destination", () => {
     assert.deepEqual(computedStep({ kind: "expression", target: "full_name", expression: "CONCAT(first_name,' ',last_name)" }), {

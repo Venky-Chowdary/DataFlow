@@ -8,7 +8,7 @@
  * column they feed.
  */
 import { findDestColumn, remapToDestination, type DestColumnCatalog } from "./destColumnCatalog";
-import { isIntentionalOmit, type EditableMapping } from "./mapping";
+import { engineTransformToUi, isIntentionalOmit, type EditableMapping } from "./mapping";
 import { stampStepSourceTable, type ShapeStepWire } from "./shape";
 
 export interface DocumentMapping {
@@ -44,7 +44,27 @@ export function documentRows(rows: EditableMapping[]): DocumentMapping[] {
   });
 }
 
-/** Apply an imported document onto the rows; every change still needs Approve. */
+/** A row with no transform and no omission: what an imported pair starts from. */
+function clearedRow(r: EditableMapping): EditableMapping {
+  return {
+    ...r,
+    transform: "none",
+    engineTransform: undefined,
+    intentionalOmit: undefined,
+    omitReason: undefined,
+    omitReasonText: undefined,
+    archiveReference: undefined,
+  } as EditableMapping;
+}
+
+/**
+ * Apply an imported document onto the rows; every change still needs Approve.
+ *
+ * The document replaces each matched row's decision outright: transforms and
+ * omissions the editor held since are cleared first, then the document's
+ * target, transform, type and create-new are applied, so exporting the result
+ * gives the same document back.
+ */
 export function applyImportedMappings(
   rows: EditableMapping[],
   imported: DocumentMapping[],
@@ -57,17 +77,30 @@ export function applyImportedMappings(
     const m = bySource.get(r.source);
     if (!m) return r;
     applied += 1;
+    const base = clearedRow(r);
     if (m.intentional_omit || m.transform === "omit") {
       return {
-        ...r,
+        ...base,
         target: "",
         transform: "omit" as EditableMapping["transform"],
-        omitReason: (m.omit_reason || r.omitReason) as EditableMapping["omitReason"],
-        omitReasonText: m.omit_reason_text || r.omitReasonText,
+        engineTransform: "omit",
+        omitReason: m.omit_reason as EditableMapping["omitReason"],
+        omitReasonText: m.omit_reason_text,
         approved: false,
       };
     }
-    return remapToDestination(r, m.target, catalog);
+    const remapped = remapToDestination(base, m.target, catalog);
+    const engine = m.transform && m.transform !== "none" ? m.transform : undefined;
+    const live = findDestColumn(catalog, remapped.target);
+    return {
+      ...remapped,
+      transform: engineTransformToUi(engine),
+      engineTransform: engine,
+      // The live table's type wins; a column still to create takes the document's.
+      destType: live ? remapped.destType : m.target_type || remapped.destType,
+      ...(live ? {} : { createNew: Boolean(m.create_new) || remapped.createNew }),
+      approved: false,
+    };
   });
   return { rows: next, applied, unmatched: imported.map((m) => m.source).filter((s) => !known.has(s)) };
 }
