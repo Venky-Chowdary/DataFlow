@@ -5,7 +5,7 @@ and keys created from then on take the Datawrap names (``dwk_`` keys,
 ``datawrap:managed`` tables); everything that already exists keeps its name
 and keeps working — ``dfk_`` keys authenticate and tables marked
 ``dataflow:managed`` take run 2 — with the flag on and after it is turned off
-again. This is the staged rollout in docs/DEPLOYMENT.md, end to end:
+again. This is the staged rollout in docs/operate/backup-and-upgrade.md, end to end:
 
 1. flag off (default): key A is ``dfk_``; run 1 with key A creates table T1
    (``dataflow:managed``);
@@ -148,7 +148,7 @@ def _run(client: TestClient, src_id: str, dst_id: str, src: str, dest: str) -> d
         "validation_mode": "strict", "async_mode": False, "skip_preflight": True,
         # A row filter keeps the run on the row writers, which mark the tables
         # they create. (The PostgreSQL->PostgreSQL COPY route marks none — the
-        # documented scope of the marker; see docs/DEPLOYMENT.md.)
+        # documented scope of the marker.)
         "source_filter": {"column": "id", "operator": "gt", "value": 0},
     })
     assert res.status_code == 200, res.text

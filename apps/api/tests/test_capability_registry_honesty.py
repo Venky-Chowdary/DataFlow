@@ -78,10 +78,17 @@ def test_transfer_ready_catalog_ids_have_honest_tier():
 
 
 def test_only_live_proven_vector_sinks_claim_cdc():
+    """A vector store can receive a CDC stream; none of them can be a CDC source.
+
+    ``supports_cdc`` used to carry both meanings, so Qdrant and pgvector were
+    listed among "engines that support CDC" while Validate refused them as a
+    source (audit M-4). The sink claim now has its own field.
+    """
     expected_cdc = {"pgvector", "qdrant"}
     for key in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
         cap = get_connector_capability(key)
-        assert cap.get("supports_cdc") is (key in expected_cdc), key
+        assert cap.get("supports_cdc") is False, key
+        assert cap.get("supports_cdc_sink") is (key in expected_cdc), key
         assert cap.get("supports_lsn_guard") is False, key
         if key in expected_cdc:
             note = str(cap.get("cdc_prerequisites") or "").lower()

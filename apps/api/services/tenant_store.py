@@ -204,7 +204,7 @@ class Tenant:
     # QA round 11: a saved session_timeout_hours is enforced. On by default;
     # an admin can still record the hours without enforcing them (explicit
     # False). Tenants saved before round 11 keep the False they were stored
-    # with until the hours are saved again (docs/DEPLOYMENT.md, backfill note).
+    # with until the hours are saved again (docs/operate/backup-and-upgrade.md, session timeout).
     enforce_session_timeout: bool = True
     ip_allowlist: list[str] = field(default_factory=list)
     # D343: members must sign in through the deployment's SSO provider; their

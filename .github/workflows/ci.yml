@@ -842,7 +842,7 @@ jobs:
       - name: bandit high-severity gate (production code)
         # Fail on High only — Medium SQL f-string debt is tracked separately;
         # key identifier paths are hardened via connectors/sql_identifiers.py.
-        # Posture + false-positive catalogue: docs/SECURITY_SCANNING.md
+        # Posture: docs/operate/security.md (static analysis in CI)
         run: >
           bandit -c bandit.yaml
           -r apps/api/connectors apps/api/services apps/api/src

@@ -7,7 +7,7 @@ PORT="${PORT:-8000}"
 # taking X-Forwarded-For hops[-N] and X-Forwarded-Proto. uvicorn's own proxy
 # handling needs --forwarded-allow-ips '*' behind Railway's edge (its address
 # is not fixed), and with '*' it takes the LEFT-most X-Forwarded-For entry,
-# which the client controls. See docs/DEPLOYMENT.md (client IP behind proxies).
+# which the client controls. See docs/operate/deploy.md (client IP behind proxies).
 # --timeout-graceful-shutdown: on SIGTERM uvicorn waits for open connections
 # before it runs the lifespan teardown (which stops and joins the API's
 # background work). Without a bound one open stream holds that teardown until

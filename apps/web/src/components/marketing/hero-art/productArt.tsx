@@ -1,6 +1,6 @@
 /**
  * Product-surface hero drawings. Each one argues that page's own mechanism —
- * see docs/MARKETING_HERO_DESIGN_SYSTEM.md. Geometry only; the frame owns the
+ * (the hero design notes were removed with the old docs). Geometry only; the frame owns the
  * field, grid, light, and type scale.
  */
 

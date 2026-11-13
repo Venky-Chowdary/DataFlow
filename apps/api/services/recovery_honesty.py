@@ -4,7 +4,7 @@ Charter: Recovery Integrity requires explainable capabilities. Datawrap must
 never advertise one-click transfer undo, staging swap, or warehouse restore as
 product features when they are not implemented.
 
-See ``docs/MIGRATION_ROLLBACK.md`` for the operator runbook.
+See ``docs/operate/runbooks.md`` (Rolling back a migration) for the operator runbook.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ def honesty_dict() -> dict[str, Any]:
             "DISCARD_STAGING": {"executable": True},
             "REQUIRE_WAREHOUSE_RESTORE": {"executable": False},
         },
-        "operator_runbook": "docs/MIGRATION_ROLLBACK.md",
+        "operator_runbook": "docs/operate/runbooks.md",
         "notes": [
             "Prefer create-new or staging schema before cutover.",
             "DISCARD_STAGING is the only executable Datawrap rollback today.",

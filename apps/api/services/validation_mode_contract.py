@@ -11,7 +11,7 @@ Charter modes:
 Legacy Studio mode ``maximum`` is retained as a stricter STRICT variant
 (confidence floor 0.95). Unknown modes fail closed to STRICT.
 
-See ``docs/VALIDATION_MODE_CONTRACT.md``.
+See ``docs/use/verification.md``.
 """
 
 from __future__ import annotations
@@ -200,7 +200,7 @@ def mode_contract(mode: str | None) -> dict[str, Any]:
     }
     contract = dict(specs[m])
     contract["population_proof"] = False
-    contract["documentation"] = "docs/VALIDATION_MODE_CONTRACT.md"
+    contract["documentation"] = "docs/use/verification.md"
     return contract
 
 
@@ -358,7 +358,7 @@ def assert_mode_allows_write(mode: str | None) -> None:
             f"Validation mode `{m}` refuses destination writes "
             f"(allows_write=false). Guarantees: {c['guarantees'][0]} "
             f"Non-guarantees: {c['non_guarantees'][0]} "
-            "See docs/VALIDATION_MODE_CONTRACT.md."
+            "See docs/use/verification.md."
         )
 
 

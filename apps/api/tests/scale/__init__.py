@@ -8,9 +8,9 @@ writer's acknowledgement.
 
 The relational duplex matrix (PostgreSQL / MySQL / SQL Server / SQLite / Oracle
 / DuckDB, each as source **and** destination) lives in ``matrix.py`` and
-``run_matrix.py``; see ``docs/SCALE_MATRIX_SQL.md`` for the measured cells. The
+``run_matrix.py`` (the measured-cells table was removed with the old docs). The
 sync-mode / CDC / scheduler / crash suites live in ``modes_matrix.py`` and
-``run_modes_matrix.py`` (``docs/SCALE_MATRIX_MODES_SCHEDULES.md``).
+``run_modes_matrix.py``.
 
 Env-gated so CI skips when the fleet is absent:
 

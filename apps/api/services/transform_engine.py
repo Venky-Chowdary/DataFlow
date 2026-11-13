@@ -1651,8 +1651,8 @@ def _parse_json(value: Any) -> str | None:
             # ``1.10`` as ``1.1`` and ``1e2`` as ``100.0``. Strings keep their
             # escapes and keys their order; only insignificant whitespace
             # goes. A native JSON column (jsonb, MySQL JSON, VARIANT, BSON)
-            # may still normalise on store: docs/ZERO_LOSS_PROPERTIES.md,
-            # Property 8 "JSON number spelling".
+            # may still normalise on store: docs/use/verification.md,
+            # "Numbers inside JSON".
             del parsed
             return compact_json_text(value)
     elif isinstance(value, (dict, list, tuple, set, frozenset)):

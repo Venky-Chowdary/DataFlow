@@ -19,8 +19,8 @@ no index, collection or file is created.
 
 The Mongo URI comes from ``--uri`` or, like the API, from ``MONGODB_URI`` /
 ``MONGO_URL`` / ``MONGO_PRIVATE_URL``. Key material is never printed; keys are
-shown by their public id (``ak_…``). See docs/AUDIT_CHAIN_PRODUCTION_CHECK.md
-for the equivalent mongosh queries.
+shown by their public id (``ak_…``). See docs/operate/security.md (the audit
+chain).
 """
 
 from __future__ import annotations

@@ -1,11 +1,22 @@
-"""Connector capability registry (sidecar — NOT transfer-liveness SSOT).
+"""Connector capability registry and the one function that answers for it.
 
-Holds CDC notes, rate limits, batch sizes, and orchestrator hints.
+:func:`get_connector_capability` is the single source of truth for what a
+connector can do. Every other reader (catalog, Pilot facts, the Decision
+Kernel hash, ``docs/reference/connectors.md``) goes through it. It composes
+three facts that each have exactly one owner, and never restates them:
 
-``transfer_ready`` on static ``CAPABILITY_REGISTRY`` entries is marketing-only
-and is **always overwritten** by ``get_connector_capability`` from
-``src.transfer.connector_capabilities`` (driver/file caps + package probes).
-Never read ``CAPABILITY_REGISTRY[k]["transfer_ready"]`` directly for catalog UI.
+* read / write / introspect / preflight and ``transfer_ready`` come from
+  ``src.transfer.connector_capabilities`` (driver and file tables plus the
+  package probe);
+* ``supports_cdc`` (can this *source* drive CDC) comes from the list the
+  Validate gate enforces, ``services.preflight_cursor_gate.cdc_source_supported``;
+* ``merge_strategy`` comes from ``connectors.merge_registry``.
+
+The static ``CAPABILITY_REGISTRY`` below only holds what has no other owner:
+tier, write-mode flags, CDC notes, rate limits, batch sizes and orchestrator
+hints. Its ``transfer_ready`` and ``supports_cdc`` values are overwritten by
+the function, so never read ``CAPABILITY_REGISTRY[k]`` directly for either.
+``tests/test_connector_capability_single_source.py`` holds the three together.
 """
 
 from __future__ import annotations
@@ -639,7 +650,9 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "transfer_ready": True,
         "tier": TIER_HIGHEST,
         "pattern": "streaming",
-        "supports_cdc": True,
+        # Not a CDC source: the Validate gate refuses it. It can receive a CDC stream.
+        "supports_cdc": False,
+        "supports_cdc_sink": True,
         "supports_streaming": True,
         "supports_upsert": False,
         "supports_append": True,
@@ -1083,7 +1096,9 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "transfer_ready": True,
         "tier": TIER_HIGH,
         "pattern": "batch",
-        "supports_cdc": True,
+        # Not a CDC source: the Validate gate refuses it. It can receive a CDC stream.
+        "supports_cdc": False,
+        "supports_cdc_sink": True,
         "supports_streaming": False,
         "supports_upsert": True,
         "supports_append": True,
@@ -1106,7 +1121,9 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "transfer_ready": True,
         "tier": TIER_HIGH,
         "pattern": "batch",
-        "supports_cdc": True,
+        # Not a CDC source: the Validate gate refuses it. It can receive a CDC stream.
+        "supports_cdc": False,
+        "supports_cdc_sink": True,
         "supports_streaming": False,
         "supports_upsert": True,
         "supports_append": True,
@@ -1123,6 +1140,22 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "cdc_prerequisites": (
             "At-least-once; deletes by document key; no LSN guard."
         ),
+    },
+    # Email is a send: rows are appended as messages, never keyed, replaced or merged.
+    "email": {
+        "transfer_ready": False,
+        "tier": TIER_STRATEGIC,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": True,
+        # Left at the registry default on purpose. Turning it off makes email an
+        # append-only destination at Validate (g_dest_append_only), which is a
+        # behaviour change for existing email routes, not a labelling fix.
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
     },
     "weaviate": {
         "transfer_ready": True,
@@ -1315,10 +1348,78 @@ def get_connector_capability(key: str) -> dict[str, Any]:
                     cap[flag] = False
         cap["driver_type"] = driver
         cap["driver_capabilities"] = caps
+        _apply_owned_facts(cap, key, normalized, driver)
     except Exception:
         if normalized in _FICTION:
             cap["transfer_ready"] = False
     return cap
+
+
+def _apply_owned_facts(cap: dict[str, Any], key: str, normalized: str, driver: str) -> None:
+    """Overwrite the fields another module owns, so no value is stated twice.
+
+    ``supports_cdc`` means "this source can drive CDC" and is exactly what the
+    Validate gate allows. ``supports_cdc_sink`` keeps the registry's separate
+    claim that a destination can receive a CDC stream; a CDC-capable source is
+    also a sink unless its entry says otherwise.
+    """
+    from connectors.merge_registry import MERGE_STRATEGIES
+    from services.preflight_cursor_gate import cdc_source_supported
+
+    declared_cdc = bool(cap.get("supports_cdc"))
+    requested = (key or "").strip().lower()
+    # A product judged by its own name (TimescaleDB) is asked under that name;
+    # a plain alias (``pg``, ``mongo``) is asked as the entry it resolves to.
+    source_cdc = cdc_source_supported(requested, driver) and cdc_source_supported(normalized, driver)
+    cap["supports_cdc"] = source_cdc
+    cap["supports_cdc_sink"] = bool(cap.get("supports_cdc_sink", declared_cdc))
+    strategy = MERGE_STRATEGIES.get(normalized) or MERGE_STRATEGIES.get(driver)
+    cap["merge_strategy"] = str(strategy.get("strategy")) if strategy else ""
+    # A file format with no entry of its own (ORC, PDF) would otherwise inherit
+    # the default "upsert: yes". A file is written whole; it has no keyed upsert.
+    from src.transfer.connector_capabilities import _FILE_CAPS
+
+    if normalized in _FILE_CAPS and normalized not in CAPABILITY_REGISTRY:
+        cap["supports_upsert"] = False
+        cap["supports_merge"] = False
+
+
+def capability_counts() -> dict[str, Any]:
+    """The connector counts the product publishes, each with what it counts.
+
+    ``transfer_live_drivers`` is the public number. The others exist because
+    they count different things (catalog tiles, or only two-way drivers) and
+    were being quoted as if they were the same figure.
+    """
+    from src.transfer.connector_capabilities import (
+        TRANSFER_READY_CATALOG_IDS,
+        resolve_driver_type,
+        transfer_live_driver_types,
+    )
+
+    live = transfer_live_driver_types()
+    catalog_drivers = sorted({resolve_driver_type(cid) for cid in TRANSFER_READY_CATALOG_IDS})
+    cdc_sources = sorted(k for k in CAPABILITY_REGISTRY if get_connector_capability(k)["supports_cdc"])
+    return {
+        "transfer_live_drivers": len(live),
+        "transfer_live_driver_types": live,
+        "transfer_ready_catalog_tiles": len(TRANSFER_READY_CATALOG_IDS),
+        "transfer_ready_catalog_drivers": len(catalog_drivers),
+        "cdc_source_engines": cdc_sources,
+        "definitions": {
+            "transfer_live_drivers": (
+                "Unique driver and file-format types that can run a transfer on this "
+                "server right now (two-way, destination-only, file and first-class "
+                "source-only), excluding fixture-only SDK sources. The public count."
+            ),
+            "transfer_ready_catalog_tiles": "Catalog ids marked transfer-ready, hosted twins included.",
+            "transfer_ready_catalog_drivers": (
+                "Unique drivers behind those tiles. Smaller than transfer_live_drivers "
+                "because several tiles share one driver and file formats are not tiles here."
+            ),
+            "cdc_source_engines": "Registry entries the Validate gate accepts as a CDC source.",
+        },
+    }
 
 
 def is_append_only_destination(key: str) -> bool:
@@ -1449,10 +1550,13 @@ def export_live_capability_matrix() -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "unique_driver_count": len(engines),
         "catalog_transfer_ready_tile_count": len(TRANSFER_READY_CATALOG_IDS),
+        "transfer_live_driver_count": capability_counts()["transfer_live_drivers"],
         "missing_static_registry": missing_static,
         "engines": engines,
         "honesty_note": (
-            "unique_driver_count is the public live count — not catalog tile count. "
+            "transfer_live_driver_count is the public live count (capability_counts). "
+            "unique_driver_count counts only the drivers behind transfer-ready catalog "
+            "tiles, and neither is the catalog tile count. "
             "transfer_ready is forced from connector_capabilities SSOT."
         ),
     }

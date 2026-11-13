@@ -2,7 +2,7 @@
 exactly-once claim, and the six wizard labels unchanged.
 
 This was the regression for the phase-1 design note
-``docs/design/set-based-engine-plan.md``. 1415f1f0f ("chore: remove
+(the set-based engine plan, under the old docs tree). 1415f1f0f ("chore: remove
 non-runtime documentation") deleted that note with the rest of ``docs/``, and
 the note no longer described the code (it said the canvas files were not on
 this branch and that join/lookup/aggregate were future work; both changed).

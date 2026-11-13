@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import logging
 from preflight.models import GateStatus
-from services.preflight_cursor_gate import build_sync_contract_gate, source_commit_facts
+from services.preflight_cursor_gate import (
+    SOURCE_PRODUCTS_JUDGED_BY_OWN_NAME,
+    build_sync_contract_gate,
+    source_commit_facts,
+)
 from typing import Any
 
 logger = logging.getLogger("services.preflight_service")
@@ -91,16 +95,7 @@ def run_transfer_policy_gates(
     product = str((source_config or {}).get("type") or "").strip().lower()
     # A TimescaleDB connector must not pass g9 because a driver alias rewrote
     # the format to postgresql. The product id is the one the operator saved.
-    if product in {
-        "timescaledb",
-        "timescale",
-        "cockroachdb",
-        "citus",
-        "greenplum",
-        "yugabytedb",
-        "redshift",
-        "duckdb",
-    }:
+    if product in SOURCE_PRODUCTS_JUDGED_BY_OWN_NAME:
         src = product
     kind = (source_kind or "file").strip().lower()
     gates: list[dict[str, Any]] = []

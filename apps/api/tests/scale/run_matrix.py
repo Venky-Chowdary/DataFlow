@@ -3,7 +3,7 @@
     cd apps/api && DATAFLOW_SCALE_MATRIX=1 PYTHONPATH=. python -m tests.scale.run_matrix
 
 Options: ``--rows`` (default 100000), ``--engines pg,mysql,...``, ``--out``
-(JSON evidence), ``--markdown`` (result table for ``docs/SCALE_MATRIX_SQL.md``).
+(JSON evidence), ``--markdown`` (a Markdown result table).
 Engines that do not answer are reported as ``skip`` with the exact reason —
 never as a pass, and never omitted.
 """

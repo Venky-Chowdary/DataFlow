@@ -800,5 +800,5 @@ def execution_contract_dict() -> dict[str, Any]:
             "Append sinks require ack / watermark persistence fail-closed.",
             "Orphan/claim reclaim uses resume only when durable progress exists.",
         ],
-        "docs": "docs/EXECUTION_ENGINE_CONTRACT.md",
+        "docs": "docs/use/sync-modes.md",
     }
