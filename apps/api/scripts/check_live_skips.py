@@ -74,6 +74,7 @@ class CheckResult:
     problems: list[str] = field(default_factory=list)
     min_executed: int = 0
     opt_in: str = ""
+    proves: list[str] = field(default_factory=list)
 
     def count(self, outcome: str) -> int:
         return sum(1 for c in self.cases if c.outcome == outcome)
@@ -111,6 +112,7 @@ class CheckResult:
             "mode": self.mode,
             "enforced": self.enforced,
             "engines": list(self.engines),
+            "proves": list(self.proves),
             "status": self.status,
             "ran": self.ran,
             "not_run_reason": self.not_run_reason,
@@ -155,6 +157,9 @@ def load_manifest(path: Path = MANIFEST) -> dict[str, Any]:
         unknown = set(job.get("engines") or []) - set(data.get("engine_tokens") or {})
         if unknown:
             raise ValueError(f"{path}: job {name!r} names engines without tokens: {sorted(unknown)}")
+        stray = set(job.get("proves") or []) - set(job.get("engines") or [])
+        if stray:
+            raise ValueError(f"{path}: job {name!r} proves engines it does not start: {sorted(stray)}")
         for entry in job.get("expected_skips") or []:
             missing = [k for k in ("test", "reason", "why") if not str(entry.get(k) or "").strip()]
             if missing:
@@ -246,6 +251,7 @@ def check(
         cases=list(cases),
         min_executed=int(spec.get("min_executed") or 0),
         opt_in=str(spec.get("opt_in") or ""),
+        proves=list(spec.get("proves") or []),
     )
     if not_run:
         if not result.opt_in and result.enforced:

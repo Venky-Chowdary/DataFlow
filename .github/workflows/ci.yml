@@ -859,6 +859,37 @@ jobs:
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
+  # A4: which engines CI actually ran green. Merges the live-engine results
+  # (scripts/check_live_skips.py) into connector_ci_evidence.json, the file
+  # the connector capability page reads. Configuration alone never makes an
+  # engine "live-verified". Reporting only: the proving jobs carry the gate.
+  live-engine-evidence:
+    name: Connector CI evidence
+    needs: [no-config-transfer, cdc-sqlserver, cdc-oracle, api-and-web]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download live-engine results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: live-engine-*
+          path: ${{ runner.temp }}/live-engine
+          merge-multiple: true
+
+      - name: Build connector CI evidence (stdlib only)
+        run: |
+          python3 apps/api/scripts/connector_ci_evidence_report.py --results "$RUNNER_TEMP/live-engine" --out "$RUNNER_TEMP/connector-ci-evidence/connector_ci_evidence.json"
+
+      - name: Upload connector CI evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-ci-evidence
+          path: ${{ runner.temp }}/connector-ci-evidence/connector_ci_evidence.json
+          if-no-files-found: error
+
   security:
     runs-on: ubuntu-latest
     steps:

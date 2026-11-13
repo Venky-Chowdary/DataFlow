@@ -8,7 +8,10 @@
     "pytest node id), `reason` (regex the skip message must match) and `why`.",
     "Modes: strict = every skip must be expected; engine_scoped = a skip whose message",
     "names one of the job's engines must be expected (whole-suite jobs); report = counted",
-    "and published, never fails the job."
+    "and published, never fails the job.",
+    "`proves` names the engines the job is the proof for; the others in `engines` are",
+    "peers it needs. An engine is live-verified only by a green job that proves it, and a",
+    "red job that proves it makes it red. `emulated` engines ran against an emulator."
   ],
   "engine_tokens": {
     "postgresql": ["postgres", "postgresql", "pg", "pgvector", "psycopg", "psycopg2", "libpq"],
@@ -25,6 +28,7 @@
   },
   "jobs": {
     "no-config-transfer": {
+      "proves": ["postgresql", "mysql", "mongodb"],
       "workflow": ".github/workflows/ci.yml",
       "mode": "strict",
       "engines": ["postgresql", "mysql", "mongodb"],
@@ -32,6 +36,7 @@
       "expected_skips": []
     },
     "cdc-sqlserver": {
+      "proves": ["sqlserver"],
       "workflow": ".github/workflows/ci.yml",
       "mode": "strict",
       "engines": ["sqlserver", "postgresql", "mysql"],
@@ -39,6 +44,7 @@
       "expected_skips": []
     },
     "cdc-oracle": {
+      "proves": ["oracle"],
       "workflow": ".github/workflows/ci.yml",
       "mode": "strict",
       "engines": ["oracle"],
@@ -47,6 +53,7 @@
       "expected_skips": []
     },
     "cdc-matrix": {
+      "proves": ["postgresql", "mysql", "mongodb", "redis"],
       "workflow": ".github/workflows/ci.yml",
       "mode": "strict",
       "engines": ["postgresql", "mysql", "mongodb", "redis"],
@@ -70,6 +77,8 @@
       ]
     },
     "warehouse-sku": {
+      "proves": ["bigquery", "snowflake"],
+      "emulated": ["bigquery", "snowflake"],
       "workflow": ".github/workflows/ci.yml",
       "mode": "strict",
       "engines": ["bigquery", "snowflake"],
@@ -77,6 +86,7 @@
       "expected_skips": []
     },
     "engine-suite": {
+      "proves": ["postgresql", "mysql", "mongodb", "redis", "kafka", "sqlserver"],
       "workflow": ".github/workflows/full-suite.yml",
       "mode": "engine_scoped",
       "engines": ["postgresql", "mysql", "mongodb", "redis", "kafka", "sqlserver"],
@@ -84,6 +94,7 @@
       "expected_skips": []
     },
     "api-tests": {
+      "proves": [],
       "workflow": ".github/workflows/ci.yml",
       "mode": "report",
       "engines": ["postgresql", "mysql", "mongodb", "redis", "bigquery", "gcs", "adls"],

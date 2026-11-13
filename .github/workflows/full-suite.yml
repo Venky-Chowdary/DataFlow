@@ -266,6 +266,11 @@ jobs:
         run: |
           python scripts/check_live_skips.py --job engine-suite --junit /tmp/pytest-junit.xml --out "$RUNNER_TEMP/live-engine/engine-suite.json"
 
+      - name: Connector CI evidence (nightly engines, incl. Kafka)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 apps/api/scripts/connector_ci_evidence_report.py --results "$RUNNER_TEMP/live-engine" --out "$RUNNER_TEMP/live-engine/evidence/connector_ci_evidence.json"
+
       - name: Upload live-engine result
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
