@@ -1,0 +1,60 @@
+{
+ "suggestions": [
+  {
+   "source": "status",
+   "target": "order_status",
+   "confidence": 0.86,
+   "kind": "synonym",
+   "reason": "Synonyms in the 'status' group.",
+   "selected": true,
+   "alternatives": [],
+   "compat": {
+    "verdict": "lossy",
+    "reasons": [
+     {
+      "kind": "precision",
+      "message": "VARCHAR \u2192 VARCHAR(20) declares precision, scale or a time zone the source never proved."
+     }
+    ]
+   }
+  },
+  {
+   "source": "customer_email",
+   "target": "email_address",
+   "confidence": 0.78,
+   "kind": "concept",
+   "reason": "Both name the same concept (email).",
+   "selected": true,
+   "alternatives": [],
+   "compat": {
+    "verdict": "lossy",
+    "reasons": [
+     {
+      "kind": "precision",
+      "message": "VARCHAR \u2192 VARCHAR(120) declares precision, scale or a time zone the source never proved."
+     }
+    ]
+   }
+  },
+  {
+   "source": "order_amt",
+   "target": "total_amount",
+   "confidence": 0.78,
+   "kind": "concept",
+   "reason": "Both name the same concept (amount).",
+   "selected": true,
+   "alternatives": [],
+   "compat": {
+    "verdict": "lossy",
+    "reasons": [
+     {
+      "kind": "precision",
+      "message": "DECIMAL(38,2) \u2192 DECIMAL(12,2) has fewer digits or less scale: values round or overflow."
+     }
+    ]
+   }
+  }
+ ],
+ "learned_pairs_used": 0,
+ "mode": "all"
+}
