@@ -24,6 +24,8 @@ STORE_MODULES = {
     "tenant_store", "resource_acl", "byok_key_manager", "notification_store", "shape_draft_store",
     "preflight_run_store", "cdc_mapping_review", "mcp_invocation_log", "audit_anchor",
     "session_policy", "sso_enforcement", "ip_allowlist_policy", "mfa_enforcement",
+    # Transfer plans: file I/O plus a cross-process lock wait of up to 30 s (PS-1).
+    "transfer_plan_store",
 }
 OFFLOAD = {"to_thread", "run_in_threadpool", "run_in_executor", "run_sync"}
 #: Startup work, before the API serves anything.
@@ -228,3 +230,135 @@ def test_the_stall_limit_still_fails_a_blocked_loop():
     assert _stall_limit(0.005) == STALL_FLOOR
     assert _stall_limit(0.06) == pytest.approx(0.24)
     assert _stall_limit(5.0) == STALL_CEILING < BLOCK_SECONDS - 0.01
+
+
+# ---------------------------------------------------------------------------
+# Transfer plans (PS-1): file reads plus a cross-process lock wait of up to 30 s
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def plan_store(tmp_path, monkeypatch):
+    """An isolated plan store holding one mapped plan; reads can be made slow."""
+    from services import transfer_plan_store as plans
+
+    monkeypatch.setattr(plans, "STORE_PATH", tmp_path / "transfer_plans.json")
+    monkeypatch.setattr("services.audit_log.STORE_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+    plan = plans.create_plan({"name": "loop", "source_columns": ["id"], "target_columns": ["id"]})
+    plans.sync_ui_mappings(plan.id, [{"source": "id", "target": "id", "confidence": 1.0}])
+    state = {"plan_id": plan.id, "slow": False, "reads": 0}
+    real_load = plans._load_all
+
+    def slow_load():
+        if state["slow"]:
+            state["reads"] += 1
+            time.sleep(BLOCK_SECONDS)
+        return real_load()
+
+    monkeypatch.setattr(plans, "_load_all", slow_load)
+    return state
+
+
+def _plan_routes(plan_id: str) -> list[tuple[str, str, dict | None]]:
+    base = f"/api/v1/transfer/plans/{plan_id}"
+    return [
+        ("GET", "/api/v1/transfer/plans", None),
+        ("POST", "/api/v1/transfer/plans", {"name": "loop-2"}),
+        ("GET", base, None),
+        ("PATCH", base, {"name": "renamed"}),
+        ("POST", f"{base}/mappings", {"mappings": [{"source": "id", "target": "id", "confidence": 1.0}]}),
+        ("POST", f"{base}/approve", None),
+        ("GET", f"{base}/run-payload", None),
+        ("GET", f"{base}/preflight", None),
+        ("GET", f"{base}/reversibility", None),
+        ("POST", "/api/v1/transfer/plans/00000000-0000-4000-8000-000000000000/map", {}),
+    ]
+
+
+async def _plan_burst(client: httpx.AsyncClient, routes, *, while_waiting=None):
+    """Every plan route at once, then /health: the worst loop tick, /health's latency, statuses."""
+    lags: list[float] = []
+
+    async def ticker() -> None:
+        while True:
+            started = time.perf_counter()
+            await asyncio.sleep(0.01)
+            lags.append(time.perf_counter() - started - 0.01)
+
+    tick = asyncio.create_task(ticker())
+    await asyncio.sleep(0.05)
+    lags.clear()
+    pending = asyncio.gather(*[client.request(m, p, json=b) for m, p, b in routes])
+    await asyncio.sleep(0.05)
+    started = time.perf_counter()
+    health = await client.get("/health")
+    health_seconds = time.perf_counter() - started
+    assert health.status_code == 200
+    max_lag = max(lags)
+    if while_waiting is not None:
+        while_waiting()
+    responses = await pending
+    tick.cancel()
+    return max_lag, health_seconds, [(r.request.url.path, r.status_code) for r in responses]
+
+
+def _run_plan_scenario(plan_store, block):
+    from services.route_table_warmup import warm_route_table
+    from src.main import app
+
+    routes = _plan_routes(plan_store["plan_id"])
+
+    async def scenario():
+        await asyncio.to_thread(warm_route_table, app)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1", timeout=60) as client:
+            for method, path, body in routes:
+                await client.request(method, path, json=body)
+            await client.get("/health")
+            baseline, _, _ = await _plan_burst(client, routes)
+            release = block()
+            return baseline, *(await _plan_burst(client, routes, while_waiting=release))
+
+    return asyncio.run(scenario())
+
+
+def test_health_answers_while_plan_routes_wait_on_a_slow_plan_store(plan_store):
+    def block():
+        plan_store["slow"] = True
+        return None
+
+    baseline, max_lag, health_seconds, statuses = _run_plan_scenario(plan_store, block)
+    assert plan_store["reads"] >= len(_plan_routes("x")), "every plan route reached the (slow) store"
+    assert all(code < 500 for _path, code in statuses), statuses
+    assert health_seconds < BLOCK_SECONDS, f"/health waited {health_seconds:.2f}s behind plan-store reads"
+    limit = _stall_limit(baseline)
+    assert max_lag < limit, f"the event loop stalled {max_lag:.2f}s (limit {limit:.2f}s, unblocked {baseline:.3f}s)"
+
+
+def test_health_answers_while_plan_writes_wait_for_the_plan_store_lock(plan_store, monkeypatch):
+    """Another process holds the plan store: writers wait for it off the loop."""
+    import fcntl
+
+    from services import transfer_plan_store as plans
+
+    monkeypatch.setattr(plans, "LOCK_TIMEOUT_SECONDS", 10.0)
+    lock_path = plans.STORE_PATH.with_name(plans.STORE_PATH.name + ".lock")
+    holder = open(lock_path, "a+")  # noqa: SIM115 - held across the burst, closed below
+
+    def block():
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+
+        def release():
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+        return release
+
+    try:
+        baseline, max_lag, health_seconds, statuses = _run_plan_scenario(plan_store, block)
+    finally:
+        holder.close()
+    assert all(code < 500 for _path, code in statuses), statuses
+    assert health_seconds < BLOCK_SECONDS, f"/health waited {health_seconds:.2f}s behind a plan write's lock wait"
+    limit = _stall_limit(baseline)
+    assert max_lag < limit, f"the event loop stalled {max_lag:.2f}s (limit {limit:.2f}s, unblocked {baseline:.3f}s)"

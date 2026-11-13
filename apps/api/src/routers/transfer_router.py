@@ -760,7 +760,7 @@ class SyncMappingsRequest(BaseModel):
 async def list_transfer_plans(limit: int = 50):
     from services.transfer_plan_store import list_plans
 
-    plans = list_plans(limit=limit)
+    plans = await asyncio.to_thread(list_plans, limit=limit)
     return {
         "plans": [
             {
@@ -788,20 +788,24 @@ async def create_transfer_plan(body: CreatePlanRequest, request: Request):
         str((side or {}).get("connector_id") or "") for side in (body.source, body.destination)
     ))
 
-    plan = create_plan(body.model_dump())
-    append_audit_event(
-        action="transfer_plan.created",
-        resource=f"plan/{plan.id}",
-        details={"name": plan.name, "source_columns": len(plan.source_columns)},
-    )
-    return {"plan": plan.to_dict()}
+    def _create() -> dict:
+        plan = create_plan(body.model_dump())
+        append_audit_event(
+            action="transfer_plan.created",
+            resource=f"plan/{plan.id}",
+            details={"name": plan.name, "source_columns": len(plan.source_columns)},
+        )
+        return {"plan": plan.to_dict()}
+
+    # Plan-store calls wait on file I/O and the store lock: off the event loop.
+    return await asyncio.to_thread(_create)
 
 
 @router.get("/plans/{plan_id}")
 async def get_transfer_plan(plan_id: str):
     from services.transfer_plan_store import get_plan
 
-    plan = get_plan(plan_id)
+    plan = await asyncio.to_thread(get_plan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     return {"plan": plan.to_dict()}
@@ -812,7 +816,7 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
     from services.transfer_plan_service import patch_plan
 
     try:
-        plan = patch_plan(plan_id, body.model_dump(exclude_none=True))
+        plan = await asyncio.to_thread(patch_plan, plan_id, body.model_dump(exclude_none=True))
         return {"plan": plan.to_dict()}
     except ValueError as e:
         raise safe_http_exception(
@@ -834,7 +838,9 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
     from services.transfer_plan_store import PlanVersionConflict
 
     try:
-        plan = sync_plan_mappings(plan_id, body.mappings, base_version=body.base_version)
+        plan = await asyncio.to_thread(
+            sync_plan_mappings, plan_id, body.mappings, base_version=body.base_version
+        )
         return {"plan": plan.to_dict()}
     except PlanVersionConflict as e:
         raise HTTPException(
@@ -860,7 +866,8 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
     from services.transfer_plan_service import run_plan_mapping
 
     try:
-        return run_plan_mapping(
+        return await asyncio.to_thread(
+            run_plan_mapping,
             plan_id,
             validation_mode=body.validation_mode,
             use_llm=body.use_llm,
@@ -901,7 +908,7 @@ class PlanPreflightRequest(BaseModel):
 async def get_plan_preflight(plan_id: str, run_id: str = ""):
     from services.plan_preflight_job import get_plan_preflight_job
 
-    job = get_plan_preflight_job(plan_id, run_id)
+    job = await asyncio.to_thread(get_plan_preflight_job, plan_id, run_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No Validate run for this plan")
     return job
@@ -922,7 +929,7 @@ async def preflight_transfer_plan(
     from services.transfer_plan_service import run_plan_preflight
 
     payload = body or PlanPreflightRequest()
-    _refuse_unavailable_plan_destination(plan_id)
+    await asyncio.to_thread(_refuse_unavailable_plan_destination, plan_id)
     try:
         ack = resolve_acknowledgments(
             compliance=payload.compliance_acknowledged,
@@ -938,7 +945,8 @@ async def preflight_transfer_plan(
         ) from e
 
     if payload.async_run:
-        job = start_plan_preflight_job(
+        job = await asyncio.to_thread(
+            start_plan_preflight_job,
             plan_id,
             acknowledgments=ack,
             shape_recipe=payload.shape_recipe,
@@ -972,7 +980,7 @@ async def approve_transfer_plan(plan_id: str, version: Optional[int] = None):
     from services.transfer_plan_service import approve_plan
 
     try:
-        plan = approve_plan(plan_id, version)
+        plan = await asyncio.to_thread(approve_plan, plan_id, version)
         return {"plan": plan.to_dict()}
     except ValueError as e:
         raise safe_http_exception(
@@ -989,7 +997,7 @@ async def transfer_plan_run_payload(plan_id: str):
     from services.transfer_plan_service import build_run_payload
 
     try:
-        return build_run_payload(plan_id)
+        return await asyncio.to_thread(build_run_payload, plan_id)
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -1227,7 +1235,8 @@ async def execute_transfer_json(
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import merge_plan_into_run
         try:
-            payload = merge_plan_into_run(
+            payload = await asyncio.to_thread(
+                merge_plan_into_run,
                 str(body.plan_id).strip(),
                 request_mappings=list(request_obj.mappings or []),
                 request_column_types=dict(request_obj.column_types or {}),
@@ -1322,7 +1331,7 @@ async def execute_transfer_json(
 
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_store import attach_job
-        attach_job(str(body.plan_id).strip(), job_id, status="running")
+        await asyncio.to_thread(attach_job, str(body.plan_id).strip(), job_id, status="running")
 
     _stamp_job_mapping_artifacts(
         job_id,
@@ -1744,7 +1753,8 @@ async def run_universal_transfer(
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
-            payload = merge_plan_into_run(
+            payload = await asyncio.to_thread(
+                merge_plan_into_run,
                 plan_id.strip(),
                 request_mappings=form_mappings,
                 request_column_types=dict(request_obj.column_types or {}),
@@ -1917,7 +1927,7 @@ async def run_universal_transfer(
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_store import attach_job
-        attach_job(plan_id.strip(), job_id, status="running")
+        await asyncio.to_thread(attach_job, plan_id.strip(), job_id, status="running")
 
     _stamp_job_mapping_artifacts(
         job_id,
