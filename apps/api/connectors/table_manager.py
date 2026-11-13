@@ -492,6 +492,8 @@ def retire_generic_sql_overwrite(
     )
     engine = get_sqlalchemy_engine(gcfg)
     try:
+        if _is_clickhouse(dialect, engine):
+            return _retire_clickhouse_overwrite(engine, table_name, live_ref, bak_ref, backup)
         with engine.connect() as conn:
             try:
                 conn.execute(sa.text(copy_sql))  # nosec B608 - quoted identifiers
@@ -541,6 +543,9 @@ def restore_generic_sql_overwrite(
     dialect, live_ref, bak_ref = _generic_refs(gcfg, table_name, schema, backup)
     engine = get_sqlalchemy_engine(gcfg)
     try:
+        if _is_clickhouse(dialect, engine):
+            _restore_clickhouse_overwrite(engine, table_name, live_ref, bak_ref)
+            return
         if dialect in {"sqlserver", "mssql"}:
             from services.dest_overwrite_swap import sqlserver_swap_staged_dest
 
@@ -607,6 +612,87 @@ def discard_generic_sql_overwrite(
             _drop_quietly(conn, bak_ref, raise_errors=True)
     finally:
         release_engine(engine)
+
+
+def _clickhouse_run(conn: Any, sql: str) -> Any:
+    import sqlalchemy as sa
+
+    result = conn.execute(sa.text(sql))  # nosec B608 - quoted identifiers
+    try:
+        conn.commit()
+    except Exception:  # noqa: BLE001 - ClickHouse statements are not transactional
+        pass
+    return result
+
+
+def _clickhouse_exists(conn: Any, ref: str) -> bool:
+    return bool(int(_clickhouse_run(conn, f"EXISTS TABLE {ref}").scalar() or 0))
+
+
+def _is_clickhouse(dialect: str, engine: Any) -> bool:
+    """A ClickHouse connector, or a generic SQL connection whose URL is ClickHouse."""
+    name = str(getattr(getattr(engine, "dialect", None), "name", "") or "")
+    return dialect == "clickhouse" or name.lower().startswith("clickhouse")
+
+
+def _retire_clickhouse_overwrite(
+    engine: Any, table_name: str, live_ref: str, bak_ref: str, backup: str
+) -> tuple[str, str | None]:
+    """ClickHouse row copy: same engine and sorting key, then TRUNCATE.
+
+    The generic path failed both ways on ClickHouse. ``CREATE TABLE AS
+    SELECT`` needs an ENGINE on servers without ``default_table_engine``, and
+    the fallback then emptied the table with no copy. Newer servers accept the
+    copy, but ``DELETE FROM t`` without WHERE is a syntax error there, so every
+    overwrite of an existing table failed. ``CREATE TABLE bak AS live`` copies
+    the live table's definition; a copy that cannot be made refuses the
+    overwrite and leaves the live rows in place.
+    """
+    with engine.connect() as conn:
+        try:
+            if not _clickhouse_exists(conn, live_ref):
+                return "absent", None
+        except Exception as exc:
+            raise TableDropError(table_name, exc) from exc
+        try:
+            _clickhouse_run(conn, f"CREATE TABLE {bak_ref} AS {live_ref}")
+            _clickhouse_run(conn, f"INSERT INTO {bak_ref} SELECT * FROM {live_ref}")  # nosec B608
+        except Exception as exc:
+            _drop_quietly(conn, bak_ref)
+            raise TableDropError(
+                table_name, f"could not keep a copy of the live rows: {exc}"
+            ) from exc
+        try:
+            _clickhouse_run(conn, f"TRUNCATE TABLE {live_ref}")
+        except Exception as exc:
+            _drop_quietly(conn, bak_ref)
+            raise TableDropError(table_name, exc) from exc
+    return "emptied", backup
+
+
+def _restore_clickhouse_overwrite(
+    engine: Any, table_name: str, live_ref: str, bak_ref: str
+) -> None:
+    """Put the copied rows back into the live table, then drop the copy.
+
+    The copy is dropped only after the rows are back, so a failed restore can
+    be run again.
+    """
+    with engine.connect() as conn:
+        if not _clickhouse_exists(conn, bak_ref):
+            raise TableDropError(table_name, f"backup {bak_ref} is missing")
+        # The failed run may have added columns to the live table: copy the
+        # columns both sides have, by name.
+        live_cols = list(_clickhouse_run(conn, f"SELECT * FROM {live_ref} WHERE 0").keys())  # nosec B608
+        bak_cols = {
+            str(c).casefold()
+            for c in _clickhouse_run(conn, f"SELECT * FROM {bak_ref} WHERE 0").keys()  # nosec B608
+        }
+        quote = _generic_column_quoter("clickhouse")
+        cols = ", ".join(quote(c) for c in live_cols if str(c).casefold() in bak_cols)
+        _clickhouse_run(conn, f"TRUNCATE TABLE {live_ref}")
+        _clickhouse_run(conn, f"INSERT INTO {live_ref} ({cols}) SELECT {cols} FROM {bak_ref}")  # nosec B608
+        _drop_quietly(conn, bak_ref)
 
 
 def _generic_column_quoter(dialect: str) -> Callable[[str], str]:

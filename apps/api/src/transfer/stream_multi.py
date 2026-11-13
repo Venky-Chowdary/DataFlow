@@ -67,6 +67,28 @@ def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
     return _drop_destination_table(destination)
 
 
+def _settle_stream_set_aside(destination: EndpointConfig, exc: BaseException | None) -> None:
+    """Settle this stream's set-aside backup before the endpoint moves on.
+
+    One endpoint is rebound to each stream's table, so each stream's clear
+    records its backup on the same ``extra`` and the next stream's replaced
+    it. A Snowflake / BigQuery / Elasticsearch / S3 backup left that way made
+    the next overwrite of that table refuse (a backup next to a live object).
+    A stream that wrote drops its backup; a stream that failed puts it back.
+    """
+    from connectors.overwrite_set_aside import SET_ASIDE_ENGINES
+
+    engine_name = str((destination.extra or {}).get("overwrite_backup_engine") or "")
+    if engine_name not in SET_ASIDE_ENGINES:
+        return
+    from .engine_finish import _settle_backup_after_error, _settle_overwrite_backup
+
+    if exc is None:
+        _settle_overwrite_backup(destination, restore=False)
+    else:
+        _settle_backup_after_error(destination, exc)
+
+
 def run_non_cdc_multi_stream_sequential(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -407,7 +429,9 @@ def run_non_cdc_multi_stream_sequential(
                     # not the table its name matches (QA C3 per-stream queries).
                     count_source=source_patch is None,
                 )
+                _settle_stream_set_aside(destination, exc)
                 raise
+            _settle_stream_set_aside(destination, None)
             record_stream_health(
                 stream_health,
                 name=stream_name,

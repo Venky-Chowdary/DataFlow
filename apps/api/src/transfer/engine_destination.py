@@ -743,6 +743,26 @@ def _clear_destination_table(
             logger.error("full_refresh empty failed for %s: %s", table_name, exc)
             raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
         return True
+    from connectors.overwrite_set_aside import retire_set_aside, set_aside_engine
+
+    aside = set_aside_engine(db_type)
+    if aside:
+        # Snowflake, BigQuery and Elasticsearch replace the object, and S3
+        # replaces the export's objects. Dropping first left nothing to put
+        # back when every row was then quarantined: keep the previous
+        # generation aside and let _settle_overwrite_backup restore or drop it.
+        try:
+            backup = retire_set_aside(aside, cfg, table_name, schema)
+        except TableDropError as exc:
+            logger.error("full_refresh set-aside failed for %s: %s", table_name, exc)
+            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+        if backup:
+            extra = dict(destination.extra or {})
+            extra["overwrite_backup"] = backup
+            extra["overwrite_backup_engine"] = aside
+            destination.extra = extra
+        # S3 removes nothing here: its writer replaces the objects.
+        return aside != "s3"
     if db_type in ("postgresql", "redshift"):
         try:
             from connectors.table_manager import postgres_columns_to_keep
