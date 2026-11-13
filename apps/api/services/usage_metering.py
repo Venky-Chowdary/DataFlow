@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from services.atomic_file import write_json_atomic
+from services.atomic_file import locked_update, write_json_atomic
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 from services.workspace_filter import WorkspaceFilter
@@ -72,16 +72,17 @@ def record_transfer_usage(
         except Exception:
             _logger.exception("Mongo usage insert failed; falling back to file")
 
-    data = {"events": []}
-    if STORE_PATH.exists():
-        try:
-            data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            data = {"events": []}
-    events = list(data.get("events") or [])
-    events.append(event)
-    data["events"] = events[-5000:]
-    write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
+    with locked_update(STORE_PATH):  # one load-append-write at a time
+        data = {"events": []}
+        if STORE_PATH.exists():
+            try:
+                data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                data = {"events": []}
+        events = list(data.get("events") or [])
+        events.append(event)
+        data["events"] = events[-5000:]
+        write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
     return event_id
 
 

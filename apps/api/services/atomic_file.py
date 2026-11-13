@@ -117,6 +117,34 @@ def write_json_atomic(
         fsync_directory(path.parent)
 
 
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def path_update_lock(path: Path) -> threading.RLock:
+    """The process-wide re-entrant lock for one JSON store path."""
+    key = os.path.abspath(path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = _PATH_LOCKS[key] = threading.RLock()
+        return lock
+
+
+@contextlib.contextmanager
+def locked_update(path: Path) -> Iterator[None]:
+    """Hold ``path``'s lock across a load-modify-``write_json_atomic`` of it.
+
+    ``write_json_atomic`` makes each write whole, not a read-modify-write
+    sequence: two threads that both load, change and write keep only the
+    last writer's change. Stores without a lock of their own wrap the
+    sequence in this (in-process; cross-process callers need a file lock,
+    as the plan store has).
+    """
+    with path_update_lock(path):
+        yield
+
+
 def _open_sibling_temp(path: str) -> tuple[int, str]:
     """Create ``.<name>.<random>.tmp`` beside ``path``.
 
