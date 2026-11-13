@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+from services.reversibility_enforce import scan_pass
 from services.type_stamp_grammar import require_safe_type_stamp, require_safe_type_stamps
 from services.value_serializer import cell_to_string
 
@@ -475,6 +476,7 @@ def iter_sf_finished_bundles(
     )
 
 
+@scan_pass  # its rows are mapped again by the write: checked here, counted there (review 5, H-1)
 def _sf_scan_finished_bundles(**kwargs: Any) -> Any:
     from connectors.sql_write_materialize import SqlWriteAccumulator
 

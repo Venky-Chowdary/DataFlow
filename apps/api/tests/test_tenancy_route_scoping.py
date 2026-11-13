@@ -512,7 +512,56 @@ def _seed_sso_config(world) -> Seeded:
     return Seeded({"sso_type": "oidc"})
 
 
+def _seed_exit_system(world) -> Seeded:
+    """A Reversibility Proof exit system of A, declared through the real route on A's own connection."""
+    from services import exit_inventory, exit_store
+
+    connector_id = _seed_saved_connector(world).params["connector_id"]
+    made = world.admin_a.post("/api/v1/exit/systems", json={
+        "name": SENTINEL, "source": {"connector_id": connector_id},
+        "tables": [{"name": "tenancy_a_table", "key_columns": ["id"]}], "exit_window_hours": 24,
+    })
+    assert made.status_code == 201, made.text
+    system_id = made.json()["id"]
+    version = exit_store.get(exit_store.SYSTEMS, system_id)["version"]
+
+    def intact() -> bool:
+        kept = exit_store.get(exit_store.SYSTEMS, system_id)
+        return (kept is not None and kept["name"] == SENTINEL and kept["version"] == version
+                and kept.get("pii_acknowledgement") is None and not exit_inventory.rehearsals_of(system_id))
+
+    return Seeded({"system_id": system_id}, intact)
+
+
+def _seed_exit_rehearsal(world) -> Seeded:
+    """A finished, unsigned rehearsal of one of A's exit systems."""
+    from services import exit_inventory, exit_store
+
+    system = exit_store.get(exit_store.SYSTEMS, _seed_exit_system(world).params["system_id"])
+    rehearsal_id = f"exr_tenancy{_next(world):05d}"
+    exit_store.insert(exit_store.REHEARSALS, {
+        "id": rehearsal_id, "system_id": system["id"], "system_name": SENTINEL,
+        "workspace_id": world.workspace_a, "n": 1, "trigger": "manual", "actor": ADMIN_A,
+        "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:05:00Z",
+        "verdict": "proven", "verdict_reason": SENTINEL, "source": dict(system["source"]),
+        "extract_format": "jsonl", "window_seconds": 86400,
+        "definition_sha256": exit_inventory.definition_sha256(system), "pii_acknowledgement": None,
+        "required_roles": list(system["required_roles"]),
+        "tables": [{"name": "tenancy_a_table", "schema": None, "key_columns": ["id"], "job_id": None,
+                    "status": "proven", "reason": SENTINEL}],
+        "approvals": [], "signed": None, "_verify": None,
+    })
+
+    def intact() -> bool:
+        kept = exit_store.get(exit_store.REHEARSALS, rehearsal_id)
+        return kept is not None and kept["approvals"] == [] and kept["verdict_reason"] == SENTINEL
+
+    return Seeded({"rehearsal_id": rehearsal_id}, intact)
+
+
 SEEDERS: dict[str, Callable[[Any], Seeded]] = {
+    "exit_system": _seed_exit_system,
+    "exit_rehearsal": _seed_exit_rehearsal,
     "plan": _seed_plan,
     "job": _seed_job,
     "proposal": _seed_proposal,
@@ -581,6 +630,10 @@ _BODIES: dict[str, Any] = {
     "PATCH /api/v1/workspace/ai-providers/{provider}": {"api_key": "sk-tenancy-probe", "enabled": True},
     "PATCH /api/v1/workspace/tenant/{tenant_id}": {"name": "renamed-by-b"},
     "POST /api/v1/transform-library/{recipe_id}/preview": {"rows": [{"a": 1}]},
+    # The exit bodies refuse unknown fields (422 before the workspace check would run).
+    "PATCH /api/v1/exit/systems/{system_id}": {"name": "renamed-by-b"},
+    "POST /api/v1/exit/systems/{system_id}/pii-acknowledgement": {"reason": "tenancy probe"},
+    "POST /api/v1/exit/rehearsals/{rehearsal_id}/signoff": {"role": "engineering", "note": "tenancy probe"},
 }
 _QUERY: dict[str, dict[str, str]] = {
     "POST /api/v1/connectors/jobs/{job_id}/resume": {"request": "{}"},
@@ -640,9 +693,11 @@ def _leaks(response) -> bool:
 def world(tenancy_world, monkeypatch):  # noqa: F811
     from fastapi.testclient import TestClient
 
-    from services import contract_store, integrations_store, resource_acl
+    from services import contract_store, exit_store, integrations_store, resource_acl
 
     monkeypatch.setattr(resource_acl, "STORE_PATH", tenancy_world.data_dir / "resource-acls.jsonl")
+    monkeypatch.setattr(exit_store, "STORE_PATH", tenancy_world.data_dir / "exit_inventory.json")
+    monkeypatch.setattr(exit_store, "_db", lambda: None)
     monkeypatch.setattr(integrations_store, "STORE_PATH", tenancy_world.data_dir / "integrations.json")
     monkeypatch.setattr(integrations_store, "_keys_collection", lambda: None)
     contract_store.reset_contract_store()

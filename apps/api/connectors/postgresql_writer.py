@@ -15,6 +15,7 @@ from typing import Any
 from services.error_handling import TransferCancelled  # noqa: E402
 from services.schema_inference import infer_type
 from services.decision_kernel import materialize_dest_ddl
+from services.reversibility_enforce import scan_pass
 from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
@@ -1068,6 +1069,7 @@ def iter_pg_finished_bundles(
     )
 
 
+@scan_pass  # its rows are mapped again by the write: checked here, counted there (review 5, H-1)
 def _pg_scan_finished_bundles(**kwargs: Any) -> Any:
     """Map + finish every bundle, keep rejects, discard accepted tuples."""
     from connectors.sql_write_materialize import SqlWriteAccumulator

@@ -108,6 +108,13 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "An append lands on top of a previously verified table. Validate checks the table still exists with the row count the last verified run left; Execute re-verifies the full value digest before writing. A dropped or edited destination blocks until the operator accepts it (audited) or rebuilds with full refresh.",
   },
   {
+    id: "g24_reversibility",
+    code: "G24R",
+    label: "Reversibility",
+    icon: "refresh",
+    rule: "Only when the transfer is marked \"require reversibility\": every table's destination must be able to give the source back. A hashed, masked, redacted, dropped or narrowed column, a rounding or truncating cast, or a recipe step that changes values or rows blocks. A conditional cast passes only when the observed sample round-trips exactly, which is not proof for rows not sampled.",
+  },
+  {
     id: "g3f_population_fit",
     label: "Population fit",
     icon: "scan",

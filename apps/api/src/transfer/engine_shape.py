@@ -42,8 +42,10 @@ def _open_shape_runner(
     recipe that changes source-side truth has to run first or those decisions
     describe data that never reaches the writer.
     """
+    from services.reversibility_sources import note_recipe_inputs
     from services.shape_apply import is_typed_value_source
 
+    note_recipe_inputs(request, columns)
     return build_shape_runner(
         getattr(request, "shape_recipe", None),
         source_columns=list(columns or []),

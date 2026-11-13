@@ -22,7 +22,10 @@ REQUIRED_PACK_KEYS: tuple[str, ...] = ("content_sha256", "signature", "job_id")
 
 
 def _missing(pack: dict[str, Any]) -> list[str]:
-    missing = [key for key in REQUIRED_PACK_KEYS if key not in pack]
+    # An Exit Evidence Pack names its rehearsal, not a job.
+    required = REQUIRED_PACK_KEYS if pack.get("kind") != "exit_evidence" else (
+        "content_sha256", "signature", "system_id", "rehearsal_id")
+    missing = [key for key in required if key not in pack]
     signature = pack.get("signature")
     if "signature" in pack and not (isinstance(signature, dict) and signature.get("value")):
         missing.append("signature.value")

@@ -33,7 +33,7 @@ import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { LoadingBlock } from "./components/LoadingState";
-import { focusFromHash, inviteLinkToken, isInviteLinkRoute, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
+import { focusFromHash, inviteLinkToken, isInviteLinkRoute, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash, writeJobsDeepLink, exitFocusFromHash, type ExitFocus } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -57,6 +57,7 @@ const TransformsPage = lazyNamed(() => import("./pages/TransformsPage"), "Transf
 const TransformLibraryPage = lazyNamed(() => import("./pages/TransformLibraryPage"), "TransformLibraryPage");
 const JobsPage = lazyNamed(() => import("./pages/JobsPage"), "JobsPage");
 const ContractsPage = lazyNamed(() => import("./pages/ContractsPage"), "ContractsPage");
+const ExitReadinessPage = lazyNamed(() => import("./pages/ExitReadinessPage"), "ExitReadinessPage");
 const McpPage = lazyNamed(() => import("./pages/McpPage"), "McpPage");
 const QueryPage = lazyNamed(() => import("./pages/QueryPage"), "QueryPage");
 const SettingsPage = lazyNamed(() => import("./pages/SettingsPage"), "SettingsPage");
@@ -82,6 +83,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string; group: "plat
   { id: "transfer", label: "Transfer", icon: "transfer", desc: "Move data with preflight gates", group: "platform" },
   { id: "connectors", label: "Connectors", icon: "connectors", desc: "Saved sources & destinations", group: "platform" },
   { id: "contracts", label: "Contracts", icon: "shield", desc: "Schema agreements and breakers", group: "platform" },
+  { id: "exit", label: "Exit readiness", icon: "arrow-up-right", desc: "Rehearsed exits and evidence", group: "platform" },
   { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
   { id: "schedules", label: "Schedules", icon: "activity", desc: "Recurring syncs", group: "ops" },
   { id: "transforms", label: "Transforms", icon: "layers", desc: "Post-load SQL models", group: "ops" },
@@ -146,6 +148,11 @@ function AppShell({
     return focus?.jobId || focus?.panel
       ? { screen: focus.screen, jobId: focus.jobId, panel: focus.panel }
       : null;
+  });
+  /** Exit readiness deep link (`#/exit?system=…&rehearsal=…`); kept until the lazy page applies it. */
+  const [exitFocus, setExitFocus] = useState<(ExitFocus & { token: number }) | null>(() => {
+    const focus = exitFocusFromHash(window.location.hash);
+    return focus && (focus.system || focus.rehearsal) ? { ...focus, token: Date.now() } : null;
   });
   const [connectorsViewToken, setConnectorsViewToken] = useState(0);
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
@@ -214,6 +221,9 @@ function AppShell({
       }
       const focus = focusFromHash(hash);
       if (!focus) return;
+      // Read before setScreen rewrites the address to the bare screen.
+      const exit = exitFocusFromHash(hash);
+      if (exit && (exit.system || exit.rehearsal)) setExitFocus({ ...exit, token: Date.now() });
       setScreen(focus.screen);
       if (focus.jobId || focus.panel) {
         setSearchFocus({
@@ -946,6 +956,18 @@ function AppShell({
                 <div className={`df2-screen-keep ${showScreen("contracts")}`} hidden={screen !== "contracts"} aria-hidden={screen !== "contracts"}>
                 <PageErrorBoundary label="Contracts">
                   <ContractsPage active={screen === "contracts"} />
+                </PageErrorBoundary>
+                </div>
+              )}
+              {mountedScreens.has("exit") && (
+                <div className={`df2-screen-keep ${showScreen("exit")}`} hidden={screen !== "exit"} aria-hidden={screen !== "exit"}>
+                <PageErrorBoundary label="Exit readiness">
+                  <ExitReadinessPage
+                    active={screen === "exit"}
+                    connectors={connectors}
+                    focus={exitFocus}
+                    onOpenJob={(jobId) => writeJobsDeepLink(jobId)}
+                  />
                 </PageErrorBoundary>
                 </div>
               )}

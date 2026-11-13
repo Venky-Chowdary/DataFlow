@@ -246,6 +246,8 @@ def run_non_cdc_multi_stream_sequential(
             # cleared. The clear stops the next table inheriting an offset.
             # The copy is what lets the table that owns the checkpoint seek.
             stream_checkpoint = isolate_stream_checkpoint(checkpoint, stream_name)
+            # Rows the copy hands this table (the stream then writes its own count onto it).
+            handed_rows = int(getattr(stream_checkpoint, "rows_processed", 0) or 0)
             begin_table_population(checkpoint)
             # Every field naming the object moves to this stream: a field left
             # on the request's name made each stream overwrite the last.
@@ -425,6 +427,10 @@ def run_non_cdc_multi_stream_sequential(
                     "mirror": summary.get("mirror"),
                     "missing_keys": summary.get("missing_keys"),
                     "extra_keys": summary.get("extra_keys"),
+                    # Rows this stream's count holds from the checkpoint it resumed from: 0 when it
+                    # was handed none, else what its route recorded (review 6).
+                    "resumed_checkpoint_rows": summary.get("resumed_checkpoint_rows")
+                    if handed_rows else 0,
                 },
                 sync_mode=sync_mode,
                 source=source,

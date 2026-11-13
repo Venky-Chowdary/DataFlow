@@ -170,6 +170,7 @@ class ScheduleCreate(PolicyFieldsModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: Optional[bool] = None
+    require_reversibility: bool = False
     date_locale: str = ""
     number_locale: str = ""
     shape_recipe: dict[str, Any] = Field(default_factory=dict)
@@ -256,6 +257,7 @@ class ScheduleUpdate(PolicyFieldsModel):
     workspace_id: Optional[str] = None
     contract_id: Optional[str] = None
     require_signed_contract: Optional[bool] = None
+    require_reversibility: Optional[bool] = None
     date_locale: Optional[str] = None
     number_locale: Optional[str] = None
     shape_recipe: Optional[dict[str, Any]] = None
@@ -322,6 +324,7 @@ class ScheduleResponse(BaseModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
+    require_reversibility: bool = False
     date_locale: str = ""
     number_locale: str = ""
     shape_recipe: dict[str, Any] = Field(default_factory=dict)
@@ -455,6 +458,7 @@ class ScheduleSummaryResponse(BaseModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
+    require_reversibility: bool = False
     max_retries: int = 0
     retry_backoff_seconds: int = 60
     notify_on_failure: bool = True
