@@ -629,7 +629,10 @@ def plan_commit_safe_window(
         # Captured before anything is read: a row this run does not see belongs
         # to a transaction at or above this horizon.
         bound = dict(capture_bound() or {})
-        if bound.get("xmin"):
+        if bound.get("in_recovery"):
+            # C6: a hot standby's horizon follows its own replay point.
+            fallback = HOT_STANDBY_NOTE
+        elif bound.get("xmin"):
             return _plan_pg(
                 stored=stored,
                 metadata=metadata,
@@ -638,12 +641,13 @@ def plan_commit_safe_window(
                 bound=bound,
                 probe_late=probe_late,
             )
-        # A PostgreSQL-compatible source without snapshot functions falls back
-        # to the re-read window below; a horizon that could not be read is said.
-        fallback = "the source's snapshot horizon could not be read"
-        probe_error = str(bound.get("error") or "")
-        if probe_error:
-            probe_error = f"snapshot horizon unreadable: {probe_error}"
+        else:
+            # A PostgreSQL-compatible source without snapshot functions falls back
+            # to the re-read window below; a horizon that could not be read is said.
+            fallback = "the source's snapshot horizon could not be read"
+            probe_error = str(bound.get("error") or "")
+            if probe_error:
+                probe_error = f"snapshot horizon unreadable: {probe_error}"
 
     if strategy in (STRATEGY_OVERLAP, STRATEGY_PG):
         # PostgreSQL lands here only when its bound could not be captured, or
@@ -699,6 +703,16 @@ def plan_commit_safe_window(
         )
 
     return _unguarded(stored, "this source exposes no commit-order bound")
+
+
+#: Why a PostgreSQL hot standby (read replica) takes the re-read window (C6).
+HOT_STANDBY_NOTE = (
+    "the source is a PostgreSQL hot standby (read replica): its snapshot horizon "
+    "follows WAL replay, and nothing shows that the horizon this run stores and "
+    "the reads it is compared with come from the same replay point (a reader "
+    "endpoint can route them to replicas at different lag), so the route takes "
+    "the re-read window instead of the snapshot horizon"
+)
 
 
 def not_a_table_note(relation_kind: str) -> str:
@@ -1032,6 +1046,18 @@ def late_row_rule(bound: Mapping[str, Any]) -> tuple[str, int, tuple[int, ...]]:
     return "horizon", xmin, ()
 
 
+def _pg_in_recovery(cur: Any) -> bool:
+    """True on a hot standby. A server that cannot answer is judged a primary,
+    as before: the question is new, and an unanswerable one must not refuse."""
+    try:
+        cur.execute("SELECT pg_is_in_recovery()")
+        row = cur.fetchone()
+    except Exception:  # noqa: BLE001 — PostgreSQL-compatible engines may lack it
+        logger.debug("commit-safe window: pg_is_in_recovery() unavailable", exc_info=True)
+        return False
+    return bool(row and row[0] is True)
+
+
 def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
     """The snapshot horizon of the source right now (``{}`` when unreadable).
 
@@ -1052,6 +1078,8 @@ def capture_pg_bound(src_cfg: Mapping[str, Any]) -> dict[str, Any]:
             xip = [str(x) for x in (row[2] if row else None) or []]
             if row and row[0] and len(xip) <= PG_XIP_MAX:
                 open_subxacts = _open_subxacts(cur, xip, notes)
+            if _pg_in_recovery(cur):
+                return {"in_recovery": True}
     except Exception as exc:  # noqa: BLE001
         logger.warning("commit-safe window: snapshot horizon unreadable: %s", exc)
         return {"error": f"{type(exc).__name__}: {exc}"[:300]}
