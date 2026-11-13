@@ -708,21 +708,34 @@ jobs:
         run: |
           bash .github/scripts/start_ci_databases.sh mysql postgres-cdc sqlserver
 
+      # Python setup runs even when an engine failed to start (PR 424 CI: the
+      # start step failed, setup was skipped, and the `!cancelled()` pytest
+      # steps ran on /usr/bin/python with no pytest, 0 executed).
       - name: Set up Python
+        if: ${{ !cancelled() }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install API deps
+        if: ${{ !cancelled() }}
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r apps/api/requirements-dev.txt
 
+      - name: The test interpreter has pytest and both SQL Server DBAPIs
+        id: python_ready
+        if: ${{ !cancelled() }}
+        run: |
+          command -v python
+          python -c "import pytest, pymssql, pyodbc; print('pytest', pytest.__version__, 'pymssql', pymssql.__version__)"
+
       - name: Install Microsoft ODBC Driver 18 (fails when pyodbc cannot see it)
-        if: ${{ matrix.driver == 'pyodbc' }}
+        if: ${{ !cancelled() && matrix.driver == 'pyodbc' }}
         run: bash .github/scripts/install_msodbcsql18.sh
 
       - name: Assert the product dials SQL Server through ${{ matrix.driver }}
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         working-directory: apps/api
         env:
           PYTHONPATH: .
@@ -741,6 +754,7 @@ jobs:
 
       - name: SQL Server CDC — Change Tracking, native CDC, CDC transfers
         id: sqlserver_cdc
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         working-directory: apps/api
         shell: bash
         run: |
@@ -772,7 +786,7 @@ jobs:
 
       - name: SQL Server CDC — exactly-once apply (live)
         id: sqlserver_cdc_eos
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         working-directory: apps/api
         shell: bash
         run: |
@@ -783,7 +797,7 @@ jobs:
 
       - name: SQL Server SKU + matrix routes (peers started in this job)
         id: sqlserver_matrix
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         # PRODUCTION_SKU routes (PG <-> SQL Server, MySQL -> SQL Server) and the
         # universal-matrix cells pairing SQL Server with an engine this job
         # starts: PostgreSQL, pgvector, MySQL, SQLite, generic_sql (SQLite

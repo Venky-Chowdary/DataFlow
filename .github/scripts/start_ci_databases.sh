@@ -242,11 +242,36 @@ start_sqlserver() {
   docker cp apps/api/tests/sqlserver_ct_init.sql dataflow-sqlserver:/tmp/ct_init.sql
   docker cp apps/api/tests/sqlserver_cdc_init.sql dataflow-sqlserver:/tmp/cdc_init.sql
   mssql_sqlcmd -i /tmp/ct_init.sql
-  mssql_sqlcmd -i /tmp/cdc_init.sql
   # Native CDC capture jobs run under SQL Server Agent. Without it the live
   # capture-job tests cannot pass, so a missing Agent fails here, not later.
   wait_for "SQL Server Agent" 30 2 mssql_agent_running \
     || { docker logs dataflow-sqlserver || true; exit 1; }
+  mssql_cdc_init
+}
+
+# sp_cdc_enable_table creates the capture job through msdb (sp_cdc_add_job).
+# Agent can read "Running" in sys.dm_server_services and still refuse job
+# operations while it starts: error 14258 "Cannot perform this operation while
+# SQLServerAGENT is starting", surfaced as Msg 22832 (PR 424 CI). The init is
+# idempotent, so retry it on exactly those errors, for at most 120 s.
+mssql_cdc_init() {
+  local deadline=$((SECONDS + 120)) out
+  until out=$(mssql_sqlcmd -i /tmp/cdc_init.sql 2>&1); do
+    if ! grep -qE "14258|22832" <<<"$out"; then
+      echo "$out" >&2
+      echo "SQL Server CDC init failed" >&2
+      exit 1
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "$out" >&2
+      echo "SQL Server Agent did not accept CDC job operations within 120 s (error 14258)" >&2
+      docker logs --tail 80 dataflow-sqlserver || true
+      exit 1
+    fi
+    echo "SQL Server Agent is still starting (14258/22832); retrying CDC init in 5 s"
+    sleep 5
+  done
+  echo "$out"
 }
 
 for svc in "$@"; do
