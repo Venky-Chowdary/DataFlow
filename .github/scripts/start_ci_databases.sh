@@ -75,10 +75,9 @@ start_mysql() {
     --enforce-gtid-consistency=ON \
     --local-infile=1 \
     --log-bin-trust-function-creators=1
-  # mysqld restarts once during first-boot init; require the user grant to
-  # succeed (not just a ping) before returning.
-  wait_for "MySQL" 60 2 docker exec dataflow-ci-mysql \
-    mysql -h 127.0.0.1 -u root -pdataflow -e "SELECT 1" \
+  # mysqld restarts once during first-boot init (see mysql_serving); the
+  # grants below then need the real server.
+  wait_for "MySQL" 60 2 mysql_serving \
     || { docker logs dataflow-ci-mysql || true; exit 1; }
   docker exec dataflow-ci-mysql mysql -h 127.0.0.1 -u root -pdataflow -e "
     GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%';
@@ -108,8 +107,7 @@ start_mongo() {
   docker exec dataflow-ci-mongo mongosh --quiet --eval '
     try { rs.status(); }
     catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] }); }'
-  wait_for "Mongo replica set primary" 40 2 docker exec dataflow-ci-mongo \
-    mongosh --quiet --eval 'if (!db.hello().isWritablePrimary) { quit(1) }' \
+  wait_for "Mongo" 40 2 mongo_serving \
     || { docker logs dataflow-ci-mongo || true; exit 1; }
   docker exec dataflow-ci-mongo mongosh --quiet --eval 'printjson({setName: db.hello().setName, primary: db.hello().isWritablePrimary})'
 }
@@ -145,7 +143,7 @@ start_redis() {
   REDIS_IMAGE=$(pull_image "$REDIS_IMAGE" "docker.io/library/redis:7-alpine")
   docker rm -f dataflow-ci-redis >/dev/null 2>&1 || true
   docker run -d --name dataflow-ci-redis -p 6379:6379 "$REDIS_IMAGE"
-  wait_for "Redis" 30 2 docker exec dataflow-ci-redis redis-cli ping \
+  wait_for "Redis" 30 2 redis_serving \
     || { docker logs dataflow-ci-redis || true; exit 1; }
 }
 
@@ -164,9 +162,8 @@ start_bigquery() {
     "$BIGQUERY_IMAGE" \
     --project=dataflow-test --dataset=dataflow --log-level=error \
     --database=/tmp/dataflow-bq.db
-  # The emulator does not serve /; use the BigQuery discovery API.
-  wait_for "BigQuery emulator" 30 2 curl -fsS \
-    http://127.0.0.1:9050/discovery/v1/apis/bigquery/v2/rest \
+  # The emulator does not serve /; bigquery_serving reads the tests' dataset.
+  wait_for "BigQuery" 30 2 bigquery_serving \
     || { docker logs dataflow-bigquery-emulator || true; exit 1; }
   docker inspect dataflow-bigquery-emulator \
     --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}'
@@ -180,6 +177,36 @@ start_bigquery() {
 # POSTGRES_DB over TCP, which the temporary server never listens on.
 pg_serving() {  # pg_serving <container>
   docker exec -e PGPASSWORD=dataflow "$1" psql -h 127.0.0.1 -U dataflow -d dataflow -Atqc "SELECT 1" >/dev/null 2>&1
+}
+
+# The same rule for the other engines: ready means the tests' database answers,
+# as the tests' login, the way the tests reach it.
+# MySQL's image also inits on a temporary server (--skip-networking) before
+# MYSQL_DATABASE / MYSQL_USER exist, then restarts: TCP reaches only the real one.
+mysql_serving() {
+  docker exec -e MYSQL_PWD=dataflow dataflow-ci-mysql \
+    mysql -h 127.0.0.1 -u dataflow -D dataflow -Nse "SELECT 1" >/dev/null 2>&1
+}
+
+# The replica-set URI the tests use (MONGO_URI), on a writable primary.
+mongo_serving() {
+  docker exec dataflow-ci-mongo mongosh --quiet "mongodb://localhost:27017/dataflow?replicaSet=rs0" \
+    --eval 'quit(db.runCommand({ping: 1}).ok === 1 && db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1
+}
+
+# redis-cli exits 0 on an error reply (e.g. "LOADING ..."): require PONG on db 0.
+redis_serving() {
+  docker exec dataflow-ci-redis redis-cli -h 127.0.0.1 -n 0 ping 2>/dev/null | grep -qx PONG
+}
+
+# The tests' database, created by the CT init, not just master.
+mssql_serving() {
+  mssql_sqlcmd -d dataflow -Q "SELECT 1" >/dev/null 2>&1
+}
+
+# The dataset the tests write to (--dataset=dataflow), not just the API.
+bigquery_serving() {
+  curl -fsS http://127.0.0.1:9050/bigquery/v2/projects/dataflow-test/datasets/dataflow >/dev/null 2>&1
 }
 
 start_postgres() {
@@ -263,6 +290,8 @@ start_sqlserver() {
   wait_for "SQL Server Agent" 30 2 mssql_agent_running \
     || { docker logs dataflow-sqlserver || true; exit 1; }
   mssql_cdc_init
+  wait_for "SQL Server dataflow database" 30 2 mssql_serving \
+    || { docker logs --tail 80 dataflow-sqlserver || true; exit 1; }
 }
 
 # sp_cdc_enable_table creates the capture job through msdb (sp_cdc_add_job).
