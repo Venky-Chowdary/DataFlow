@@ -7,6 +7,7 @@ import {
   computedStep,
   documentRows,
   loadTimeAdvice,
+  mergeComputedSteps,
   templateUnboundNote,
 } from "./mappingCode";
 
@@ -88,5 +89,33 @@ describe("template re-binding notes", () => {
       templateUnboundNote({ source: "a", target: "b", missing: "source" }),
       "a → b: no matching source column here (or it is already bound).",
     );
+  });
+});
+
+describe("adding computed columns to Transform", () => {
+  const derive = (to: string, expression: string, extra: Record<string, unknown> = {}) => ({
+    op: "derive_column", options: { to, expression }, ...extra,
+  });
+
+  it("stamps the Map step's stream so a two-stream run applies it to that table only", () => {
+    const out = mergeComputedSteps([], [derive("loaded_by", "'etl'")], { table: "orders", tableCount: 2 });
+    assert.deepEqual(out, [{ ...derive("loaded_by", "'etl'"), source_table: "orders" }]);
+  });
+
+  it("replaces only the same column on the same stream", () => {
+    const prev = [
+      derive("loaded_by", "'old'", { source_table: "orders" }),
+      derive("loaded_by", "'cust'", { source_table: "customers" }),
+    ];
+    const out = mergeComputedSteps(prev, [derive("loaded_by", "'new'")], { table: "orders", tableCount: 2 });
+    assert.deepEqual(out, [
+      derive("loaded_by", "'cust'", { source_table: "customers" }),
+      derive("loaded_by", "'new'", { source_table: "orders" }),
+    ]);
+  });
+
+  it("leaves a single-stream step unstamped", () => {
+    const out = mergeComputedSteps([derive("x", "1")], [derive("x", "2")], { table: "orders", tableCount: 1 });
+    assert.deepEqual(out, [derive("x", "2")]);
   });
 });

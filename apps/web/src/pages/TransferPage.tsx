@@ -323,6 +323,7 @@ import {
   type RuleCompileReport,
 } from "../lib/businessRules";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
+import { mergeComputedSteps } from "../lib/mappingCode";
 import { mapApprovalPendingCount, mapBlockerSummary, mapCanContinueToValidate } from "../lib/mapBlockers";
 import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
 import {
@@ -7382,10 +7383,10 @@ export function TransferPage({
           sourceObjectName={mapActiveStream || primarySourceStream || ""}
           transformSteps={shapeSteps}
           onAddComputedSteps={(steps) => {
-            // Computed columns are Transform steps: add them there (replacing a
-            // step that already produces the same column) and preview them.
-            const to = (st: { op: string; options?: Record<string, unknown> }) => `${st.op}:${String(st.options?.to ?? "")}`;
-            setShapeSteps((prev) => [...prev.filter((p) => !steps.some((st) => to(st) === to(p))), ...steps]);
+            // Computed columns are Transform steps for this Map stream: add them
+            // there (replacing the same column on the same stream) and preview.
+            const stream = { table: mapActiveStream || primarySourceStream || "", tableCount: multiStreamNames.length };
+            setShapeSteps((prev) => mergeComputedSteps(prev, steps, stream));
             setStep(STEP_SHAPE);
             toast({
               title: "Computed column added to Transform",

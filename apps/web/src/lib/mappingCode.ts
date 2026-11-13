@@ -9,7 +9,7 @@
  */
 import { findDestColumn, remapToDestination, type DestColumnCatalog } from "./destColumnCatalog";
 import { isIntentionalOmit, type EditableMapping } from "./mapping";
-import type { ShapeStepWire } from "./shape";
+import { stampStepSourceTable, type ShapeStepWire } from "./shape";
 
 export interface DocumentMapping {
   source: string;
@@ -123,4 +123,22 @@ export function templateUnboundNote(u: TemplateUnbound): string {
   }
   if (u.missing === "both") return `${head}: no matching source or destination column here.`;
   return `${head}: no matching ${u.missing} column here (or it is already bound).`;
+}
+
+/**
+ * Add computed-column steps from the Map step to the Transform steps.
+ *
+ * Each step is stamped with the stream the Map step is editing (only when the
+ * run has two or more streams, as Transform's own steps are), and replaces a
+ * step that already produces the same column on that same stream.
+ */
+export function mergeComputedSteps(
+  prev: ShapeStepWire[],
+  added: ShapeStepWire[],
+  stream: { table: string; tableCount: number },
+): ShapeStepWire[] {
+  const stamped = added.map((s) => stampStepSourceTable(s, stream.table, stream.tableCount));
+  const key = (s: ShapeStepWire) => `${s.source_table ?? ""}\u0000${s.op}:${String(s.options?.to ?? "")}`;
+  const replaced = new Set(stamped.map(key));
+  return [...prev.filter((p) => !replaced.has(key(p))), ...stamped];
 }
