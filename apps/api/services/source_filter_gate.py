@@ -132,6 +132,11 @@ def request_refusal(request: Any) -> str:
     )
 
     dest = request.destination
+    # map_target is the server's own record: an inbound one is dropped here,
+    # first, for every route (security re-check F1a).
+    from services.target_name_legacy import strip_request_map_targets
+
+    strip_request_map_targets(request)
     # G11: an existing table keeps the columns an earlier run named; the
     # mapping is retargeted before any read, write or Gate-8 digest.
     try:

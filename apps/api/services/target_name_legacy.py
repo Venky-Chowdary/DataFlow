@@ -125,6 +125,34 @@ def strip_client_map_targets(mappings: Any) -> Any:
     ]
 
 
+def strip_contract_map_targets(contracts: Any) -> Any:
+    """``strip_client_map_targets`` inside every stream contract's own Map rows."""
+    if not isinstance(contracts, list):
+        return contracts
+    return [
+        {**c, "mappings": strip_client_map_targets(c["mappings"])}
+        if isinstance(c, dict) and isinstance(c.get("mappings"), list) else c
+        for c in contracts
+    ]
+
+
+def strip_request_map_targets(request: Any) -> None:
+    """Execute's one choke point (security re-check F1a): no inbound row keeps ``map_target``.
+
+    Runs first in ``request_refusal``, before adoption, on the Map and on every
+    stream contract's rows, whatever route assigned them (multipart forms and
+    plan merges set ``request.mappings`` after construction).
+    """
+    if request is None:
+        return
+    rows = getattr(request, "mappings", None)
+    if isinstance(rows, list):
+        request.mappings = strip_client_map_targets(rows)
+    contracts = getattr(request, "stream_contracts", None)
+    if isinstance(contracts, list):
+        request.stream_contracts = strip_contract_map_targets(contracts)
+
+
 def operator_rows(mappings: Iterable[Any] | None) -> list[dict[str, Any]]:
     """Map rows with any earlier adoption undone (the operator's own targets)."""
     rows = [dict(_as_dict(m)) for m in (mappings or [])]
@@ -1146,6 +1174,8 @@ __all__ = [
     "LegacyFieldsUnverified",
     "operator_rows",
     "strip_client_map_targets",
+    "strip_contract_map_targets",
+    "strip_request_map_targets",
     "prepare_stream_targets",
     "selected_streams",
     "stream_existing_columns",
