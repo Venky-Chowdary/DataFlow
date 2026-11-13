@@ -15,7 +15,6 @@ in the plan exactly once, under unique consecutive versions.
 from __future__ import annotations
 
 import json
-import multiprocessing
 import threading
 
 import pytest
@@ -161,38 +160,58 @@ def test_concurrent_creates_and_edits_keep_every_plan():
     _assert_every_edit_kept(plan_id, 0, edits)
 
 
-def _process_writer(path: str, plan_id: str, worker: int, edits: int, barrier) -> None:
-    from pathlib import Path
+#: A separate Python process that edits the plan once the parent says "go".
+_WRITER = """
+import sys
+from pathlib import Path
 
-    from services import transfer_plan_store as child_store
+from services import transfer_plan_store as store
 
-    child_store.STORE_PATH = Path(path)
-    barrier.wait()
-    for n in range(edits):
-        child_store.sync_ui_mappings(plan_id, _mapping(f"p{worker}-{n}"))
+store.STORE_PATH = Path(sys.argv[1])
+plan_id, worker, edits = sys.argv[2], sys.argv[3], int(sys.argv[4])
+print("ready", flush=True)
+sys.stdin.readline()
+for n in range(edits):
+    store.sync_ui_mappings(
+        plan_id, [{"source": "customer_id", "target": "customer_id", "reason": f"p{worker}-{n}"}]
+    )
+print("done", flush=True)
+"""
 
 
 def test_edits_from_separate_processes_are_all_kept(isolated_plan_store):
     """Two API processes (or replicas sharing one data volume) write the same file."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
     plan_id = _plan()
     workers, edits = 4, 4
-    # Import what the writers import before forking, so the children start warm.
-    import services.mapping_proof  # noqa: F401
-
-    ctx = multiprocessing.get_context("fork")
-    barrier = ctx.Barrier(workers)
+    env = {**os.environ, "PYTHONPATH": str(Path(store.__file__).resolve().parents[1])}
     procs = [
-        ctx.Process(
-            target=_process_writer,
-            args=(str(isolated_plan_store), plan_id, w, edits, barrier),
+        subprocess.Popen(  # nosec B603 - this interpreter, fixed script
+            [sys.executable, "-c", _WRITER, str(isolated_plan_store), plan_id, str(w), str(edits)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            env=env,
         )
         for w in range(workers)
     ]
-    for p in procs:
-        p.start()
-    for p in procs:
-        p.join(timeout=120)
-    assert [p.exitcode for p in procs] == [0] * workers
+    try:
+        # Barrier: every writer has imported the store before any starts.
+        assert [p.stdout.readline().strip() for p in procs] == ["ready"] * workers
+        for p in procs:
+            p.stdin.write("go\n")
+            p.stdin.flush()
+        outs = [p.communicate(timeout=120)[0].strip() for p in procs]
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+    assert [p.returncode for p in procs] == [0] * workers
+    assert outs == ["done"] * workers
     tags = [f"p{w}-{n}" for w in range(workers) for n in range(edits)]
     _assert_every_edit_kept(plan_id, 0, tags)
 
