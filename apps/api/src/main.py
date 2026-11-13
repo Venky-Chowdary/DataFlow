@@ -18,6 +18,7 @@ from services.brand_env import getenv_brand
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
 from services.control_plane_store import ControlPlaneUnavailable
+from services.transfer_plan_store import PlanStoreBusy, PlanStoreUnreadable
 from services.shared_doc_store import SharedDocConflict
 from services.cors_policy import TenantAwareCORSMiddleware
 from services import health_service
@@ -1042,6 +1043,41 @@ async def control_plane_unavailable_handler(request: Request, exc: ControlPlaneU
             "detail": "Workspace settings are temporarily unavailable. Retry shortly.",
         },
         headers={"Retry-After": "5"},
+    )
+
+
+@app.exception_handler(PlanStoreUnreadable)
+async def plan_store_unreadable_handler(request: Request, exc: PlanStoreUnreadable):
+    """The transfer-plan store file is damaged: refuse, never answer "no plans".
+
+    The store logged the path and error class once at ERROR; the response
+    names the files an operator repairs or restores, not their location.
+    """
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "plan_store_unreadable",
+            "detail": (
+                "Transfer plans cannot be loaded: the plan store file (transfer_plans.json in "
+                "the data directory) is unreadable or damaged, so nothing was read or changed. "
+                "An operator must repair it or restore the previous good copy, "
+                "transfer_plans.json.bak, then retry."
+            ),
+        },
+    )
+
+
+@app.exception_handler(PlanStoreBusy)
+async def plan_store_busy_handler(request: Request, exc: PlanStoreBusy):
+    """Another writer held the transfer-plan store past the lock timeout: retryable."""
+    logger.warning("Transfer plan store busy on %s", request.url.path)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "plan_store_busy",
+            "detail": "The plan is being saved by another request. Retry shortly.",
+        },
+        headers={"Retry-After": "2"},
     )
 
 

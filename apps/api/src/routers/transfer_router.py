@@ -831,7 +831,7 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
     holds answers 409 with ``current_version`` instead of replacing it.
     """
     from services.transfer_plan_service import sync_plan_mappings
-    from services.transfer_plan_store import PlanStoreBusy, PlanVersionConflict
+    from services.transfer_plan_store import PlanVersionConflict
 
     try:
         plan = sync_plan_mappings(plan_id, body.mappings, base_version=body.base_version)
@@ -845,12 +845,6 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
                 "base_version": e.base_version,
                 "current_version": e.current_version,
             },
-        ) from e
-    except PlanStoreBusy as e:
-        raise HTTPException(
-            status_code=503,
-            detail="The plan is being saved by another request. Try again.",
-            headers={"Retry-After": "2"},
         ) from e
     except ValueError as e:
         raise safe_http_exception(

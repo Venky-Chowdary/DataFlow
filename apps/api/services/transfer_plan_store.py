@@ -11,18 +11,29 @@ bumped by every write (a legacy plan without one reads as 0 and gets one on
 its first write). A UI save may name the mapping revision it was based on
 (``base_version``); when the plan has gained a newer revision since, the save
 raises :class:`PlanVersionConflict` instead of replacing that revision.
+
+Fail closed (PS-2): an absent store file is an empty store, but a present one
+that cannot be read or parsed raises :class:`PlanStoreUnreadable` for every
+read and write — answering "no plans" would let the next write replace the
+file with only the plan in hand. Each write first keeps the file it replaces
+as ``<store>.bak`` (one generation) for an operator to restore; reads never
+fall back to it, since it may hold plans deleted since.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import logging
+import os
+import shutil
 import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from services.atomic_file import write_json_atomic
@@ -30,6 +41,8 @@ from services.platform_config import data_dir
 from services.schema_fingerprint import fingerprint_mappings, fingerprint_schema
 from services.value_serializer import json_default
 from services.workspace_filter import WorkspaceFilter, bound_allows, current_workspace_stamp
+
+logger = logging.getLogger(__name__)
 
 STORE_PATH = data_dir() / "transfer_plans.json"
 #: How long a plan write waits for another writer to finish before it gives up.
@@ -41,6 +54,28 @@ _HELD = threading.local()
 
 class PlanStoreBusy(TimeoutError):
     """Another writer held the plan store past ``LOCK_TIMEOUT_SECONDS``; nothing was written."""
+
+
+class PlanStoreUnreadable(RuntimeError):
+    """The store file exists but cannot be read or parsed; nothing was read or written."""
+
+    def __init__(self, path: Path, error: BaseException) -> None:
+        self.path = str(path)
+        self.backup_path = str(_backup_path(path))
+        self.error_class = type(error).__name__
+        super().__init__(
+            f"Transfer plan store {self.path} cannot be read ({self.error_class}); nothing was "
+            f"read or written. Repair it, or restore the previous good copy {self.backup_path}, "
+            "then retry."
+        )
+
+
+#: Path -> error class already logged, so a damaged store is reported once, not per request.
+_REPORTED: dict[str, str] = {}
+
+
+def _backup_path(path: Path) -> Path:
+    return path.with_name(path.name + ".bak")
 
 
 class PlanVersionConflict(RuntimeError):
@@ -224,17 +259,67 @@ class TransferPlanRecord:
         return self.revisions[-1]
 
 
+def _unreadable(path: Path, error: BaseException) -> PlanStoreUnreadable:
+    refusal = PlanStoreUnreadable(path, error)
+    if _REPORTED.get(refusal.path) != refusal.error_class:
+        _REPORTED[refusal.path] = refusal.error_class
+        # Path and error class only: the error text can quote the file's bytes.
+        logger.error(
+            "Transfer plan store %s cannot be read (%s): every plan read and write is "
+            "refused until it is repaired or restored from %s",
+            refusal.path,
+            refusal.error_class,
+            refusal.backup_path,
+        )
+    return refusal
+
+
 def _load_all() -> list[TransferPlanRecord]:
-    if not STORE_PATH.exists():
-        return []
+    """Every stored plan; ``[]`` only when the store file does not exist.
+
+    A file that exists but cannot be read or parsed raises
+    :class:`PlanStoreUnreadable` — never ``[]``, which the next write would
+    persist over every plan in it.
+    """
+    path = STORE_PATH
     try:
-        raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        return [TransferPlanRecord.from_dict(p) for p in raw.get("plans", [])]
-    except Exception:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return []
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _unreadable(path, exc) from exc
+    try:
+        raw = json.loads(text)
+        rows = raw.get("plans", []) if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            raise TypeError("not a transfer plan store document")
+        plans = [TransferPlanRecord.from_dict(p) for p in rows]
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise _unreadable(path, exc) from exc
+    _REPORTED.pop(str(path), None)
+    return plans
+
+
+def _keep_backup() -> None:
+    """Keep the store file about to be replaced as ``<store>.bak`` (inside :func:`_exclusive`).
+
+    The file was just read and parsed by this write, so the backup is a good
+    copy. A hard link costs no space; a copy is the fallback where links fail.
+    """
+    if not STORE_PATH.exists():
+        return
+    backup = _backup_path(STORE_PATH)
+    staging = backup.with_name(f".{backup.name}.{os.getpid()}.staging")
+    staging.unlink(missing_ok=True)
+    try:
+        os.link(STORE_PATH, staging)
+    except OSError:
+        shutil.copy2(STORE_PATH, staging)
+    os.replace(staging, backup)
 
 
 def _save_all(plans: list[TransferPlanRecord]) -> None:
+    _keep_backup()
     write_json_atomic(
         STORE_PATH,
         {"plans": [p.to_dict() for p in plans]},
