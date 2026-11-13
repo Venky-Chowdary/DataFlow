@@ -225,13 +225,18 @@ def test_async_validate_job_error_does_not_leak_the_data_directory(
 
     a, _b = _two_plans()
     data_dir = str(isolated_plan_store.parent)
+    # Real layout: uploads are a sibling of the data directory (apps/api/uploads,
+    # <volume>/uploads), not inside it.
+    upload_dir = isolated_plan_store.parent.parent / f"uploads-{isolated_plan_store.parent.name}"
+    monkeypatch.delenv("DATAWRAP_UPLOAD_DIR", raising=False)
+    monkeypatch.setenv("DATAFLOW_UPLOAD_DIR", str(upload_dir))
 
     def failing_preflight(plan_id, **_kwargs):
         if failure == "unreadable":
             raise PlanStoreUnreadable(isolated_plan_store, ValueError("bad json"))
         if failure == "busy":
             raise store.PlanStoreBusy(isolated_plan_store)
-        raise RuntimeError(f"could not open {isolated_plan_store.parent / 'uploads' / 'x.csv'}")
+        raise FileNotFoundError(2, "No such file or directory", str(upload_dir / "f_1_people.csv"))
 
     monkeypatch.setattr(jobs, "threading", SimpleNamespace(Thread=_InlineThread))
     monkeypatch.setattr("services.transfer_plan_service.run_plan_preflight", failing_preflight)
@@ -244,10 +249,21 @@ def test_async_validate_job_error_does_not_leak_the_data_directory(
     assert view["status"] == "failed"
     assert view["error"], "the failure is still reported"
     assert data_dir not in view["error"], view["error"]
+    assert str(upload_dir) not in view["error"], view["error"]
     if failure == "other":
-        assert "x.csv" in view["error"]
+        assert "f_1_people.csv" in view["error"]
     else:
         assert "transfer_plans.json" in view["error"]
+
+
+def test_a_relative_data_dir_setting_does_not_garble_job_errors(monkeypatch):
+    """Only absolute roots are replaced: DATAFLOW_DATA_DIR=data must not touch prose."""
+    from services.plan_preflight_job import public_job_error
+
+    monkeypatch.delenv("DATAWRAP_DATA_DIR", raising=False)
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", "data")
+    message = "the data directory is full; uploads could not be staged"
+    assert public_job_error(RuntimeError(message)) == message
 
 
 def test_the_failure_is_logged_once_with_path_and_error_class_only(isolated_plan_store, caplog):
