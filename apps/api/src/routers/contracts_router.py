@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.brand import PRODUCT_SLUG
 from services.gitops_yaml import dump_artifact_yaml
@@ -77,6 +77,14 @@ class _CreateFromTransferRequest(BaseModel):
     strict: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 at request time (G7)."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
+
 
 class _ContractListResponse(BaseModel):
     contracts: list[_ContractResponse]
@@ -100,6 +108,14 @@ class _ContractTestRequest(BaseModel):
     source: dict[str, Any] = Field(default_factory=dict)
     destination: dict[str, Any] = Field(default_factory=dict)
     column_types: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 at request time (G7)."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
 
 
 class _ContractTestResponse(BaseModel):

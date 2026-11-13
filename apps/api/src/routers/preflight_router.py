@@ -195,6 +195,14 @@ class PreflightRequest(PolicyFieldsModel):
             setattr(self, attr, key)
         return self
 
+    @field_validator("dest_extra")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 at request time (G7)."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
+
 
 def _schema_default(db_type: str) -> str:
     from services.dialect_profiles import default_schema_for

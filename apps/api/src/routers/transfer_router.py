@@ -317,14 +317,9 @@ class EndpointDTO(BaseModel):
     @model_validator(mode="after")
     def _formula_protection_vocabulary(self) -> "EndpointDTO":
         """G7: an unknown formula_protection or tsv_null is a 422, never silently ignored."""
-        from services.csv_safety import formula_protection_mode
-        from services.export_dialect import tsv_null_mode
+        from services.dest_writer_options import validate_dest_writer_options
 
-        for key, check in (("formula_protection", formula_protection_mode), ("tsv_null", tsv_null_mode)):
-            nested = self.extra.get(key) if isinstance(self.extra, dict) else None
-            for value in ((self.model_extra or {}).get(key), nested):
-                if value is not None:
-                    check(value)
+        validate_dest_writer_options(dict(self.model_extra or {}), self.extra)
         return self
 
 
@@ -728,6 +723,14 @@ class CreatePlanRequest(BaseModel):
             return value
         return canonicalize_policy_fields(value, drop_blank=False)
 
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 when the plan is saved."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
+
 
 class PlanMapRequest(PolicyFieldsModel):
     validation_mode: str = "balanced"
@@ -755,6 +758,14 @@ class UpdatePlanRequest(BaseModel):
         if not isinstance(value, dict):
             return value
         return canonicalize_policy_fields(value, drop_blank=False)
+
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 when the plan is saved."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
 
 
 class SyncMappingsRequest(BaseModel):
@@ -1532,6 +1543,10 @@ async def run_universal_transfer(
                 dest_extra = parsed
         except Exception:
             dest_extra = {}
+    from services.dest_writer_options import refuse_invalid_dest_writer_options
+
+    # An unknown formula_protection / tsv_null is the request's fault: 422 now, not at run time.
+    refuse_invalid_dest_writer_options(dest_extra)
 
     _refuse_unavailable_destination(
         {
