@@ -1250,6 +1250,9 @@ def _copy_buffer():
 
 def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list[tuple]) -> None:
     from psycopg2 import sql
+    from services.null_marker_guard import refuse_unbound_marker
+
+    refuse_unbound_marker(rows, columns, table=table_name, copy_mode=True)  # no undecoded escape
 
     cols_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
     copy_sql = sql.SQL("COPY {}.{} ({}) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')").format(
@@ -1271,6 +1274,9 @@ def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list
 def _copy_rows_temp(cur, table_name: str, columns: list[str], rows: list[tuple]) -> None:
     """COPY into a session TEMP table (unqualified identifier)."""
     from psycopg2 import sql
+    from services.null_marker_guard import refuse_unbound_marker
+
+    refuse_unbound_marker(rows, columns, table=table_name, copy_mode=True)  # no undecoded escape
 
     cols_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
     copy_sql = sql.SQL(

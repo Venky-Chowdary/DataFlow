@@ -56,20 +56,32 @@ class NullMarkerLeak(ValueError):
     """A writer was about to store Datawrap's NULL marker as data."""
 
 
-def _leaked(value: Any) -> bool:
-    if type(value) is not str:  # WireLiteral (a decoded user literal) is a subclass
+def _leaked(value: Any, *, copy_mode: bool = False) -> bool:
+    """True for a cell nobody decoded: a marker (plain or a marked wire cell) or a live escape.
+
+    A decoded user literal (``WireLiteral``) is never a leak. In ``copy_mode``
+    a NULL marker is SQL NULL by design (COPY writes it as ``\\N``), so only a
+    cell still carrying the escape prefix is refused there.
+    """
+    from services.value_serializer import WireLiteral
+
+    if not isinstance(value, str) or isinstance(value, WireLiteral):
         return False
     if not value.startswith("__"):
         return False
-    return value.strip().lower() in _MARKERS or value.startswith(ESCAPED_WIRE_PREFIX)
+    if value.startswith(ESCAPED_WIRE_PREFIX):
+        return True
+    return not copy_mode and value.strip().lower() in _MARKERS
 
 
-def refuse_unbound_marker(rows: Iterable[Any], columns: list[str] | None = None, *, table: str = "") -> None:
-    """Raise :class:`NullMarkerLeak` when a row about to be bound carries a raw marker."""
+def refuse_unbound_marker(
+    rows: Iterable[Any], columns: list[str] | None = None, *, table: str = "", copy_mode: bool = False,
+) -> None:
+    """Raise :class:`NullMarkerLeak` when a row about to be written carries an undecoded marker."""
     for index, row in enumerate(rows):
         cells = row.values() if isinstance(row, dict) else row
         for position, value in enumerate(cells):
-            if _leaked(value):
+            if _leaked(value, copy_mode=copy_mode):
                 column = (
                     list(row.keys())[position] if isinstance(row, dict)
                     else (columns[position] if columns and position < len(columns) else f"#{position + 1}")
