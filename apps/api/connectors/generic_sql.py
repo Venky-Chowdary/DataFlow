@@ -6085,7 +6085,7 @@ def write_mapped_rows(
                                 )
                             chunk_idx += 1
                             continue
-                        chunk_written = 0
+                        chunk_written, chunk_skipped, kept_now = 0, 0, []
                         keyed_chunk = write_mode == "upsert" and bool(conflict_columns)
                         if keyed_chunk:
                             rows_skipped += drop_stored_key_dicts(
@@ -6102,10 +6102,9 @@ def write_mapped_rows(
                                 rejected_details=rejected_details,
                                 policy=policy,
                             )
-                            kept_now = pop_skip_kept(table_obj)  # skip_duplicates fallback
-                            write_acc.skipped_identity_keys.extend(kept_now)
+                            kept_now = pop_skip_kept(table_obj)  # recorded after commit
                             if DF_LSN_COL in target_cols or kept_now:
-                                rows_skipped += len(batch) - chunk_written
+                                chunk_skipped = len(batch) - chunk_written
                             else:
                                 chunk_written = len(batch)
                         elif not keyed_chunk:
@@ -6127,7 +6126,10 @@ def write_mapped_rows(
                             )
                         conn.commit()
                         written += chunk_written
+                        rows_skipped += chunk_skipped
+                        write_acc.skipped_identity_keys.extend(kept_now)
                     except Exception as chunk_exc:
+                        pop_skip_kept(table_obj)  # a rolled-back chunk kept nothing
                         try:
                             conn.rollback()
                         except Exception as rollback_exc:
@@ -6157,10 +6159,8 @@ def write_mapped_rows(
                                             rejected_details=rejected_details,
                                             policy=policy,
                                         )
-                                        if DF_LSN_COL in target_cols:
-                                            if not row_written:
-                                                rows_skipped += 1
-                                        else:
+                                        row_kept = pop_skip_kept(table_obj)
+                                        if DF_LSN_COL not in target_cols and not row_kept:
                                             row_written = 1
                                     else:
                                         result = conn.execute(table_obj.insert(), [row])
@@ -6171,7 +6171,11 @@ def write_mapped_rows(
                                         )
                                     conn.commit()
                                     chunk_written += row_written
+                                    if write_mode == "upsert" and conflict_columns:
+                                        rows_skipped += 0 if row_written else 1
+                                        write_acc.skipped_identity_keys.extend(row_kept)
                                 except Exception as row_exc:
+                                    pop_skip_kept(table_obj)
                                     try:
                                         conn.rollback()
                                     except Exception as rollback_exc:

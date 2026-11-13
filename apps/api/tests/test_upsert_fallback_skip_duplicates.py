@@ -176,3 +176,66 @@ def test_postgresql_fallback_under_skip_keeps_the_stored_row(skip):
         with eng.begin() as c:
             c.execute(sa.text(f"drop table if exists {t}"))
         eng.dispose()
+
+
+def test_salvage_path_counts_a_kept_key_once_and_drops_a_rolled_back_chunks_markers(
+    tmp_path, skip, monkeypatch
+):
+    """Re-check Low 2: the chunk's fallback stashes a kept marker, then the chunk
+    fails and rolls back; the per-row salvage path must pop its own markers, and
+    the rolled-back chunk's marker must not be recorded (nor leak onward)."""
+    import connectors.generic_sql as gs
+
+    db = tmp_path / "ws_salvage.db"
+    c = sqlite3.connect(db)
+    c.execute("create table t(k text collate nocase, name text)")
+    c.execute("insert into t values ('ABC', 'stored')")
+    c.commit()
+    c.close()
+    real = gs._upsert_batch
+
+    def chunk_fails_after_fallback(conn, table_obj, batch, *a, **k):
+        n = real(conn, table_obj, batch, *a, **k)
+        if len(batch) > 1:
+            raise sa.exc.IntegrityError("INSERT", {}, Exception("value out of range"))
+        return n
+
+    monkeypatch.setattr(gs, "_upsert_batch", chunk_fails_after_fallback)
+    result = gs.write_mapped_rows(
+        host="", port=0, database=str(db), username="", password="", schema="",
+        connection_string=f"sqlite:///{db}", ssl=False, table_name="t",
+        headers=["k", "name"], data_rows=[["abc", "incoming"], ["xyz", "new"]],
+        mappings=[{"source": "k", "target": "k"}, {"source": "name", "target": "name"}],
+        column_types={"k": "VARCHAR", "name": "VARCHAR"}, create_table=False,
+        write_mode="upsert", conflict_columns=["k"], type="sqlite", error_policy="quarantine",
+    )
+    assert result.ok, result.error
+    assert (result.rows_written, result.rows_skipped) == (1, 1), result
+    assert result.meta.get("skipped_identity_keys") == ["abc"], result.meta
+    assert _rows(db) == [("ABC", "stored"), ("xyz", "new")]
+
+
+def test_sqlite_writer_under_skip_marks_a_collation_equal_kept_key(tmp_path, skip):
+    """Re-check Low 3: the kept key got rows_skipped but no Gate-8 marker, so
+    Gate-8 graded the source row against the stored one. Both spellings are
+    marked: the source key and the stored key SQLite matched."""
+    from connectors.sqlite_writer import write_mapped_rows
+
+    db = tmp_path / "ws_sqlite_skip.db"
+    c = sqlite3.connect(db)
+    c.execute("create table t(k text collate nocase, name text)")
+    c.execute("insert into t values ('ABC', 'stored')")
+    c.commit()
+    c.close()
+    r = write_mapped_rows(
+        host="", port=0, database=str(db), username="", password="", schema="",
+        connection_string="", ssl=False, table_name="t", headers=["k", "name"],
+        data_rows=[["abc", "incoming"], ["xyz", "new"]],
+        mappings=[{"source": "k", "target": "k"}, {"source": "name", "target": "name"}],
+        column_types={"k": "VARCHAR", "name": "VARCHAR"}, create_table=False,
+        write_mode="upsert", conflict_columns=["k"],
+    )
+    assert r.ok, r.error
+    assert (r.rows_written, r.rows_skipped) == (1, 1), r
+    assert sorted(r.meta.get("skipped_identity_keys") or []) == ["ABC", "abc"], r.meta
+    assert _rows(db) == [("ABC", "stored"), ("xyz", "new")]

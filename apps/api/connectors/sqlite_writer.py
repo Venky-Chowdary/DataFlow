@@ -592,8 +592,12 @@ def _sqlite_upsert_batch(
     policy: str = "quarantine",
     row_offset: int = 0,
     allow_equal_lsn: bool = False,
+    kept_markers: list[str] | None = None,
 ) -> tuple[int, int]:
     """Upsert with optional ``_df_lsn`` monotonic guard (at-least-once CDC).
+
+    ``kept_markers`` collects the Gate-8 markers of keys skip_duplicates kept
+    in the fallback (a key equal to a stored one only under its collation).
 
     Prefetch existing LSNs for the batch, drop stale rows, then
     ``INSERT … ON CONFLICT DO UPDATE`` (UPDATE-then-INSERT when the key has
@@ -684,6 +688,7 @@ def _sqlite_upsert_batch(
                 [],
                 insert_cols,
                 rows,
+                kept_markers=kept_markers,
             )
             return written, empty_pk_skipped + skipped + max(0, len(rows) - written)
 
@@ -731,7 +736,8 @@ def _sqlite_upsert_batch(
                 skipped += 1
                 continue
             applied = _sqlite_update_insert_upsert(
-                cur, table_quoted, target_cols, conflict_cols, update_cols, insert_cols, [row]
+                cur, table_quoted, target_cols, conflict_cols, update_cols, insert_cols, [row],
+                kept_markers=kept_markers,
             )
             if not applied or stored_rowids & touched:
                 skipped += 1
@@ -819,6 +825,8 @@ def _sqlite_update_insert_upsert(
     update_cols: list[str],
     insert_cols: list[str],
     rows: list[Any],
+    *,
+    kept_markers: list[str] | None = None,
 ) -> int:
     """sqlite3 spelling of ``merge_dialects.update_insert_upsert``. Never DELETE.
 
@@ -837,15 +845,38 @@ def _sqlite_update_insert_upsert(
         )
     cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
     ph = ", ".join("?" for _ in insert_cols)
-    cur.executemany(
+    insert_sql = (
         f"INSERT INTO {table_quoted} ({cols_sql}) SELECT {ph} "  # nosec B608
-        f"WHERE NOT EXISTS (SELECT 1 FROM {table_quoted} WHERE {where_sql})",
-        [_project_row(row, target_cols, insert_cols) + key for row, key in zip(rows, keys)],
+        f"WHERE NOT EXISTS (SELECT 1 FROM {table_quoted} WHERE {where_sql})"
     )
+    values = [_project_row(row, target_cols, insert_cols) + key for row, key in zip(rows, keys)]
     if update_cols:
+        cur.executemany(insert_sql, values)
         return len(rows)
-    inserted = cur.rowcount
-    return inserted if isinstance(inserted, int) and inserted >= 0 else len(rows)
+    # skip_duplicates: row by row, so each kept key is known and marked for
+    # Gate-8 under both spellings (the source key and the stored key SQLite
+    # matched, which differ under NOCASE / RTRIM).
+    from connectors.writer_common import identity_marker
+
+    pk_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
+    inserted = 0
+    for key, one in zip(keys, values):
+        cur.execute(insert_sql, one)
+        if cur.rowcount == 1:
+            inserted += 1
+            continue
+        if kept_markers is None:
+            continue
+        cur.execute(
+            f"SELECT {pk_sql} FROM {table_quoted} WHERE {where_sql} LIMIT 1",  # nosec B608
+            key,
+        )
+        stored = cur.fetchone()
+        for marker in dict.fromkeys(
+            identity_marker(tuple(k)) for k in (key, tuple(stored) if stored else key)
+        ):
+            kept_markers.append(marker)
+    return inserted
 
 
 def _sqlite_duplicate_key_message(
@@ -1729,6 +1760,7 @@ def write_mapped_rows(
                                     policy=policy,
                                     row_offset=start,
                                     allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
+                                    kept_markers=skipped_identity_keys,
                                 )
                                 written += chunk_written
                                 rows_skipped += chunk_skipped
