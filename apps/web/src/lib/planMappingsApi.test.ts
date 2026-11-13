@@ -77,3 +77,29 @@ describe("mapTransferPlan", () => {
     }
   });
 });
+
+describe("approveTransferPlan", () => {
+  it("names the revision Validate checked and surfaces a newer active one as a conflict", async () => {
+    const urls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    const g = globalThis as { window?: unknown };
+    const hadWindow = "window" in g;
+    if (!hadWindow) g.window = globalThis;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return json(409, { detail: { code: "plan_version_conflict", message: "x", base_version: 3, current_version: 4, compared: "active" } });
+    }) as typeof fetch;
+    try {
+      const { approveTransferPlan } = await import("./api.js");
+      await assert.rejects(approveTransferPlan("p", undefined, { expectedVersion: 3 }), (err: unknown) => {
+        assert.ok(err instanceof PlanVersionConflictError);
+        assert.equal(err.compared, "active");
+        return true;
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (!hadWindow) delete g.window;
+    }
+    assert.match(urls[0], /\/transfer\/plans\/p\/approve\?expected_version=3$/);
+  });
+});

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { PlanConflictNote } from "./PlanConflictNote";
 import { ComplianceAdvisories } from "./ComplianceAdvisories";
 import { FkRouteNotices } from "./FkRouteNotices";
 import { DtIcon } from "../DtIcon";
@@ -349,6 +350,10 @@ interface ValidateDashboardProps {
    * a verdict arrived. Rail owns Re-run; this card must not invent a second teal.
    */
   preflightError?: string;
+  /** Set while a plan-version conflict from Validate is unresolved. */
+  planConflictNote?: string;
+  /** Re-open the comparison with the latest plan revision. */
+  onResolvePlanConflict?: () => void;
 }
 
 /** Plain-language report of what a Validate remediation button just did. */
@@ -822,6 +827,8 @@ export function ValidateDashboard({
   onBadDataFixOpenChange,
   studioPrimary: _studioPrimary,
   preflightError = "",
+  planConflictNote = "",
+  onResolvePlanConflict,
 }: ValidateDashboardProps) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
@@ -1865,6 +1872,8 @@ export function ValidateDashboard({
               <p className="df2-vd-exec-summary-sub">{hardDeleteWarning}</p>
             </div>
           )}
+
+          {!running && <PlanConflictNote note={planConflictNote} onResolve={onResolvePlanConflict} />}
 
           {transportFailed && (
             <div className="df2-vd-exec-summary" role="alert">

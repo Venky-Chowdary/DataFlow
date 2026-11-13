@@ -8,7 +8,7 @@ import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedR
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, JobHistoryQuery, jobHistoryFromResponse } from "./jobHistory";
 import { apiBearerToken, apiUnauthorizedEndsSession, clearSession, getSessionActor, readSession } from "./session";
-import { planWriteResponse } from "./planConcurrency";
+import { planWriteResponse, type PlanView } from "./planConcurrency";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
 import { readOptionsPayload } from "./readOptions";
@@ -3052,7 +3052,7 @@ export async function mapTransferPlan(
 }
 
 /** A persisted transfer plan as GET /transfer/plans/{id} returns it. */
-export async function getTransferPlan(planId: string): Promise<{ plan: { id: string; revisions?: Array<{ version: number }>; active_version?: number } }> {
+export async function getTransferPlan(planId: string): Promise<{ plan: PlanView }> {
   const res = await planWriteResponse(() => apiFetch(`${API_BASE}/transfer/plans/${planId}`));
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load transfer plan"));
   return res.json();
@@ -3200,9 +3200,24 @@ export async function preflightTransferPlan(
   return res.json();
 }
 
-export async function approveTransferPlan(planId: string, version?: number) {
-  const qs = version != null ? `?version=${version}` : "";
-  const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/approve${qs}`, { method: "POST" });
+/**
+ * Approve a plan revision. `expectedVersion` is the revision Validate checked
+ * (its `mapping_version`): when another revision has become active since, the
+ * API refuses with 409 and this throws PlanVersionConflictError instead of
+ * approving something no gate has seen.
+ */
+export async function approveTransferPlan(
+  planId: string,
+  version?: number,
+  options: { expectedVersion?: number | null } = {},
+) {
+  const params = new URLSearchParams();
+  if (version != null) params.set("version", String(version));
+  if (typeof options.expectedVersion === "number") params.set("expected_version", String(options.expectedVersion));
+  const qs = params.toString() ? `?${params}` : "";
+  const res = await planWriteResponse(() =>
+    apiFetch(`${API_BASE}/transfer/plans/${planId}/approve${qs}`, { method: "POST" }),
+  );
   if (!res.ok) throw new Error(await parseApiError(res, "Plan approval failed"));
   return res.json();
 }
@@ -3234,7 +3249,7 @@ export async function syncTransferPlanMappings(
   planId: string,
   mappings: { source: string; target: string; confidence: number; reason?: string; transform?: string }[],
   options: { baseVersion?: number | null } = {},
-): Promise<{ plan: { id: string; revisions?: Array<{ version: number }>; active_version?: number } }> {
+): Promise<{ plan: PlanView }> {
   const payload: Record<string, unknown> = { mappings };
   if (typeof options.baseVersion === "number" && Number.isFinite(options.baseVersion)) {
     payload.base_version = options.baseVersion;

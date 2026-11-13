@@ -101,3 +101,28 @@ describe("planWriteResponse", () => {
     assert.equal(s.calls(), 1);
   });
 });
+
+describe("diffPlanMappings / sameMappings", () => {
+  it("compares per destination column, including columns only one side maps", async () => {
+    const { diffPlanMappings, sameMappings } = await import("./planConcurrency.js");
+    const rows = diffPlanMappings(
+      [{ source: "a", target: "x" }, { source: "b", target: "y" }],
+      [{ source: "a", target: "x" }, { source: "c", target: "y" }, { source: "d", target: "z" }],
+    );
+    assert.deepEqual(rows, [
+      { target: "x", latestSource: "a", mineSource: "a", differs: false },
+      { target: "y", latestSource: "b", mineSource: "c", differs: true },
+      { target: "z", latestSource: null, mineSource: "d", differs: true },
+    ]);
+    assert.equal(sameMappings([{ source: "a", target: "x" }], [{ source: "a", target: "x", confidence: 0.4 }]), true);
+    assert.equal(sameMappings([{ source: "a", target: "x", transform: "upper" }], [{ source: "a", target: "x" }]), false);
+  });
+});
+
+describe("plan_store_lock_unavailable", () => {
+  it("is an operator error, never retried", async () => {
+    const s = sender([json(503, { error: "plan_store_lock_unavailable", detail: "An operator must make transfer_plans.json.lock writable" })]);
+    await assert.rejects(planWriteResponse(s.send, { sleep: async () => assert.fail("no retry") }), PlanStoreUnreadableError);
+    assert.equal(s.calls(), 1);
+  });
+});

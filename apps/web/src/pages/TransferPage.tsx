@@ -17,8 +17,13 @@ import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { MAPPING_TIMEOUT_MS, mappingErrorSummary, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
 import { countGateStatuses } from "../lib/preflightGates";
 import { PermissionNotice } from "../components/PermissionNotice";
-import { PlanChangedNotice } from "../components/transfer/PlanChangedNotice";
-import { headVersion, isPlanVersionConflict } from "../lib/planConcurrency";
+import { PlanConflictDialog } from "../components/transfer/PlanConflictDialog";
+import {
+  headVersion,
+  isPlanVersionConflict,
+  type PlanMappingRow,
+} from "../lib/planConcurrency";
+import { usePlanConflict } from "../lib/usePlanConflict";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
 import {
@@ -550,8 +555,11 @@ export function TransferPage({
   // it: sent as base_version so a save never lands on a newer revision the
   // user has not seen (the API answers 409 instead).
   const planHeadRef = useRef<number | null>(null);
-  const [planConflictId, setPlanConflictId] = useState<string | null>(null);
-  const [planReloading, setPlanReloading] = useState(false);
+  // Validate panel note while a plan conflict is unresolved (the dialog was
+  // cancelled or is open); re-opens the comparison.
+  const [planConflictNote, setPlanConflictNote] = useState("");
+  const lastPlanConflictRef = useRef<{ planId: string; mine: PlanMappingRow[]; origin: "validate" | "map" | "execute" | "approve" } | null>(null);
+  const mapConflictRef = useRef(false);
   useEffect(() => {
     if (!persistedPlanId) planHeadRef.current = null;
   }, [persistedPlanId]);
@@ -647,6 +655,15 @@ export function TransferPage({
   // Regeneration (step change, dest schema reload) must not wipe operator
   // approvals — carryOperatorDecisions replays them by decision fingerprint.
   const columnMappingsRef = useRef<EditableMapping[]>([]);
+  const planConflictApi = useMemo(() => ({
+    getPlan: (planId: string) => getTransferPlan(planId),
+    saveMappings: (planId: string, mappings: PlanMappingRow[], baseVersion: number) =>
+      syncTransferPlanMappings(
+        planId,
+        mappings.map((m) => ({ ...m, confidence: m.confidence ?? 1 })),
+        { baseVersion },
+      ),
+  }), []);
   columnMappingsRef.current = columnMappings;
   /** Per-stream column mappings when source lists multiple tables. */
   const [streamMappings, setStreamMappings] = useState<Record<string, EditableMapping[]>>({});
@@ -1735,6 +1752,42 @@ export function TransferPage({
     [primarySourceStream],
   );
 
+  const applyLatestPlanMappings = useCallback((rows: PlanMappingRow[]) => {
+    const latest = editableFromPipelineMappings(
+      rows.map((m) => ({ ...m, confidence: m.confidence ?? 1 })),
+      parsed?.data ?? parsed?.sample_data,
+      destColumns.length ? destColumns : undefined,
+      confidenceThresholdForMode(validationMode),
+      destSchemaMap,
+    );
+    columnMappingsRef.current = latest;
+    setColumnMappings(latest);
+    setPlanConflictNote("");
+  }, [parsed, destColumns, validationMode, destSchemaMap]);
+  const notifyPlanConflict = useCallback(
+    (title: string, message: string, tone: "success" | "info" | "warning" | "error") => {
+      if (tone !== "error") setPlanConflictNote("");
+      toast({ title, message, tone });
+    },
+    [toast],
+  );
+  const planConflict = usePlanConflict({
+    api: planConflictApi,
+    headRef: planHeadRef,
+    onUseLatest: applyLatestPlanMappings,
+    notify: notifyPlanConflict,
+  });
+  /** Show the comparison for `mine`; "resolved" when the plan already holds it. */
+  const openPlanConflict = useCallback(
+    (planId: string, mine: PlanMappingRow[], origin: "validate" | "map" | "execute" | "approve") => {
+      lastPlanConflictRef.current = { planId, mine, origin };
+      return planConflict.open(planId, mine, origin);
+    },
+    [planConflict.open],
+  );
+  const editorMappingRows = (): PlanMappingRow[] =>
+    columnMappingsRef.current.map((m) => ({ source: m.source, target: m.target, confidence: m.confidence }));
+
   const applyPipelineMappings = useCallback(
     async (
       targetCols?: string[],
@@ -1835,6 +1888,7 @@ export function TransferPage({
         setMappingProof(proof);
         return carried;
       };
+      let mappedViaPlan: string | null = null;
       try {
         // Prefer direct map when fresh dest schema is in-hand — plan persistence
         // can lag React state and previously wiped create-new proposals.
@@ -1854,6 +1908,7 @@ export function TransferPage({
             target_schema: mapTargetSchema,
           });
           if (planId) {
+            mappedViaPlan = planId;
             result = await mapTransferPlan(planId, {
               validation_mode: validationMode,
               use_llm: true,
@@ -1933,10 +1988,11 @@ export function TransferPage({
           (result as { mapping_proof?: import("../components/MappingProofDrawer").MappingProof }).mapping_proof ?? null,
         );
       } catch (e) {
-        if (isPlanVersionConflict(e)) {
+        if (isPlanVersionConflict(e) && mappedViaPlan) {
           // Map's result was not stored: the plan changed while it ran. Keep
-          // what is on screen; the notice offers a reload.
-          setPlanConflictId(persistedPlanId);
+          // what is on screen and show the comparison; goToMapping stops.
+          mapConflictRef.current = true;
+          void openPlanConflict(mappedViaPlan, editorMappingRows(), "map");
           return columnMappingsRef.current;
         }
         console.error("Mapping pipeline failed:", e);
@@ -1988,6 +2044,7 @@ export function TransferPage({
       connectorId,
       targetCollection,
       stampCompiledWorkbookMappings,
+      openPlanConflict,
     ],
   );
 
@@ -4150,6 +4207,7 @@ export function TransferPage({
     if (explainDestinationGap()) return;
     setStep(STEP_MAP);
     setMappingError(null);
+    mapConflictRef.current = false;
     setAnalyzing(true);
     const startedAt = Date.now();
     mappingRunRef.current = startedAt;
@@ -4291,6 +4349,17 @@ export function TransferPage({
           tone: "warning",
         });
         setStep(STEP_SOURCE);
+        return;
+      }
+      if (mapConflictRef.current) {
+        // Map's result was not stored (the plan changed while it ran): stop
+        // here instead of carrying on as if mapping had succeeded.
+        setAnalyzing(false);
+        setMappingProgress(0);
+        setMappingError(
+          "Map's result was not saved: this plan changed since you opened it. "
+          + "Compare your mappings with the latest revision and choose which to keep.",
+        );
         return;
       }
 
@@ -5354,8 +5423,21 @@ export function TransferPage({
       const planId = await ensurePersistedPlan(activeValidation);
       if (planId) {
         try {
-          const synced = await syncTransferPlanMappings(planId, mappings, { baseVersion: planHeadRef.current });
-          planHeadRef.current = headVersion(synced?.plan);
+          try {
+            const synced = await syncTransferPlanMappings(planId, mappings, { baseVersion: planHeadRef.current });
+            planHeadRef.current = headVersion(synced?.plan);
+          } catch (syncErr) {
+            if (!isPlanVersionConflict(syncErr)) throw syncErr;
+            // The plan already holding exactly these mappings is no conflict
+            // (resolved: carry on); otherwise stop and show the comparison.
+            if (await openPlanConflict(planId, mappings, "validate") !== "resolved") {
+              setPlanConflictNote(
+                "Validate did not run: this plan changed since you opened it. "
+                + "Compare your mappings with the latest revision to continue.",
+              );
+              return;
+            }
+          }
           // The plan transport must carry the attestation — a body-less call
           // cannot clear a PII/drift/FK gate, and Execute would stay locked.
           const pf = await preflightTransferPlan(
@@ -5375,7 +5457,22 @@ export function TransferPage({
           // unlock requires decision===approve (same bar as Validate rail).
           const decision = pf.proof_bundle?.transfer_decision?.decision;
           if (pf.passed && decision === "approve") {
-            await approveTransferPlan(planId);
+            // Approve the revision Validate checked — never one that became
+            // active since (the API answers 409 and nothing is approved).
+            const checked = (pf as { mapping_version?: unknown }).mapping_version;
+            try {
+              await approveTransferPlan(planId, undefined, {
+                expectedVersion: typeof checked === "number" ? checked : null,
+              });
+            } catch (approveErr) {
+              if (!isPlanVersionConflict(approveErr)) throw approveErr;
+              void openPlanConflict(planId, mappings, "approve");
+              setPlanConflictNote(
+                "Validate passed, but nothing was approved: a different mapping revision became active "
+                + "while it ran. Compare it with your mappings, then run Validate again.",
+              );
+              return;
+            }
           }
           setPreflight(pf);
           stampValidatedContract(activeMappings, pf as PreflightResult);
@@ -5399,12 +5496,6 @@ export function TransferPage({
           }
           return;
         } catch (planErr) {
-          if (isPlanVersionConflict(planErr)) {
-            // Not saved, not validated: someone else saved this plan since it
-            // was loaded. The edits stay on screen for a reload + re-apply.
-            setPlanConflictId(planId);
-            return;
-          }
           if (!(sourceKind === "file" && destKindMode === "file_export" && parsed)) {
             throw planErr;
           }
@@ -6010,27 +6101,24 @@ export function TransferPage({
       // Belt-and-suspenders: sync Studio mappings onto the plan before Execute so
       // an empty draft (Map race) cannot block a green Validate with "no mappings".
       let runPlanId = persistedPlanId ?? undefined;
-      if (runPlanId && transferMappings?.length) {
+      const syncForRun = async (planId: string, rows: NonNullable<typeof transferMappings>) => {
         try {
-          const synced = await syncTransferPlanMappings(runPlanId, transferMappings, { baseVersion: planHeadRef.current });
+          const synced = await syncTransferPlanMappings(planId, rows, { baseVersion: planHeadRef.current });
           planHeadRef.current = headVersion(synced?.plan);
         } catch (syncErr) {
+          if (!isPlanVersionConflict(syncErr)) return;  // still send mappings_json; the backend recovers
           // Someone saved this plan since it was loaded: never run a version the
-          // user has not seen. Otherwise still send mappings_json; the backend's
-          // merge_plan_into_run recovers.
-          if (isPlanVersionConflict(syncErr)) throw syncErr;
+          // user has not seen. Run only if the plan already holds these mappings.
+          if (await openPlanConflict(planId, rows, "execute") !== "resolved") throw syncErr;
         }
+      };
+      if (runPlanId && transferMappings?.length) {
+        await syncForRun(runPlanId, transferMappings);
       } else if (!runPlanId && transferMappings?.length) {
         const created = await ensurePersistedPlan();
         if (created) {
-          try {
-            const synced = await syncTransferPlanMappings(created, transferMappings, { baseVersion: planHeadRef.current });
-            planHeadRef.current = headVersion(synced?.plan);
-            runPlanId = created;
-          } catch (syncErr) {
-            if (isPlanVersionConflict(syncErr)) throw syncErr;
-            runPlanId = created;
-          }
+          await syncForRun(created, transferMappings);
+          runPlanId = created;
         }
       }
       setRunStartupProgress(stagePercent(2, RUN_LAUNCH_STAGES.length));
@@ -6273,9 +6361,8 @@ export function TransferPage({
       if (data.success) onTransferComplete();
     } catch (transferErr) {
       if (isPlanVersionConflict(transferErr)) {
-        // The plan changed since this page loaded it: nothing ran. The edits
-        // stay on screen; the notice offers a reload before running again.
-        setPlanConflictId(persistedPlanId);
+        // The plan changed since this page loaded it: nothing ran. The
+        // comparison dialog is open; the edits stay on screen.
         setTransferring(false);
         return;
       }
@@ -6310,30 +6397,6 @@ export function TransferPage({
       }
     }
     setTransferring(false);
-  };
-
-  const reloadConflictedPlan = async () => {
-    const planId = planConflictId;
-    if (!planId) return;
-    setPlanReloading(true);
-    try {
-      const { plan } = await getTransferPlan(planId);
-      planHeadRef.current = headVersion(plan);
-      setPlanConflictId(null);
-      toast({
-        title: "Plan reloaded",
-        message: `Now at mapping revision ${planHeadRef.current}. Your edits are still on screen — review them and Validate to save them on top of the latest version.`,
-        tone: "success",
-      });
-    } catch (err) {
-      toast({
-        title: "Could not reload the plan",
-        message: err instanceof Error ? err.message : "Try again in a moment.",
-        tone: "error",
-      });
-    } finally {
-      setPlanReloading(false);
-    }
   };
 
   const openJobTheater = () => {
@@ -7261,13 +7324,12 @@ export function TransferPage({
         reason={jobRun.reason}
         what="You can plan a transfer but not run one."
       />
-      {planConflictId && (
-        <PlanChangedNotice
-          reloading={planReloading}
-          onReload={() => void reloadConflictedPlan()}
-          onDismiss={() => setPlanConflictId(null)}
-        />
-      )}
+      <PlanConflictDialog
+        conflict={planConflict.conflict}
+        onUseLatest={planConflict.useLatest}
+        onKeepMine={() => void planConflict.keepMine()}
+        onCancel={planConflict.cancel}
+      />
       <header className="df2-transfer-studio-chrome">
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps
@@ -8918,6 +8980,11 @@ export function TransferPage({
             onPrimaryFix={primaryFix.onPrimaryFix}
             primaryFixLabel={primaryFix.primaryFixLabel}
             preflightError={preflightError}
+            planConflictNote={planConflictNote}
+            onResolvePlanConflict={() => {
+              const last = lastPlanConflictRef.current;
+              if (last) void openPlanConflict(last.planId, last.mine, last.origin);
+            }}
             running={preflighting}
             progress={validateProgress}
             confidenceThreshold={confidenceThreshold}

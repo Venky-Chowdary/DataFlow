@@ -130,10 +130,81 @@ export async function planWriteResponse(
     if (res.status !== 503) return res;
     const data = await body(res);
     const detail = typeof data?.detail === "string" ? data.detail : "";
-    if (data?.error === "plan_store_unreadable") throw new PlanStoreUnreadableError(detail);
+    if (data?.error === "plan_store_unreadable" || data?.error === "plan_store_lock_unavailable") {
+      // An operator has to repair or restore the store / its lock file: no retry.
+      throw new PlanStoreUnreadableError(detail);
+    }
     if (data?.error !== "plan_store_busy") return res;
     if (attempt >= 1) throw new PlanStoreBusyError(detail);
     await sleep(retryAfterMs(res));
     res = await send();
   }
+}
+
+/** One mapping row as the plan API stores it (a revision's `mappings[]`). */
+export interface PlanMappingRow {
+  source: string;
+  target: string;
+  confidence?: number;
+  transform?: string;
+  reason?: string;
+}
+
+/** One target column compared between the latest revision and the user's unsaved mappings. */
+export interface PlanMappingDiffRow {
+  target: string;
+  latestSource: string | null;
+  mineSource: string | null;
+  differs: boolean;
+}
+
+/** A revision of a persisted plan as GET /transfer/plans/{id} returns it. */
+export interface PlanRevisionView {
+  version: number;
+  mappings?: PlanMappingRow[];
+  validation?: { source?: string } | null;
+  agents_used?: string[];
+}
+
+export interface PlanView {
+  id: string;
+  active_version?: number;
+  revisions?: PlanRevisionView[];
+}
+
+/** The revision Execute would run: `active_version`, else the newest. */
+export function activeRevision(plan: PlanView | null | undefined): PlanRevisionView | null {
+  const revisions = plan?.revisions ?? [];
+  if (!revisions.length) return null;
+  return revisions.find((r) => r.version === plan?.active_version) ?? revisions[revisions.length - 1];
+}
+
+function sourceByTarget(rows: PlanMappingRow[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const row of rows) {
+    if (!row?.target) continue;
+    const src = row.transform ? `${row.source} (${row.transform})` : row.source;
+    out.set(row.target, src ?? "");
+  }
+  return out;
+}
+
+/**
+ * Per destination column: which source each side maps, and whether they differ.
+ * Columns only one side maps appear with `null` on the other side.
+ */
+export function diffPlanMappings(latest: PlanMappingRow[], mine: PlanMappingRow[]): PlanMappingDiffRow[] {
+  const theirs = sourceByTarget(latest);
+  const ours = sourceByTarget(mine);
+  const targets = [...new Set([...theirs.keys(), ...ours.keys()])];
+  return targets.map((target) => {
+    const latestSource = theirs.get(target) ?? null;
+    const mineSource = ours.get(target) ?? null;
+    return { target, latestSource, mineSource, differs: latestSource !== mineSource };
+  });
+}
+
+/** True when both sides map every destination column from the same source. */
+export function sameMappings(a: PlanMappingRow[], b: PlanMappingRow[]): boolean {
+  return diffPlanMappings(a, b).every((row) => !row.differs);
 }
