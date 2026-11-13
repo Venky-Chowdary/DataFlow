@@ -39,6 +39,8 @@ from services.workspace_filter import current_workspace_stamp
 MAX_PAIRS_PER_WORKSPACE = 5000
 #: Pairs one request may record: one confirmation per destination column.
 MAX_PAIRS_PER_REQUEST = 200
+#: Distinct confirmers kept per pair (the count saturates here).
+MAX_CONFIRMERS = 20
 _NAME_LIMIT = 256
 
 
@@ -105,6 +107,15 @@ def _workspace_records(workspace_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def _confirmers(prior: dict[str, Any]) -> list[str]:
+    """Who confirmed a pair so far (a record from before this field: its last confirmer)."""
+    listed = prior.get("confirmed_by")
+    if isinstance(listed, list):
+        return [str(x) for x in listed if str(x)]
+    last = str(prior.get("last_confirmed_by") or "").strip().lower()
+    return [last or "anonymous"] if prior else []
+
+
 def _clean(name: Any) -> str:
     return str(name or "").strip()[:_NAME_LIMIT]
 
@@ -117,10 +128,15 @@ def record_confirmed(
     destination: dict[str, Any] | None = None,
     actor: str = "",
 ) -> dict[str, int]:
-    """Count each confirmed ``{source, target}`` once more for this destination."""
+    """Record that ``actor`` confirmed each ``{source, target}`` for this destination.
+
+    A pair's ``count`` is the number of distinct people who confirmed it; the
+    same person (or an anonymous caller) confirming again changes nothing.
+    """
     owner = _owner(workspace_id)
     scope = destination_scope(destination)
     key = _key(owner, scope)
+    who = str(actor or "").strip().lower()[:_NAME_LIMIT] or "anonymous"
     data = _DOC.load(keys=[key])
     record = data.get(key)
     if not isinstance(record, dict) or str(record.get("workspace_id") or "") != owner:
@@ -138,12 +154,18 @@ def record_confirmed(
             continue
         seen.add(pair_key)
         prior = stored.get(pair_key) if isinstance(stored.get(pair_key), dict) else {}
+        confirmed_by = _confirmers(prior)
+        if who not in confirmed_by:
+            confirmed_by.append(who)
         stored[pair_key] = {
             "source": source,
             "target": target,
             "source_norm": s_norm,
             "target_norm": t_norm,
-            "count": int(prior.get("count") or 0) + 1,
+            # Distinct people, not POSTs: Map → Validate → back → Continue
+            # re-sends the same choice, and is not a second confirmation.
+            "count": len(confirmed_by),
+            "confirmed_by": confirmed_by[-MAX_CONFIRMERS:],
             "first_confirmed_at": prior.get("first_confirmed_at") or _now(),
             "last_confirmed_at": _now(),
             "last_confirmed_by": str(actor or "")[:_NAME_LIMIT],

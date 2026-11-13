@@ -353,8 +353,10 @@ DEST_B = {"connector_id": "c-1", "database": "app", "schema": "public", "table":
 
 
 def test_memory_is_scoped_per_destination_and_per_workspace(memory):
-    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a", destination=DEST_A)
-    memory.record_confirmed([{"source": "CustFname", "target": "GivenName"}], workspace_id="ws-a", destination=DEST_A)
+    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a",
+                            destination=DEST_A, actor="ann@example.com")
+    memory.record_confirmed([{"source": "CustFname", "target": "GivenName"}], workspace_id="ws-a",
+                            destination=DEST_A, actor="bob@example.com")
     assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {"cust_fname": {"given_name": (2, True)}}
     # Another destination of the same workspace sees it only as a fallback.
     assert memory.learned_index(workspace_id="ws-a", destination=DEST_B) == {"cust_fname": {"given_name": (2, False)}}
@@ -366,9 +368,37 @@ def test_memory_is_scoped_per_destination_and_per_workspace(memory):
     assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {}
 
 
+def test_one_planner_posting_twice_is_one_confirmation(memory):
+    """Review: Map → Validate → back → Continue re-posts the same pairs."""
+    for _ in range(3):
+        memory.record_confirmed([{"source": "email", "target": "phone"}], workspace_id="ws-a",
+                                destination=DEST_A, actor="mallory@example.com")
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {"email": {"phone": (1, True)}}
+    memory.record_confirmed([{"source": "email", "target": "phone"}], workspace_id="ws-a",
+                            destination=DEST_A, actor="")
+    memory.record_confirmed([{"source": "email", "target": "phone"}], workspace_id="ws-a",
+                            destination=DEST_A, actor="")
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_A)["email"]["phone"][0] == 2, (
+        "an anonymous caller counts once, however often it posts"
+    )
+
+
+def test_a_pair_learned_elsewhere_is_never_preselected(memory):
+    for actor in ("a@example.com", "b@example.com", "c@example.com", "d@example.com"):
+        memory.record_confirmed([{"source": "email", "target": "phone"}], workspace_id="ws-a",
+                                destination=DEST_A, actor=actor)
+    out = suggest_assignments(
+        ["email"], ["phone", "contact"],
+        learned=memory.learned_index(workspace_id="ws-a", destination=DEST_B), dest_table="orders",
+    )
+    assert out and out[0]["kind"] == "learned"
+    assert out[0]["selected"] is False and out[0]["confidence"] < 0.7, out
+
+
 def test_memory_feeds_the_learned_tier(memory):
-    for _ in range(2):
-        memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a", destination=DEST_A)
+    for actor in ("ann@example.com", "bob@example.com"):
+        memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a",
+                                destination=DEST_A, actor=actor)
     out = suggest_assignments(
         ["cust_fname"], ["given_name", "surname"],
         learned=memory.learned_index(workspace_id="ws-a", destination=DEST_A),
@@ -456,3 +486,36 @@ def test_g14_allows_an_omitted_row_whose_old_target_was_generated():
         dest_columns=["x"],
     )
     assert gate is None or gate["status"] != "block"
+
+
+@pytest.mark.parametrize("sources,target", [
+    (["billing_city", "shipping_city"], "city"),
+    (["created_at", "updated_at"], "timestamp"),
+    (["work_email", "home_email"], "email"),
+    (["home_phone", "work_phone", "mobile"], "phone"),
+])
+def test_an_equal_tie_on_one_target_is_not_preselected(sources, target):
+    """Review (H2 leftovers): which sibling wins a tie is arbitrary; say so."""
+    out = suggest_assignments(sources, [target], dest_table="orders", source_table="x")
+    assert len(out) == 1 and out[0]["selected"] is False, out
+    rivals = [s for s in sources if s != out[0]["source"]]
+    assert any(r in out[0]["reason"] for r in rivals), out[0]["reason"]
+
+
+@pytest.mark.parametrize("src,tgt", [
+    ("total_qty", "qty"), ("total_amount", "amount"), ("total_price", "price"),
+    ("sum_amount", "amount"), ("total_tax", "tax"), ("tax_total", "tax"),
+    ("total_quantity", "quantity"), ("line_amount", "amount"), ("grand_total_amount", "amount"),
+])
+def test_an_aggregate_is_not_its_measure(src, tgt):
+    """Review (H2 leftovers): total_qty is not the qty, sum_amount is not the amount."""
+    out = suggest_assignments([src], [tgt], dest_table="", source_table="x")
+    assert out == [] or (out[0]["selected"] is False and out[0]["kind"] not in ("synonym", "concept")), out
+
+
+def test_aggregate_contrast_leaves_the_reported_case_and_plain_pairs_alone():
+    assert score_pair("total_balance", "amount")[1] == "concept"
+    assert score_pair("qty", "quantity")[1] == "synonym"
+    assert score_pair("total_amount", "total_amount")[1] == "exact"
+    one = suggest_assignments(["shipping_city"], ["city"], dest_table="orders")
+    assert one[0]["selected"] is True, "no rival, no tie"

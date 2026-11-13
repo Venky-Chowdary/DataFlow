@@ -352,11 +352,14 @@ export function useMappingStudio(opts: {
 
   const pointerDrop = useCallback(
     (source: string, target: string) => {
+      // Only a live pointer drag of this source drops: one cancelled meanwhile
+      // (Escape, blur, another pick-up) must not land on lift.
+      const live = dnd.mode === "dragging" && dnd.via === "pointer" && dnd.source === source;
       setDnd(IDLE);
-      if (!mappings.some((m) => m.source === source)) return;
+      if (!live || !mappings.some((m) => m.source === source)) return;
       remap(source, target);
     },
-    [mappings, remap],
+    [dnd, mappings, remap],
   );
 
   const conflicts = useMemo(() => targetConflicts(mappings), [mappings]);
