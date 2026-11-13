@@ -262,31 +262,33 @@ def _read_destination_sample(
                         connection_string=dest.get("connection_string", ""),
                         ssl=attempt_ssl,
                     )
-                    with conn.cursor() as cur:
-                        read_sql = text_carry_select_sql(cur, schema, table_name, cols) or col_sql
-                        if keys and sort_key:
-                            key_col = quote_sql_identifier(
-                                require_safe_identifier(sort_key, preserve_case=True)
-                            )
-                            placeholders = ",".join(["%s"] * len(keys))
-                            execute_keyed_read(
-                                conn,
-                                cur,
-                                f"SELECT {read_sql} FROM {table_ref} "  # nosec B608
-                                f"WHERE {{key}} IN ({placeholders}){_nk(key_col)} "
-                                f"ORDER BY {order_sql} LIMIT %s",
-                                key_col,
-                                keys,
-                                (int(limit),),
-                            )
-                        else:
-                            cur.execute(
-                                f"SELECT {read_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",  # nosec B608
-                                (limit,),
-                            )
-                        names = _row_names(cur.description)
-                        rows = cur.fetchall()
-                    conn.close()
+                    try:  # OPS-F1: close (and so roll back) even when the read fails
+                        with conn.cursor() as cur:
+                            read_sql = text_carry_select_sql(cur, schema, table_name, cols) or col_sql
+                            if keys and sort_key:
+                                key_col = quote_sql_identifier(
+                                    require_safe_identifier(sort_key, preserve_case=True)
+                                )
+                                placeholders = ",".join(["%s"] * len(keys))
+                                execute_keyed_read(
+                                    conn,
+                                    cur,
+                                    f"SELECT {read_sql} FROM {table_ref} "  # nosec B608
+                                    f"WHERE {{key}} IN ({placeholders}){_nk(key_col)} "
+                                    f"ORDER BY {order_sql} LIMIT %s",
+                                    key_col,
+                                    keys,
+                                    (int(limit),),
+                                )
+                            else:
+                                cur.execute(
+                                    f"SELECT {read_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",  # nosec B608
+                                    (limit,),
+                                )
+                            names = _row_names(cur.description)
+                            rows = cur.fetchall()
+                    finally:
+                        conn.close()
                     return [dict(zip(names, row)) for row in rows]
                 except Exception as exc:
                     # Report the configured mode's failure, not the upgrade probe's.
@@ -330,26 +332,30 @@ def _read_destination_sample(
                 connection_string=dest.get("connection_string", ""),
                 ssl=dest.get("ssl", False),
             )
-            with conn.cursor() as cur:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True), "`"
-                    )
-                    placeholders = ",".join(["%s"] * len(keys))
-                    cur.execute(
-                        f"SELECT {mysql_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
-                        f"ORDER BY {mysql_order} LIMIT %s",
-                        (*keys, int(limit)),
-                    )
-                else:
-                    cur.execute(
-                        f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",  # nosec B608
-                        (limit,),
-                    )
-                names = _row_names(cur.description)
-                rows = cur.fetchall()
-            conn.close()
+            # OPS-F1: a failed read (1054 Unknown column) skipped close(), and the
+            # open transaction kept the table's metadata lock: DROP TABLE hung.
+            try:
+                with conn.cursor() as cur:
+                    if keys and sort_key:
+                        key_col = quote_sql_identifier(
+                            require_safe_identifier(sort_key, preserve_case=True), "`"
+                        )
+                        placeholders = ",".join(["%s"] * len(keys))
+                        cur.execute(
+                            f"SELECT {mysql_col_sql} FROM {table_ref} "  # nosec B608
+                            f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
+                            f"ORDER BY {mysql_order} LIMIT %s",
+                            (*keys, int(limit)),
+                        )
+                    else:
+                        cur.execute(
+                            f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",  # nosec B608
+                            (limit,),
+                        )
+                    names = _row_names(cur.description)
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
             return [dict(zip(names, row)) for row in rows]
 
         if db_type in {"sqlserver", "mssql", "azure_sql"}:
