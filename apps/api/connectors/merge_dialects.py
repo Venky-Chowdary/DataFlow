@@ -876,9 +876,6 @@ def _sybase_merge_upsert(
             conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
 
 
-_KEY_HIT_CHUNK = 400
-
-
 def update_insert_upsert(
     conn: Any,
     table_obj: sa.Table,
@@ -894,83 +891,46 @@ def update_insert_upsert(
     DEFAULT — a silent un-delete. This fallback is used when the dest table
     has dest-owned columns and native upsert cannot run (no unique index).
     Does not require a unique constraint. At-least-once, not exactly-once.
+
+    The database decides key equality, never Python: a case- or
+    trailing-space-insensitive collation matches ``'ABC'`` to ``'abc'`` in SQL,
+    and a Python tuple compare then inserted a duplicate (or hit the unique
+    index). So every row runs ``UPDATE … WHERE key = :k`` and then ``INSERT …
+    SELECT :v… WHERE NOT EXISTS (… key = :k)`` — two executemany statements in
+    the caller's transaction. UPDATE rowcount is not used to find absent keys:
+    MySQL reports changed, not matched, rows, so identical values would read
+    as "absent". A stored row keeps its own key spelling. A new key that one
+    batch carries under two collation-equal spellings inserts its first image
+    once; the later spelling is not inserted again.
     """
     if not rows or not conflict_cols:
         return 0
-    from connectors.writer_common import (
-        _conflict_key_identity,
-        assert_dense_upsert_keys_present,
-    )
+    from connectors.writer_common import assert_dense_upsert_keys_present
 
     assert_dense_upsert_keys_present(rows, conflict_cols)
-    existing = _existing_conflict_keys(conn, table_obj, rows, conflict_cols)
     update_cols = [c for c in target_cols if c not in conflict_cols]
-    to_update: list[dict[str, Any]] = []
-    to_insert: list[dict[str, Any]] = []
-    for row in rows:
-        payload = {c: row.get(c) for c in target_cols}
-        key = tuple(_conflict_key_identity(row[c]) for c in conflict_cols)
-        if key in existing:
-            if update_cols:
-                to_update.append(payload)
-        else:
-            to_insert.append(payload)
-    written = 0
-    if to_update and update_cols:
+    key_match = sa.and_(
+        *(table_obj.c[c] == sa.bindparam(f"_k_{c}", type_=table_obj.c[c].type) for c in conflict_cols)
+    )
+    params = [
+        {
+            **{f"_k_{c}": row[c] for c in conflict_cols},
+            **{f"_v_{c}": row.get(c) for c in target_cols},
+        }
+        for row in rows
+    ]
+    if update_cols:
         stmt = (
             table_obj.update()
-            .where(
-                sa.and_(
-                    *(table_obj.c[c] == sa.bindparam(f"_k_{c}") for c in conflict_cols)
-                )
-            )
-            .values({c: sa.bindparam(f"_u_{c}") for c in update_cols})
+            .where(key_match)
+            .values({c: sa.bindparam(f"_v_{c}", type_=table_obj.c[c].type) for c in update_cols})
         )
-        conn.execute(
-            stmt,
-            [
-                {
-                    **{f"_k_{c}": row[c] for c in conflict_cols},
-                    **{f"_u_{c}": row.get(c) for c in update_cols},
-                }
-                for row in to_update
-            ],
-        )
-        written += len(to_update)
-    elif to_update:
-        written += len(to_update)
-    if to_insert:
-        conn.execute(table_obj.insert(), to_insert)
-        written += len(to_insert)
-    return written
-
-
-def _existing_conflict_keys(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-) -> set[tuple[Any, ...]]:
-    from connectors.writer_common import _conflict_key_identity, _is_nullish_conflict_key
-
-    keys: set[tuple[Any, ...]] = set()
-    for i in range(0, len(rows), _KEY_HIT_CHUNK):
-        chunk = rows[i : i + _KEY_HIT_CHUNK]
-        clauses = [
-            sa.and_(*[table_obj.c[c] == row[c] for c in conflict_cols])
-            for row in chunk
-            if not any(_is_nullish_conflict_key(row.get(c)) for c in conflict_cols)
-        ]
-        if not clauses:
-            continue
-        stmt = sa.select(*[table_obj.c[c] for c in conflict_cols]).where(
-            sa.or_(*clauses)
-        )
-        for found in conn.execute(stmt):
-            keys.add(
-                tuple(_conflict_key_identity(found[j]) for j in range(len(conflict_cols)))
-            )
-    return keys
+        conn.execute(stmt, params)
+    absent = sa.select(
+        *(sa.bindparam(f"_v_{c}", type_=table_obj.c[c].type) for c in target_cols)
+    ).where(~sa.exists().where(key_match))
+    conn.execute(table_obj.insert().from_select(list(target_cols), absent), params)
+    return len(rows)
 
 
 # --------------------------------------------------------------------------- #

@@ -747,43 +747,32 @@ def _sqlite_update_insert_upsert(
     insert_cols: list[str],
     rows: list[Any],
 ) -> int:
-    """sqlite3 spelling of ``merge_dialects.update_insert_upsert``. Never DELETE."""
+    """sqlite3 spelling of ``merge_dialects.update_insert_upsert``. Never DELETE.
+
+    SQLite decides key equality (``COLLATE NOCASE`` / ``RTRIM`` keys match
+    across spellings): UPDATE by key, then INSERT … SELECT … WHERE NOT EXISTS.
+    With no SET columns (skip_duplicates) only absent keys insert, and the
+    count returned is the rows inserted, so kept keys are not counted written.
+    """
+    where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
     keys = [_project_row(row, target_cols, conflict_cols) for row in rows]
-    existing: set[tuple[Any, ...]] = set()
-    pk_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
-    for i in range(0, len(keys), 400):
-        part = keys[i : i + 400]
-        ph = ", ".join("(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in part)
-        cur.execute(
-            f"SELECT {pk_sql} FROM {table_quoted} WHERE ({pk_sql}) IN ({ph})",  # nosec B608
-            [v for key in part for v in key],
-        )
-        existing.update(tuple(found) for found in cur.fetchall())
-    to_update: list[tuple[Any, ...]] = []
-    to_insert: list[tuple[Any, ...]] = []
-    for row, key in zip(rows, keys):
-        if key in existing:
-            if update_cols:
-                to_update.append(_project_row(row, target_cols, update_cols) + key)
-        else:
-            to_insert.append(_project_row(row, target_cols, insert_cols))
-            if not update_cols:
-                existing.add(key)
-    if to_update and update_cols:
+    if update_cols:
         set_sql = ", ".join(f"{quote_sql_identifier(c)}=?" for c in update_cols)
-        where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
         cur.executemany(
             f"UPDATE {table_quoted} SET {set_sql} WHERE {where_sql}",  # nosec B608
-            to_update,
+            [_project_row(row, target_cols, update_cols) + key for row, key in zip(rows, keys)],
         )
-    if to_insert:
-        cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
-        ph = ", ".join("?" for _ in insert_cols)
-        cur.executemany(
-            f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({ph})",  # nosec B608
-            to_insert,
-        )
-    return len(rows)
+    cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
+    ph = ", ".join("?" for _ in insert_cols)
+    cur.executemany(
+        f"INSERT INTO {table_quoted} ({cols_sql}) SELECT {ph} "  # nosec B608
+        f"WHERE NOT EXISTS (SELECT 1 FROM {table_quoted} WHERE {where_sql})",
+        [_project_row(row, target_cols, insert_cols) + key for row, key in zip(rows, keys)],
+    )
+    if update_cols:
+        return len(rows)
+    inserted = cur.rowcount
+    return inserted if isinstance(inserted, int) and inserted >= 0 else len(rows)
 
 
 def _sqlite_duplicate_key_message(
