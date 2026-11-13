@@ -27,6 +27,8 @@ export interface DestColumn {
   writable: boolean;
   /** Who fills it when nothing is mapped: the engine (generated) or an identity. */
   fill: "generated" | "identity" | null;
+  /** The server's comparison key for this name (case-insensitive, as the DDL gate). */
+  matchKey: string;
 }
 
 export interface DestColumnCatalog {
@@ -76,6 +78,7 @@ export function catalogFromApi(raw: Record<string, unknown>): DestColumnCatalog 
         required: triBool(c.required),
         writable: c.writable === false ? false : !bool(c.generated),
         fill: c.fill === "generated" || c.fill === "identity" ? c.fill : bool(c.generated) ? "generated" : bool(c.identity) ? "identity" : null,
+        matchKey: typeof c.match_key === "string" && c.match_key ? c.match_key : String(c.name).toLowerCase(),
       })),
     nullabilityMeasured: raw.nullability_measured === true,
     canAddColumns: raw.can_add_columns === true,
@@ -113,6 +116,7 @@ export function catalogFromNames(
       required: null,
       writable: true,
       fill: null,
+      matchKey: name.toLowerCase(),
     })),
     nullabilityMeasured: false,
     // Only a confirmed-missing table may promise a CREATE before the read lands.
@@ -131,7 +135,7 @@ export function findDestColumn(
 ): DestColumn | undefined {
   if (!catalog || !name) return undefined;
   const want = name.trim().toLowerCase();
-  return catalog.columns.find((c) => c.name.toLowerCase() === want);
+  return catalog.columns.find((c) => c.matchKey === want);
 }
 
 /** Rows that write a destination column (omitted rows write nothing). */
@@ -181,7 +185,7 @@ export function destinationColumnStates(
     sourcesFor.set(key, [...(sourcesFor.get(key) ?? []), m.source]);
   }
   return catalog.columns.map((column) => {
-    const sources = sourcesFor.get(column.name.toLowerCase()) ?? [];
+    const sources = sourcesFor.get(column.matchKey) ?? [];
     if (sources.length > 1) {
       return {
         column, sources, status: "conflict", blocking: true,
@@ -249,7 +253,7 @@ export function summarizeMapTargets(
 ): MapTargetSummary {
   const states = destinationColumnStates(catalog, mappings);
   const conflicts = targetConflicts(mappings);
-  const known = new Set((catalog?.columns ?? []).map((c) => c.name.toLowerCase()));
+  const known = new Set((catalog?.columns ?? []).map((c) => c.matchKey));
   const hasCatalog = Boolean(catalog && catalog.columns.length > 0);
   const newTargets = hasCatalog
     ? writingRows(mappings).filter((m) => !known.has(m.target.trim().toLowerCase())).map((m) => m.target)
@@ -406,7 +410,8 @@ export function mapTargetIssues(
       });
     }
   }
-  for (const name of summary.refusedNewTargets) {
+  // A table the run recreates is created from the mappings: a new name is fine.
+  for (const name of opts.tableRecreated ? [] : summary.refusedNewTargets) {
     issues.push({
       code: "new_target_refused",
       title: `${name} is not a destination column`,

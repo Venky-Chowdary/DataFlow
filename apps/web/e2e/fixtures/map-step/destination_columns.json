@@ -14,7 +14,10 @@
    "primary_key": true,
    "identity": false,
    "generated": false,
-   "required": true
+   "writable": true,
+   "fill": null,
+   "required": true,
+   "match_key": "legacy_ref"
   },
   {
    "name": "email_address",
@@ -26,7 +29,10 @@
    "primary_key": false,
    "identity": false,
    "generated": false,
-   "required": false
+   "writable": true,
+   "fill": null,
+   "required": false,
+   "match_key": "email_address"
   },
   {
    "name": "total_amount",
@@ -38,7 +44,10 @@
    "primary_key": false,
    "identity": false,
    "generated": false,
-   "required": false
+   "writable": true,
+   "fill": null,
+   "required": false,
+   "match_key": "total_amount"
   },
   {
    "name": "ordered_on",
@@ -50,7 +59,10 @@
    "primary_key": false,
    "identity": false,
    "generated": false,
-   "required": false
+   "writable": true,
+   "fill": null,
+   "required": false,
+   "match_key": "ordered_on"
   },
   {
    "name": "order_status",
@@ -62,7 +74,10 @@
    "primary_key": false,
    "identity": false,
    "generated": false,
-   "required": false
+   "writable": true,
+   "fill": null,
+   "required": false,
+   "match_key": "order_status"
   },
   {
    "name": "tenant_id",
@@ -74,7 +89,10 @@
    "primary_key": false,
    "identity": false,
    "generated": false,
-   "required": true
+   "writable": true,
+   "fill": null,
+   "required": true,
+   "match_key": "tenant_id"
   },
   {
    "name": "created_at",
@@ -86,7 +104,10 @@
    "primary_key": false,
    "identity": false,
    "generated": false,
-   "required": false
+   "writable": true,
+   "fill": null,
+   "required": false,
+   "match_key": "created_at"
   },
   {
    "name": "notes",
@@ -98,7 +119,10 @@
    "primary_key": false,
    "identity": false,
    "generated": false,
-   "required": false
+   "writable": true,
+   "fill": null,
+   "required": false,
+   "match_key": "notes"
   }
  ],
  "nullability_measured": true,
