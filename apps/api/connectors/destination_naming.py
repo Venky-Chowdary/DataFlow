@@ -163,6 +163,18 @@ def column_key(name: Any) -> str:
     return sanitize_identifier(name, preserve_case=True, max_len=_NO_CUT).casefold()
 
 
+def name_copy_targets(dest_type: str | None, mappings: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """Map rows for a server-to-server COPY route, targets named as the row writer does."""
+    name_of = writer_identifier(dest_type, preserve_case=True)
+    out: list[dict[str, Any]] = []
+    for m in mappings or []:
+        row = dict(m) if isinstance(m, dict) else dict(_as_dict(m))
+        if str(row.get("target") or "").strip():
+            row["target"] = name_of(row["target"])
+        out.append(row)
+    return out
+
+
 def _name_size(kind: str, name: str) -> int:
     return len(name.encode("utf-8")) if kind in _BYTE_LIMITED else len(name)
 
@@ -309,6 +321,7 @@ __all__ = [
     "column_key",
     "dest_kind",
     "keeps_exact_names",
+    "name_copy_targets",
     "name_limit",
     "target_name_gate",
     "target_name_issues",
