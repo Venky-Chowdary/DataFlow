@@ -119,8 +119,12 @@ def _table_verdict(
         return {"status": "skipped", "probed": False, "scope": "none", "reason": scope,
                 "leaked": False, "table": table}
     base = {"probed": True, "scope": scope.kind, "table": table, "timeout_seconds": probe_timeout_seconds()}
-    dest = count_marker_rows(dest_type, dest_cfg, table, targets, scope)
+    dest = count_marker_rows(dest_cfg, table, targets, scope)
     base["timeout_enforced"] = dest.timeout_enforced
+    if dest.not_applicable:
+        # Datawrap's own lack of a route never fails or undoes a run.
+        return {**base, "probed": False, "status": "not_applicable", "reason": dest.reason,
+                "destination_rows": None, "leaked": False}
     if dest.rows is None:
         return {**base, "status": "not_measured", "reason": f"destination: {dest.reason}",
                 "destination_rows": None, "leaked": False}
@@ -132,10 +136,11 @@ def _table_verdict(
     if (source_endpoint is not None and source_scope is not None
             and _engine_type(source_endpoint) in _SQL_PROBE_TYPES):
         source = count_marker_rows(
-            _engine_type(source_endpoint), resolve_connector_config(source_endpoint),
-            source_table, sources, source_scope,
+            resolve_connector_config(source_endpoint), source_table, sources, source_scope,
         )
-        if source.capped and dest.raw <= source.raw and dest.escaped <= source.escaped:
+        if source.not_applicable:
+            source = None  # no route to the source: count it on the records, or do not judge
+        elif source.capped and dest.raw <= source.raw and dest.escaped <= source.escaped:
             # The source holds at least as many of each form as the (fully
             # counted) destination: nothing leaked.
             return {**base, "status": "passed", "leaked": False, "source_rows": None,
@@ -157,7 +162,12 @@ def _table_verdict(
 
 
 #: Worst first: the status a multi-table check reports.
-_STATUS_ORDER = ("leaked", "not_measured", "not_judged", "passed", "skipped")
+_STATUS_ORDER = ("leaked", "not_measured", "not_judged", "not_applicable", "passed", "skipped")
+
+
+def _not_applicable(table: str, reason: str) -> dict[str, Any]:
+    return {"status": "not_applicable", "probed": False, "scope": "none", "reason": reason,
+            "leaked": False, "table": table}
 
 
 def _stream_verdicts(
@@ -218,11 +228,14 @@ def null_marker_verdict(
     rows_written: int = 0,
     validation_mode: str | None = "strict",
 ) -> dict[str, Any] | None:
-    """Gate-8: the destination's marker text against the source's; ``None`` when not probed.
+    """Gate-8: the destination's marker text against the source's.
 
     ``status`` is ``passed``, ``leaked``, ``not_judged`` (marker text the
-    source could not be counted for), ``not_measured`` (timeout, cap or error)
-    or ``skipped`` (the run's rows cannot be named and the mode is not strict).
+    source could not be counted for), ``not_measured`` (the check applies but
+    could not complete: timeout, cap, query error, no connection back through
+    the writer's engine), ``not_applicable`` (the probe has no route to this
+    destination; never fails a run) or ``skipped`` (the run's rows cannot be
+    named and the mode is not strict).
     The source is counted on its engine (SQL) or, for any other source, on the
     run's own source records, where a user literal is still escaped or marked.
     A multi-table run is judged table by table (``tables``).
@@ -231,9 +244,12 @@ def null_marker_verdict(
     from src.transfer.adapters import resolve_connector_config, resolve_dest_table
 
     dest_type = _engine_type(endpoint)
-    if dest_type not in _SQL_PROBE_TYPES:
-        return None
     summary = dest_summary if isinstance(dest_summary, dict) else {}
+    if dest_type not in _SQL_PROBE_TYPES:
+        return _not_applicable(
+            str(summary.get("table") or getattr(endpoint, "table", "") or ""),
+            f"no SQL marker probe for a {getattr(endpoint, 'format', '') or dest_type or 'non-SQL'} destination",
+        )
     kw = {"mappings": mappings, "records": records, "rows_written": int(rows_written or 0)}
     if summary.get("multi_stream") and summary.get("streams"):
         tables = _stream_verdicts(dest_type=dest_type, endpoint=endpoint, source_endpoint=source_endpoint,
@@ -252,8 +268,11 @@ def null_marker_verdict(
         or ""
     )
     scope = resolve_probe_scope(dest_summary=summary, validation_mode=validation_mode, **kw)
+    dest_cfg = resolve_connector_config(endpoint)
+    if str(summary.get("schema") or "").strip():
+        dest_cfg["schema"] = str(summary["schema"])  # where the writer says it wrote
     return _table_verdict(
-        dest_type=dest_type, dest_cfg=resolve_connector_config(endpoint), table=table,
+        dest_type=dest_type, dest_cfg=dest_cfg, table=table,
         targets=_names(mappings, "target"), scope=scope, source_endpoint=source_endpoint,
         source_table=str(getattr(source_endpoint, "table", "") or ""), sources=_names(mappings, "source"),
         **kw,

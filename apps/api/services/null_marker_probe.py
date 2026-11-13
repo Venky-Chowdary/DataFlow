@@ -98,6 +98,8 @@ class MarkerCount:
     raw: int = 0
     escaped: int = 0
     capped: bool = False
+    #: The probe has no route to this destination (Datawrap's gap, not the run's).
+    not_applicable: bool = False
 
 
 #: The NULL markers as a leak stores them, and their escaped spellings.
@@ -221,6 +223,13 @@ def statement_timeout(conn: Any, db_type: str, seconds: float) -> Iterator[bool]
             raw, previous = _dbapi(conn), _dbapi(conn).timeout
             raw.timeout = max(1, math.ceil(seconds))
             undo = lambda: setattr(raw, "timeout", previous)  # noqa: E731
+        elif db_type == "duckdb" and hasattr(_dbapi(conn), "interrupt"):
+            import threading
+
+            timer = threading.Timer(seconds, _dbapi(conn).interrupt)
+            timer.daemon = True
+            timer.start()
+            undo = timer.cancel
         elif db_type == "oracle" and hasattr(_dbapi(conn), "call_timeout"):
             raw, previous = _dbapi(conn), _dbapi(conn).call_timeout
             raw.call_timeout = millis
@@ -299,62 +308,149 @@ def _columns(conn: Any, table: str, schema: str | None, wanted: list[str],
     return out, fixed, key_type
 
 
-def _exact_in(column: Any, db_type: str, texts: list[str]) -> Any:
+def _exact_in(column: Any, dialect: str, texts: list[str]) -> Any:
     """``column IN texts``, byte for byte where the engine's own collation may fold or pad."""
     import sqlalchemy as sa
 
-    if db_type in ("mysql", "mariadb"):
+    if dialect in ("mysql", "mariadb"):
         # CAST(... AS BINARY): no case folding, no PAD SPACE.
         return sa.cast(column, sa.LargeBinary).in_([t.encode("utf-8") for t in texts])
     return column.in_(texts)
 
 
+class ProbeNotApplicable(Exception):
+    """The probe has no route to this destination; the reason says why."""
+
+
+#: Errors that mean Datawrap cannot build a SQL route to the destination at all
+#: (no dialect plugin, no driver, a URL it cannot parse), never that the
+#: destination failed.
+def _no_route(exc: BaseException) -> bool:
+    import sqlalchemy.exc as sa_exc
+
+    seen: BaseException | None = exc
+    while seen is not None:
+        if isinstance(seen, (sa_exc.NoSuchModuleError, sa_exc.ArgumentError, ImportError, NotImplementedError)):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def _unreachable_by_a_second_connection(cfg: dict[str, Any]) -> str:
+    """Why a second connection cannot see the destination the writer wrote, or ``""``."""
+    kind = str(cfg.get("type") or "").lower()
+    conn_s = str(cfg.get("connection_string") or "").strip()
+    database = str(cfg.get("database") or "").strip()
+    if kind == "motherduck":
+        return "a MotherDuck database has no SQL read-back route"
+    if kind == "duckdb" or conn_s.lower().startswith("duckdb:"):
+        from connectors.sqlite_common import duckdb_file_path
+
+        path = duckdb_file_path(database, conn_s) or ""
+        if path.lower().startswith(("md:", "motherduck:")):
+            return "a MotherDuck database has no SQL read-back route"
+        if path in ("", ":memory:"):
+            return "an in-memory DuckDB database is not visible to a second connection"
+    if kind == "sqlite" and not conn_s and database in ("", ":memory:"):
+        return "an in-memory SQLite database is not visible to a second connection"
+    return ""
+
+
+def probe_engine(cfg: dict[str, Any]) -> Any:
+    """The writer's own engine for ``cfg`` (same config, same pool); raises :class:`ProbeNotApplicable`.
+
+    ``cfg`` is the destination config the writer was handed: its ``type`` is
+    the endpoint's own engine (``duckdb``, ``clickhouse``, ...), never the
+    catalog's driver family (``generic_sql``), so the probe builds exactly the
+    URL the writer built.
+    """
+    from connectors import generic_sql
+
+    reason = _unreachable_by_a_second_connection(cfg)
+    if reason:
+        raise ProbeNotApplicable(reason)
+    try:
+        return generic_sql.get_sqlalchemy_engine(dict(cfg))
+    except Exception as exc:
+        if _no_route(exc) or isinstance(exc, ValueError):
+            raise ProbeNotApplicable(f"Datawrap has no SQL route to this destination: {exc}") from exc
+        raise
+
+
 def count_marker_rows(
-    db_type: str, cfg: dict[str, Any], table: str, columns: list[str], scope: ProbeScope | None = None,
+    cfg: dict[str, Any], table: str, columns: list[str], scope: ProbeScope | None = None,
 ) -> MarkerCount:
     """Rows of ``scope`` whose text columns hold a marker, raw and escaped apart.
 
-    Bounded three ways (review F3): the scope, a statement timeout and a cap.
-    Any of them reached, or an unreadable table, is "not measured" with its
-    reason. The SQL filter only narrows the candidates; every candidate is
-    classified byte for byte here (review F4).
+    Opened through the writer's own engine (:func:`probe_engine`). Bounded three
+    ways (review F3): the scope, a statement timeout and a cap. Any of them
+    reached, a query error, or no connection back through that engine after
+    the write is "not measured" with its reason. No route at all is
+    ``not_applicable``. The SQL filter only narrows the candidates; every
+    candidate is classified byte for byte here (review F4).
     """
     import sqlalchemy as sa
 
-    from connectors.generic_sql import _engine
     from connectors.sql_identifiers import split_qualified_table
+    from services.engine_pool import release_engine
 
     scope = scope or ProbeScope("whole_table")
     if not table:
         return MarkerCount(None, "no table to probe")
     raw_forms, escaped_forms = _forms()
-    probe_cfg = {**dict(cfg or {}), "type": db_type}
-    schema, bare = split_qualified_table(table, (probe_cfg.get("schema") or "").strip() or None)
+    schema, bare = split_qualified_table(table, (str(cfg.get("schema") or "")).strip() or None)
     seconds = probe_timeout_seconds()
     enforced = False
     try:
-        engine = _engine(probe_cfg)
-        with engine.connect() as conn:
-            text_cols, fixed, key_type = _columns(conn, bare, schema, columns, scope.key_column)
-            if not text_cols:
-                return MarkerCount(0)
-            if scope.kind == "run_keys" and key_type is None:
-                return MarkerCount(None, f"the key column {scope.key_column!r} is not in {table}")
-            cols = [sa.column(c) for c in text_cols]
-            if scope.kind == "run_keys" and scope.key_column not in text_cols:
-                cols.append(sa.column(scope.key_column, key_type))
-            tbl = sa.table(bare, *cols, schema=schema or None)
-            texts = sorted(raw_forms | escaped_forms)
-            hit = sa.or_(*[_exact_in(tbl.c[c], db_type, texts) for c in text_cols])
-            with statement_timeout(conn, db_type, seconds) as enforced:
-                result = bounded_marker_count(conn, tbl, text_cols, hit, scope, time.monotonic() + seconds, fixed)
-            result.timeout_enforced = enforced
-            return result
-    except Exception as exc:  # noqa: BLE001 — an unreadable probe is "not measured", not a pass
-        if timed_out(exc):
-            return MarkerCount(None, f"timed out after {seconds:g}s", enforced)
-        logger.warning("NULL-marker probe of %s failed", table, exc_info=True)
-        return MarkerCount(None, f"the probe failed ({type(exc).__name__})", enforced)
+        engine = probe_engine(cfg)
+    except ProbeNotApplicable as exc:
+        return MarkerCount(None, str(exc), False, not_applicable=True)
+    except Exception as exc:  # noqa: BLE001 — the writer's own config would not build again
+        logger.warning("NULL-marker probe of %s could not build the writer's engine", table, exc_info=True)
+        return MarkerCount(None, f"the writer's engine could not be built again ({type(exc).__name__})")
+    try:
+        try:
+            conn = engine.connect()  # SQLAlchemy 2 connects here
+        except Exception as exc:  # noqa: BLE001 — recorded, never a pass
+            if _no_route(exc):
+                return MarkerCount(None, f"Datawrap has no SQL route to this destination: {exc}",
+                                   False, not_applicable=True)
+            logger.warning("NULL-marker probe of %s could not connect", table, exc_info=True)
+            return MarkerCount(None, "could not connect again through the engine the write used "
+                                     f"({type(exc).__name__})")
+        with conn:
+            dialect = str(getattr(engine.dialect, "name", "") or "").lower()
+            if dialect == "mysql" and getattr(engine.dialect, "is_mariadb", False):
+                dialect = "mariadb"
+            try:
+                text_cols, fixed, key_type = _columns(conn, bare, schema, columns, scope.key_column)
+                if not text_cols:
+                    return MarkerCount(0)
+                if scope.kind == "run_keys" and key_type is None:
+                    return MarkerCount(None, f"the key column {scope.key_column!r} is not in {table}")
+                cols = [sa.column(c) for c in text_cols]
+                if scope.kind == "run_keys" and scope.key_column not in text_cols:
+                    cols.append(sa.column(scope.key_column, key_type))
+                tbl = sa.table(bare, *cols, schema=schema or None)
+                texts = sorted(raw_forms | escaped_forms)
+                hit = sa.or_(*[_exact_in(tbl.c[c], dialect, texts) for c in text_cols])
+                with statement_timeout(conn, _TIMEOUT_DIALECT.get(dialect, dialect), seconds) as enforced:
+                    result = bounded_marker_count(
+                        conn, tbl, text_cols, hit, scope, time.monotonic() + seconds, fixed
+                    )
+                result.timeout_enforced = enforced
+                return result
+            except Exception as exc:  # noqa: BLE001 — an unreadable probe is "not measured", not a pass
+                if timed_out(exc):
+                    return MarkerCount(None, f"timed out after {seconds:g}s", enforced)
+                logger.warning("NULL-marker probe of %s failed", table, exc_info=True)
+                return MarkerCount(None, f"the probe query failed ({type(exc).__name__})", enforced)
+    finally:
+        release_engine(engine)
+
+
+#: SQLAlchemy dialect name -> the timeout family :func:`statement_timeout` knows.
+_TIMEOUT_DIALECT = {"mssql": "sqlserver"}
 
 
 def count_literal_marker_records(records: Any) -> MarkerCount | None:
