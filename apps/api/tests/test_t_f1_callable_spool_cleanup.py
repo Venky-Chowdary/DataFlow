@@ -350,7 +350,10 @@ def test_a_nested_pytest_passes_while_this_process_holds_a_live_spool(tmp_path):
             out = subprocess.run(
                 [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
                  f"--basetemp={tmp_path / 'nested'}", str(probe.relative_to(api_root))],
-                cwd=api_root, env={**os.environ}, capture_output=True, text=True, timeout=600,
+                # The nested run is one file: under the parent's CI shard (DATAFLOW_TEST_SHARD=i/n)
+                # it is assigned to shard 1, so any other shard deselects it and pytest exits 5.
+                cwd=api_root, env={k: v for k, v in os.environ.items() if k != "DATAFLOW_TEST_SHARD"},
+                capture_output=True, text=True, timeout=600,
             )
         finally:
             probe.unlink(missing_ok=True)
