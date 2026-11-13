@@ -856,15 +856,17 @@ async def _link_job_to_plan(plan_id: str, job_id: str) -> None:
     The pending job already holds the idempotency key and the destination, so
     a failure here must not fail the request (that would orphan the job and
     turn the caller's retry into a 409 duplicate). The run does not need the
-    link; a plan store that is busy or unreadable is logged and skipped.
+    link, so any failure — a busy or unreadable store, a full or read-only
+    disk, a lock file it may not open — is logged and skipped. The log names
+    the error class and the ids only: the error text can carry store paths.
     """
-    from services.transfer_plan_store import PlanStoreBusy, PlanStoreUnreadable, attach_job
+    from services.transfer_plan_store import attach_job
 
     try:
         await run_plan_write(attach_job, plan_id, job_id, status="running")
-    except (PlanStoreBusy, PlanStoreUnreadable) as exc:
+    except Exception as exc:  # noqa: BLE001 - the job exists; the link is optional
         logging.getLogger(__name__).warning(
-            "Run %s started but was not linked to plan %s: the plan store refused (%s)",
+            "Run %s started but was not linked to plan %s: %s",
             job_id,
             plan_id,
             type(exc).__name__,

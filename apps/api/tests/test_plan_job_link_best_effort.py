@@ -85,8 +85,11 @@ def _post(route: str):
     [
         lambda: plans.PlanStoreBusy(plans.STORE_PATH),
         lambda: plans.PlanStoreUnreadable(plans.STORE_PATH, ValueError("bad json")),
+        lambda: OSError(28, "No space left on device", "/srv/secret-volume/transfer_plans.json"),
+        lambda: plans.PlanStoreReentry("nested"),
+        lambda: RuntimeError("unexpected at /srv/secret-volume/x"),
     ],
-    ids=["busy", "unreadable"],
+    ids=["busy", "unreadable", "enospc", "reentry", "runtime"],
 )
 def test_a_plan_store_refusal_does_not_fail_a_run_that_was_already_created(
     started_runs, monkeypatch, caplog, route, refusal
@@ -100,7 +103,9 @@ def test_a_plan_store_refusal_does_not_fail_a_run_that_was_already_created(
     assert res.status_code == 200, res.text
     assert res.json()["job_id"] == "job-link"
     assert started_runs.created == ["job-link"]
-    assert any("job-link" in r.getMessage() and "plan-link" in r.getMessage() for r in caplog.records)
+    logged = [r for r in caplog.records if "job-link" in r.getMessage() and "plan-link" in r.getMessage()]
+    assert logged, "the skipped link is logged with the job and plan ids"
+    assert all("/srv/secret-volume" not in r.getMessage() and not r.exc_info for r in logged)
 
 
 @pytest.mark.parametrize("route", ["execute", "run"])
