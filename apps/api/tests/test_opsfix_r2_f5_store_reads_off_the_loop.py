@@ -29,6 +29,26 @@ OFFLOAD = {"to_thread", "run_in_threadpool", "run_in_executor", "run_sync"}
 #: Startup work, before the API serves anything.
 ALLOWED = {("main", "lifespan")}
 BLOCK_SECONDS = 0.4
+#: The stall a warm, unloaded loop is allowed while nine store reads wait.
+STALL_FLOOR = BLOCK_SECONDS / 2
+#: A loop that ran one store read on itself stalls for BLOCK_SECONDS (less one
+#: 10 ms tick), so no limit at or above this can let that regression through.
+STALL_CEILING = BLOCK_SECONDS * 3 / 4
+
+
+def _stall_limit(baseline: float) -> float:
+    """STALL_FLOOR, widened for a slow runner by its own unblocked jitter.
+
+    CI (api-tests 2/6, PR 412) failed this case with "the event loop stalled
+    0.21s" against a 0.20 s bar: the late tick was the first /health request
+    building the app's lazily materialised route table on the loop (the work
+    ``services.route_table_warmup`` does at startup, which an ASGI transport
+    without lifespan skips), about 85 ms here and over 200 ms on a loaded
+    runner. The limit scales with the same burst measured with the store not
+    blocking (4x its worst tick) but never reaches STALL_CEILING, so a store
+    read on the loop still fails at any runner speed.
+    """
+    return min(STALL_CEILING, max(STALL_FLOOR, 4 * baseline))
 
 
 def _tree(path: Path) -> ast.Module | None:
@@ -151,9 +171,11 @@ ROUTES = [
 
 
 def test_health_and_the_loop_stay_responsive_while_store_routes_wait_on_the_database(blocking_stores):
+    from services.route_table_warmup import warm_route_table
     from src.main import app
 
-    async def scenario() -> tuple[float, float, list[int]]:
+    async def burst(client: httpx.AsyncClient) -> tuple[float, float, list[int]]:
+        """Every store route at once, then /health: the worst tick and /health's latency."""
         lags: list[float] = []
 
         async def ticker() -> None:
@@ -162,28 +184,47 @@ def test_health_and_the_loop_stay_responsive_while_store_routes_wait_on_the_data
                 await asyncio.sleep(0.01)
                 lags.append(time.perf_counter() - started - 0.01)
 
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1", timeout=60) as client:
-            # Warm up (first-request imports and schema builds are not the finding), then block the store.
-            for method, path, body in ROUTES:
-                await client.request(method, path, json=body)
-            blocking_stores["blocking"] = True
-            tick = asyncio.create_task(ticker())
-            await asyncio.sleep(0.05)
-            lags.clear()
-            calls = [client.request(m, p, json=b) for m, p, b in ROUTES]
-            routes = asyncio.gather(*calls)
-            await asyncio.sleep(0.05)
-            started = time.perf_counter()
-            health = await client.get("/health")
-            health_seconds = time.perf_counter() - started
-            assert health.status_code == 200
-            responses = await routes
-            tick.cancel()
+        tick = asyncio.create_task(ticker())
+        await asyncio.sleep(0.05)
+        lags.clear()
+        calls = [client.request(m, p, json=b) for m, p, b in ROUTES]
+        routes = asyncio.gather(*calls)
+        await asyncio.sleep(0.05)
+        started = time.perf_counter()
+        health = await client.get("/health")
+        health_seconds = time.perf_counter() - started
+        assert health.status_code == 200
+        responses = await routes
+        tick.cancel()
         return max(lags), health_seconds, [r.status_code for r in responses]
 
-    max_lag, health_seconds, statuses = asyncio.run(scenario())
+    async def scenario() -> tuple[float, float, float, list[int]]:
+        # What the API's startup does before it serves anything (an ASGI
+        # transport skips lifespan): the route table is built off the request path.
+        await asyncio.to_thread(warm_route_table, app)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1", timeout=60) as client:
+            # Warm up (first-request imports and schema builds are not the finding)...
+            for method, path, body in ROUTES:
+                await client.request(method, path, json=body)
+            await client.get("/health")
+            # ...take this runner's own jitter for the same burst, then block the store.
+            baseline, _, _ = await burst(client)
+            blocking_stores["blocking"] = True
+            max_lag, health_seconds, statuses = await burst(client)
+        return baseline, max_lag, health_seconds, statuses
+
+    baseline, max_lag, health_seconds, statuses = asyncio.run(scenario())
     assert blocking_stores["n"] >= len(ROUTES), "every route reached the (blocking) store"
     assert all(code < 500 for code in statuses), statuses
     assert health_seconds < BLOCK_SECONDS, f"/health waited {health_seconds:.2f}s behind store reads"
-    assert max_lag < BLOCK_SECONDS / 2, f"the event loop stalled {max_lag:.2f}s"
+    limit = _stall_limit(baseline)
+    assert max_lag < limit, f"the event loop stalled {max_lag:.2f}s (limit {limit:.2f}s, unblocked {baseline:.3f}s)"
+
+
+def test_the_stall_limit_still_fails_a_blocked_loop():
+    """A warm runner keeps the 0.2 s bar; a slow one is judged against itself,
+    and one store read on the loop (BLOCK_SECONDS) fails at any runner speed."""
+    assert _stall_limit(0.005) == STALL_FLOOR
+    assert _stall_limit(0.06) == pytest.approx(0.24)
+    assert _stall_limit(5.0) == STALL_CEILING < BLOCK_SECONDS - 0.01
