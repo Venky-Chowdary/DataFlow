@@ -15,15 +15,16 @@ read, so they are never encoded twice):
   decoded. A user literal reaches the binder as a
   :class:`~services.value_serializer.WireLiteral`; a plain one is a leak, so the
   write is refused before the row is sent.
-* :func:`null_marker_verdict` — Gate-8 looks for marker text in the destination
-  table and fails the run when the destination holds more of it than the source
-  does (a source that really stores the text keeps passing).
+* :func:`null_marker_verdict` — Gate-8 looks for marker text in each
+  destination table the run wrote and fails the run when the destination holds
+  more of it than the source does, the raw marker and its escaped spelling
+  judged apart (a source that really stores the text keeps passing). The probe
+  itself (scope, timeout, cap, exact match) is :mod:`services.null_marker_probe`.
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Iterable
 
 from services.value_serializer import (
@@ -34,14 +35,6 @@ from services.value_serializer import (
 
 logger = logging.getLogger(__name__)
 
-#: Text a leaked marker is stored as: the marker itself, or its escaped form
-#: when the escape survived too.
-MARKER_TEXTS = (
-    SQL_NULL_SENTINEL,
-    DF_MISSING_SENTINEL,
-    ESCAPED_WIRE_PREFIX + SQL_NULL_SENTINEL,
-    ESCAPED_WIRE_PREFIX + DF_MISSING_SENTINEL,
-)
 _MARKERS = frozenset(m.lower() for m in (SQL_NULL_SENTINEL, DF_MISSING_SENTINEL))
 
 #: SQL destinations Gate-8 can probe with one bounded query.
@@ -100,75 +93,119 @@ def _engine_type(endpoint: Any) -> str:
     return str(resolve_driver_type(str(getattr(endpoint, "format", "") or "")) or "").lower()
 
 
-def _columns(conn: Any, table: str, schema: str | None, wanted: list[str], key: str = "") -> tuple[list[str], Any]:
-    """(text columns to probe, the key column's reflected type) of ``table``."""
-    import sqlalchemy as sa
-
-    folded = {c.lower() for c in wanted}
-    out: list[str] = []
-    key_type: Any = None
-    for col in sa.inspect(conn).get_columns(table, schema=schema or None):
-        name = str(col.get("name") or "")
-        if key and name == key:
-            key_type = col.get("type")
-        if folded and name.lower() not in folded:
-            continue
-        if isinstance(col.get("type"), sa.String):
-            out.append(name)
-    return out, key_type
-
-
-def count_marker_rows(
-    db_type: str, cfg: dict[str, Any], table: str, columns: list[str], scope: Any = None,
-) -> Any:
-    """Rows of ``scope`` whose text columns hold a marker spelling (a :class:`MarkerCount`).
-
-    Bounded three ways (review F3): the scope (this run's rows where the route
-    names them), a statement timeout, and a cap. Any of them reached, or an
-    unreadable table, is a count of ``None`` with its reason: not measured.
-    """
-    import sqlalchemy as sa
-
-    from connectors.generic_sql import _engine
-    from connectors.sql_identifiers import split_qualified_table
+def _table_verdict(
+    *,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    table: str,
+    targets: list[str],
+    scope: Any,
+    source_endpoint: Any,
+    source_table: str,
+    sources: list[str],
+    mappings: list[dict[str, Any]] | None,
+    records: list[Any] | None,
+    rows_written: int,
+) -> dict[str, Any]:
+    """One destination table's verdict; the raw marker and its escaped spelling judged apart (review F4)."""
     from services.null_marker_probe import (
-        MarkerCount,
-        ProbeScope,
-        bounded_marker_count,
+        count_literal_marker_records,
+        count_marker_rows,
         probe_timeout_seconds,
-        statement_timeout,
-        timed_out,
     )
+    from src.transfer.adapters import resolve_connector_config
 
-    scope = scope or ProbeScope("whole_table")
-    if db_type not in _SQL_PROBE_TYPES or not table:
-        return MarkerCount(None, "no SQL probe for this destination")
-    probe_cfg = {**dict(cfg or {}), "type": db_type}
-    schema, bare = split_qualified_table(table, (probe_cfg.get("schema") or "").strip() or None)
-    seconds = probe_timeout_seconds()
-    enforced = False
-    try:
-        engine = _engine(probe_cfg)
-        with engine.connect() as conn:
-            text_cols, key_type = _columns(conn, bare, schema, columns, scope.key_column)
-            if not text_cols:
-                return MarkerCount(0)
-            if scope.kind == "run_keys" and key_type is None:
-                return MarkerCount(None, f"the key column {scope.key_column!r} is not in {table}")
-            cols = [sa.column(c) for c in text_cols]
-            if scope.kind == "run_keys" and scope.key_column not in text_cols:
-                cols.append(sa.column(scope.key_column, key_type))
-            tbl = sa.table(bare, *cols, schema=schema or None)
-            hit = sa.or_(*[tbl.c[c].in_(MARKER_TEXTS) for c in text_cols])
-            with statement_timeout(conn, db_type, seconds) as enforced:
-                result = bounded_marker_count(conn, tbl, hit, scope, time.monotonic() + seconds)
-            result.timeout_enforced = enforced
-            return result
-    except Exception as exc:  # noqa: BLE001 — an unreadable probe is "not measured", not a pass
-        if timed_out(exc):
-            return MarkerCount(None, f"timed out after {seconds:g}s", enforced)
-        logger.warning("NULL-marker probe of %s failed", table, exc_info=True)
-        return MarkerCount(None, f"the probe failed ({type(exc).__name__})", enforced)
+    if isinstance(scope, str):
+        return {"status": "skipped", "probed": False, "scope": "none", "reason": scope,
+                "leaked": False, "table": table}
+    base = {"probed": True, "scope": scope.kind, "table": table, "timeout_seconds": probe_timeout_seconds()}
+    dest = count_marker_rows(dest_type, dest_cfg, table, targets, scope)
+    base["timeout_enforced"] = dest.timeout_enforced
+    if dest.rows is None:
+        return {**base, "status": "not_measured", "reason": f"destination: {dest.reason}",
+                "destination_rows": None, "leaked": False}
+    base.update(destination_rows=dest.rows, destination_raw_rows=dest.raw, destination_escaped_rows=dest.escaped)
+    if dest.rows == 0:
+        return {**base, "status": "passed", "leaked": False}
+    source = None
+    source_scope = scope.on_source(mappings)
+    if (source_endpoint is not None and source_scope is not None
+            and _engine_type(source_endpoint) in _SQL_PROBE_TYPES):
+        source = count_marker_rows(
+            _engine_type(source_endpoint), resolve_connector_config(source_endpoint),
+            source_table, sources, source_scope,
+        )
+        if source.capped and dest.raw <= source.raw and dest.escaped <= source.escaped:
+            # The source holds at least as many of each form as the (fully
+            # counted) destination: nothing leaked.
+            return {**base, "status": "passed", "leaked": False, "source_rows": None,
+                    "source_raw_rows_at_least": source.raw, "source_escaped_rows_at_least": source.escaped}
+    if (source is None or source.rows is None) and records and len(records) >= int(rows_written or 0):
+        # Only a whole population can say how many literals the source holds.
+        source = count_literal_marker_records(records) or source
+    if source is not None and source.rows is None:
+        # The source probe ran and stopped (timeout, cap, error): not measured.
+        return {**base, "status": "not_measured", "reason": f"source: {source.reason}",
+                "source_rows": None, "leaked": False}
+    if source is None:
+        # A source nobody can count is not judged: the marker text may be the
+        # user's own literal (a file cell that really says it).
+        return {**base, "status": "not_judged", "source_rows": None, "leaked": False}
+    leaked = dest.raw > source.raw or dest.escaped > source.escaped
+    return {**base, "status": "leaked" if leaked else "passed", "leaked": leaked,
+            "source_rows": source.rows, "source_raw_rows": source.raw, "source_escaped_rows": source.escaped}
+
+
+#: Worst first: the status a multi-table check reports.
+_STATUS_ORDER = ("leaked", "not_measured", "not_judged", "passed", "skipped")
+
+
+def _stream_verdicts(
+    *, dest_type: str, endpoint: Any, source_endpoint: Any, dest_summary: dict[str, Any],
+    mappings: list[dict[str, Any]] | None, records: list[Any] | None, rows_written: int,
+    validation_mode: str | None,
+) -> list[dict[str, Any]]:
+    """A verdict for every table a multi-table run wrote (review F4: not only the last)."""
+    import dataclasses
+
+    from services.null_marker_probe import resolve_probe_scope
+    from src.transfer.adapters import resolve_connector_config
+
+    last_table = str(dest_summary.get("table") or "")
+    out: list[dict[str, Any]] = []
+    for entry in dest_summary.get("streams") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "")
+        table = str(entry.get("table") or name)
+        written = int(entry.get("records_processed") or 0)
+        if str(entry.get("status") or "completed") != "completed" or written <= 0:
+            reason = ("an earlier pass of this job wrote it" if entry.get("rows_from_earlier_pass")
+                      else "this run wrote no rows to it")
+            out.append({"status": "skipped", "probed": False, "scope": "none", "table": table,
+                        "reason": reason, "leaked": False})
+            continue
+        last = table == last_table
+        maps = mappings if last else None
+        scope = resolve_probe_scope(
+            dest_summary=dest_summary if last else {"sync_mode": entry.get("sync_mode")},
+            records=records if last else None, mappings=maps,
+            rows_written=rows_written if last else written, validation_mode=validation_mode,
+        )
+        source = source_endpoint
+        if source is not None and dataclasses.is_dataclass(source) and name:
+            source = dataclasses.replace(source, table=name)
+        out.append(_table_verdict(
+            dest_type=dest_type, dest_cfg=resolve_connector_config(endpoint), table=table,
+            targets=_names(maps, "target"), scope=scope, source_endpoint=source,
+            source_table=str(getattr(source, "table", "") or ""), sources=_names(maps, "source"),
+            mappings=maps, records=records if last else None, rows_written=rows_written if last else written,
+        ))
+    return out
+
+
+def _names(mappings: list[dict[str, Any]] | None, side: str) -> list[str]:
+    return [str(m.get(side) or "") for m in mappings or [] if isinstance(m, dict) and m.get(side)]
 
 
 def null_marker_verdict(
@@ -188,87 +225,54 @@ def null_marker_verdict(
     or ``skipped`` (the run's rows cannot be named and the mode is not strict).
     The source is counted on its engine (SQL) or, for any other source, on the
     run's own source records, where a user literal is still escaped or marked.
+    A multi-table run is judged table by table (``tables``).
     """
-    from services.null_marker_probe import probe_timeout_seconds, resolve_probe_scope
+    from services.null_marker_probe import resolve_probe_scope
     from src.transfer.adapters import resolve_connector_config, resolve_dest_table
 
     dest_type = _engine_type(endpoint)
     if dest_type not in _SQL_PROBE_TYPES:
         return None
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    kw = {"mappings": mappings, "records": records, "rows_written": int(rows_written or 0)}
+    if summary.get("multi_stream") and summary.get("streams"):
+        tables = _stream_verdicts(dest_type=dest_type, endpoint=endpoint, source_endpoint=source_endpoint,
+                                  dest_summary=summary, validation_mode=validation_mode, **kw)
+        if tables:
+            status = min((t["status"] for t in tables), key=_STATUS_ORDER.index)
+            return {
+                "status": status, "scope": "per_table", "tables": tables,
+                "probed": any(t.get("probed") for t in tables),
+                "leaked": any(t.get("leaked") for t in tables),
+                "table": ", ".join(t["table"] for t in tables if t["status"] == status),
+            }
     table = str(
-        (dest_summary or {}).get("table")
+        summary.get("table")
         or resolve_dest_table(dest_type, endpoint, getattr(source_endpoint, "table", "") or "")
         or ""
     )
-    scope = resolve_probe_scope(
-        dest_summary=dest_summary, records=records, mappings=mappings,
-        rows_written=int(rows_written or 0), validation_mode=validation_mode,
+    scope = resolve_probe_scope(dest_summary=summary, validation_mode=validation_mode, **kw)
+    return _table_verdict(
+        dest_type=dest_type, dest_cfg=resolve_connector_config(endpoint), table=table,
+        targets=_names(mappings, "target"), scope=scope, source_endpoint=source_endpoint,
+        source_table=str(getattr(source_endpoint, "table", "") or ""), sources=_names(mappings, "source"),
+        **kw,
     )
-    if isinstance(scope, str):
-        return {"status": "skipped", "probed": False, "scope": "none", "reason": scope,
-                "leaked": False, "table": table}
-    base = {"probed": True, "scope": scope.kind, "table": table,
-            "timeout_seconds": probe_timeout_seconds()}
-    targets = [str(m.get("target") or "") for m in mappings or [] if isinstance(m, dict) and m.get("target")]
-    dest = count_marker_rows(dest_type, resolve_connector_config(endpoint), table, targets, scope)
-    base["timeout_enforced"] = dest.timeout_enforced
-    if dest.rows is None:
-        return {**base, "status": "not_measured", "reason": f"destination: {dest.reason}",
-                "destination_rows": None, "leaked": False}
-    if dest.rows == 0:
-        return {**base, "status": "passed", "destination_rows": 0, "leaked": False}
-    source_hits: int | None = None
-    source_reason = ""
-    source_scope = scope.on_source(mappings)
-    if (source_endpoint is not None and source_scope is not None
-            and _engine_type(source_endpoint) in _SQL_PROBE_TYPES):
-        sources = [str(m.get("source") or "") for m in mappings or [] if isinstance(m, dict) and m.get("source")]
-        source = count_marker_rows(
-            _engine_type(source_endpoint), resolve_connector_config(source_endpoint),
-            str(getattr(source_endpoint, "table", "") or ""), sources, source_scope,
-        )
-        source_hits, source_reason = source.rows, source.reason
-        if source.capped:
-            # More source rows than the cap hold the text: more than the
-            # (fully counted) destination holds, so nothing leaked.
-            return {**base, "status": "passed", "destination_rows": dest.rows,
-                    "source_rows": None, "source_rows_at_least": source.at_least, "leaked": False}
-    if source_hits is None and records and len(records) >= int(rows_written or 0):
-        # Only a whole population can say how many literals the source holds.
-        source_hits = count_literal_marker_records(records)
-    # A source nobody could count is not judged: the marker text may be the
-    # user's own literal (a file cell that really says it).
-    leaked = source_hits is not None and dest.rows > source_hits
-    status = "leaked" if leaked else ("passed" if source_hits is not None else "not_judged")
-    out = {**base, "status": status, "destination_rows": dest.rows, "source_rows": source_hits,
-           "leaked": leaked}
-    if source_hits is None and source_reason:
-        out["reason"] = f"source: {source_reason}"
-    return out
 
 
-def count_literal_marker_records(records: Any) -> int | None:
-    """Source rows (wire records) holding a *literal* marker spelling; ``None`` when unreadable."""
-    from services.value_serializer import WireLiteral
-
-    literals = {ESCAPED_WIRE_PREFIX + SQL_NULL_SENTINEL, ESCAPED_WIRE_PREFIX + DF_MISSING_SENTINEL}
-    try:
-        rows = list(records)
-    except TypeError:
-        return None
-    count = 0
-    for row in rows:
-        cells = row.values() if isinstance(row, dict) else row
-        try:
-            if any(
-                (isinstance(c, WireLiteral) and c.strip().lower() in _MARKERS)
-                or (isinstance(c, str) and c in literals)
-                for c in cells
-            ):
-                count += 1
-        except TypeError:
-            return None
-    return count
+def _leak_note(v: dict[str, Any]) -> str:
+    source = v.get("source_rows")
+    held = "the source holds none" if source == 0 else (
+        "the source was not probed" if source is None else f"the source holds {source}"
+    )
+    escaped = int(v.get("destination_escaped_rows") or 0)
+    form = (f" ({escaped} in its escaped spelling {ESCAPED_WIRE_PREFIX}{SQL_NULL_SENTINEL}, "
+            "an escape that was never decoded)") if escaped else ""
+    return (
+        f"Destination {v.get('table')} holds {v.get('destination_rows')} row(s) "
+        f"with Datawrap's internal NULL marker ({SQL_NULL_SENTINEL}) as text{form}, and "
+        f"{held}: a NULL was written as the marker text."
+    )
 
 
 def apply_null_marker_gate(recon: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -283,33 +287,26 @@ def apply_null_marker_gate(recon: dict[str, Any], **kwargs: Any) -> dict[str, An
     if not verdict:
         return recon
     recon["null_marker_check"] = verdict
-    if verdict.get("status") == "not_measured":
+    tables = verdict.get("tables") or [verdict]
+    unmeasured = [t for t in tables if t.get("status") == "not_measured"]
+    if unmeasured:
         # A timeout, a cap hit or an unreadable table proves nothing: a report
         # that would pass is unproven instead (review F3). A report that already
         # failed on a measured finding stays failed, not "held".
         recon["migration_proven"] = False
         if recon.get("passed", True):
             recon["unproven"] = True
-        note = (
-            f"Datawrap's NULL-marker check of {verdict.get('table')} was not measured "
-            f"({verdict.get('reason')}): the destination is not proven free of the "
-            "marker text."
+        note = " ".join(
+            f"Datawrap's NULL-marker check of {t.get('table')} was not measured "
+            f"({t.get('reason')}): the destination is not proven free of the marker text."
+            for t in unmeasured
         )
         message = str(recon.get("message") or "").strip()
         recon["message"] = f"{message} {note}".strip()
-    if verdict.get("leaked"):
-        source = verdict.get("source_rows")
-        held = "the source holds none" if source == 0 else (
-            "the source was not probed" if source is None else f"the source holds {source}"
-        )
-        note = (
-            f"Destination {verdict.get('table')} holds {verdict['destination_rows']} row(s) "
-            f"with Datawrap's internal NULL marker ({SQL_NULL_SENTINEL}) as text, and "
-            f"{held}: a NULL was written as the marker text. The destination is not "
-            "verified."
-        )
+    leaked = [t for t in tables if t.get("leaked")]
+    if leaked:
+        note = " ".join(_leak_note(t) for t in leaked) + " The destination is not verified."
         recon["passed"] = False
         message = str(recon.get("message") or "").strip()
         recon["message"] = f"{note} {message}".strip()
     return recon
-

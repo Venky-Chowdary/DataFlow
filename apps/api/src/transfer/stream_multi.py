@@ -485,6 +485,9 @@ def run_non_cdc_multi_stream_sequential(
                 records_processed=rows,
                 summary=summary,
                 extra={
+                    # The table this stream wrote: Gate-8's NULL-marker check
+                    # probes each one, not only the last (review F4).
+                    "table": summary.get("table"),
                     "watermark": summary.get("watermark"),
                     "sync_mode": summary.get("sync_mode")
                     or resolve_effective_sync_mode(

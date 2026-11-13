@@ -15,6 +15,10 @@ as if it were a census. Now:
   (:func:`probe_timeout_seconds`), inside one overall budget.
 * **Not measured.** A timeout, a cap hit or a probe error is "not measured"
   with its reason, never a pass.
+* **Exact, form by form** (review F4). Text is matched byte for byte, never
+  through the column's collation (a ``_ci`` or PAD SPACE column matched
+  ``__df_sql_null__`` and ``'__DF_SQL_NULL__ '``), and the raw marker and its
+  escaped spelling are counted apart.
 """
 
 from __future__ import annotations
@@ -82,17 +86,45 @@ class ProbeScope:
 
 @dataclass
 class MarkerCount:
-    """Rows holding marker text; ``rows is None`` means not measured (``reason`` says why)."""
+    """Rows holding marker text; ``rows is None`` means not measured (``reason`` says why).
+
+    ``raw`` counts rows holding the marker itself, ``escaped`` rows holding its
+    escaped spelling. A capped count keeps what it saw as lower bounds.
+    """
 
     rows: int | None
     reason: str = ""
     timeout_enforced: bool = True
-    #: Set when the cap stopped the count: at least this many rows match.
-    at_least: int | None = None
+    raw: int = 0
+    escaped: int = 0
+    capped: bool = False
 
-    @property
-    def capped(self) -> bool:
-        return self.at_least is not None
+
+#: The NULL markers as a leak stores them, and their escaped spellings.
+def _forms() -> tuple[frozenset[str], frozenset[str]]:
+    from services.value_serializer import DF_MISSING_SENTINEL, ESCAPED_WIRE_PREFIX, SQL_NULL_SENTINEL
+
+    raw = frozenset({SQL_NULL_SENTINEL, DF_MISSING_SENTINEL})
+    return raw, frozenset(ESCAPED_WIRE_PREFIX + m for m in raw)
+
+
+def classify_cells(cells: Any, fixed: Any = ()) -> tuple[bool, bool]:
+    """(holds the raw marker, holds an escaped marker), byte for byte.
+
+    ``fixed`` are positions of fixed-width CHAR columns, whose stored value is
+    padded with spaces by definition.
+    """
+    raw_forms, escaped_forms = _forms()
+    raw = escaped = False
+    for position, value in enumerate(cells):
+        if isinstance(value, (bytes, bytearray)):
+            value = bytes(value).decode("utf-8", "replace")
+        if not isinstance(value, str):
+            continue
+        text = value.rstrip(" ") if position in fixed else value
+        raw = raw or text in raw_forms
+        escaped = escaped or text in escaped_forms
+    return raw, escaped
 
 
 def _key_values(dest_summary: dict[str, Any], records: list[Any] | None, mappings: Any,
@@ -215,23 +247,143 @@ def timed_out(exc: BaseException) -> bool:
     return any(marker in text for marker in _TIMEOUT_MARKERS)
 
 
-def bounded_marker_count(conn: Any, tbl: Any, hit: Any, scope: ProbeScope, deadline: float) -> MarkerCount:
-    """Count rows matching ``hit`` in ``scope``, at most :data:`PROBE_LIMIT`."""
+def bounded_marker_count(conn: Any, tbl: Any, text_cols: list[str], hit: Any, scope: ProbeScope,
+                         deadline: float, fixed: Any = ()) -> MarkerCount:
+    """Read the rows ``hit`` may match in ``scope`` (at most :data:`PROBE_LIMIT`) and classify them exactly."""
     import sqlalchemy as sa
 
     batches: list[tuple[str, ...] | None] = [None]
     if scope.kind == "run_keys":
         keys = list(scope.keys)
         batches = [tuple(keys[i:i + _KEY_BATCH]) for i in range(0, len(keys), _KEY_BATCH)]
-    total = 0
+    seen = rows = raw = escaped = 0
     for batch in batches:
         if time.monotonic() > deadline:
             return MarkerCount(None, f"timed out after {probe_timeout_seconds():g}s")
         where = hit
         if batch is not None:
             where = sa.and_(hit, tbl.c[scope.key_column].in_(list(batch)))
-        inner = sa.select(sa.literal(1)).select_from(tbl).where(where).limit(PROBE_LIMIT + 1 - total).subquery()
-        total += int(conn.execute(sa.select(sa.func.count()).select_from(inner)).scalar() or 0)
-        if total > PROBE_LIMIT:
-            return MarkerCount(None, f"the probe reached its cap of {PROBE_LIMIT:,} marker rows", at_least=total)
-    return MarkerCount(total)
+        stmt = sa.select(*[tbl.c[c] for c in text_cols]).where(where).limit(PROBE_LIMIT + 1 - seen)
+        for row in conn.execute(stmt):
+            seen += 1
+            is_raw, is_escaped = classify_cells(tuple(row), fixed)
+            rows += int(is_raw or is_escaped)
+            raw += int(is_raw)
+            escaped += int(is_escaped)
+        if seen > PROBE_LIMIT:
+            return MarkerCount(None, f"the probe reached its cap of {PROBE_LIMIT:,} candidate rows",
+                               raw=raw, escaped=escaped, capped=True)
+    return MarkerCount(rows, raw=raw, escaped=escaped)
+
+
+def _columns(conn: Any, table: str, schema: str | None, wanted: list[str],
+             key: str = "") -> tuple[list[str], set[int], Any]:
+    """(text columns to probe, positions of fixed-width CHAR ones, the key column's type)."""
+    import sqlalchemy as sa
+
+    folded = {c.lower() for c in wanted}
+    out: list[str] = []
+    fixed: set[int] = set()
+    key_type: Any = None
+    for col in sa.inspect(conn).get_columns(table, schema=schema or None):
+        name = str(col.get("name") or "")
+        if key and name == key:
+            key_type = col.get("type")
+        if folded and name.lower() not in folded:
+            continue
+        kind = col.get("type")
+        if isinstance(kind, sa.String):
+            if isinstance(kind, sa.CHAR) and not isinstance(kind, sa.VARCHAR):
+                fixed.add(len(out))
+            out.append(name)
+    return out, fixed, key_type
+
+
+def _exact_in(column: Any, db_type: str, texts: list[str]) -> Any:
+    """``column IN texts``, byte for byte where the engine's own collation may fold or pad."""
+    import sqlalchemy as sa
+
+    if db_type in ("mysql", "mariadb"):
+        # CAST(... AS BINARY): no case folding, no PAD SPACE.
+        return sa.cast(column, sa.LargeBinary).in_([t.encode("utf-8") for t in texts])
+    return column.in_(texts)
+
+
+def count_marker_rows(
+    db_type: str, cfg: dict[str, Any], table: str, columns: list[str], scope: ProbeScope | None = None,
+) -> MarkerCount:
+    """Rows of ``scope`` whose text columns hold a marker, raw and escaped apart.
+
+    Bounded three ways (review F3): the scope, a statement timeout and a cap.
+    Any of them reached, or an unreadable table, is "not measured" with its
+    reason. The SQL filter only narrows the candidates; every candidate is
+    classified byte for byte here (review F4).
+    """
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
+
+    scope = scope or ProbeScope("whole_table")
+    if not table:
+        return MarkerCount(None, "no table to probe")
+    raw_forms, escaped_forms = _forms()
+    probe_cfg = {**dict(cfg or {}), "type": db_type}
+    schema, bare = split_qualified_table(table, (probe_cfg.get("schema") or "").strip() or None)
+    seconds = probe_timeout_seconds()
+    enforced = False
+    try:
+        engine = _engine(probe_cfg)
+        with engine.connect() as conn:
+            text_cols, fixed, key_type = _columns(conn, bare, schema, columns, scope.key_column)
+            if not text_cols:
+                return MarkerCount(0)
+            if scope.kind == "run_keys" and key_type is None:
+                return MarkerCount(None, f"the key column {scope.key_column!r} is not in {table}")
+            cols = [sa.column(c) for c in text_cols]
+            if scope.kind == "run_keys" and scope.key_column not in text_cols:
+                cols.append(sa.column(scope.key_column, key_type))
+            tbl = sa.table(bare, *cols, schema=schema or None)
+            texts = sorted(raw_forms | escaped_forms)
+            hit = sa.or_(*[_exact_in(tbl.c[c], db_type, texts) for c in text_cols])
+            with statement_timeout(conn, db_type, seconds) as enforced:
+                result = bounded_marker_count(conn, tbl, text_cols, hit, scope, time.monotonic() + seconds, fixed)
+            result.timeout_enforced = enforced
+            return result
+    except Exception as exc:  # noqa: BLE001 — an unreadable probe is "not measured", not a pass
+        if timed_out(exc):
+            return MarkerCount(None, f"timed out after {seconds:g}s", enforced)
+        logger.warning("NULL-marker probe of %s failed", table, exc_info=True)
+        return MarkerCount(None, f"the probe failed ({type(exc).__name__})", enforced)
+
+
+def count_literal_marker_records(records: Any) -> MarkerCount | None:
+    """Source rows (wire records) holding a *literal* marker, raw and escaped apart.
+
+    On the wire a user's raw marker text is escaped once (or a decoded
+    :class:`~services.value_serializer.WireLiteral`), and a user's escaped
+    spelling is escaped twice; the bare marker is a NULL. ``None`` when unreadable.
+    """
+    from services.value_serializer import ESCAPED_WIRE_PREFIX, WireLiteral
+
+    raw_forms, escaped_forms = _forms()
+    wire_raw = {ESCAPED_WIRE_PREFIX + m for m in raw_forms}
+    wire_escaped = {ESCAPED_WIRE_PREFIX + m for m in escaped_forms}
+    try:
+        rows = list(records)
+    except TypeError:
+        return None
+    count = raw = escaped = 0
+    for row in rows:
+        cells = row.values() if isinstance(row, dict) else row
+        try:
+            texts = [str(c) for c in cells if isinstance(c, str) and not isinstance(c, WireLiteral)]
+            literal = [str(c) for c in cells if isinstance(c, WireLiteral)]
+        except TypeError:
+            return None
+        is_raw = any(t in raw_forms for t in literal) or any(t in wire_raw for t in texts)
+        is_escaped = any(t in escaped_forms for t in literal) or any(t in wire_escaped for t in texts)
+        count += int(is_raw or is_escaped)
+        raw += int(is_raw)
+        escaped += int(is_escaped)
+    return MarkerCount(count, raw=raw, escaped=escaped)
