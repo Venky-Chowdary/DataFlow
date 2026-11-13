@@ -385,7 +385,9 @@ def test_a_write_that_landed_is_not_reported_failed_when_the_backup_rename_fails
 def test_a_failed_final_backup_rename_keeps_every_backup_generation(
     isolated_plan_store, caplog, monkeypatch
 ):
-    """Rotation is all or nothing: if staging cannot become .bak, all three stay as they were."""
+    """If staging cannot become .bak, no existing generation is dropped (PS-34: the
+    older ones have already been shifted by copy, so .bak and .bak.1 hold the
+    same generation), and the warning says the rotation stopped."""
     import os
 
     a = create_plan({"name": "A"}).id
@@ -405,12 +407,12 @@ def test_a_failed_final_backup_rename_keeps_every_backup_generation(
         patched.setattr(store.os, "replace", failing_final_rename)
         update_plan(a, {"name": "landed"})
     assert get_plan(a).name == "landed"
-    after = {n: isolated_plan_store.with_name(n).read_bytes() for n in names}
-    assert after == before, "a failed rotation must not drop or shift any backup"
+    after = [isolated_plan_store.with_name(n).read_bytes() for n in names]
+    assert before["transfer_plans.json.bak"] in after and before["transfer_plans.json.bak.1"] in after
     leftovers = [p.name for p in isolated_plan_store.parent.iterdir() if p.name.startswith(".") and "bak" in p.name]
     assert leftovers == []
     warning = next(r.getMessage() for r in caplog.records if "backup" in r.getMessage())
-    assert "not rotated" in warning and "unchanged" in warning
+    assert "not rotated" in warning and "no existing backup generation was dropped" in warning
 
 
 def test_a_store_saved_with_a_utf8_bom_is_readable(isolated_plan_store):
@@ -507,3 +509,89 @@ def test_a_lock_file_that_cannot_be_opened_for_writing_is_a_clear_refusal(isolat
     assert body["error"] == "plan_store_lock_unavailable"
     assert "transfer_plans.json.lock" in body["detail"] and str(isolated_plan_store.parent) not in body["detail"]
     assert isolated_plan_store.read_bytes() == store_before
+
+
+# ---------------------------------------------------------------------------
+# PS-34: backup rotation never drops a generation, at any step
+# ---------------------------------------------------------------------------
+
+GENERATIONS = ("transfer_plans.json.bak", "transfer_plans.json.bak.1", "transfer_plans.json.bak.2")
+
+
+def _three_generations(isolated_plan_store):
+    a = create_plan({"name": "A"}).id
+    for i in range(3):
+        update_plan(a, {"name": f"A{i}"})
+    contents = {n: isolated_plan_store.with_name(n).read_bytes() for n in GENERATIONS}
+    contents["store"] = isolated_plan_store.read_bytes()
+    return a, contents
+
+
+@pytest.mark.parametrize("failing_step", ["bak1_to_bak2", "bak_to_bak1", "staging_to_bak"])
+def test_a_rotation_failure_at_any_step_loses_no_generation(isolated_plan_store, monkeypatch, failing_step):
+    import os
+
+    a, before = _three_generations(isolated_plan_store)
+    real_replace = os.replace
+
+    def failing(src, dst):
+        dst = str(dst)
+        step = (
+            "bak1_to_bak2" if dst.endswith(".bak.2")
+            else "bak_to_bak1" if dst.endswith(".bak.1")
+            else "staging_to_bak" if dst.endswith(".bak")
+            else None
+        )
+        if step == failing_step:
+            raise OSError(5, "Input/output error")
+        return real_replace(src, dst)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(store.os, "replace", failing)
+        update_plan(a, {"name": "landed"})
+    assert get_plan(a).name == "landed"
+    # No existing backup generation is dropped: the two newest are still on disk
+    # (.bak.2, the oldest, is the one a completed rotation retires). Only the
+    # generation being added (the replaced store) may not have made it in.
+    now = [isolated_plan_store.with_name(n).read_bytes() for n in GENERATIONS]
+    for name in GENERATIONS[:2]:
+        assert before[name] in now, f"{name} was lost when {failing_step} failed"
+    leftovers = [p.name for p in isolated_plan_store.parent.iterdir() if p.name.endswith(".staging")]
+    assert leftovers == []
+
+
+def test_hard_linked_generations_rotate_without_leaving_staging_files(isolated_plan_store):
+    """rename() between two links to one inode is a no-op; rotation must still finish."""
+    import os
+
+    a = create_plan({"name": "A"}).id
+    update_plan(a, {"name": "B"})
+    bak, bak1, bak2 = (isolated_plan_store.with_name(n) for n in GENERATIONS)
+    bak1.unlink(missing_ok=True)
+    bak2.unlink(missing_ok=True)
+    os.link(bak, bak1)
+    os.link(bak, bak2)
+    for i in range(3):
+        update_plan(a, {"name": f"C{i}"})
+    assert [p.name for p in isolated_plan_store.parent.iterdir() if p.name.endswith(".staging")] == []
+    assert len({bak.read_bytes(), bak1.read_bytes(), bak2.read_bytes()}) == 3
+
+
+def test_staging_files_left_by_a_crashed_writer_are_swept(isolated_plan_store):
+    a = create_plan({"name": "A"}).id
+    stale = [
+        isolated_plan_store.with_name(".transfer_plans.json.bak.99999.staging"),
+        isolated_plan_store.with_name(".transfer_plans.json.bak.1.99999.staging"),
+    ]
+    for path in stale:
+        path.write_text("{}")
+    update_plan(a, {"name": "B"})
+    assert not any(p.exists() for p in stale)
+
+
+def test_rotation_fsyncs_the_directory(isolated_plan_store, monkeypatch):
+    a = create_plan({"name": "A"}).id
+    synced: list[str] = []
+    monkeypatch.setattr(store, "fsync_directory", lambda d: synced.append(str(d)))
+    update_plan(a, {"name": "B"})
+    assert str(isolated_plan_store.parent) in synced

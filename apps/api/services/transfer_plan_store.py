@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from services.atomic_file import write_json_atomic
+from services.atomic_file import fsync_directory, write_json_atomic
 from services.platform_config import data_dir
 from services.schema_fingerprint import fingerprint_mappings, fingerprint_schema
 from services.value_serializer import json_default
@@ -471,38 +471,69 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def _rotate_backups(staging: Path, backup: Path) -> None:
-    generations = _backup_paths(STORE_PATH)
-    shifted: list[tuple[Path, Path]] = []  # (staged copy, generation it becomes)
+def _install(staged: Path, dst: Path) -> None:
+    """Rename ``staged`` over ``dst``. Store files are never changed in place,
+    so hard links are safe copies; when both already name one inode, rename()
+    is a no-op that would leave ``staged`` behind, so it is just removed."""
     try:
-        for newer, older in zip(generations[:-1], generations[1:]):
-            if newer.exists():
-                staged = older.with_name(f".{older.name}.{os.getpid()}.staging")
-                _link_or_copy(newer, staged)
-                shifted.append((staged, older))
-        os.replace(staging, backup)
-    except OSError as exc:
-        for staged, _older in shifted:
+        if dst.exists() and os.path.samefile(staged, dst):
             staged.unlink(missing_ok=True)
-        staging.unlink(missing_ok=True)
-        logger.warning(
-            "Transfer plan store saved, but its backups were not rotated (%s): "
-            "%s and the older generations are unchanged",
-            type(exc).__name__,
-            backup.name,
-        )
-        return
-    for staged, older in shifted:
+            return
+    except OSError:
+        pass
+    os.replace(staged, dst)
+
+
+def _rotate_backups(staging: Path, backup: Path) -> None:
+    """Shift the generations oldest first, each step a copy, then add staging.
+
+    ``.bak.2 <- .bak.1``, ``.bak.1 <- .bak``, ``.bak <- staging``: each step
+    installs a copy (hard link) of a generation that stays where it was, so a
+    failure at any step leaves at worst two names for one generation, never
+    a dropped one. The first failure stops the rotation (a later step would
+    overwrite a generation that was not copied on); only the generation being
+    added then does not make it in. The directory is fsynced afterwards.
+    """
+    generations = _backup_paths(STORE_PATH)
+    pid = os.getpid()
+    steps: list[tuple[Path | None, Path]] = [
+        (generations[i - 1] if i > 0 else None, generations[i]) for i in range(len(generations) - 1, -1, -1)
+    ]
+    for src, dst in steps:
         try:
-            os.replace(staged, older)
+            if src is None:
+                _install(staging, dst)
+                continue
+            if not src.exists():
+                continue
+            staged = dst.with_name(f".{dst.name}.{pid}.staging")
+            _link_or_copy(src, staged)
+            try:
+                _install(staged, dst)
+            finally:
+                staged.unlink(missing_ok=True)
         except OSError as exc:
-            staged.unlink(missing_ok=True)
+            staging.unlink(missing_ok=True)
             logger.warning(
-                "Transfer plan store saved and %s updated, but %s was not (%s)",
-                backup.name,
-                older.name,
+                "Transfer plan store saved, but its backups were not rotated past %s (%s): "
+                "no existing backup generation was dropped",
+                dst.name,
                 type(exc).__name__,
             )
+            break
+    fsync_directory(STORE_PATH.parent)
+
+
+def _sweep_staging() -> None:
+    """Remove backup staging files a crashed writer left (inside :func:`_exclusive`).
+
+    Holding the cross-process lock, no other writer is mid-rotation.
+    """
+    try:
+        for leftover in STORE_PATH.parent.glob(f".{STORE_PATH.name}.bak*.staging"):
+            leftover.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Could not sweep plan-store staging files", exc_info=True)
 
 
 @contextlib.contextmanager
@@ -559,6 +590,7 @@ def _exclusive() -> Iterator[None]:
         _HELD.held = True
         try:
             with _store_file_lock(deadline):
+                _sweep_staging()
                 yield
         finally:
             _HELD.held = False
