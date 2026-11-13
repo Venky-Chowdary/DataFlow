@@ -22,7 +22,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
-from services.atomic_file import write_json_atomic
+from services.atomic_file import fsync_directory, write_json_atomic
 from services.platform_config import data_dir
 from services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell
 
@@ -1156,6 +1156,7 @@ def forget_job_runs(job_ids: set[str], *, dry_run: bool = False) -> int:
             else:
                 coll.replace_one({"_id": doc["_id"]}, new)
         return touched
+    rewrote = False
     for path in sorted(quality_profiles_dir().glob("*.json")):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
@@ -1172,5 +1173,9 @@ def forget_job_runs(job_ids: set[str], *, dry_run: bool = False) -> int:
         if new is None:
             path.unlink(missing_ok=True)
         else:
-            write_json_atomic(path, new)
+            # One directory fsync for the whole sweep, not one per profile.
+            write_json_atomic(path, new, sync_directory=False)
+        rewrote = True
+    if rewrote:
+        fsync_directory(quality_profiles_dir())
     return touched
