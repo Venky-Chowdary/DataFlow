@@ -275,3 +275,47 @@ def test_generic_fallback_refuses_a_stale_image_under_another_spelling(tmp_path)
     c = sqlite3.connect(db)
     assert (n, list(c.execute("select * from t"))) == (0, [("ABC", "newer", 10)])
     c.close()
+
+
+def _lsn_batch(tmp_path, stored, batch):
+    from connectors.sqlite_writer import write_mapped_rows
+
+    db = tmp_path / "ws_lsn_batch.db"
+    c = sqlite3.connect(db)
+    c.execute("create table t(k text collate nocase, name text, _df_lsn integer)")
+    if stored:
+        c.execute("insert into t values (?, ?, ?)", stored)
+    c.commit()
+    c.close()
+    r = write_mapped_rows(
+        host="", port=0, database=str(db), username="", password="", schema="",
+        connection_string="", ssl=False, table_name="t", headers=["k", "name", "_df_lsn"],
+        data_rows=batch, mappings=[{"source": x, "target": x} for x in ("k", "name", "_df_lsn")],
+        column_types={"k": "VARCHAR", "name": "VARCHAR", "_df_lsn": "BIGINT"},
+        create_table=False, write_mode="upsert", conflict_columns=["k"],
+    )
+    c = sqlite3.connect(db)
+    try:
+        return r, list(c.execute("select k, name, _df_lsn from t order by rowid"))
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize(
+    ("stored", "batch", "expected"),
+    [
+        (("ABC", "old", 3), [["abc", "seven", 7], ["Abc", "five", 5]], [("ABC", "seven", 7)]),
+        (None, [["abc", "seven", 7], ["Abc", "five", 5]], [("abc", "seven", 7)]),
+        (None, [["abc", "five", 5], ["Abc", "seven", 7]], [("abc", "seven", 7)]),
+    ],
+    ids=["stored_newer_then_older", "new_newer_then_older", "new_older_then_newer"],
+)
+def test_sqlite_fallback_keeps_the_newest_image_of_spellings_in_one_batch(
+    tmp_path, stored, batch, expected
+):
+    """Re-check Low 1: two spellings equal only under NOCASE, in one batch."""
+    r, rows = _lsn_batch(tmp_path, stored, batch)
+    assert r.ok, r.error
+    assert rows == expected
+    assert r.rows_written + r.rows_skipped == 2, r
+    assert r.rows_skipped >= 1

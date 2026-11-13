@@ -715,13 +715,30 @@ def _sqlite_upsert_batch(
 
     if lsn_guarded:
         # The prefilter matched stored LSNs by exact key; SQLite decides key
-        # equality (a NOCASE / RTRIM key matches another spelling).
-        rows, stale = _sqlite_drop_stale_by_db_key(
-            cur, table_quoted, target_cols, conflict_cols, rows, allow_equal_lsn
-        )
-        skipped += stale
-        if not rows:
-            return 0, empty_pk_skipped + skipped
+        # equality (a NOCASE / RTRIM key matches another spelling). Row by row,
+        # so a later spelling in this batch is judged against what an earlier
+        # one just wrote: the newest image wins, an older one is skipped.
+        # An image that replaces one this batch already wrote supersedes it: the
+        # earlier image counts as skipped, so written + skipped = rows and the
+        # destination holds one row per database-equal key.
+        written = 0
+        touched: set[int] = set()
+        for row in rows:
+            stale, stored_rowids = _sqlite_stale_by_db_key(
+                cur, table_quoted, target_cols, conflict_cols, row, allow_equal_lsn
+            )
+            if stale:
+                skipped += 1
+                continue
+            applied = _sqlite_update_insert_upsert(
+                cur, table_quoted, target_cols, conflict_cols, update_cols, insert_cols, [row]
+            )
+            if not applied or stored_rowids & touched:
+                skipped += 1
+            else:
+                written += 1
+            touched |= _sqlite_rowids_by_db_key(cur, table_quoted, target_cols, conflict_cols, row)
+        return written, empty_pk_skipped + skipped
     written = _sqlite_update_insert_upsert(
         cur,
         table_quoted,
@@ -747,42 +764,51 @@ def _project_row(row: Any, target_cols: list[str], cols: list[str]) -> tuple[Any
     return tuple(row[target_cols.index(c)] for c in cols)
 
 
-def _sqlite_drop_stale_by_db_key(
+def _sqlite_stale_by_db_key(
     cur: Any,
     table_quoted: str,
     target_cols: list[str],
     conflict_cols: list[str],
-    rows: list[Any],
+    row: Any,
     allow_equal_lsn: bool,
-) -> tuple[list[Any], int]:
-    """Drop rows whose ``_df_lsn`` is not newer than every LSN SQLite stores under
-    the same key, as SQLite itself matches keys. Same rule as
-    ``filter_stale_lsn_rows`` (``lsn_is_newer``; equal only when allowed)."""
+) -> tuple[bool, set[int]]:
+    """``(stale, stored rowids)``: stale when ``row``'s ``_df_lsn`` is not newer
+    than every LSN SQLite stores under the same key, as SQLite itself matches
+    keys. Same rule as ``filter_stale_lsn_rows`` (``lsn_is_newer``; equal only
+    when allowed)."""
     from connectors.writer_common import DF_LSN_COL, lsn_is_newer
 
     where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
-    lsn_q = quote_sql_identifier(DF_LSN_COL)
-    keep: list[Any] = []
-    for row in rows:
-        incoming = _project_row(row, target_cols, [DF_LSN_COL])[0]
-        cur.execute(
-            f"SELECT {lsn_q} FROM {table_quoted} WHERE {where_sql}",  # nosec B608
-            _project_row(row, target_cols, conflict_cols),
-        )
+    incoming = _project_row(row, target_cols, [DF_LSN_COL])[0]
+    cur.execute(
+        f"SELECT rowid, {quote_sql_identifier(DF_LSN_COL)} FROM {table_quoted} "  # nosec B608
+        f"WHERE {where_sql}",
+        _project_row(row, target_cols, conflict_cols),
+    )
+    found = cur.fetchall()
 
-        def _ok(prior: Any) -> bool:
-            if (
-                allow_equal_lsn
-                and incoming not in (None, "")
-                and prior not in (None, "")
-                and str(incoming).strip() == str(prior).strip()
-            ):
-                return True
-            return lsn_is_newer(incoming, prior)
+    def _ok(prior: Any) -> bool:
+        if (
+            allow_equal_lsn
+            and incoming not in (None, "")
+            and prior not in (None, "")
+            and str(incoming).strip() == str(prior).strip()
+        ):
+            return True
+        return lsn_is_newer(incoming, prior)
 
-        if all(_ok(found[0]) for found in cur.fetchall()):
-            keep.append(row)
-    return keep, len(rows) - len(keep)
+    return not all(_ok(hit[1]) for hit in found), {int(hit[0]) for hit in found}
+
+
+def _sqlite_rowids_by_db_key(
+    cur: Any, table_quoted: str, target_cols: list[str], conflict_cols: list[str], row: Any
+) -> set[int]:
+    where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
+    cur.execute(
+        f"SELECT rowid FROM {table_quoted} WHERE {where_sql}",  # nosec B608
+        _project_row(row, target_cols, conflict_cols),
+    )
+    return {int(hit[0]) for hit in cur.fetchall()}
 
 
 def _sqlite_update_insert_upsert(
