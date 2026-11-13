@@ -477,7 +477,7 @@ _SFTP_TRUST_KEYS = ("host_key", "known_hosts", "host_key_policy")
 #: declared ``trust_server_certificate`` (generic_sql merges ``extra`` into the
 #: driver cfg for connection_options) and a Kafka source's consumer
 #: ``group_id`` (D84; without one each route derives its own).
-_EXTRA_LIFT_KEYS = _SFTP_TRUST_KEYS + ("trust_server_certificate", "group_id")
+_EXTRA_LIFT_KEYS = _SFTP_TRUST_KEYS + ("trust_server_certificate", "group_id", "key_format")
 
 
 def connector_extra_from_payload(data: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -1114,6 +1114,10 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         if updated is not None:
             return updated
 
+    if conn.type == "redis":
+        # Only a connector saved now gets the raw key layout by default; one
+        # saved before (no key_format) keeps legacy so its keys never move.
+        conn.extra.setdefault("key_format", "raw")
     if _use_mongo():
         try:
             coll = _mongo_collection()

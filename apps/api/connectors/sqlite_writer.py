@@ -25,7 +25,6 @@ from connectors.writer_common import (
     reject_on_strict_policy,
     CHUNK_SIZE,
     _coerced_null_row_count,
-    _conflict_key_identity,
     _rejected_row_count,
     bind_sql_mapped_rows_with_quarantine,
     filter_stale_lsn_rows,
@@ -595,11 +594,16 @@ def _sqlite_upsert_batch(
     policy: str = "quarantine",
     row_offset: int = 0,
     allow_equal_lsn: bool = False,
+    kept_markers: list[str] | None = None,
 ) -> tuple[int, int]:
     """Upsert with optional ``_df_lsn`` monotonic guard (at-least-once CDC).
 
-    Prefetch existing LSNs for the batch, drop stale rows, then either use
-    ``INSERT … ON CONFLICT DO UPDATE WHERE`` or delete+insert fallback. Returns
+    ``kept_markers`` collects the Gate-8 markers of keys skip_duplicates kept
+    in the fallback (a key equal to a stored one only under its collation).
+
+    Prefetch existing LSNs for the batch, drop stale rows, then
+    ``INSERT … ON CONFLICT DO UPDATE`` (UPDATE-then-INSERT when the key has
+    no unique index; never DELETE). Returns
     (rows_written, rows_skipped) for accurate reconciliation accounting.
     """
     from connectors.writer_common import (
@@ -639,7 +643,6 @@ def _sqlite_upsert_batch(
     if not rows:
         return 0, empty_pk_skipped
 
-    original_count = len(rows)
     lsn_guarded = DF_LSN_COL in target_cols and conflict_cols
     if lsn_guarded:
         rows, skipped = filter_stale_lsn_rows(
@@ -687,61 +690,73 @@ def _sqlite_upsert_batch(
                 [],
                 insert_cols,
                 rows,
+                kept_markers=kept_markers,
             )
             return written, empty_pk_skipped + skipped + max(0, len(rows) - written)
 
-    if lsn_guarded and update_cols:
-        where_sql = sqlite_lsn_update_guard_sql(
-            table_name, allow_equal_lsn=allow_equal_lsn
-        )
-        set_sql = ", ".join(
-            f"{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}"
-            for c in update_cols
-        )
-        insert_sql = (
-            f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders}) "  # nosec B608
-            f"ON CONFLICT ({conflict_sql}) DO UPDATE SET {set_sql} WHERE {where_sql}"
-        )
-        try:
-            cur.executemany(
-                insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows]
-            )
-            return len(rows), empty_pk_skipped + skipped
-        except Exception as exc:
-            logger.debug("sqlite ON CONFLICT unavailable: %s", exc)
-
-    if lattice:
-        written = _sqlite_update_insert_upsert(
-            cur,
-            table_quoted,
-            target_cols,
-            conflict_cols,
-            update_cols,
-            insert_cols,
-            rows,
-        )
-        return written, empty_pk_skipped + skipped
-
-    # delete+insert fallback when the dest has no dest-owned lattice columns.
-    indices = [target_cols.index(c) for c in conflict_cols]
-    deduped = {
-        tuple(_conflict_key_identity(row[i]) for i in indices): row for row in rows
-    }
-    rows = list(deduped.values())
-    col_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
-    del_placeholders = ", ".join(
-        "(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in deduped
+    # Every upsert is INSERT … ON CONFLICT DO UPDATE SET <mapped non-key
+    # columns>: the matched row keeps every column the mapping does not
+    # write (G15), its rowid, and its ON DELETE CASCADE children. The old
+    # delete+insert fallback reset unmapped columns and cascaded deletes.
+    set_sql = ", ".join(
+        f"{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}"
+        for c in update_cols
     )
-    delete_sql = f"DELETE FROM {table_quoted} WHERE ({col_sql}) IN ({del_placeholders})"  # nosec B608
-    delete_params = [v for key in deduped.keys() for v in key]
-    cur.execute(delete_sql, delete_params)
-
+    where_sql = (
+        " WHERE " + sqlite_lsn_update_guard_sql(table_name, allow_equal_lsn=allow_equal_lsn)
+        if lsn_guarded and update_cols
+        else ""
+    )
+    action_sql = f"DO UPDATE SET {set_sql}{where_sql}" if update_cols else "DO NOTHING"
     insert_sql = (
-        f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"  # nosec B608
+        f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders}) "  # nosec B608
+        f"ON CONFLICT ({conflict_sql}) {action_sql}"
     )
-    cur.executemany(insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows])
-    dedup_skipped = original_count - len(rows) - skipped
-    return len(rows), empty_pk_skipped + skipped + max(0, dedup_skipped)
+    try:
+        cur.executemany(insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows])
+        return len(rows), empty_pk_skipped + skipped
+    except sqlite3.OperationalError as exc:
+        # No PRIMARY KEY / UNIQUE index on the key (an operator's table —
+        # never silently altered): UPDATE-then-INSERT below, never DELETE.
+        logger.info("sqlite ON CONFLICT unavailable on %s: %s", table_name, exc)
+
+    if lsn_guarded:
+        # The prefilter matched stored LSNs by exact key; SQLite decides key
+        # equality (a NOCASE / RTRIM key matches another spelling). Row by row,
+        # so a later spelling in this batch is judged against what an earlier
+        # one just wrote: the newest image wins, an older one is skipped.
+        # An image that replaces one this batch already wrote supersedes it: the
+        # earlier image counts as skipped, so written + skipped = rows and the
+        # destination holds one row per database-equal key.
+        written = 0
+        touched: set[int] = set()
+        for row in rows:
+            stale, stored_rowids = _sqlite_stale_by_db_key(
+                cur, table_quoted, target_cols, conflict_cols, row, allow_equal_lsn
+            )
+            if stale:
+                skipped += 1
+                continue
+            applied = _sqlite_update_insert_upsert(
+                cur, table_quoted, target_cols, conflict_cols, update_cols, insert_cols, [row],
+                kept_markers=kept_markers,
+            )
+            if not applied or stored_rowids & touched:
+                skipped += 1
+            else:
+                written += 1
+            touched |= _sqlite_rowids_by_db_key(cur, table_quoted, target_cols, conflict_cols, row)
+        return written, empty_pk_skipped + skipped
+    written = _sqlite_update_insert_upsert(
+        cur,
+        table_quoted,
+        target_cols,
+        conflict_cols,
+        update_cols,
+        insert_cols,
+        rows,
+    )
+    return written, empty_pk_skipped + skipped
 
 
 def _sqlite_physical_lattice(cur: Any, table_name: str) -> tuple[str, ...]:
@@ -757,6 +772,53 @@ def _project_row(row: Any, target_cols: list[str], cols: list[str]) -> tuple[Any
     return tuple(row[target_cols.index(c)] for c in cols)
 
 
+def _sqlite_stale_by_db_key(
+    cur: Any,
+    table_quoted: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    row: Any,
+    allow_equal_lsn: bool,
+) -> tuple[bool, set[int]]:
+    """``(stale, stored rowids)``: stale when ``row``'s ``_df_lsn`` is not newer
+    than every LSN SQLite stores under the same key, as SQLite itself matches
+    keys. Same rule as ``filter_stale_lsn_rows`` (``lsn_is_newer``; equal only
+    when allowed)."""
+    from connectors.writer_common import DF_LSN_COL, lsn_is_newer
+
+    where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
+    incoming = _project_row(row, target_cols, [DF_LSN_COL])[0]
+    cur.execute(
+        f"SELECT rowid, {quote_sql_identifier(DF_LSN_COL)} FROM {table_quoted} "  # nosec B608
+        f"WHERE {where_sql}",
+        _project_row(row, target_cols, conflict_cols),
+    )
+    found = cur.fetchall()
+
+    def _ok(prior: Any) -> bool:
+        if (
+            allow_equal_lsn
+            and incoming not in (None, "")
+            and prior not in (None, "")
+            and str(incoming).strip() == str(prior).strip()
+        ):
+            return True
+        return lsn_is_newer(incoming, prior)
+
+    return not all(_ok(hit[1]) for hit in found), {int(hit[0]) for hit in found}
+
+
+def _sqlite_rowids_by_db_key(
+    cur: Any, table_quoted: str, target_cols: list[str], conflict_cols: list[str], row: Any
+) -> set[int]:
+    where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
+    cur.execute(
+        f"SELECT rowid FROM {table_quoted} WHERE {where_sql}",  # nosec B608
+        _project_row(row, target_cols, conflict_cols),
+    )
+    return {int(hit[0]) for hit in cur.fetchall()}
+
+
 def _sqlite_update_insert_upsert(
     cur: Any,
     table_quoted: str,
@@ -765,44 +827,58 @@ def _sqlite_update_insert_upsert(
     update_cols: list[str],
     insert_cols: list[str],
     rows: list[Any],
+    *,
+    kept_markers: list[str] | None = None,
 ) -> int:
-    """sqlite3 spelling of ``merge_dialects.update_insert_upsert``. Never DELETE."""
+    """sqlite3 spelling of ``merge_dialects.update_insert_upsert``. Never DELETE.
+
+    SQLite decides key equality (``COLLATE NOCASE`` / ``RTRIM`` keys match
+    across spellings): UPDATE by key, then INSERT … SELECT … WHERE NOT EXISTS.
+    With no SET columns (skip_duplicates) only absent keys insert, and the
+    count returned is the rows inserted, so kept keys are not counted written.
+    """
+    where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
     keys = [_project_row(row, target_cols, conflict_cols) for row in rows]
-    existing: set[tuple[Any, ...]] = set()
-    pk_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
-    for i in range(0, len(keys), 400):
-        part = keys[i : i + 400]
-        ph = ", ".join("(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in part)
-        cur.execute(
-            f"SELECT {pk_sql} FROM {table_quoted} WHERE ({pk_sql}) IN ({ph})",  # nosec B608
-            [v for key in part for v in key],
-        )
-        existing.update(tuple(found) for found in cur.fetchall())
-    to_update: list[tuple[Any, ...]] = []
-    to_insert: list[tuple[Any, ...]] = []
-    for row, key in zip(rows, keys):
-        if key in existing:
-            if update_cols:
-                to_update.append(_project_row(row, target_cols, update_cols) + key)
-        else:
-            to_insert.append(_project_row(row, target_cols, insert_cols))
-            if not update_cols:
-                existing.add(key)
-    if to_update and update_cols:
+    if update_cols:
         set_sql = ", ".join(f"{quote_sql_identifier(c)}=?" for c in update_cols)
-        where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
         cur.executemany(
             f"UPDATE {table_quoted} SET {set_sql} WHERE {where_sql}",  # nosec B608
-            to_update,
+            [_project_row(row, target_cols, update_cols) + key for row, key in zip(rows, keys)],
         )
-    if to_insert:
-        cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
-        ph = ", ".join("?" for _ in insert_cols)
-        cur.executemany(
-            f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({ph})",  # nosec B608
-            to_insert,
+    cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
+    ph = ", ".join("?" for _ in insert_cols)
+    insert_sql = (
+        f"INSERT INTO {table_quoted} ({cols_sql}) SELECT {ph} "  # nosec B608
+        f"WHERE NOT EXISTS (SELECT 1 FROM {table_quoted} WHERE {where_sql})"
+    )
+    values = [_project_row(row, target_cols, insert_cols) + key for row, key in zip(rows, keys)]
+    if update_cols:
+        cur.executemany(insert_sql, values)
+        return len(rows)
+    # skip_duplicates: row by row, so each kept key is known and marked for
+    # Gate-8 under both spellings (the source key and the stored key SQLite
+    # matched, which differ under NOCASE / RTRIM).
+    from connectors.writer_common import identity_marker
+
+    pk_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
+    inserted = 0
+    for key, one in zip(keys, values):
+        cur.execute(insert_sql, one)
+        if cur.rowcount == 1:
+            inserted += 1
+            continue
+        if kept_markers is None:
+            continue
+        cur.execute(
+            f"SELECT {pk_sql} FROM {table_quoted} WHERE {where_sql} LIMIT 1",  # nosec B608
+            key,
         )
-    return len(rows)
+        stored = cur.fetchone()
+        for marker in dict.fromkeys(
+            identity_marker(tuple(k)) for k in (key, tuple(stored) if stored else key)
+        ):
+            kept_markers.append(marker)
+    return inserted
 
 
 def _sqlite_duplicate_key_message(
@@ -1686,6 +1762,7 @@ def write_mapped_rows(
                                     policy=policy,
                                     row_offset=start,
                                     allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
+                                    kept_markers=skipped_identity_keys,
                                 )
                                 written += chunk_written
                                 rows_skipped += chunk_skipped

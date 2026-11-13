@@ -102,7 +102,7 @@ def test_mssql_merge_sql_null_safe_holdlock_and_fallback():
     assert "[DBO].[ORDERS]" in merged or "DBO" in merged
 
 
-def test_upsert_batch_mssql_prefers_merge_then_delete_insert():
+def test_upsert_batch_mssql_prefers_merge_then_update_insert():
     import sqlalchemy as sa
 
     from connectors.generic_sql import _upsert_batch
@@ -145,4 +145,6 @@ def test_upsert_batch_mssql_prefers_merge_then_delete_insert():
     assert n == 1
     assert any("MERGE" in c.upper() for c in calls)
     assert "ROLLBACK" in calls
-    assert "DELETE_KEYS" in calls
+    # MERGE failure falls back to UPDATE-then-INSERT — never DELETE (G15).
+    assert "DELETE_KEYS" not in calls
+    assert not any(c.lstrip().upper().startswith("DELETE") for c in calls)
