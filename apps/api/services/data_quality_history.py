@@ -1157,25 +1157,28 @@ def forget_job_runs(job_ids: set[str], *, dry_run: bool = False) -> int:
                 coll.replace_one({"_id": doc["_id"]}, new)
         return touched
     rewrote = False
-    for path in sorted(quality_profiles_dir().glob("*.json")):
-        try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(doc, dict):
-            continue
-        hit, new = _strip(doc)
-        if not hit:
-            continue
-        touched += 1
-        if dry_run:
-            continue
-        if new is None:
-            path.unlink(missing_ok=True)
-        else:
-            # One directory fsync for the whole sweep, not one per profile.
-            write_json_atomic(path, new, sync_directory=False)
-        rewrote = True
-    if rewrote:
-        fsync_directory(quality_profiles_dir())
+    try:
+        for path in sorted(quality_profiles_dir().glob("*.json")):
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(doc, dict):
+                continue
+            hit, new = _strip(doc)
+            if not hit:
+                continue
+            touched += 1
+            if dry_run:
+                continue
+            if new is None:
+                path.unlink(missing_ok=True)
+            else:
+                # One directory fsync for the whole sweep, not one per profile.
+                write_json_atomic(path, new, sync_directory=False)
+            rewrote = True
+    finally:
+        # Also when a later profile fails: the ones already rewritten stay durable.
+        if rewrote:
+            fsync_directory(quality_profiles_dir())
     return touched
