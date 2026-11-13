@@ -1,0 +1,84 @@
+{
+  "about": "Licence policy for scripts/licence_scan.py --check (F3). `allowed`: SPDX ids a dependency may carry without review. `exceptions`: packages whose copyleft, proprietary or unknown licence was reviewed. Each records the licence it was reviewed under (a change fails the check) and why it is acceptable; `notice` is the text NOTICE carries for it; `owner_decision: true` marks an exception that is in place only so CI stays green and still needs the owner's sign-off. A new copyleft or unknown dependency fails CI until it is reviewed here.",
+  "allowed": [
+    "MIT", "MIT-0", "MIT-CMU", "Apache-2.0", "BSD", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "ISC",
+    "PSF-2.0", "Python-2.0", "CNRI-Python", "Unlicense", "Zlib", "HPND", "CC0-1.0", "BlueOak-1.0.0",
+    "CC-BY-4.0", "OFL-1.1", "Public-Domain", "UPL-1.0", "DFSG approved"
+  ],
+  "exceptions": {
+    "pypi:certifi": {
+      "licence": "MPL-2.0",
+      "why": "Weak, file-level copyleft. Used unmodified as a library (CA bundle for requests/httpx/snowflake). Obligation: keep its notices and say where its source is.",
+      "notice": "MPL-2.0, used unmodified. Source: https://github.com/certifi/python-certifi"
+    },
+    "pypi:orjson": {
+      "licence": "MPL-2.0 AND (Apache-2.0 OR MIT)",
+      "why": "Pulled in by trino. Weak, file-level copyleft (MPL-2.0 parts). Used unmodified as a library.",
+      "notice": "MPL-2.0 AND (Apache-2.0 OR MIT), used unmodified. Source: https://github.com/ijl/orjson"
+    },
+    "pypi:paramiko": {
+      "licence": "LGPL-2.1",
+      "why": "SFTP connector. LGPL library used unmodified and loaded as a separate, user-replaceable Python package. Redistributing it in the API image needs its licence text and source location.",
+      "notice": "LGPL-2.1, used unmodified as a separately replaceable library. Source: https://github.com/paramiko/paramiko",
+      "owner_decision": true
+    },
+    "pypi:psycopg2-binary": {
+      "licence": "LGPL",
+      "why": "PostgreSQL connector. LGPL-3.0 with exceptions. Used unmodified as a separate library. The binary wheel bundles libpq (PostgreSQL Licence) and OpenSSL.",
+      "notice": "LGPL-3.0 (with the psycopg2 exceptions), used unmodified as a separately replaceable library; the wheel bundles libpq and OpenSSL. Source: https://github.com/psycopg/psycopg2",
+      "owner_decision": true
+    },
+    "pypi:pymssql": {
+      "licence": "LGPL",
+      "why": "SQL Server fallback driver. LGPL-2.1. Used unmodified as a separate library. The wheel bundles FreeTDS (LGPL).",
+      "notice": "LGPL-2.1, used unmodified as a separately replaceable library; the wheel bundles FreeTDS (LGPL-2.0). Source: https://github.com/pymssql/pymssql",
+      "owner_decision": true
+    },
+    "pypi:hdbcli": {
+      "licence": "Other/Proprietary License",
+      "why": "SAP HANA client, proprietary (SAP Developer License Agreement). Whether SAP's terms allow shipping it inside the production image is not established. Owner decision: keep it, make it an operator-installed optional driver, or remove it.",
+      "notice": "Proprietary SAP licence. Not yet cleared for redistribution: see the owner decision in docs/legal/third-party-licences.md",
+      "owner_decision": true
+    },
+    "pypi:teradatasql": {
+      "licence": "Other/Proprietary License",
+      "why": "Teradata SQL driver, proprietary licence. Whether its terms allow shipping it inside the production image is not established. Owner decision: keep it, make it optional, or remove it.",
+      "notice": "Proprietary Teradata licence. Not yet cleared for redistribution: see the owner decision in docs/legal/third-party-licences.md",
+      "owner_decision": true
+    },
+    "pypi:pypdfium2": {
+      "licence": "BSD-3-Clause, Apache-2.0, dependency licenses",
+      "why": "PDF rendering. The bindings are BSD-3-Clause / Apache-2.0. The bundled PDFium binary carries the licences of its own dependencies (FreeType, libjpeg-turbo, OpenJPEG, LittleCMS, zlib, ICU, abseil, ...), which ship in the wheel's licence folder. All are permissive.",
+      "notice": "BSD-3-Clause / Apache-2.0; the bundled PDFium binary's third-party licences ship in the wheel (pypdfium2 *.dist-info/licenses). Source: https://github.com/pypdfium2-team/pypdfium2"
+    },
+    "pypi:hypothesis": {
+      "licence": "MPL-2.0",
+      "why": "Test tool only (requirements-dev.txt). Not in the production image, so not distributed."
+    },
+    "npm:@fontsource/ibm-plex-mono": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1: may be bundled, not sold on its own. Its copyright and licence must accompany it.",
+      "notice": "SIL Open Font License 1.1. Copyright IBM Corp. Licence text: https://openfontlicense.org"
+    },
+    "npm:@fontsource/ibm-plex-sans": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1.",
+      "notice": "SIL Open Font License 1.1. Copyright IBM Corp. Licence text: https://openfontlicense.org"
+    },
+    "npm:@fontsource/inter": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1.",
+      "notice": "SIL Open Font License 1.1. Copyright The Inter Project Authors. Licence text: https://openfontlicense.org"
+    },
+    "npm:@fontsource/jetbrains-mono": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1.",
+      "notice": "SIL Open Font License 1.1. Copyright The JetBrains Mono Project Authors. Licence text: https://openfontlicense.org"
+    },
+    "npm:@fontsource/plus-jakarta-sans": {
+      "licence": "OFL-1.1",
+      "why": "Font, OFL-1.1.",
+      "notice": "SIL Open Font License 1.1. Copyright The Plus Jakarta Sans Project Authors. Licence text: https://openfontlicense.org"
+    }
+  }
+}

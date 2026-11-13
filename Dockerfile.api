@@ -24,7 +24,9 @@ COPY apps/api/requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
 COPY packages/preflight /app/packages/preflight
-RUN pip install -e "/app/packages/preflight[dev]" || pip install -e /app/packages/preflight
+# Runtime only: preflight's dev extra is pytest, which the image must not ship
+# (test tools live in the API dev requirements file, which CI installs).
+RUN pip install -e /app/packages/preflight
 
 COPY apps/api /app/apps/api
 COPY scripts/start-api.sh /app/scripts/start-api.sh

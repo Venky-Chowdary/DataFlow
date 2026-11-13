@@ -1,0 +1,200 @@
+"""F3: test tools stay out of the production install; licences are gated.
+
+* ``requirements.txt`` (what Dockerfile.api installs) carries no test tool;
+  ``requirements-dev.txt`` carries them and includes the runtime file.
+* Product code never imports a test tool at module level (moto / fakesnow are
+  reached only inside guarded optional paths).
+* Every CI job that runs pytest installs the dev file.
+* ``scripts/licence_scan.py`` classifies licences, honours reviewed
+  exceptions, fails on new copyleft / unknown ones and on a stale NOTICE.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import re
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+API = Path(__file__).resolve().parents[1]
+REPO = API.parents[1]
+TEST_TOOLS = {"pytest", "pytest-asyncio", "pytest-timeout", "hypothesis", "moto", "fakesnow", "responses"}
+
+
+def _load_scanner():
+    spec = importlib.util.spec_from_file_location("licence_scan", REPO / "scripts" / "licence_scan.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module  # dataclasses resolve the module by name
+    spec.loader.exec_module(module)
+    return module
+
+
+scan = _load_scanner()
+
+
+def _names(path: Path) -> set[str]:
+    out = set()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line and not line.startswith("-"):
+            out.add(re.split(r"[<>=!~\[; ]", line, maxsplit=1)[0].lower())
+    return out
+
+
+def test_runtime_requirements_carry_no_test_tool() -> None:
+    leaked = _names(API / "requirements.txt") & TEST_TOOLS
+    assert not leaked, f"move {sorted(leaked)} to requirements-dev.txt"
+
+
+def test_dev_requirements_include_runtime_and_the_test_tools() -> None:
+    text = (API / "requirements-dev.txt").read_text(encoding="utf-8")
+    assert re.search(r"^-r requirements\.txt$", text, re.MULTILINE)
+    assert TEST_TOOLS <= _names(API / "requirements-dev.txt")
+
+
+def test_production_image_installs_runtime_only() -> None:
+    dockerfile = (REPO / "Dockerfile.api").read_text(encoding="utf-8")
+    assert "requirements-dev" not in dockerfile
+    assert "[dev]" not in dockerfile
+
+
+def test_product_code_never_imports_a_test_tool_at_module_level() -> None:
+    top_level = re.compile(r"^(?:import|from)\s+(pytest|hypothesis|responses|moto|fakesnow)\b", re.MULTILINE)
+    offenders = []
+    for root in ("connectors", "services", "src"):
+        for path in (API / root).rglob("*.py"):
+            if "/tests/" in path.as_posix():
+                continue
+            match = top_level.search(path.read_text(encoding="utf-8", errors="replace"))
+            if match:
+                offenders.append(f"{path.relative_to(API)}: {match.group(0)}")
+    assert not offenders, offenders
+
+
+def _ci_files() -> list[Path]:
+    return sorted((REPO / ".github" / "workflows").glob("*.yml"))
+
+
+def test_every_ci_job_that_runs_pytest_installs_the_dev_requirements() -> None:
+    problems = []
+    for path in _ci_files():
+        jobs = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("jobs") or {}
+        for name, job in jobs.items():
+            steps = job.get("steps") or []
+            runs = "\n".join(str(s.get("run") or "") for s in steps)
+            uses = "\n".join(str(s.get("uses") or "") for s in steps)
+            runs_pytest = "pytest" in runs or "npm run test:cdc" in runs or "warehouse_sku_report" in runs
+            installs_dev = "requirements-dev.txt" in runs or "./.github/actions/ci-services" in uses
+            if runs_pytest and not installs_dev:
+                problems.append(f"{path.name}:{name}")
+    action = (REPO / ".github" / "actions" / "ci-services" / "action.yml").read_text(encoding="utf-8")
+    assert "requirements-dev.txt" in action
+    assert not problems, f"jobs run pytest without requirements-dev.txt: {problems}"
+
+
+# ── scanner ────────────────────────────────────────────────────────────────
+
+POLICY = {
+    "allowed": ["MIT", "Apache-2.0", "BSD-3-Clause"],
+    "exceptions": {"pypi:lgpl-lib": {"licence": "LGPL-2.1", "why": "reviewed"}},
+}
+
+
+@pytest.mark.parametrize(
+    ("raw", "spdx"),
+    [
+        ("MIT License", "MIT"),
+        ("Apache Software License", "Apache-2.0"),
+        ("Apache License, Version 2.0", "Apache-2.0"),
+        ("new BSD", "BSD-3-Clause"),
+        ("UNKNOWN", ""),
+        ("", ""),
+        ("Permission is hereby granted, free of charge, to any person " + "x" * 120, "MIT"),
+    ],
+)
+def test_normalise(raw: str, spdx: str) -> None:
+    assert scan.normalise(raw) == spdx
+
+
+def _pkg(name: str, licence: str, ecosystem: str = "pypi", scope: str = "runtime"):
+    return scan.classify(scan.Package(ecosystem, name, "1.0", licence, scope, "test"), POLICY)
+
+
+@pytest.mark.parametrize(
+    ("licence", "status"),
+    [
+        ("MIT", "allowed"),
+        ("MIT OR GPL-3.0", "allowed"),  # dual licence: the permissive option is ours
+        ("MIT AND Apache-2.0", "allowed"),
+        ("MIT AND LGPL-2.1", "copyleft"),
+        ("GPL-3.0", "copyleft"),
+        ("AGPL-3.0", "copyleft"),
+        ("SSPL-1.0", "copyleft"),
+        ("MPL-2.0", "copyleft"),
+        ("Other/Proprietary License", "unknown"),
+        ("", "unknown"),
+    ],
+)
+def test_classify(licence: str, status: str) -> None:
+    assert _pkg("x", licence).status == status
+
+
+def test_a_new_copyleft_dependency_fails_until_reviewed() -> None:
+    problems = scan.violations([_pkg("new-gpl", "GPL-3.0"), _pkg("lgpl-lib", "LGPL-2.1")], POLICY)
+    assert len(problems) == 1 and "new-gpl" in problems[0]
+
+
+def test_a_reviewed_dependency_whose_licence_changed_fails() -> None:
+    problems = scan.violations([_pkg("lgpl-lib", "AGPL-3.0")], POLICY)
+    assert problems and "changed" in problems[0]
+
+
+def test_policy_exceptions_need_a_licence_and_a_why(tmp_path: Path) -> None:
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"allowed": [], "exceptions": {"pypi:x": {"licence": "GPL"}}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="lacks"):
+        scan.load_policy(path)
+    path.write_text(json.dumps({"allowed": [], "exceptions": {"x": {"licence": "GPL", "why": "y"}}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="pypi: or npm:"):
+        scan.load_policy(path)
+
+
+def test_the_repository_policy_loads_and_flags_owner_decisions() -> None:
+    policy = scan.load_policy(REPO / "licence-policy.json")
+    owner = {k for k, v in policy["exceptions"].items() if v.get("owner_decision")}
+    assert {"pypi:hdbcli", "pypi:teradatasql"} <= owner
+
+
+def test_npm_scan_reads_the_lockfile(tmp_path: Path) -> None:
+    lock = {
+        "lockfileVersion": 3,
+        "packages": {
+            "": {"name": "root"},
+            "apps/web": {"dependencies": {"react": "^18", "@own/ds": "*"}},
+            "node_modules/@own/ds": {"link": True, "resolved": "packages/ds"},
+            "node_modules/react": {"version": "18.3.1", "license": "MIT"},
+            "node_modules/vite": {"version": "5.0.0", "license": "MIT", "dev": True},
+            "node_modules/weird": {"version": "1.0.0"},
+        },
+    }
+    path = tmp_path / "package-lock.json"
+    path.write_text(json.dumps(lock), encoding="utf-8")
+    rows = {p.name: p for p in scan.scan_npm(path)}
+    assert rows["react"].scope == "runtime" and rows["react"].licence == "MIT"
+    assert rows["vite"].scope == "dev"
+    assert scan.classify(rows["weird"], POLICY).status == "unknown"
+    assert "@own/ds" not in rows
+    direct = scan.direct_dependencies(tmp_path / "missing.txt", path)
+    assert direct == {"npm:react"}
+
+
+def test_notice_names_every_direct_production_dependency() -> None:
+    direct = scan.direct_dependencies()
+    gaps = scan.notice_gaps(direct, (REPO / "NOTICE").read_text(encoding="utf-8"))
+    assert not gaps, f"regenerate NOTICE (scripts/licence_scan.py --notice NOTICE): {gaps}"
+    assert "pypi:fastapi" in direct and "npm:react" in direct
