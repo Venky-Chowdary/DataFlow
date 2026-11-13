@@ -12,6 +12,7 @@ on the server and ``DROP TABLE`` succeeds under a short ``lock_wait_timeout``.
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import sqlite3
 import uuid
@@ -92,10 +93,8 @@ def test_failed_gate8_leaves_no_open_transaction_or_metadata_lock(tmp_path: Path
     finally:
         db = _mysql()
         try:
-            with db.cursor() as cur:
+            with db.cursor() as cur, contextlib.suppress(Exception):  # cleanup only
                 cur.execute("SET SESSION lock_wait_timeout = 5")
                 cur.execute(f"DROP TABLE IF EXISTS `{table}`")
-        except Exception:  # noqa: BLE001 - cleanup only
-            pass
         finally:
             db.close()
