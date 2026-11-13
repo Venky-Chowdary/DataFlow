@@ -10,7 +10,8 @@ and booleans are typed cells, decided by the column's export type (the
 mapping/destination type the export already knows) and, without one, by the
 Python type of the value. A value Excel cannot hold exactly stays exact text:
 more than 15 significant digits, a non-canonical number (``0012``), a date
-before 1900, or a timestamp with a time-zone offset (Excel has no zones).
+before 1900, a timestamp with a time-zone offset (Excel has no zones), or a
+timestamp with digits finer than milliseconds.
 """
 
 from __future__ import annotations
@@ -26,6 +27,10 @@ from services.value_serializer import cell_to_string
 # Excel stores numbers as IEEE-754 doubles: 15 significant digits round-trip.
 _EXCEL_EXACT_DIGITS = 15
 _EXCEL_MIN_YEAR = 1900
+
+# Excel date-times carry milliseconds; anything finer is kept as exact text.
+_EXCEL_FRACTION_DIGITS = 3
+_FRACTION_TEXT = re.compile(r"\d{2}:\d{2}:\d{2}[.,](\d+)")
 
 _INT_TEXT = re.compile(r"^[+-]?(?:0|[1-9]\d*)$")
 _DECIMAL_TEXT = re.compile(r"^[+-]?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
@@ -93,6 +98,9 @@ def _excel_date(value: Any) -> Any:
     if isinstance(value, _dt.datetime):
         if value.tzinfo is not None or value.year < _EXCEL_MIN_YEAR:
             return None
+        # Excel holds a date-time to the millisecond: finer digits stay text.
+        if value.microsecond % 1000:
+            return None
         return value
     if isinstance(value, _dt.date):
         return value if value.year >= _EXCEL_MIN_YEAR else None
@@ -129,6 +137,11 @@ def _typed_from_text(text: str, family: str) -> Any:
             return False
         return None
     if family in {"date", "datetime"}:
+        fraction = _FRACTION_TEXT.search(text)
+        if fraction and len(fraction.group(1).rstrip("0")) > _EXCEL_FRACTION_DIGITS:
+            # ``.123456`` / ``.1235`` / a DATETIME2 seventh digit: Excel would
+            # round it, and fromisoformat drops a seventh digit silently.
+            return None
         try:
             if family == "date" and len(text) == 10:
                 return _excel_date(_dt.date.fromisoformat(text))
