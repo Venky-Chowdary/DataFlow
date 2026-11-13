@@ -4735,7 +4735,9 @@ def _iter_excel_records(source: Any) -> Any:
     except ImportError as exc:
         raise UnmeasuredArtifact("excel_checksum_needs_parser") from exc
     try:
-        yield from iter_excel_dicts(source)
+        # Destination read-back: a missing cell is NULL, an empty string cell
+        # is '' (G7 F1) — the XLSX writers spell them that way.
+        yield from iter_excel_dicts(source, null_blank_cells=True)
     except UnmeasuredArtifact:
         raise
     except Exception as exc:
