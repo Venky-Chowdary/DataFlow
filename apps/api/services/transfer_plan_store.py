@@ -116,14 +116,13 @@ def _backup_paths(path: Path) -> list[Path]:
 
 
 def _newest_readable_backup(path: Path) -> Path | None:
-    """The newest backup generation that parses as a plan store, if any."""
+    """The newest backup generation the store's own loader would accept, if any."""
     for candidate in _backup_paths(path):
         try:
-            raw = json.loads(candidate.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
+            _parse_store_text(candidate.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, *_PARSE_ERRORS):
             continue
-        if isinstance(raw, dict) and isinstance(raw.get("plans", []), list):
-            return candidate
+        return candidate
     return None
 
 
@@ -380,15 +379,24 @@ def _load_all() -> list[TransferPlanRecord]:
     except (OSError, UnicodeDecodeError) as exc:
         raise _unreadable(path, exc) from exc
     try:
-        raw = json.loads(text)
-        rows = raw.get("plans", []) if isinstance(raw, dict) else None
-        if not isinstance(rows, list):
-            raise TypeError("not a transfer plan store document")
-        plans = [TransferPlanRecord.from_dict(p) for p in rows]
-    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        plans = _parse_store_text(text)
+    except _PARSE_ERRORS as exc:
         raise _unreadable(path, exc) from exc
     _REPORTED.pop(str(path), None)
     return plans
+
+
+#: What a store text that is not a valid plan store raises while parsing.
+_PARSE_ERRORS = (ValueError, TypeError, KeyError, AttributeError)
+
+
+def _parse_store_text(text: str) -> list[TransferPlanRecord]:
+    """Every plan in a store file's text; raises one of ``_PARSE_ERRORS`` otherwise."""
+    raw = json.loads(text)
+    rows = raw.get("plans", []) if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        raise TypeError("not a transfer plan store document")
+    return [TransferPlanRecord.from_dict(p) for p in rows]
 
 
 def _save_all(plans: list[TransferPlanRecord]) -> None:

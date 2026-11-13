@@ -456,3 +456,25 @@ def test_the_refusal_names_the_newest_readable_backup(isolated_plan_store):
     assert none_left.value.readable_backup == ""
     assert "no readable backup" in str(none_left.value)
     assert "no readable backup" in client.get(f"/api/v1/transfer/plans/{a}").json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "bad_backup",
+    [
+        {"plans": [1, 2]},
+        {"plans": [{"name": "row without an id"}]},
+        {"plans": [{"id": "x", "revisions": [{"mappings": []}]}]},  # revision without a version
+    ],
+    ids=["scalar_rows", "row_without_id", "revision_without_version"],
+)
+def test_a_backup_the_loader_would_reject_is_never_named(isolated_plan_store, bad_backup):
+    import json
+
+    a = create_plan({"name": "A"}).id
+    for i in range(3):
+        update_plan(a, {"name": f"A{i}"})
+    _truncated(isolated_plan_store)
+    isolated_plan_store.with_name("transfer_plans.json.bak").write_text(json.dumps(bad_backup))
+    with pytest.raises(PlanStoreUnreadable) as caught:
+        get_plan(a)
+    assert caught.value.readable_backup == "transfer_plans.json.bak.1"
