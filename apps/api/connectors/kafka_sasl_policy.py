@@ -24,8 +24,9 @@ Client options that name a file on the host (librdkafka ``ssl.*.location``,
 point inside an area a connector may open (``services.tenant_host_files``);
 Kerberos settings need the Kerberos opt-in; ``sasl.kerberos.kinit.cmd`` (a
 command the client runs) and ``plugin.library.paths`` (libraries it loads) are
-always refused, as is an OAuth token fetched with a cloud identity
-(``sasl.oauthbearer.metadata.authentication.type``). Option names are folded
+always refused, as is every librdkafka ``sasl.oauthbearer.*`` option (the
+client would build or fetch its own token: a token endpoint, a client secret,
+an unsecured JWT, cloud metadata; follow-up review 5, L5). Option names are folded
 (case, ``.``, ``_``, ``-``) so no spelling hides one. Checked at save on the
 connector's fields, ``extra`` and ``connect_args`` (nested mappings too), and on
 the kwargs every client is built with. Messages name the option and the remedy,
@@ -53,7 +54,9 @@ _FILE_OPTIONS = frozenset({
 #: Never from a tenant: the client runs this command or loads these libraries.
 _NEVER = frozenset({"saslkerberoskinitcmd", "pluginlibrarypaths", "sasloauthtokenprovider"})
 _KERBEROS_PREFIX = "saslkerberos"
-_OAUTH_IDENTITY = "sasloauthbearermetadataauthenticationtype"
+#: librdkafka's own OAUTHBEARER settings (method, token endpoint, client id / secret, unsecured
+#: JWT config, assertion files, cloud metadata authentication): it builds or fetches the token.
+_OAUTH_PREFIX = "sasloauthbearer"
 
 
 def _fold(key: Any) -> str:
@@ -167,10 +170,12 @@ def _option_refusal(key: Any, value: Any, where: str) -> str:
             f"Kafka client option {_shown(key)} {where} makes the client run a command or load a "
             "library on this server. Datawrap does not accept it from a connector; remove it."
         )
-    if folded == _OAUTH_IDENTITY and str(value or "").strip().lower() not in {"", "none"}:
+    if folded.startswith(_OAUTH_PREFIX):  # any value (follow-up review 5, L5)
         return (
-            f"Kafka client option {_shown(key)} {where} would fetch a token with this server's cloud "
-            "identity. Use this connector's own token (extra.sasl_oauth_token)."
+            f"Kafka client option {_shown(key)} {where} would make the client build or fetch its own "
+            "OAuth token (a token endpoint, a client secret, an unsecured token or this server's cloud "
+            "identity). Datawrap does not accept it from a connector; use this connector's own token "
+            "(extra.sasl_oauth_token)."
         )
     if folded.startswith(_KERBEROS_PREFIX) and not platform_kerberos_allowed():
         return _kerberos_message(f"Kafka client option {_shown(key)} {where}")
