@@ -611,7 +611,10 @@ def test_iceberg_catalog(endpoint: Any) -> tuple[bool, str]:
             probe = root / ".dataflow_iceberg_probe"
             probe.write_text("ok", encoding="utf-8")
             probe.unlink(missing_ok=True)
-            return True, f"Iceberg filesystem warehouse writable at {root}"
+            from services.iceberg_workspace_root import shown_location
+
+            # The workspace-relative name, never the host path (follow-up review 5, L1).
+            return True, f"Iceberg filesystem warehouse writable ({shown_location(root)})"
 
         _ensure_pyiceberg()
         catalog = load_catalog(endpoint)

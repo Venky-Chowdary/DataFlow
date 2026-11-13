@@ -237,6 +237,23 @@ def place(candidate: Path, root: Path, scope: Scope, label: str) -> Path:
     return resolved
 
 
+def shown_location(resolved: Path) -> str:
+    """A local Iceberg location as a caller may see it: relative to its own area (review 5, L1).
+
+    Never the API host's absolute path or another workspace's id; outside any
+    root, only the folder's name.
+    """
+    from connectors.iceberg_catalog import iceberg_local_root
+
+    root = iceberg_local_root()
+    if root is not None:
+        scope = current_scope()
+        base = workspace_area(root, scope.workspace) if scope.workspace and not scope.whole_root else root
+        if is_within(resolved, base):
+            return resolved.relative_to(base).as_posix() or "."
+    return resolved.name or "."
+
+
 def ensure_area(root: Path, scope: Scope) -> None:
     """Create the scope's own area (a SQLite catalog file needs its folder)."""
     if scope.workspace and not scope.whole_root:
