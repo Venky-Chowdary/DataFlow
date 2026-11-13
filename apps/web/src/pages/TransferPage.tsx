@@ -7374,6 +7374,12 @@ export function TransferPage({
           onApplyPrimaryKey={applyPrimaryKeySuggestion}
           onClearPrimaryKey={clearPrimaryKey}
           sampleRows={(samplePreviewRows as Record<string, unknown>[]) || []}
+          destEndpoint={destKindMode === "database" ? (currentDestinationEndpoint as Record<string, unknown>) : null}
+          destProbeKey={currentDestinationProbeKey}
+          destSchemaTypes={destSchemaMap}
+          schemaPolicy={schemaPolicy}
+          syncMode={syncMode}
+          sourceObjectName={mapActiveStream || primarySourceStream || ""}
         />
       )}
 

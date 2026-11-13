@@ -201,7 +201,7 @@ export async function apiErrorFrom(res: Response, fallback: string): Promise<Api
   return new ApiError(detail, res.status, permission, role);
 }
 
-async function parseApiError(res: Response, fallback: string): Promise<string> {
+export async function parseApiError(res: Response, fallback: string): Promise<string> {
   return (await readApiRefusal(res, fallback)).detail;
 }
 

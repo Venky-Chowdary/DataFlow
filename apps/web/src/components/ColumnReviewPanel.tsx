@@ -2,7 +2,11 @@ import { DtIcon } from "./DtIcon";
 import { FilterTabs } from "./ui/FilterTabs";
 import { ReasonDisclosure } from "./transfer/ReasonDisclosure";
 import { StructurePreview } from "./ui/StructurePreview";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { DestColumnCombobox } from "./mapping/DestColumnCombobox";
+import { TypeCompatBadge } from "./mapping/TypeCompatBadge";
+import type { DestColumnCatalog } from "../lib/destColumnCatalog";
+import type { TypeGrade } from "../lib/mappingStudioApi";
 import {
   ARRAY_POLICIES,
   MAPPING_TRANSFORMS,
@@ -112,6 +116,23 @@ interface ColumnReviewPanelProps {
   migrationId?: string;
   /** Destination table stamped onto Risk Contracts. */
   tableName?: string;
+  /**
+   * Map-step remapping: the destination column picker, live type grades and
+   * drag handles. Absent, the row keeps its plain destination-name field.
+   */
+  remap?: ColumnRemapControls;
+}
+
+export interface ColumnRemapControls {
+  catalog: DestColumnCatalog;
+  /** lower(target) → every source writing it. */
+  claimedBy: Map<string, string[]>;
+  /** lower(target) → sources, only where more than one source writes it. */
+  conflicts: Map<string, string[]>;
+  onRemap: (source: string, target: string) => void;
+  gradeFor: (m: EditableMapping) => TypeGrade | undefined;
+  gradesPending: boolean;
+  renderGrip: (m: EditableMapping) => ReactNode;
 }
 
 function confidenceClass(
@@ -173,6 +194,7 @@ export function ColumnReviewPanel({
   onFilterChange,
   migrationId = "",
   tableName = "",
+  remap,
 }: ColumnReviewPanelProps) {
   const [internalSearch, setInternalSearch] = useState("");
   const [internalFilter, setInternalFilter] = useState<ColumnFilter>("review");
@@ -831,6 +853,7 @@ export function ColumnReviewPanel({
                 >
                   <td className="df2-column-source-cell">
                     <div className="df2-column-cell-content">
+                      {remap && !omitted ? remap.renderGrip(m) : null}
                       <span className="df2-column-source">{m.source}</span>
                       {m.businessRule && (
                         <span
@@ -1015,6 +1038,19 @@ export function ColumnReviewPanel({
                         </div>
                       ) : (
                         <>
+                      {remap ? (
+                        <DestColumnCombobox
+                          sourceName={m.source}
+                          value={m.target}
+                          catalog={remap.catalog}
+                          claimedBy={remap.claimedBy}
+                          onCommit={(target) => remap.onRemap(m.source, target)}
+                          inputRef={(el) => {
+                            if (el) destInputRefs.current.set(m.source, el);
+                            else destInputRefs.current.delete(m.source);
+                          }}
+                        />
+                      ) : (
                       <input
                         className="df2-input df2-column-target-input"
                         value={m.target}
@@ -1025,6 +1061,16 @@ export function ColumnReviewPanel({
                         onChange={(e) => updateMapping(index, applyOperatorRemapDest(m, e.target.value))}
                         aria-label={`Destination name for ${m.source}`}
                       />
+                      )}
+                      {remap && m.target && (remap.conflicts.get(m.target.toLowerCase())?.length ?? 0) > 1 ? (
+                        <span className="df2-ms-tag is-conflict" role="status">
+                          Conflict: {m.target} is also written by{" "}
+                          {(remap.conflicts.get(m.target.toLowerCase()) ?? []).filter((x) => x !== m.source).join(", ")}
+                        </span>
+                      ) : null}
+                      {remap && !m.target ? (
+                        <span className="df2-ms-tag is-unassigned">No destination: pick one or omit</span>
+                      ) : null}
                       <select
                         className="df2-input df2-select df2-column-dest-type-select"
                         value={
@@ -1059,6 +1105,9 @@ export function ColumnReviewPanel({
                           </option>
                         ))}
                       </select>
+                      {remap ? (
+                        <TypeCompatBadge grade={remap.gradeFor(m)} pending={remap.gradesPending && Boolean(m.destType)} />
+                      ) : null}
                       {!omitted && isCodeCrosswalkCandidate(m) && !enumSignalled(m) && !isCodeCrosswalkDeclared(m) && !crosswalkOpen[m.source] && (
                         <button
                           type="button"

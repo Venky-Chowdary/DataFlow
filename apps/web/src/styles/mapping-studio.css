@@ -1,0 +1,667 @@
+/* Map-step remapping (.df2-ms-* namespace, sole authority):
+   destination column picker, destination panel, drag handles, type chips,
+   auto-map preview. Colours are semantic tokens only, re-mapped by the dark
+   theme in tokens.css; the one component token below adds a danger ink that
+   keeps 4.5:1 on the dark surface (the shared --df-danger does not). */
+
+.df2-app,
+.df2-ms-combo-menu,
+.df2-ms-automap {
+  --df2-ms-danger-ink: var(--df-danger);
+  --df2-ms-row: 76px;
+  --df2-ms-option: 48px;
+}
+
+html[data-theme="dark"] .df2-app,
+html[data-theme="dark"] .df2-ms-combo-menu,
+html[data-theme="dark"] .df2-ms-automap {
+  --df2-ms-danger-ink: color-mix(in srgb, var(--df-danger) 52%, white);
+}
+
+/* ---- layout ----------------------------------------------------------- */
+/* The Map step is viewport-bound (internal scroll only). The split owns the
+   remaining height; the workspace keeps its own single-column rules. */
+
+.df2-ms-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 12px;
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.df2-ms-split.has-panel {
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+@media (min-width: 1024px) {
+  .df2-ms-split.has-panel {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
+
+.df2-ms-split > .df2-map-step-workspace {
+  min-height: 0;
+}
+
+.df2-ms-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.df2-ms-toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.df2-ms-drag-status {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--df-radius-sm);
+  border: 1px dashed var(--df-focus-ring);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+  font-size: var(--df-fs-sm);
+}
+
+/* ---- drag handle ------------------------------------------------------ */
+
+.df2-ms-grip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  /* WCAG 2.2 target size: at least 24 x 24. */
+  width: 24px;
+  min-height: 28px;
+  margin-right: 4px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--df-radius-sm);
+  background: transparent;
+  color: var(--df-text-tertiary);
+  cursor: grab;
+}
+
+.df2-ms-grip:hover {
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-ms-grip:focus-visible,
+.df2-ms-link:focus-visible,
+.df2-ms-chip:focus-visible,
+.df2-ms-compat:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+.df2-ms-grip.is-grabbed {
+  border-color: var(--df-focus-ring);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+  cursor: grabbing;
+}
+
+.df2-ms-grip-dots {
+  display: block;
+  width: 10px;
+  height: 16px;
+  background-image: radial-gradient(currentColor 1.3px, transparent 1.6px);
+  background-size: 5px 5px;
+}
+
+/* ---- combobox --------------------------------------------------------- */
+
+.df2-ms-combo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.df2-ms-combo-input {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.df2-ms-combo.is-new .df2-ms-combo-input {
+  border-style: dashed;
+}
+
+.df2-ms-combo-menu {
+  position: fixed;
+  z-index: var(--df-z-max);
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  overflow-y: auto;
+  background: var(--df-surface-raised);
+  color: var(--df-text-primary);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  box-shadow: var(--df-shadow-lg);
+}
+
+.df2-ms-combo-option {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: var(--df2-ms-option);
+  padding: 4px 10px;
+  border-radius: var(--df-radius-sm);
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.df2-ms-combo-option.is-active {
+  background: var(--df-surface-muted);
+  border-left-color: var(--df-focus-ring);
+}
+
+.df2-ms-combo-option[aria-selected="true"] .df2-ms-combo-name {
+  font-weight: 700;
+}
+
+.df2-ms-combo-option.is-refused {
+  cursor: not-allowed;
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-combo-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--df-fs-sm);
+}
+
+.df2-ms-combo-facts {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+  font-family: var(--df-font-mono);
+}
+
+.df2-ms-combo-empty {
+  padding: 10px;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-sm);
+}
+
+/* ---- tags & status chips --------------------------------------------- */
+
+.df2-ms-tag,
+.df2-ms-status,
+.df2-ms-match {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--df-radius-sm);
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.df2-ms-tag.is-required,
+.df2-ms-tag.is-conflict,
+.df2-ms-status.is-required_unmapped,
+.df2-ms-status.is-conflict {
+  background: var(--df-danger-bg);
+  border-color: var(--df-danger-border);
+  color: var(--df2-ms-danger-ink);
+}
+
+.df2-ms-tag.is-claimed,
+.df2-ms-tag.is-unassigned {
+  background: var(--df-warning-bg);
+  border-color: var(--df-warning-border);
+  color: var(--df-warning-text);
+}
+
+.df2-ms-tag.is-create,
+.df2-ms-match.is-learned {
+  background: var(--df-info-bg);
+  border-color: var(--df-info-border);
+  color: var(--df-info-text);
+}
+
+.df2-ms-status.is-mapped,
+.df2-ms-match.is-exact,
+.df2-ms-match.is-case_insensitive,
+.df2-ms-match.is-normalized {
+  background: var(--df-success-bg);
+  border-color: var(--df-success-border);
+  color: var(--df-success-text);
+}
+
+.df2-ms-match.is-synonym,
+.df2-ms-match.is-key_suffix {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-text);
+}
+
+/* ---- type compatibility chip ----------------------------------------- */
+
+.df2-ms-compat-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.df2-ms-compat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: var(--df-radius-sm);
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.df2-ms-compat-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.df2-ms-compat.is-safe {
+  background: var(--df-success-bg);
+  border-color: var(--df-success-border);
+  color: var(--df-success-text);
+}
+
+.df2-ms-compat.is-lossy {
+  background: var(--df-warning-bg);
+  border-color: var(--df-warning-border);
+  color: var(--df-warning-text);
+}
+
+.df2-ms-compat.is-incompatible {
+  background: var(--df-danger-bg);
+  border-color: var(--df-danger-border);
+  color: var(--df2-ms-danger-ink);
+}
+
+.df2-ms-compat-kind {
+  font-weight: 500;
+}
+
+.df2-ms-compat-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: var(--df-z-popover);
+  width: max-content;
+  max-width: min(320px, 80vw);
+  padding: 8px 10px;
+  border-radius: var(--df-radius-md);
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-raised);
+  color: var(--df-text-primary);
+  box-shadow: var(--df-shadow-md);
+  font-size: var(--df-fs-sm);
+  line-height: 1.4;
+  white-space: normal;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.df2-ms-compat-wrap:hover .df2-ms-compat-tip,
+.df2-ms-compat:focus + .df2-ms-compat-tip {
+  visibility: visible;
+  opacity: 1;
+}
+
+/* ---- destination panel ------------------------------------------------ */
+
+.df2-ms-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+}
+
+.df2-ms-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.df2-ms-panel-title {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  font-weight: 700;
+}
+
+.df2-ms-panel-sub {
+  margin: 2px 0 0;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+  font-family: var(--df-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.df2-ms-panel-counts {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-panel-counts .is-block,
+.df2-ms-panel-note.is-block {
+  color: var(--df2-ms-danger-ink);
+}
+
+.df2-ms-panel-blockers {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--df-radius-sm);
+  border: 1px solid var(--df-danger-border);
+  background: var(--df-danger-bg);
+  font-size: var(--df-fs-sm);
+}
+
+
+.df2-ms-panel-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.df2-ms-panel-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.df2-ms-chip {
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: var(--df-radius-sm);
+  border: 1px solid var(--df-border);
+  background: var(--df-surface);
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.df2-ms-chip.is-active {
+  border-color: var(--df-focus-ring);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-ms-panel-list {
+  flex: 1 1 0;
+  min-height: 120px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  border-radius: var(--df-radius-sm);
+}
+
+.df2-ms-panel-list.is-drop-armed {
+  outline: 1px dashed var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+.df2-ms-panel-empty {
+  padding: 12px;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-sm);
+}
+
+.df2-ms-dest-row {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  height: var(--df2-ms-row);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--df-border);
+  border-left: 3px solid transparent;
+  overflow: hidden;
+}
+
+.df2-ms-dest-row.is-required_unmapped,
+.df2-ms-dest-row.is-conflict {
+  border-left-color: var(--df-danger);
+}
+
+.df2-ms-dest-row.is-mapped {
+  border-left-color: var(--df-success);
+}
+
+.df2-ms-dest-row.is-drop-over {
+  background: var(--df-surface-muted);
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: -2px;
+}
+
+.df2-ms-dest-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.df2-ms-dest-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-sm);
+  font-weight: 600;
+}
+
+.df2-ms-key {
+  padding: 0 4px;
+  border-radius: var(--df-radius-sm);
+  background: var(--df-info-bg);
+  color: var(--df-info-text);
+  font-size: var(--df-fs-xs);
+}
+
+.df2-ms-dest-facts,
+.df2-ms-dest-why {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
+
+.df2-ms-dest-facts {
+  font-family: var(--df-font-mono);
+}
+
+.df2-ms-dest-sources {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
+
+.df2-ms-link {
+  min-height: 24px;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--df-brand-text);
+  font-size: var(--df-fs-xs);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.df2-ms-link.is-unmap {
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-panel-note {
+  margin: 0;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
+
+/* ---- auto-map preview -------------------------------------------------- */
+
+.df2-ms-automap-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-sm);
+}
+
+.df2-ms-automap-scroll {
+  max-height: min(60vh, 520px);
+  overflow: auto;
+}
+
+.df2-ms-automap-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--df-fs-sm);
+}
+
+.df2-ms-automap-table th,
+.df2-ms-automap-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--df-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.df2-ms-automap-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--df-surface-raised);
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+}
+
+.df2-ms-automap-table tbody th {
+  font-family: var(--df-font-mono);
+  font-weight: 600;
+}
+
+.df2-ms-automap-table tr.is-picked td,
+.df2-ms-automap-table tr.is-picked th {
+  background: var(--df-surface-muted);
+}
+
+.df2-ms-automap-target {
+  font-family: var(--df-font-mono);
+}
+
+.df2-ms-automap-was {
+  display: block;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
+
+.df2-ms-confidence {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-ms-confidence-bar {
+  display: inline-block;
+  width: 48px;
+  height: 6px;
+  border-radius: var(--df-radius-sm);
+  background: var(--df-surface-muted);
+  overflow: hidden;
+}
+
+.df2-ms-confidence-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--df-brand);
+}
+
+/* ---- narrow screens ----------------------------------------------------- */
+/* Viewport-bound panes leave a phone a sliver of grid once the banners and
+   toolbar take their lines. Below the desktop split, the split scrolls as one
+   column: the grid track keeps a usable minimum height (a grid track, not the
+   workspace's own flex sizing, which the shared Map rules pin) and the panel
+   follows it. */
+
+@media (max-width: 1023.98px) {
+  .df2-ms-split,
+  .df2-ms-split.has-panel {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(min(70vh, 560px), auto);
+    overflow-y: auto;
+  }
+
+  .df2-ms-split.has-panel {
+    grid-template-rows: minmax(min(70vh, 560px), auto) auto;
+  }
+
+  .df2-ms-panel-list {
+    flex: none;
+    height: 360px;
+  }
+}
+
+@media (max-width: 639.98px) {
+  .df2-ms-toolbar .df2-btn {
+    padding-inline: 8px;
+  }
+
+  .df2-ms-automap-table th:nth-child(4),
+  .df2-ms-automap-table td:nth-child(4) {
+    display: none;
+  }
+}
