@@ -92,6 +92,12 @@ jobs:
         run: |
           echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
 
+      - name: Every shipped source is pinned by SHA-2 (not MD5 alone)
+        # keyutils 1.5.8 has only a published MD5. CI's api-image job records
+        # its SHA-256 after verifying the MD5; it must be committed as the
+        # UPSTREAM sha256 before a release, so the release build enforces it.
+        run: python3 scripts/source_bundle.py --require-sha2-pins
+
       - name: Build and push the companion source image (tag + -sources)
         # Owner decision 2026-11-13: the Debian system-package sources and the
         # GCC source are not in the runtime image. They are published here, in

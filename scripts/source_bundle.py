@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bundled_libraries import COMPANION_LOCATION, IMAGE_SOURCE_DIR
+from bundled_libraries import COMPANION_LOCATION, IMAGE_SOURCE_DIR, UPSTREAM
 from fetch_debian_sources import (
     DOC_ROOT,
     DebPackage,
@@ -238,6 +238,11 @@ def verify_dockerfile(dockerfile: Path) -> list[str]:
     return problems
 
 
+def weak_pins() -> list[tuple[str, str]]:
+    """UPSTREAM sources verified by MD5 alone (no SHA-256 / SHA-512 pin)."""
+    return sorted(key for key, up in UPSTREAM.items() if not (up.sha256 or up.sha512))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--pointer", type=Path, help="companion manifests directory")
@@ -246,7 +251,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", type=Path, help="companion manifests directory")
     parser.add_argument("--runtime-sources", type=Path, default=Path(IMAGE_SOURCE_DIR))
     parser.add_argument("--verify-dockerfile", type=Path)
+    parser.add_argument(
+        "--require-sha2-pins",
+        action="store_true",
+        help="release gate: fail while any UPSTREAM source has no SHA-256 / SHA-512 pin",
+    )
     args = parser.parse_args(argv)
+    if args.require_sha2_pins:
+        weak = weak_pins()
+        for family, version in weak:
+            print(
+                f"- {family} {version} is pinned by MD5 only. The CI api-image job records its "
+                "SHA-256 after the MD5 check (job notice / Actions cache keyutils-1.5.8-sha256-v1); "
+                "commit it as UPSTREAM sha256 in scripts/bundled_libraries.py before releasing."
+            )
+        print("source pins: " + ("MD5-ONLY PINS, release refused" if weak else "all SHA-2"))
+        return 1 if weak else 0
     if args.verify_dockerfile:
         problems = verify_dockerfile(args.verify_dockerfile)
         for problem in problems:

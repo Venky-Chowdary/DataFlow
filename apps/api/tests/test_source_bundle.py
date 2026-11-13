@@ -392,3 +392,17 @@ def test_release_checks_the_companion_before_pushing_the_release_image() -> None
     assert "diff" in check["run"] and "io.datawrap.sources" in check["run"]
     assert check["if"] == "${{ matrix.companion }}"
     assert "docker cp" in steps[verify]["run"] and "/SHA256SUMS" in steps[verify]["run"]
+
+
+def test_a_release_refuses_a_source_pinned_only_by_md5(tmp_path) -> None:
+    """Final review L1: keyutils 1.5.8 has only a published MD5. CI records its
+    SHA-256 (api-image job) for a maintainer to commit into UPSTREAM; until
+    then a release fails, so no release ships a source verified by MD5 alone."""
+    weak = bundle.weak_pins()
+    assert ("keyutils", "1.5.8") in weak, "remove this once the recorded SHA-256 is committed"
+    assert bundle.main(["--require-sha2-pins"]) == 1
+    steps = _workflow("release.yml")["jobs"]["publish-images"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    gate = next(i for i, s in enumerate(steps) if "--require-sha2-pins" in str(s.get("run", "")))
+    first_build = next(i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith("docker/build-push-action"))
+    assert gate < first_build, names
