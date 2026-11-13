@@ -23,12 +23,44 @@ WRITER_OPTION_CHECKS: dict[str, Callable[[object], str]] = {
 }
 
 
+#: Object-store / file-server engines whose file format follows the object name.
+_OBJECT_FILE_ENGINES = frozenset({
+    "s3", "minio", "r2", "gcs", "gcp_storage", "adls", "azure_blob", "azure_blob_storage",
+    "azure_data_lake", "azure_data_lake_storage", "sftp", "email", "smtp",
+})
+
+
+def _written_file_format(payload: dict[str, Any]) -> str:
+    """The file format an endpoint dict writes, or ``""`` when it cannot be told here.
+
+    file_export: its ``format``. An object store / SFTP / email: an explicit
+    ``file_format``, else the object name's extension. A database or an
+    ``extra``-only payload: unknown (the writer still refuses at run time).
+    """
+    nested = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    kind = str(payload.get("kind") or "").strip().lower()
+    fmt = str(payload.get("format") or payload.get("type") or "").strip().lower()
+    if kind == "file_export":
+        return fmt.lstrip(".")
+    if fmt not in _OBJECT_FILE_ENGINES:
+        return ""
+    declared = str(payload.get("file_format") or nested.get("file_format") or "").strip().lower()
+    if declared:
+        return declared.lstrip(".")
+    name = str(payload.get("table") or payload.get("collection") or payload.get("key") or "").strip().lower()
+    return name.rsplit(".", 1)[-1] if "." in name.rsplit("/", 1)[-1] else ""
+
+
 def validate_dest_writer_options(*payloads: Any) -> None:
-    """Raise ``ValueError`` for an unknown writer option in any payload.
+    """Raise ``ValueError`` for an unknown or misplaced writer option in any payload.
 
     A payload is an endpoint dict (its own keys and its nested ``extra``) or an
     ``extra`` dict; anything else is ignored. Absent options are fine.
+    ``tsv_null: "\\N"`` is refused when the payload names a file format other
+    than TSV (a CSV/JSON file_export, an object named ``*.csv``).
     """
+    from services.export_dialect import tsv_null_marker
+
     for payload in payloads:
         if not isinstance(payload, dict):
             continue
@@ -38,6 +70,10 @@ def validate_dest_writer_options(*payloads: Any) -> None:
                 value = scope.get(key)
                 if value is not None:
                     check(value)
+        mode = payload.get("tsv_null") or (nested.get("tsv_null") if isinstance(nested, dict) else None)
+        fmt = _written_file_format(payload)
+        if mode is not None and fmt:
+            tsv_null_marker(fmt, mode)
 
 
 def checked_dest_payload(value: Any) -> Any:

@@ -319,7 +319,10 @@ class EndpointDTO(BaseModel):
         """G7: an unknown formula_protection or tsv_null is a 422, never silently ignored."""
         from services.dest_writer_options import validate_dest_writer_options
 
-        validate_dest_writer_options(dict(self.model_extra or {}), self.extra)
+        validate_dest_writer_options({
+            **dict(self.model_extra or {}), "kind": self.kind, "format": self.format,
+            "table": self.table or self.collection, "extra": self.extra,
+        })
         return self
 
 
@@ -1545,8 +1548,12 @@ async def run_universal_transfer(
             dest_extra = {}
     from services.dest_writer_options import refuse_invalid_dest_writer_options
 
-    # An unknown formula_protection / tsv_null is the request's fault: 422 now, not at run time.
-    refuse_invalid_dest_writer_options(dest_extra)
+    # An unknown formula_protection / tsv_null (or \\N on a non-TSV file) is the
+    # request's fault: 422 now, not at run time.
+    refuse_invalid_dest_writer_options({
+        "kind": dest_kind, "format": dest_format, "table": dest_table or dest_collection,
+        "file_format": dest_extra.get("file_format", ""), "extra": dest_extra,
+    })
 
     _refuse_unavailable_destination(
         {

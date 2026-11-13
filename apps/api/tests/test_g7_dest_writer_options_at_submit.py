@@ -114,3 +114,74 @@ def test_schedules_carry_no_destination_extras():
     for model in (ScheduleCreate, ScheduleUpdate):
         assert not {"extra", "dest_extra", "formula_protection", "tsv_null"} & set(model.model_fields)
         assert model.model_config.get("extra") in (None, "ignore")
+
+
+# ── review L: \N on a non-TSV file, and saved connectors ────────────────────
+
+
+@pytest.mark.parametrize(
+    "dest",
+    [
+        {"kind": "file_export", "format": "csv", "extra": {"tsv_null": "\\N"}},
+        {"kind": "file_export", "format": "json", "tsv_null": "\\N"},
+        {"kind": "database", "format": "s3", "table": "out/data.csv", "extra": {"tsv_null": "\\N"}},
+        {"kind": "database", "format": "sftp", "table": "x", "file_format": "jsonl", "extra": {"tsv_null": "\\N"}},
+    ],
+)
+def test_backslash_n_on_a_non_tsv_file_is_refused_at_request_time(client, dest):
+    from pydantic import ValidationError
+
+    from services.dest_writer_options import validate_dest_writer_options
+    from src.routers.transfer_router import CreatePlanRequest, EndpointDTO
+
+    with pytest.raises(ValueError, match="TSV files only"):
+        validate_dest_writer_options(dest)
+    with pytest.raises(ValidationError, match="TSV files only"):
+        CreatePlanRequest(destination=dest)
+    with pytest.raises(ValidationError, match="TSV files only"):
+        EndpointDTO(**dest)
+    for path, body in (
+        ("/api/v1/transfer/plans", {"source": {"kind": "file"}, "destination": dest}),
+        ("/api/v1/contracts/from-transfer", {"name": "c", "source": {"kind": "file"}, "destination": dest}),
+    ):
+        response = client.post(path, json=body)
+        assert response.status_code == 422, (path, response.text)
+
+
+def test_backslash_n_on_a_tsv_file_is_accepted():
+    from services.dest_writer_options import validate_dest_writer_options
+
+    validate_dest_writer_options(
+        {"kind": "file_export", "format": "tsv", "extra": {"tsv_null": "\\N"}},
+        {"kind": "database", "format": "s3", "table": "out/data.tsv", "tsv_null": "\\N"},
+        {"kind": "database", "format": "postgresql", "table": "t", "extra": {"tsv_null": "\\N"}},  # no file: run time
+        {"tsv_null": "\\N"},  # extra-only payload: the format is not known here
+    )
+
+
+def test_multipart_run_refuses_backslash_n_on_a_csv_file_export(client):
+    response = client.post(
+        "/api/v1/transfer/run",
+        data={"source_kind": "file", "dest_kind": "file_export", "dest_format": "csv",
+              "dest_extra_json": json.dumps({"tsv_null": "\\N"})},
+        files={"file": ("a.csv", b"id\n1\n", "text/csv")},
+    )
+    assert response.status_code == 422, response.text
+    assert "TSV files only" in response.text
+
+
+@pytest.mark.parametrize("bad", BAD)
+def test_saved_connector_create_and_patch_validate_writer_options(client, bad):
+    from pydantic import ValidationError
+
+    from src.routers.saved_connectors_router import ConnectorPatchDTO, ConnectorSaveDTO
+
+    with pytest.raises(ValidationError, match=next(iter(bad))):
+        ConnectorSaveDTO(name="s3 out", type="s3", host="s3.amazonaws.com", port=443, extra=bad)
+    with pytest.raises(ValidationError, match=next(iter(bad))):
+        ConnectorPatchDTO(extra=bad)
+    response = client.post("/api/v1/connectors/saved", json={
+        "name": "s3 out", "type": "s3", "host": "s3.amazonaws.com", "port": 443, "extra": bad,
+    })
+    assert response.status_code == 422, response.text
+    ConnectorSaveDTO(name="s3 out", type="s3", host="s3.amazonaws.com", port=443, extra={"tsv_null": "\\N"})
