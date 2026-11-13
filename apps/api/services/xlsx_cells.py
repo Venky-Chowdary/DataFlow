@@ -165,6 +165,20 @@ def xlsx_cell_value(value: Any, declared_type: Any = None) -> tuple[Any, bool]:
     return cell_to_string(value), True
 
 
+_SCALED_NUMERIC = re.compile(
+    r"^\s*(?:numeric|decimal|dec|number|bignumeric)\s*\(\s*\d+\s*,\s*(\d+)\s*\)", re.IGNORECASE
+)
+
+
+def number_format_for(declared: Any) -> str | None:
+    """``0.00`` for ``numeric(12,2)``: the declared scale is shown, the value stays exact."""
+    match = _SCALED_NUMERIC.match(str(declared or ""))
+    if not match:
+        return None
+    scale = int(match.group(1))
+    return "0" if scale == 0 else "0." + "0" * min(scale, 30)
+
+
 def _set_cell(cell: Any, raw: Any, declared: Any, *, text: bool = False) -> None:
     """Bind ``raw`` to ``cell``; text is forced to a string cell."""
     if text:
@@ -172,6 +186,10 @@ def _set_cell(cell: Any, raw: Any, declared: Any, *, text: bool = False) -> None
     else:
         value, as_text = xlsx_cell_value(raw, declared)
     cell.value = value
+    if not as_text and isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        fmt = number_format_for(declared)
+        if fmt:
+            cell.number_format = fmt
     if as_text:
         # openpyxl binds ``=…`` as a formula and ``#N/A`` as an error:
         # data is never either.

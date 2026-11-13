@@ -26,7 +26,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Literal
+from typing import Any
 
 from connectors.mongodb_common import (
     _mongo_client,
@@ -35,7 +35,7 @@ from connectors.mongodb_common import (
 )
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from services import connector_store
 import services.query_extract as services_query_extract
 from services.brand_env import getenv_brand
@@ -765,14 +765,23 @@ class QueryExportRequest(QueryExecuteRequest):
     )
     conflict_columns: list[str] = Field(default_factory=list, description="Columns to use for upsert conflict resolution")
     # G7 (CWE-1236): a console export is a file a person opens in a spreadsheet.
-    formula_protection: Literal["off", "prefix"] = Field(
+    formula_protection: str = Field(
         "prefix",
         description=(
-            "CSV/TSV file export: \"prefix\" (default) puts a leading ' on text cells that "
-            "start with = + - @ tab or CR so a spreadsheet never runs them as formulas "
-            "(numbers such as -5 are untouched); \"off\" writes exact values"
+            "CSV/TSV file export: \"prefix\" (default; also for null or empty) puts a leading ' "
+            "on text cells and header names that start with = + - @ tab or CR so a spreadsheet "
+            "never runs them as formulas (numbers such as -5 are untouched); \"off\" writes "
+            "exact values. Case and surrounding spaces are ignored; anything else is a 422"
         ),
     )
+
+    @field_validator("formula_protection", mode="before")
+    @classmethod
+    def _formula_protection_vocabulary(cls, value: Any) -> str:
+        """Same vocabulary as a transfer destination's formula_protection (G7)."""
+        from services.csv_safety import formula_protection_mode
+
+        return formula_protection_mode(value, default="prefix")
 
 
 class QueryResult(BaseModel):

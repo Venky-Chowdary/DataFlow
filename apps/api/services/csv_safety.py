@@ -35,7 +35,8 @@ _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 # A plain numeral (``-5``, ``-1.5``, ``+3``, ``-1e-3``) opens as a number, never a
 # formula: export guards leave it intact so negative numbers are not mangled.
-_NUMERIC_LITERAL = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+# ASCII digits only and the whole string (``\\Z``): ``-١٢`` or ``-5<LF>`` is text.
+_NUMERIC_LITERAL = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z", re.ASCII)
 
 FORMULA_PROTECTION_MODES = ("off", "prefix")
 
