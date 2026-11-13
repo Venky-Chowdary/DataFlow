@@ -1511,7 +1511,10 @@ def run_file_preflight(
     from services.duplicate_policy import dedupe_skip_validate_gate
 
     dup_dest_gate = (
-        dedupe_skip_validate_gate(dest_kind)
+        dedupe_skip_validate_gate(
+            dest_kind,
+            connection_string=str((destination_config or {}).get("connection_string") or ""),
+        )
         if _plan_duplicate_policy(source_config, destination_config) == "dedupe_skip"
         else None
     )

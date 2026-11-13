@@ -632,13 +632,28 @@ def _holds_no_stored_keys(raw: str, driver: str) -> bool:
     return bool(_FILE_CAPS.get(driver, {}).get("file_export"))
 
 
-def dedupe_skip_refusal(dest_type: str) -> str:
+def _is_clickhouse(raw: str, connection_string: str) -> bool:
+    scheme = str(connection_string or "").strip().lower().split("://", 1)[0]
+    return "clickhouse" in raw or ("://" in str(connection_string or "") and "clickhouse" in scheme)
+
+
+def dedupe_skip_refusal(dest_type: str, *, connection_string: str = "") -> str:
     """Why ``skip_duplicates`` cannot run into this destination, or "".
 
     Every other writer upserts — it would overwrite the stored row the policy
     promises to leave alone, so the option is refused rather than ignored.
+    ClickHouse is decided by dialect (type or URL scheme): it resolves to the
+    generic SQL driver, but its upsert inserts into a ReplacingMergeTree.
     """
     raw = str(dest_type or "").strip().lower()
+    if _is_clickhouse(raw, connection_string):
+        return (
+            "Duplicate rows 'Skip keys already stored' (skip_duplicates) is not "
+            "available for a ClickHouse destination: its upsert inserts into a "
+            "ReplacingMergeTree, whose merge replaces the stored row with the new "
+            "one. Choose 'Update keys already stored' (upsert) or 'Insert every "
+            "row' (append)."
+        )
     if not raw:
         return ""
     from src.transfer.connector_capabilities import resolve_driver_type
@@ -656,9 +671,11 @@ def dedupe_skip_refusal(dest_type: str) -> str:
     )
 
 
-def dedupe_skip_validate_gate(dest_type: str) -> dict[str, Any] | None:
+def dedupe_skip_validate_gate(
+    dest_type: str, *, connection_string: str = ""
+) -> dict[str, Any] | None:
     """Validate blocker for ``skip_duplicates`` into an unsupported destination."""
-    message = dedupe_skip_refusal(dest_type)
+    message = dedupe_skip_refusal(dest_type, connection_string=connection_string)
     if not message:
         return None
     return {
@@ -685,6 +702,7 @@ def schedule_dedupe_skip_refusal(payload: Any) -> str:
     if normalize_duplicate_policy(str(data.get("duplicate_policy") or "")) != "dedupe_skip":
         return ""
     dest_type = str(data.get("dest_type") or "")
+    connection_string = str(data.get("dest_connection_string") or "")
     if not dest_type and data.get("dest_connector_id"):
         try:
             from services.connector_store import get_connector
@@ -693,7 +711,8 @@ def schedule_dedupe_skip_refusal(payload: Any) -> str:
         except Exception:  # noqa: BLE001 — unresolved here: Validate decides
             return ""
         dest_type = str(getattr(found, "type", "") or "") if found else ""
-    return dedupe_skip_refusal(dest_type)
+        connection_string = str(getattr(found, "connection_string", "") or "") if found else ""
+    return dedupe_skip_refusal(dest_type, connection_string=connection_string)
 
 
 #: Destinations whose append now refuses a stored key (``SET NX`` /

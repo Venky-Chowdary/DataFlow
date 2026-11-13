@@ -508,3 +508,32 @@ def test_bigquery_skip_markers_compare_typed_values(skip_policy, dense_key, stor
         [(dense_key, "INCOMING"), ("other", "NEW")],
     )
     assert (written, len(kept)) == (1, 1), (written, kept)
+
+
+# ------------------------------------------------------- ClickHouse (by dialect)
+def test_clickhouse_skip_duplicates_is_refused_by_dialect():
+    """Review L3: ClickHouse resolves to the generic_sql driver (allowed), but its
+    upsert inserts into ReplacingMergeTree, which replaces the stored key."""
+    from services.duplicate_policy import (
+        dedupe_skip_refusal,
+        dedupe_skip_validate_gate,
+        schedule_dedupe_skip_refusal,
+    )
+
+    for dest, cs in (
+        ("clickhouse", ""),
+        ("ClickHouse", ""),
+        ("generic_sql", "clickhouse+native://u:p@h:9000/db"),
+        ("generic_sql", "clickhouse://h:8123/db"),
+    ):
+        msg = dedupe_skip_refusal(dest, connection_string=cs)
+        assert "ClickHouse" in msg and "ReplacingMergeTree" in msg, (dest, cs, msg)
+    assert dedupe_skip_validate_gate("clickhouse")["status"] == "block"
+    assert dedupe_skip_refusal("generic_sql", connection_string="postgresql://h/db") == ""
+    with patch(
+        "services.connector_store.get_connector",
+        return_value=MagicMock(type="generic_sql", connection_string="clickhouse://h/db"),
+    ):
+        assert "ClickHouse" in schedule_dedupe_skip_refusal(
+            {"duplicate_policy": "skip_duplicates", "dest_connector_id": "c1"}
+        )
