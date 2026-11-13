@@ -165,6 +165,18 @@ def _matched_files(
     return [item.name for item in listed]
 
 
+def callable_read_scope(src_cfg: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """``(cfg, scope)`` for a source read outside a job: a CALL/SELECT source gets
+    its own ``peek-<uuid>`` spool scope, which the caller closes when the read ends
+    (``close_callable_spool(job_id=scope)``); any other source is returned as is."""
+    from services.procedure_source import is_callable_source, stamp_callable_job_id
+
+    if not is_callable_source(src_cfg):
+        return src_cfg, ""
+    scope = f"peek-{uuid.uuid4().hex[:16]}"
+    return stamp_callable_job_id(src_cfg, scope), scope
+
+
 def peek_stream_source(
     source: EndpointConfig,
     *,
@@ -204,13 +216,12 @@ def peek_stream_source(
         return (*result, probe) if include_batch else result
 
     from services.cancel_check import wait_pulse
-    from services.procedure_source import close_callable_spool, is_callable_source, stamp_callable_job_id
+    from services.procedure_source import close_callable_spool
 
     # A CALL/SELECT peek spools its extract under its own scope and releases it
     # here: an unscoped spool outlived every job and served the next job's peek
     # a stale result (T-F1 review: a column added since was silently dropped).
-    peek_scope = f"peek-{uuid.uuid4().hex[:16]}" if is_callable_source(src_cfg) else ""
-    read_cfg = stamp_callable_job_id(src_cfg, peek_scope) if peek_scope else src_cfg
+    read_cfg, peek_scope = callable_read_scope(src_cfg)
     try:
         with wait_pulse(source_wait_message(src_type, src_cfg, "Analyzing source table")):
             probe, _ = _unwrap_read(
@@ -369,6 +380,11 @@ def iter_stream_source_column_rows(
     total: int | None = None
     offset = 0
     emitted = 0
+    # The population walk of a CALL/SELECT source (preflight population fit,
+    # Validate) spools under its own scope, released when the walk ends —
+    # exhausted, stopped early, failed or garbage-collected (T-F1: an unscoped
+    # spool from this walk outlived its job and every later test saw it).
+    src_cfg, walk_scope = callable_read_scope(src_cfg)
     try:
         while True:
             extra: dict[str, Any] = {}
@@ -437,6 +453,10 @@ def iter_stream_source_column_rows(
     finally:
         if scan_state is not None:
             close_table_scan(scan_state)
+        if walk_scope:
+            from services.procedure_source import close_callable_spool
+
+            close_callable_spool(job_id=walk_scope)
 
 
 def iter_bounded_table_population_rows(

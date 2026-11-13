@@ -48,10 +48,11 @@ def _root_files() -> set[str]:
     return {str(p) for p in root.rglob("df-proc-*.jsonl")} if root.is_dir() else set()
 
 
-def _unscoped_spools() -> list:
+def _unscoped_spools() -> set[str]:
+    """Paths of the unscoped (no job id) spools this process holds right now."""
     from services import procedure_source
 
-    return [s for s in procedure_source._SPOOLS.values() if not s.job_id]
+    return {str(s.path) for s in list(procedure_source._SPOOLS.values()) if not s.job_id}
 
 
 def _run(monkeypatch, tmp_path, job_id: str):
@@ -84,7 +85,7 @@ def test_successful_query_source_job_leaves_no_spool(monkeypatch, tmp_path):
     assert _job_files(job_id) == []
     # Nothing anywhere under the spool root either (a peek used to spool unscoped).
     assert _root_files() - before == set()
-    assert _unscoped_spools() == []
+    assert _unscoped_spools() == set()
 
 
 def test_a_reread_after_the_stream_closed_is_released_by_the_job_scope(monkeypatch, tmp_path):
@@ -150,7 +151,7 @@ def test_a_new_column_reaches_the_next_job(monkeypatch, tmp_path):
         conn.close()
     assert cols == ["id", "note", "extra_col"]
     assert first_row == (1, "n1", "E1")
-    assert _unscoped_spools() == []
+    assert _unscoped_spools() == set()
 
 
 def test_an_unscoped_read_from_offset_zero_never_reuses_an_old_extract(tmp_path):
@@ -164,12 +165,48 @@ def test_an_unscoped_read_from_offset_zero_never_reuses_an_old_extract(tmp_path)
     conn.commit()
     conn.close()
     try:
-        second = procedure_source.read_callable_batch(cfg, offset=0, limit=100)
+        second = procedure_source.read_callable_batch(cfg, offset=0, limit=50)
         paged = procedure_source.read_callable_batch(cfg, offset=50, limit=10)  # paging still works
     finally:
         procedure_source.close_callable_spool()
-    assert len(first.rows) == 50 and len(second.rows) == 51
+    assert len(first.rows) == 50 and len(second.rows) == 50
     assert [r[0] for r in paged.rows] == ["51"]
+
+
+def test_an_unscoped_read_that_reaches_the_end_releases_its_spool(tmp_path):
+    """No job will close an unscoped spool: the read that exhausts it releases it."""
+    from services import procedure_source
+
+    src, _dst = _db(tmp_path)
+    before = _unscoped_spools()
+    page = procedure_source.read_callable_batch(_cfg(src, ""), offset=0, limit=20)
+    held = _unscoped_spools() - before
+    assert len(page.rows) == 20 and len(held) == 1, "a page short of the end keeps paging open"
+    rest = procedure_source.read_callable_batch(_cfg(src, ""), offset=20, limit=100)
+    assert len(rest.rows) == 30
+    assert _unscoped_spools() - before == set()
+    assert not any(Path(p).exists() for p in held)
+
+
+@pytest.mark.parametrize("limit", [0, 7], ids=["exhausted", "stopped-early"])
+def test_a_population_walk_of_a_query_source_leaves_no_spool(tmp_path, limit):
+    """Preflight's population-fit walk (iter_stream_source_column_rows) of a
+    CALL/SELECT source ran outside any job scope: its spool outlived the job
+    (CI 3/6, test_mx3_11 left one before this file). It spools under its own
+    scope now, released when the walk ends — exhausted or stopped early."""
+    from src.transfer.models import EndpointConfig
+    from src.transfer.source_peek import iter_stream_source_column_rows
+
+    src, _dst = _db(tmp_path)
+    source = EndpointConfig(
+        kind="database", format="sqlite", database=src, table="src_rows",
+        extra={"source_read_mode": "query", "source_query": QUERY},
+    )
+    before_unscoped, before_files = _unscoped_spools(), _root_files()
+    rows = list(iter_stream_source_column_rows(source, ["id", "note"], limit=limit))
+    assert len(rows) == (limit or 50)
+    assert _unscoped_spools() - before_unscoped == set()
+    assert _root_files() - before_files == set()
 
 
 def test_failed_query_source_job_leaves_no_spool(monkeypatch, tmp_path):

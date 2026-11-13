@@ -1073,6 +1073,11 @@ def read_callable_batch(
         cursor_column=cursor_column,
         cursor_after=cursor_after,
     )
+    if not job_id_of(cfg) and offset + len(rows) >= int(matched or 0):
+        # An unscoped read (no job closes it) that has reached the end of the
+        # extract is done with its spool: release it now instead of holding a
+        # registered file until the process exits.
+        close_callable_spool(key)
     if columns:
         headers, rows = _project(headers, rows, columns)
     return ReadBatch(
