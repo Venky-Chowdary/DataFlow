@@ -25,7 +25,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from services.rbac import require_admin_for_endpoints
 from services.workspace_access import assert_connector_accessible, resolve_write_workspace, tenant_scope
 from services.transfer_policy_values import (
@@ -314,16 +314,20 @@ class EndpointDTO(BaseModel):
         ),
     )
 
-    @model_validator(mode="after")
-    def _formula_protection_vocabulary(self) -> "EndpointDTO":
-        """G7: an unknown formula_protection or tsv_null is a 422, never silently ignored."""
-        from services.dest_writer_options import validate_dest_writer_options
-
-        validate_dest_writer_options({
+    def writer_options_payload(self) -> dict[str, Any]:
+        """This endpoint as the shared writer-option validator reads a destination."""
+        return {
             **dict(self.model_extra or {}), "kind": self.kind, "format": self.format,
             "table": self.table or self.collection, "extra": self.extra,
-        })
-        return self
+        }
+
+
+def _checked_destination_dto(value: "EndpointDTO") -> "EndpointDTO":
+    """G7: a destination's unknown formula_protection / tsv_null is a 422 (never a source's)."""
+    from services.dest_writer_options import validate_dest_writer_options
+
+    validate_dest_writer_options(value.writer_options_payload())
+    return value
 
 
 class AnalyzeRequest(BaseModel):
@@ -331,6 +335,11 @@ class AnalyzeRequest(BaseModel):
     destination: EndpointDTO
     source_columns: list[str] = Field(default_factory=list)
     source_schema: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("destination")
+    @classmethod
+    def _destination_writer_options(cls, value: EndpointDTO) -> EndpointDTO:
+        return _checked_destination_dto(value)
 
 
 class ExecuteTransferRequest(PolicyFieldsModel):
@@ -426,6 +435,11 @@ class ExecuteTransferRequest(PolicyFieldsModel):
     transform_recipe_params: dict = Field(default_factory=dict)
     # Set-graph identity. Empty matches a recipe with no set nodes.
     approved_set_hash: str = ""
+
+    @field_validator("destination")
+    @classmethod
+    def _destination_writer_options(cls, value: EndpointDTO) -> EndpointDTO:
+        return _checked_destination_dto(value)
 
 
 class MapColumnsRequest(PolicyFieldsModel):
@@ -2517,6 +2531,11 @@ async def download_export(filename: str, request: Request):
 class ContinuityRebaselineBody(BaseModel):
     destination: EndpointDTO
     reason: str = Field("", max_length=2000)
+
+    @field_validator("destination")
+    @classmethod
+    def _destination_writer_options(cls, value: EndpointDTO) -> EndpointDTO:
+        return _checked_destination_dto(value)
 
 
 @router.post("/continuity/rebaseline")

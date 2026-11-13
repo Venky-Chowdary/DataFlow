@@ -82,10 +82,15 @@ def test_endpoint_dto_validates_tsv_null():
 
     from src.routers.transfer_router import EndpointDTO
 
-    assert EndpointDTO(kind="file_export", format="tsv", tsv_null=TEXT_NULL)
-    assert EndpointDTO(kind="file_export", format="tsv", extra={"tsv_null": "empty"})
+    from src.routers.transfer_router import AnalyzeRequest
+
+    def dest(**kw):
+        return AnalyzeRequest(source={"kind": "file"}, destination={"kind": "file_export", "format": "tsv", **kw})
+
+    assert dest(tsv_null=TEXT_NULL)
+    assert dest(extra={"tsv_null": "empty"})
     with pytest.raises(ValidationError):
-        EndpointDTO(kind="file_export", format="tsv", extra={"tsv_null": "NULL"})
+        dest(extra={"tsv_null": "NULL"})
     assert "tsv_null" in (EndpointDTO.model_fields["extra"].description or "")
 
 

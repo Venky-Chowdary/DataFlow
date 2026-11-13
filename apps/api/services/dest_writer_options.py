@@ -31,24 +31,42 @@ _OBJECT_FILE_ENGINES = frozenset({
 
 
 def _written_file_format(payload: dict[str, Any]) -> str:
-    """The file format an endpoint dict writes, or ``""`` when it cannot be told here.
+    """The file format an endpoint dict writes — the writer's own rule — or ``""`` if unknown here.
 
-    file_export: its ``format``. An object store / SFTP / email: an explicit
-    ``file_format``, else the object name's extension. A database or an
-    ``extra``-only payload: unknown (the writer still refuses at run time).
+    - file_export: its ``format``.
+    - Object store (S3/GCS/ADLS/…): the object key's extension when it has one;
+      ``file_format`` only for an extensionless key (``normalize_object_base_key``).
+    - SFTP: the remote name's extension, else ``file_format`` (``sftp_dest_path``).
+    - Email: the attachment format, ``extra.format``.
+    No object name yet, a database, or an ``extra``-only payload: unknown (the
+    writer still refuses at run time).
     """
     nested = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
     kind = str(payload.get("kind") or "").strip().lower()
-    fmt = str(payload.get("format") or payload.get("type") or "").strip().lower()
+    engine = str(payload.get("format") or payload.get("type") or "").strip().lower()
     if kind == "file_export":
-        return fmt.lstrip(".")
-    if fmt not in _OBJECT_FILE_ENGINES:
+        return engine.lstrip(".")
+    if engine in {"email", "smtp"}:
+        return str(nested.get("format") or "").strip().lower().lstrip(".")
+    if engine not in _OBJECT_FILE_ENGINES:
+        return ""
+    name = str(payload.get("table") or payload.get("collection") or payload.get("key") or "").strip()
+    if not name:
         return ""
     declared = str(payload.get("file_format") or nested.get("file_format") or "").strip().lower()
-    if declared:
-        return declared.lstrip(".")
-    name = str(payload.get("table") or payload.get("collection") or payload.get("key") or "").strip().lower()
-    return name.rsplit(".", 1)[-1] if "." in name.rsplit("/", 1)[-1] else ""
+    try:
+        if engine == "sftp":
+            from connectors.sftp_common import sftp_dest_path
+
+            written = sftp_dest_path(name, declared)
+        else:
+            from connectors.object_store_common import normalize_object_base_key
+
+            written = normalize_object_base_key(name, "", declared)
+    except ValueError:
+        return ""  # an unsafe key is refused by its own check
+    leaf = written.rsplit("/", 1)[-1]
+    return leaf.rsplit(".", 1)[-1].lower() if "." in leaf else ""
 
 
 def validate_dest_writer_options(*payloads: Any) -> None:

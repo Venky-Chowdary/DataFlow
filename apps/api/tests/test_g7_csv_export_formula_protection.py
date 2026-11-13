@@ -246,16 +246,23 @@ def test_transfer_file_export_rejects_unknown_protection():
 
 
 def test_endpoint_dto_rejects_unknown_protection():
+    """A destination's unknown formula_protection is a 422; a source's options are not writer options."""
     from pydantic import ValidationError
 
-    from src.routers.transfer_router import EndpointDTO
+    from src.routers.transfer_router import AnalyzeRequest
 
-    assert EndpointDTO(kind="file_export", format="csv", formula_protection="prefix")
-    assert EndpointDTO(kind="file_export", format="csv", extra={"formula_protection": "off"})
+    src = {"kind": "file", "format": "csv"}
+
+    def dest(**kw):
+        return AnalyzeRequest(source=src, destination={"kind": "file_export", "format": "csv", **kw})
+
+    assert dest(formula_protection="prefix")
+    assert dest(extra={"formula_protection": "off"})
     with pytest.raises(ValidationError):
-        EndpointDTO(kind="file_export", format="csv", formula_protection="strip")
+        dest(formula_protection="strip")
     with pytest.raises(ValidationError):
-        EndpointDTO(kind="file_export", format="csv", extra={"formula_protection": "strip"})
+        dest(extra={"formula_protection": "strip"})
+    assert AnalyzeRequest(source={**src, "formula_protection": "strip"}, destination={"kind": "file_export", "format": "csv"})
 
 
 @pytest.mark.parametrize("extra", [None, {"formula_protection": "prefix"}])
