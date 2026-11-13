@@ -13,8 +13,8 @@ Now each destination's own rule is checked at Validate (gate
 * MongoDB targets are field paths (``services.document_paths``): an empty
   segment, a leading ``$``, NUL, ``_id`` below the root, or a collision such as
   ``a`` and ``a.b`` is refused with the path's issue code;
-* SQL engines refuse a name longer than the engine's real limit (PostgreSQL /
-  Redshift 63, MySQL 64, SQL Server / Oracle 128, Snowflake 255, BigQuery 300;
+* SQL engines refuse a name longer than the engine's real limit (PostgreSQL 63,
+  Redshift 127, MySQL 64, SQL Server / Oracle 128, Snowflake 255, BigQuery 300;
   SQLite has none), naming the limit and the offending name;
 * BigQuery refuses two targets that differ only in case;
 * Elasticsearch keeps ``@timestamp`` and dotted object paths, and refuses a
@@ -104,7 +104,7 @@ def test_mongo_alias_kinds_use_the_same_rule():
     ("dest", "limit"),
     [
         ("postgresql", 63),
-        ("redshift", 63),
+        ("redshift", 127),
         ("mysql", 64),
         ("sqlserver", 128),
         ("oracle", 128),

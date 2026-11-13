@@ -29,11 +29,13 @@ from typing import Any
 from connectors.sql_identifiers import sanitize_identifier
 
 #: Longest column name each SQL engine stores. PostgreSQL counts bytes
-#: (NAMEDATALEN-1); Redshift loads through the PostgreSQL writer, so it keeps
-#: that writer's limit; Oracle 12.2+ counts 128 bytes.
+#: (NAMEDATALEN-1); Redshift 127 bytes (it loads through the PostgreSQL
+#: writer, which names its columns by this entry); Oracle 12.2+ 128 bytes.
 SQL_NAME_LIMITS: dict[str, int] = {
     "postgresql": 63,
-    "redshift": 63,
+    "redshift": 127,
+    "amazon_redshift": 127,
+    "redshift_serverless": 127,
     "mysql": 64,
     "sqlserver": 128,
     "synapse": 128,
@@ -43,7 +45,9 @@ SQL_NAME_LIMITS: dict[str, int] = {
 }
 #: SQL engines with no practical column-name limit: never cut.
 SQL_UNLIMITED = frozenset({"sqlite", "duckdb"})
-_BYTE_LIMITED = frozenset({"postgresql", "redshift", "oracle"})
+_BYTE_LIMITED = frozenset(
+    {"postgresql", "redshift", "amazon_redshift", "redshift_serverless", "oracle"}
+)
 _NO_CUT = 1 << 20
 
 DOCUMENT_STORES = frozenset({"mongodb"})

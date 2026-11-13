@@ -18,6 +18,7 @@ from services.decision_kernel import materialize_dest_ddl
 from services.reversibility_enforce import scan_pass
 from services.value_serializer import json_default
 
+from connectors.destination_naming import writer_identifier
 from connectors.postgresql_conn import get_connection
 from connectors.pg_tx_guard import explain_aborted as pg_explain_aborted
 from connectors.pg_tx_guard import savepoint as pg_savepoint
@@ -1525,6 +1526,11 @@ def write_mapped_rows(
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
         dest_db="postgresql",
+        # G11: Redshift shares this writer but names columns by its own limit.
+        identifier=writer_identifier(
+            str(_kwargs.get("engine") or _kwargs.get("db_type") or "postgresql"),
+            preserve_case=True,
+        ),
     )
     if not target_cols:
         return WriteResult(
