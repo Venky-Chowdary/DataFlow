@@ -382,6 +382,37 @@ def test_a_write_that_landed_is_not_reported_failed_when_the_backup_rename_fails
     assert any("transfer_plans.json.bak" in r.getMessage() for r in caplog.records)
 
 
+def test_a_failed_final_backup_rename_keeps_every_backup_generation(
+    isolated_plan_store, caplog, monkeypatch
+):
+    """Rotation is all or nothing: if staging cannot become .bak, all three stay as they were."""
+    import os
+
+    a = create_plan({"name": "A"}).id
+    for i in range(3):
+        update_plan(a, {"name": f"A{i}"})
+    names = ("transfer_plans.json.bak", "transfer_plans.json.bak.1", "transfer_plans.json.bak.2")
+    before = {n: isolated_plan_store.with_name(n).read_bytes() for n in names}
+    real_replace = os.replace
+
+    def failing_final_rename(src, dst):
+        if str(src).endswith(".staging") and str(dst).endswith(".bak"):
+            raise OSError(5, "Input/output error")
+        return real_replace(src, dst)
+
+    caplog.set_level(logging.WARNING, logger=store.logger.name)
+    with monkeypatch.context() as patched:
+        patched.setattr(store.os, "replace", failing_final_rename)
+        update_plan(a, {"name": "landed"})
+    assert get_plan(a).name == "landed"
+    after = {n: isolated_plan_store.with_name(n).read_bytes() for n in names}
+    assert after == before, "a failed rotation must not drop or shift any backup"
+    leftovers = [p.name for p in isolated_plan_store.parent.iterdir() if p.name.startswith(".") and "bak" in p.name]
+    assert leftovers == []
+    warning = next(r.getMessage() for r in caplog.records if "backup" in r.getMessage())
+    assert "not rotated" in warning and "unchanged" in warning
+
+
 def test_a_store_saved_with_a_utf8_bom_is_readable(isolated_plan_store):
     a, b = _two_plans()
     isolated_plan_store.write_bytes(b"\xef\xbb\xbf" + isolated_plan_store.read_bytes())

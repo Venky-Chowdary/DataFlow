@@ -424,22 +424,54 @@ def _save_all(plans: list[TransferPlanRecord]) -> None:
     if staging is None:
         return
     # The new store has landed: the write is committed. Rotate the backups
-    # (.bak.1 -> .bak.2, .bak -> .bak.1, staging -> .bak). One that cannot be
-    # rotated is logged, never reported as a failed write (a retry would
-    # append the same change twice).
-    generations = _backup_paths(STORE_PATH)
+    # all or nothing: the older generations are first linked to staging names
+    # (originals untouched), staging becomes .bak, and only then do the staged
+    # older ones replace .bak.1 / .bak.2. If staging cannot become .bak, every
+    # generation is still as it was. A failed rotation is logged, never
+    # reported as a failed write (a retry would append the same change twice).
+    _rotate_backups(staging, backup)
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    dst.unlink(missing_ok=True)
     try:
-        for older, newer in zip(reversed(generations[1:]), reversed(generations[:-1])):
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def _rotate_backups(staging: Path, backup: Path) -> None:
+    generations = _backup_paths(STORE_PATH)
+    shifted: list[tuple[Path, Path]] = []  # (staged copy, generation it becomes)
+    try:
+        for newer, older in zip(generations[:-1], generations[1:]):
             if newer.exists():
-                os.replace(newer, older)
+                staged = older.with_name(f".{older.name}.{os.getpid()}.staging")
+                _link_or_copy(newer, staged)
+                shifted.append((staged, older))
         os.replace(staging, backup)
     except OSError as exc:
+        for staged, _older in shifted:
+            staged.unlink(missing_ok=True)
         staging.unlink(missing_ok=True)
         logger.warning(
-            "Transfer plan store saved, but its backup %s was not updated (%s)",
-            backup.name,
+            "Transfer plan store saved, but its backups were not rotated (%s): "
+            "%s and the older generations are unchanged",
             type(exc).__name__,
+            backup.name,
         )
+        return
+    for staged, older in shifted:
+        try:
+            os.replace(staged, older)
+        except OSError as exc:
+            staged.unlink(missing_ok=True)
+            logger.warning(
+                "Transfer plan store saved and %s updated, but %s was not (%s)",
+                backup.name,
+                older.name,
+                type(exc).__name__,
+            )
 
 
 @contextlib.contextmanager
