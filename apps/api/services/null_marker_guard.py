@@ -127,7 +127,7 @@ def _table_verdict(
                 "destination_rows": None, "leaked": False}
     if dest.rows is None:
         return {**base, "status": "not_measured", "reason": f"destination: {dest.reason}",
-                "destination_rows": None, "leaked": False}
+                "internal": dest.internal, "destination_rows": None, "leaked": False}
     base.update(destination_rows=dest.rows, destination_raw_rows=dest.raw, destination_escaped_rows=dest.escaped)
     if dest.rows == 0:
         return {**base, "status": "passed", "leaked": False}
@@ -151,7 +151,7 @@ def _table_verdict(
     if source is not None and source.rows is None:
         # The source probe ran and stopped (timeout, cap, error): not measured.
         return {**base, "status": "not_measured", "reason": f"source: {source.reason}",
-                "source_rows": None, "leaked": False}
+                "internal": source.internal, "source_rows": None, "leaked": False}
     if source is None:
         # A source nobody can count is not judged: the marker text may be the
         # user's own literal (a file cell that really says it).
@@ -268,9 +268,10 @@ def null_marker_verdict(
         or ""
     )
     scope = resolve_probe_scope(dest_summary=summary, validation_mode=validation_mode, **kw)
+    # The endpoint's own schema, as the writer was handed it. (The writer's
+    # reported ``schema`` is not one: generic SQL into a SQLite URL reports the
+    # database file path there.)
     dest_cfg = resolve_connector_config(endpoint)
-    if str(summary.get("schema") or "").strip():
-        dest_cfg["schema"] = str(summary["schema"])  # where the writer says it wrote
     return _table_verdict(
         dest_type=dest_type, dest_cfg=dest_cfg, table=table,
         targets=_names(mappings, "target"), scope=scope, source_endpoint=source_endpoint,
@@ -294,6 +295,22 @@ def _leak_note(v: dict[str, Any]) -> str:
     )
 
 
+def _unmeasured_note(t: dict[str, Any]) -> str:
+    from services.null_marker_probe import PROBE_TIMEOUT_ENV
+
+    if t.get("internal"):
+        return (
+            f"Datawrap's NULL-marker check of {t.get('table')} could not be measured "
+            f"({t.get('reason')}): the destination is not proven free of the marker text."
+        )
+    return (
+        f"Datawrap's NULL-marker check of {t.get('table')} could not be measured "
+        f"({t.get('reason')}): the destination is not proven free of the marker text. "
+        f"Raise DATAWRAP_{PROBE_TIMEOUT_ENV} (DATAFLOW_{PROBE_TIMEOUT_ENV}) or run in "
+        "balanced validation mode, where an unmeasured check is reported, not failed."
+    )
+
+
 def apply_null_marker_gate(recon: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     """Fail the Gate-8 report when the destination holds a leaked marker (never raises)."""
     if not isinstance(recon, dict):
@@ -312,25 +329,22 @@ def apply_null_marker_gate(recon: dict[str, Any], **kwargs: Any) -> dict[str, An
         # A timeout, a cap hit or an unreadable table proves nothing: a report
         # that would pass is unproven instead (review F3). A report that already
         # failed on a measured finding stays failed, not "held".
-        from services.null_marker_probe import PROBE_TIMEOUT_ENV, STRICT_MODES
+        from services.null_marker_probe import STRICT_MODES
         from services.validation_mode_contract import normalize_validation_mode
 
         recon["migration_proven"] = False
         if recon.get("passed", True):
             recon["unproven"] = True
             # Business-rule convention: strict and maximum fail closed on an
-            # unverified check; balanced completes, still unproven.
-            if normalize_validation_mode(kwargs.get("validation_mode", "strict")) in STRICT_MODES:
+            # unverified check; balanced completes, still unproven. A probe
+            # Datawrap could not connect for, after Gate-8's own read-back
+            # reached the destination, is an internal error: never a failure.
+            applies = [t for t in unmeasured if not t.get("internal")]
+            if applies and normalize_validation_mode(kwargs.get("validation_mode", "strict")) in STRICT_MODES:
                 recon["passed"] = False
                 recon["details"] = {**dict(recon.get("details") or {}),
                                     "reason": "null_marker_check_not_measured"}
-        note = " ".join(
-            f"Datawrap's NULL-marker check of {t.get('table')} could not be measured "
-            f"({t.get('reason')}): the destination is not proven free of the marker text. "
-            f"Raise DATAWRAP_{PROBE_TIMEOUT_ENV} (DATAFLOW_{PROBE_TIMEOUT_ENV}) or run in "
-            "balanced validation mode, where an unmeasured check is reported, not failed."
-            for t in unmeasured
-        )
+        note = " ".join(_unmeasured_note(t) for t in unmeasured)
         message = str(recon.get("message") or "").strip()
         recon["message"] = f"{message} {note}".strip()
     leaked = [t for t in tables if t.get("leaked")]

@@ -189,7 +189,9 @@ def test_a_destination_with_no_sql_probe_is_not_applicable():
 # --------------------------------------------------------------------------
 
 
-def test_no_connection_back_through_the_writers_engine_fails_strict():
+def test_no_connection_for_the_probe_is_an_internal_error_not_a_strict_failure():
+    """Gate-8's own read-back runs first and holds the run if the destination is gone;
+    the probe failing to connect after that is Datawrap's error, logged and unproven."""
     from tests.helpers.live_env import pg_creds
 
     c = pg_creds()
@@ -198,9 +200,10 @@ def test_no_connection_back_through_the_writers_engine_fails_strict():
                               schema="public", table="t")
     strict = _gate(endpoint)
     check = strict["null_marker_check"]
-    assert check["status"] == "not_measured" and "could not connect" in check["reason"], check
-    assert strict["passed"] is False
-    assert _gate(endpoint, mode="balanced")["passed"] is True
+    assert check["status"] == "not_measured" and check["internal"] is True, check
+    assert "could not connect" in check["reason"], check
+    assert strict["passed"] is True and strict["unproven"] is True, strict
+    assert strict["migration_proven"] is False
 
 
 def test_a_query_error_on_a_supported_engine_fails_strict(tmp_path):
@@ -290,3 +293,22 @@ def test_engine_run_into_duckdb_is_probed_and_succeeds_in_strict(tmp_path, _isol
     # The source really holds one marker-spelling literal; the destination holds the same one.
     assert check and check["status"] == "passed" and check["scope"] == "table_written_by_run", check
     assert check["destination_raw_rows"] == 1 and check["source_raw_rows"] == 1, check
+
+
+def test_engine_run_into_generic_sql_over_a_sqlite_url_is_probed(tmp_path, _isolated):  # noqa: F811
+    """The generic SQL writer reports the file path as its schema; the probe must not use it."""
+    import sqlite3
+
+    from tests.test_cr_d125_file_quoted_empty_fidelity import run_transfer
+
+    src = tmp_path / "s.sqlite"
+    with sqlite3.connect(src) as conn:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, note TEXT)")
+        conn.executemany("INSERT INTO t VALUES (?, ?)", [(1, None), (2, "fine")])
+    dest = EndpointConfig(kind="database", format="generic_sql", table="t",
+                          connection_string=f"sqlite:///{tmp_path / 'g.db'}")
+    result = run_transfer(EndpointConfig(kind="database", format="sqlite", database=str(src), table="t"), dest)
+    check = ((result.destination_summary or {}).get("reconciliation") or {}).get("null_marker_check") \
+        or (getattr(result, "reconciliation", None) or {}).get("null_marker_check")
+    assert result.success is True, result.error
+    assert check and check["status"] == "passed", check

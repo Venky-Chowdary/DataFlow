@@ -100,6 +100,9 @@ class MarkerCount:
     capped: bool = False
     #: The probe has no route to this destination (Datawrap's gap, not the run's).
     not_applicable: bool = False
+    #: Datawrap could not reach the destination for the probe after Gate-8's
+    #: own read-back did: an internal error, logged, never a strict failure.
+    internal: bool = False
 
 
 #: The NULL markers as a leak stores them, and their escaped spellings.
@@ -384,9 +387,10 @@ def count_marker_rows(
 
     Opened through the writer's own engine (:func:`probe_engine`). Bounded three
     ways (review F3): the scope, a statement timeout and a cap. Any of them
-    reached, a query error, or no connection back through that engine after
-    the write is "not measured" with its reason. No route at all is
-    ``not_applicable``. The SQL filter only narrows the candidates; every
+    reached, or a query error, is "not measured" with its reason. No
+    connection back after the write is "not measured" and ``internal``
+    (Gate-8's own read-back already reached the destination). No route at all
+    is ``not_applicable``. The SQL filter only narrows the candidates; every
     candidate is classified byte for byte here (review F4).
     """
     import sqlalchemy as sa
@@ -407,7 +411,8 @@ def count_marker_rows(
         return MarkerCount(None, str(exc), False, not_applicable=True)
     except Exception as exc:  # noqa: BLE001 — the writer's own config would not build again
         logger.warning("NULL-marker probe of %s could not build the writer's engine", table, exc_info=True)
-        return MarkerCount(None, f"the writer's engine could not be built again ({type(exc).__name__})")
+        return MarkerCount(None, f"the writer's engine could not be built again ({type(exc).__name__})",
+                           internal=True)
     try:
         try:
             conn = engine.connect()  # SQLAlchemy 2 connects here
@@ -416,8 +421,8 @@ def count_marker_rows(
                 return MarkerCount(None, f"Datawrap has no SQL route to this destination: {exc}",
                                    False, not_applicable=True)
             logger.warning("NULL-marker probe of %s could not connect", table, exc_info=True)
-            return MarkerCount(None, "could not connect again through the engine the write used "
-                                     f"({type(exc).__name__})")
+            return MarkerCount(None, "Datawrap could not connect again for the probe "
+                                     f"({type(exc).__name__}; internal error, logged)", internal=True)
         with conn:
             dialect = str(getattr(engine.dialect, "name", "") or "").lower()
             if dialect == "mysql" and getattr(engine.dialect, "is_mariadb", False):
