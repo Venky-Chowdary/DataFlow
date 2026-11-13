@@ -311,14 +311,46 @@ def _columns(conn: Any, table: str, schema: str | None, wanted: list[str],
     return out, fixed, key_type
 
 
-def _exact_in(column: Any, dialect: str, texts: list[str]) -> Any:
-    """``column IN texts``, byte for byte where the engine's own collation may fold or pad."""
+#: Columns per chunk of the marker predicate (data audit DATA-9). A flat ``OR``
+#: chain is a left-deep tree to SQLite's parser, whose expression depth limit
+#: is 1,000, so one ``OR`` over 1,000+ text columns raised OperationalError.
+#: Each chunk is closed in a ``CASE`` (SQLAlchemy flattens nested ORs, even
+#: parenthesised ones), so the depth is one chunk plus one term per chunk.
+_CHUNK_COLUMNS = {"sqlite": 64}
+_DEFAULT_CHUNK_COLUMNS = 256
+
+
+def _marker_values(texts: list[str]) -> Any:
+    """The constant marker texts, rendered inline: no bind-parameter limit applies (SQL Server: 2,100)."""
+    import sqlalchemy as sa
+
+    return sa.bindparam("df_marker_texts", value=list(texts), type_=sa.String(), expanding=True,
+                        literal_execute=True)
+
+
+def _exact_in(column: Any, dialect: str, values: Any) -> Any:
+    """``column IN values``, byte for byte where the engine's own collation may fold or pad."""
     import sqlalchemy as sa
 
     if dialect in ("mysql", "mariadb"):
-        # CAST(... AS BINARY): no case folding, no PAD SPACE.
-        return sa.cast(column, sa.LargeBinary).in_([t.encode("utf-8") for t in texts])
-    return column.in_(texts)
+        # CAST(... AS BINARY) against text: a binary compare, no case folding, no PAD SPACE.
+        return sa.cast(column, sa.LargeBinary).in_(values)
+    return column.in_(values)
+
+
+def marker_predicate(tbl: Any, text_cols: list[str], dialect: str, texts: list[str]) -> Any:
+    """Any text column holding a marker, in column chunks sized to the engine."""
+    import sqlalchemy as sa
+
+    values = _marker_values(texts)
+    size = _CHUNK_COLUMNS.get(dialect, _DEFAULT_CHUNK_COLUMNS)
+    chunks = [
+        sa.or_(*[_exact_in(tbl.c[c], dialect, values) for c in text_cols[i:i + size]])
+        for i in range(0, len(text_cols), size)
+    ]
+    if len(chunks) == 1:
+        return chunks[0]
+    return sa.or_(*[sa.case((chunk, 1), else_=0) == 1 for chunk in chunks])
 
 
 class ProbeNotApplicable(Exception):
@@ -437,8 +469,7 @@ def count_marker_rows(
                 if scope.kind == "run_keys" and scope.key_column not in text_cols:
                     cols.append(sa.column(scope.key_column, key_type))
                 tbl = sa.table(bare, *cols, schema=schema or None)
-                texts = sorted(raw_forms | escaped_forms)
-                hit = sa.or_(*[_exact_in(tbl.c[c], dialect, texts) for c in text_cols])
+                hit = marker_predicate(tbl, text_cols, dialect, sorted(raw_forms | escaped_forms))
                 with statement_timeout(conn, _TIMEOUT_DIALECT.get(dialect, dialect), seconds) as enforced:
                     result = bounded_marker_count(
                         conn, tbl, text_cols, hit, scope, time.monotonic() + seconds, fixed
@@ -449,7 +480,13 @@ def count_marker_rows(
                 if timed_out(exc):
                     return MarkerCount(None, f"timed out after {seconds:g}s", enforced)
                 logger.warning("NULL-marker probe of %s failed", table, exc_info=True)
-                return MarkerCount(None, f"the probe query failed ({type(exc).__name__})", enforced)
+                first = str(getattr(exc, "orig", None) or exc).strip().splitlines()[:1]
+                return MarkerCount(
+                    None,
+                    f"the NULL-marker probe query failed: {type(exc).__name__}"
+                    + (f": {first[0][:200]}" if first else ""),
+                    enforced,
+                )
     finally:
         release_engine(engine)
 
