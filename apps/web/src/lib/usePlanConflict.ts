@@ -36,7 +36,12 @@ export interface PlanConflictState {
   planId: string;
   origin: PlanConflictOrigin;
   mine: PlanMappingRow[];
-  latest: { version: number; head: number; mappings: PlanMappingRow[] } | null;
+  /**
+   * `version`/`mappings`: the active revision (what runs). `head`: the newest
+   * revision's version; when it is not the active one (e.g. an approval
+   * rolled the plan back), `headMappings` holds its mappings too.
+   */
+  latest: { version: number; head: number; mappings: PlanMappingRow[]; headMappings: PlanMappingRow[] | null } | null;
   status: "loading" | "ready" | "saving";
   error: string;
 }
@@ -87,7 +92,13 @@ export function usePlanConflict({ api, headRef, onUseLatest, notify }: PlanConfl
         update(null);
         return "resolved";
       }
-      update({ ...pending, status: "ready", latest: { version: latest?.version ?? 0, head, mappings: latestMappings } });
+      const newest = (plan.revisions ?? []).find((r) => r.version === head);
+      const headMappings = latest && head !== latest.version ? newest?.mappings ?? [] : null;
+      update({
+        ...pending,
+        status: "ready",
+        latest: { version: latest?.version ?? 0, head, mappings: latestMappings, headMappings },
+      });
       return "shown";
     },
     [api, headRef, update],

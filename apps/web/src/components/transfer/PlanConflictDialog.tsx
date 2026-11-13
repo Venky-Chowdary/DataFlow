@@ -28,6 +28,16 @@ export function PlanConflictDialog({
 }) {
   const latest = conflict?.latest ?? null;
   const rows = latest ? diffPlanMappings(latest.mappings, conflict?.mine ?? []) : [];
+  // Newest revision when it is not the active one: shown as its own column.
+  const headSplit = Boolean(latest?.headMappings);
+  const headByTarget = new Map(
+    (latest?.headMappings ? diffPlanMappings(latest.headMappings, []) : []).map((r) => [r.target.toLowerCase(), r.latestSource]),
+  );
+  const keepMineLabel = !latest
+    ? "Keep mine"
+    : headSplit
+      ? `Keep mine (save as revision ${latest.head + 1}, replacing active revision ${latest.version})`
+      : `Keep mine (save over revision ${latest.version})`;
   const changed = rows.filter((r) => r.differs).length;
   const saving = conflict?.status === "saving";
   const loading = conflict?.status === "loading";
@@ -44,7 +54,7 @@ export function PlanConflictDialog({
             {latest ? `Use latest (revision ${latest.version})` : "Use latest"}
           </button>
           <button type="button" className="df2-btn df2-btn-primary" onClick={onKeepMine} disabled={!latest || saving}>
-            {saving ? "Saving…" : latest ? `Keep mine (save over revision ${latest.version})` : "Keep mine"}
+            {saving ? "Saving…" : keepMineLabel}
           </button>
           <button type="button" className="df2-btn df2-btn-ghost" onClick={onCancel} disabled={saving}>
             Cancel
@@ -55,6 +65,13 @@ export function PlanConflictDialog({
       <div data-testid="plan-conflict-dialog">
         {conflict && <p>{ORIGIN_COPY[conflict.origin]}</p>}
         {loading && <p role="status">Loading the latest saved revision…</p>}
+        {latest && headSplit && (
+          <p>
+            Revision {latest.head} is the newest saved revision, but revision {latest.version} is the active one
+            (the one that runs). Both are shown; Keep mine saves your edits as revision {latest.head + 1}, which
+            becomes active.
+          </p>
+        )}
         {latest && (
           <p>
             Revision {latest.version} was saved after this page loaded the plan. Your edits on this page are
@@ -72,7 +89,8 @@ export function PlanConflictDialog({
             <thead>
               <tr>
                 <th scope="col">Destination column</th>
-                <th scope="col">Latest (revision {latest.version})</th>
+                <th scope="col">{headSplit ? `Active (revision ${latest.version})` : `Latest (revision ${latest.version})`}</th>
+                {headSplit && <th scope="col">Newest (revision {latest.head})</th>}
                 <th scope="col">Your unsaved edits</th>
               </tr>
             </thead>
@@ -88,6 +106,7 @@ export function PlanConflictDialog({
                     {row.latestSource ?? "— not mapped"}
                     {row.latestSources.length > 1 && <em> (duplicate: {row.latestSources.length} sources)</em>}
                   </td>
+                  {headSplit && <td>{headByTarget.get(row.target.toLowerCase()) ?? "— not mapped"}</td>}
                   <td>
                     {row.mineSource ?? "— not mapped"}
                     {row.mineSources.length > 1 && <em> (duplicate: {row.mineSources.length} sources)</em>}
@@ -101,7 +120,7 @@ export function PlanConflictDialog({
         {latest && (
           <ul className="df2-plan-conflict-choices">
             <li><strong>Use latest</strong> shows revision {latest.version} in the editor and drops your unsaved edits.</li>
-            <li><strong>Keep mine</strong> saves your edits as a new revision that replaces revision {latest.version} as the active mappings.</li>
+            <li><strong>Keep mine</strong> saves your edits as revision {latest.head + 1}, which replaces revision {latest.version} as the active mappings.</li>
             <li><strong>Cancel</strong> keeps your edits on screen, unsaved; saving later will ask again.</li>
           </ul>
         )}

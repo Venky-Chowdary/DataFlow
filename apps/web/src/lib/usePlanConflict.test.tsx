@@ -244,3 +244,29 @@ describe("plan conflict dialog — cancelled while loading", () => {
     assert.equal(h.head.current, 2);
   });
 });
+
+describe("plan conflict dialog — newest revision is not the active one", () => {
+  it("shows both, and says what Keep mine replaces", async () => {
+    const twoHeads = {
+      plan: {
+        id: "p1",
+        active_version: 2, // e.g. an approval rolled the plan back to v2
+        revisions: [
+          { version: 1, mappings: [] },
+          { version: 2, mappings: LATEST },
+          { version: 3, mappings: [{ source: "x", target: "full_name" }] },
+        ],
+      },
+    };
+    const a = api({ getPlan: async () => twoHeads });
+    const h = await mount(a);
+    await act(async () => void (await h.open(MINE)));
+    const d = dialog()!;
+    assert.match(d.textContent ?? "", /Revision 3 is the newest saved revision, but revision 2 is the active one/);
+    const headers = [...d.querySelectorAll("thead th")].map((th) => th.textContent);
+    assert.deepEqual(headers, ["Destination column", "Active (revision 2)", "Newest (revision 3)", "Your unsaved edits"]);
+    assert.ok(button(/^Keep mine \(save as revision 4, replacing active revision 2\)$/));
+    await click(/^Keep mine/);
+    assert.deepEqual(a.saved.map((s) => s.base), [3], "saved on top of the newest revision the user has now seen");
+  });
+});
