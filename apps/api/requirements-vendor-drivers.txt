@@ -6,7 +6,7 @@
 #   pip install -r requirements-vendor-drivers.txt
 #   # or: docker build -f Dockerfile.api --build-arg INSTALL_VENDOR_DRIVERS=1 .
 #
-# Without them, the SAP HANA and Teradata connectors refuse Test, save and run
+# Without them, the SAP HANA, Teradata and IBM Db2 connectors refuse Test, save and run
 # with the install instruction (connectors/vendor_drivers.py).
 
 # SAP HANA: SAP's client (SAP Developer License Agreement) and the
@@ -18,3 +18,8 @@ sqlalchemy-hana>=2.0.0
 # Teradata's own licence terms).
 teradatasql>=17.10.0.0
 teradatasqlalchemy>=20.0.0.0
+
+# IBM Db2: ibm-db bundles IBM's proprietary Db2 client (clidriver, IBM licence
+# and redistribution terms); ibm-db-sa is the SQLAlchemy dialect (Apache-2.0).
+ibm-db>=3.2.0
+ibm-db-sa>=0.4.1

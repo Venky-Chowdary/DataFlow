@@ -15,8 +15,8 @@ must resolve to an :data:`UPSTREAM` source; anything else fails the image
 build and the CI check, so a new bundled library cannot slip in unreviewed.
 
 Inventory of 2026-11-13 (runtime requirements, cp312 manylinux wheels, read
-from the wheels on PyPI): google-crc32c, ibm_db, ijson, numpy, pillow,
-psycopg2-binary, pymssql.
+from the wheels on PyPI): google-crc32c, ijson, numpy, pillow, psycopg2-binary,
+pymssql. ibm_db is operator-installed since owner decision 3 and not shipped.
 """
 
 from __future__ import annotations
@@ -113,6 +113,13 @@ BUNDLED: dict[str, Bundled] = {
 }
 
 
+#: Wheels the operator installs (requirements-vendor-drivers.txt, owner
+#: decision 3): never shipped in the image, so neither scanned nor sourced.
+OPERATOR_INSTALLED: frozenset[str] = frozenset(
+    {"hdbcli", "sqlalchemy-hana", "teradatasql", "teradatasqlalchemy", "ibm-db", "ibm-db-sa"}
+)
+
+
 @dataclass(frozen=True)
 class Upstream:
     filename: str
@@ -127,17 +134,13 @@ _KEYUTILS_1510 = (
     "7f6f956c7e76cdc2aeb52e74fe670b20a5f9a5d9b543fd2ce971d80c48745f37"
     "d05235a42f0a8f152b1128a109c7d8bf07e751282a20d2d3f433a99a5308ae8d"
 )
-_KEYUTILS_163 = (
-    "f65965b8566037078b8eeffa66c6fdbe121c8c2bea7fa5bce04cf7ba5ccc50d5"
-    "b48e51f4a67ca91e4d5d9a12469e7e3eb3036c920ab25e3feba6e93b4c149cf9"
-)
 _GCC_85_EL8 = (
     "4811dbcbdce8fe0fa8bc1fdca024988a1a75ac89e3efc675fe991b81032c220a"
     "b4bd1bc530bb99f6209ffeca67581a198de82f7253530de8c24a2a81770eb4ea"
 )
 
 #: (family, version) -> where its source comes from. Checksums: CentOS Stream
-#: dist-git ``sources`` files (keyutils c8s / c9s, gcc c8s) and the manylinux
+#: dist-git ``sources`` files (keyutils c8s, gcc c8s) and the manylinux
 #: libxcrypt pin, all read on 2026-11-13.
 UPSTREAM: dict[tuple[str, str], Upstream] = {
     ("keyutils", "1.5.8"): Upstream(
@@ -152,11 +155,6 @@ UPSTREAM: dict[tuple[str, str], Upstream] = {
             "https://people.redhat.com/~dhowells/keyutils/keyutils-1.5.10.tar.bz2",
         ),
         sha512=_KEYUTILS_1510,
-    ),
-    ("keyutils", "1.6.3"): Upstream(
-        "keyutils-1.6.3.tar.gz",
-        (f"{_LOOKASIDE}/keyutils/keyutils-1.6.3.tar.gz/sha512/{_KEYUTILS_163}/keyutils-1.6.3.tar.gz",),
-        sha512=_KEYUTILS_163,
     ),
     ("libxcrypt", "4.5.2"): Upstream(
         "libxcrypt-4.5.2.tar.xz",
@@ -264,6 +262,8 @@ def installed_bundles(distributions: Any = None) -> list[tuple[str, str, list[Pa
 
     out = []
     for dist in distributions if distributions is not None else metadata.distributions():
+        if _canon(dist.metadata["Name"]) in OPERATOR_INSTALLED:
+            continue
         paths = [
             Path(str(f.locate()))
             for f in dist.files or []

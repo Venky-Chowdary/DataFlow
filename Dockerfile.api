@@ -37,8 +37,10 @@ RUN python /tmp/lgpl/fetch_lgpl_sources.py --dest /usr/share/doc/datawrap/third-
       paramiko psycopg2-binary=psycopg2 pymssql+freetds \
     && rm -rf /tmp/lgpl
 
-# Proprietary vendor drivers (SAP HANA hdbcli, Teradata teradatasql and their
-# SQLAlchemy dialects) are NOT shipped by default. An operator who has accepted
+# Proprietary vendor drivers (SAP HANA hdbcli, Teradata teradatasql, IBM Db2
+# ibm-db with its clidriver, and their SQLAlchemy dialects) are NOT shipped by
+# default. They are installed after the LGPL source step, so their bundled
+# libraries are the operator's to account for. An operator who has accepted
 # the vendors' licences builds with:  --build-arg INSTALL_VENDOR_DRIVERS=1
 ARG INSTALL_VENDOR_DRIVERS=0
 COPY apps/api/requirements-vendor-drivers.txt /app/requirements-vendor-drivers.txt

@@ -1,9 +1,11 @@
 """Database drivers the operator installs, not Datawrap (owner decision, 2026-11-13).
 
-SAP's ``hdbcli`` and Teradata's ``teradatasql`` are proprietary. Their vendor
+SAP's ``hdbcli``, Teradata's ``teradatasql`` and IBM's ``ibm_db`` (which
+bundles IBM's proprietary Db2 ``clidriver``) are proprietary. Their vendor
 licences do not clearly allow Datawrap to redistribute them inside its image,
 so the image does not ship them, nor the SQLAlchemy dialects the generic SQL
-path dials through (``sqlalchemy-hana``, ``teradatasqlalchemy``). An operator
+path dials through (``sqlalchemy-hana``, ``teradatasqlalchemy``,
+``ibm-db-sa``). An operator
 who has accepted the vendor's licence installs them on the API host
 (``pip install ...``, or the API image's ``INSTALL_VENDOR_DRIVERS=1``
 build-arg).
@@ -51,6 +53,14 @@ TERADATA = VendorDriver(
     modules=("teradatasql", "teradatasqlalchemy"),
 )
 
+IBM_DB2 = VendorDriver(
+    label="IBM Db2",
+    vendor="IBM",
+    licence="IBM's licence for the Db2 client (ibm_db and the clidriver it bundles)",
+    packages=("ibm-db", "ibm-db-sa"),
+    modules=("ibm_db", "ibm_db_sa"),
+)
+
 #: Catalog ids, connector types and SQLAlchemy driver names -> driver.
 _BY_KIND: dict[str, VendorDriver] = {
     "sap_hana": SAP_HANA,
@@ -59,6 +69,10 @@ _BY_KIND: dict[str, VendorDriver] = {
     "teradata": TERADATA,
     "teradata_vantage": TERADATA,
     "teradatasql": TERADATA,
+    "db2": IBM_DB2,
+    "ibm_db2": IBM_DB2,
+    "ibm_db2_warehouse": IBM_DB2,
+    "ibm_db_sa": IBM_DB2,
 }
 
 

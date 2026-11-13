@@ -127,7 +127,6 @@ httptools: MIT
 httpx: BSD
 httpx2: BSD-3-Clause
 hyperframe: MIT
-ibm_db: Apache-2.0
 idna: BSD-3-Clause
 ijson: BSD-3-Clause AND ISC
 impyla: Apache-2.0
@@ -317,18 +316,6 @@ corresponding source is shipped in the image at /usr/share/doc/datawrap/third-pa
 (BUNDLED_LIBRARIES.json, MANIFEST.json, SHA256SUMS).
 
 google-crc32c 1.9.0: libcrc32c-7ebc40c5.so.1.1.0 - google/crc32c, BSD-3-Clause
-ibm_db 3.3.0: libcom_err-d6076f24.so.2.1 - com_err (MIT Kerberos / e2fsprogs), MIT
-ibm_db 3.3.0: libcrypto-7a1514b3.so.3.5.1 - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
-  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
-ibm_db 3.3.0: libgssapi_krb5-82e569d3.so.2.2 - MIT Kerberos (krb5), MIT
-ibm_db 3.3.0: libk5crypto-188823b6.so.3.1 - MIT Kerberos (krb5), MIT
-ibm_db 3.3.0: libkeyutils-81e5c457.so.1.10 - keyutils, LGPL-2.1-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/
-ibm_db 3.3.0: libkrb5-68b134bf.so.3.3 - MIT Kerberos (krb5), MIT
-ibm_db 3.3.0: libkrb5support-28787768.so.0.1 - MIT Kerberos (krb5), MIT
-ibm_db 3.3.0: liblzma-270e41f3.so.5.2.5 - XZ Utils liblzma, 0BSD / public domain
-ibm_db 3.3.0: libpcre2-8-b77f698a.so.0.11.0 - PCRE2, BSD-3-Clause WITH PCRE2-exception
-ibm_db 3.3.0: libselinux-a1ff09bf.so.1 - libselinux, public domain
-ibm_db 3.3.0: libxml2-a0a916ee.so.2.9.13 - libxml2, MIT
 ijson 3.6.0: libyajl-9393e5bd.so.2.1.1 - YAJL, ISC
 numpy 2.5.4: libgfortran-83c28eba-468e71e5.so.5.0.0 - GCC libgfortran, GPL-3.0-or-later WITH GCC-exception-3.1; source shipped in image at /usr/share/doc/datawrap/third-party-source/
 numpy 2.5.4: libquadmath-2284e583-a9307bba.so.0.0.0 - GCC libquadmath, LGPL-2.1-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/

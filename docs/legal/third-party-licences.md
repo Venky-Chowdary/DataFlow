@@ -100,8 +100,10 @@ allows bundling as long as the copyright and licence travel with the fonts;
      step also ships the source of the LGPL/GPL native libraries that the
      installed manylinux wheels carry in `<package>.libs/`. See the next
      section.
-3. **Proprietary drivers** (`hdbcli`, `teradatasql`). Decided 2026-11-13:
-   operator-installed. They are no longer in `apps/api/requirements.txt` or
+3. **Proprietary drivers** (`hdbcli`, `teradatasql`; and `ibm-db`, whose
+   wheel bundles IBM's proprietary Db2 `clidriver`). Decided 2026-11-13:
+   operator-installed (the same rule was applied to `ibm-db` once its
+   `clidriver` was found). They are no longer in `apps/api/requirements.txt` or
    the production image, and no longer in `licence-policy.json` (Datawrap
    does not distribute them). See the next section.
 
@@ -121,7 +123,6 @@ named.
 |---|---|---|
 | psycopg2-binary 2.9.13 | libpq, OpenSSL 3 (libssl, libcrypto), MIT Kerberos (krb5, k5crypto, gssapi, krb5support, com_err), OpenLDAP (ldap, lber), Cyrus SASL, PCRE, libselinux, **keyutils 1.5.8**, **libcrypt (libxcrypt 4.5.2)** | PostgreSQL, Apache-2.0, MIT, OLDAP-2.8, CMU, BSD-3-Clause, public domain, **LGPL-2.1+** |
 | pymssql 2.4.6 | OpenSSL 1.1.1k, MIT Kerberos, PCRE2, libselinux, **keyutils 1.5.10**; FreeTDS 1.5.19 linked statically | OpenSSL/SSLeay, MIT, BSD-3-Clause, public domain, **LGPL-2.1+**, **LGPL-2.0+** |
-| ibm_db 3.3.0 | OpenSSL 3.5.1, MIT Kerberos, libxml2, liblzma, PCRE2, libselinux, **keyutils 1.6.3** | Apache-2.0, MIT, 0BSD, BSD-3-Clause, public domain, **LGPL-2.1+** |
 | numpy 2.5.4 | OpenBLAS, **GCC 8.5.0 libquadmath**, **libgfortran** | BSD-3-Clause, **LGPL-2.1+**, **GPL-3.0+ with the GCC Runtime Library Exception** |
 | pillow 13.0.0 | FreeType, HarfBuzz, libjpeg-turbo, Little CMS, OpenJPEG, libpng, libtiff, libwebp/sharpyuv, libavif, Brotli, Zstandard, liblzma, libXau, libxcb | FTL, MIT, IJG/BSD/Zlib, BSD-2/3-Clause, libpng-2.0, libtiff, 0BSD |
 | ijson 3.6.0 | YAJL | ISC |
@@ -133,7 +134,7 @@ listing every bundled library:
 
 | Source | Covers | Verified against |
 |---|---|---|
-| keyutils 1.5.10, 1.6.3 | the pymssql and ibm_db copies | CentOS Stream dist-git SHA-512 (lookaside cache), pinned |
+| keyutils 1.5.10 | the pymssql copy | CentOS Stream dist-git SHA-512 (lookaside cache), pinned |
 | keyutils 1.5.8 | the psycopg2-binary copy | no published checksum found for 1.5.8, so the SHA-256 is recorded at download and labelled as such |
 | libxcrypt 4.5.2 | psycopg2-binary's libcrypt | pinned SHA-256, the same value manylinux pins |
 | GCC 8.5.0 (el8 tarball, about 65 MB) | numpy's libquadmath and libgfortran | pinned SHA-512 from CentOS Stream c8s |
@@ -158,13 +159,15 @@ shipped Python wheels".
 
 **Not covered by this scan:** libraries linked statically into an extension
 module. FreeTDS is handled explicitly; others would need their own review.
-The `ibm_db` wheel also ships IBM's proprietary `clidriver` (about 120 MB,
-not in `.libs/`), which needs an owner decision like the SAP and Teradata
-drivers.
 
-## Operator-installed vendor drivers (SAP HANA, Teradata)
+`ibm_db` is no longer shipped. Its wheel bundled IBM's proprietary
+`clidriver` (about 120 MB, outside `.libs/`) and keyutils 1.6.3. Under
+owner decision 3 it is operator-installed, so it is excluded from this scan
+and from NOTICE (`OPERATOR_INSTALLED` in `scripts/bundled_libraries.py`).
 
-The SAP HANA and Teradata connectors need proprietary vendor drivers, plus
+## Operator-installed vendor drivers (SAP HANA, Teradata, IBM Db2)
+
+The SAP HANA, Teradata and IBM Db2 connectors need proprietary vendor drivers, plus
 the SQLAlchemy dialect the generic SQL path dials through. Datawrap does not
 ship any of them. The connectors show **"Requires operator-installed
 driver"** in the connector catalog (`operator_installed_driver` on each
@@ -174,6 +177,7 @@ catalog entry) until an operator installs them.
 |---|---|---|
 | SAP HANA (`sap_hana`, `hana`, `sap_bw_4hana`) | `hdbcli`, `sqlalchemy-hana` | SAP's licence for the HANA client; the dialect is Apache-2.0 |
 | Teradata (`teradata`, `teradata_vantage`) | `teradatasql`, `teradatasqlalchemy` | Teradata's licence terms |
+| IBM Db2 (`db2`, `ibm_db2`, `ibm_db2_warehouse`) | `ibm-db` (bundles IBM's `clidriver`), `ibm-db-sa` | IBM's licence and redistribution terms for the Db2 client; the dialect is Apache-2.0 |
 
 An operator who has accepted the vendor's licence installs them on the API
 host, then restarts the API, in one of two ways:
@@ -189,7 +193,7 @@ naming the packages to install and the licence to accept. No connection is
 attempted (`connectors/vendor_drivers.py`). With the drivers installed,
 behaviour is unchanged.
 
-CI does not install them: no test exercises a real SAP HANA or Teradata
+CI does not install them: no test exercises a real SAP HANA, Teradata or Db2
 server. The connector tests use stand-in modules.
 
 ## The CI gate

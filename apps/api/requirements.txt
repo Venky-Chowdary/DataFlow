@@ -96,13 +96,13 @@ azure-storage-blob>=12.19.0
 sqlglot~=30.22.0
 
 # Generic SQL engines (SQLAlchemy DBAPI drivers)
-# SAP HANA (hdbcli) and Teradata (teradatasql) are proprietary vendor drivers the
+# SAP HANA (hdbcli), Teradata (teradatasql) and IBM Db2 (ibm-db, which bundles
+# IBM's proprietary clidriver) are proprietary vendor drivers the
 # operator installs: requirements-vendor-drivers.txt, or the API image's
 # --build-arg INSTALL_VENDOR_DRIVERS=1 (owner decision, 2026-11-13).
 pyodbc>=5.0.0                # SQL Server, Sybase, Informix, Exasol via unixodbc
 pymssql>=2.3.0               # SQL Server fallback when unixodbc is unavailable
 oracledb>=2.0.0              # Oracle
-ibm-db>=3.2.0                # IBM DB2
 vertica-python>=1.3.0        # Vertica
 pydruid>=0.6.0               # Apache Druid
 pinotdb>=0.4.0               # Apache Pinot

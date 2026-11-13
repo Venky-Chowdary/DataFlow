@@ -213,9 +213,15 @@ def test_uncertified_generic_sql_brands_are_planned() -> None:
 
 
 def test_planned_brand_blocked_as_transfer_endpoint() -> None:
-    ok, msg = endpoint_allowed_for_role("db2", "source")
+    ok, msg = endpoint_allowed_for_role("vertica", "source")
     assert ok is False
     assert "Planned" in msg
+
+    # Db2 is also Planned, and its driver is operator-installed (owner
+    # decision 3): without ibm-db the refusal says what to install instead.
+    ok, msg = endpoint_allowed_for_role("db2", "source")
+    assert ok is False
+    assert "Planned" in msg or "pip install ibm-db ibm-db-sa" in msg
 
     ok, msg = endpoint_allowed_for_role("hubspot", "destination")
     assert ok is True, msg
@@ -226,11 +232,14 @@ def test_planned_brand_blocked_as_transfer_endpoint() -> None:
     ok, msg = endpoint_allowed_for_role("postgresql", "destination")
     assert ok is True
 
-    honest, _ = assert_transfer_endpoint_honesty("database", "db2", "database", "postgresql")
+    honest, _ = assert_transfer_endpoint_honesty("database", "vertica", "database", "postgresql")
     assert honest is False
-    route_ok, route_msg = validate_transfer("database", "db2", "database", "postgresql")
+    route_ok, route_msg = validate_transfer("database", "vertica", "database", "postgresql")
     assert route_ok is False
     assert "Planned" in route_msg
+    route_ok, route_msg = validate_transfer("database", "db2", "database", "postgresql")
+    assert route_ok is False
+    assert "Planned" in route_msg or "pip install ibm-db ibm-db-sa" in route_msg
 
 
 def test_catalog_search_live_is_certified_only() -> None:

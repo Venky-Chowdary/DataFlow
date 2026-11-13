@@ -30,6 +30,8 @@ WS = "ws-vendor-drivers"
 VENDOR = {
     "sap_hana": ("hdbcli", "sqlalchemy_hana", "pip install hdbcli sqlalchemy-hana", "SAP"),
     "teradata": ("teradatasql", "teradatasqlalchemy", "pip install teradatasql teradatasqlalchemy", "Teradata"),
+    # Owner decision 3 applied to IBM Db2: ibm_db bundles IBM's proprietary clidriver.
+    "db2": ("ibm_db", "ibm_db_sa", "pip install ibm-db ibm-db-sa", "IBM"),
 }
 ALL_MODULES = [m for spec in VENDOR.values() for m in spec[:2]]
 
@@ -123,14 +125,17 @@ def test_rest_save_refuses_cleanly(kind, drivers_missing, monkeypatch):
     assert not [c for c in list_connectors(workspace_id=WS) if c.name == f"vendor-{kind}"]
 
 
-@pytest.mark.parametrize("kind", ["sap_hana", "hana", "sap_bw_4hana", "teradata", "teradata_vantage"])
+@pytest.mark.parametrize(
+    "kind",
+    ["sap_hana", "hana", "sap_bw_4hana", "teradata", "teradata_vantage", "db2", "ibm_db2", "ibm_db2_warehouse"],
+)
 def test_catalog_says_requires_operator_installed_driver(kind, drivers_missing):
     from src.transfer.connector_capabilities import enrich_catalog_entry
 
     row = enrich_catalog_entry({"id": kind, "name": kind, "status": "live"})
     info = row["operator_installed_driver"]
     assert info["installed"] is False
-    assert info["vendor"] in {"SAP", "Teradata"}
+    assert info["vendor"] in {"SAP", "Teradata", "IBM"}
     assert row["capability_label"] == "Requires operator-installed driver"
     assert row["driver_available"] is False
 
@@ -158,7 +163,7 @@ def test_with_the_driver_installed_behaviour_is_unchanged(kind, drivers_present)
 def test_other_connectors_are_untouched(drivers_missing):
     from src.transfer.connector_capabilities import enrich_catalog_entry, planned_driver_message
 
-    for kind in ("postgresql", "mysql", "sqlite", "oracle", "db2"):
+    for kind in ("postgresql", "mysql", "sqlite", "oracle", "vertica"):
         assert "operator" not in planned_driver_message(kind)
         assert enrich_catalog_entry({"id": kind, "name": kind})["operator_installed_driver"] is None
 
@@ -173,7 +178,7 @@ def _names(path: Path) -> set[str]:
 
 
 def test_vendor_drivers_are_not_in_the_image_by_default() -> None:
-    vendor = {"hdbcli", "sqlalchemy-hana", "teradatasql", "teradatasqlalchemy"}
+    vendor = {"hdbcli", "sqlalchemy-hana", "teradatasql", "teradatasqlalchemy", "ibm-db", "ibm-db-sa"}
     assert not (_names(API / "requirements.txt") & vendor)
     assert not (_names(API / "requirements-dev.txt") & vendor)
     assert _names(API / "requirements-vendor-drivers.txt") == vendor
@@ -181,3 +186,22 @@ def test_vendor_drivers_are_not_in_the_image_by_default() -> None:
     assert "ARG INSTALL_VENDOR_DRIVERS=0" in dockerfile
     assert 'if [ "$INSTALL_VENDOR_DRIVERS" = "1" ]' in dockerfile
     assert "requirements-vendor-drivers.txt" in dockerfile
+
+
+def test_operator_installed_wheels_are_not_part_of_the_shipped_inventory(tmp_path):
+    """ibm_db's bundled libraries (keyutils 1.6.3, ...) are the operator's to
+    distribute: the image's source step and NOTICE skip operator-installed
+    wheels even when an operator has installed them."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    import bundled_libraries as bl
+
+    assert {"ibm-db", "hdbcli", "teradatasql"} <= bl.OPERATOR_INSTALLED
+    assert ("keyutils", "1.6.3") not in bl.UPSTREAM
+
+    class _Dist:
+        def __init__(self, name):
+            self.metadata = {"Name": name}
+            self.version = "1.0"
+            self.files = []
+
+    assert bl.installed_bundles([_Dist("ibm_db")]) == []
