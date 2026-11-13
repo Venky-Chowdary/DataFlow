@@ -79,31 +79,32 @@ def execute(
     *,
     plan_id: str,
     pf: dict[str, Any],
-    src_id: str,
-    dst_id: str,
-    src_kind: str,
-    dst_kind: str,
-    database: str,
-    source_table: str,
-    dest_table: str,
+    source: dict[str, Any],
+    destination: dict[str, Any],
     mappings: list[dict[str, Any]],
     sync_mode: str,
     stream_contracts: list[dict[str, Any]] | None = None,
     extra_form: dict[str, str] | None = None,
     schema_policy: str = "manual_review",
+    expect_status: int = 200,
 ) -> dict[str, Any]:
+    """``/api/v1/transfer/run`` under the hashes Validate approved."""
     proof = pf.get("proof_bundle") or {}
     artifact = proof.get("decision_artifact") or {}
     assert artifact.get("content_hash"), sorted(proof)
+    dest_table = str(destination.get("table") or destination.get("collection") or "")
     form = {
-        "source_kind": "database", "source_format": src_kind,
-        "source_connector_id": src_id, "source_database": database,
-        "source_table": source_table,
-        "dest_kind": "database", "dest_format": dst_kind,
-        "dest_database": database, "dest_table": dest_table,
-        "dest_collection": dest_table, "dest_connector_id": dst_id,
+        "source_kind": "database", "source_format": source["format"],
+        "source_connector_id": source.get("connector_id") or "",
+        "source_database": source.get("database") or "",
+        "source_table": source.get("table") or "",
+        "dest_kind": "database", "dest_format": destination["format"],
+        "dest_connector_id": destination.get("connector_id") or "",
+        "dest_database": destination.get("database") or "",
+        "dest_table": dest_table, "dest_collection": dest_table,
         "skip_preflight": "false", "async_mode": "false", "plan_id": plan_id,
-        "mappings_json": json.dumps(mappings), "sync_mode": sync_mode,
+        # Studio runs the Map Validate approved (its effective rows).
+        "mappings_json": json.dumps(pf.get("mappings") or mappings), "sync_mode": sync_mode,
         "validation_mode": "strict", "schema_policy": schema_policy,
         "approved_decision_artifact_hash":
             proof.get("decision_artifact_hash") or artifact["content_hash"],
@@ -114,8 +115,9 @@ def execute(
         **(extra_form or {}),
     }
     resp = client.post("/api/v1/transfer/run", data=form)
-    assert resp.status_code == 200, resp.text
-    return resp.json()
+    assert resp.status_code == expect_status, resp.text
+    body = resp.json()
+    return body.get("detail") if isinstance(body.get("detail"), dict) else body
 
 
 def blockers(pf: dict[str, Any]) -> list[tuple[Any, Any]]:

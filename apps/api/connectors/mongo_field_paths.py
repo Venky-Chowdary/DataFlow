@@ -31,9 +31,12 @@ def insert_document(doc: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def value_at_path(doc: Any, path: str) -> Any:
-    """The value stored at ``path``, or the module's missing marker."""
-    if isinstance(doc, Mapping) and path in doc:
-        return doc[path]
+    """The value stored at ``path``, or the module's missing marker.
+
+    Read through sub-documents only. A literal top-level key ``"a.b"`` is a
+    different field (an old COPY shape), not the mapped path: reading it
+    would let Gate-8 pass a document the row path never writes.
+    """
     node = doc
     for seg in path.split("."):
         if not isinstance(node, Mapping) or seg not in node:
