@@ -182,3 +182,13 @@ def test_the_mysql_ca_reaches_the_tls_tests_in_every_job_that_starts_mysql() -> 
     manifest = json.loads((API / "scripts" / "live_engine_jobs.json").read_text(encoding="utf-8"))
     entries = [e for j in manifest["jobs"].values() for e in j.get("expected_skips") or []]
     assert not [e for e in entries if "DATAFLOW_TEST_MYSQL_CA" in e["reason"]], "the CA is wired, not allowlisted"
+
+
+def test_the_test_jobs_install_the_versions_the_image_ships() -> None:
+    """Final review L3: api-tests (ci-services action) and the nightly install
+    the dev requirements under constraints-image.txt, the image's lock, so the
+    suite tests the shipped versions."""
+    action = (REPO / ".github" / "actions" / "ci-services" / "action.yml").read_text(encoding="utf-8")
+    assert "pip install -r requirements-dev.txt -c constraints-image.txt" in action
+    nightly = (REPO / ".github" / "workflows" / "full-suite.yml").read_text(encoding="utf-8")
+    assert "pip install -r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt" in nightly
