@@ -293,12 +293,23 @@ def apply_null_marker_gate(recon: dict[str, Any], **kwargs: Any) -> dict[str, An
         # A timeout, a cap hit or an unreadable table proves nothing: a report
         # that would pass is unproven instead (review F3). A report that already
         # failed on a measured finding stays failed, not "held".
+        from services.null_marker_probe import PROBE_TIMEOUT_ENV, STRICT_MODES
+        from services.validation_mode_contract import normalize_validation_mode
+
         recon["migration_proven"] = False
         if recon.get("passed", True):
             recon["unproven"] = True
+            # Business-rule convention: strict and maximum fail closed on an
+            # unverified check; balanced completes, still unproven.
+            if normalize_validation_mode(kwargs.get("validation_mode", "strict")) in STRICT_MODES:
+                recon["passed"] = False
+                recon["details"] = {**dict(recon.get("details") or {}),
+                                    "reason": "null_marker_check_not_measured"}
         note = " ".join(
-            f"Datawrap's NULL-marker check of {t.get('table')} was not measured "
-            f"({t.get('reason')}): the destination is not proven free of the marker text."
+            f"Datawrap's NULL-marker check of {t.get('table')} could not be measured "
+            f"({t.get('reason')}): the destination is not proven free of the marker text. "
+            f"Raise DATAWRAP_{PROBE_TIMEOUT_ENV} (DATAFLOW_{PROBE_TIMEOUT_ENV}) or run in "
+            "balanced validation mode, where an unmeasured check is reported, not failed."
             for t in unmeasured
         )
         message = str(recon.get("message") or "").strip()

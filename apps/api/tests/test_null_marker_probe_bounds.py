@@ -115,15 +115,34 @@ def test_a_table_this_run_wrote_whole_is_probed_in_any_mode(tables):
     assert recon["passed"] is False
 
 
-def test_a_probe_that_times_out_is_not_measured(tables, monkeypatch):
-    _src, dst = tables
+def _timed_out_gate(dst, monkeypatch, mode):
     pg_sql(f"INSERT INTO public.\"{dst}\" SELECT g, 'n' || g FROM generate_series(1, 400000) g")
     monkeypatch.setenv("DATAFLOW_NULL_MARKER_PROBE_SECONDS", "0.001")
-    recon = _gate(dst, validation_mode="strict", summary={"target_rows_before": 5, "sync_mode": "append"})
+    # The run wrote the whole table, so the probe runs in every mode.
+    recon = _gate(dst, validation_mode=mode, summary={"target_rows_before": 0, "sync_mode": "append"})
     check = recon["null_marker_check"]
     assert check["status"] == "not_measured" and "timed out" in check["reason"], check
     assert recon["unproven"] is True and recon["migration_proven"] is False, recon
-    assert "not measured" in recon["message"], recon["message"]
+    return recon
+
+
+@pytest.mark.parametrize("mode", ["strict", "maximum"])
+def test_strict_fails_closed_when_the_probe_is_not_measured(tables, monkeypatch, mode):
+    """Coordinator decision (business-rule convention): strict/maximum fail an unmeasured check."""
+    _src, dst = tables
+    recon = _timed_out_gate(dst, monkeypatch, mode)
+    assert recon["passed"] is False, recon
+    message = recon["message"]
+    assert "could not be measured" in message and dst in message, message
+    assert "DATAFLOW_NULL_MARKER_PROBE_SECONDS" in message and "balanced" in message, message
+    assert (recon.get("details") or {}).get("reason") == "null_marker_check_not_measured", recon
+
+
+def test_balanced_marks_an_unmeasured_probe_unproven_not_failed(tables, monkeypatch):
+    _src, dst = tables
+    recon = _timed_out_gate(dst, monkeypatch, "balanced")
+    assert recon["passed"] is True, recon
+    assert "could not be measured" in recon["message"], recon["message"]
 
 
 def test_a_probe_that_reaches_its_cap_is_not_measured(tables):
