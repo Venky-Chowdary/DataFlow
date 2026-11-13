@@ -115,6 +115,14 @@ def test_scalar_cannot_also_be_an_object():
     assert "address" in issues[0].message
 
 
+def test_collision_names_the_path_it_collides_with():
+    (issue,) = collision_issues([("orders", ARRAY), ("orders.total", SCALAR)])
+    assert issue.other == "orders"
+    assert issue.to_dict()["other"] == "orders"
+    (dup,) = collision_issues([("a", SCALAR), ("a", SCALAR)])
+    assert dup.other == "" and "other" not in dup.to_dict()
+
+
 def test_prefix_collision_is_found_whatever_the_order():
     issues = collision_issues([("a.b.c", SCALAR), ("a", SCALAR)])
     assert _codes(issues) == ["path_prefix_collision"]

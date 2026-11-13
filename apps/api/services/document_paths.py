@@ -44,9 +44,14 @@ class PathIssue:
     code: str
     path: str
     message: str
+    #: For a prefix or array collision, the shorter path it collides with.
+    other: str = ""
 
     def to_dict(self) -> dict[str, str]:
-        return {"code": self.code, "path": self.path, "message": self.message}
+        out = {"code": self.code, "path": self.path, "message": self.message}
+        if self.other:
+            out["other"] = self.other
+        return out
 
 
 class PathError(ValueError):
@@ -59,8 +64,8 @@ class PathError(ValueError):
         self.path = issue.path
 
 
-def _issue(code: str, path: str, message: str) -> PathIssue:
-    return PathIssue(code=code, path=path, message=message)
+def _issue(code: str, path: str, message: str, other: str = "") -> PathIssue:
+    return PathIssue(code=code, path=path, message=message, other=other)
 
 
 def path_issues(path: Any, *, allow_id: bool = True) -> list[PathIssue]:
@@ -159,6 +164,7 @@ def collision_issues(entries: Iterable[tuple[str, str]]) -> list[PathIssue]:
                         path,
                         f"Field path {path!r} writes inside {prefix!r}, which holds "
                         "an array; put the field inside the array's elements instead.",
+                        prefix,
                     )
                 )
             else:
@@ -169,6 +175,7 @@ def collision_issues(entries: Iterable[tuple[str, str]]) -> list[PathIssue]:
                         f"Field path {path!r} writes inside {prefix!r}, which already "
                         "holds a single value; a path cannot be both a value and a "
                         "sub-document.",
+                        prefix,
                     )
                 )
             break
