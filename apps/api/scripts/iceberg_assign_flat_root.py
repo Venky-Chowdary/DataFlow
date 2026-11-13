@@ -12,9 +12,10 @@ files are not moved (Iceberg metadata records absolute file locations).
     python scripts/iceberg_assign_flat_root.py --assign <name> --workspace <workspace id>
     python scripts/iceberg_assign_flat_root.py --revoke <name>
 
-``--list`` prints each flat entry, the workspace it is assigned to, and the
-workspaces of saved Iceberg connectors that name it (a hint; the operator
-decides). Assign an entry only to the workspace whose data it holds: a SQLite
+``--list`` prints each flat entry, the workspace it is assigned to, and each
+saved Iceberg connector that names it with its workspace (a hint; the operator
+decides); a claim from a workspace other than the assigned one is marked
+unverified. ``--assign`` refuses a workspace that does not exist. Assign an entry only to the workspace whose data it holds: a SQLite
 catalog file and the warehouse folder its tables live in are two entries when
 they sit side by side in the root.
 """
@@ -31,8 +32,9 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 
-def _claims(root: Path) -> dict[str, set[str]]:
-    """Flat entry -> workspaces of the saved Iceberg connectors that name it (as before the partition)."""
+def _claims(root: Path) -> dict[str, list[tuple[str, str]]]:
+    """Flat entry -> ``(connector id, its workspace)`` for each saved Iceberg connector naming it
+    (read as before the partition)."""
     from services.connector_store import list_connectors
     from services.iceberg_workspace_root import _entry, _local_paths
     from services.local_file_policy import is_within
@@ -41,7 +43,7 @@ def _claims(root: Path) -> dict[str, set[str]]:
 
     with bound_workspace_filter(None):  # every workspace's connectors, for the hint only
         connectors = list_connectors()
-    claims: dict[str, set[str]] = {}
+    claims: dict[str, list[tuple[str, str]]] = {}
     for connector in connectors:
         if resolve_driver_type(str(getattr(connector, "type", "") or "").lower()) != "iceberg":
             continue
@@ -54,9 +56,25 @@ def _claims(root: Path) -> dict[str, set[str]]:
             candidate = Path(text).expanduser()
             resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
             entry = _entry(root, resolved) if is_within(resolved, root) else ""
-            if entry:
-                claims.setdefault(entry, set()).add(str(getattr(connector, "workspace_id", "") or "-"))
+            claim = (str(getattr(connector, "id", "") or "?"), str(getattr(connector, "workspace_id", "") or "-"))
+            if entry and claim not in claims.setdefault(entry, []):
+                claims[entry].append(claim)
     return claims
+
+
+def _shown_claims(claims: list[tuple[str, str]], owner: str) -> str:
+    """``connector@workspace``; a claim from another workspace than the owner is unverified (review 5, L2)."""
+    shown = []
+    for connector_id, workspace in sorted(claims):
+        mark = " (unverified: not the assigned workspace)" if owner and workspace != owner else ""
+        shown.append(f"{connector_id}@{workspace}{mark}")
+    return ", ".join(shown) or "-"
+
+
+def _workspace_exists(workspace_id: str) -> bool:
+    from services.team_store import get_workspace
+
+    return bool(workspace_id) and get_workspace(workspace_id) is not None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,12 +99,17 @@ def main(argv: list[str] | None = None) -> int:
             owners = flat_owners(root)
             claims = _claims(root)
             for name in flat_entries(root):
-                named_by = ", ".join(sorted(claims.get(name, set()))) or "-"
-                print(f"{name}\tassigned={owners.get(name, '-')}\tnamed_by={named_by}")
+                owner = owners.get(name, "")
+                print(f"{name}\tassigned={owner or '-'}\tclaims={_shown_claims(claims.get(name, []), owner)}")
             return 0
         if args.assign:
+            if not _workspace_exists(str(args.workspace or "").strip()):
+                raise ValueError("that workspace does not exist; check the id (team workspaces list)")
             assign_flat_entry(args.assign, args.workspace, root)
             print(f"assigned {args.assign} to workspace {args.workspace}")
+            others = [c for c in _claims(root).get(args.assign.strip(), []) if c[1] != args.workspace]
+            if others:
+                print(f"claims from other workspaces: {_shown_claims(others, args.workspace)}")
             return 0
         removed = revoke_flat_entry(args.revoke, root)
         print(f"revoked {args.revoke}" if removed else f"{args.revoke} was not assigned")

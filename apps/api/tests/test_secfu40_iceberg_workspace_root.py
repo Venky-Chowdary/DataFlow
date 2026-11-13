@@ -286,6 +286,8 @@ def test_the_assignment_command(legacy, root, capsys, monkeypatch, tmp_path):
 
     monkeypatch.setattr(connector_store, "STORE_PATH", tmp_path / "connectors.json")
     monkeypatch.setattr(connector_store, "_backend_choice", "file")
+    # Review 5 (L2): --assign checks that the workspace exists.
+    monkeypatch.setattr("services.team_store.get_workspace", lambda ws: object() if ws in {WS_A, WS_B} else None)
 
     assert main(["--list"]) == 0
     assert "legacy" in capsys.readouterr().out
