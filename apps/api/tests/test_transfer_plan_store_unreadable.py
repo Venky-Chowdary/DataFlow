@@ -595,3 +595,37 @@ def test_rotation_fsyncs_the_directory(isolated_plan_store, monkeypatch):
     monkeypatch.setattr(store, "fsync_directory", lambda d: synced.append(str(d)))
     update_plan(a, {"name": "B"})
     assert str(isolated_plan_store.parent) in synced
+
+
+def test_the_readable_backup_is_not_reparsed_on_every_refused_request(isolated_plan_store, monkeypatch):
+    a = create_plan({"name": "A"}).id
+    for i in range(3):
+        update_plan(a, {"name": f"A{i}"})
+    _truncated(isolated_plan_store)
+    _garbage(isolated_plan_store.with_name("transfer_plans.json.bak"))
+    parsed: list[str] = []
+    real = store._parse_store_text
+
+    def counting(text):
+        parsed.append(text[:10])
+        return real(text)
+
+    monkeypatch.setattr(store, "_parse_store_text", counting)
+    with pytest.raises(PlanStoreUnreadable) as caught:
+        get_plan(a)
+    assert caught.value.readable_backup == "transfer_plans.json.bak.1"
+    first = len(parsed)  # the store, then .bak.1 (.bak is not even text)
+    for _ in range(4):
+        with pytest.raises(PlanStoreUnreadable) as caught:
+            get_plan(a)
+        assert caught.value.readable_backup == "transfer_plans.json.bak.1"
+    assert len(parsed) == first + 4, "each request parses the store; unchanged backups are not parsed again"
+
+    # A backup that changes is looked at again.
+    import os
+    bak1 = isolated_plan_store.with_name("transfer_plans.json.bak.1")
+    _garbage(bak1)
+    os.utime(bak1, ns=(1, 1))
+    with pytest.raises(PlanStoreUnreadable) as caught:
+        get_plan(a)
+    assert caught.value.readable_backup == "transfer_plans.json.bak.2"

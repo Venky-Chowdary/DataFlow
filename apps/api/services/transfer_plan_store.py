@@ -115,15 +115,43 @@ def _backup_paths(path: Path) -> list[Path]:
     return [newest] + [newest.with_name(f"{newest.name}.{i}") for i in range(1, BACKUP_GENERATIONS)]
 
 
+#: store path -> ((name, mtime_ns, size) per backup generation, answer): a
+#: damaged store is refused on every request; its backups are parsed once
+#: per change, not per request.
+_READABLE_BACKUP_CACHE: dict[str, tuple[tuple[tuple[str, int, int] | None, ...], Path | None]] = {}
+
+
+def _backup_signature(path: Path) -> tuple[tuple[str, int, int] | None, ...]:
+    signature: list[tuple[str, int, int] | None] = []
+    for candidate in _backup_paths(path):
+        try:
+            st = candidate.stat()
+            signature.append((candidate.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            signature.append(None)
+    return tuple(signature)
+
+
 def _newest_readable_backup(path: Path) -> Path | None:
-    """The newest backup generation the store's own loader would accept, if any."""
+    """The newest backup generation the store's own loader would accept, if any.
+
+    Cached on every generation's (mtime_ns, size): unchanged backups are not
+    parsed again for each refused request.
+    """
+    signature = _backup_signature(path)
+    cached = _READABLE_BACKUP_CACHE.get(str(path))
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    found: Path | None = None
     for candidate in _backup_paths(path):
         try:
             _parse_store_text(candidate.read_text(encoding="utf-8-sig"))
         except (OSError, UnicodeDecodeError, *_PARSE_ERRORS):
             continue
-        return candidate
-    return None
+        found = candidate
+        break
+    _READABLE_BACKUP_CACHE[str(path)] = (signature, found)
+    return found
 
 
 class UnknownPlanVersion(LookupError):
