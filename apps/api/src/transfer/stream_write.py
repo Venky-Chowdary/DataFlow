@@ -186,6 +186,14 @@ def _write_batch(
         set_match_action,
     )
 
+    from services.duplicate_policy import enforce_dedupe_skip_destination
+
+    enforce_dedupe_skip_destination(
+        str((getattr(dest, "extra", None) or {}).get("duplicate_policy") or ""), dest_type,
+        connection_string=str(
+            cfg.get("connection_string") or getattr(dest, "connection_string", "") or ""
+        ),
+    )
     try:
         decided = resolve_duplicate_policy(
             duplicate_policy=str((getattr(dest, "extra", None) or {}).get("duplicate_policy") or ""),

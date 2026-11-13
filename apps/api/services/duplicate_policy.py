@@ -715,6 +715,18 @@ def schedule_dedupe_skip_refusal(payload: Any) -> str:
     return dedupe_skip_refusal(dest_type, connection_string=connection_string)
 
 
+def enforce_dedupe_skip_destination(
+    duplicate_policy: str, dest_type: str, *, connection_string: str = ""
+) -> None:
+    """Execute-time twin of the Validate gate (a run, or a schedule run, that
+    skipped Validate): never run skip_duplicates into a refused destination."""
+    if normalize_duplicate_policy(str(duplicate_policy or "")) != "dedupe_skip":
+        return
+    message = dedupe_skip_refusal(dest_type, connection_string=connection_string)
+    if message:
+        raise DuplicatePolicyError(message)
+
+
 #: Destinations whose append now refuses a stored key (``SET NX`` /
 #: conditional ``PutItem``) instead of overwriting it.
 _KEYED_APPEND_REFUSES = frozenset({"redis", "dynamodb"})
@@ -757,3 +769,22 @@ def keyed_append_cursor_gate(
         },
         "suggested_actions": ["Set Duplicate rows to Update keys already stored (upsert)"],
     }
+
+
+def enforce_dedupe_skip_endpoint(endpoint: Any, duplicate_policy: str = "") -> None:
+    """:func:`enforce_dedupe_skip_destination` for an engine write's endpoint.
+
+    Runs before the write's precount dials the destination.
+    """
+    extra = getattr(endpoint, "extra", None) or {}
+    policy = duplicate_policy or str(extra.get("duplicate_policy") or "")
+    if normalize_duplicate_policy(policy) != "dedupe_skip":
+        return
+    connection_string = str(getattr(endpoint, "connection_string", "") or "")
+    if not connection_string and getattr(endpoint, "connector_id", None):
+        from src.transfer.adapters import resolve_connector_config
+
+        connection_string = str(resolve_connector_config(endpoint).get("connection_string") or "")
+    enforce_dedupe_skip_destination(
+        policy, str(getattr(endpoint, "format", "") or ""), connection_string=connection_string
+    )

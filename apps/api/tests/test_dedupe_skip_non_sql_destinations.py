@@ -537,3 +537,47 @@ def test_clickhouse_skip_duplicates_is_refused_by_dialect():
         assert "ClickHouse" in schedule_dedupe_skip_refusal(
             {"duplicate_policy": "skip_duplicates", "dest_connector_id": "c1"}
         )
+
+
+# ------------------------------------------------- Execute without Validate
+@pytest.mark.parametrize(
+    ("dest_type", "cs"), [("qdrant", ""), ("generic_sql", "clickhouse://h:8123/db")]
+)
+def test_stream_write_refuses_skip_into_refused_destination(dest_type, cs):
+    """Review L4: Execute (and a schedule run) without Validate still refuses."""
+    from services.duplicate_policy import DuplicatePolicyError
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream_write import _write_batch
+
+    dest = EndpointConfig(
+        kind="database", format=dest_type, connection_string=cs,
+        extra={"duplicate_policy": "skip_duplicates"},
+    )
+    with pytest.raises(DuplicatePolicyError, match="Skip keys already stored"):
+        _write_batch(
+            dest_type, dest, {"connection_string": cs}, "ws_t", ["id"], [["1"]], _MAP[:1],
+            {"id": "VARCHAR"}, False, None, 0, 1, 0, write_mode="insert", conflict_columns=["id"],
+        )
+
+
+def test_engine_write_refuses_skip_into_refused_destination():
+    from services.duplicate_policy import DuplicatePolicyError
+    from src.transfer.adapters import write_destination_database
+    from src.transfer.models import EndpointConfig
+
+    dest = EndpointConfig(kind="database", format="pinecone", table="ws_t")
+    with patch("services.dest_precount.precount_destination", side_effect=AssertionError("dialed")):
+        with pytest.raises(DuplicatePolicyError, match="Skip keys already stored"):
+            write_destination_database(
+                dest, [{"id": "1"}], ["id"], {"id": "VARCHAR"}, _MAP[:1],
+                duplicate_policy="skip_duplicates", conflict_columns=["id"], write_mode="insert",
+            )
+
+
+def test_file_stream_refuses_skip_into_refused_destination():
+    import inspect
+
+    import src.transfer.file_stream as fs
+
+    src = inspect.getsource(fs.stream_file_to_database)
+    assert "enforce_dedupe_skip_destination(" in src
