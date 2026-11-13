@@ -12,6 +12,7 @@ call to it.
 from __future__ import annotations
 
 import ast
+import os
 import asyncio
 import time
 from pathlib import Path
@@ -27,6 +28,8 @@ STORE_MODULES = {
     # Transfer plans: file I/O plus a cross-process lock wait of up to 30 s (PS-1).
     "transfer_plan_store",
 }
+#: Stores whose helpers are followed through any depth of sync calls.
+TRANSITIVE_STORE_MODULES = {"transfer_plan_store"}
 OFFLOAD = {"to_thread", "run_in_threadpool", "run_in_executor", "run_sync"}
 #: Startup work, before the API serves anything.
 ALLOWED = {("main", "lifespan")}
@@ -93,16 +96,39 @@ def _store_reads_on_the_loop() -> list[str]:
                 store_funcs.add((module, node.name))
     files = [p for p in list((API / "src").rglob("*.py")) + list((API / "services").rglob("*.py"))]
     trees = {p: _tree(p) for p in files}
-    helpers: set[tuple[str, str]] = set()
+    # Each sync function's call targets: imported (module, name) and same-file names.
+    callees: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    imported: dict[tuple[str, str], set[tuple[str, str]]] = {}
     for path, tree in trees.items():
         if tree is None:
             continue
         imports = _imports(tree)
         for fn in ast.walk(tree):
-            if isinstance(fn, ast.FunctionDef) and any(
-                isinstance(c, ast.Call) and _target(c, imports) in store_funcs for c in ast.walk(fn)
-            ):
-                helpers.add((path.stem, fn.name))
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            key = (path.stem, fn.name)
+            targets, via_import = callees.setdefault(key, set()), imported.setdefault(key, set())
+            for c in ast.walk(fn):
+                if not isinstance(c, ast.Call):
+                    continue
+                target = _target(c, imports)
+                if target:
+                    targets.add(target)
+                    via_import.add(target)
+                if isinstance(c.func, ast.Name):
+                    targets.add((path.stem, c.func.id))
+    # Control-plane stores: a sync helper that calls one directly.
+    helpers = {key for key, targets in imported.items() if targets & store_funcs}
+    # The transfer-plan store, transitively: route -> assert_body_ids ->
+    # plan_owner -> get_plan counts, to a fixed point. (The other stores keep
+    # the one-level rule: transitively they reach many pre-existing sites.)
+    reaching = {f for f in store_funcs if f[0] in TRANSITIVE_STORE_MODULES}
+    while True:
+        found = {key for key, targets in callees.items() if key not in reaching and targets & reaching}
+        if not found:
+            break
+        reaching |= found
+    helpers |= reaching
     hits = []
     for path, tree in trees.items():
         if tree is None:
@@ -362,3 +388,60 @@ def test_health_answers_while_plan_writes_wait_for_the_plan_store_lock(plan_stor
     assert health_seconds < BLOCK_SECONDS, f"/health waited {health_seconds:.2f}s behind a plan write's lock wait"
     limit = _stall_limit(baseline)
     assert max_lag < limit, f"the event loop stalled {max_lag:.2f}s (limit {limit:.2f}s, unblocked {baseline:.3f}s)"
+
+
+def test_plan_writes_waiting_on_the_lock_do_not_starve_reads_or_the_shared_thread_pool(plan_store, monkeypatch):
+    """Writers parked on a held plan-store lock must not use up the default executor.
+
+    The loop's default executor is pinned to 4 threads here; 8 PATCHes wait
+    for a lock another process holds. GET /plans (no lock) and an unrelated
+    asyncio.to_thread call must still answer at once.
+    """
+    import concurrent.futures
+    import fcntl
+
+    from services import transfer_plan_store as plans
+    from services.route_table_warmup import warm_route_table
+    from src.main import app
+
+    monkeypatch.setattr(plans, "LOCK_TIMEOUT_SECONDS", 20.0)
+    plan_id = plan_store["plan_id"]
+    lock_path = plans.STORE_PATH.with_name(plans.STORE_PATH.name + ".lock")
+
+    async def scenario():
+        asyncio.get_running_loop().set_default_executor(
+            concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="test-default")
+        )
+        await asyncio.to_thread(warm_route_table, app)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1", timeout=60) as client:
+            await client.get("/api/v1/transfer/plans")
+            fd = os.open(lock_path, os.O_RDONLY | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)  # "another process" holds the plan store
+                writes = asyncio.gather(*[
+                    client.patch(f"/api/v1/transfer/plans/{plan_id}", json={"name": f"n{i}"})
+                    for i in range(8)
+                ])
+                await asyncio.sleep(0.3)  # the writers are now parked on the lock
+                started = time.perf_counter()
+                listed = await client.get("/api/v1/transfer/plans")
+                read_seconds = time.perf_counter() - started
+                started = time.perf_counter()
+                await asyncio.wait_for(asyncio.to_thread(lambda: None), timeout=10)
+                shared_seconds = time.perf_counter() - started
+                started = time.perf_counter()
+                health = await client.get("/health")
+                health_seconds = time.perf_counter() - started
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            statuses = [r.status_code for r in await writes]
+        return listed.status_code, read_seconds, shared_seconds, health.status_code, health_seconds, statuses
+
+    listed, read_seconds, shared_seconds, health, health_seconds, statuses = asyncio.run(scenario())
+    assert listed == 200 and health == 200
+    assert read_seconds < 1.0, f"GET /plans waited {read_seconds:.2f}s behind parked plan writers"
+    assert shared_seconds < 1.0, f"the shared thread pool was starved for {shared_seconds:.2f}s"
+    assert health_seconds < 1.0
+    assert statuses == [200] * 8, statuses

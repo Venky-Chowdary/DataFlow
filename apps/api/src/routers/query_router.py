@@ -22,6 +22,7 @@ is refused instead of allowed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -1121,7 +1122,7 @@ async def query_export(
 
         # Before the query is read (review 3, body routes): another workspace's
         # destination answers like a missing one.
-        assert_body_ids(request, connectors=(body.destination_connector_id,), write=True)
+        await asyncio.to_thread(assert_body_ids, request, connectors=(body.destination_connector_id,), write=True)
     # Security review H2: an export writes the workspace's rows without a job,
     # so nothing else would ask where they land. Both branches (a connector, a
     # file on this deployment) are judged before the query is read.

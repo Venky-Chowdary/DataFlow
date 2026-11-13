@@ -8,6 +8,7 @@ import logging
 from services.threadpool_handler import off_event_loop
 from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
+from services.plan_store_offload import run_plan_write
 from services.safe_errors import safe_http_exception
 from services.shape_preflight import ShapePreflightRefused
 from services.upload_limits import PayloadTooLarge, read_upload
@@ -589,7 +590,7 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
     """
     from services.body_id_ownership import assert_body_ids
 
-    assert_body_ids(request, jobs=(str(body.job_id or ""),))  # review 3, body routes
+    await asyncio.to_thread(assert_body_ids, request, jobs=(str(body.job_id or ""),))  # review 3, body routes
     import sys
     from pathlib import Path
 
@@ -806,7 +807,7 @@ async def create_transfer_plan(body: CreatePlanRequest, request: Request):
     from services.transfer_plan_store import create_plan
 
     # A plan stores its endpoints' connector ids: they must be the caller's (review 3, Low).
-    assert_body_ids(request, connectors=tuple(
+    await asyncio.to_thread(assert_body_ids, request, connectors=tuple(
         str((side or {}).get("connector_id") or "") for side in (body.source, body.destination)
     ))
 
@@ -819,8 +820,8 @@ async def create_transfer_plan(body: CreatePlanRequest, request: Request):
         )
         return {"plan": plan.to_dict()}
 
-    # Plan-store calls wait on file I/O and the store lock: off the event loop.
-    return await asyncio.to_thread(_create)
+    # A plan write can wait on the store lock: off the loop, on the plan-write pool.
+    return await run_plan_write(_create)
 
 
 @router.get("/plans/{plan_id}")
@@ -838,7 +839,7 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
     from services.transfer_plan_service import patch_plan
 
     try:
-        plan = await asyncio.to_thread(patch_plan, plan_id, body.model_dump(exclude_none=True))
+        plan = await run_plan_write(patch_plan, plan_id, body.model_dump(exclude_none=True))
         return {"plan": plan.to_dict()}
     except ValueError as e:
         raise safe_http_exception(
@@ -860,7 +861,7 @@ async def _link_job_to_plan(plan_id: str, job_id: str) -> None:
     from services.transfer_plan_store import PlanStoreBusy, PlanStoreUnreadable, attach_job
 
     try:
-        await asyncio.to_thread(attach_job, plan_id, job_id, status="running")
+        await run_plan_write(attach_job, plan_id, job_id, status="running")
     except (PlanStoreBusy, PlanStoreUnreadable) as exc:
         logging.getLogger(__name__).warning(
             "Run %s started but was not linked to plan %s: the plan store refused (%s)",
@@ -894,7 +895,7 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
     from services.transfer_plan_store import PlanVersionConflict
 
     try:
-        plan = await asyncio.to_thread(
+        plan = await run_plan_write(
             sync_plan_mappings, plan_id, body.mappings, base_version=body.base_version
         )
         return {"plan": plan.to_dict()}
@@ -1037,7 +1038,7 @@ async def approve_transfer_plan(plan_id: str, version: Optional[int] = None):
     from services.transfer_plan_service import approve_plan
 
     try:
-        plan = await asyncio.to_thread(approve_plan, plan_id, version)
+        plan = await run_plan_write(approve_plan, plan_id, version)
         return {"plan": plan.to_dict()}
     except ValueError as e:
         raise safe_http_exception(
@@ -1288,11 +1289,11 @@ async def execute_transfer_json(
     from services.body_id_ownership import assert_body_ids as _assert_body_ids
 
     # The plan and recipe a run uses must be the caller's (review 3, body routes).
-    _assert_body_ids(request, plans=(str(body.plan_id or ""),), recipes=(str(body.transform_recipe_id or ""),))
+    await asyncio.to_thread(_assert_body_ids, request, plans=(str(body.plan_id or ""),), recipes=(str(body.transform_recipe_id or ""),))
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import merge_plan_into_run
         try:
-            payload = await asyncio.to_thread(
+            payload = await run_plan_write(
                 merge_plan_into_run,
                 str(body.plan_id).strip(),
                 request_mappings=list(request_obj.mappings or []),
@@ -1316,7 +1317,7 @@ async def execute_transfer_json(
     from services.body_id_ownership import assert_body_ids
 
     # Another workspace's contract answers like a missing one (review 3, Low).
-    assert_body_ids(request, contracts=(body.contract_id or "",))
+    await asyncio.to_thread(assert_body_ids, request, contracts=(body.contract_id or "",))
     from src.transfer.contract_engine import stamp_request_contract
 
     plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
@@ -1809,7 +1810,7 @@ async def run_universal_transfer(
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
-            payload = await asyncio.to_thread(
+            payload = await run_plan_write(
                 merge_plan_into_run,
                 plan_id.strip(),
                 request_mappings=form_mappings,
@@ -1912,7 +1913,7 @@ async def run_universal_transfer(
     from services.body_id_ownership import assert_body_ids
     from src.transfer.contract_engine import stamp_request_contract
 
-    assert_body_ids(request, contracts=(contract_id,))  # review 3, Low
+    await asyncio.to_thread(assert_body_ids, request, contracts=(contract_id,))  # review 3, Low
     try:
         stamp_request_contract(
             request_obj,
