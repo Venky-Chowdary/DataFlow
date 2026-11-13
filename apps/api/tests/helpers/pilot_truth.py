@@ -24,6 +24,27 @@ from typing import Any
 #: it, so "today" differs by time zone and a UTC-only answer is caught.
 FROZEN_NOW = datetime(2026, 11, 11, 2, 30, tzinfo=timezone.utc)
 
+#: Latest hour of a UTC day a case may be asked before: see ``case_now``.
+_CASE_HOUR = 12
+
+
+def case_now() -> datetime:
+    """The instant every other case is asked at: now, but never before noon UTC.
+
+    A case seeds jobs "N minutes ago" and may ask about "today" or "this
+    week". On the raw wall clock a run in the first minutes of a UTC day put
+    those seeds in yesterday, and the right answer ("0 failed today") failed
+    the case. ``reset_workspace`` pins Pilot's clock here and ``seed_job``
+    counts back from Pilot's clock, so both read one clock, and a seed up to
+    12 hours back is in the same UTC day (week, month) at any time of day.
+    The instant only ever moves forward of the wall clock, so the app's own
+    timers (stall watchdog, orphan sweeper) never see a seed as older than
+    the case meant. Cases about midnight, DST or time zones pin their own
+    instant (``freeze_clock``) and keep doing so.
+    """
+    now = datetime.now(timezone.utc)
+    return max(now, now.replace(hour=_CASE_HOUR, minute=0, second=0, microsecond=0))
+
 
 _CASE = [0]
 
@@ -53,6 +74,7 @@ def reset_workspace(monkeypatch=None) -> None:
         # sweeper or stall watchdog left running by an earlier test's app is
         # right to fail such a job, and would change the ledger mid-case.
         monkeypatch.setenv("DATAFLOW_API_ORPHAN_RESUME", "0")
+        pin_clock(monkeypatch, case_now())
     from services.job_watchdog import stop_stall_watchdog
     from services.orphan_jobs import stop_orphan_sweeper
 
@@ -74,21 +96,43 @@ def reset_workspace(monkeypatch=None) -> None:
         monkeypatch.setenv("DATAFLOW_SEED_DEMO", "0")
 
 
+def pin_clock(monkeypatch, now: datetime) -> None:
+    """Pin the instant Pilot reads the job ledger at (its "now" for every window)."""
+    try:
+        from src.ai.copilot import job_window
+    except ImportError:  # code that predates windowed job reads has no clock to pin
+        return
+    monkeypatch.setattr(job_window, "utc_now", lambda: now)
+
+
 def freeze_clock(monkeypatch, now: datetime = FROZEN_NOW, zone: str = "UTC") -> None:
     """Pin Pilot's clock and the workspace time zone for a windowed case."""
     try:
         from src.ai.copilot import job_window
     except ImportError:  # code that predates windowed job reads has no clock to pin
         return
-    monkeypatch.setattr(job_window, "utc_now", lambda: now)
+    pin_clock(monkeypatch, now)
     monkeypatch.setattr(job_window, "workspace_zone_name", lambda: zone)
+
+
+def pilot_now() -> datetime:
+    """The instant Pilot reads the ledger at: the pinned clock, else the wall clock."""
+    try:
+        from src.ai.copilot import job_window
+    except ImportError:
+        return datetime.now(timezone.utc)
+    return job_window.utc_now()
 
 
 def seed_job(status: str = "completed", *, minutes_ago: float = 0, at: datetime | None = None,
              now: datetime | None = None, **extra: Any) -> str:
-    """One job in the ledger with an exact ``created_at`` and status."""
+    """One job in the ledger with an exact ``created_at`` and status.
+
+    ``minutes_ago`` counts back from Pilot's own clock (``pilot_now``), so a
+    seed and the window Pilot answers for agree on what "now" and "today" are.
+    """
     store = mongo()
-    created = at or ((now or datetime.now(timezone.utc)) - timedelta(minutes=minutes_ago))
+    created = at or ((now or pilot_now()) - timedelta(minutes=minutes_ago))
     data = {
         "source_name": extra.pop("source_name", "orders"),
         "source_type": extra.pop("source_type", "postgresql"),
