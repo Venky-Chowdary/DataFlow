@@ -344,13 +344,20 @@ export function TransferMapStep({
       }
     : undefined;
 
+  // Pairs already sent this session: Map → Validate → back → Continue is not
+  // a second confirmation of the same choice.
+  const rememberedRef = useRef<Set<string>>(new Set());
   const continueWithMemory = () => {
-    // Confirmed, renamed pairs teach this workspace's learned auto-map tier.
+    // Only renamed pairs the operator chose (picker, drag, applied auto-map)
+    // and approved teach the learned tier; an engine suggestion left as it
+    // was is not evidence.
     const learned = columnMappings
-      .filter((m) => m.approved && !isIntentionalOmit(m) && m.target)
+      .filter((m) => m.approved && m.operatorTarget && !isIntentionalOmit(m) && m.target)
       .filter((m) => normalizeColumnName(m.source) !== normalizeColumnName(m.target))
-      .map((m) => ({ source: m.source, target: m.target }));
+      .map((m) => ({ source: m.source, target: m.target }))
+      .filter((p) => !rememberedRef.current.has(`${p.source}\u0000${p.target}`));
     if (remapEnabled && learned.length && destEndpoint) {
+      for (const p of learned) rememberedRef.current.add(`${p.source}\u0000${p.target}`);
       void recordMappingMemory(learned, destEndpoint).catch(() => {
         /* Memory is a suggestion source; Validate never depends on it. */
       });

@@ -503,21 +503,29 @@ describe("Map step: remap onto existing destination columns", () => {
     assert.ok(panelRows.length < 60, `panel rendered ${panelRows.length}`);
   });
 
-  it("Continue records renamed, approved pairs in the workspace's mapping memory", async () => {
+  it("Continue records only pairs the operator chose, and each one once per session", async () => {
     await render([
-      m("order_id", "legacy_ref", "BIGINT"),
-      m("first_name", "given_name", "VARCHAR(40)"),
+      m("order_id", "legacy_ref", "BIGINT", { operatorTarget: true }),
+      m("first_name", "given_name", "VARCHAR(40)", { operatorTarget: true }),
+      // An engine suggestion left as it was is not a confirmation.
+      m("last_name", "surname", "VARCHAR(60)"),
     ]);
     assert.equal(continueButton().disabled, false);
     await act(async () => continueButton().click());
     await settle(10);
     assert.equal(continued, 1);
-    const mem = calls.find((c) => c.url.endsWith("/transfer/mapping/memory"));
+    const posts = () => calls.filter((c) => c.url.endsWith("/transfer/mapping/memory"));
+    const mem = posts()[0];
     assert.deepEqual((mem?.body as { destination: unknown }).destination,
       { kind: "database", format: "postgresql", connector_id: "c1", table: "orders_dest" });
     assert.deepEqual((mem?.body as { pairs: unknown }).pairs, [
       { source: "order_id", target: "legacy_ref" },
       { source: "first_name", target: "given_name" },
     ]);
+    // Back from Validate and Continue again: nothing new was confirmed.
+    await act(async () => continueButton().click());
+    await settle(10);
+    assert.equal(continued, 2);
+    assert.equal(posts().length, 1, "the same confirmations are not posted twice");
   });
 });

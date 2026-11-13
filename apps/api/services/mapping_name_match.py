@@ -244,12 +244,13 @@ def _learned_confidence(count: int, same_destination: bool) -> float:
     """Learned evidence (review M4): one confirmation is a hint below the
     dictionary; it outranks a synonym only when confirmed twice for this
     destination, and never reaches a normalized match. Another destination of
-    the workspace is a weaker fallback."""
+    the workspace is a weaker fallback that is never pre-selected (it stays
+    below ``DEFAULT_SELECT_THRESHOLD``): the operator picks it."""
     if same_destination:
         if count >= 2:
             return round(min(TIER_CONFIDENCE[NORMALIZED] - 0.01, TIER_CONFIDENCE[LEARNED] + 0.01 * (count - 2)), 3)
         return 0.84
-    return 0.72 if count >= 2 else 0.66
+    return 0.66 if count >= 2 else 0.62
 
 
 def _key_suffix_match(src: str, tgt: str, entities: set[str]) -> float | None:

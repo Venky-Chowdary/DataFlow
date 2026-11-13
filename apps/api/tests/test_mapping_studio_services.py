@@ -353,8 +353,10 @@ DEST_B = {"connector_id": "c-1", "database": "app", "schema": "public", "table":
 
 
 def test_memory_is_scoped_per_destination_and_per_workspace(memory):
-    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a", destination=DEST_A)
-    memory.record_confirmed([{"source": "CustFname", "target": "GivenName"}], workspace_id="ws-a", destination=DEST_A)
+    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a",
+                            destination=DEST_A, actor="ann@example.com")
+    memory.record_confirmed([{"source": "CustFname", "target": "GivenName"}], workspace_id="ws-a",
+                            destination=DEST_A, actor="bob@example.com")
     assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {"cust_fname": {"given_name": (2, True)}}
     # Another destination of the same workspace sees it only as a fallback.
     assert memory.learned_index(workspace_id="ws-a", destination=DEST_B) == {"cust_fname": {"given_name": (2, False)}}
@@ -366,9 +368,37 @@ def test_memory_is_scoped_per_destination_and_per_workspace(memory):
     assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {}
 
 
+def test_one_planner_posting_twice_is_one_confirmation(memory):
+    """Review: Map → Validate → back → Continue re-posts the same pairs."""
+    for _ in range(3):
+        memory.record_confirmed([{"source": "email", "target": "phone"}], workspace_id="ws-a",
+                                destination=DEST_A, actor="mallory@example.com")
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {"email": {"phone": (1, True)}}
+    memory.record_confirmed([{"source": "email", "target": "phone"}], workspace_id="ws-a",
+                            destination=DEST_A, actor="")
+    memory.record_confirmed([{"source": "email", "target": "phone"}], workspace_id="ws-a",
+                            destination=DEST_A, actor="")
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_A)["email"]["phone"][0] == 2, (
+        "an anonymous caller counts once, however often it posts"
+    )
+
+
+def test_a_pair_learned_elsewhere_is_never_preselected(memory):
+    for actor in ("a@example.com", "b@example.com", "c@example.com", "d@example.com"):
+        memory.record_confirmed([{"source": "email", "target": "phone"}], workspace_id="ws-a",
+                                destination=DEST_A, actor=actor)
+    out = suggest_assignments(
+        ["email"], ["phone", "contact"],
+        learned=memory.learned_index(workspace_id="ws-a", destination=DEST_B), dest_table="orders",
+    )
+    assert out and out[0]["kind"] == "learned"
+    assert out[0]["selected"] is False and out[0]["confidence"] < 0.7, out
+
+
 def test_memory_feeds_the_learned_tier(memory):
-    for _ in range(2):
-        memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a", destination=DEST_A)
+    for actor in ("ann@example.com", "bob@example.com"):
+        memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a",
+                                destination=DEST_A, actor=actor)
     out = suggest_assignments(
         ["cust_fname"], ["given_name", "surname"],
         learned=memory.learned_index(workspace_id="ws-a", destination=DEST_A),

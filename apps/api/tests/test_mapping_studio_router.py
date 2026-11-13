@@ -147,7 +147,8 @@ def test_memory_records_only_confirmed_pairs_onto_real_destination_columns(tenan
     assert first.json()["recorded"] == 1 and first.json()["refused"] == ["not_a_column"]
     assert world.a.post(f"{BASE}/memory", json=pairs).json()["total"] == 1
     listed = world.a.get(f"{BASE}/memory").json()["pairs"]
-    assert listed[0]["count"] == 2 and listed[0]["target"] == "given_name"
+    # The same person posting again is not a second confirmation.
+    assert listed[0]["count"] == 1 and listed[0]["target"] == "given_name"
     assert world.b.get(f"{BASE}/memory").json()["pairs"] == []
     assert world.b.post(f"{BASE}/memory", json=pairs).status_code in (403, 404)
 
