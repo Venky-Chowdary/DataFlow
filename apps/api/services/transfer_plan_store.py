@@ -781,7 +781,12 @@ def add_preflight_run(
 
     def change(plan: TransferPlanRecord) -> None:
         active = plan.active_revision()
-        version = plan.active_version if mapping_version is None else int(mapping_version)
+        if mapping_version is None:
+            # Legacy callers: the revision Execute runs (active_revision() falls
+            # back to the newest when active_version names none), as before.
+            version = active.version if active else plan.active_version
+        else:
+            version = int(mapping_version)
         if mapping_hash is not None:
             digest = mapping_hash
         else:

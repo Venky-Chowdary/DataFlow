@@ -437,3 +437,22 @@ def test_approve_route_answers_409_when_the_checked_revision_is_no_longer_active
     ok = client.post(f"/api/v1/transfer/plans/{plan_id}/approve", params={"expected_version": 2})
     assert ok.status_code == 200, ok.text
     assert [r["version"] for r in ok.json()["plan"]["revisions"] if r["approved"]] == [2]
+
+
+def test_a_legacy_preflight_record_still_sets_the_status_when_active_version_names_no_revision():
+    """Callers that pass no mapping_version (legacy) record the revision Execute runs."""
+    import json
+
+    from services import transfer_plan_store as store
+
+    plan_id = _plan()
+    sync_ui_mappings(plan_id, _maps("login"))
+    raw = json.loads(store.STORE_PATH.read_text())
+    raw["plans"][0]["active_version"] = 99
+    store.STORE_PATH.write_text(json.dumps(raw))
+
+    add_preflight_run(plan_id, {"passed": False, "run_id": "pf_legacy"})
+    plan = get_plan(plan_id)
+    assert plan.status == "preflight_failed"
+    assert plan.preflight_runs[-1]["mapping_version"] == 2
+    assert plan.preflight_runs[-1]["mapping_hash"] == plan.active_revision().mapping_hash
