@@ -76,3 +76,43 @@ def test_skip_after_a_failed_run_keeps_the_failure(store):
     assert after.last_status == "failed"
     view = life.derive_status(after)
     assert view["last_status"] == "failed" and view["last_skip"]["reason"] == IN_PROGRESS
+
+
+def test_skip_on_a_pre_ledger_failure_keeps_the_failure(store):
+    """Final review M-c: the stored mirror holds a failure the history no longer has."""
+    from services import schedule_run_lifecycle as life
+
+    sched = _schedule(store, "legacy")
+    life._mutate(sched.id, lambda s: {"last_status": "failed", "run_history": []})
+    life.record_skip(sched.id, "approval_pending", "Waiting on an approval")
+    after = store.get_schedule(sched.id)
+    assert after.last_status == "failed"
+    assert life.derive_status(after)["last_status"] == "failed"
+
+
+def test_a_failure_then_many_alternating_skips_stays_failed(store):
+    """Final review M-c: skips that push the failure out of the history window."""
+    from services import schedule_run_lifecycle as life
+
+    sched = _schedule(store, "trim")
+    run_id = life.begin_run(sched.id, trigger=life.TRIGGER_CADENCE)
+    life.finish_run(sched.id, run_id, "failed", reason="boom", reason_code="start_error")
+    for i in range(26):
+        code = "source_unchanged" if i % 2 else "approval_pending"
+        life.record_skip(sched.id, code, f"reason {code}")
+    after = store.get_schedule(sched.id)
+    assert after.last_status == "failed"
+    assert life.derive_status(after)["last_status"] == "failed"
+
+
+def test_copilot_still_sees_the_failure(store):
+    from services import schedule_run_lifecycle as life
+    from src.ai.copilot.schedule_questions import _failed_last
+
+    sched = _schedule(store, "copilot")
+    run_id = life.begin_run(sched.id, trigger=life.TRIGGER_CADENCE)
+    life.finish_run(sched.id, run_id, "failed", reason="boom", reason_code="start_error")
+    for i in range(26):
+        life.record_skip(sched.id, "approval_pending" if i % 2 else "source_unchanged", f"r{i}")
+    row = {**store.get_schedule(sched.id).to_dict(), **life.derive_status(store.get_schedule(sched.id))}
+    assert _failed_last(row)

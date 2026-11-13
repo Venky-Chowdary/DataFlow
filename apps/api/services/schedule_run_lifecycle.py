@@ -519,15 +519,19 @@ def derive_status(sched: Any) -> dict[str, Any]:
         reason = str(latest.get("reason") or "")
         code = str(latest.get("reason_code") or "")
         run_id = str(latest.get("run_id") or "")
-    elif last_skip is not None:
-        # Every record is a skip: the beat that started nothing is the status.
+    elif last_skip is not None and str(getattr(sched, "last_status", "") or "") in ("", SKIPPED):
+        # Every record is a skip and no run ever finished: the beat that
+        # started nothing is the status. A stored status from a run the
+        # history no longer holds (trimmed, or a pre-ledger document) wins:
+        # a skip never hides a failure (final review M-c).
         status = SKIPPED
         reason = str(last_skip.get("reason") or "")
         code = str(last_skip.get("reason_code") or "")
         run_id = str(last_skip.get("run_id") or "")
     else:
         stored = str(getattr(sched, "last_status", "") or "")
-        status = stored if (stored in _RUN_STATUSES_LEGACY or not history) else ""
+        status = stored if (stored in _RUN_STATUSES_LEGACY or not history
+                            or last_skip is not None) else ""
         reason, code, run_id = "", "", ""
     return {
         "last_status": status or None,
