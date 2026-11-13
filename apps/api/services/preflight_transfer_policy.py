@@ -483,17 +483,31 @@ def run_transfer_policy_gates(
     # field paths, SQL engine length limits, BigQuery case), refused here
     # rather than renamed or cut by the writer; an existing table's legacy
     # columns (an earlier run's spelling) are kept, with an info note.
-    from services.target_name_legacy import legacy_field_policy_of, target_name_gates
+    from services.target_name_legacy import (
+        legacy_field_policy_of,
+        selected_streams,
+        stream_target_gates,
+        target_name_gates,
+    )
 
+    policy = legacy_field_policy_of(destination_endpoint)
+    streams = selected_streams(type("R", (), {"stream_contracts": contracts})())
     gates.extend(
-        target_name_gates(
+        # Multi-stream: every stream against its own object and Map rows.
+        stream_target_gates(
+            dest, mappings, streams, destination_config=destination_config,
+            sync_mode=sync, legacy_field_policy=policy,
+            destination_endpoint=destination_endpoint,
+        )
+        if streams
+        else target_name_gates(
             dest,
             mappings,
             existing_columns=list(destination_columns or []),
             destination_config=destination_config,
             destination_table=destination_table or _endpoint_table(destination_endpoint),
             sync_mode=sync,
-            legacy_field_policy=legacy_field_policy_of(destination_endpoint),
+            legacy_field_policy=policy,
         )
     )
 

@@ -317,6 +317,11 @@ def run_non_cdc_multi_stream_sequential(
                     stream_sync = resolve_effective_sync_mode(
                         sync_mode, single_contracts[0].get("sync_mode")
                     ).lower()
+                    # G11: this stream's targets against its own table (legacy
+                    # columns adopted; names refused; old document fields).
+                    from services.target_name_legacy import prepare_stream_targets
+
+                    use_mappings = prepare_stream_targets(destination, use_mappings, stream_sync)
                     if stream_sync in ("full_refresh_mirror", "mirror", "scd2"):
                         # SCD2/mirror per stream: the endpoints above are already
                         # remapped to this stream's table/collection, so the

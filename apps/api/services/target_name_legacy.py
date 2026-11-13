@@ -46,6 +46,10 @@ _CASE_INSENSITIVE = frozenset({"mysql", "sqlserver", "synapse", "sqlite", "bigqu
 _LEGACY_CUT = 63
 
 
+#: Key on an adopted Map row holding the operator's original target.
+MAP_TARGET = "map_target"
+
+
 def legacy_spelling(dest_type: str | None, name: Any) -> str:
     """The column name a writer produced for ``name`` before G11."""
     kind = dest_kind(dest_type)
@@ -92,6 +96,15 @@ def existing_column_for(
     return hits[0]
 
 
+def operator_rows(mappings: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """Map rows with any earlier adoption undone (the operator's own targets)."""
+    rows = [dict(_as_dict(m)) for m in (mappings or [])]
+    for row in rows:
+        if row.get(MAP_TARGET):
+            row["target"] = row.pop(MAP_TARGET)
+    return rows
+
+
 def adopt_existing_columns(
     dest_type: str | None, mappings: Iterable[Any] | None, existing: Iterable[str] | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -101,6 +114,7 @@ def adopt_existing_columns(
     notes: list[dict[str, str]] = []
     if not cols or not _applies(dest_kind(dest_type)):
         return rows, notes
+    rows = operator_rows(rows)  # re-resolve from the operator's spelling
     for row in rows:
         target = str(row.get("target") or "")
         if not target.strip():
@@ -109,6 +123,9 @@ def adopt_existing_columns(
         if column is None:
             continue
         row["target"] = column
+        # The Map's own spelling travels with the row, so a multi-stream run
+        # can resolve it again against each stream's table.
+        row[MAP_TARGET] = target
         notes.append({
             "code": "target_uses_existing_column",
             "target": target,
@@ -191,6 +208,153 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
         for note in notes:
             logger.info("G11: %s", note["message"])
     return notes
+
+
+# -- multi-stream: each stream against its own destination object -----------
+
+
+def selected_streams(request: Any) -> list[dict[str, Any]]:
+    """Selected stream contracts of a multi-stream request (empty for one stream)."""
+    contracts = [
+        dict(_as_dict(c)) for c in (getattr(request, "stream_contracts", None) or [])
+    ]
+    picked = [c for c in contracts if c.get("selected", True) and str(c.get("name") or "")]
+    # One stream writes the request's own object (stream_multi runs only for N > 1).
+    return picked if len(picked) > 1 else []
+
+
+def prepare_stream_targets(
+    destination: Any,
+    mappings: Iterable[Any] | None,
+    sync_mode: str | None,
+    *,
+    stream_name: str = "",
+) -> list[dict[str, Any]]:
+    """One stream's Map rows, adopted onto its own table, or ``ValueError``.
+
+    ``destination`` is already bound to the stream, or is bound here (on a
+    copy) when ``stream_name`` is given. Applies the same rules as a
+    single-stream Execute: legacy-column adoption, the name refusal, and the
+    MongoDB / Elasticsearch old-field rule.
+    """
+    import copy
+    from types import SimpleNamespace
+
+    from connectors.destination_naming import target_names_refusal
+
+    dest = destination
+    if stream_name:
+        from services.multi_stream_targets import bind_endpoint_to_stream
+
+        dest = copy.deepcopy(destination)
+        bind_endpoint_to_stream(dest, stream_name)
+    rows = operator_rows(mappings)
+    req = SimpleNamespace(destination=dest, mappings=rows, sync_mode=sync_mode)
+    adopt_for_request(req)
+    refusal = target_names_refusal(str(getattr(dest, "format", "") or ""), req.mappings) or (
+        legacy_fields_refusal(req)
+    )
+    if refusal:
+        label = stream_name or str(getattr(dest, "table", "") or getattr(dest, "collection", ""))
+        raise ValueError(f"Stream {label!r}: {refusal}")
+    return list(req.mappings)
+
+
+def stream_existing_columns(
+    dest_type: str | None, cfg: Mapping[str, Any] | None, table: str, endpoint: Any = None
+) -> list[str]:
+    """The columns a stream's existing destination table holds ([] if new).
+
+    Validate passes the probe config; Execute's own preflight passes the
+    request's destination endpoint, bound here (on a copy) to the stream.
+    """
+    if not table or not _applies(dest_kind(dest_type)):
+        return []
+    if endpoint is not None and not isinstance(endpoint, Mapping):
+        import copy
+
+        from services.multi_stream_targets import bind_endpoint_to_stream
+
+        endpoint = copy.deepcopy(endpoint)
+        bind_endpoint_to_stream(endpoint, table)
+    elif cfg:
+        from src.transfer.models import EndpointConfig
+
+        endpoint = EndpointConfig(
+            kind="database", format=str(dest_type or ""), host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0), database=str(cfg.get("database") or ""),
+            schema=str(cfg.get("schema") or ""), username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            connection_string=str(cfg.get("connection_string") or ""), table=table,
+        )
+    else:
+        return []
+    try:
+        info = _bounded_probe(endpoint)
+    except Exception as exc:  # noqa: BLE001 - Execute re-checks each stream before writing
+        logger.info("stream column probe skipped for %s: %s", table, exc)
+        return []
+    if info.get("table_exists") is False:
+        return []
+    return list(dict(info.get("schema") or {}).keys())
+
+
+def stream_target_gates(
+    dest_type: str | None,
+    mappings: Iterable[Any] | None,
+    contracts: Iterable[Mapping[str, Any]],
+    *,
+    destination_config: Mapping[str, Any] | None,
+    sync_mode: str | None,
+    legacy_field_policy: str = "",
+    destination_endpoint: Any = None,
+) -> list[dict[str, Any]]:
+    """Validate's target-name gates for every stream of a multi-stream route.
+
+    Each stream is judged against its own destination object (named after the
+    stream) with its own Map rows; issues and notes carry the stream name.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for contract in contracts:
+        name = str(contract.get("name") or "")
+        own = contract.get("mappings")
+        rows = own if isinstance(own, list) and own else list(mappings or [])
+        gates = target_name_gates(
+            dest_type, rows,
+            existing_columns=stream_existing_columns(
+                dest_type, destination_config, name, destination_endpoint),
+            destination_config=destination_config, destination_table=name,
+            sync_mode=str(contract.get("sync_mode") or sync_mode or ""),
+            legacy_field_policy=legacy_field_policy,
+        )
+        for gate in gates:
+            into = merged.setdefault(gate["id"], {**gate, "message": "", "details": {
+                **gate["details"], "issues": [], "notes": []}})
+            into["message"] = (into["message"] + " " if into["message"] else "") + (
+                f"Stream {name!r}: {gate['message']}")
+            if gate["status"] == "block":
+                into["status"] = "block"
+            for key in ("issues", "notes"):
+                into["details"][key].extend(
+                    {**item, "stream": name} for item in gate["details"].get(key) or [])
+    return list(merged.values())
+
+
+def streams_refusal(request: Any) -> str:
+    """Execute, before any write: every selected stream against its own object."""
+    mappings = list(getattr(request, "mappings", None) or [])
+    for contract in selected_streams(request):
+        own = contract.get("mappings")
+        try:
+            prepare_stream_targets(
+                request.destination,
+                own if isinstance(own, list) and own else mappings,
+                str(contract.get("sync_mode") or getattr(request, "sync_mode", "") or ""),
+                stream_name=str(contract["name"]),
+            )
+        except ValueError as exc:
+            return str(exc)
+    return ""
 
 
 # -- document / search stores: the old renamed field ------------------------
@@ -477,6 +641,13 @@ def target_name_gates(
 
 
 __all__ = [
+    "MAP_TARGET",
+    "operator_rows",
+    "prepare_stream_targets",
+    "selected_streams",
+    "stream_existing_columns",
+    "stream_target_gates",
+    "streams_refusal",
     "adopt_existing_columns",
     "adopt_for_request",
     "existing_column_for",

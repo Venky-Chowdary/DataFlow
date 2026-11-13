@@ -2375,6 +2375,10 @@ def _run_cdc_shared_multi_table(
         stream_maps = raw.get("mappings")
         declared = isinstance(stream_maps, list) and bool(stream_maps)
         use_maps = stream_maps if declared else mappings
+        # G11: this stream's targets against its own destination object.
+        from services.target_name_legacy import prepare_stream_targets
+
+        use_maps = prepare_stream_targets(destination, use_maps, "cdc", stream_name=name)
         stream_cfg[name] = {
             "primary_key": _cdc_pk_str(
                 contract.primary_key or primary_keys.get(name), name

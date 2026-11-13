@@ -102,7 +102,8 @@ def execute(
         "dest_connector_id": destination.get("connector_id") or "",
         "dest_database": destination.get("database") or "",
         "dest_table": dest_table, "dest_collection": dest_table,
-        "skip_preflight": "false", "async_mode": "false", "plan_id": plan_id,
+        "skip_preflight": "false", "async_mode": "false",
+        **({"plan_id": plan_id} if plan_id else {}),
         # Studio runs the Map Validate approved (its effective rows).
         "mappings_json": json.dumps(pf.get("mappings") or mappings), "sync_mode": sync_mode,
         "validation_mode": "strict", "schema_policy": schema_policy,
