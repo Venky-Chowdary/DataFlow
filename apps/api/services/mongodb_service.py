@@ -1297,6 +1297,26 @@ class MongoDBService:
         result = collection.update_one(query, {"$set": updates})
         return result.matched_count > 0
 
+    def destination_job_history(
+        self, destination_collection: str, *, workspace_filter: WorkspaceFilter | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Jobs that wrote rows to ``destination_collection`` (G11 Kafka topic history).
+
+        Only the fields that identify the destination and say rows were written.
+        """
+        db = self.get_database()
+        query = {"$and": [
+            self._job_scope_query(None, workspace_filter),
+            {"destination_collection": str(destination_collection)},
+            {"$or": [{"records_processed": {"$gt": 0}},
+                     {"status": {"$in": sorted(COMPLETED_STATUSES)}}]},
+        ]}
+        projection = {"destination_type": 1, "dest_connector_id": 1, "status": 1,
+                      "records_processed": 1, "transfer_request.destination.host": 1}
+        return [dict(doc, _id=str(doc["_id"])) for doc in
+                db["transfer_jobs"].find(query, projection).limit(max(1, int(limit)))]
+
     def list_unscoped_jobs(self) -> list[dict]:
         """Every job with no workspace — the legacy rows the D154 backfill assigns.
 
@@ -2124,6 +2144,19 @@ class MemoryMongoDBService:
             if touch_updated_at:
                 rec["updated_at"] = datetime.now(timezone.utc)
         return True
+
+    def destination_job_history(
+        self, destination_collection: str, *, workspace_filter: WorkspaceFilter | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        scope = job_workspace_filter(None, workspace_filter)
+        out = [
+            dict(j) for j in list(self._jobs.values())
+            if scope.matches(j.get("workspace_id"))
+            and str(j.get("destination_collection") or "") == str(destination_collection)
+            and (int(j.get("records_processed") or 0) > 0 or j.get("status") in COMPLETED_STATUSES)
+        ]
+        return out[: max(1, int(limit))]
 
     def list_unscoped_jobs(self) -> list[dict]:
         """Every job with no workspace (see ``MongoDBService.list_unscoped_jobs``)."""

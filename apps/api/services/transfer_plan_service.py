@@ -182,6 +182,7 @@ def _plan_fit_progress(plan_id: str, rows_estimate: int):
 
 
 from services.duplicate_policy import with_duplicate_route_option  # noqa: E402
+from services.kafka_field_names import with_kafka_name_options  # noqa: E402
 from services.fk_parent_preflight import with_fk_route_option  # noqa: E402
 
 
@@ -480,7 +481,7 @@ def run_plan_preflight(
         destination_check_constraints=dest_meta.get("check_constraints") or [],
         # Without the destination connection the append key-collision probe cannot
         # run, and Validate greens a batch Execute then refuses on the same key.
-        destination_config=with_duplicate_route_option(
+        destination_config=with_kafka_name_options(with_duplicate_route_option(
             with_fk_route_option(
                 dest_meta.get("_probe_cfg"),
                 (dest.get("extra") if isinstance(dest.get("extra"), dict) else {}).get("foreign_keys_mode")
@@ -488,7 +489,7 @@ def run_plan_preflight(
             ),
             dest.get("extra") if isinstance(dest.get("extra"), dict) else {},
             {"duplicate_policy": dest.get("duplicate_policy")} if dest.get("duplicate_policy") else {},
-        ),
+        ), dest.get("extra") if isinstance(dest.get("extra"), dict) else {}, dest),
         stream_contracts=stream_contracts,
         compliance_acknowledged=ack.compliance,
         schema_drift_acknowledged=ack.schema_drift,

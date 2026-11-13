@@ -36,6 +36,7 @@ from connectors.destination_naming import (
     SEARCH_STORES,
     SQL_NAME_LIMITS,
     SQL_UNLIMITED,
+    STREAM_SINKS,
     _NO_CUT,
     _as_dict,
     dest_kind,
@@ -64,15 +65,19 @@ def legacy_spelling(dest_type: str | None, name: Any) -> str:
 def _full_spelling(name: Any, kind: str = "") -> str:
     """The name without the old cut (what Validate measures against the limit).
 
-    A SaaS app's field name is kept exactly as mapped (G11)."""
-    if kind in SAAS_APPS:
+    A SaaS app's field name / a Kafka field is kept exactly as mapped (G11)."""
+    if kind in SAAS_APPS or kind in STREAM_SINKS:
         return str(name or "").strip()
     return sanitize_identifier(str(name or ""), preserve_case=True, max_len=_NO_CUT)
 
 
 def _applies(kind: str) -> bool:
-    """Destinations whose existing columns / fields a target may adopt."""
-    return kind in SQL_NAME_LIMITS or kind in SQL_UNLIMITED or kind in SAAS_APPS
+    """Destinations whose existing columns / fields a target may adopt.
+
+    Kafka: a Schema Registry subject's fields, or ``key_format=legacy``
+    (``services.kafka_field_names``)."""
+    return (kind in SQL_NAME_LIMITS or kind in SQL_UNLIMITED or kind in SAAS_APPS
+            or kind in STREAM_SINKS)
 
 
 def existing_column_for(
@@ -120,7 +125,7 @@ def recreated_by_overwrite(dest_type: str | None, sync_mode: str | None) -> bool
     name is used, in single-stream and multi-stream alike (re-review L3).
     """
     kind = dest_kind(dest_type)
-    if not _applies(kind) or kind in SAAS_APPS:
+    if not _applies(kind) or kind in SAAS_APPS or kind in STREAM_SINKS:
         return False
     from services.db_type_utils import dest_schema_is_recreated_on_overwrite
     from services.sync_cursor import is_overwrite_sync
@@ -130,12 +135,41 @@ def recreated_by_overwrite(dest_type: str | None, sync_mode: str | None) -> bool
 
 def adopt_rows_for_run(
     dest_type: str | None, mappings: Iterable[Any] | None, existing: Iterable[str] | None,
-    sync_mode: str | None,
+    sync_mode: str | None, *, destination_config: Mapping[str, Any] | None = None,
+    destination_table: str = "",
 ) -> list[dict[str, Any]]:
-    """The Map rows a run writes: adopted onto existing columns unless it recreates the table."""
+    """The Map rows a run writes: adopted onto existing columns unless it recreates the table.
+
+    Kafka (no live columns at Validate): the registry subject's fields or
+    ``key_format=legacy``, read the way Execute reads them.
+    """
     if recreated_by_overwrite(dest_type, sync_mode):
         return operator_rows(mappings)
+    existing = list(existing or [])
+    if not existing and dest_kind(dest_type) in STREAM_SINKS and destination_config:
+        try:
+            existing = _kafka_fields(destination_config, None, destination_table, mappings)
+        except Exception as exc:  # noqa: BLE001 - Validate's g23e reports it
+            logger.info("Kafka field names unread at Validate: %s", exc)
     return adopt_existing_columns(dest_type, mappings, existing)[0]
+
+
+def _kafka_fields(cfg: Any, endpoint: Any, topic: str, mappings: Any, run_scope: Any = None
+                  ) -> list[str]:
+    """``kafka_field_names.kafka_existing_fields``; a registry read once per run and topic."""
+    from services.kafka_field_names import kafka_existing_fields, kafka_registry_url
+
+    rows = operator_rows(mappings)
+    if not kafka_registry_url(cfg, endpoint):
+        return kafka_existing_fields(cfg, endpoint, topic, rows)  # key_format only, no I/O
+    key = _run_key(run_scope, "kafka-registry", topic) if run_scope is not None else None
+    hit = _INTROSPECT_MEMO.get(key) if key else None
+    if hit and time.monotonic() - hit[0] < _PROBE_MEMO_SECONDS:
+        return list(hit[1]["fields"])
+    fields = kafka_existing_fields(cfg, endpoint, topic, rows, timeout=_probe_seconds())
+    if key:
+        _INTROSPECT_MEMO[key] = (time.monotonic(), {"fields": list(fields)})
+    return fields
 
 
 def adopted_collision_issues(dest_type: str | None, rows: Iterable[Any]) -> list[dict[str, str]]:
@@ -313,7 +347,16 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
     if any(i["code"] != "target_name_too_long" for i in raw_issues):
         return []
     try:
-        info = _memo_probe(dest)
+        if kind in STREAM_SINKS:
+            from src.transfer.adapters import resolve_connector_config
+
+            existing = _kafka_fields(
+                resolve_connector_config(dest), dest,
+                writer_object_name(dest, getattr(request, "source", None)), mappings, dest)
+            info: dict[str, Any] = {}
+        else:
+            info = _memo_probe(dest)
+            existing = list(dict(info.get("schema") or {}).keys())
     except Exception as exc:  # noqa: BLE001 - fail closed (re-review L2)
         # Adopting nothing would write the full name beside an earlier run's
         # column, or fail later as a misleading "DDL identity mismatch".
@@ -324,7 +367,6 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
         ) from exc
     if info.get("table_exists") is False:
         return []
-    existing = list(dict(info.get("schema") or {}).keys())
     rows, notes = adopt_existing_columns(kind, mappings, existing)
     if notes:
         request.mappings = rows
@@ -455,6 +497,7 @@ def stream_target_gates(
             destination_config=destination_config, destination_table=name,
             sync_mode=str(contract.get("sync_mode") or sync_mode or ""),
             legacy_field_policy=legacy_field_policy,
+            destination_endpoint=destination_endpoint,
         )
         for gate in gates:
             into = merged.setdefault(gate["id"], {**gate, "message": "", "details": {
@@ -814,6 +857,8 @@ def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
     """
     dest = getattr(request, "destination", None)
     kind = dest_kind(str(getattr(dest, "format", "") or ""))
+    if dest is not None and kind in STREAM_SINKS:
+        return _kafka_check(request)
     if dest is None or kind not in _FIELD_STORES:
         return "", []
     mappings = list(getattr(request, "mappings", None) or [])
@@ -851,6 +896,34 @@ def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
             for i in issues
         ]
     return "", []
+
+
+def _kafka_check(request: Any) -> tuple[str, list[str]]:
+    """Execute's form of the Kafka rule (``kafka_field_names.kafka_name_verdict``)."""
+    from services.kafka_field_names import kafka_ack, kafka_name_verdict, renamed_targets
+
+    dest = request.destination
+    mappings = list(getattr(request, "mappings", None) or [])
+    if not renamed_targets(mappings):
+        return "", []
+    policy = _policy_of(dict(getattr(dest, "extra", None) or {}))
+    try:
+        from src.transfer.adapters import resolve_connector_config
+
+        topic = writer_object_name(dest, getattr(request, "source", None))
+        issues, blocking = kafka_name_verdict(
+            mappings, resolve_connector_config(dest), dest, topic, policy=policy)
+    except Exception as exc:  # noqa: BLE001 - fail closed: unread history is not "new topic"
+        if policy == WRITE_NEW:
+            return "", [f"topic history not verified ({exc}); {LEGACY_FIELD_POLICY}={WRITE_NEW}"]
+        return (
+            f"Could not verify the topic's earlier field names ({exc}). Set "
+            f"{LEGACY_FIELD_POLICY}={WRITE_NEW!r} to write the new names anyway (recorded "
+            "on the run), or key_format='legacy' to keep the old ones.", [])
+    if blocking:
+        return "Topic holds the old field names: " + " ".join(
+            i["message"] for i in issues[:3]), []
+    return "", kafka_ack(issues, topic) if issues else []
 
 
 def set_run_ack(dest: Any, ack: list[str]) -> None:
@@ -909,6 +982,7 @@ def target_name_gates(
     destination_table: str = "",
     sync_mode: str | None = None,
     legacy_field_policy: str = "",
+    destination_endpoint: Any = None,
 ) -> list[dict[str, Any]]:
     """Validate's target-name gates.
 
@@ -922,6 +996,14 @@ def target_name_gates(
     """
     from connectors.destination_naming import _mapped_targets, target_name_issues
 
+    kind = dest_kind(dest_type)
+    unread: Exception | None = None
+    if kind in STREAM_SINKS and not list(existing_columns or []):
+        try:  # the topic's Schema Registry subject / key_format=legacy
+            existing_columns = _kafka_fields(
+                destination_config, destination_endpoint, destination_table, mappings)
+        except Exception as exc:  # noqa: BLE001 - reported in g23e, never "no fields"
+            unread = exc
     rows, notes = adopt_existing_columns(dest_type, mappings, existing_columns)
     if recreated_by_overwrite(dest_type, sync_mode):
         rows = operator_rows(rows)  # the table is recreated: full names (re-review L3)
@@ -932,7 +1014,6 @@ def target_name_gates(
     issues = target_name_issues(dest_type, _mapped_targets(rows))
     issues.extend(adopted_collision_issues(dest_type, rows))
     gates: list[dict[str, Any]] = []
-    kind = dest_kind(dest_type)
     if issues:
         head = "; ".join(i["message"] for i in issues[:3])
         more = f" (and {len(issues) - 3} more)" if len(issues) > 3 else ""
@@ -963,10 +1044,19 @@ def target_name_gates(
         })
         return gates
     try:
-        warnings, blocking = legacy_field_verdict(
-            dest_type, mappings, destination_config, destination_table,
-            sync_mode=sync_mode, policy=legacy_field_policy,
-        )
+        if unread is not None:
+            raise unread
+        if kind in STREAM_SINKS:
+            from services.kafka_field_names import kafka_name_verdict
+
+            warnings, blocking = kafka_name_verdict(
+                rows, destination_config, destination_endpoint, destination_table,
+                policy=legacy_field_policy)
+        else:
+            warnings, blocking = legacy_field_verdict(
+                dest_type, mappings, destination_config, destination_table,
+                sync_mode=sync_mode, policy=legacy_field_policy,
+            )
     except Exception as exc:  # noqa: BLE001 - reported, never read as "no old fields"
         from services.sync_cursor import is_overwrite_sync
 

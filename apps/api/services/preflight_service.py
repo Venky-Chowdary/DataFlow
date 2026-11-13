@@ -420,6 +420,7 @@ def run_file_preflight(
     mappings = adopt_rows_for_run(
         destination_db_type, mappings,
         [] if destination_table_exists is False else list(existing), sync_mode,
+        destination_config=destination_config, destination_table=destination_table,
     )
 
     # Canonical sync vocabulary — G9/DDL/policy must match writers (insert→append).

@@ -799,6 +799,8 @@ def write_mapped_rows(
         rejected_rows=len(rejected_details),
         coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
         driver="kafka",
+        # G11: an acknowledged legacy_field_policy=write_new, on the run.
+        warnings=[str(a) for a in (_kwargs.get("legacy_field_ack") or [])][:10],
         meta={
             "reconcile_sample": produced_sample,
             "source_row_count": len(mapped_rows),

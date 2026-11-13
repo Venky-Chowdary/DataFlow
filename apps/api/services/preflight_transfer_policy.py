@@ -509,6 +509,7 @@ def run_transfer_policy_gates(
                 destination_table, destination_endpoint, source_endpoint),
             sync_mode=sync,
             legacy_field_policy=policy,
+            destination_endpoint=destination_endpoint,
         )
     )
 
