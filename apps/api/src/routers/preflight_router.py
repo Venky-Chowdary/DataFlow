@@ -278,8 +278,9 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
             asyncio.shield(work), timeout=seconds + ANSWER_RESERVE_SECONDS
         )
     except asyncio.TimeoutError:
-        return _preflight_deadline_refusal(
-            body, deadline_timeout_message("Preflight", seconds, progress), seconds
+        # It records the refused run in the shared store: off the event loop.
+        return await run_in_threadpool(
+            _preflight_deadline_refusal, body, deadline_timeout_message("Preflight", seconds, progress), seconds
         )
 
 
@@ -832,7 +833,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
 
 
 @router.get("/runs")
-async def list_preflight_runs(limit: int = 20):
+def list_preflight_runs(limit: int = 20):
     """List recent validation runs (IDs Datawrap Pilot / Jobs can reference)."""
     from services.preflight_run_store import list_preflight_runs as _list
 
@@ -840,7 +841,7 @@ async def list_preflight_runs(limit: int = 20):
 
 
 @router.get("/runs/{run_id}")
-async def get_preflight_run(run_id: str):
+def get_preflight_run(run_id: str):
     """Fetch a stored validation run by ID for Pilot triage and audit."""
     from services.preflight_run_store import get_preflight_run as _get
 
@@ -865,7 +866,7 @@ class ExplainRequest(PolicyFieldsModel):
 
 
 @router.post("/explain")
-async def explain_preflight(body: ExplainRequest):
+def explain_preflight(body: ExplainRequest):
     """AI-assisted 'explain & suggest fix' for a preflight/validation result.
 
     Returns a structured, actionable explanation — what failed, which

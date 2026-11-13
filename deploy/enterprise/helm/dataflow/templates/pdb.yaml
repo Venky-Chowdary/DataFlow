@@ -13,3 +13,35 @@ spec:
       app.kubernetes.io/component: api
       {{- include "dataflow.selectorLabels" . | nindent 6 }}
 {{- end }}
+---
+{{ if and .Values.podDisruptionBudget.enabled .Values.web.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "dataflow.fullname" . }}-web
+  labels:
+    app.kubernetes.io/component: web
+    {{- include "dataflow.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: web
+      {{- include "dataflow.selectorLabels" . | nindent 6 }}
+{{- end }}
+---
+{{ if and .Values.podDisruptionBudget.enabled .Values.worker.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "dataflow.fullname" . }}-worker
+  labels:
+    app.kubernetes.io/component: worker
+    {{- include "dataflow.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.workerMaxUnavailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+      {{- include "dataflow.selectorLabels" . | nindent 6 }}
+{{- end }}

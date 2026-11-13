@@ -12,13 +12,15 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from services.brand_env import getenv_brand
-from fastapi.responses import JSONResponse, PlainTextResponse
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
+from services.control_plane_store import ControlPlaneUnavailable
+from services.shared_doc_store import SharedDocConflict
 from services.cors_policy import TenantAwareCORSMiddleware
-from services.health_service import aggregate_health
+from services import health_service
 from services.safe_errors import public_error
 from services.upload_limits import PayloadTooLarge
 from services.procedure_source import ProcedureSourceError
@@ -103,6 +105,13 @@ async def lifespan(app: FastAPI):
     Railway ``/health`` liveness can pass within the healthcheck window.
     """
     apply_railway_defaults()
+    # SIGTERM sets a process-wide flag before uvicorn's own handler runs, so
+    # long-lived responses (the job stream) end at once and the teardown below
+    # is reached within --timeout-graceful-shutdown (ops review High 4).
+    from services import shutdown_signal
+
+    shutdown_signal.reset()
+    shutdown_signal.install()
     # Do not sys.exit here. The socket is not accepting yet, so a fatal
     # config used to fail Railway's /health probe as "service unavailable"
     # for the whole window. Liveness stays up; other routes return 503.
@@ -249,8 +258,17 @@ async def lifespan(app: FastAPI):
     training = TrainingRuntime()
     app.state.training_runtime = training
 
+    # Build the route table now, off the request path: FastAPI would
+    # otherwise do it on the event loop inside the first request (usually the
+    # first health probe), which then takes ~1s instead of milliseconds.
+    from services.route_table_warmup import warm_route_table
+
+    await asyncio.to_thread(warm_route_table, app)
+
     # Accept traffic immediately — do not block on HuggingFace / RAG init.
     app.state.ready = False
+    # Loop tasks started below are kept so shutdown can cancel them (M-9).
+    app.state.background_tasks = []
     print("[+] HTTP listener ready (background warm-up starting)")
 
     async def _warm_up():
@@ -276,6 +294,18 @@ async def lifespan(app: FastAPI):
                 print("[*] Training Agent disabled (DATAFLOW_TRAINING=off)")
         except Exception as e:
             print(f"[!] RAG initialization warning: {e}")
+
+        # H-5: tenant settings, BYOK keys, ACLs and the other control-plane
+        # stores live in the shared store on a multi-replica deployment. Import
+        # this node's files once (idempotent; the files are left in place).
+        try:
+            from services.shared_doc_store import import_local_files
+
+            imported_stores = await asyncio.to_thread(import_local_files)
+            if imported_stores:
+                print(f"[+] Imported control-plane store file(s) into the shared store: {sorted(imported_stores)}")
+        except Exception as import_exc:  # noqa: BLE001 - a store that cannot be reached fails closed on use
+            print(f"[!] Control-plane store import skipped: {import_exc}")
 
         # Review M3: exports written before workspaces had folders move to the
         # folder of the workspace whose job records own them. Idempotent, and
@@ -318,7 +348,7 @@ async def lifespan(app: FastAPI):
             if schedule_loop_enabled():
                 from .services.schedule_runner import run_schedule_loop
 
-                asyncio.create_task(run_schedule_loop())
+                app.state.background_tasks.append(asyncio.create_task(run_schedule_loop()))
                 print("[+] Pipeline scheduler started")
             else:
                 print("[+] Pipeline scheduler not started in this process (SCHEDULE_LOOP off)")
@@ -395,6 +425,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    shutdown_signal.request()
     warm = getattr(app.state, "warm_task", None)
     if warm and not warm.done():
         warm.cancel()
@@ -402,21 +433,25 @@ async def lifespan(app: FastAPI):
             await warm
         except asyncio.CancelledError:
             pass
-    # This lifespan's runtime: sets its stop event, cancels its tasks, waits <= 1 s.
+    # This lifespan's training runtime: sets its stop event, cancels its tasks,
+    # waits <= 1 s (PR 410).
     await training.shutdown()
-    try:
-        from services.otel_logging import shutdown_otel_logging
+    # M-9: nothing this app started may outlive it. The schedule loops are
+    # cancelled; the four threads are stopped and joined off the event loop
+    # (the claim loop drains in-flight transfers first, bounded by
+    # WORKER_DRAIN_SECONDS, and releases their leases), and the OTel log and
+    # trace flushes run last inside that budget.
+    from services.background_lifecycle import cancel_background_tasks, stop_background_threads
 
-        shutdown_otel_logging()
-    except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
-        logger.debug("OpenTelemetry log shutdown failed: %s", exc)
-    try:
-        from services.tracing import shutdown_tracing
-
-        shutdown_tracing()
-    except Exception:
-        pass
+    await cancel_background_tasks(getattr(app.state, "background_tasks", []))
+    app.state.background_tasks = []
+    # The OTel log and trace flushes are the last budgeted stop (an unreachable
+    # collector cannot hold the process past the shutdown budget).
+    await asyncio.to_thread(stop_background_threads)
+    app.state.ready = False
     print("[*] Datawrap API shutting down…")
+    # The process exits next; an in-process restart (tests) starts clean.
+    shutdown_signal.reset()
 
 
 _docs = "/docs" if docs_enabled() else None
@@ -676,6 +711,15 @@ async def _add_timing_header_response(request: Request, call_next):
         )
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
+    # M-7: request count and latency by route template (never the raw path).
+    from services.ops_metrics import record_http_request, route_template
+
+    record_http_request(
+        method=request.method,
+        route=route_template(request.scope),
+        status_code=response.status_code,
+        duration_seconds=process_time,
+    )
     response.headers["X-Correlation-ID"] = correlation_id
     if trace_id:
         response.headers["X-Trace-Id"] = trace_id
@@ -715,9 +759,12 @@ async def _add_timing_header_response(request: Request, call_next):
     named_admin = False
     if request.method != "GET" and path.startswith("/api/v1/"):
         try:
+            from starlette.concurrency import run_in_threadpool
+
             from services.admin_audit import record_unhandled_admin_change
 
-            named_admin = record_unhandled_admin_change(request, response.status_code)
+            # An audit append can seal the chain tip in the shared anchor store: off the event loop.
+            named_admin = await run_in_threadpool(record_unhandled_admin_change, request, response.status_code)
         except Exception as exc:
             logging.getLogger(__name__).warning("Admin audit suppressed: %s", exc, exc_info=exc)
     if (
@@ -742,7 +789,10 @@ async def _add_timing_header_response(request: Request, call_next):
                 details["correlation_id_rejected"] = True
             if getattr(request.state, "workspace_header_rejected", False):
                 details["workspace_header_rejected"] = True
-            append_audit_event(
+            from starlette.concurrency import run_in_threadpool
+
+            await run_in_threadpool(
+                append_audit_event,
                 action=f"http.{request.method.lower()}",
                 resource=path,
                 actor=actor,
@@ -873,7 +923,11 @@ async def health_ready():
     dependency checks report healthy so Railway does not route traffic
     to a pod that cannot accept transfer jobs.
     """
-    payload = aggregate_health()
+    # Off the event loop and shared between close probes (M-8): the checks
+    # open a database connection and touch the data directory.
+    from starlette.concurrency import run_in_threadpool
+
+    payload = await run_in_threadpool(health_service.cached_health)
     pool = connector_executor.readiness()
     payload["connector_pool"] = pool
     if not pool["ok"] and payload.get("status") == "healthy":
@@ -888,14 +942,15 @@ async def health_ready():
 
 
 @app.get("/metrics")
-async def prometheus_metrics():
-    """Prometheus exposition format for job/CDC/quarantine ops metrics."""
-    from services.ops_metrics import prometheus_text
+async def prometheus_metrics(request: Request):
+    """Prometheus exposition format: HTTP, job-store and CDC ops metrics.
 
-    return PlainTextResponse(
-        content=prometheus_text(),
-        media_type="text/plain; version=0.0.4; charset=utf-8",
-    )
+    The deployment-wide series (HTTP traffic, job gauges) are for platform
+    administrators only (src.metrics_app.metrics_response).
+    """
+    from src.metrics_app import metrics_response
+
+    return await metrics_response(request)
 
 
 @app.get("/api/v1")
@@ -963,6 +1018,39 @@ async def connector_store_error_handler(request: Request, exc: ConnectorStoreErr
     return JSONResponse(
         status_code=503,
         content={"error": "connector_store_unavailable", "detail": str(exc)},
+    )
+
+
+@app.exception_handler(ControlPlaneUnavailable)
+async def control_plane_unavailable_handler(request: Request, exc: ControlPlaneUnavailable):
+    """A control-plane store (tenants, BYOK keys, ACLs, ...) cannot be read: fail closed, retryable.
+
+    Callers never fall back to a permissive default or a node's local file
+    (ops review High 1, Medium 6); the user gets a clean 503 instead of a 500.
+    """
+    logger.warning("Control-plane store unavailable on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "control_plane_unavailable",
+            "detail": "Workspace settings are temporarily unavailable. Retry shortly.",
+        },
+        headers={"Retry-After": "5"},
+    )
+
+
+@app.exception_handler(SharedDocConflict)
+async def shared_doc_conflict_handler(request: Request, exc: SharedDocConflict):
+    """Concurrent writers kept winning a control-plane record after every retry: retryable, not a 500."""
+    logger.warning("Control-plane write conflict on %s after retries: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": "concurrent_update",
+            "detail": "Another change to the same settings was saved at the same moment. Retry the request.",
+            "retry_after_sec": 1,
+        },
+        headers={"Retry-After": "1"},
     )
 
 
