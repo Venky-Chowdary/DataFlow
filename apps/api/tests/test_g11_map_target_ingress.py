@@ -227,3 +227,15 @@ def test_prepare_stream_targets_still_resolves_a_real_adoption_per_stream():
                return_value={"table_exists": True, "schema": {long[:63]: "bigint"}}):
         rows, _ack = prepare_stream_targets(dest, adopted, "full_refresh_append")
     assert [(m["target"], m.get("map_target")) for m in rows] == [(long[:63], long)]
+
+
+def test_stored_plan_policies_lose_map_target_in_stream_contracts():
+    """Defence in depth: a plan's policies carry stream contracts too."""
+    from services.transfer_plan_store import TransferPlanRecord
+
+    plan = TransferPlanRecord.from_dict({
+        "id": "p", "name": "p", "source": {}, "destination": {},
+        "policies": {"stream_contracts": [{"name": "s1", "mappings": [dict(m) for m in CRAFTED]}]},
+    })
+    rows = plan.policies["stream_contracts"][0]["mappings"]
+    assert all("map_target" not in m for m in rows), rows

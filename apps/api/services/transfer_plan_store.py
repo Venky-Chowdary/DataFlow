@@ -145,6 +145,16 @@ class TransferPlanRecord:
     #: Owning workspace (D154); "" = unscoped legacy plan.
     workspace_id: str = ""
 
+    def __post_init__(self) -> None:
+        # The plan's stream contracts never carry map_target either (written
+        # or read back; security re-check F1a, defence in depth).
+        from services.target_name_legacy import strip_contract_map_targets
+
+        contracts = (self.policies or {}).get("stream_contracts")
+        if isinstance(contracts, list):
+            self.policies = {**self.policies,
+                             "stream_contracts": strip_contract_map_targets(contracts)}
+
     def to_dict(self) -> dict[str, Any]:
         return {
             **asdict(self),
