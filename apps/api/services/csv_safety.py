@@ -10,9 +10,9 @@ Which export gets which guard (G7, CWE-1236) — decided per path:
 
 * Operator reports (redacted samples, quarantine CSV): always
   ``neutralize_formula_cell``.
-* Human downloads produced on request — the Query console's CSV/TSV file
-  export (``formula_protection`` defaults to ``"prefix"``):
-  ``neutralize_export_cell``.
+* Human downloads produced on request — the audit CSV export (always) and
+  the Query console's CSV/TSV file export (``formula_protection`` defaults to
+  ``"prefix"``): ``neutralize_export_cell``.
 * Data-plane output — a transfer job's ``file_export`` destination, wherever
   it lands (exports folder, export bucket, the presigned/``/transfer/download``
   link that serves those stored bytes) — is data for machine consumption:

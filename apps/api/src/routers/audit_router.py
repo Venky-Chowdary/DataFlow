@@ -363,6 +363,8 @@ def export_events(
         "workspace_id", "tenant_id", "event_hash", "prev_hash", "hash_alg",
         "details",
     ]
+    from services.csv_safety import neutralize_export_cell
+
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(columns)
@@ -370,7 +372,9 @@ def export_events(
         row = [ev.get(col, "") for col in columns[:-1]]
         details = ev.get("details") or {}
         row.append(json.dumps(details, ensure_ascii=False, default=str) if details else "")
-        writer.writerow(row)
+        # G7 (CWE-1236): a reviewer opens this in a spreadsheet — actor names,
+        # resources and details are attacker-influenced text, never formulas.
+        writer.writerow([neutralize_export_cell(cell) for cell in row])
     body = (
         f"# {honesty}\n"
         f"# workspace_id={workspace_id} tenant_id={tenant_id or ''} "
