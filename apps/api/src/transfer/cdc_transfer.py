@@ -49,6 +49,7 @@ from services.cdc_capability import (
     classify_log_capture_failure,
 )
 from services.cdc_catchup import stamp_capture_identity
+from services.transform_resolver import mark_declared_transforms
 from services.ops_events import emit_event
 from services.cdc_effectively_once import gate_cdc_destination
 from services.dest_precount import DestBeforeCensus
@@ -3199,7 +3200,9 @@ def _run_cdc_multi_stream_sequential(
                 # Prefer per-stream mappings when the operator mapped each stream on Map.
                 stream_maps = single_contracts[0].get("mappings")
                 declared_maps = isinstance(stream_maps, list) and bool(stream_maps)
-                use_mappings = stream_maps if declared_maps else mappings
+                use_mappings = (
+                    mark_declared_transforms(stream_maps) if declared_maps else mappings
+                )
                 status = "completed"
                 error: str | None = None
                 rows = 0

@@ -13,6 +13,7 @@ import logging
 from typing import Any, Callable
 
 from services.row_conservation import record_stream_health
+from services.transform_resolver import mark_declared_transforms
 
 from .models import EndpointConfig
 from .stream_foreign_keys import (
@@ -279,7 +280,10 @@ def run_non_cdc_multi_stream_sequential(
             ]
             stream_maps = single_contracts[0].get("mappings")
             use_mappings = (
-                stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
+                # A stream's own map is operator-declared, like request.mappings.
+                mark_declared_transforms(stream_maps)
+                if isinstance(stream_maps, list) and stream_maps
+                else mappings
             )
             # The FK planner translates key columns through this map; without it
             # a reference would be emitted against a destination column name

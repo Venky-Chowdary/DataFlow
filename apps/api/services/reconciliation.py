@@ -60,6 +60,9 @@ from services.transform_engine import (
     set_strict_number_reading,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
+from services.transform_resolver import (
+    effective_cell_transform as _writer_cell_transform,
+)
 from services.expected_rows import expected_destination_rows, held_out_rows
 from services.fingerprint_rules import (
     BOOL_STORED_TEXT as _BOOL_STORED_TEXT,
@@ -4732,6 +4735,7 @@ def sample_compare_rows(
                     )
                 except Exception:
                     transform = m.get("transform")
+            transform = _writer_cell_transform(transform, m)
             try:
                 converted, err = apply_transform(raw_src, transform or "none")
             except Exception:
@@ -4823,6 +4827,9 @@ def sample_compare_rows(
                     )
                 except Exception:
                     transform = m.get("transform")
+            # The writer skips a trim the operator did not ask for; expecting
+            # the trimmed value here failed a correct load (or passed a wrong one).
+            transform = _writer_cell_transform(transform, m)
             # Sparse CDC / STOP_COLUMN / coerce_null: source DF_MISSING means
             # omit-from-SET — skip compare (do not fingerprint as NULL).
             # Destination DF_MISSING is a leak and must still mismatch.

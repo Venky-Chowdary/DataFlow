@@ -23,7 +23,11 @@ from services.rule_compiler.apply import evaluate_contract
 from services.reversibility_enforce import STAMP as _REVERSIBILITY_STAMP
 from services.reversibility_enforce import note_rows_checked, refuse_changed_value, uncounted
 from services.transform_engine import apply_transform
-from services.transform_resolver import LiveDestTypes, resolve_transform
+from services.transform_resolver import (
+    LiveDestTypes,
+    effective_cell_transform,
+    resolve_transform,
+)
 from services.value_serializer import (
     DF_MISSING_SENTINEL,
     SQL_NULL_SENTINEL,
@@ -2117,17 +2121,11 @@ def _convert_mapped_cell(
     operator_boolean = bool(
         isinstance(mapping, dict) and mapping.get("transform_override")
     )
-    # A name-triggered trim/trim_id rewrites internal whitespace on a normal
-    # load. Apply it only when the operator asked (user_override or
-    # transform_override). collapse_whitespace remains the explicit op.
-    if (
-        isinstance(mapping, dict)
-        and str(transform or "").strip().lower() in {"trim", "trim_id"}
-        and not mapping.get("user_override")
-        and not mapping.get("userOverride")
-        and not mapping.get("transform_override")
-    ):
-        transform = None
+    # A name-triggered trim/trim_id rewrites stored text on a normal load.
+    # Apply it only when the operator asked: approved (user_override), replay
+    # (transform_override), or declared on the request's mapping contract.
+    # Gate-8's read-back compare calls the same rule.
+    transform = effective_cell_transform(transform, mapping)
     converted, err = apply_transform(
         val, transform, accept_informal_boolean=operator_boolean
     )

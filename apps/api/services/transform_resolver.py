@@ -349,6 +349,88 @@ def attach_transforms_to_mappings(
     return out
 
 
+# A mapping carries this key when its transform came in on the request's own
+# mapping contract (top-level ``mappings`` or a stream contract's ``mappings``),
+# not from inference or engine enrichment. Its value is the canonical engine id
+# that was declared, so a declared ``upper`` that enrichment later replaced with
+# an inferred ``trim_id`` is not taken as a declared trim.
+DECLARED_TRANSFORM_KEY = "transform_declared"
+
+_WHITESPACE_TRIMS: frozenset[str] = frozenset({"trim", "trim_id"})
+_UNDECLARED_TOKENS: frozenset[str] = frozenset(
+    {"", "none", "null", "identity", "direct", "passthrough"}
+)
+
+
+def _canonical_transform(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    canon = normalize_engine_transform(UI_TO_ENGINE.get(text, text))
+    return str(canon or text).strip().lower()
+
+
+def mark_declared_transforms(mappings: list[dict] | None) -> list[dict]:
+    """Stamp the transform each request mapping declares (see ``DECLARED_TRANSFORM_KEY``).
+
+    Call once where a mapping contract enters the engine, before
+    ``attach_transforms_to_mappings`` overwrites ``transform`` with the resolved
+    id. Returns copies. A mapping that already carries a stamp keeps it, and a
+    blank / identity transform declares nothing.
+    """
+    out: list[dict] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        copy = dict(m)
+        if not copy.get(DECLARED_TRANSFORM_KEY):
+            declared = _canonical_transform(copy.get("transform"))
+            if declared not in _UNDECLARED_TOKENS:
+                copy[DECLARED_TRANSFORM_KEY] = declared
+        out.append(copy)
+    return out
+
+
+def operator_requested_transform(mapping: Any, transform: Any) -> bool:
+    """True when the operator asked for ``transform`` on this mapping.
+
+    Approval (``user_override``), a replay override (``transform_override``), or
+    the same transform declared on the request's mapping contract.
+    """
+    if not isinstance(mapping, dict):
+        return False
+    if (
+        mapping.get("user_override")
+        or mapping.get("userOverride")
+        or mapping.get("transform_override")
+    ):
+        return True
+    declared = str(mapping.get(DECLARED_TRANSFORM_KEY) or "").strip().lower()
+    return bool(declared) and declared == _canonical_transform(transform)
+
+
+def effective_cell_transform(transform: Any, mapping: Any) -> Any:
+    """The transform the writer applies to a cell of ``mapping``.
+
+    ``trim`` / ``trim_id`` change stored text, so they apply only when the
+    operator asked for them (:func:`operator_requested_transform`). Without that,
+    a trim is an inferred stamp and the cell keeps its whitespace. Every other
+    transform passes through unchanged.
+
+    The writer (``writer_common._convert_mapped_cell``) and Gate-8's read-back
+    compare (``reconciliation.sample_compare_rows``) both call this, so the
+    value Gate-8 expects is the value the writer stored.
+    """
+    if (
+        isinstance(mapping, dict)
+        and str(transform or "").strip().lower() in _WHITESPACE_TRIMS
+        and not operator_requested_transform(mapping, transform)
+    ):
+        return None
+    return transform
+
+
 def write_plan_transform(
     mapping: dict,
     *,

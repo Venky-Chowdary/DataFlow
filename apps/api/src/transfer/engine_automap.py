@@ -75,7 +75,12 @@ def _auto_map(
     }
 
     if request.mappings:
-        mappings = request.mappings
+        # The operator's mapping contract: record which transforms it declares
+        # before enrichment overwrites ``transform`` with the resolved id, so
+        # the writer applies a declared trim instead of treating it as inferred.
+        from services.transform_resolver import mark_declared_transforms
+
+        mappings = mark_declared_transforms(request.mappings)
     elif request.destination.kind != "database":
         mappings = default_mappings(columns)
     else:
