@@ -1,5 +1,6 @@
 """Pytest configuration — isolate tests from live infrastructure."""
 
+import contextlib
 import logging
 import os
 import socket
@@ -1009,6 +1010,27 @@ def _orphan_callable_spools() -> list[str]:
     return sorted(str(p.relative_to(root)) for p in root.rglob("df-proc-*.jsonl") if str(p) not in owned)
 
 
+def _remove_session_spools() -> None:
+    """Remove every spool this pytest process created, live or orphaned.
+
+    Only this process's own folder is touched (``callable_spool_root`` is the
+    per-process ``<base>/<worker>-p<pid>`` above), so a parallel xdist worker or
+    a parent pytest that holds a live spool keeps it.
+    """
+    procedure_source = sys.modules.get("services.procedure_source")
+    if procedure_source is None:
+        return
+    procedure_source.close_callable_spool()  # live spools in this process's registry
+    root = procedure_source.callable_spool_root()
+    if not root.is_dir():
+        return
+    for leftover in root.rglob("df-proc-*.jsonl"):
+        leftover.unlink(missing_ok=True)
+    for folder in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+        with contextlib.suppress(OSError):
+            folder.rmdir()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _guard_no_test_writes_dev_data_dir():
     """The suite must never write into apps/api/data — per-test stores live
@@ -1033,6 +1055,7 @@ def _guard_no_test_writes_dev_data_dir():
         before_src, {name: _tree_fingerprint(_api_root / name) for name in _GUARDED_SOURCE_DIRS}
     )
     orphans = _orphan_callable_spools()
+    _remove_session_spools()  # reported or not, nothing this session spooled stays on disk
     if orphans:
         problems.append(
             "tests left CALL/SELECT spool files nothing owns (close_callable_spool / the job "
