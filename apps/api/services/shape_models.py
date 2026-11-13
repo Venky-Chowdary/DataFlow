@@ -534,7 +534,9 @@ class ShapeStep:
         if self.op == "rename_column":
             target = str(options.get("to") or "")
             return (target,) if target else ()
-        if self.op in ("constant_column", "derive_column", "concat_columns", "hash_identity"):
+        if self.op in (
+            "constant_column", "derive_column", "concat_columns", "hash_identity", "nest_json",
+        ):
             target = str(options.get("to") or "")
             return (target,) if target else ()
         if self.op == "split_column":

@@ -481,7 +481,12 @@ def recipe_output_schema(
     from services.shape_type_propagation import propagated_derive_types
 
     propagated = propagated_derive_types(recipe, prior)
-    cast_steps = _final_cast_steps(recipe)
+    last_writers = _final_writing_steps(recipe)
+    cast_steps = {c: st for c, st in last_writers.items() if st.op == "cast_column"}
+    # ``nest_json`` builds an object by construction: declare it JSON, as a
+    # cast declares its type, so the writer binds a sub-document / JSON column
+    # even when no shaped sample was measured (Document Modeler PR1).
+    nested = {c for c, st in last_writers.items() if st.op == "nest_json"}
     out: dict[str, str] = {}
     for column in columns:
         if column not in touched and column in prior:
@@ -493,6 +498,8 @@ def recipe_output_schema(
             out[column] = prior[origin]
             continue
         declared = propagated.get(column) or inferred.get(column) or prior.get(column) or "VARCHAR"
+        if column in nested:
+            declared = "JSON"
         cast = cast_steps.get(column)
         if cast is not None:
             declared = _cast_carrier(
@@ -505,8 +512,8 @@ def recipe_output_schema(
     return out
 
 
-def _final_cast_steps(recipe: ShapeRecipe) -> dict[str, Any]:
-    """Columns whose last writing step is ``cast_column``, with that step.
+def _final_writing_steps(recipe: ShapeRecipe) -> dict[str, Any]:
+    """Each written column's last writing step (``cast_column``, ``nest_json``...).
 
     ``cast_column`` declares the column's logical type. The values it leaves
     can still read as another type (``1`` cast to text is the string "1"), so
@@ -529,7 +536,7 @@ def _final_cast_steps(recipe: ShapeRecipe) -> dict[str, Any]:
         for column in step.writes:
             if column:
                 last[column] = step
-    return {c: st for c, st in last.items() if st.op == "cast_column"}
+    return last
 
 
 _CAST_FAMILIES: dict[str, frozenset[str]] = {
