@@ -35,3 +35,23 @@ describe("localFileExport byte fidelity", () => {
     assert.deepEqual(parsed.map((r) => r.cell), values);
   });
 });
+
+/** G7-F2: the Studio destination's "Protect against spreadsheet formulas", offline too. */
+describe("localFileExport formula protection", () => {
+  const rows = [{ "=h": '=HYPERLINK("x")', n: "-5" }, { "=h": "@SUM(A1)", n: "-2+3" }];
+
+  it("guards CSV cells and header names with the API rule when the destination opts in", async () => {
+    const { blob } = serializeRows(rows, "csv", { formulaProtection: true });
+    assert.equal(await blob.text(), "'=h,n\n\"'=HYPERLINK(\"\"x\"\")\",-5\n'@SUM(A1),'-2+3");
+  });
+
+  it("guards TSV and quotes a tab, CR or LF inside a value", async () => {
+    const { blob } = serializeRows([{ a: "=1\t2", b: "x\ry" }], "tsv", { formulaProtection: true });
+    assert.equal(await blob.text(), 'a\tb\n"\'=1\t2"\t"x\ry"');
+  });
+
+  it("stays byte-exact when the destination leaves protection off (the API default)", async () => {
+    const { blob } = serializeRows(rows, "csv");
+    assert.equal(await blob.text(), '=h,n\n"=HYPERLINK(""x"")",-5\n@SUM(A1),-2+3');
+  });
+});

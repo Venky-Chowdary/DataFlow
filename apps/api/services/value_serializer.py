@@ -265,6 +265,20 @@ def is_null_evidence(value: Any) -> bool:
     return not text or text in NULL_WIRE_SENTINELS
 
 
+def is_encoded_null(value: Any) -> bool:
+    """NULL as the *reader* encoded it — never decided by a string's spelling.
+
+    ``None``, the ``Missing`` singleton, a store's explicit NULL, or a marked
+    reader wire cell (:class:`WireCell`) holding a NULL marker. A plain string is
+    a value whatever it spells: a key whose text really is ``__DF_SQL_NULL__``
+    is that key (review F1). Readers that hand plain wire strings mark them
+    (``reader_wire_cell``) so their NULLs stay recognizable.
+    """
+    if value is None or value is Missing or value is EXPLICIT_NULL:
+        return True
+    return isinstance(value, WireCell) and str(value) in NULL_WIRE_SENTINELS
+
+
 def is_reader_null_cell(value: Any) -> bool:
     """Reader-wired SQL NULL / Missing — not empty or whitespace text.
 

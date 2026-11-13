@@ -2128,8 +2128,8 @@ class PostgreSqlChangeStreamCdc:
                             (change.relation or "").lower(), change.relation or self.table
                         )
                         pk = self._pk_value(change.old_tuple, table=tbl)
-                        # An unkeyed delete is refused by the buffer, not skipped.
-                        buf.delete(tbl, pk, lsn=lsn)
+                        # An unkeyed delete is parked with its image (C2), never skipped.
+                        buf.delete(tbl, pk, lsn=lsn, row=change.old_tuple)
         else:
             for location, line in rows:
                 lsn = str(location) if location else None
@@ -2176,7 +2176,7 @@ class PostgreSqlChangeStreamCdc:
                     buf.update(tbl, new_tuple, pk=pk or None, lsn=lsn, old_pk=old or None)
                 elif op == "delete" and old_key:
                     pk = self._pk_value(old_key, table=tbl)
-                    buf.delete(tbl, pk, lsn=lsn)
+                    buf.delete(tbl, pk, lsn=lsn, row=old_key)
 
         if buf.open_xid is not None:
             if not buf.explicit_txn:

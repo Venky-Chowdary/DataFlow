@@ -847,7 +847,8 @@ export function engineStampedRiskChip(m: EditableMapping): {
   if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast") {
     return {
       label: fidelity === "lossy_cast" ? "lossy" : fidelity === "mutate" ? "mutate" : "cast",
-      detail: m.fidelityReason || `${m.inferredType || "?"} → ${m.destType || "?"}`,
+      detail: m.fidelityReason
+        || `${m.inferredType || `${m.source}'s value`} → ${m.destType || "the destination column's type"}`,
       severity: fidelity === "lossy_cast" ? "block" : "warn",
     };
   }

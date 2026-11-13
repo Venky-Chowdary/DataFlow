@@ -237,6 +237,34 @@ def note_rows_checked(mappings: Sequence[Any] | None, first_row: int, rows: int)
                 _ROWS[key] = _ROWS.get(key, 0) + int(rows)
 
 
+#: job id -> {(table, column): rows} an earlier pass of the job checked for a table this pass skipped
+#: because that pass finished it (C5): the proof is carried, never counted as this pass's writing.
+_CARRIED: OrderedDict[str, dict[tuple[str, str], int]] = OrderedDict()
+
+
+def checked_for_table(job_id: str, table: str) -> dict[str, int]:
+    """Rows checked so far in this job for each enforced column of ``table`` (case-insensitive)."""
+    want = str(table or "").strip().lower()
+    with _LOCK:
+        return {k[2]: int(v) for k, v in _ROWS.items()
+                if k[0] == job_id and str(k[1]).strip().lower() == want}
+
+
+def carry_checked(job_id: str, table: str, checked: Mapping[str, Any] | None) -> None:
+    """Carry an earlier pass's per-column check counts for a table this pass did not write."""
+    if not job_id or not isinstance(checked, Mapping) or not checked:
+        return
+    with _LOCK:
+        carried = _CARRIED.setdefault(job_id, {})
+        for column, rows in checked.items():
+            try:
+                carried[(str(table), str(column))] = int(rows or 0)
+            except (TypeError, ValueError):
+                continue
+        while len(_CARRIED) > _MAX_TRACKED:
+            _CARRIED.popitem(last=False)
+
+
 def note_prescan(job_id: str, rows: int, seconds: float) -> None:
     """The pre-write scan read ``rows`` source rows in ``seconds`` for ``job_id`` (summed over its streams)."""
     with _LOCK:
@@ -275,11 +303,19 @@ def summary(job_id: str, *, forget: bool = True) -> dict[str, Any] | None:
         rows = [{"table": k[1], "column": k[2], "rows_checked": _ROWS[k]} for k in keys]
         scan = dict(_PRESCANS.get(job_id) or {})
         resumed = dict(_RESUMES.get(job_id) or {})
+        carried = dict(_CARRIED.get(job_id) or {})
         if forget:
             for k in keys:
                 _ROWS.pop(k, None)
             _PRESCANS.pop(job_id, None)
             _RESUMES.pop(job_id, None)
+            _CARRIED.pop(job_id, None)
+    for row in rows:
+        folded = (str(row["table"]).strip().lower(), str(row["column"]))
+        hit = next((n for (t, c), n in carried.items() if (t.strip().lower(), c) == folded), None)
+        if hit is not None:
+            # Checked by the earlier pass that wrote the table; this pass wrote none of it.
+            row["carried_from_earlier_pass"] = hit
     if not rows:
         return None
     out = {"enforced": True, "columns": sorted(rows, key=lambda r: (r["table"], r["column"]))}

@@ -197,6 +197,27 @@ def run_non_cdc_multi_stream_sequential(
                 return list(steps)
         return None
 
+    from services.multi_stream_resume import (
+        completed_streams,
+        forget_all_progress,
+        record_stream_completed,
+        skip_reason,
+    )
+
+    # C5: on a resume, tables an earlier pass of this job finished are not
+    # read again. A fresh run starts a new record (a reused job id must not
+    # inherit an earlier execution's progress).
+    from .resume_state import RESUMED_PASS_ATTR
+
+    if getattr(checkpoint, RESUMED_PASS_ATTR, False):
+        finished_before = completed_streams(str(job_id or ""))
+    else:
+        finished_before = {}
+        forget_all_progress(str(job_id or ""))
+    last_selected = (selected_list[-1].name or "").strip() if selected_list else ""
+    from services.multi_stream_undo import begin_undo_pass
+
+    begin_undo_pass(destination)  # C4: undo facts belong to this pass only
     total_rows = 0
     shaped_out = 0
     ddl_log: list[str] = [
@@ -298,6 +319,28 @@ def run_non_cdc_multi_stream_sequential(
             }
             fk_context.column_maps[stream_name] = context_map
 
+            prior = finished_before.get(stream_name.lower())
+            if prior and stream_name != last_selected:
+                # No ledger and no rows of this pass: an earlier pass of the job
+                # read and wrote the table (its ledger was judged then). Its rows
+                # are named as carried, never as written by this pass, and its
+                # reversibility checks travel with it.
+                from services.reversibility_enforce import carry_checked
+
+                carry_checked(
+                    str(job_id or ""), str(prior.get("table") or stream_name),
+                    prior.get("reversibility_checked"),
+                )
+                stream_health.append({
+                    "name": stream_name, "status": "completed", "records_processed": 0,
+                    # This pass's (empty) tally holds none of the checkpoint's rows.
+                    "resumed_checkpoint_rows": 0,
+                    "rows_from_earlier_pass": int(prior.get("rows") or 0),
+                    "resumed": skip_reason(prior), "sync_mode": prior.get("sync_mode"),
+                })
+                ddl_log.append(f"RESUME {stream_name}: {skip_reason(prior)}")
+                continue
+
             # Per-stream overwrite: drop remapped dest (outer engine skip when N>1).
             if should_drop_destination_for_sync(
                 request_sync_mode=sync_mode,
@@ -395,6 +438,19 @@ def run_non_cdc_multi_stream_sequential(
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
                 last_summary = summary
+                from services.multi_stream_undo import remember_stream_restore_point
+
+                remember_stream_restore_point(destination, stream_name, summary)
+                from services.reversibility_enforce import checked_for_table
+
+                record_stream_completed(
+                    str(job_id or ""), stream_name, rows=rows,
+                    sync_mode=str(summary.get("sync_mode") or sync_mode),
+                    table=str((summary or {}).get("table") or ""),
+                    reversibility_checked=checked_for_table(
+                        str(job_id or ""), str((summary or {}).get("table") or stream_name)
+                    ),
+                )
                 last_stream_mappings = list(use_mappings or [])
                 _publish_stream_written(job_id, stream_name, rows)
                 shaped_out += int((summary or {}).get("rows_shaped_out") or 0)
@@ -407,6 +463,20 @@ def run_non_cdc_multi_stream_sequential(
                 # still names it; the engine's settle would put the backup on
                 # the request's table instead (and leave this one empty).
                 _settle_stream_overwrite(destination, restore=True)
+                # C4: undo every table this run reached before the failing one,
+                # each against its own pre-run facts (the failing stream already
+                # undid its own batch).
+                from services.multi_stream_undo import note_failed_multi_stream
+                from .adapters import resolve_dest_table
+
+                note_failed_multi_stream(
+                    exc, destination, sync_mode=sync_mode, job_id=str(job_id or ""),
+                    failed_table=str(
+                        resolve_dest_table(
+                            str(getattr(destination, "format", "") or ""), destination, stream_name
+                        ) or ""
+                    ),
+                )
                 record_stream_health(
                     stream_health,
                     name=stream_name,
@@ -429,6 +499,9 @@ def run_non_cdc_multi_stream_sequential(
                 records_processed=rows,
                 summary=summary,
                 extra={
+                    # The table this stream wrote: Gate-8's NULL-marker check
+                    # probes each one, not only the last (review F4).
+                    "table": summary.get("table"),
                     "watermark": summary.get("watermark"),
                     "sync_mode": summary.get("sync_mode")
                     or resolve_effective_sync_mode(
@@ -452,6 +525,10 @@ def run_non_cdc_multi_stream_sequential(
                 count_source=source_patch is None,
             )
         streams_ok = True
+        # Every table finished: the job has no unfinished pass for a resume to
+        # continue, so a later resume reads every table again (C5 skips only
+        # tables of an interrupted pass).
+        forget_all_progress(str(job_id or ""))
     finally:
         if (
             run_session_after

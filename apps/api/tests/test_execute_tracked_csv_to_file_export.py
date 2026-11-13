@@ -71,8 +71,12 @@ def test_csv_to_csv_export():
 
 
 def test_csv_to_csv_export_with_output_path():
+    from services.export_paths import exports_dir
+
+    # "exports/<name>" names a file in the configured exports folder
+    # (DATAFLOW_EXPORTS_DIR in tests), never the source tree's apps/api/exports.
     out_path = "exports/test_output_path.csv"
-    out_file = Path(_API_ROOT) / out_path
+    out_file = exports_dir(create=False) / "test_output_path.csv"
     csv_content = b"id,name\n1,alice\n2,bob\n"
     try:
         request = TransferRequest(

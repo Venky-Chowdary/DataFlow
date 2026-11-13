@@ -207,15 +207,24 @@ def compare_row_sets(
 
 
 def _as_dicts(headers: list[str], rows: list[Any]) -> list[dict[str, Any]]:
+    """ReadBatch rows as dicts of *marked* wire cells.
+
+    The rows are wire by the reader contract (NULL is ``__DF_SQL_NULL__``). The
+    drift repair hands them back to the CDC apply as change records, which
+    encodes every unmarked cell once: unmarked, a NULL key was escaped into the
+    text ``__DF_SQL_NULL__`` and written to the destination.
+    """
+    from services.value_serializer import reader_wire_cell
+
     out: list[dict[str, Any]] = []
     for row in rows:
         if isinstance(row, dict):
-            out.append(row)
+            out.append({k: reader_wire_cell(v) for k, v in row.items()})
             continue
         cells = list(row)
         out.append(
             {
-                headers[i]: cells[i] if i < len(cells) else None
+                headers[i]: reader_wire_cell(cells[i]) if i < len(cells) else None
                 for i in range(len(headers))
             }
         )

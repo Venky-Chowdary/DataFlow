@@ -580,6 +580,7 @@ def combine_change_batch(change: Any, *, pk_cols: list[str]) -> Any:
         table=getattr(change, "table", None),
         ack_barrier=bool(getattr(change, "ack_barrier", True)),
         lookup_columns=getattr(change, "lookup_columns", None) or {},
+        unkeyed_deletes=list(getattr(change, "unkeyed_deletes", None) or []),
     )
 
 

@@ -174,6 +174,20 @@ def refuse_unorderable_text_cursor(cfg: Any, scope: Any, catalog: tuple | None, 
         from services.source_duplicate_probe import is_sqlish_source
 
         src_cfg, db_type = _resolve_source_cfg("", dict(cfg.src_cfg or {}), None)
+        mongo_reason = ""
+        if src_cfg and str(db_type or "").lower() in {"mongodb", "mongo"}:
+            # C6: a MongoDB string field is ordered as text too.
+            from services.mongo_cursor_order import probe_mongo_text_cursor
+
+            mongo_reason = probe_mongo_text_cursor(src_cfg, table, cfg.cursor_source_col)
+    except Exception as exc:  # noqa: BLE001 — unmeasured, not refused
+        logger.warning("text cursor ordering probe skipped: %s", exc)
+        return
+    if mongo_reason:
+        raise ValueError(mongo_reason)
+    if str(db_type or "").lower() in {"mongodb", "mongo"}:
+        return
+    try:
         if not src_cfg or not is_sqlish_source(db_type):
             return
         # The every-row scan runs on the route's first run, then only when

@@ -23,7 +23,7 @@ async def plan_reversibility(plan_id: str, request: Request):
     from services.transfer_plan_store import get_plan
     from services.workspace_access import assert_resource_workspace
 
-    plan = get_plan(plan_id)
+    plan = await asyncio.to_thread(get_plan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     assert_resource_workspace(request, plan.workspace_id or None, not_found_detail="Plan not found")

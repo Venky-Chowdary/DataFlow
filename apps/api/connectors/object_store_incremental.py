@@ -90,6 +90,7 @@ def prepare_incremental_export(
     conflict_columns: list[str] | None,
     spill_max_size: int,
     backup_put: Callable[[bytes], None] | None = None,
+    tsv_null: str = "empty",
 ) -> ObjectStoreExport:
     """Merge when this write would otherwise replace a populated key.
 
@@ -124,6 +125,7 @@ def prepare_incremental_export(
         conflict_columns=conflict_columns,
         strategy=strategy,
         spill_max_size=spill_max_size,
+        tsv_null=tsv_null,
     )
     if backup_put is not None:
         try:
@@ -148,22 +150,28 @@ def merge_object_bytes(
     conflict_columns: list[str] | None,
     strategy: str,
     spill_max_size: int,
+    tsv_null: str = "empty",
 ) -> ObjectStoreExport:
-    """Return a new export that contains the prior rows plus this batch."""
+    """Return a new export that contains the prior rows plus this batch.
+
+    ``tsv_null="\\N"``: the object and this batch are TSV in the opt-in text
+    NULL convention (G7-F3); a re-encoded merge is written in it again.
+    """
     new_bytes = new_export.read_all()
     content_type = str(new_export.content_type or "application/json")
     fmt = resolve_object_store_export_format(key) or "json"
     if strategy == "concat":
         spliced = _concat_bytes(fmt, existing, new_bytes)
         if spliced is None:
-            prior = _parse_records(key, existing)
-            incoming = _parse_records(key, new_bytes)
+            prior = _parse_records(key, existing, tsv_null)
+            incoming = _parse_records(key, new_bytes, tsv_null)
             spliced = _encode_records(
                 key,
                 prior + incoming,
                 target_cols,
                 dest_types,
                 spill_max_size,
+                tsv_null,
             )
             return spliced
         return _export_from_bytes(spliced, content_type, spill_max_size)
@@ -178,10 +186,10 @@ def merge_object_bytes(
             f"Object {key!r} incremental merge needs a primary key; "
             "the existing object was not replaced."
         )
-    prior = _parse_records(key, existing)
-    incoming = _parse_records(key, new_bytes)
+    prior = _parse_records(key, existing, tsv_null)
+    incoming = _parse_records(key, new_bytes, tsv_null)
     merged = _merge_by_key(prior, incoming, keys)
-    return _encode_records(key, merged, target_cols, dest_types, spill_max_size)
+    return _encode_records(key, merged, target_cols, dest_types, spill_max_size, tsv_null)
 
 
 def _concat_bytes(fmt: str, existing: bytes, new: bytes) -> bytes | None:
@@ -300,13 +308,13 @@ def _identity_text(value: Any) -> str | None:
     return text or None
 
 
-def _parse_records(key: str, body: bytes) -> list[dict[str, Any]]:
+def _parse_records(key: str, body: bytes, tsv_null: str = "empty") -> list[dict[str, Any]]:
     fmt = resolve_object_store_export_format(key) or "json"
     raw = body.strip()
     if not raw:
         return []
     try:
-        records = _parse_records_as_stored(fmt, key, raw, body)
+        records = _parse_records_as_stored(fmt, key, raw, body, tsv_null)
     except ObjectMergeRefused:
         raise
     except Exception as exc:
@@ -327,14 +335,18 @@ def _parse_records(key: str, body: bytes) -> list[dict[str, Any]]:
 
 
 def _parse_records_as_stored(
-    fmt: str, key: str, raw: bytes, body: bytes
+    fmt: str, key: str, raw: bytes, body: bytes, tsv_null: str = "empty"
 ) -> list[dict[str, Any]] | None:
     if fmt == "json":
         return _parse_json(raw, key)
     if fmt == "jsonl":
         return _parse_jsonl(raw, key)
     if fmt in {"csv", "tsv"}:
-        return _parse_delimited(body, "\t" if fmt == "tsv" else ",", key)
+        from services.export_dialect import tsv_null_marker
+
+        # G7-F3: in the ``\\N`` convention an unquoted empty cell is '' (kept).
+        keep = fmt == "tsv" and bool(tsv_null_marker(fmt, tsv_null))
+        return _parse_delimited(body, "\t" if fmt == "tsv" else ",", key, "keep" if keep else "null")
     if fmt == "parquet":
         return _parse_parquet(body, key)
     if fmt == "excel":
@@ -369,13 +381,13 @@ def _parse_jsonl(raw: bytes, key: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _parse_delimited(body: bytes, delimiter: str, key: str) -> list[dict[str, Any]]:
+def _parse_delimited(body: bytes, delimiter: str, key: str, empty_cell: str = "null") -> list[dict[str, Any]]:
     from services.csv_codec import iter_csv_records
 
     text = body.decode("utf-8-sig")
     # newline="" — the csv module requires it; the default universal-newlines
     # mode would fold CR/CRLF inside quoted fields to LF on read (D108).
-    reader = iter_csv_records(io.StringIO(text, newline=""), delimiter)
+    reader = iter_csv_records(io.StringIO(text, newline=""), delimiter, empty_cell=empty_cell)
     header = next(reader, None)
     if not header:
         raise ObjectMergeRefused(
@@ -427,6 +439,7 @@ def _encode_records(
     target_cols: list[str],
     dest_types: dict[str, str] | None,
     spill_max_size: int,
+    tsv_null: str = "empty",
 ) -> ObjectStoreExport:
     from connectors.object_store_common import serialize_object_store_export
 
@@ -438,6 +451,7 @@ def _encode_records(
         target_cols=cols,
         dest_types=dest_types,
         spill_max_size=spill_max_size,
+        tsv_null=tsv_null,
     )
 
 

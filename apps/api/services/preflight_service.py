@@ -2482,6 +2482,12 @@ def run_file_preflight(
     if scan_method:
         code_crosswalk["scan_method"] = scan_method
     out["code_crosswalk"] = code_crosswalk
+    from services.run_clock import run_timestamp_target_gate  # a run start needs a zone
+
+    run_ts_gate = run_timestamp_target_gate(shape_recipe, mappings, destination_column_types)
+    if run_ts_gate:
+        contract_gates = [*contract_gates, run_ts_gate]
+        contract_blockers = [*contract_blockers, {k: run_ts_gate[k] for k in ("id", "message", "details")}]
     contract_gates = [*contract_gates, crosswalk_gate]
     if crosswalk_gate.get("status") == "block":
         contract_blockers = [

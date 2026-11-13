@@ -76,6 +76,35 @@ def writer_extra_kwargs(
     }
 
 
+_FILE_WRITER_OPTIONS = ("tsv_null", "formula_protection", "file_format")
+
+
+def file_writer_dest_extra(cfg: dict[str, Any], dest: Any = None) -> dict[str, Any]:
+    """The ``dest_extra`` a file-like writer (S3/GCS/ADLS/SFTP/email) receives.
+
+    The saved connector's nested ``extra`` overlaid with the run's inline
+    ``dest.extra``, plus the writer options :func:`resolve_connector_config`
+    flattened onto ``cfg`` (``tsv_null``, ``formula_protection``,
+    ``file_format``). Gate-8 reads ``tsv_null`` from that same ``cfg``, so the
+    writer and the read-back can never disagree on the TSV NULL convention
+    (review H2: the S3/GCS/ADLS stream writers got no ``dest_extra`` at all).
+    """
+    saved = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    raw = getattr(dest, "extra", None)
+    # A blank writer option (None / "") is "not set" — the same rule Gate-8's
+    # tsv_null_from applies — so it never masks a saved connector's value on the
+    # write side while the read-back still honours it.
+    inline = {
+        k: v for k, v in (raw.items() if isinstance(raw, dict) else ())
+        if not (k in _FILE_WRITER_OPTIONS and (v is None or not str(v).strip()))
+    }
+    merged = {**saved, **inline}
+    for key in _FILE_WRITER_OPTIONS:
+        if not merged.get(key) and cfg.get(key):
+            merged[key] = cfg[key]
+    return merged
+
+
 def _route_wide_writer_kwargs(cfg: dict[str, Any], dest: Any) -> dict[str, Any]:
     """Writer kwargs every driver needs, on every path.
 

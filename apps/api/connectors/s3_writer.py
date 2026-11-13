@@ -291,6 +291,8 @@ def write_mapped_rows(
                 client=client,
             )
             _backup_clear()
+            from services.export_dialect import tsv_null_from
+
             export = prepare_incremental_export(
                 key=key,
                 export=export,
@@ -303,6 +305,7 @@ def write_mapped_rows(
                 dest_types=dest_types,
                 conflict_columns=conflict_columns,
                 spill_max_size=resolve_spill_max(extra),
+                tsv_null=tsv_null_from(extra),  # G7-F3
                 backup_put=_backup_put,
             )
         except ObjectMergeRefused as exc:

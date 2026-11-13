@@ -25,6 +25,8 @@ def write_destination_file(
     job's file is data, byte-exact) or ``"prefix"`` (CSV/TSV text cells that
     would open as a spreadsheet formula get a leading ``'``; see
     ``services.csv_safety``). Human-download callers pass ``"prefix"``.
+    ``endpoint.extra["tsv_null"]``: ``"empty"`` (default) or ``"\\N"`` — a TSV
+    then spells NULL ``\\N`` and ``''`` as an empty cell (G7-F3).
     """
     import sys
     from pathlib import Path
@@ -50,6 +52,13 @@ def write_destination_file(
         )
         == "prefix"
         and fmt in {"csv", "tsv"}
+    )
+    from services.export_dialect import tsv_null_marker
+
+    # G7-F3: opt-in MySQL/PostgreSQL text NULL convention for a TSV (``\\N``);
+    # unset keeps the export dialect (NULL empty, '' quoted). Refused on non-TSV.
+    null_marker = tsv_null_marker(
+        fmt, (endpoint.extra if isinstance(endpoint.extra, dict) else {}).get("tsv_null")
     )
     src_fmt = (source_format or fmt).lower()
     if src_fmt == "ndjson":
@@ -186,6 +195,9 @@ def write_destination_file(
         if guard_formulas:
             # Gate-8 reads the guarded cells back to the exact values sent.
             out["formula_protection"] = "prefix"
+        if null_marker:
+            # Gate-8 and the readers read the file back in the same NULL convention.
+            out["tsv_null"] = null_marker
         return out
 
     def _export_header_cells() -> list[str]:
@@ -274,7 +286,9 @@ def write_destination_file(
         # Header names come from data: the formula guard ("prefix") covers them too.
         lines = [format_written_row(_export_header_cells(), delimiter)]
         lines += [
-            format_written_row([_export_delimited_cell(r.get(c), c) for c in export_columns], delimiter)
+            format_written_row(
+                [_export_delimited_cell(r.get(c), c) for c in export_columns], delimiter, null_marker=null_marker
+            )
             for r in export_records
         ]
         content = ("\r\n".join(lines) + "\r\n").encode("utf-8")
