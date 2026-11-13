@@ -26,6 +26,18 @@ import pytest
 _API = Path(__file__).resolve().parents[1]
 
 
+def _nested_env(**extra: str) -> dict[str, str]:
+    """The environment of a nested pytest run: never a CI shard selection.
+
+    Under CI ``DATAFLOW_TEST_SHARD=i/6`` a one-file collection always hashes
+    to one shard, so on every other shard the inner test was deselected
+    (exit 5, "1 deselected"; the same as PR 423's 16d0180cd).
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k not in {"DATAFLOW_TEST_SHARD", "DATAWRAP_TEST_SHARD"}}
+    return {**env, "PYTHONPATH": str(_API), **extra}
+
+
 def _conn():
     import psycopg2
 
@@ -109,7 +121,7 @@ def test_sigterm_mid_run_still_drops_the_slot(tmp_path: Path):
             conn.commit()
             time.sleep(120)  # killed here, before any teardown of its own
     """))
-    env = {**os.environ, "PYTHONPATH": str(_API)}
+    env = _nested_env()
     proc = subprocess.Popen(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p",
          "tests.pg_slot_guard", str(test_file), "--rootdir", str(tmp_path),
@@ -188,7 +200,7 @@ def test_session_end_never_drops_another_sessions_slots(tmp_path: Path):
         cur = conn.cursor()
         for name in foreign:  # another session's idle slots (raw SQL: untracked here)
             cur.execute("SELECT pg_create_logical_replication_slot(%s, 'pgoutput')", (name,))
-        env = {**os.environ, "PYTHONPATH": str(_API)}
+        env = _nested_env()
         done = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
              "tests/test_pg_slot_guard.py::test_a_fake_cursor_records_nothing",
@@ -225,7 +237,7 @@ def _killed_session(tmp_path: Path, name: str, ledger_dir: Path) -> None:
             conn.close()
             os.kill(os.getpid(), signal.SIGKILL)  # no finally, no session end
     """))
-    env = {**os.environ, "PYTHONPATH": str(_API), "DATAFLOW_TEST_SLOT_LEDGER": str(ledger_dir)}
+    env = _nested_env(DATAFLOW_TEST_SLOT_LEDGER=str(ledger_dir))
     subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p",
          "tests.pg_slot_guard", str(test_file), "--rootdir", str(tmp_path),

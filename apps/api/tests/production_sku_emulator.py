@@ -19,6 +19,10 @@ from typing import Any
 def run_production_sku_emulator_honesty(*, timeout_s: int = 1800) -> dict[str, Any]:
     api_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
+    # A CI shard selection would split the two files across shards and run
+    # only part of the honesty pair in this nested session.
+    env.pop("DATAFLOW_TEST_SHARD", None)
+    env.pop("DATAWRAP_TEST_SHARD", None)
     env["PYTHONPATH"] = os.pathsep.join(
         [
             str(api_root),
