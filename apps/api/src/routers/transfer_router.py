@@ -1038,10 +1038,25 @@ async def preflight_transfer_plan(
 @router.post("/plans/{plan_id}/approve")
 async def approve_transfer_plan(plan_id: str, version: Optional[int] = None):
     from services.transfer_plan_service import approve_plan
+    from services.transfer_plan_store import UnknownPlanVersion
 
     try:
         plan = await run_plan_write(approve_plan, plan_id, version)
         return {"plan": plan.to_dict()}
+    except UnknownPlanVersion as e:
+        have = (
+            f"Its mapping revisions are {e.versions[0]} to {e.versions[-1]}."
+            if e.versions
+            else "It has no mapping revision yet: run Map or save mappings first."
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "unknown_plan_version",
+                "message": f"This plan has no mapping revision {e.version}. {have}",
+                "version": e.version,
+            },
+        ) from e
     except ValueError as e:
         raise safe_http_exception(
             e,

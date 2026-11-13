@@ -94,6 +94,17 @@ def _backup_path(path: Path) -> Path:
     return path.with_name(path.name + ".bak")
 
 
+class UnknownPlanVersion(LookupError):
+    """An operation named a mapping revision the plan does not have."""
+
+    def __init__(self, plan_id: str, version: int, versions: list[int]) -> None:
+        self.plan_id = plan_id
+        self.version = version
+        self.versions = versions
+        have = f"its revisions are {versions[0]}..{versions[-1]}" if versions else "it has no revisions"
+        super().__init__(f"Plan {plan_id} has no mapping revision {version} ({have})")
+
+
 class PlanStoreReentry(RuntimeError):
     """A plan-store write was started inside another on the same thread.
 
@@ -626,10 +637,9 @@ def add_preflight_run(
             "mapping_hash": digest,
         }
         plan.preflight_runs.append(run)
-        still_active = (
-            version == plan.active_version
-            and (active.mapping_hash if active else "") == digest
-        )
+        # The revision Execute would run now: active_revision() falls back to the
+        # newest one when active_version names none (legacy / stale data).
+        still_active = active is not None and active.version == version and active.mapping_hash == digest
         if still_active:
             plan.status = "preflight_passed" if run["passed"] else "preflight_failed"
         plan.updated_at = _now()
@@ -736,8 +746,24 @@ def sync_ui_mappings(
 
 
 def approve_plan_version(plan_id: str, version: int | None = None) -> TransferPlanRecord | None:
+    """Approve ``version`` (default: the active revision) and make it active.
+
+    An explicit version the plan has no revision for raises
+    :class:`UnknownPlanVersion` and nothing is written: approving it would
+    leave ``active_version`` naming nothing, and Execute would silently run
+    another revision.
+    """
+
     def change(plan: TransferPlanRecord) -> None:
-        target_version = version or plan.active_version
+        if version:
+            target_version = int(version)
+            if not any(rev.version == target_version for rev in plan.revisions):
+                raise UnknownPlanVersion(plan_id, target_version, [r.version for r in plan.revisions])
+        else:
+            # The revision Execute would run (a stale active_version falls back
+            # to the newest); a plan with none keeps 0, as before.
+            active = plan.active_revision()
+            target_version = active.version if active else plan.active_version
         for rev in plan.revisions:
             rev.approved = rev.version == target_version
         plan.active_version = target_version

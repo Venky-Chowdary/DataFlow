@@ -86,14 +86,14 @@ def test_a_preflight_run_of_the_still_active_revision_sets_the_status():
     assert plan.preflight_runs[-1]["mapping_version"] == 1
 
 
-def _run_validate(plan_id: str, during=None) -> dict:
+def _run_validate(plan_id: str, during=None, passed: bool = True) -> dict:
     """run_plan_preflight with the engines stubbed; ``during`` runs mid-Validate."""
     from services.transfer_plan_service import run_plan_preflight
 
     def fake_file_preflight(**_kw):
         if during:
             during()
-        return {"passed": True, "passed_count": 1, "total_gates": 1, "gates": [], "blockers": []}
+        return {"passed": passed, "passed_count": 1, "total_gates": 1, "gates": [], "blockers": []}
 
     with patch("services.transfer_plan_service._preflight") as engines, patch(
         "src.transfer.adapters.read_source_database", side_effect=Exception("skip")
@@ -260,3 +260,60 @@ def test_the_request_model_documents_what_base_version_is_compared_with():
 
     text = SyncMappingsRequest.model_fields["base_version"].description
     assert "revisions" in text and "doc_version" in text and "409" in text
+
+
+# ---------------------------------------------------------------------------
+# active_version that names no revision (legacy data) / approving one
+# ---------------------------------------------------------------------------
+
+
+def test_validate_sets_the_status_when_active_version_names_no_revision(isolated_stores):
+    """A stale active_version falls back to the newest revision, which is what
+    Validate checks and Execute runs: its verdict must become the status."""
+    import json
+
+    from services import transfer_plan_store as store
+
+    plan_id = _plan()
+    sync_ui_mappings(plan_id, _maps("login"))
+    raw = json.loads(store.STORE_PATH.read_text())
+    raw["plans"][0]["active_version"] = 99  # legacy / hand-edited store
+    raw["plans"][0]["status"] = "approved"
+    store.STORE_PATH.write_text(json.dumps(raw))
+
+    _run_validate(plan_id, passed=False)
+    plan = get_plan(plan_id)
+    assert plan.preflight_runs[-1]["mapping_version"] == 2
+    assert plan.status == "preflight_failed"
+
+
+def test_approving_a_version_that_does_not_exist_is_refused():
+    from services.transfer_plan_store import UnknownPlanVersion, approve_plan_version
+
+    plan_id = _plan()
+    before = get_plan(plan_id)
+    with pytest.raises(UnknownPlanVersion):
+        approve_plan_version(plan_id, 99)
+    after = get_plan(plan_id)
+    assert (after.active_version, after.status, after.doc_version) == (
+        before.active_version, before.status, before.doc_version
+    )
+
+
+def test_approve_route_answers_400_for_a_version_that_does_not_exist():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.routers import transfer_router
+
+    plan_id = _plan()
+    app = FastAPI()
+    app.include_router(transfer_router.router, prefix="/api/v1")
+    client = TestClient(app)
+    res = client.post(f"/api/v1/transfer/plans/{plan_id}/approve", params={"version": 99})
+    assert res.status_code == 400, res.text
+    assert "99" in res.text and "revision" in res.text
+    assert get_plan(plan_id).status == "mapped"
+    ok = client.post(f"/api/v1/transfer/plans/{plan_id}/approve", params={"version": 1})
+    assert ok.status_code == 200, ok.text
+    assert get_plan(plan_id).status == "approved"
