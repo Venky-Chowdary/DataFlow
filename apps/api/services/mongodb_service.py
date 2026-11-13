@@ -1314,7 +1314,9 @@ class MongoDBService:
         self._ensure_naming_history_indexes(jobs)
         obj = str(destination_object)
         query = {"$and": [
-            {"workspace_id": str(workspace_id or "")},
+            # A missing / null / blank workspace_id is "no workspace" here too
+            # (D218 rows), exactly as the memory store reads it (re-check F2).
+            WorkspaceFilter.only(str(workspace_id or "")).mongo_query(),
             {"$or": [{"destination_collection": obj}, {"naming.object": obj}]},
             {"$or": [{"records_processed": {"$gt": 0}},
                      {"status": {"$in": sorted(COMPLETED_STATUSES)}}]},
@@ -2178,9 +2180,10 @@ class MemoryMongoDBService:
             return any(isinstance(n, dict) and n.get("object") == obj
                        for n in (job.get("naming") or []))
 
+        scope = WorkspaceFilter.only(str(workspace_id or ""))
         out = [
             dict(j) for j in list(self._jobs.values())
-            if str(j.get("workspace_id") or "") == str(workspace_id or "")
+            if scope.matches(j.get("workspace_id"))
             and (str(j.get("destination_collection") or "") == obj or stamped(j))
             and (int(j.get("records_processed") or 0) > 0 or j.get("status") in COMPLETED_STATUSES)
         ]
