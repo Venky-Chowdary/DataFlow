@@ -47,7 +47,9 @@ export function dndReduce(state: DndState, action: DndAction, targets: DndTarget
     if (n === 0) {
       return { state: IDLE, announce: `No destination columns to map ${action.source} onto.` };
     }
-    const over = clamp(action.startAt ?? 0, n);
+    // The keyboard starts on a column; a finger or mouse is over none until
+    // it reaches one (highlighting the first column would be a guess).
+    const over = action.via === "pointer" ? -1 : clamp(action.startAt ?? 0, n);
     return {
       state: { mode: "dragging", source: action.source, over, via: action.via },
       announce: action.via === "keyboard"

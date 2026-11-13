@@ -935,6 +935,7 @@ export function TransferMapStep({
               onUnmap={studio.unmapDestination}
               onFocusSource={focusSourceRow}
               dragOver={studio.dragOver}
+              followDrag={studio.dnd.mode === "dragging" && studio.dnd.via === "keyboard"}
               dragging={studio.dnd.mode === "dragging"}
               onPointerDrop={studio.pointerDrop}
               onPointerOver={studio.pointerOver}
