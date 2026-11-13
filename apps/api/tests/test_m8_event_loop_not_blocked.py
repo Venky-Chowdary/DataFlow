@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import importlib
 import json
 import os
+import threading
 import time
 
 import httpx
@@ -28,15 +30,32 @@ class _SlowStore:
         self.job = job
         self.delay = delay
         self.reads = 0
+        self._in_flight = 0
+        self._idle = threading.Condition()
+
+    def _wait(self) -> None:
+        with self._idle:
+            self._in_flight += 1
+        try:
+            time.sleep(self.delay)
+        finally:
+            with self._idle:
+                self._in_flight -= 1
+                self._idle.notify_all()
+
+    def drain(self, timeout: float = 10.0) -> bool:
+        """Wait until no read is still sleeping; True when none is."""
+        with self._idle:
+            return self._idle.wait_for(lambda: self._in_flight == 0, timeout=timeout)
 
     def get_job(self, _job_id):
         self.reads += 1
-        time.sleep(self.delay)
+        self._wait()
         return dict(self.job) if self.job else None
 
     def get_connector(self, _connector_id):
         self.reads += 1
-        time.sleep(self.delay)
+        self._wait()
         return {"_id": "c1", "id": "c1", "name": "pg", "type": "postgresql", "config": {}, "workspace_id": ""}
 
 
@@ -54,13 +73,54 @@ def app_and_store(monkeypatch):
     async def health():
         return {"status": "ok"}
 
-    return app, store
+    yield app, store
+    # The case cancels its slow request, but the handler's thread keeps sleeping
+    # in the store and then runs the rest of the route (and its first-call
+    # imports) inside the *next* case's timed window. Every case ends with its
+    # own store reads.
+    assert store.drain(), "a slow store read outlived its case"
+
+
+class _CollectorPauses:
+    """Seconds the garbage collector stopped every thread while this is open.
+
+    A collection is the interpreter pausing the whole process, the event loop
+    included; it is not something a route did, so it is reported and not
+    charged to the route.
+    """
+
+    def __init__(self) -> None:
+        self.seconds = 0.0
+        self.count = 0
+        self._started = 0.0
+
+    def _callback(self, phase: str, _info: dict) -> None:
+        if phase == "start":
+            self._started = time.perf_counter()
+        else:
+            self.seconds += time.perf_counter() - self._started
+            self.count += 1
+
+    def __enter__(self) -> _CollectorPauses:
+        gc.collect()  # start from a collected heap: no backlog lands in the window
+        gc.callbacks.append(self._callback)
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        gc.callbacks.remove(self._callback)
 
 
 async def _health_latency_while(app: FastAPI, slow_path: str) -> tuple[float, bool]:
     """Seconds /health took while ``slow_path`` was in flight, and whether it still was."""
+    from services.route_table_warmup import warm_route_table
+
+    # What the API's startup does (an ASGI transport runs no lifespan): /health
+    # is declared after the router, so its first request would build the
+    # router's lazily materialised routes on the loop.
+    warm_route_table(app)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.get("/health")
 
         async def slow() -> None:
             async with client.stream("GET", slow_path) as response:
@@ -93,10 +153,16 @@ async def _health_latency_while(app: FastAPI, slow_path: str) -> tuple[float, bo
 )
 def test_slow_store_call_does_not_stall_an_unrelated_request(app_and_store, slow_path):
     app, _store = app_and_store
-    elapsed, still_running = asyncio.run(_health_latency_while(app, slow_path))
+    with _CollectorPauses() as paused:
+        elapsed, still_running = asyncio.run(_health_latency_while(app, slow_path))
     assert still_running, "the slow request finished too early for the test to mean anything"
-    assert elapsed < 0.1 + SLOW_SECONDS / 2, (
-        f"/health took {elapsed:.2f}s while {slow_path} waited on the store: the event loop was blocked"
+    others = sorted(t.name for t in threading.enumerate() if t is not threading.main_thread())
+    # A route that reads the store on the loop holds it for SLOW_SECONDS: the
+    # bar is half of that, after the collector's whole-process pauses.
+    assert elapsed - paused.seconds < 0.1 + SLOW_SECONDS / 2, (
+        f"/health took {elapsed:.2f}s while {slow_path} waited on the store: the event loop was blocked "
+        f"(collector paused {paused.seconds:.2f}s in {paused.count} collections; "
+        f"{len(others)} other threads: {', '.join(others)[:400]})"
     )
 
 
