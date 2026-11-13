@@ -60,9 +60,10 @@ async function stubConflict(page: Page): Promise<SaveLog> {
     saved.active_version = 3;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ plan: saved }) });
   });
-  // GET the plan (the comparison); POST /transfer/plans stays the hermetic stub.
+  // GET the plan (the comparison) and PATCH it (Validate re-persists the plan
+  // settings); POST /transfer/plans stays the hermetic stub.
   await page.route(/\/api\/v1\/transfer\/plans\/[^/?]+$/, async (route) => {
-    if (route.request().method() !== "GET") return route.fallback();
+    if (!["GET", "PATCH"].includes(route.request().method())) return route.fallback();
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ plan: latest }) });
   });
   return saves;
@@ -141,7 +142,7 @@ test.describe("plan conflict (PS-26)", () => {
     await expect(page.locator(".dt-toast", { hasText: "Your mappings were saved" }).first()).toBeVisible();
   });
 
-  test("Use latest puts the latest revision in the editor without saving", async ({ page }) => {
+  test("Use latest puts revision 2 in the editor: the next save sends its mappings on base 2", async ({ page }) => {
     const saves = await stubConflict(page);
     await walkToValidate(page);
     const d = dialog(page);
@@ -150,5 +151,77 @@ test.describe("plan conflict (PS-26)", () => {
     await expect(d).toBeHidden();
     await expect(page.locator(".dt-toast", { hasText: "Showing revision 2" }).first()).toBeVisible();
     expect(saves).toHaveLength(1);
+
+    // What the editor now holds is what the next Validate saves: revision 2's
+    // mappings (status fed by customer_email), on base 2.
+    const save = page.waitForRequest((r: Request) => r.url().includes("/mappings") && r.method() === "POST");
+    await page.getByRole("button", { name: /Run preflight|Re-run Validate/ }).first().click();
+    const sent = (await save).postDataJSON() as SaveLog[number];
+    expect(sent.base_version).toBe(2);
+    expect(sent.mappings.find((m) => m.target === "status")?.source).toBe("customer_email");
+  });
+
+  test("Approve meets a newer active revision: nothing is approved, the comparison opens", async ({ page }) => {
+    const latest = latestPlan();
+    await page.route(/\/api\/v1\/transfer\/plans\/[^/?]+$/, async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ plan: latest }) });
+    });
+    const approvals: string[] = [];
+    await page.route("**/api/v1/transfer/plans/*/approve*", async (route) => {
+      approvals.push(route.request().url());
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: { code: "plan_version_conflict", message: "x", base_version: 1, current_version: 2, compared: "active" },
+        }),
+      });
+    });
+    await walkToValidate(page);
+    const d = dialog(page);
+    await expect(d).toBeVisible({ timeout: 30_000 });
+    await expect(d).toContainText("Nothing was approved");
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatch(/expected_version=1$/);
+    await d.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByTestId("validate-plan-conflict")).toContainText("nothing was approved");
+  });
+
+  test("Execute meets a newer revision: the run does not start, the comparison opens", async ({ page }) => {
+    const latest = latestPlan();
+    await page.route(/\/api\/v1\/transfer\/plans\/[^/?]+$/, async (route) => {
+      if (!["GET", "PATCH"].includes(route.request().method())) return route.fallback();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ plan: latest }) });
+    });
+    const fixture = readFileSync(join(FIXTURES, "plan_mappings.json"), "utf8");
+    let mappingSaves = 0;
+    await page.route("**/api/v1/transfer/plans/*/mappings*", async (route) => {
+      mappingSaves += 1;
+      if (mappingSaves === 1) {
+        await route.fulfill({ status: 200, contentType: "application/json", body: fixture });
+        return;
+      }
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: { code: "plan_version_conflict", message: "x", base_version: 1, current_version: 2, compared: "head" },
+        }),
+      });
+    });
+    const runs: string[] = [];
+    await page.route("**/api/v1/transfer/run*", async (route) => {
+      runs.push(route.request().url());
+      await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+    });
+    await walkToValidate(page);
+    const execute = page.getByRole("button", { name: /^Execute\b|Run transfer/ }).first();
+    await expect(execute).toBeEnabled({ timeout: 30_000 });
+    await execute.click();
+    const d = dialog(page);
+    await expect(d).toBeVisible({ timeout: 30_000 });
+    await expect(d).toContainText("The transfer did not start");
+    expect(runs).toHaveLength(0);
   });
 });
