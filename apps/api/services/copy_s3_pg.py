@@ -29,9 +29,8 @@ from services.copy_s3_common import (
     s3_client,
     s3_dest_count,
     s3_ext,
-    s3_file_has_legacy_null,
-    s3_file_has_quote,
     s3_list_keys,
+    scan_delimited_file,
 )
 from services.copy_sql_pairs import pg_ident as _pg_ident
 
@@ -180,12 +179,14 @@ def copy_s3_to_postgres(
             os.close(fd)
             tmp_paths.append(tmp_path)
             client.download_file(bucket, src_key, tmp_path)
-            if s3_file_has_legacy_null(tmp_path):
+            # One streaming pass for every byte-level decline (G7 F-a).
+            scan = scan_delimited_file(tmp_path, "\t" if ext == "tsv" else ",")
+            if scan.legacy_null:
                 raise FastPathUnavailable(
                     f"source object {src_key!r} spells NULL as \\N; the row "
                     "path's CSV codec reads it (COPY's CSV NULL is the empty field)"
                 )
-            if ext == "tsv" and s3_file_has_quote(tmp_path):
+            if ext == "tsv" and scan.quote:
                 # G7 B1: PG's CSV parser reads a mid-field '"' (raw in a
                 # product TSV) as a quote; the row path reads it literally.
                 raise FastPathUnavailable(

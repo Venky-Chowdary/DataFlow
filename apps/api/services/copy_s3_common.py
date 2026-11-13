@@ -394,11 +394,6 @@ def scan_delimited_file(
     )
 
 
-def s3_file_has_quote(path: str, *, chunk_size: int = 1 << 20) -> bool:
-    """True when the file holds any ``"`` (see ``DelimitedFileScan.quote``)."""
-    return scan_delimited_file(path, "\t", chunk_size=chunk_size).quote
-
-
 def s3_iter_delimited_rows(
     path: str,
     delimiter: str,
