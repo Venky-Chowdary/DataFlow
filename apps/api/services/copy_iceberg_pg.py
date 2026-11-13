@@ -219,9 +219,9 @@ def _arrow_from_iceberg_files(
                     "Iceberg S3 snapshot files require configured catalog S3 properties"
                 )
             try:
-                from pyiceberg.io import load_file_io
+                from connectors.iceberg_credential_guard import guarded_file_io
 
-                file_io = load_file_io(properties, location=str(uri))
+                file_io = guarded_file_io(properties, location=str(uri))
             except Exception as exc:
                 logger.warning(
                     "Iceberg S3 FileIO initialization failed (%s)",

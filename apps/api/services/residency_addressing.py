@@ -354,17 +354,33 @@ def family_of(fmt: str, url: str = "") -> tuple[str, Family]:
 # --------------------------------------------------------------------------- reading keys
 
 
-def _url_query(text: str) -> list[tuple[str, str]]:
+def url_query_pairs(text: str) -> list[tuple[str, str]]:
     """The URL's query as the driver layer reads it.
 
     SQLAlchemy's URL pattern takes everything after the first ``?`` as the
     query, a ``#`` included; ``urlparse`` would call ``#...`` a fragment and
     hide ``?a=b#&odbc_connect=...`` from this check (security review 5).
-    Reading the longer string can only add keys to judge."""
+    Reading the longer string can only add keys to judge.
+
+    SQLAlchemy starts the query after the database, so a ``?`` in the password
+    put the real keys inside the first split's first value
+    (``u:p?charset=a@h/db?unix_socket=/run/x``); the keys ``make_url`` reads are
+    judged as well (follow-up review 2, independent re-review)."""
     if "://" not in text or "?" not in text:
         return []
-    query = text.split("?", 1)[1]
-    return parse_qsl(query, keep_blank_values=True)
+    pairs = parse_qsl(text.split("?", 1)[1], keep_blank_values=True)
+    try:
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.exc import ArgumentError
+
+        query = make_url(text).query
+    except (ArgumentError, ValueError, TypeError):
+        return pairs
+    for key, value in query.items():
+        for item in value if isinstance(value, tuple) else (value,):
+            if (key, item) not in pairs:
+                pairs.append((key, item))
+    return pairs
 
 
 def _odbc_pairs(raw: str) -> list[tuple[str, str]] | None:
@@ -503,7 +519,7 @@ def _query_pairs(endpoint: Any) -> list[tuple[str, str, str]]:
             continue
         if text.lower().startswith("jdbc:"):
             text = text[5:]
-        for key, value in _url_query(text):
+        for key, value in url_query_pairs(text):
             found.append((name, key, value))
             if _norm_key(key) == "odbcconnect":
                 # SQLAlchemy's PyODBCConnector unquote_plus-es the value after

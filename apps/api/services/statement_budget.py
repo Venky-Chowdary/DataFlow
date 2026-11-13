@@ -154,6 +154,11 @@ def _on_do_connect(dialect: Any, _record: Any, cargs: Any, cparams: Any) -> Any:
     """
     if getattr(dialect, "name", "") != "oracle":
         return None
+    from connectors.tls_file_options import check_guarded_dial
+
+    # Runs before the engine's own listeners: a connector's wallet / config
+    # directory is checked here too (follow-up review 2, TLS files).
+    check_guarded_dial(dialect, cargs, cparams)
     _pin_oracle_thin_mode(dialect)
     from services.oracle_handshake_bound import connect_within_timeout
     from src.ai.copilot.tool_deadline import _progress, interruptible_connect

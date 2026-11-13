@@ -1220,6 +1220,9 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             connect_args=connect_args,
             **pool_settings(),
         )
+        from connectors.tls_file_options import guard_engine
+
+        guard_engine(engine)  # no TLS file on this host (follow-up review 2), before any dial
         if mysql_tls is not None:
             from sqlalchemy import event as _sa_event
 

@@ -1107,33 +1107,32 @@ def verify_redis_prefix(
 
 def verify_dynamodb_table(
     *,
-    connection_string: str,
-    database: str,
+    cfg: dict[str, Any],
     table_name: str,
-    username: str = "local",
-    password: str = "local",
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
-    """Reconcile a DynamoDB target by Scan count and item fingerprint."""
+    """Reconcile a DynamoDB target by Scan count and item fingerprint.
+
+    ``cfg`` is the writer's client config (``dynamodb_writer.dynamodb_client_cfg``):
+    the read-back is built like the write's client (endpoint, region, keys,
+    egress check), so it reads where the write went. It used to dial
+    ``connection_string or http://localhost:8000`` signing for us-east-1, so a
+    real-AWS table was "verified" against whatever answered locally. A client
+    that cannot be built or read reports ``(-1, "")``: not verified.
+    """
 
     from services.reconciliation import (
         canonical_checksum_from_iter,
     )
 
     try:
-        import boto3
         from boto3.dynamodb.types import TypeDeserializer
 
-        endpoint = connection_string or "http://localhost:8000"
-        client = boto3.client(
-            "dynamodb",
-            endpoint_url=endpoint,
-            aws_access_key_id=username.strip() or "local",
-            aws_secret_access_key=password.strip() or "local",
-            region_name="us-east-1",
-        )
+        from connectors.aws_common import boto3_client
+
+        client = boto3_client("dynamodb", cfg)
         paginator = client.get_paginator("scan")
         count = sum(
             page["Count"]

@@ -24,6 +24,8 @@ def dev_env(monkeypatch, tmp_path):
         "DATAFLOW_DUCKDB_ROOT", "DATAWRAP_DUCKDB_ROOT",
         "DATAWRAP_ENV", "DATAWRAP_DATA_DIR",
         "RAILWAY_ENVIRONMENT", "RAILWAY_SERVICE_ID",
+        # conftest declares the temp dir a source root; production confinement honours it.
+        "DATAFLOW_SOURCE_PATH_ROOTS", "DATAWRAP_SOURCE_PATH_ROOTS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "development")
