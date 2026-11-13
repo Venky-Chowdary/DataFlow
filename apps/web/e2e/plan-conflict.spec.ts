@@ -224,4 +224,47 @@ test.describe("plan conflict (PS-26)", () => {
     await expect(d).toContainText("The transfer did not start");
     expect(runs).toHaveLength(0);
   });
+
+  test("Map through the persisted plan meets a newer revision: Map stops, the comparison opens", async ({ page }) => {
+    // The Studio maps through /plans/{id}/map only when the plan is persisted
+    // and Map is not held to a transform image or known destination columns
+    // (TransferPage applyPipelineMappings: useDirect = mapTargetCols.length ||
+    // !persistedPlanId || transformed). With no recipe, the Transform step
+    // still publishes its identity image when the shape preview answers, so
+    // here the preview fails: no image, and Map after Validate (which
+    // persists the plan) goes through the plan.
+    await page.route("**/api/v1/shape/preview", async (route) => {
+      await route.fulfill({ status: 503, contentType: "application/json", body: '{"detail":"preview unavailable"}' });
+    });
+    const latest = latestPlan();
+    await page.route(/\/api\/v1\/transfer\/plans\/[^/?]+$/, async (route) => {
+      if (!["GET", "PATCH"].includes(route.request().method())) return route.fallback();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ plan: latest }) });
+    });
+    const maps: Array<{ client_request_id?: string }> = [];
+    await page.route("**/api/v1/transfer/plans/*/map", async (route) => {
+      maps.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: { code: "plan_version_conflict", message: "x", base_version: 1, current_version: 2, compared: "head" },
+        }),
+      });
+    });
+    await walkToValidate(page);
+    await expect(page.locator(".dt-toast", { hasText: /Preflight passed/ }).first()).toBeVisible({ timeout: 30_000 });
+    const seen: string[] = [];
+    page.on("request", (r) => { if (r.url().includes("/api/")) seen.push(`${r.method()} ${new URL(r.url()).pathname}`); });
+    await page.getByRole("button", { name: "4. Map" }).first().click();
+    const d = dialog(page);
+    await expect(d, `requests: ${JSON.stringify(seen)}`).toBeVisible({ timeout: 30_000 });
+    await expect(d).toContainText("Map's result was not saved");
+    expect(maps.length).toBeGreaterThan(0);
+    expect(maps[0].client_request_id).toMatch(/^map-/);
+    await d.getByRole("button", { name: "Cancel" }).click();
+    await expect(d).toBeHidden();
+    // Map's result was not stored and nothing replaced what is on screen.
+    await expect(page.getByText("Rows 1–5 of 5")).toBeVisible();
+  });
 });
