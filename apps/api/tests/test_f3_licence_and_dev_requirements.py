@@ -334,6 +334,35 @@ def test_the_gate_recognises_the_projects_own_packages_as_first_party() -> None:
     ).status == "first_party"
 
 
+def test_a_dependency_cannot_pass_as_first_party_by_its_name(tmp_path: Path) -> None:
+    # Review 6: first-party needs the scope the scanner gives only to the
+    # lockfile's own root / workspace paths (outside node_modules) and the
+    # repo's packages/*/pyproject.toml, not just a name on the list.
+    policy = scan.load_policy(REPO / "licence-policy.json")
+    lock = {
+        "lockfileVersion": 3,
+        "packages": {
+            "": {"name": "dataflow", "version": "0.1.0", "license": "UNLICENSED"},
+            # Same name and version as the root: must not be folded into it.
+            "node_modules/dataflow": {"version": "0.1.0", "license": "GPL-3.0"},
+            "node_modules/@dataflow/web": {"version": "6.6.6", "license": "AGPL-3.0"},
+        },
+    }
+    path = tmp_path / "package-lock.json"
+    path.write_text(json.dumps(lock), encoding="utf-8")
+    rows = [scan.classify(p, policy) for p in scan.scan_npm(path)]
+    own = [p for p in rows if p.scope == "first-party"]
+    assert [(p.name, p.status) for p in own] == [("dataflow", "first_party")]
+    spoofed = {p.name: p for p in rows if p.scope != "first-party"}
+    assert spoofed["dataflow"].status == "copyleft" and spoofed["@dataflow/web"].status == "copyleft"
+    problems = scan.violations(rows, policy)
+    assert any("npm:dataflow 0.1.0" in p for p in problems)
+    assert any("npm:@dataflow/web 6.6.6" in p for p in problems)
+    # The same goes for PyPI: an installed dist named like the repo's package.
+    pypi = scan.classify(scan.Package("pypi", "dataflow-preflight", "9.9", "GPL-3.0", "runtime", "classifier"), policy)
+    assert pypi.status == "copyleft"
+
+
 def test_notice_and_docs_point_at_the_licence() -> None:
     notice_text = (REPO / "NOTICE").read_text(encoding="utf-8")
     assert "Copyright (c) 2026 Venky Chowdary. All rights reserved." in notice_text

@@ -285,12 +285,15 @@ def scan_npm(lockfile: Path = LOCKFILE, node_modules: Path | None = None) -> lis
                 source if licence else "none",
             )
         )
-    # One row per name@version (the lockfile nests duplicates).
-    unique: dict[tuple[str, str], Package] = {}
+    # One row per name@version (the lockfile nests duplicates). A first-party
+    # row is kept apart, so a dependency with the same name and version is not
+    # folded into (and hidden behind) the repository's own package.
+    unique: dict[tuple[str, str, bool], Package] = {}
     for pkg in packages:
-        prior = unique.get((pkg.name, pkg.version))
+        key = (pkg.name, pkg.version, pkg.scope == "first-party")
+        prior = unique.get(key)
         if prior is None or (prior.scope == "dev" and pkg.scope == "runtime"):
-            unique[(pkg.name, pkg.version)] = pkg
+            unique[key] = pkg
     return list(unique.values())
 
 
@@ -318,6 +321,12 @@ def scan_first_party_python(repo: Path = REPO) -> list[Package]:
 
 
 def _first_party(pkg: Package, policy: dict[str, Any]) -> bool:
+    """The repository's own package: listed by name AND found where only the
+    repository's own packages are (scope "first-party": the lockfile's root /
+    workspace paths outside node_modules, or packages/*/pyproject.toml). A
+    dependency that merely shares the name is classified like any other."""
+    if pkg.scope != "first-party":
+        return False
     return pkg.name in set((policy.get("first_party") or {}).get(pkg.ecosystem) or [])
 
 
