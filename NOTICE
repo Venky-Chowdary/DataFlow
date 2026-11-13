@@ -313,9 +313,11 @@ Libraries bundled inside the shipped Python wheels
 manylinux wheels carry these native libraries in their <package>.libs/
 directory, or link them statically into an extension module (found by a
 best-effort scan for well-known version strings; scripts/bundled_libraries.py).
-For the LGPL/GPL ones the
-corresponding source is shipped in the image at /usr/share/doc/datawrap/third-party-source/
-(BUNDLED_LIBRARIES.json, MANIFEST.json, SHA256SUMS).
+For the LGPL/GPL ones the corresponding source is shipped in the image at
+/usr/share/doc/datawrap/third-party-source/ (BUNDLED_LIBRARIES.json, MANIFEST.json, SHA256SUMS),
+or, for the large GCC source, in the companion bundle <tag>-sources: the
+<image>:<tag>-sources image published with each release in the same registry
+(/usr/share/doc/datawrap/SOURCES.md in the image says where, with checksums).
 
 cryptography 50.0.2: _rust.abi3.so (statically linked 4.0.3) - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
   This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
@@ -325,8 +327,8 @@ grpcio 1.85.0: cygrpc.cpython-313-x86_64-linux-gnu.so (statically linked 1.3.1.1
 ijson 3.6.0: libyajl-9393e5bd.so.2.1.1 - YAJL, ISC
 lxml 6.1.3: etree.cpython-313-x86_64-linux-gnu.so (statically linked 1.3.2) - zlib, Zlib
 lxml 6.1.3: objectify.cpython-313-x86_64-linux-gnu.so (statically linked 1.3.2) - zlib, Zlib
-numpy 2.5.4: libgfortran-83c28eba-468e71e5.so.5.0.0 - GCC libgfortran, GPL-3.0-or-later WITH GCC-exception-3.1; source shipped in image at /usr/share/doc/datawrap/third-party-source/
-numpy 2.5.4: libquadmath-2284e583-a9307bba.so.0.0.0 - GCC libquadmath, LGPL-2.1-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/
+numpy 2.5.4: libgfortran-83c28eba-468e71e5.so.5.0.0 - GCC libgfortran, GPL-3.0-or-later WITH GCC-exception-3.1; source in companion bundle <tag>-sources
+numpy 2.5.4: libquadmath-2284e583-a9307bba.so.0.0.0 - GCC libquadmath, LGPL-2.1-or-later; source in companion bundle <tag>-sources
 numpy 2.5.4: libscipy_openblas64_-f48b354e.so - OpenBLAS (scipy-openblas), BSD-3-Clause
 pillow 13.0.0: libXau-154567c4.so.6.0.0 - libXau, MIT
 pillow 13.0.0: libavif-c6062d5f.so.16.4.2 - libavif, BSD-2-Clause
@@ -391,6 +393,21 @@ pymssql 2.4.6: libselinux-81bdf592.so.1 - libselinux, public domain
 pymssql 2.4.6: libssl-7f59e8e2.so.1.1.1k - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
   This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
 xmlsec 1.3.17: xmlsec.cpython-313-x86_64-linux-gnu.so (statically linked 1.3.1) - zlib, Zlib
+
+========================================================================
+Debian packages in the API image
+========================================================================
+
+The API image is Debian bookworm. The Debian source (.dsc, orig and debian
+tarballs of the exact installed version) of every package in it whose
+/usr/share/doc/<package>/copyright names a copyleft licence - the base
+image's packages and those below - is in the companion bundle <tag>-sources:
+<image>:<tag>-sources, published with each release in the same registry.
+/usr/share/doc/datawrap/SOURCES.md in the image says where, with checksums.
+
+curl: curl (MIT-style); its libraries' licences are read from their copyright files at build time; source: companion bundle <tag>-sources when its copyright file names a copyleft licence (build-time scan)
+libodbc2: LGPL-2.1; source: companion bundle <tag>-sources
+unixodbc: LGPL-2.1; source: companion bundle <tag>-sources
 
 ========================================================================
 NOTICE files of redistributed packages

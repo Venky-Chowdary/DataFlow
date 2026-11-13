@@ -45,6 +45,9 @@ DEV_REQS = REPO / "apps" / "api" / "requirements-dev.txt"
 LOCKFILE = REPO / "package-lock.json"
 #: Where Dockerfile.api puts the corresponding source of the LGPL components.
 LGPL_SOURCE_DIR = "/usr/share/doc/datawrap/third-party-source"
+#: Where the large copyleft sources are: the companion OCI image release.yml
+#: publishes with each API image, same registry, tag + "-sources".
+COMPANION_LOCATION = "companion bundle <tag>-sources"
 
 _COPYLEFT = re.compile(
     r"\b(A?GPL|LGPL|GNU (?:Affero |Lesser |Library )?General Public|SSPL|Server Side Public"
@@ -419,6 +422,12 @@ def load_policy(path: Path = POLICY) -> dict[str, Any]:
                     f"(gnu.org/licenses URL) and say 'source shipped in image at {LGPL_SOURCE_DIR}' "
                     "(no written offer) in its notice"
                 )
+    for name, entry in (policy.get("apt_packages") or {}).items():
+        if re.search(r"GPL", str(entry.get("licence"))) and entry.get("source") != COMPANION_LOCATION:
+            raise ValueError(
+                f"{path}: apt package {name!r} is copyleft; its source must say "
+                f"'{COMPANION_LOCATION}' (the companion source image published with each release)"
+            )
     return policy
 
 
@@ -554,18 +563,39 @@ def notice(
             "manylinux wheels carry these native libraries in their <package>.libs/",
             "directory, or link them statically into an extension module (found by a",
             "best-effort scan for well-known version strings; scripts/bundled_libraries.py).",
-            "For the LGPL/GPL ones the",
-            f"corresponding source is shipped in the image at {LGPL_SOURCE_DIR}/",
-            "(BUNDLED_LIBRARIES.json, MANIFEST.json, SHA256SUMS).",
+            "For the LGPL/GPL ones the corresponding source is shipped in the image at",
+            f"{LGPL_SOURCE_DIR}/ (BUNDLED_LIBRARIES.json, MANIFEST.json, SHA256SUMS),",
+            f"or, for the large GCC source, in the {COMPANION_LOCATION}: the",
+            "<image>:<tag>-sources image published with each release in the same registry",
+            "(/usr/share/doc/datawrap/SOURCES.md in the image says where, with checksums).",
             "",
         ]
         for row in bundled:
             text = f"{row['dist']} {row['dist_version']}: {row['file']} - {row['component']}, {row['licence']}"
-            if row["copyleft"]:
+            if row["copyleft"] and row.get("source_location") == COMPANION_LOCATION:
+                text += f"; source in {COMPANION_LOCATION}"
+            elif row["copyleft"]:
                 text += f"; source shipped in image at {LGPL_SOURCE_DIR}/"
             lines.append(text)
             if row["attribution"]:
                 lines.append(f"  {row['attribution']}")
+        lines.append("")
+    apt = (policy.get("apt_packages") or {}) if isinstance(policy, dict) else {}
+    if apt:
+        lines += [
+            "=" * 72,
+            "Debian packages in the API image",
+            "=" * 72,
+            "",
+            "The API image is Debian bookworm. The Debian source (.dsc, orig and debian",
+            "tarballs of the exact installed version) of every package in it whose",
+            "/usr/share/doc/<package>/copyright names a copyleft licence - the base",
+            f"image's packages and those below - is in the {COMPANION_LOCATION}:",
+            "<image>:<tag>-sources, published with each release in the same registry.",
+            "/usr/share/doc/datawrap/SOURCES.md in the image says where, with checksums.",
+            "",
+        ]
+        lines += [f"{name}: {entry['licence']}; source: {entry['source']}" for name, entry in sorted(apt.items())]
         lines.append("")
     notices = upstream_notices(shipped)
     if notices:

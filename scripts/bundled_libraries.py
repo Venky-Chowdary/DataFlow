@@ -128,6 +128,24 @@ class Upstream:
     sha512: str = ""
     md5: str = ""  # only where no SHA-2 checksum was ever published (keyutils 1.5.8)
     note: str = ""
+    #: "image": shipped in the runtime image; "companion": in the companion
+    #: source bundle <image>:<tag>-sources (owner decision: large sources).
+    bundle: str = "image"
+
+
+#: Where a companion-located source is, as NOTICE, the policy and the
+#: inventory say it. release.yml publishes <image>:<tag>-sources with each image.
+COMPANION_LOCATION = "companion bundle <tag>-sources"
+IMAGE_SOURCE_DIR = "/usr/share/doc/datawrap/third-party-source"
+
+
+def source_location(key: tuple[str, str] | None) -> str:
+    """Where the corresponding source of a bundled library is ("" when none is needed)."""
+    if key is None:
+        return ""
+    if UPSTREAM[key].bundle == "companion":
+        return COMPANION_LOCATION
+    return f"image: {IMAGE_SOURCE_DIR}"
 
 
 _LOOKASIDE = "https://sources.stream.centos.org/sources/rpms"
@@ -149,7 +167,14 @@ _GCC_85_EL8 = (
 UPSTREAM: dict[tuple[str, str], Upstream] = {
     ("keyutils", "1.5.8"): Upstream(
         "keyutils-1.5.8.tar.bz2",
-        ("https://people.redhat.com/~dhowells/keyutils/keyutils-1.5.8.tar.bz2",),
+        (
+            "https://people.redhat.com/~dhowells/keyutils/keyutils-1.5.8.tar.bz2",
+            # Fedora's lookaside cache, addressed by the same MD5.
+            (
+                "https://src.fedoraproject.org/lookaside/pkgs/keyutils/keyutils-1.5.8.tar.bz2/"
+                "3c7f463039b83833c12a9414c2fcb389/keyutils-1.5.8.tar.bz2"
+            ),
+        ),
         md5="3c7f463039b83833c12a9414c2fcb389",
         note="MD5 published in Arch Linux's keyutils 1.5.8-1 PKGBUILD (archlinux/svntogit-packages "
         "a6cd0f050a660763a49e670a0886371bbd1178d3, 2013-10-28). No SHA-2 checksum was published for "
@@ -182,6 +207,8 @@ UPSTREAM: dict[tuple[str, str], Upstream] = {
         "gcc-8.5.0-20210514.tar.xz",
         (f"{_LOOKASIDE}/gcc/gcc-8.5.0-20210514.tar.xz/sha512/{_GCC_85_EL8}/gcc-8.5.0-20210514.tar.xz",),
         sha512=_GCC_85_EL8,
+        # About 65 MB: in the companion source bundle, not the runtime image.
+        bundle="companion",
     ),
 }
 
@@ -302,6 +329,7 @@ def inventory(dists: list[tuple[str, str, list[Path]]]) -> list[dict[str, Any]]:
                 "copyleft": entry.copyleft,
                 "attribution": entry.attribution,
                 "source": list(key) if key else None,
+                "source_location": source_location(key),
             })
     if problems:
         raise BundledLibraryError("; ".join(problems))

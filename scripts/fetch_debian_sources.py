@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Ship the corresponding source of every copyleft Debian package in the image.
+"""Collect the corresponding source of every copyleft Debian package in the image.
 
-Dockerfile.api runs this in the final stage, after its last ``apt-get
-install``. It writes into the same directory as fetch_lgpl_sources.py
-(``/usr/share/doc/datawrap/third-party-source``):
+Dockerfile.api runs this in the ``sources-collect`` stage, which is built FROM
+the runtime packages. It writes into ``/sources``, the companion source bundle
+(``<image>:<tag>-sources``, owner decision 2026-11-13: large sources are not
+in the runtime image; scripts/source_bundle.py writes the runtime's pointer):
 
 1. every installed package and its exact source version (``dpkg-query``);
 2. each package's licence class, read from ``/usr/share/doc/<pkg>/copyright``:
@@ -17,12 +18,12 @@ install``. It writes into the same directory as fetch_lgpl_sources.py
    * when that version has left the archive, from snapshot.debian.org, each
      file checked against its content address (SHA-1);
    and every file checked again against the ``.dsc``'s Checksums-Sha256;
-4. ``SHA256SUMS`` (merged with the PyPI sources' sums) and
+4. ``SHA256SUMS`` (merged with the GCC source's sums) and
    ``DEBIAN_SOURCES.json`` (package -> source -> files, how verified).
 
 Any download or checksum failure fails the image build.
 
-``--verify-dockerfile`` (CI, offline) is the drift check: the final stage
+``--verify-dockerfile`` (CI, offline) is the drift check: the runtime stages
 must install exactly the apt packages reviewed in licence-policy.json
 (``apt_packages``), and no compiler or -dev package.
 """
@@ -283,29 +284,69 @@ def _merge_sums(path: Path, sums: dict[str, str]) -> None:
     path.write_text("".join(f"{d}  {n}\n" for n, d in sorted(lines.items())), encoding="utf-8")
 
 
-def final_stage_apt_packages(dockerfile: str) -> set[str]:
+@dataclass(frozen=True)
+class Stage:
+    name: str  # "" for an unnamed stage
+    base: str  # the image or stage it is built FROM
+    body: str  # instructions, continuation lines joined
+
+
+def dockerfile_stages(dockerfile: str) -> list[Stage]:
     joined = dockerfile.replace("\\\n", " ")
-    final = re.split(r"^FROM\s+", joined, flags=re.MULTILINE)[-1]
+    stages = []
+    for part in re.split(r"^FROM\s+", joined, flags=re.MULTILINE)[1:]:
+        head, _, body = part.partition("\n")
+        words = head.split()
+        name = words[2] if len(words) >= 3 and words[1].upper() == "AS" else ""
+        stages.append(Stage(name, words[0], body))
+    return stages
+
+
+def runtime_chain(stages: list[Stage]) -> list[Stage]:
+    """The last stage (the default build target: the runtime image) and the
+    named stages it is built FROM, base first."""
+    by_name = {s.name: s for s in stages if s.name}
+    chain = [stages[-1]]
+    while chain[0].base in by_name:
+        chain.insert(0, by_name[chain[0].base])
+    return chain
+
+
+def apt_installs(body: str) -> set[str]:
     pkgs: set[str] = set()
-    for match in re.finditer(r"apt-get install ([^&;\n]+)", final):
+    for match in re.finditer(r"apt-get install ([^&;\n]+)", body):
         pkgs |= {w for w in match.group(1).split() if not w.startswith("-")}
     return pkgs
 
 
+def runtime_apt_packages(dockerfile: str) -> set[str]:
+    """The apt packages the runtime image's stages install on top of the base image."""
+    return set().union(*(apt_installs(s.body) for s in runtime_chain(dockerfile_stages(dockerfile))))
+
+
+def copyleft_sources(packages: list[DebPackage], docs: Path = DOC_ROOT) -> dict[tuple[str, str], list[str]]:
+    """(source, version) -> binary packages, for every copyleft package installed."""
+    groups: dict[tuple[str, str], list[str]] = {}
+    for pkg in packages:
+        if classify(pkg, docs) == "copyleft":
+            groups.setdefault((pkg.source, pkg.source_version), []).append(pkg.name)
+    return groups
+
+
 def verify_dockerfile(dockerfile: Path, policy: Path) -> list[str]:
-    """Drift check: the final stage installs exactly the reviewed apt packages."""
+    """Drift check: the runtime image installs exactly the reviewed apt packages."""
     problems = []
-    installed = final_stage_apt_packages(dockerfile.read_text(encoding="utf-8"))
+    installed = runtime_apt_packages(dockerfile.read_text(encoding="utf-8"))
     reviewed = json.loads(policy.read_text(encoding="utf-8")).get("apt_packages") or {}
     if extra := sorted(installed - set(reviewed)):
         problems.append(
-            f"{dockerfile.name}'s final stage installs {extra}, which licence-policy.json "
+            f"{dockerfile.name}'s runtime stages install {extra}, which licence-policy.json "
             "apt_packages has not reviewed"
         )
     if stale := sorted(set(reviewed) - installed):
-        problems.append(f"licence-policy.json apt_packages lists {stale}, which the final stage does not install")
+        problems.append(f"licence-policy.json apt_packages lists {stale}, which the runtime image does not install")
     if tools := sorted(p for p in installed if p in _COMPILERS or p.endswith("-dev")):
-        problems.append(f"the final stage installs build tools {tools}; they belong in the build stage")
+        problems.append(f"the runtime image installs build tools {tools}; they belong in the build stage")
     for name, entry in reviewed.items():
         missing = [k for k in ("licence", "why", "source") if not str(entry.get(k) or "").strip()]
         if missing:

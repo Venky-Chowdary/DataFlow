@@ -1049,6 +1049,13 @@ jobs:
         # api-image job proves it.
         run: python scripts/fetch_debian_sources.py --verify-dockerfile Dockerfile.api
 
+      - name: Companion source bundle drift check (Dockerfile.api stages)
+        # The companion stage lists exactly UPSTREAM's companion-located
+        # families (the GCC source) and runs the Debian step, which ships every
+        # copyleft package; the runtime stages run neither, and carry the
+        # pointer, the label and the build-time exactness check.
+        run: python scripts/source_bundle.py --verify-dockerfile Dockerfile.api
+
       - name: Upload licence report
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -1075,14 +1082,20 @@ jobs:
   # required check name does not change. Shared setup lives in
   # .github/actions/studio-surface. studio-ui-next is not a required check.
   api-image:
-    # Builds Dockerfile.api from scratch (no layer cache, so the source steps
-    # really run) and checks the result: no compiler or build-essential in the
-    # final stage, the shipped sources present and matching SHA256SUMS
-    # (PyPI sdists, FreeTDS, wheel-bundled libraries, Debian packages), and a
-    # consistent, importable Python environment.
-    name: API image (multi-stage build, shipped sources)
+    # Builds both images from Dockerfile.api, without a layer cache (so the
+    # source steps really run):
+    # - the companion source bundle (--target sources, what release.yml
+    #   publishes as <image>:<tag>-sources);
+    # - the runtime image, pointed at it.
+    # Runtime checks: no compiler or build-essential; the small wheel sources
+    # and inventory present; no Debian or GCC source; the SOURCES.md pointer,
+    # the label and the companion's SHA256SUMS present; pip check; imports.
+    # Companion checks: every file matches its SHA256SUMS, which equals the
+    # runtime's copy. keyutils 1.5.8 has only a published MD5: this job
+    # records its SHA-256 once (after the MD5 check) and fails if it changes.
+    name: API image (runtime + companion source bundle)
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1090,7 +1103,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Dockerfile.api
+      - name: Build the companion source bundle (target sources)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          target: sources
+          load: true
+          push: false
+          tags: datawrap-api:ci-sources
+
+      - name: Build the runtime image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -1098,27 +1121,76 @@ jobs:
           load: true
           push: false
           tags: datawrap-api:ci
+          build-args: SOURCES_REF=datawrap-api:ci-sources
 
-      - name: Check the image
+      - name: Check the runtime image
         run: |
-          docker image ls datawrap-api:ci --format 'image size: {{.Size}}'
-          cat > "$RUNNER_TEMP/check-image.sh" <<'CHECK'
+          docker image ls datawrap-api:ci --format 'runtime image size: {{.Size}}'
+          label=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.source" }}' datawrap-api:ci)
+          [ "$label" = "datawrap-api:ci-sources" ] || { echo "org.opencontainers.image.source is '$label'"; exit 1; }
+          cat > "$RUNNER_TEMP/check-runtime.sh" <<'CHECK'
           set -e
           if dpkg -s build-essential >/dev/null 2>&1; then echo "build-essential is in the image"; exit 1; fi
           if command -v gcc >/dev/null 2>&1; then echo "gcc is in the image"; exit 1; fi
           src=/usr/share/doc/datawrap/third-party-source
-          for f in SHA256SUMS MANIFEST.json BUNDLED_LIBRARIES.json DEBIAN_SOURCES.json; do
-            test -s "$src/$f" || { echo "missing $src/$f"; exit 1; }
-          done
           cd "$src"
+          for f in SHA256SUMS MANIFEST.json BUNDLED_LIBRARIES.json; do test -s "$f" || { echo "missing $src/$f"; exit 1; }; done
           sha256sum --check --quiet SHA256SUMS
-          ls unixodbc_*.dsc freetds-*.tar.bz2 paramiko-*.tar.gz
-          python -c 'import json; d = json.load(open("DEBIAN_SOURCES.json")); print(len(d["sources"]), "Debian source packages shipped")'
+          ls freetds-*.tar.bz2 paramiko-*.tar.gz psycopg2-*.tar.gz pymssql-*.tar.gz keyutils-*.tar.bz2 libxcrypt-*.tar.xz
+          if ls *.dsc gcc-* 2>/dev/null | grep -q .; then echo "Debian or GCC source is in the runtime image"; exit 1; fi
+          test ! -e DEBIAN_SOURCES.json || { echo "DEBIAN_SOURCES.json is in the runtime image"; exit 1; }
+          grep -q "datawrap-api:ci-sources" /usr/share/doc/datawrap/SOURCES.md
+          grep -q "Debian source packages" /usr/share/doc/datawrap/SOURCES.md
+          test -s /usr/share/doc/datawrap/companion/SHA256SUMS
           du -sh "$src"
           pip check
           python -c 'import fastapi, psycopg2, pymssql, pyodbc, snowflake.connector, preflight'
           CHECK
-          docker run --rm -v "$RUNNER_TEMP/check-image.sh:/check-image.sh:ro" datawrap-api:ci sh /check-image.sh
+          docker run --rm -v "$RUNNER_TEMP/check-runtime.sh:/check-runtime.sh:ro" datawrap-api:ci sh /check-runtime.sh
+
+      - name: Check the companion source bundle
+        run: |
+          docker image ls datawrap-api:ci-sources --format 'companion image size: {{.Size}}'
+          cid=$(docker create datawrap-api:ci-sources none)
+          mkdir -p "$RUNNER_TEMP/companion"
+          docker export "$cid" | tar -x -C "$RUNNER_TEMP/companion"
+          docker rm "$cid" >/dev/null
+          cd "$RUNNER_TEMP/companion"
+          sha256sum --check --quiet SHA256SUMS
+          ls *.dsc gcc-*.tar.xz DEBIAN_SOURCES.json MANIFEST.json
+          docker run --rm datawrap-api:ci cat /usr/share/doc/datawrap/companion/SHA256SUMS | diff - SHA256SUMS
+          python3 -c 'import json; d = json.load(open("DEBIAN_SOURCES.json")); print(len(d["sources"]), "Debian source packages in the companion")'
+          du -sh .
+
+      - name: Restore the recorded keyutils 1.5.8 SHA-256
+        uses: actions/cache@v4
+        with:
+          path: .ci-pins/keyutils-1.5.8.sha256
+          key: keyutils-1.5.8-sha256-v1
+
+      - name: keyutils 1.5.8 - MD5 verified, SHA-256 recorded and held
+        # Only an MD5 was ever published for keyutils-1.5.8.tar.bz2 (Arch
+        # Linux's 1.5.8-1 PKGBUILD). The image build verified it; this step
+        # re-checks it, records the tarball's SHA-256 on the first run, and
+        # fails if a later download differs. Commit the recorded value as
+        # UPSTREAM sha256 in scripts/bundled_libraries.py to make the build
+        # itself enforce it.
+        run: |
+          out=$(docker run --rm datawrap-api:ci sh -c 'cd /usr/share/doc/datawrap/third-party-source && md5sum keyutils-1.5.8.tar.bz2 && sha256sum keyutils-1.5.8.tar.bz2')
+          md5=$(echo "$out" | awk 'NR==1 {print $1}')
+          sha256=$(echo "$out" | awk 'NR==2 {print $1}')
+          [ "$md5" = "3c7f463039b83833c12a9414c2fcb389" ] || { echo "::error::keyutils-1.5.8.tar.bz2 MD5 is $md5"; exit 1; }
+          pin=.ci-pins/keyutils-1.5.8.sha256
+          if [ -f "$pin" ]; then
+            if [ "$(cat "$pin")" != "$sha256" ]; then
+              echo "::error::keyutils-1.5.8.tar.bz2 sha256 changed: recorded $(cat "$pin"), now $sha256"
+              exit 1
+            fi
+            echo "keyutils-1.5.8.tar.bz2 sha256 $sha256 matches the recorded value"
+          else
+            mkdir -p .ci-pins && echo "$sha256" > "$pin"
+            echo "::notice::recorded keyutils-1.5.8.tar.bz2 sha256 $sha256 (MD5 verified); commit it as UPSTREAM sha256"
+          fi
 
   studio-ui:
     runs-on: ubuntu-latest

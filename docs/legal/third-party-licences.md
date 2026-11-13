@@ -134,14 +134,15 @@ named.
 
 **Copyleft (bold).** Their corresponding source ships in
 `/usr/share/doc/datawrap/third-party-source/`, with `BUNDLED_LIBRARIES.json`
-listing every bundled library:
+listing every bundled library. The exception is the GCC source, which is in
+the companion source bundle:
 
 | Source | Covers | Verified against |
 |---|---|---|
 | keyutils 1.5.10 | the pymssql copy | CentOS Stream dist-git SHA-512 (lookaside cache), pinned |
-| keyutils 1.5.8 | the psycopg2-binary copy | pinned MD5 published in Arch Linux's 1.5.8-1 PKGBUILD (2013), the only checksum ever published for 1.5.8 (Fedora / CentOS 7 recorded MD5 / SHA-1; Debian never packaged it) |
+| keyutils 1.5.8 | the psycopg2-binary copy | pinned MD5 published in Arch Linux's 1.5.8-1 PKGBUILD (2013), the only checksum ever published for 1.5.8 (Fedora / CentOS 7 recorded MD5 / SHA-1; Debian never packaged it). The CI `api-image` job records its SHA-256 after the MD5 check and fails if it changes |
 | libxcrypt 4.5.2 | psycopg2-binary's libcrypt | pinned SHA-256, the same value manylinux pins |
-| GCC 8.5.0 (el8 tarball, about 65 MB) | numpy's libquadmath and libgfortran | pinned SHA-512 from CentOS Stream c8s |
+| GCC 8.5.0 (el8 tarball, about 65 MB; **companion bundle**) | numpy's libquadmath and libgfortran | pinned SHA-512 from CentOS Stream c8s |
 
 How the libxcrypt version was identified: the library carries no version
 string. It is libxcrypt, not glibc, because it exports the `crypt_gensalt`
@@ -192,43 +193,97 @@ permissive hits are attributed in NOTICE:
 A library that embeds no recognisable version string is not detected, so
 this scan is a safety net, not a proof of absence.
 
-**Image size.** Shipping the GCC 8.5.0 source for numpy's libquadmath and
-libgfortran adds about 65 MB to the API image. The owner accepted this
-(2026-11-13) as the cost of meeting the LGPL by shipping source instead of a
-written offer.
+**Where the GCC source is.** The GCC 8.5.0 source for numpy's
+libquadmath and libgfortran is about 65 MB. Under the owner's
+companion-bundle decision (2026-11-13), it is not in the runtime image. It
+is in the companion source bundle (see "Companion source bundle" below). Its
+`UPSTREAM` entry says `bundle="companion"`. The runtime's
+`BUNDLED_LIBRARIES.json` and NOTICE name "companion bundle <tag>-sources" as
+its location.
 
 `ibm_db` is no longer shipped. Its wheel bundled IBM's proprietary
 `clidriver` (about 120 MB, outside `.libs/`) and keyutils 1.6.3. Under
 owner decision 3 it is operator-installed, so it is excluded from this scan
 and from NOTICE (`OPERATOR_INSTALLED` in `scripts/bundled_libraries.py`).
 
+## Companion source bundle (owner decision, 2026-11-13)
+
+Large copyleft source is not in the runtime image. It goes in a companion
+source bundle, published with every release.
+
+**What stays in the runtime image.** The image keeps the small Python-wheel
+LGPL sources, so it stays self-describing:
+- paramiko, psycopg2 and pymssql;
+- FreeTDS, keyutils and libxcrypt;
+- the bundled-library inventory.
+
+They are in `/usr/share/doc/datawrap/third-party-source/`, with
+`SHA256SUMS`, `MANIFEST.json` and `BUNDLED_LIBRARIES.json`.
+
+**What moves to the companion.** The companion is an OCI image:
+- built `FROM scratch` (the `sources` stage of `Dockerfile.api`);
+- named `<registry>/<image>:<tag>-sources`, for example
+  `ghcr.io/<owner>/<repo>/api:v1.2.3-sources`.
+
+It holds only:
+- the Debian source of every copyleft system package in the runtime image;
+- the GCC 8.5.0 source;
+- `SHA256SUMS`, `DEBIAN_SOURCES.json` and `MANIFEST.json`.
+
+`release.yml` publishes it in the same job, the same registry and with the
+same tag plus `-sources`. It is pushed before the runtime image. Before the
+release is created, the job checks that the companion is published, and
+that the runtime image's label and `SOURCES.md` name it. If the companion is
+not published, the release fails. This is the GPL model of "equivalent
+access to copy the source from the same place". The GitHub release notes
+name the companion too.
+
+**The pointer.** The runtime image says exactly where its companion is:
+- `/usr/share/doc/datawrap/SOURCES.md` gives the companion reference for
+  this tag and how to copy it (`docker create` + `docker export`,
+  `sha256sum -c SHA256SUMS`). It lists every Debian source package, with
+  the binary packages it covers, and every file, with its SHA-256;
+- the OCI label `org.opencontainers.image.source` holds the companion
+  reference;
+- `/usr/share/doc/datawrap/companion/` holds a copy of the companion's
+  `SHA256SUMS` and manifests.
+
+The runtime build runs `scripts/source_bundle.py --check`. It fails unless
+the companion holds exactly two things:
+- the runtime's copyleft Debian source packages, recomputed from the
+  runtime's own `dpkg-query` and copyright files;
+- the inventory's companion-located wheel-library sources.
+
+Builds outside a release (local, CI) keep the default `SOURCES_REF`, which
+says the build is unpublished.
+
 ## Debian packages in the API image
 
 The API image is Debian bookworm (`python:3.12-slim-bookworm`). It ships
-the base image's packages plus the final stage's `unixodbc`, `libodbc2`
+the base image's packages plus the runtime stage's `unixodbc`, `libodbc2`
 (LGPL-2.1, for pyodbc) and `curl` (health check), with their dependencies.
 
 **Multi-stage build.** `Dockerfile.api` builds the Python environment
 (`/opt/venv`) in a `build` stage that has `build-essential` and `libpq-dev`.
-The final stage copies `/opt/venv` and installs only the runtime packages
-above, so no compiler or header package ships. The runtime requirements
-need no compiler (four sdists are pure Python: clickhouse-sqlalchemy,
-pure-sasl, pydruid, pyhive), but they are built in the build stage all the
-same. The final stage's pip installs are wheels only:
+The runtime stages (`runtime-base`, `runtime`) copy `/opt/venv` and install
+only the runtime packages above, so no compiler or header package ships.
+The runtime requirements need no compiler (four sdists are pure Python:
+clickhouse-sqlalchemy, pure-sasl, pydruid, pyhive), but they are built in
+the build stage all the same. The runtime pip installs are wheels only:
 - the vendor drivers, with `--only-binary :all:`;
 - preflight, which is pure Python.
 
-**Source shipping.** The final stage runs `scripts/fetch_debian_sources.py`
-after its last `apt-get install`, in five steps:
+**Source collection.** The `sources-collect` stage is built FROM
+`runtime-base`, so it has exactly the runtime's packages. It runs
+`scripts/fetch_debian_sources.py --dest /sources` in five steps:
 1. List every installed package with `dpkg-query`, with its exact source
    version.
 2. Read each package's licence from `/usr/share/doc/<pkg>/copyright`. A
    package whose copyright file is missing, or names no licence the script
    recognises, fails the build.
 3. For every package whose copyright file names a copyleft licence (GPL,
-   LGPL, MPL, ...), ship the `.dsc`, orig and debian tarballs of the exact
-   source version into `/usr/share/doc/datawrap/third-party-source/`, next to
-   the PyPI sources. The files come from deb.debian.org and are checked
+   LGPL, MPL, ...), collect the `.dsc`, orig and debian tarballs of the
+   exact source version. The files come from deb.debian.org and are checked
    against apt's signed Sources index: the step adds `deb-src` and runs
    `apt-get update`, which verifies the archive signature. When a version
    has left the archive, they come from snapshot.debian.org, checked against
@@ -238,30 +293,47 @@ after its last `apt-get install`, in five steps:
 5. List package, source, files and how each was verified in
    `DEBIAN_SOURCES.json`.
 
-Any failure fails the build. The `deb-src` entries and the index are removed
-in the same layer.
+Any failure fails the build. On the 2026-11-13 base image, 96 of its 105
+packages (67 source packages) have a copyleft copyright file. The 9
+permissive ones are debconf, libmd0, the ncurses packages, libpcre2-8-0,
+tzdata and zlib1g. Their sources (glibc, GCC 12's runtime libraries, perl,
+systemd, util-linux, ...) are a few hundred MB, now in the companion and not
+the runtime image.
 
-On the 2026-11-13 base image, 96 of its 105 packages (67 source packages)
-have a copyleft copyright file. The 9 permissive ones are debconf, libmd0,
-the ncurses packages, libpcre2-8-0, tzdata and zlib1g. Shipping their
-sources (glibc, GCC 12's runtime libraries, perl, systemd, util-linux, ...)
-adds a few hundred MB to the image. The CI `api-image` job prints the
-directory's size.
+**Drift checks** (CI security job, offline):
+- `fetch_debian_sources.py --verify-dockerfile` fails in three cases. The
+  runtime stages install an apt package that `licence-policy.json`
+  `apt_packages` has not reviewed, or no longer install a listed one, or
+  install a compiler or a `-dev` package. Copyleft entries must say
+  "companion bundle <tag>-sources"; the licence gate rejects any other text.
+- `source_bundle.py --verify-dockerfile` checks the companion layout:
+  - the companion step lists exactly the companion-located families in
+    `UPSTREAM` (today `gcc`);
+  - the companion stage runs the Debian step, which covers every copyleft
+    apt package (exactness is checked at build time, see above);
+  - `sources` is `FROM scratch` and holds only `/sources`;
+  - the runtime stages run neither step, copy only the manifests, set the
+    label and write the pointer.
 
-**Drift check.** `licence-policy.json` `apt_packages` reviews the final
-stage's own apt packages. `fetch_debian_sources.py --verify-dockerfile` (CI
-security job) fails in three cases:
-- the Dockerfile installs a package the policy has not reviewed;
-- it no longer installs a listed one;
-- it installs a compiler or a `-dev` package in the final stage.
+**CI image job.** The `api-image` job builds both images without a layer
+cache.
 
-The CI `api-image` job builds the image without a cache and checks the
-result:
+The runtime image must have:
 - no `build-essential` or `gcc`;
-- all four manifests are present;
-- `sha256sum --check SHA256SUMS` passes;
-- `pip check` passes;
-- the core imports work.
+- the small wheel sources, matching `SHA256SUMS`;
+- no Debian `.dsc`, no GCC source and no `DEBIAN_SOURCES.json`;
+- the `SOURCES.md` pointer, naming the companion, and the label;
+- a passing `pip check` and working core imports.
+
+The companion is exported, and every file must match its `SHA256SUMS`. That
+file must equal the runtime's copy.
+
+**keyutils 1.5.8.** keyutils 1.5.8 has only a published MD5, and no mirror
+of it is reachable from the development sandbox. So the same job re-checks
+the MD5 of the tarball in the runtime image. It records the tarball's
+SHA-256 in the Actions cache on the first run and fails if a later build's
+differs. Committing that value as `UPSTREAM` `sha256` makes the build
+itself enforce it.
 
 ## Operator-installed vendor drivers (SAP HANA, Teradata, IBM Db2)
 

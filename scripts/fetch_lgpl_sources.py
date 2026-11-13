@@ -98,7 +98,10 @@ def dockerfile_specs(dockerfile: str) -> list[Spec]:
     """The specs the Dockerfile's fetch step passes (one RUN, continuations joined)."""
     joined = dockerfile.replace("\\\n", " ")
     for line in joined.splitlines():
-        if "fetch_lgpl_sources.py" in line and "--dest" in line and line.lstrip().startswith("RUN"):
+        if (
+            "fetch_lgpl_sources.py" in line and "--dest" in line and line.lstrip().startswith("RUN")
+            and "--companion" not in line  # the companion bundle's step names families, not specs
+        ):
             words = shlex.split(line.split("fetch_lgpl_sources.py", 1)[1])
             specs, skip = [], False
             for word in words:
@@ -214,13 +217,13 @@ def _upstream(up: Upstream, get: Callable[[str], bytes]) -> tuple[bytes, str]:
 
 
 def _bundled_rows(
-    bundles: list[tuple[str, str, list[Path]]], get: Callable[[str], bytes]
+    bundles: list[tuple[str, str, list[Path]]], get: Callable[[str], bytes], *, bundle: str = "image"
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """(source rows to ship, the full bundled-library inventory)."""
+    """(source rows to ship where ``bundle`` says, the full bundled-library inventory)."""
     libraries = inventory(bundles)
     users: dict[tuple[str, str], list[str]] = {}
     for row in libraries:
-        if row["source"]:
+        if row["source"] and UPSTREAM[tuple(row["source"])].bundle == bundle:
             users.setdefault(tuple(row["source"]), []).append(
                 f"{row['dist']} {row['dist_version']}: {row['file']}"
             )
@@ -283,6 +286,43 @@ def ship(
     )
     (dest / "MANIFEST.json").write_text(
         json.dumps({"purpose": "LGPL corresponding source for the binaries in this image",
+                    "components": rows}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return rows
+
+
+def companion_families() -> set[str]:
+    """Families whose source goes in the companion bundle (UPSTREAM ``bundle``)."""
+    return {family for (family, _), up in UPSTREAM.items() if up.bundle == "companion"}
+
+
+def ship_companion(
+    families: list[str],
+    dest: Path,
+    *,
+    get: Callable[[str], bytes] = _http_get,
+    bundled: list[tuple[str, str, list[Path]]] | None = None,
+) -> list[dict[str, Any]]:
+    """The companion bundle's share of the wheel-bundled sources (the GCC source).
+
+    ``families`` is what the Dockerfile step lists; it must equal the
+    companion-located families (UPSTREAM ``bundle="companion"``), so the
+    step and the review cannot drift apart.
+    """
+    if set(families) != companion_families():
+        raise SourceError(
+            f"the companion step lists families {sorted(families)}, but UPSTREAM puts "
+            f"{sorted(companion_families())} in the companion bundle; make them agree"
+        )
+    rows, _ = _bundled_rows(installed_bundles() if bundled is None else bundled, get, bundle="companion")
+    dest.mkdir(parents=True, exist_ok=True)
+    for row in rows:
+        (dest / row["file"]).write_bytes(row.pop("data"))
+        row["sha256"] = _sha256((dest / row["file"]).read_bytes())
+    (dest / "SHA256SUMS").write_text("".join(f"{r['sha256']}  {r['file']}\n" for r in rows), encoding="utf-8")
+    (dest / "MANIFEST.json").write_text(
+        json.dumps({"purpose": "corresponding source of wheel-bundled libraries kept out of the runtime image",
                     "components": rows}, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -362,6 +402,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also ship the source of the LGPL/GPL libraries the installed wheels bundle",
     )
+    parser.add_argument(
+        "--companion",
+        action="store_true",
+        help="ship only the companion bundle's wheel-bundled sources; the positional args are families",
+    )
     parser.add_argument("--verify-dockerfile")
     parser.add_argument("--policy", default="licence-policy.json")
     parser.add_argument("--requirements", default="apps/api/requirements.txt")
@@ -372,6 +417,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"- {problem}")
         print("LGPL source step: " + ("DRIFT" if problems else "consistent"))
         return 1 if problems else 0
+    if args.companion:
+        if not args.dest:
+            parser.error("--dest is required")
+        for row in ship_companion(args.specs, Path(args.dest)):
+            print(f"{row['sha256']}  {row['file']}  ({row['for']}; {row['verified_against']})")
+        return 0
     if not args.dest or not args.specs:
         parser.error("--dest and at least one spec are required")
     rows = ship(

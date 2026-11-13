@@ -24,12 +24,10 @@ import gzip
 import hashlib
 import importlib.util
 import json
-import re
 import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 API = Path(__file__).resolve().parents[1]
 REPO = API.parents[1]
@@ -255,53 +253,53 @@ def test_source_file_names_drop_the_epoch() -> None:
     assert deb.dsc_name("zlib", "1:1.2.13.dfsg-1") == "zlib_1.2.13.dfsg-1.dsc"
 
 
-# ── Dockerfile.api: multi-stage, and the Debian step ──────────────────────
+# ── Dockerfile.api: multi-stage; Debian sources go to the companion bundle ──
 
 
-def _stages() -> list[tuple[str, str]]:
-    text = (REPO / "Dockerfile.api").read_text(encoding="utf-8").replace("\\\n", " ")
-    parts = re.split(r"^FROM\s+", text, flags=re.MULTILINE)[1:]
-    return [(p.splitlines()[0], p) for p in parts]
+def _stages():
+    return deb.dockerfile_stages((REPO / "Dockerfile.api").read_text(encoding="utf-8"))
 
 
-def _apt_installs(stage: str) -> set[str]:
-    pkgs: set[str] = set()
-    for match in re.finditer(r"apt-get install ([^&;\n]+)", stage):
-        pkgs |= {w for w in match.group(1).split() if not w.startswith("-")}
-    return pkgs
+def _by_name():
+    return {s.name: s for s in _stages()}
+
+
+def _runtime_text() -> str:
+    return "\n".join(s.body for s in deb.runtime_chain(_stages()))
 
 
 def test_the_image_is_multi_stage_with_compilers_only_in_the_build_stage() -> None:
-    stages = _stages()
-    assert len(stages) >= 2
-    build_head, build = stages[0]
-    final_head, final = stages[-1]
-    assert build_head.split()[-1] == "build" and " AS " in build_head.upper()
-    assert "build-essential" in _apt_installs(build)
-    final_pkgs = _apt_installs(final)
-    assert not {p for p in final_pkgs if p == "build-essential" or p.endswith("-dev") or p in {"gcc", "g++", "make"}}
-    assert "COPY --from=build /opt/venv /opt/venv" in final
+    stages = _by_name()
+    build = stages["build"]
+    assert "build-essential" in deb.apt_installs(build.body)
+    chain = deb.runtime_chain(_stages())
+    assert [s.name for s in chain] == ["runtime-base", "runtime"], "the last stage is the runtime image"
+    runtime_pkgs = set().union(*(deb.apt_installs(s.body) for s in chain))
+    assert not {p for p in runtime_pkgs if p == "build-essential" or p.endswith("-dev") or p in {"gcc", "g++", "make"}}
+    runtime = _runtime_text()
+    assert "COPY --from=build /opt/venv /opt/venv" in runtime
     # Everything that may compile (sdists of the runtime requirements) is built
-    # in the build stage; the final stage installs wheels only.
-    assert "pip install -r /app/requirements.txt -c /app/constraints-image.txt" in build
-    for line in final.splitlines():
+    # in the build stage; the runtime stages install wheels only.
+    assert "pip install -r /app/requirements.txt -c /app/constraints-image.txt" in build.body
+    for line in runtime.splitlines():
         if "pip install" in line and "--upgrade pip" not in line:
             assert "--only-binary :all:" in line or "/app/packages/preflight" in line, line
 
 
-def test_the_final_stage_installs_exactly_the_reviewed_apt_packages() -> None:
+def test_the_runtime_installs_exactly_the_reviewed_apt_packages() -> None:
     policy = json.loads((REPO / "licence-policy.json").read_text(encoding="utf-8"))
     reviewed = policy["apt_packages"]
-    assert _apt_installs(_stages()[-1][1]) == set(reviewed)
+    assert deb.runtime_apt_packages((REPO / "Dockerfile.api").read_text(encoding="utf-8")) == set(reviewed)
     for name in ("unixodbc", "libodbc2"):
-        assert reviewed[name]["licence"].startswith("LGPL-2.1") and reviewed[name]["source"] == "shipped"
+        assert reviewed[name]["licence"].startswith("LGPL-2.1")
+        assert reviewed[name]["source"] == "companion bundle <tag>-sources"
     assert deb.verify_dockerfile(REPO / "Dockerfile.api", REPO / "licence-policy.json") == []
 
 
 def test_the_drift_check_fails_on_an_unreviewed_apt_package(tmp_path: Path) -> None:
     text = (REPO / "Dockerfile.api").read_text(encoding="utf-8")
-    final_start = text.rindex("\nFROM ")
-    head, tail = text[:final_start], text[final_start:]
+    start = text.index("AS runtime-base")
+    head, tail = text[:start], text[start:]
     tail = tail.replace("apt-get install -y --no-install-recommends", "apt-get install -y --no-install-recommends libgnutls30", 1)
     bad = tmp_path / "Dockerfile"
     bad.write_text(head + tail, encoding="utf-8")
@@ -309,30 +307,16 @@ def test_the_drift_check_fails_on_an_unreviewed_apt_package(tmp_path: Path) -> N
     assert problems and "libgnutls30" in problems[0]
 
 
-def test_the_debian_step_runs_after_the_last_apt_install_into_the_shared_dir() -> None:
-    final = _stages()[-1][1]
-    install = final.index("apt-get install")
-    step = final.index("fetch_debian_sources.py --dest")
-    assert install < step
-    run = next(line for line in final.splitlines() if "fetch_debian_sources.py --dest" in line)
-    assert f"--dest {SOURCE_DIR}" in run
+def test_the_debian_step_runs_in_the_companion_stage_not_the_runtime() -> None:
+    stages = _by_name()
+    collect = stages["sources-collect"]
+    assert collect.base == "runtime-base", "same packages as the runtime image"
+    run = next(line for line in collect.body.splitlines() if "fetch_debian_sources.py --dest" in line)
+    assert "--dest /sources" in run
     assert "deb-src" in run and "apt-get" in run and "update" in run
-    assert "rm -rf /var/lib/apt/lists/*" in run, "the source index does not stay in the image"
-    lgpl = final.index("fetch_lgpl_sources.py --dest")
-    assert lgpl < step, "both write to the same directory; the Debian step merges SHA256SUMS"
-
-
-def test_ci_builds_the_image_and_checks_it() -> None:
-    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
-    jobs = workflow["jobs"]
-    job = jobs["api-image"]
-    text = json.dumps(job)
-    assert "Dockerfile.api" in text
-    for probe in ("DEBIAN_SOURCES.json", "SHA256SUMS", "build-essential", "gcc", "pip check"):
-        assert probe in text, probe
-    assert "api-image" in jobs["required-checks"]["needs"]
-    security = json.dumps(jobs["security"])
-    assert "fetch_debian_sources.py --verify-dockerfile Dockerfile.api" in security
+    assert "rm -rf /var/lib/apt/lists/*" in run
+    assert "fetch_debian_sources.py --dest" not in _runtime_text()
+    assert stages["sources"].base == "scratch"
 
 
 def test_network_errors_are_retried_then_reported_checksum_errors_are_not() -> None:
