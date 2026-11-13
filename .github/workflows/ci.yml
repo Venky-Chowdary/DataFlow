@@ -357,16 +357,18 @@ jobs:
           grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP/api_tests.log" | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
           grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP/api_tests.log" | tail -2 || true
 
-      - name: Live-engine skip report (report mode, never fails)
-        # The general suite is not a live-engine proof job yet (manifest
-        # `api-tests`, mode report): its engine-attributed skips are
-        # published per shard so the backlog can be triaged and ratcheted.
+      - name: No live-engine test may skip (engine-scoped)
+        # A skip whose message names PostgreSQL, MySQL, Mongo or Redis (which
+        # this job starts) and no engine it lacks fails the shard unless it is
+        # an expected skip in apps/api/scripts/live_engine_jobs.json
+        # (`api-tests`). BigQuery / GCS / ADLS emulator skips are counted and
+        # published but do not fail yet (report_engines).
         if: ${{ !cancelled() }}
         working-directory: apps/api
         run: |
-          python scripts/check_live_skips.py --job api-tests --junit "$RUNNER_TEMP/live-junit/api-tests.xml" --out "$RUNNER_TEMP/live-engine/api-tests-${{ matrix.shard }}.json"
+          python scripts/check_live_skips.py --job api-tests --label shard=${{ matrix.shard }} --junit "$RUNNER_TEMP/live-junit/api-tests.xml" --out "$RUNNER_TEMP/live-engine/api-tests-${{ matrix.shard }}.json"
 
-      - name: Upload live-engine report
+      - name: Upload live-engine result
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:

@@ -12,22 +12,26 @@ Two faults, both on the live route:
    and declined the scan, so reconciliation fell back to the COUNT diagnostic,
    which by design never passes.
 
-Live tests need MySQL (ROW binlog) on 127.0.0.1:3307 and PostgreSQL on
+Live tests need MySQL (ROW binlog) on 127.0.0.1:3307 (DATAFLOW_TEST_MYSQL_PORT) and PostgreSQL on
 localhost:5432 with ``dataflow/dataflow``; they skip otherwise.
 """
 
 from __future__ import annotations
 
+import os
 import socket
 import uuid
 from datetime import datetime
 
 import pytest
 
+# Compose lab MySQL is on 3307; CI serves it on 3306 (DATAFLOW_TEST_MYSQL_PORT).
+_MYSQL_PORT = int(os.environ.get("DATAFLOW_TEST_MYSQL_PORT") or 3307)
+
 MYSQL = {
     "type": "mysql",
     "host": "127.0.0.1",
-    "port": 3307,
+    "port": _MYSQL_PORT,
     "database": "dataflow",
     "username": "dataflow",
     "password": "dataflow",
@@ -57,7 +61,7 @@ def _mysql():
     import pymysql
 
     return pymysql.connect(
-        host="127.0.0.1", port=3307, user="dataflow", password="dataflow",
+        host="127.0.0.1", port=_MYSQL_PORT, user="dataflow", password="dataflow",
         database="dataflow", autocommit=True, connect_timeout=3,
     )
 
@@ -74,7 +78,7 @@ def _pg():
 
 
 def _mysql_binlog_ready() -> bool:
-    if not _port_open("127.0.0.1", 3307):
+    if not _port_open("127.0.0.1", _MYSQL_PORT):
         return False
     try:
         import pymysqlreplication  # noqa: F401
@@ -102,7 +106,7 @@ def _pg_ready() -> bool:
 
 
 needs_mysql = pytest.mark.skipif(
-    not _mysql_binlog_ready(), reason="MySQL ROW binlog not reachable on 127.0.0.1:3307"
+    not _mysql_binlog_ready(), reason=f"MySQL ROW binlog not reachable on 127.0.0.1:{_MYSQL_PORT}"
 )
 needs_pg = pytest.mark.skipif(
     not _pg_ready(), reason="PostgreSQL dataflow/dataflow not reachable on localhost:5432"

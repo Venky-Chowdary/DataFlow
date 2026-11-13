@@ -107,10 +107,13 @@
       "expected_skips": []
     },
     "api-tests": {
-      "proves": [],
+      "proves": ["postgresql", "mysql", "mongodb", "redis"],
       "workflow": ".github/workflows/ci.yml",
-      "mode": "report",
+      "mode": "engine_scoped",
       "engines": ["postgresql", "mysql", "mongodb", "redis", "bigquery", "gcs", "adls"],
+      "report_engines": ["bigquery", "gcs", "adls"],
+      "report_engines_why": "The universal-matrix cells with a BigQuery / GCS / ADLS emulator *source* (8 each) skip as 'not reachable' with the emulators running; not yet investigated. Counted and published, never live-verified, not failing the shard.",
+      "required_labels": {"shard": ["1", "2", "3", "4", "5", "6"]},
       "min_executed": 1000,
       "measurement": "2026-11-13: the ~3,330 api-tests skips replayed under the shards' exact environment: 284 named a PostgreSQL / MySQL / Mongo / Redis / emulator engine the job starts, the rest (~2,820) are external (SaaS templates, Oracle, SQL Server, Kafka, Iceberg, vector stores, MinIO, MariaDB, real clouds). With .github/ci-live-engines.vars, 104 of the 284 ran and passed locally; see the PR for the rest.",
       "expected_skips": [
@@ -199,8 +202,7 @@
           "reason": "tunnel Azurite",
           "why": "Needs an Azurite reached through an SSH tunnel."
         }
-      ],
-      "report_only_why": "The general API suite. Report mode until the shards export every connection-setting spelling (next change). Its expected_skips are the allowlist the nightly engine-suite inherits: both run the same suite."
+      ]
     }
   }
 }
