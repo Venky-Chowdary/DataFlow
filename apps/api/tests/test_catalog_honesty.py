@@ -217,12 +217,6 @@ def test_planned_brand_blocked_as_transfer_endpoint() -> None:
     assert ok is False
     assert "Planned" in msg
 
-    # Db2 is also Planned, and its driver is operator-installed (owner
-    # decision 3): without ibm-db the refusal says what to install instead.
-    ok, msg = endpoint_allowed_for_role("db2", "source")
-    assert ok is False
-    assert "Planned" in msg or "pip install ibm-db ibm-db-sa" in msg
-
     ok, msg = endpoint_allowed_for_role("hubspot", "destination")
     assert ok is True, msg
 
@@ -237,9 +231,55 @@ def test_planned_brand_blocked_as_transfer_endpoint() -> None:
     route_ok, route_msg = validate_transfer("database", "vertica", "database", "postgresql")
     assert route_ok is False
     assert "Planned" in route_msg
-    route_ok, route_msg = validate_transfer("database", "db2", "database", "postgresql")
-    assert route_ok is False
-    assert "Planned" in route_msg or "pip install ibm-db ibm-db-sa" in route_msg
+
+
+def _db2_driver(monkeypatch, present: bool) -> None:
+    import importlib.machinery
+    import sys
+    import types
+
+    from src.transfer import connector_capabilities as cc
+
+    for name in ("ibm_db", "ibm_db_sa"):
+        if present:
+            mod = types.ModuleType(name)
+            mod.__spec__ = importlib.machinery.ModuleSpec(name, None)
+            monkeypatch.setitem(sys.modules, name, mod)
+        else:
+            monkeypatch.setitem(sys.modules, name, None)  # import fails, find_spec -> None
+    cc._module_is_installed.cache_clear()
+
+
+def test_db2_without_its_driver_says_what_the_operator_installs(monkeypatch) -> None:
+    # Owner decision 3: ibm-db bundles IBM's proprietary clidriver, so it is
+    # operator-installed. Without it, both the endpoint and the route refusal
+    # are the install instruction, not the generic Planned text.
+    from src.transfer import connector_capabilities as cc
+
+    _db2_driver(monkeypatch, present=False)
+    try:
+        ok, msg = endpoint_allowed_for_role("db2", "source")
+        assert ok is False
+        route_ok, route_msg = validate_transfer("database", "db2", "database", "postgresql")
+        assert route_ok is False
+        for text in (msg, route_msg):
+            assert "pip install ibm-db ibm-db-sa" in text, text
+            assert "IBM Db2 needs a driver the operator installs" in text, text
+            assert "INSTALL_VENDOR_DRIVERS=1" in text, text
+    finally:
+        cc._module_is_installed.cache_clear()
+
+
+def test_db2_with_its_driver_is_still_planned(monkeypatch) -> None:
+    from src.transfer import connector_capabilities as cc
+
+    _db2_driver(monkeypatch, present=True)
+    try:
+        ok, msg = endpoint_allowed_for_role("db2", "source")
+        assert ok is False
+        assert "Planned" in msg and "pip install ibm-db" not in msg
+    finally:
+        cc._module_is_installed.cache_clear()
 
 
 def test_catalog_search_live_is_certified_only() -> None:
