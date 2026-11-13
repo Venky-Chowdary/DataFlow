@@ -284,9 +284,14 @@ def stream_scd2_mirror_transfer(
             f"STAGING {src_type}.{source.table or source.collection} → {staging_qualified} "
             f"({rows_staged:,} rows)",
         ]
+        # Gate-8's source count is the rows read: staged + held out by the
+        # staging load. Counting only the staged rows and then also
+        # subtracting the quarantined ones failed every run that held a row
+        # out ("expected target 1 vs target 2").
+        rows_read = max(rows_staged, int(stage_summary.get("source_row_count") or 0))
         dest_summary = {
-            "source_rows": rows_staged,
-            "source_row_count": rows_staged,
+            "source_rows": rows_read,
+            "source_row_count": rows_read,
             "staging_table": staging_qualified,
             "sync_mode": effective_sync,
         }
@@ -340,13 +345,6 @@ def stream_scd2_mirror_transfer(
             approx_batches = max(1, math.ceil(rows_staged / batch_size))
 
             stage_rejects = list(stage_summary.get("rejected_details") or [])
-            # Gate-8's source count is the rows read: staged + held out by the
-            # staging load. Counting only the staged rows and then also
-            # subtracting the quarantined ones failed every run that held a
-            # row out ("expected target 1 vs target 2").
-            rows_read = max(rows_staged, int(stage_summary.get("source_row_count") or 0))
-            dest_summary["source_rows"] = rows_read
-            dest_summary["source_row_count"] = rows_read
             rejected_all: list[dict] = []
             scd2_block_error: str | None = None
             partial_committed = False
@@ -668,27 +666,55 @@ def stream_scd2_mirror_transfer(
             # Map column and scopes a composite mirror by ``id`` alone.
             dest_summary["conflict_columns"] = list(pk_cols)
             dest_summary["primary_key_columns"] = list(pk_cols)
+            from services.scd2_engine import held_out_keys
+
+            # A row the staging load quarantined is absent from staging but
+            # still in the source: never an inferred delete (SCD2-F2 rule).
+            held_keys = held_out_keys(destination, stage_rejects, mappings, schema, pk_cols)
+            lattice = "_deleted" if mirror_delete_mode == "soft" else ""
             with engine.connect() as conn:
-                dest_summary.update(
-                    apply_inferred_deletes_via_staging(
-                        conn,
-                        target_qualified,
-                        staging_qualified,
-                        pk_cols,
-                        dialect=dest_type,
-                        target_table=destination.table or staging.table,
-                        delete_mode=mirror_delete_mode,
-                    )
+                census = apply_inferred_deletes_via_staging(
+                    conn,
+                    target_qualified,
+                    staging_qualified,
+                    pk_cols,
+                    dialect=dest_type,
+                    target_table=destination.table or staging.table,
+                    delete_mode=mirror_delete_mode,
+                    keep_keys=held_keys,
+                    key_types=_target_key_types(
+                        conn, destination.table, schema_name, pk_cols
+                    ) if held_keys else None,
                 )
+                kept = set(census.pop("kept_current_keys", None) or ())
+                dest_summary.update(census)
                 conn.commit()
                 active_count, active_checksum = _compute_active_checksum(
                     conn,
                     target_qualified,
                     target_cols,
-                    "_deleted" if mirror_delete_mode == "soft" else "",
+                    lattice,
                     batch_size=1_000,
                     dest_types=digest_types,
                 )
+                if kept:
+                    dest_summary["quarantined_keys_kept_current"] = len(kept)
+                    _stamp_retained_scope(
+                        conn, dest_summary, kept,
+                        staging_qualified=staging_qualified,
+                        target_qualified=target_qualified,
+                        target_cols=target_cols,
+                        conflict_columns=pk_cols,
+                        dest_type=dest_type,
+                        digest_types=digest_types,
+                        scd2_cols={},
+                        batch_size=1_000,
+                        scoped=lambda keys: _compute_active_checksum(
+                            conn, target_qualified, target_cols, lattice,
+                            batch_size=1_000, dest_types=digest_types,
+                            pk_columns=pk_cols, exclude_keys=keys,
+                        ),
+                    )
                 conn.commit()
             release_engine(engine)
             dest_summary["active_rows"] = active_count
@@ -745,8 +771,12 @@ def _stamp_retained_scope(
     digest_types: dict[str, str],
     scd2_cols: dict[str, Any],
     batch_size: int,
+    scoped: Callable[[set[str]], tuple[int, str]] | None = None,
 ) -> None:
     """Stamp the Gate-8 scope for current keys this run kept but did not write.
+
+    ``scoped`` digests the live rows outside ``retained``; the default is the
+    SCD2 current-version digest (a mirror passes its active-row digest).
 
     ``retained`` keys stay current without a row in staging: absent keys under
     close_missing=off, or keys whose row the staging load quarantined. Gate-8
@@ -772,7 +802,7 @@ def _stamp_retained_scope(
     )
     dest_summary["source_snapshot_checksum"] = digest
     if retained:
-        s_rows, s_checksum = _active_checksum(
+        s_rows, s_checksum = (scoped or (lambda keys: _active_checksum(
             conn,
             target_qualified,
             target_cols,
@@ -781,8 +811,8 @@ def _stamp_retained_scope(
             dest_types=digest_types,
             cols=scd2_cols,
             pk_columns=conflict_columns,
-            exclude_keys=retained,
-        )
+            exclude_keys=keys,
+        )))(retained)
         dest_summary["source_scoped_rows"] = s_rows
         dest_summary["source_scoped_checksum"] = s_checksum
 

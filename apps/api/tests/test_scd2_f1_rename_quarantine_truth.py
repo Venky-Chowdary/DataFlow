@@ -73,7 +73,10 @@ def _run(
             destination=dest,
             sync_mode=sync,
             validation_mode=validation_mode,
-            stream_contracts=[{"selected": True, "primary_key": "id", "sync_mode": sync}],
+            stream_contracts=extra.pop(
+                "stream_contracts",
+                [{"selected": True, "primary_key": "id", "sync_mode": sync}],
+            ),
             mappings=[dict(m) for m in mappings],
             **extra,
         )

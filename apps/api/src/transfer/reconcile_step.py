@@ -3398,20 +3398,64 @@ def _only_rows_recovered_behind_watermark(
     return recovered > 0 and _as_count(report.get("source_rows")) <= recovered
 
 
-def _scd2_current_column(dest_summary: Any) -> str:
-    """The is-current column of an SCD2 run's history table, or ""."""
+def source_rewrites_needed(
+    source_reread: bool, rewrites: bool, rows: list[dict], mappings: list[dict]
+) -> bool:
+    """Whether the ladder's source rows must be mapped to the written image.
+
+    A re-read always is the pre-image. In-memory rows are when they still
+    carry a renamed column under its source name and not its target name.
+    """
+    if not rewrites:
+        return False
+    if source_reread:
+        return True
+    first = rows[0] if rows and isinstance(rows[0], dict) else None
+    if first is None:
+        return False
+    for m in mappings or []:
+        src = str((m or {}).get("source") or "").strip()
+        tgt = str((m or {}).get("target") or "").strip()
+        if src and tgt and src.casefold() != tgt.casefold() and src in first and tgt not in first:
+            return True
+    return False
+
+
+def _run_sub_summary(dest_summary: Any) -> dict[str, Any]:
+    """The history / mirror census a buffered merge nests under its mode."""
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    for key in ("scd2", "mirror"):
+        if isinstance(summary.get(key), dict):
+            return summary[key]
+    return {}
+
+
+def _live_row_column(dest_summary: Any) -> tuple[str, bool]:
+    """``(flag column, value that marks a live row)``, or ``("", True)``.
+
+    SCD2: the is-current flag (true). Soft-delete mirror: the tombstone flag
+    (false). Every other route's table is its live population.
+    """
     summary = dest_summary if isinstance(dest_summary, dict) else {}
     sync = str(summary.get("sync_mode") or summary.get("effective_sync_mode") or "")
-    if sync.strip().lower() != "scd2" and not isinstance(summary.get("scd2"), dict):
-        return ""
-    from services.scd2_engine import resolve_scd2_cols
+    sync = sync.strip().lower()
+    if sync == "scd2" or isinstance(summary.get("scd2"), dict):
+        from services.scd2_engine import resolve_scd2_cols
 
-    opts = summary.get("scd2_opts")
-    return str(resolve_scd2_cols(opts if isinstance(opts, dict) else None)["is_current"])
+        opts = summary.get("scd2_opts")
+        return str(resolve_scd2_cols(opts if isinstance(opts, dict) else None)["is_current"]), True
+    mirror = summary.get("mirror") if isinstance(summary.get("mirror"), dict) else summary
+    if sync in {"mirror", "full_refresh_mirror"} or isinstance(summary.get("mirror"), dict):
+        lattice = str(mirror.get("soft_delete_column") or "")
+        if str(mirror.get("mirror_delete_mode") or "soft").lower() == "soft" and lattice:
+            return lattice, False
+    return "", True
 
 
 def _is_current_cell(value: Any) -> bool:
-    """An is-current flag as any engine reads it back (bool, 1/0, 't'/'f', text)."""
+    """A boolean flag as any engine reads it back (bool, 1/0, 't'/'f', text)."""
+    if value is None:
+        return False
     if isinstance(value, bool):
         return value
     from decimal import Decimal
@@ -3553,7 +3597,8 @@ def _maybe_attach_verification_ladder(
     # one. Grading closed versions against the source failed every SCD2 run
     # that quarantined a row once history existed (the row-level L3-L5 only
     # runs when quarantined keys are excluded).
-    current_col = _scd2_current_column(dest_summary)
+    # A soft-delete mirror's tombstones are not its live population either.
+    current_col, live_when = _live_row_column(dest_summary)
     # Prefer full SQL population over buffered records (streaming passes []).
     try:
         target_rows = _read_verify_rows(
@@ -3567,7 +3612,8 @@ def _maybe_attach_verification_ladder(
             target_rows = [
                 {c: r.get(c) for c in target_cols}
                 for r in target_rows
-                if isinstance(r, dict) and _is_current_cell(r.get(current_col))
+                if isinstance(r, dict)
+                and _is_current_cell(r.get(current_col)) is live_when
             ]
     except PopulationTooLarge as exc:
         return _return(
@@ -3731,7 +3777,10 @@ def _maybe_attach_verification_ladder(
                     r for r in target_rows if _t_window.position(r) == IN_WINDOW
                 ]
                 window_scoped_target = True
-    if source_reread and rewrites:
+    # Buffered records handed in by the engine are the source image too: a
+    # mirror keeps them for its key census, and comparing them unmapped read
+    # every renamed column as NULL ("column 'clv_value' source=None").
+    if source_rewrites_needed(source_reread, rewrites, source_rows, mappings):
         def _as_written(rows: list[dict]) -> list[dict]:
             if not rows:
                 return rows
@@ -3835,7 +3884,7 @@ def _maybe_attach_verification_ladder(
     # counts the current rows this run owns (current - kept).
     _kept_current = _as_count(
         (dest_summary or {}).get("quarantined_keys_kept_current")
-        or ((dest_summary or {}).get("scd2") or {}).get("quarantined_keys_kept_current")
+        or _run_sub_summary(dest_summary).get("quarantined_keys_kept_current")
     ) or 0
     if _kept_current and _rej_keys:
         target_rows = [
@@ -7550,23 +7599,33 @@ def _run_reconciliation_impl(
         # keyed by this run's source.
         _retained = int(
             (dest_summary or {}).get("retained_missing_rows")
-            or ((dest_summary or {}).get("scd2") or {}).get(
+            or _run_sub_summary(dest_summary).get(
                 "retained_missing_rows"
             )
             or 0
         )
         _scoped = (
             (dest_summary or {}).get("source_scoped_checksum")
-            or ((dest_summary or {}).get("scd2") or {}).get(
+            or _run_sub_summary(dest_summary).get(
                 "source_scoped_checksum"
             )
         )
         _snapshot_digest = (
             (dest_summary or {}).get("source_snapshot_checksum")
-            or ((dest_summary or {}).get("scd2") or {}).get(
+            or _run_sub_summary(dest_summary).get(
                 "source_snapshot_checksum"
             )
         )
+        if (
+            not _snapshot_digest
+            and _retained
+            and _scoped
+            and isinstance((dest_summary or {}).get("mirror"), dict)
+        ):
+            # Buffered mirror: the write-pass fingerprint IS the digest of the
+            # rows this run wrote — the population the scoped digest covers
+            # once the kept quarantined keys are left out.
+            _snapshot_digest = source_checksum
         _scoped_pair = bool(
             _retained and _scoped and _snapshot_digest
         )
@@ -7596,7 +7655,7 @@ def _run_reconciliation_impl(
             # under close_missing=off, or their row was quarantined (SCD2-F2).
             _held = _as_count(
                 (dest_summary or {}).get("quarantined_keys_kept_current")
-                or ((dest_summary or {}).get("scd2") or {}).get(
+                or _run_sub_summary(dest_summary).get(
                     "quarantined_keys_kept_current"
                 )
             )
@@ -7610,7 +7669,7 @@ def _run_reconciliation_impl(
                 # that population, not the full current count.
                 _scoped_rows = int(
                     (dest_summary or {}).get("source_scoped_rows")
-                    or ((dest_summary or {}).get("scd2") or {}).get(
+                    or _run_sub_summary(dest_summary).get(
                         "source_scoped_rows"
                     )
                     or source_rows
