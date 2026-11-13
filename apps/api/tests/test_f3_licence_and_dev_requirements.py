@@ -144,6 +144,97 @@ def test_classify(licence: str, status: str) -> None:
     assert _pkg("x", licence).status == status
 
 
+# ── review 2: several classifiers are all the package's terms ──────────────
+
+REVIEW_FAKE = Path(
+    "/tmp/claude-0/-home-user-DataFlow/bf71655b-4a5d-5975-beb8-f06ec2244960/scratchpad/rev_t1/fake"
+)
+
+
+def _dist(tmp_path: Path, name: str, *headers: str):
+    from importlib import metadata
+
+    info = tmp_path / f"{name}-1.0.dist-info"
+    info.mkdir()
+    lines = ["Metadata-Version: 2.1", f"Name: {name}", "Version: 1.0", *headers]
+    (info / "METADATA").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return metadata.PathDistribution(info)
+
+
+def _gplpkg(tmp_path: Path):
+    """The reviewer's fake dist (rev_t1/fake/gplpkg-1.0.dist-info), inlined for CI."""
+    from importlib import metadata
+
+    if (REVIEW_FAKE / "gplpkg-1.0.dist-info" / "METADATA").is_file():
+        return metadata.PathDistribution(REVIEW_FAKE / "gplpkg-1.0.dist-info")
+    return _dist(
+        tmp_path,
+        "gplpkg",
+        "Classifier: License :: DFSG approved",
+        "Classifier: License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    )
+
+
+def test_a_gpl_package_cannot_pass_by_also_claiming_dfsg_approved(tmp_path: Path) -> None:
+    licence, source = scan._python_licence(_gplpkg(tmp_path))
+    assert (licence, source) == ("GPL-3.0", "classifier")
+    pkg = scan.classify(scan.Package("pypi", "gplpkg", "1.0", licence, "runtime", source), POLICY)
+    assert pkg.status == "copyleft"
+    assert any("gplpkg" in p for p in scan.violations([pkg], POLICY))
+
+
+def test_dfsg_approved_is_not_a_licence_in_the_repository_policy() -> None:
+    policy = scan.load_policy(REPO / "licence-policy.json")
+    assert "DFSG approved" not in policy["allowed"]
+    pkg = scan.classify(scan.Package("pypi", "x", "1", "DFSG approved", "runtime", "classifier"), policy)
+    assert pkg.status == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("classifiers", "licence", "status"),
+    [
+        (["MIT License", "Apache Software License"], "Apache-2.0 AND MIT", "allowed"),
+        (["MIT License", "GNU General Public License v3 (GPLv3)"], "GPL-3.0 AND MIT", "copyleft"),
+        (["DFSG approved", "MIT License"], "MIT", "allowed"),  # pytest-timeout's metadata
+        (["DFSG approved"], "", "unknown"),
+        (["MIT License", "Other/Proprietary License"], "MIT AND Other/Proprietary License", "unknown"),
+    ],
+)
+def test_several_classifiers_are_and_not_or(
+    tmp_path: Path, classifiers: list[str], licence: str, status: str
+) -> None:
+    headers = [f"Classifier: License :: OSI Approved :: {c}" for c in classifiers]
+    got, _ = scan._python_licence(_dist(tmp_path, "pkg", *headers))
+    assert got == licence
+    assert _pkg("pkg", got).status == status
+
+
+def test_only_an_explicit_spdx_expression_offers_a_choice(tmp_path: Path) -> None:
+    dist = _dist(
+        tmp_path,
+        "dual",
+        "License-Expression: MIT OR GPL-3.0-only",
+        "Classifier: License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    )
+    licence, source = scan._python_licence(dist)
+    assert (licence, source) == ("MIT OR GPL-3.0-only", "License-Expression")
+    assert _pkg("dual", licence).status == "allowed"
+
+
+def test_a_legacy_npm_licenses_array_is_and_not_or(tmp_path: Path) -> None:
+    lock = {"lockfileVersion": 3, "packages": {"node_modules/two": {"version": "1.0.0"}}}
+    path = tmp_path / "package-lock.json"
+    path.write_text(json.dumps(lock), encoding="utf-8")
+    pkg_dir = tmp_path / "node_modules" / "two"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "package.json").write_text(
+        json.dumps({"licenses": [{"type": "MIT"}, {"type": "GPL-3.0"}]}), encoding="utf-8"
+    )
+    row = scan.scan_npm(path, tmp_path / "node_modules")[0]
+    assert row.licence == "MIT AND GPL-3.0"
+    assert scan.classify(row, POLICY).status == "copyleft"
+
+
 def test_a_new_copyleft_dependency_fails_until_reviewed() -> None:
     problems = scan.violations([_pkg("new-gpl", "GPL-3.0"), _pkg("lgpl-lib", "LGPL-2.1")], POLICY)
     assert len(problems) == 1 and "new-gpl" in problems[0]

@@ -70,7 +70,7 @@ appdirs-stubs: MIT
 argon2-cffi: MIT
 argon2-cffi-bindings: MIT
 asn1crypto: MIT
-async-generator: Apache-2.0 OR MIT
+async-generator: Apache-2.0 AND MIT
 async-property: MIT
 asynch: Apache-2.0
 attrs: MIT
@@ -103,7 +103,7 @@ fastavro: MIT
 fdb: BSD
 filelock: MIT
 firebolt_sdk: Apache-2.0
-firebolt_sqlalchemy: Apache-2.0 OR MIT
+firebolt_sqlalchemy: Apache-2.0 AND MIT
 frozenlist: Apache-2.0
 fsspec: BSD-3-Clause
 future: MIT
@@ -156,7 +156,7 @@ opentelemetry-sdk: Apache-2.0
 opentelemetry-semantic-conventions: Apache-2.0
 oracledb: UPL-1.0 OR Apache-2.0
 orjson: MPL-2.0 AND (Apache-2.0 OR MIT)
-outcome: Apache-2.0 OR MIT
+outcome: Apache-2.0 AND MIT
 packaging: Apache-2.0 OR BSD-2-Clause
 pandas: BSD-3-Clause
 paramiko: LGPL-2.1
@@ -193,7 +193,7 @@ pypdf: BSD-3-Clause
 pypdfium2: BSD-3-Clause, Apache-2.0, dependency licenses
 pyroaring: MIT
 pytesseract: Apache-2.0
-python-dateutil: Apache-2.0 OR BSD
+python-dateutil: Apache-2.0 AND BSD
 python-docx: MIT
 python-dotenv: BSD-3-Clause
 python-multipart: Apache-2.0
@@ -208,7 +208,7 @@ rich: MIT
 s3fs: BSD
 s3transfer: Apache-2.0
 six: MIT
-sniffio: Apache-2.0 OR MIT
+sniffio: Apache-2.0 AND MIT
 snowflake-connector-python: Apache-2.0
 snowflake-sqlalchemy: Apache-2.0
 sortedcontainers: Apache-2.0
@@ -229,7 +229,7 @@ typing_extensions: PSF-2.0
 tzlocal: MIT
 urllib3: MIT
 uvicorn: BSD-3-Clause
-uvloop: Apache-2.0 OR MIT
+uvloop: Apache-2.0 AND MIT
 vertica-python: Apache-2.0
 watchfiles: MIT
 websockets: BSD-3-Clause

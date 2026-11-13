@@ -67,6 +67,9 @@ _ALIASES: list[tuple[str, str]] = [
     (r"^zlib$|^zlib/libpng$", "Zlib"),
     (r"^historical permission notice and disclaimer \(hpnd\)$", "HPND"),
 ]
+# "License :: OSI Approved" and "License :: DFSG approved" are approval
+# labels, not licences: they say nothing about which terms apply.
+_APPROVAL_LABELS = {"OSI Approved", "DFSG approved"}
 _CLASSIFIER = {
     "MIT License": "MIT",
     "Apache Software License": "Apache-2.0",
@@ -141,11 +144,15 @@ def _python_licence(dist: metadata.Distribution) -> tuple[str, str]:
     classifiers = [
         c.split(" :: ")[-1]
         for c in meta.get_all("Classifier") or []
-        if c.startswith("License ::") and c != "License :: OSI Approved"
+        if c.startswith("License ::") and c.split(" :: ")[-1] not in _APPROVAL_LABELS
     ]
     mapped = sorted({_CLASSIFIER.get(c, c) for c in classifiers})
     if mapped:
-        return " OR ".join(mapped), "classifier"
+        # Several licence classifiers do not say the package is offered under
+        # a choice of them, so all of them apply (AND): a GPL classifier next
+        # to a permissive one is copyleft and goes to review. Only an explicit
+        # SPDX License-Expression (above) can offer a choice (OR).
+        return " AND ".join(mapped), "classifier"
     field = normalise(meta.get("License") or "")
     if field:
         return field, "License"
@@ -263,7 +270,8 @@ def scan_npm(lockfile: Path = LOCKFILE, node_modules: Path | None = None) -> lis
                 data = json.loads(pkg_json.read_text(encoding="utf-8"))
                 lic = data.get("license") or data.get("licenses") or ""
                 if isinstance(lic, list):
-                    lic = " OR ".join(x.get("type", "") if isinstance(x, dict) else str(x) for x in lic)
+                    # The legacy array form lists licences, not a choice: AND.
+                    lic = " AND ".join(x.get("type", "") if isinstance(x, dict) else str(x) for x in lic)
                 elif isinstance(lic, dict):
                     lic = lic.get("type", "")
                 licence, source = str(lic), "node_modules package.json"
