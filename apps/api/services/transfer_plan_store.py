@@ -53,20 +53,36 @@ _HELD = threading.local()
 
 
 class PlanStoreBusy(TimeoutError):
-    """Another writer held the plan store past ``LOCK_TIMEOUT_SECONDS``; nothing was written."""
+    """Another writer held the plan store past ``LOCK_TIMEOUT_SECONDS``; nothing was written.
+
+    ``str()`` names the store file only (it can reach clients); ``path`` has
+    the full location for logs.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = str(path)
+        super().__init__(
+            f"Transfer plan store {Path(path).name} is busy: another writer held it past "
+            "the lock timeout, so nothing was written. Retry shortly."
+        )
 
 
 class PlanStoreUnreadable(RuntimeError):
-    """The store file exists but cannot be read or parsed; nothing was read or written."""
+    """The store file exists but cannot be read or parsed; nothing was read or written.
+
+    ``str()`` names files only, never the data directory (it can reach clients,
+    e.g. as an async Validate job's error); ``path`` and ``backup_path`` keep
+    the full locations for the operator log.
+    """
 
     def __init__(self, path: Path, error: BaseException) -> None:
         self.path = str(path)
         self.backup_path = str(_backup_path(path))
         self.error_class = type(error).__name__
         super().__init__(
-            f"Transfer plan store {self.path} cannot be read ({self.error_class}); nothing was "
-            f"read or written. Repair it, or restore the previous good copy {self.backup_path}, "
-            "then retry."
+            f"Transfer plan store {Path(path).name} cannot be read ({self.error_class}); nothing "
+            f"was read or written. Repair it, or restore the previous good copy "
+            f"{_backup_path(Path(path)).name} in the data directory, then retry."
         )
 
 
@@ -345,7 +361,7 @@ def _store_file_lock(deadline: float) -> Iterator[None]:
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise PlanStoreBusy(f"plan store {STORE_PATH} is busy") from None
+                    raise PlanStoreBusy(STORE_PATH) from None
                 time.sleep(_LOCK_POLL_SECONDS)
         try:
             yield
@@ -358,7 +374,7 @@ def _exclusive() -> Iterator[None]:
     """Hold the plan store for one read-modify-write (re-entrant per thread)."""
     deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
     if not _PROCESS_LOCK.acquire(timeout=LOCK_TIMEOUT_SECONDS):
-        raise PlanStoreBusy(f"plan store {STORE_PATH} is busy")
+        raise PlanStoreBusy(STORE_PATH)
     try:
         depth = getattr(_HELD, "depth", 0)
         _HELD.depth = depth + 1

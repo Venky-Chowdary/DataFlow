@@ -90,7 +90,7 @@ def start_plan_preflight_job(
                 if _LATEST.get(key) is not job:
                     return
                 job["status"] = "failed"
-                job["error"] = str(exc) or exc.__class__.__name__
+                job["error"] = public_job_error(exc)
                 job["finished_at"] = time.time()
 
     threading.Thread(
@@ -100,6 +100,21 @@ def start_plan_preflight_job(
         daemon=True,
     ).start()
     return accepted
+
+
+def public_job_error(exc: BaseException) -> str:
+    """A worker failure as GET /preflight may show it: no data-directory paths, no secrets."""
+    import os
+
+    from services import transfer_plan_store
+    from services.log_redaction import redact_log_text
+    from services.platform_config import data_dir
+
+    text = str(exc) or exc.__class__.__name__
+    roots = {str(transfer_plan_store.STORE_PATH.parent), str(data_dir())}
+    for root in sorted(roots, key=len, reverse=True):
+        text = text.replace(root + os.sep, "").replace(root, "<data dir>")
+    return redact_log_text(text)
 
 
 def get_plan_preflight_job(plan_id: str, run_id: str = "") -> dict[str, Any] | None:

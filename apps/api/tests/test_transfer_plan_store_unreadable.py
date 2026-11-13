@@ -177,9 +177,77 @@ def test_reads_never_fall_back_to_the_backup(isolated_plan_store):
     with pytest.raises(PlanStoreUnreadable) as caught:
         get_plan(a)
     message = str(caught.value)
-    assert str(isolated_plan_store) in message
-    assert "transfer_plans.json.bak" in message
+    assert "transfer_plans.json" in message and "transfer_plans.json.bak" in message
     assert caught.value.error_class == "UnicodeDecodeError"
+    # The full locations stay on the exception (for the log), not in its text.
+    assert caught.value.path == str(isolated_plan_store)
+    assert caught.value.backup_path == str(isolated_plan_store) + ".bak"
+
+
+def test_refusal_texts_never_carry_the_data_directory(isolated_plan_store, monkeypatch):
+    """str(exc) reaches clients (async Validate's job error): file names only."""
+    a, _b = _two_plans()
+    data_dir = str(isolated_plan_store.parent)
+    _truncated(isolated_plan_store)
+    with pytest.raises(PlanStoreUnreadable) as unreadable:
+        get_plan(a)
+    assert data_dir not in str(unreadable.value)
+
+    isolated_plan_store.write_bytes(isolated_plan_store.with_name("transfer_plans.json.bak").read_bytes())
+    monkeypatch.setattr(store, "LOCK_TIMEOUT_SECONDS", 0.05)
+    import fcntl
+
+    with open(isolated_plan_store.with_name("transfer_plans.json.lock"), "a+") as other:
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX)
+        with pytest.raises(store.PlanStoreBusy) as busy:
+            update_plan(a, {"name": "x"})
+    assert data_dir not in str(busy.value)
+    assert "transfer_plans.json" in str(busy.value)
+
+
+class _InlineThread:
+    """Runs the async Validate worker inline, so its outcome is ready on return."""
+
+    def __init__(self, *, target, args=(), **_kwargs):
+        self._target, self._args = target, args
+
+    def start(self):
+        self._target(*self._args)
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "busy", "other"])
+def test_async_validate_job_error_does_not_leak_the_data_directory(
+    isolated_plan_store, monkeypatch, failure
+):
+    from types import SimpleNamespace
+
+    import services.plan_preflight_job as jobs
+
+    a, _b = _two_plans()
+    data_dir = str(isolated_plan_store.parent)
+
+    def failing_preflight(plan_id, **_kwargs):
+        if failure == "unreadable":
+            raise PlanStoreUnreadable(isolated_plan_store, ValueError("bad json"))
+        if failure == "busy":
+            raise store.PlanStoreBusy(isolated_plan_store)
+        raise RuntimeError(f"could not open {isolated_plan_store.parent / 'uploads' / 'x.csv'}")
+
+    monkeypatch.setattr(jobs, "threading", SimpleNamespace(Thread=_InlineThread))
+    monkeypatch.setattr("services.transfer_plan_service.run_plan_preflight", failing_preflight)
+    jobs.reset_plan_preflight_jobs()
+    try:
+        accepted = jobs.start_plan_preflight_job(a)
+        view = jobs.get_plan_preflight_job(a, accepted["run_id"])
+    finally:
+        jobs.reset_plan_preflight_jobs()
+    assert view["status"] == "failed"
+    assert view["error"], "the failure is still reported"
+    assert data_dir not in view["error"], view["error"]
+    if failure == "other":
+        assert "x.csv" in view["error"]
+    else:
+        assert "transfer_plans.json" in view["error"]
 
 
 def test_the_failure_is_logged_once_with_path_and_error_class_only(isolated_plan_store, caplog):
