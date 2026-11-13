@@ -127,8 +127,14 @@ class ObjectStoreEncoder:
         target_cols: list[str],
         dest_types: dict[str, str] | None = None,
         spill_max_size: int = 8 * 1024 * 1024,
+        formula_protection: str = "off",
     ) -> None:
+        from services.csv_safety import formula_protection_mode
+
         self.key = key or ""
+        # G7: "prefix" guards CSV/TSV header names and text cells for a file a
+        # person opens (the email destination); data destinations stay exact.
+        self._guard_formulas = formula_protection_mode(formula_protection) == "prefix"
         self.key_l = self.key.lower()
         self.target_cols = list(target_cols)
         self.dest_types = dest_types or {}
@@ -190,9 +196,17 @@ class ObjectStoreEncoder:
         delim = "\t" if self.key_l.endswith(".tsv") else ","
         self._text = _SpoolTextSink(self._spool)
         self._csv = delim
-        self._text.write(format_csv_row(list(self.target_cols), delim) + "\n")
+        header = [self._guard_text(c) for c in self.target_cols]
+        self._text.write(format_csv_row(header, delim) + "\n")
         self._header_written = True
         return delim
+
+    def _guard_text(self, text: str) -> str:
+        if not self._guard_formulas:
+            return text
+        from services.csv_safety import neutralize_export_cell
+
+        return neutralize_export_cell(text)
 
     def _append_delimited(self, mapped_rows: Sequence[tuple]) -> None:
         from connectors.writer_common import iter_mapped_delimited_records
@@ -211,7 +225,7 @@ class ObjectStoreEncoder:
                         csv_cell_encode(
                             None
                             if record.get(k) is None
-                            else wire_cell_text(record.get(k))
+                            else self._guard_text(wire_cell_text(record.get(k)))
                         )
                         for k in self.target_cols
                     ],
@@ -455,6 +469,7 @@ def materialize_object_store_export(
     records: list[dict[str, Any]] | None = None,
     source_spill_max: int | None = None,
     source_spool: Any = None,
+    formula_protection: str = "off",
 ) -> ObjectStoreMaterializeResult:
     """Map, quarantine, and encode without retaining the source matrix.
 
@@ -522,6 +537,7 @@ def materialize_object_store_export(
         target_cols=target_cols,
         dest_types=dest_types,
         spill_max_size=spill_max_size,
+        formula_protection=formula_protection,
     )
     acc = FingerprintAccumulator()
     sample_rows: list[tuple] = []

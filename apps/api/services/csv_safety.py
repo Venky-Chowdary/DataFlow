@@ -10,17 +10,18 @@ Which export gets which guard (G7, CWE-1236) — decided per path:
 
 * Operator reports (redacted samples, quarantine CSV): always
   ``neutralize_formula_cell``.
-* Human downloads produced on request — the audit CSV export (always) and
-  the Query console's CSV/TSV file export (``formula_protection`` defaults to
-  ``"prefix"``): ``neutralize_export_cell``.
+* Human downloads produced on request — the audit CSV export (always), the
+  Query console's CSV/TSV file export and the email destination's CSV/TSV
+  attachment (``formula_protection`` defaults to ``"prefix"``, ``"off"`` opts
+  out): ``neutralize_export_cell``, header names included.
 * Data-plane output — a transfer job's ``file_export`` destination, wherever
   it lands (exports folder, export bucket, the presigned/``/transfer/download``
   link that serves those stored bytes) — is data for machine consumption:
   Gate-8 re-reads it and downstream loads ingest it. It stays byte-exact
   (``formula_protection`` defaults to ``"off"``) unless the destination opts
   in with ``"prefix"``; Gate-8 then reads it back with ``restore_export_cell``.
-  Database/object-store writers never apply a guard: a ``'`` prefix silently
-  mutates delivered values like ``=A1``.
+  Database and object-store writers (S3/GCS/ADLS/SFTP) never apply a guard:
+  a ``'`` prefix silently mutates delivered values like ``=A1``.
 
 XLSX exports need no prefix: ``services.xlsx_cells`` writes text as explicit
 string cells, never formulas.
