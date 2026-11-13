@@ -706,6 +706,8 @@ export function TransferMapStep({
             </div>
           </div>
         )}
+        {/* Toolbar and split scroll inside the Map body: the classic view is a fixed-height card. */}
+        <div className="df2-ms-scroll">
         {remapControls && (
           <MappingToolbar
             canUndo={studio.canUndo}
@@ -780,6 +782,7 @@ export function TransferMapStep({
               onPointerOver={studio.pointerOver}
             />
           )}
+        </div>
         </div>
         <span id={gripHelpId} className="df2-sr-only">
           Press Space or Enter to pick up, arrow keys to move over destination columns, Enter to drop, Escape to cancel.

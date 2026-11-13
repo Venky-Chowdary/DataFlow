@@ -19,20 +19,31 @@ html[data-theme="dark"] .df2-ms-automap {
 }
 
 /* ---- layout ----------------------------------------------------------- */
-/* The Map step is viewport-bound (internal scroll only). The split owns the
-   remaining height; the workspace keeps its own single-column rules. */
+/* The classic Map step is a fixed-height card whose body hides overflow.
+   Everything this feature adds below the banners lives in one scroll region,
+   so a short laptop screen scrolls it instead of cutting the grid's own
+   controls; the split keeps a usable minimum height for the grid. */
+
+.df2-ms-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+}
 
 .df2-ms-split {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 12px;
-  flex: 1 1 0;
-  min-height: 0;
+  flex: 1 0 auto;
+  min-height: min(420px, 70vh);
 }
 
 .df2-ms-split.has-panel {
-  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(min(420px, 70vh), 1fr) auto;
 }
 
 @media (min-width: 1024px) {
@@ -44,6 +55,26 @@ html[data-theme="dark"] .df2-ms-automap {
 
 .df2-ms-split > .df2-map-step-workspace {
   min-height: 0;
+}
+
+/* Studio review stacks Map above Validate under a scrolling shell: the Map
+   body is content-sized there, so the region and split size to content. */
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-ms-scroll {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-ms-split,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-ms-split.has-panel {
+  flex: 0 0 auto;
+  min-height: 0;
+  grid-template-rows: auto;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-ms-panel-list {
+  flex: 0 1 auto;
+  height: auto;
+  max-height: 420px;
 }
 
 .df2-ms-toolbar {
@@ -631,24 +662,10 @@ html[data-theme="dark"] .df2-ms-automap {
 }
 
 /* ---- narrow screens ----------------------------------------------------- */
-/* Viewport-bound panes leave a phone a sliver of grid once the banners and
-   toolbar take their lines. Below the desktop split, the split scrolls as one
-   column: the grid track keeps a usable minimum height (a grid track, not the
-   workspace's own flex sizing, which the shared Map rules pin) and the panel
-   follows it. */
+/* Below the desktop split the panel follows the grid inside the scroll
+   region, with a list of its own height. */
 
 @media (max-width: 1023.98px) {
-  .df2-ms-split,
-  .df2-ms-split.has-panel {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(min(70vh, 560px), auto);
-    overflow-y: auto;
-  }
-
-  .df2-ms-split.has-panel {
-    grid-template-rows: minmax(min(70vh, 560px), auto) auto;
-  }
-
   .df2-ms-panel-list {
     flex: none;
     height: 360px;
@@ -658,6 +675,20 @@ html[data-theme="dark"] .df2-ms-automap {
 @media (max-width: 639.98px) {
   .df2-ms-toolbar .df2-btn {
     padding-inline: 8px;
+  }
+
+  /* The Map footer's actions wrap inside the card on a phone instead of
+     running past its right edge. */
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions > .df2-btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: normal;
   }
 
   .df2-ms-automap-table th:nth-child(4),
