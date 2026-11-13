@@ -369,8 +369,9 @@ def _store_file_lock(deadline: float) -> Iterator[None]:
         return
     lock_path = STORE_PATH.with_name(STORE_PATH.name + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # Never written: read-only, created owner-only; flock works on any open fd.
-    fd = os.open(lock_path, os.O_RDONLY | os.O_CREAT, 0o600)
+    # Owner-only and never written to, but opened read-write: on NFS/EFS Linux
+    # emulates flock() with fcntl locks, and an exclusive one needs a writable fd.
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         while True:
             try:

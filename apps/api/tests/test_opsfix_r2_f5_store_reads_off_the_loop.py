@@ -416,7 +416,7 @@ def test_plan_writes_waiting_on_the_lock_do_not_starve_reads_or_the_shared_threa
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1", timeout=60) as client:
             await client.get("/api/v1/transfer/plans")
-            fd = os.open(lock_path, os.O_RDONLY | os.O_CREAT, 0o600)
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX)  # "another process" holds the plan store
                 writes = asyncio.gather(*[

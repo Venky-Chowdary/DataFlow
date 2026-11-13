@@ -372,14 +372,32 @@ def test_a_write_started_inside_another_write_is_refused():
     assert get_plan(plan_id).job_ids == ["job-after"]
 
 
-def test_the_lock_file_is_private_and_opened_read_only(isolated_plan_store):
+def test_the_lock_file_is_private_opened_for_writing_and_never_written(isolated_plan_store, monkeypatch):
+    """Owner-only, opened read-write, empty.
+
+    On NFS/EFS Linux emulates flock() with fcntl locks, and an exclusive fcntl
+    lock needs a descriptor open for writing: a read-only one fails with EBADF
+    and every plan write would fail on a shared volume.
+    """
+    import fcntl
     import os
     import stat
 
-    plan_id = _plan()
-    sync_ui_mappings(plan_id, _mapping("x"))
     lock = isolated_plan_store.with_name("transfer_plans.json.lock")
+    access_modes: list[int] = []
+    real_open = os.open
+
+    def recording_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if str(path) == str(lock):
+            access_modes.append(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE)
+        return fd
+
+    with monkeypatch.context() as patched:
+        patched.setattr(store.os, "open", recording_open)
+        plan_id = _plan()
+        sync_ui_mappings(plan_id, _mapping("x"))
+
+    assert access_modes and set(access_modes) == {os.O_RDWR}, access_modes
     assert stat.S_IMODE(os.stat(lock).st_mode) & 0o077 == 0
-    lock.chmod(0o400)  # a read-only lock file still serializes writers
-    sync_ui_mappings(plan_id, _mapping("y"))
-    assert get_plan(plan_id).head_version() == 2
+    assert os.stat(lock).st_size == 0, "the lock file is never written"
