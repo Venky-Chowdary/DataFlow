@@ -199,6 +199,7 @@ def test_the_test_jobs_install_the_versions_the_image_ships() -> None:
     [
         ("test_privilege_probe_grant_signals", "ADMIN", "user"),
         ("test_widen_respects_existing_carrier", "PG", "username"),
+        ("test_row_contract_quarantine_accounting", "PG", "username"),
     ],
 )
 def test_shard4_live_pg_modules_take_the_postgres_from_the_environment(module, attr, user_key, monkeypatch) -> None:

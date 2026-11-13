@@ -83,12 +83,14 @@ def test_identity_collisions_still_abort_the_chunk(message):
     assert not is_sql_data_error(_IntegrityError(message))
 
 
+# The PostgreSQL the environment names (CI: .github/ci-live-engines.vars),
+# else the compose lab's.
 PG = {
-    "host": "localhost",
-    "port": 5433,
-    "database": "dataflow",
-    "username": "postgres",
-    "password": "postgres",  # nosec B106 - local test container
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5433")),
+    "database": os.environ.get("PGDATABASE", "dataflow"),
+    "username": os.environ.get("PGUSER", "postgres"),
+    "password": os.environ.get("PGPASSWORD", "postgres"),  # nosec B106 - local test container
 }
 
 
