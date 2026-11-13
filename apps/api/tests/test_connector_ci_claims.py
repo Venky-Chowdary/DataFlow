@@ -91,8 +91,14 @@ def test_kafka_is_proved_only_by_the_nightly_engine_suite(manifest) -> None:
         if spec["workflow"].endswith("ci.yml") and spec["mode"] != "report"
     ]
     assert not engine_evidence(manifest, pr_jobs)["kafka"]["live_verified"]
-    nightly = engine_evidence(manifest, [_result("engine-suite", "green")])
-    assert nightly["kafka"]["live_verified"]
+    shards = [
+        {**_result("engine-suite", "green"), "labels": {"shard": str(n)}} for n in range(1, 7)
+    ]
+    assert engine_evidence(manifest, shards)["kafka"]["live_verified"]
+    # A shard that never reported (cancelled, timed out) is not a green nightly.
+    partial = engine_evidence(manifest, shards[:5])["kafka"]
+    assert partial["status"] == "no_ci_result"
+    assert "engine-suite[shard=6]" in partial["missing_results"]
 
 
 def test_an_opt_in_job_that_did_not_run_is_not_live(manifest) -> None:
@@ -199,3 +205,15 @@ def test_sqlserver_needs_the_production_driver_green(manifest) -> None:
         manifest, [_driver_result("green", "pyodbc"), _driver_result("red", "pymssql")]
     )["sqlserver"]
     assert red["status"] == "ci_red"
+
+
+def test_a_green_job_whose_engine_tests_skipped_does_not_prove_that_engine(manifest) -> None:
+    shards = [
+        {**_result("engine-suite", "green"), "labels": {"shard": str(n)},
+         "engine_skips": {"kafka": 3} if n == 2 else {}}
+        for n in range(1, 7)
+    ]
+    ev = engine_evidence(manifest, shards)
+    assert not ev["kafka"]["live_verified"]
+    assert ev["kafka"]["status"] == "ci_red"
+    assert ev["redis"]["live_verified"]

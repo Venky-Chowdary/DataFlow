@@ -215,3 +215,58 @@ def test_labels_record_which_variant_of_a_job_ran(junit: Path, tmp_path: Path, m
     assert json.loads(out.read_text(encoding="utf-8"))["labels"] == {"driver": "pymssql"}
     with pytest.raises(SystemExit):
         main(["--job", "j", "--junit", str(junit), "--manifest", str(manifest), "--label", "pymssql"])
+
+
+def test_a_skip_that_also_names_an_engine_the_job_lacks_is_not_this_jobs(tmp_path: Path) -> None:
+    """"MySQL 3306 or Oracle 1521 not reachable" skips because Oracle is absent."""
+    from scripts.check_live_skips import Case
+
+    manifest = _manifest(mode="engine_scoped", engines=["postgresql"])
+    manifest["engine_tokens"]["mysql"] = ["mysql"]
+    manifest["jobs"]["j"]["engines"] = ["postgresql", "mysql"]
+    cases = [
+        Case("tests/a.py::t1", "skipped", "MySQL 3306 or Oracle 1521 not reachable"),
+        Case("tests/a.py::t2", "skipped", "live MySQL / PostgreSQL not reachable"),
+        Case("tests/a.py::t3", "skipped", "PostgreSQL 5432 or SQL Server 1433 not reachable"),
+        Case("tests/a.py::t4", "passed"),
+    ]
+    result = check("j", cases, manifest)
+    assert [r["test"] for r in result.unexpected] == ["tests/a.py::t2"]
+    assert {r["test"] for r in result.ignored} == {"tests/a.py::t1", "tests/a.py::t3"}
+
+
+def test_mariadb_is_its_own_engine_not_mysql() -> None:
+    manifest = load_manifest(MANIFEST)
+    assert "mariadb" not in manifest["engine_tokens"]["mysql"]
+    assert "mariadb" in manifest["engine_tokens"]
+
+
+def test_report_engines_are_counted_but_do_not_fail_the_job() -> None:
+    """The nightly cannot yet prove Kafka / SQL Server skip-free: their skips are
+    published per engine (so evidence stays honest) without failing the run."""
+    from scripts.check_live_skips import Case
+
+    manifest = _manifest(mode="engine_scoped", report_engines=["sqlserver"])
+    cases = [
+        Case("tests/a.py::t1", "skipped", "live SQL Server not reachable"),
+        Case("tests/a.py::t2", "passed"),
+    ]
+    result = check("j", cases, manifest)
+    assert result.status == "green" and result.exit_code() == 0
+    assert result.to_json()["engine_skips"] == {"sqlserver": 1}
+    assert [r["test"] for r in result.reported] == ["tests/a.py::t1"]
+
+
+def test_a_job_can_inherit_another_jobs_expected_skips() -> None:
+    """The nightly runs the same suite as api-tests: one allowlist, not two copies."""
+    from scripts.check_live_skips import Case
+
+    manifest = _manifest(mode="engine_scoped", inherit_expected_skips=["base"])
+    manifest["jobs"]["base"] = {
+        "mode": "report",
+        "engines": ["postgresql"],
+        "expected_skips": [{"test": "tests/a.py::*", "reason": "wal_level=replica", "why": "second PG"}],
+    }
+    cases = [Case("tests/a.py::t", "skipped", "needs a PostgreSQL with wal_level=replica"), Case("tests/a.py::u", "passed")]
+    result = check("j", cases, manifest)
+    assert not result.unexpected and result.expected[0]["why"] == "second PG"

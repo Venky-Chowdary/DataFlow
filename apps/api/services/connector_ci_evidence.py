@@ -78,10 +78,9 @@ def engine_evidence(
     for result in results:
         by_job.setdefault(str(result["job"]), []).append(result)
 
-    engines = sorted(
-        set(manifest.get("engine_tokens") or {})
-        | {e for spec in jobs.values() for e in spec.get("engines") or []}
-    )
+    # Engines some job starts. engine_tokens also names engines no job starts
+    # (only so a skip can be attributed to them); those have no evidence.
+    engines = sorted({e for spec in jobs.values() for e in spec.get("engines") or []})
     out: dict[str, dict[str, Any]] = {}
     for engine in engines:
         proving = [
@@ -92,11 +91,15 @@ def engine_evidence(
         runs = []
         for name in proving:
             for result in by_job.get(name, []):
+                skipped_here = int((result.get("engine_skips") or {}).get(engine, 0))
                 runs.append(
                     {
                         "job": name,
+                        # A green run in which this engine's own tests skipped
+                        # did not prove the engine.
+                        "engine_skips": skipped_here,
                         "workflow": jobs[name].get("workflow", ""),
-                        "status": result.get("status", ""),
+                        "status": "red" if skipped_here else result.get("status", ""),
                         "executed": (result.get("counts") or {}).get("executed", 0),
                         "unexpected_skips": (result.get("counts") or {}).get("unexpected_skips", 0),
                         "sha": (result.get("run") or {}).get("sha", ""),

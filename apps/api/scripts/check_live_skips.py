@@ -70,6 +70,8 @@ class CheckResult:
     expected: list[dict[str, str]] = field(default_factory=list)
     unexpected: list[dict[str, str]] = field(default_factory=list)
     ignored: list[dict[str, str]] = field(default_factory=list)
+    # Skips naming a `report_engines` engine: counted, published, not failing.
+    reported: list[dict[str, str]] = field(default_factory=list)
     stale_allowlist: list[dict[str, str]] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     min_executed: int = 0
@@ -91,6 +93,13 @@ class CheckResult:
         if self.problems or self.unexpected or self.count("failed"):
             return "red"
         return "green"
+
+    def engine_skips(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in [*self.unexpected, *self.reported]:
+            for engine in filter(None, str(row.get("engines") or "").split(",")):
+                counts[engine] = counts.get(engine, 0) + 1
+        return counts
 
     @property
     def enforced(self) -> bool:
@@ -129,9 +138,14 @@ class CheckResult:
                 "expected_skips": len(self.expected),
                 "unexpected_skips": len(self.unexpected),
                 "other_skips": len(self.ignored),
+                "reported_skips": len(self.reported),
                 "min_executed": self.min_executed,
             },
             "unexpected_skips": self.unexpected,
+            "reported_skips": self.reported,
+            # Per engine: skips that name it (unexpected or reported). Evidence
+            # never calls an engine live-verified while this is non-zero.
+            "engine_skips": self.engine_skips(),
             "expected_skips": self.expected,
             "stale_allowlist": self.stale_allowlist,
             "problems": self.problems,
@@ -160,6 +174,7 @@ def load_manifest(path: Path = MANIFEST) -> dict[str, Any]:
         if unknown:
             raise ValueError(f"{path}: job {name!r} names engines without tokens: {sorted(unknown)}")
         stray = set(job.get("proves") or []) - set(job.get("engines") or [])
+        stray |= set(job.get("report_engines") or []) - set(job.get("engines") or [])
         if stray:
             raise ValueError(f"{path}: job {name!r} proves engines it does not start: {sorted(stray)}")
         for entry in job.get("expected_skips") or []:
@@ -265,7 +280,10 @@ def check(
         result.problems.append(
             f"only {result.executed} tests executed; the job's floor is {result.min_executed}"
         )
+    report_only = set(spec.get("report_engines") or [])
     allow = list(spec.get("expected_skips") or [])
+    for other in spec.get("inherit_expected_skips") or []:
+        allow += list((jobs.get(other) or {}).get("expected_skips") or [])
     used = [False] * len(allow)
     tokens = manifest.get("engine_tokens") or {}
     for case in cases:
@@ -279,10 +297,18 @@ def check(
             continue
         if result.mode == "engine_scoped" or result.mode == "report":
             named = names_engine(case.message, result.engines, tokens)
-            if not named:
+            # "MySQL 3306 or Oracle 1521 not reachable" skips because of the
+            # engine this job does not start: it is that engine's skip.
+            elsewhere = names_engine(
+                case.message, [e for e in tokens if e not in result.engines], tokens
+            )
+            if not named or elsewhere:
                 result.ignored.append(row)
                 continue
             row["engines"] = ",".join(named)
+            if set(named) <= report_only:
+                result.reported.append(row)
+                continue
         result.unexpected.append(row)
     result.stale_allowlist = [
         {"test": e["test"], "reason": e["reason"]} for e, u in zip(allow, used) if not u
@@ -307,12 +333,16 @@ def summary_markdown(result: CheckResult, limit: int = 40) -> str:
     lines.append(
         f"- {c['executed']} executed ({c['passed']} passed, {c['failed']} failed), "
         f"{c['skipped']} skipped: {c['expected_skips']} expected, "
-        f"{c['unexpected_skips']} unexpected, {c['other_skips']} not this job's engines"
+        f"{c['unexpected_skips']} unexpected, {c['reported_skips']} reported only, "
+        f"{c['other_skips']} not this job's engines"
     )
     for problem in result.problems:
         lines.append(f"- problem: {problem}")
     for row in result.unexpected[:limit]:
         lines.append(f"- unexpected skip: `{row['test']}` — {row['reason'][:200]}")
+    for engine, n in sorted(result.engine_skips().items()):
+        if any(engine in str(r.get("engines")) for r in result.reported):
+            lines.append(f"- {engine}: {n} skips reported (not yet enforced; not live-verified)")
     if len(result.unexpected) > limit:
         lines.append(f"- … {len(result.unexpected) - limit} more in the result JSON")
     for row in result.stale_allowlist:

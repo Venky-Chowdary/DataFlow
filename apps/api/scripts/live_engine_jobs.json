@@ -17,7 +17,8 @@
   ],
   "engine_tokens": {
     "postgresql": ["postgres", "postgresql", "pg", "pgvector", "psycopg", "psycopg2", "libpq"],
-    "mysql": ["mysql", "pymysql", "mariadb"],
+    "mysql": ["mysql", "pymysql"],
+    "mariadb": ["mariadb"],
     "mongodb": ["mongo", "mongodb", "pymongo"],
     "redis": ["redis"],
     "kafka": ["kafka", "confluent_kafka"],
@@ -26,7 +27,12 @@
     "bigquery": ["bigquery"],
     "snowflake": ["snowflake", "fakesnow"],
     "gcs": ["gcs", "fake-gcs"],
-    "adls": ["adls", "azurite"]
+    "adls": ["adls", "azurite"],
+    "s3": ["s3", "minio"],
+    "iceberg": ["iceberg"],
+    "elasticsearch": ["elasticsearch"],
+    "vector_stores": ["qdrant", "weaviate", "milvus", "pinecone"],
+    "other_sql": ["redshift", "redshift_emulator", "clickhouse", "trino", "presto", "cockroachdb", "tidb", "timescaledb", "citus", "materialize", "risingwave", "questdb", "db2", "teradata", "hana"]
   },
   "jobs": {
     "no-config-transfer": {
@@ -93,6 +99,10 @@
       "workflow": ".github/workflows/full-suite.yml",
       "mode": "engine_scoped",
       "engines": ["postgresql", "mysql", "mongodb", "redis", "kafka", "sqlserver"],
+      "required_labels": {"shard": ["1", "2", "3", "4", "5", "6"]},
+      "report_engines": ["kafka", "sqlserver"],
+      "inherit_expected_skips": ["api-tests"],
+      "report_engines_why": "Kafka and SQL Server cannot run on the development machine, so their nightly skips could not be proven absent before this landed. They are counted per engine and published (evidence never calls them live-verified while any skip names them) but do not fail the nightly. Move them to enforced once a nightly shows zero; cdc-sqlserver already enforces SQL Server on every PR.",
       "min_executed": 1000,
       "expected_skips": []
     },
@@ -101,9 +111,96 @@
       "workflow": ".github/workflows/ci.yml",
       "mode": "report",
       "engines": ["postgresql", "mysql", "mongodb", "redis", "bigquery", "gcs", "adls"],
-      "report_only_why": "The general API suite (six shards, ~3,350 skips on 2026-11-13, e.g. 73 PostgreSQL tests gated on DATAFLOW_PG_TEST_DSN, which the shards do not set). Published per shard so the backlog is measurable; promote to engine_scoped once the owner triages it.",
       "min_executed": 1000,
-      "expected_skips": []
+      "measurement": "2026-11-13: the ~3,330 api-tests skips replayed under the shards' exact environment: 284 named a PostgreSQL / MySQL / Mongo / Redis / emulator engine the job starts, the rest (~2,820) are external (SaaS templates, Oracle, SQL Server, Kafka, Iceberg, vector stores, MinIO, MariaDB, real clouds). With .github/ci-live-engines.vars, 104 of the 284 ran and passed locally; see the PR for the rest.",
+      "expected_skips": [
+        {
+          "test": "tests/test_r7_cdc_replica_message_e2e.py::*",
+          "reason": "wal_level=replica",
+          "why": "Needs a second PostgreSQL running wal_level=replica; the CI PostgreSQL runs wal_level=logical for every CDC test."
+        },
+        {
+          "test": "tests/test_mx3_05_cdc_preflight_wal_level.py::*",
+          "reason": "wal_level=replica",
+          "why": "Needs a second PostgreSQL running wal_level=replica; the CI PostgreSQL runs wal_level=logical."
+        },
+        {
+          "test": "tests/test_d28_pg_non_logical_cdc_poll_live.py::*",
+          "reason": "without logical decoding",
+          "why": "Needs a PostgreSQL without logical decoding; the CI PostgreSQL has it on for CDC."
+        },
+        {
+          "test": "tests/test_r14_mysql_*::*",
+          "reason": "private MySQL for SET GLOBAL",
+          "why": "Changes server-wide MySQL settings (SET GLOBAL); needs a dedicated MySQL, not the one every other test in the shard shares."
+        },
+        {
+          "test": "tests/test_r14_mysql_tls_mode_truth_e2e.py::*",
+          "reason": "DATAFLOW_TEST_MYSQL_CA",
+          "why": "Needs a TLS-configured MySQL and its CA file; the CI MySQL is plaintext."
+        },
+        {
+          "test": "tests/test_d176_*::*",
+          "reason": "NOREPL|no-replication MySQL user",
+          "why": "Needs a second MySQL account without REPLICATION grants; CI has only the dataflow account, which holds them for CDC."
+        },
+        {
+          "test": "tests/test_gate8_leftover_quarantine_cdc_live.py::*",
+          "reason": "MySQL :\\d+ is open",
+          "why": "By design: this Postgres-only file skips its MySQL leg whenever MySQL is up; the MySQL CDC e2e covers it."
+        },
+        {
+          "test": "tests/test_signed_contract_live_sandbox.py::*",
+          "reason": "MySQL :\\d+ is open",
+          "why": "By design: this Postgres-only file skips its MySQL leg whenever MySQL is up; the MySQL sandbox covers it."
+        },
+        {
+          "test": "tests/test_d53_d70_exact_upsert_keys.py::*",
+          "reason": "only MySQL's default collation is case-insensitive",
+          "why": "Parametrised: the case-insensitive leg applies to MySQL's collation only, so the other engines' legs skip."
+        },
+        {
+          "test": "tests/test_benchmark_harness.py::*",
+          "reason": "DATAFLOW_KEYSET_BENCHMARK_URL",
+          "why": "Opt-in performance benchmark, not a correctness test."
+        },
+        {
+          "test": "tests/test_transform_quarantine_dest_count_pg_live.py::*",
+          "reason": "(redshift|bigquery)_emulator not reachable",
+          "why": "Hold-out legs for the Redshift and BigQuery transform emulators, which CI does not start on these ports."
+        },
+        {
+          "test": "tests/test_schedule_finalize_outcome_atomic.py::*",
+          "reason": "shared \\(Mongo\\) store",
+          "why": "Needs MONGODB_URI, which also moves the product's own stores to Mongo for the whole shard; deliberately not set (.github/ci-live-engines.vars)."
+        },
+        {
+          "test": "tests/test_r10_datetime2_seventh_digit_e2e.py::*",
+          "reason": "route needs ports \\[1433",
+          "why": "The source of every route is SQL Server, which this job does not start (cdc-sqlserver covers it)."
+        },
+        {
+          "test": "tests/test_r13_e10*.py::*mariadb*",
+          "reason": "Connection refused|Can't connect",
+          "why": "MariaDB leg; MariaDB is not started in CI."
+        },
+        {
+          "test": "tests/test_real_cloud_connectors.py::*",
+          "reason": "No credentials available",
+          "why": "Real cloud accounts, not emulators."
+        },
+        {
+          "test": "tests/test_saas_privilege_deny_live.py::*",
+          "reason": "deny matrix not enabled",
+          "why": "Needs a real BigQuery project with a denied principal."
+        },
+        {
+          "test": "tests/test_mx1_07_adls_custom_endpoint_field_form.py::*",
+          "reason": "tunnel Azurite",
+          "why": "Needs an Azurite reached through an SSH tunnel."
+        }
+      ],
+      "report_only_why": "The general API suite. Report mode until the shards export every connection-setting spelling (next change). Its expected_skips are the allowlist the nightly engine-suite inherits: both run the same suite."
     }
   }
 }

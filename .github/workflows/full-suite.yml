@@ -26,10 +26,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The whole suite in one process no longer fits: run 42398708790 (2026-11-07)
+  # spent 142 min in pytest and reached 55% when the 150-min limit cancelled
+  # it (18:03 -> 20:26; 11% at 18:34, 23% at 19:25, 46% at 20:07), i.e. about
+  # 260 min for the whole suite. It is split into six shards with the same
+  # file-hash sharding as the PR api-tests (tests/conftest.py::_select_ci_shard),
+  # whose six shards take 27-50 min on the same suite without SQL Server /
+  # Kafka; ~45-60 min per shard is expected, so the 150-min limit per shard is
+  # kept (not raised) and each shard still starts every engine.
   engine-suite:
-    name: Full pytest suite (live engines)
+    name: Full pytest suite (live engines, ${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     # SQL Server is started in a step (start_ci_databases.sh sqlserver), not
     # as a service: a service container cannot take a per-run password or
     # run the CT / native CDC init, and it ran without SQL Server Agent, so
@@ -43,6 +55,7 @@ jobs:
 
     env:
       PYTHONPATH: apps/api:packages/preflight/src:apps/api/src:apps/api/tests
+      DATAFLOW_TEST_SHARD: ${{ matrix.shard }}/6
       DATAFLOW_JOB_STORE: memory
       DATAFLOW_DISABLE_OBJECT_STORE: "1"
       DATAFLOW_ENGINE_DIGEST: "1"
@@ -77,6 +90,9 @@ jobs:
       DATAFLOW_TEST_MYSQL_DB: dataflow
       DATAFLOW_TEST_MYSQL_USER: dataflow
       DATAFLOW_TEST_MYSQL_PASSWORD: dataflow
+      # This job's MySQL is started below with MYSQL_ROOT_PASSWORD=root_ci;
+      # overrides the ci-live-engines.vars value (which matches the PR jobs).
+      DATAFLOW_TEST_MYSQL_ROOT_PASSWORD: root_ci
       # SQL Server (password: generated per run, see the first step)
       DATAFLOW_SQLSERVER_ENABLE: "1"
       DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
@@ -247,7 +263,13 @@ jobs:
           docker exec "$cid" mysql -uroot -proot_ci -e \
             "GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'; FLUSH PRIVILEGES;"
 
-      - name: Full suite
+      - name: Export live-engine connection settings (every name the suite reads)
+        # Job-level env above wins where both set a name (same values); the
+        # file adds the spellings the job never set (DATAFLOW_PG_TEST_DSN,
+        # DATAFLOW_TEST_PGVECTOR_PORT, R11_PG_LOGICAL_*, ...).
+        run: grep -vE '^\s*(#|$)' .github/ci-live-engines.vars >> "$GITHUB_ENV"
+
+      - name: Full suite (shard ${{ matrix.shard }}/6)
         working-directory: apps/api
         run: |
           python -m pytest tests -q -rfEs -p no:cacheprovider -p randomly \
@@ -255,24 +277,19 @@ jobs:
 
       - name: No live-engine test may skip (engine-scoped)
         # A skip whose message names an engine this job starts (postgres,
-        # mysql, mongo, redis, kafka, sqlserver) fails the job unless it is an
-        # expected skip in apps/api/scripts/live_engine_jobs.json (job
-        # `engine-suite`). SaaS / Oracle / cloud skips are not this job's claim.
+        # mysql, mongo, redis, kafka, sqlserver) and no engine it lacks fails
+        # the shard unless it is an expected skip in
+        # apps/api/scripts/live_engine_jobs.json (job `engine-suite`).
         if: ${{ !cancelled() }}
         working-directory: apps/api
         run: |
-          python scripts/check_live_skips.py --job engine-suite --junit /tmp/pytest-junit.xml --out "$RUNNER_TEMP/live-engine/engine-suite.json"
-
-      - name: Connector CI evidence (nightly engines, incl. Kafka)
-        if: ${{ !cancelled() }}
-        run: |
-          python3 apps/api/scripts/connector_ci_evidence_report.py --results "$RUNNER_TEMP/live-engine" --out "$RUNNER_TEMP/live-engine/evidence/connector_ci_evidence.json"
+          python scripts/check_live_skips.py --job engine-suite --label shard=${{ matrix.shard }} --junit /tmp/pytest-junit.xml --out "$RUNNER_TEMP/live-engine/engine-suite-${{ matrix.shard }}.json"
 
       - name: Upload live-engine result
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: live-engine-engine-suite-${{ github.run_id }}
+          name: live-engine-engine-suite-${{ matrix.shard }}
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
@@ -280,21 +297,69 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-junit-${{ github.run_id }}
+          name: pytest-junit-${{ github.run_id }}-${{ matrix.shard }}
           path: /tmp/pytest-junit.xml
           if-no-files-found: error
 
-      - name: Route certification matrix
-        if: always()
-        working-directory: apps/api
-        # Grades every PRODUCTION_SKU route × sync mode from this run's results.
-        # Exits non-zero when a cell failed.
+  # Whole-run reports need every shard's results.
+  engine-suite-report:
+    name: Route certification + connector CI evidence
+    needs: engine-suite
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
         run: |
-          python scripts/route_certification_report.py --junit /tmp/pytest-junit.xml \
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Download shard junit
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pytest-junit-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/junit
+
+      - name: Download live-engine results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: live-engine-engine-suite-*
+          path: ${{ runner.temp }}/live-engine
+          merge-multiple: true
+
+      - name: Connector CI evidence (nightly engines, incl. Kafka)
+        run: |
+          python3 apps/api/scripts/connector_ci_evidence_report.py --results "$RUNNER_TEMP/live-engine" --out "$RUNNER_TEMP/connector-ci-evidence/connector_ci_evidence.json"
+
+      - name: Upload connector CI evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-ci-evidence-nightly-${{ github.run_id }}
+          path: ${{ runner.temp }}/connector-ci-evidence/connector_ci_evidence.json
+          if-no-files-found: error
+
+      - name: Route certification matrix
+        if: ${{ always() }}
+        working-directory: apps/api
+        # Grades every PRODUCTION_SKU route x sync mode from all shards'
+        # results. Exits non-zero when a cell failed (pipefail: the old
+        # `| tee` without it could never fail the step).
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          python scripts/route_certification_report.py --junit $(find "$RUNNER_TEMP/junit" -name '*.xml' | sort) \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload route certification matrix
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: route-certification-${{ github.run_id }}
