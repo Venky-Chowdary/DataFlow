@@ -10,6 +10,7 @@ start those engines load it.
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -142,3 +143,42 @@ def test_workflow_comments_do_not_claim_job_level_env_beats_github_env() -> None
         text = (REPO / ".github" / "workflows" / wf_name).read_text(encoding="utf-8")
         for wrong in ("would win over", "Job-level env above wins", "overrides the ci-live-engines.vars value"):
             assert wrong not in text, f"{wf_name}: {wrong!r} is wrong; GITHUB_ENV outranks job-level env"
+
+
+# ── final review B2: the last two unexpected-skip families in api-tests ────
+
+
+def test_streaming_readback_dials_the_postgres_the_environment_names(monkeypatch) -> None:
+    """test_streaming_readback hard-coded localhost:5433 / postgres:postgres, a
+    compose-lab spelling; CI's PostgreSQL is PGHOST:PGPORT as dataflow."""
+    import types
+
+    seen: dict = {}
+    fake = types.SimpleNamespace(connect=lambda **kw: seen.update(kw) or object())
+    monkeypatch.setitem(sys.modules, "psycopg2", fake)
+    for name, value in {"PGHOST": "127.0.0.1", "PGPORT": "5432", "PGUSER": "dataflow",
+                        "PGPASSWORD": "dataflow", "PGDATABASE": "dataflow"}.items():
+        monkeypatch.setenv(name, value)
+    sys.modules.pop("test_streaming_readback", None)
+    mod = importlib.import_module("test_streaming_readback")
+    mod._pg_conn()
+    assert (seen["host"], int(seen["port"]), seen["user"], seen["dbname"]) == (
+        "127.0.0.1", 5432, "dataflow", "dataflow"
+    )
+    assert _env()["PGPORT"] == "5432" and _env()["PGHOST"] == "127.0.0.1"
+
+
+def test_the_mysql_ca_reaches_the_tls_tests_in_every_job_that_starts_mysql() -> None:
+    """DATAFLOW_TEST_MYSQL_CA: MySQL 8 generates ca.pem on first boot; the jobs
+    copy it out of the container and export it, so the TLS tests run instead
+    of skipping (they were the last unexpected skips of api-tests 6/6)."""
+    script = (REPO / ".github" / "scripts" / "start_ci_databases.sh").read_text(encoding="utf-8")
+    start_mysql = script[script.index("start_mysql() {"):script.index("start_mongo() {")]
+    assert "docker cp dataflow-ci-mysql:/var/lib/mysql/ca.pem" in start_mysql
+    assert 'DATAFLOW_TEST_MYSQL_CA=' in start_mysql and "GITHUB_ENV" in start_mysql
+    nightly = yaml.safe_load((REPO / ".github" / "workflows" / "full-suite.yml").read_text(encoding="utf-8"))
+    runs = "\n".join(str(s.get("run", "")) for s in nightly["jobs"]["engine-suite"]["steps"])
+    assert "/var/lib/mysql/ca.pem" in runs and "DATAFLOW_TEST_MYSQL_CA=" in runs
+    manifest = json.loads((API / "scripts" / "live_engine_jobs.json").read_text(encoding="utf-8"))
+    entries = [e for j in manifest["jobs"].values() for e in j.get("expected_skips") or []]
+    assert not [e for e in entries if "DATAFLOW_TEST_MYSQL_CA" in e["reason"]], "the CA is wired, not allowlisted"

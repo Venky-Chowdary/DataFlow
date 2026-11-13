@@ -119,6 +119,14 @@ start_mysql() {
     FLUSH PRIVILEGES;"
   docker exec dataflow-ci-mysql mysql -h 127.0.0.1 -u root -pdataflow -Ne \
     "SHOW VARIABLES WHERE Variable_name IN ('local_infile','log_bin','binlog_format')"
+  # MySQL 8 generates a CA and server certificate on first boot. The TLS
+  # tests (test_r14_mysql_ssl_mode_form_options / _tls_mode_truth) verify
+  # against it: export its path for the job's later steps.
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    local ca="${RUNNER_TEMP:-/tmp}/dataflow-ci-mysql-ca.pem"
+    docker cp dataflow-ci-mysql:/var/lib/mysql/ca.pem "$ca"
+    echo "DATAFLOW_TEST_MYSQL_CA=${ca}" >> "$GITHUB_ENV"
+  fi
 }
 
 start_mongo() {

@@ -154,11 +154,6 @@
           "why": "Changes server-wide MySQL settings (SET GLOBAL); needs a dedicated MySQL, not the one every other test in the shard shares."
         },
         {
-          "test": "tests/test_r14_mysql_tls_mode_truth_e2e.py::*",
-          "reason": "DATAFLOW_TEST_MYSQL_CA",
-          "why": "Needs a TLS-configured MySQL and its CA file; the CI MySQL is plaintext."
-        },
-        {
           "test": "tests/test_d176_*::*",
           "reason": "NOREPL|no-replication MySQL user",
           "why": "Needs a second MySQL account without REPLICATION grants; CI has only the dataflow account, which holds them for CDC."

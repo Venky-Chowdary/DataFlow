@@ -252,6 +252,9 @@ jobs:
           done
           docker exec "$cid" mysql -uroot -proot_ci -e \
             "GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'; FLUSH PRIVILEGES;"
+          # MySQL 8's auto-generated CA, for the TLS tests (same as the PR jobs).
+          docker cp "$cid":/var/lib/mysql/ca.pem "$RUNNER_TEMP/mysql-ca.pem"
+          echo "DATAFLOW_TEST_MYSQL_CA=$RUNNER_TEMP/mysql-ca.pem" >> "$GITHUB_ENV"
 
       - name: Full suite (shard ${{ matrix.shard }}/6)
         working-directory: apps/api
