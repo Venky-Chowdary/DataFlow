@@ -155,6 +155,59 @@ describe("sameFullMappings", () => {
     assert.equal(sameFullMappings([omit], [{ ...omit, omit_reason: "legal" }]), false);
     assert.equal(sameFullMappings([base, omit], [omit, base]), true, "order does not matter");
   });
+
+  it("compares every field a save carries, not only target/source/transform", async () => {
+    const { sameFullMappings } = await import("./planConcurrency.js");
+    const row = { source: "amount", target: "amount", confidence: 0.9, transform: "", user_override: true };
+    // The review's probe: another tab saved the same column as BIGINT.
+    assert.equal(
+      sameFullMappings([{ ...row, target_type: "BIGINT" }], [{ ...row, target_type: "INTEGER" }]),
+      false,
+      "target_type",
+    );
+    const mine = { ...row, code_crosswalk: { A: "1" }, rule_contracts: [{ kind: "not_null" }], risk_contract: { k: 1 } };
+    assert.equal(sameFullMappings([row], [mine]), false, "crosswalk / rules / risk contract added");
+    assert.equal(sameFullMappings([{ ...mine, code_crosswalk: { A: "2" } }], [mine]), false, "crosswalk value");
+    assert.equal(sameFullMappings([{ ...mine, rule_contracts: [{ kind: "unique" }] }], [mine]), false, "rules");
+    assert.equal(sameFullMappings([{ ...row, code_crosswalk_system: "ICD10" }], [row]), false);
+    assert.equal(sameFullMappings([{ ...row, risk_acknowledged: true }], [row]), false);
+    assert.equal(sameFullMappings([{ ...row, false_friend_confirmed: true }], [row]), false);
+    assert.equal(sameFullMappings([{ ...row, business_rule: { kind: "x", text: "t" } }], [row]), false);
+    assert.equal(sameFullMappings([{ ...row, create_new: true }], [row]), false);
+    assert.equal(sameFullMappings([{ ...row, assignment_strategy: "create_compatible_new" }], [row]), false);
+    assert.equal(sameFullMappings([{ ...row, control_total: true }], [row]), false);
+    // control_total is tri-state in the editor: an explicit "no" is a decision.
+    assert.equal(sameFullMappings([{ ...row, control_total: false }], [row]), false);
+    const omit = { source: "ssn", target: "", transform: "omit", intentional_omit: true, omit_reason: "pii" };
+    assert.equal(sameFullMappings([{ ...omit, archive_reference: "box 4" }], [omit]), false);
+    assert.equal(sameFullMappings([{ ...omit, retention_until: "2030-01-01" }], [omit]), false);
+    assert.equal(sameFullMappings([{ ...omit, omit_approved_by: "dpo" }], [omit]), false);
+  });
+
+  it("ignores key order, absent-vs-empty values and the free-text reason", async () => {
+    const { sameFullMappings } = await import("./planConcurrency.js");
+    const row = { source: "a", target: "x", confidence: 0.9, user_override: true, code_crosswalk: { A: "1", B: "2" } };
+    const reordered = { code_crosswalk: { B: "2", A: "1" }, user_override: true, confidence: 0.9, target: "x", source: "a" };
+    assert.equal(sameFullMappings([row], [reordered]), true, "key order, nested too");
+    assert.equal(
+      sameFullMappings([row], [{ ...row, transform: "", requires_review: false, type_narrowing: undefined, retention_until: null }]),
+      true,
+      "undefined / null / false / empty mean unset",
+    );
+    assert.equal(sameFullMappings([row], [{ ...row, reason: "User reviewed" }]), true, "reason is an explanation");
+    assert.equal(sameFullMappings([row], [{ ...row, confidence: 0.9000001 }]), true, "confidence is rounded");
+    // What the API stores is the JSON of what was sent (undefined keys vanish).
+    const sent = { ...row, risk_acknowledged: undefined, omit_reason: undefined, target_type: "INTEGER" };
+    assert.equal(sameFullMappings(JSON.parse(JSON.stringify([sent])), [sent]), true, "JSON round-trip");
+  });
+
+  it("treats a reorder of duplicate rows as the same (no tie order)", async () => {
+    const { sameFullMappings } = await import("./planConcurrency.js");
+    const a = { source: "a", target: "x", transform: "", confidence: 0.5 };
+    const b = { source: "a", target: "x", transform: "", confidence: 0.9 };
+    assert.equal(sameFullMappings([a, b], [b, a]), true);
+    assert.equal(sameFullMappings([a, b], [a, a]), false);
+  });
 });
 
 describe("headAfterOwnMap", () => {
@@ -203,6 +256,14 @@ describe("headIfOurs", () => {
     assert.equal(headIfOurs(plan(mine), mine), 4);
     assert.equal(headIfOurs(plan([{ source: "b", target: "x" }]), mine), null);
     assert.equal(headIfOurs({ id: "p", revisions: [] }, mine), null);
+  });
+
+  it("does not adopt a revision that differs only in a column's type", async () => {
+    const { headIfOurs } = await import("./planConcurrency.js");
+    const mine = [{ source: "amount", target: "amount", target_type: "INTEGER" }];
+    const theirs = [{ source: "amount", target: "amount", target_type: "BIGINT" }];
+    const plan = { id: "p", active_version: 6, revisions: [{ version: 5, mappings: mine }, { version: 6, mappings: theirs }] };
+    assert.equal(headIfOurs(plan, mine), null);
   });
 });
 

@@ -251,26 +251,65 @@ export function sameMappings(a: PlanMappingRow[], b: PlanMappingRow[]): boolean 
   return diffPlanMappings(a, b).every((row) => !row.differs);
 }
 
+/** Free-text explanation of how a row was chosen; not part of the decision. */
+const EXPLANATION_KEYS = new Set(["reason"]);
+/** Tri-state flags whose explicit `false` is a decision of its own (not "unset"). */
+const TRI_STATE_KEYS = new Set(["control_total"]);
+
+/** A value with object keys sorted at every depth (stable JSON). */
+function sortedDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortedDeep);
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(obj).sort()) {
+      if (obj[key] !== undefined) out[key] = sortedDeep(obj[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** Unset at row level: undefined, null, false, "" and empty lists / objects. */
+function isUnset(key: string, value: unknown): boolean {
+  if (value === undefined || value === null || value === "") return true;
+  if (value === false) return !TRI_STATE_KEYS.has(key);
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === "object") return Object.keys(value as object).length === 0;
+  return false;
+}
+
+/** One row as stable JSON: every key that carries a value, keys sorted. */
+function canonicalRow(row: PlanMappingRow): string {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (EXPLANATION_KEYS.has(key) || isUnset(key, value)) continue;
+    out[key] = value;
+  }
+  // Spellings that mean the same decision.
+  const target = String(row.target ?? "").trim();
+  if (target) out.target = target;
+  else delete out.target;
+  if (isOmit(row)) {
+    out.intentional_omit = true;
+    out.transform = "omit";
+  }
+  out.confidence = Math.round((typeof row.confidence === "number" ? row.confidence : 1) * 1000) / 1000;
+  return JSON.stringify(sortedDeep(out));
+}
+
 function canonicalRows(rows: PlanMappingRow[]): string {
-  const canon = rows.map((r) => ({
-    t: (r.target ?? "").trim(),
-    s: r.source ?? "",
-    x: r.transform ?? "",
-    u: Boolean(r.user_override),
-    o: isOmit(r),
-    r: r.omit_reason ?? "",
-    rt: r.omit_reason_text ?? "",
-    c: Math.round((typeof r.confidence === "number" ? r.confidence : 1) * 1000) / 1000,
-  }));
-  canon.sort((p, q) => (p.t + "\u0000" + p.s + "\u0000" + p.x).localeCompare(q.t + "\u0000" + q.s + "\u0000" + q.x));
-  return JSON.stringify(canon);
+  // Sorted by the whole canonical row, so duplicates compare without a tie order.
+  return JSON.stringify(rows.map(canonicalRow).sort());
 }
 
 /**
- * Whether two mapping sets are the same decision, row for row: target,
- * source, transform, user override, intentional omit and its reasons, and
- * confidence. Used before adopting a revision silently as "this page's own";
- * the per-column diff ignores most of these and is for display only.
+ * Whether two mapping sets are the same decision, row for row, on every
+ * field a save carries (types, crosswalks, rule and risk contracts, omit
+ * evidence, overrides, confidence, …). Unset spellings (absent, null, false,
+ * "", empty list) are equal, except an explicit `control_total: false`; the
+ * free-text `reason` is ignored. Used before adopting a revision silently as
+ * "this page's own"; the per-column diff is for display only.
  */
 export function sameFullMappings(a: PlanMappingRow[], b: PlanMappingRow[]): boolean {
   return canonicalRows(a) === canonicalRows(b);
