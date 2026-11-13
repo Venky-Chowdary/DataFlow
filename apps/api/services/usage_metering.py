@@ -222,16 +222,20 @@ def assign_unscoped_workspaces(
             if ws and apply:
                 coll.update_one({"_id": doc["_id"]}, {"$set": {"workspace_id": ws}})
         return counts
-    if not STORE_PATH.exists():
-        return counts
-    data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-    for event in data.get("events") or []:
-        if not unscoped.matches(event.get("workspace_id")):
-            continue
-        ws = (workspace_for(event) or "").strip()
-        counts["assigned" if ws else "skipped"] += 1
-        if ws:
-            event["workspace_id"] = ws
-    if apply and counts["assigned"]:
-        write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
+    # One load-stamp-write against record_transfer_usage in this process.
+    # The backfill normally runs as a CLI (scripts/backfill_legacy_workspaces.py),
+    # a separate process this lock does not reach: run it with the API stopped.
+    with locked_update(STORE_PATH):
+        if not STORE_PATH.exists():
+            return counts
+        data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+        for event in data.get("events") or []:
+            if not unscoped.matches(event.get("workspace_id")):
+                continue
+            ws = (workspace_for(event) or "").strip()
+            counts["assigned" if ws else "skipped"] += 1
+            if ws:
+                event["workspace_id"] = ws
+        if apply and counts["assigned"]:
+            write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
     return counts

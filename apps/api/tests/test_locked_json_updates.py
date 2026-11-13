@@ -229,3 +229,105 @@ def test_concurrent_retired_slot_records_are_all_kept(tmp_path, monkeypatch):
     _together(10, lambda i: cdc_slot_resume.retire_slot_lsn(f"0/{i:X}", cursor_key=f"k{i}", slot_name="s"))
     rows = json.loads((tmp_path / "retired.json").read_text())["resumes"]
     assert sorted(r["cursor_key"] for r in rows) == sorted(f"k{i}" for i in range(10))
+
+
+_DQ_SRC = {"kind": "database", "type": "postgresql", "table": "a"}
+_DQ_DST = {"kind": "database", "type": "postgresql", "table": "b"}
+
+
+def _quality_store(tmp_path, monkeypatch):
+    from services import data_quality_history as dq
+
+    monkeypatch.setattr(dq, "quality_profiles_dir", lambda: tmp_path)
+    monkeypatch.setattr(dq, "_profile_collection", lambda: None)
+    return dq, {"id": dq.profile_column([1, 2, 3], "id", "integer")}
+
+
+def test_concurrent_quality_profiles_are_all_kept(tmp_path, monkeypatch):
+    dq, profile = _quality_store(tmp_path, monkeypatch)
+    src, dst = _DQ_SRC, _DQ_DST
+    _slow_writes(monkeypatch, dq)
+    _together(8, lambda i: dq.save_profile(src, dst, profile, job_id=f"job-{i}", pii_hash_key_version=""))
+    runs = dq.load_run_history(src, dst)
+    assert sorted(r["job_id"] for r in runs) == sorted(f"job-{i}" for i in range(8))
+
+
+def test_concurrent_parity_records_are_all_kept(tmp_path, monkeypatch):
+    dq, profile = _quality_store(tmp_path, monkeypatch)
+    src, dst = _DQ_SRC, _DQ_DST
+    for i in range(8):  # the runs exist first, one at a time
+        dq.save_profile(src, dst, profile, job_id=f"job-{i}", pii_hash_key_version="")
+    _slow_writes(monkeypatch, dq)
+    _together(8, lambda i: dq.record_run_parity(src, dst, job_id=f"job-{i}", parity={"ok": i}))
+    parity = {r["job_id"]: r.get("parity") for r in dq.load_run_history(src, dst)}
+    assert parity == {f"job-{i}": {"ok": i} for i in range(8)}
+
+
+def test_concurrent_pending_release_ledger_updates_are_all_kept(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from services import cdc_capture_release as ccr
+
+    monkeypatch.setattr(ccr, "_ledger_path", lambda: tmp_path / "pending.json")
+    monkeypatch.setattr(ccr, "_ledger_coll", lambda: None)
+    real_write = atomic_file.write_json_atomic
+
+    def slow_write(target, data, **kwargs):
+        time.sleep(0.01)
+        return real_write(target, data, **kwargs)
+
+    monkeypatch.setattr(atomic_file, "write_json_atomic", slow_write)  # imported per call there
+
+    def sched(i):
+        return SimpleNamespace(id=f"s{i}", name=f"s{i}", workspace_id="", source_connector_id="c")
+
+    seeded = [ccr._record_pending(sched(i), {}, slots=[])["pending_id"] for i in range(4)]
+
+    def step(i):
+        if i < 4:
+            ccr._record_pending(sched(10 + i), {}, slots=[])
+        elif i < 6:
+            ccr._drop_pending(seeded[i - 4])
+        else:
+            ccr._bump_pending({"id": seeded[i - 4], "attempts": 0}, "busy")
+
+    _together(8, step)
+    entries = {e["schedule_id"]: e for e in ccr.list_pending_capture_releases()}
+    assert set(entries) == {"s2", "s3", "s10", "s11", "s12", "s13"}
+    assert entries["s2"]["attempts"] == 1 and entries["s3"]["attempts"] == 1
+
+
+def test_concurrent_ddl_records_take_unique_versions(tmp_path, monkeypatch):
+    from services import cdc_schema_history as sh
+
+    monkeypatch.setattr(sh, "STORE_DIR", tmp_path)
+    monkeypatch.setattr(sh, "_mongo", lambda: None)
+    _slow_writes(monkeypatch, sh)
+    _together(8, lambda i: sh.record_ddl("pg:src", "orders", f"ALTER TABLE orders ADD c{i} INT", i, {"c": i}))
+    history = sh.list_history("pg:src", "orders")
+    assert sorted(e["version"] for e in history) == list(range(1, 9))
+    assert sorted(e["ddl"] for e in history) == sorted(f"ALTER TABLE orders ADD c{i} INT" for i in range(8))
+
+
+def test_usage_backfill_keeps_events_recorded_while_it_runs(tmp_path, monkeypatch):
+    path = tmp_path / "usage_metering.json"
+    monkeypatch.setattr(usage_metering, "STORE_PATH", path)
+    monkeypatch.setattr(usage_metering, "_mongo", lambda: None)
+    _slow_writes(monkeypatch, usage_metering)
+    path.write_text(json.dumps({"events": [
+        {"id": f"old-{i}", "job_id": f"old-{i}", "workspace_id": "", "rows_written": 1} for i in range(3)
+    ]}))
+
+    def placed(_event):
+        time.sleep(0.02)  # a slow owner lookup keeps the backfill's load->write window open
+        return "ws-1"
+
+    _together(7, lambda i: (
+        usage_metering.assign_unscoped_workspaces(placed, apply=True)
+        if i == 0 else
+        usage_metering.record_transfer_usage(job_id=f"new-{i}", rows_written=i)
+    ))
+    events = json.loads(path.read_text())["events"]
+    jobs = {e["job_id"] for e in events}
+    assert {f"new-{i}" for i in range(1, 7)} <= jobs, sorted(jobs)
+    assert all(e["workspace_id"] == "ws-1" for e in events if e["job_id"].startswith("old-"))
