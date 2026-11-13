@@ -250,16 +250,9 @@ import {
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { formulaGuardApplies } from "../lib/csvSafety";
-import {
-  FILE_EXPORT_FORMULA_PROTECTION_DEFAULT,
-  FILE_EXPORT_FORMULA_PROTECTION_HELP,
-  TSV_NULL_DEFAULT,
-  fileExportDestExtra,
-  fileExportEndpoint,
-  objectStoreDestExtra,
-  tsvNullApplies,
-  type TsvNull,
-} from "../lib/fileExportDestination";
+import { FILE_EXPORT_FORMULA_PROTECTION_HELP, tsvNullApplies } from "../lib/fileExportDestination";
+import { useFileExportOptions } from "../lib/exportOptions";
+import { FormulaProtectionToggle } from "../components/export/FormulaProtectionToggle";
 import { TsvNullMarkerField } from "../components/transfer/TsvNullMarkerField";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
 import { localizeServerEventLog, readJobEventLog } from "../lib/jobEventLog";
@@ -553,11 +546,14 @@ export function TransferPage({
   const mapSourceKind = sourceKind === "cloud" ? "object_store" : sourceKind;
   const destSelected = destKindMode === "file_export" || Boolean(destType);
   const [exportFormat, setExportFormat] = useState("json");
-  // G7-F2: file_export "Protect against spreadsheet formulas" — on for a new job
-  // (Gate-8 reverses the prefix); a reopened job restores what it stored.
-  const [exportFormulaProtection, setExportFormulaProtection] = useState(FILE_EXPORT_FORMULA_PROTECTION_DEFAULT);
-  // G7-F3: a TSV file destination's NULL marker (file_export TSV or an object-store .tsv).
-  const [tsvNullMarker, setTsvNullMarker] = useState<TsvNull>(TSV_NULL_DEFAULT);
+  // G7-F2 / G7-F3: file_export "Protect against spreadsheet formulas" (on for a new
+  // job; Gate-8 reverses the prefix; a reopened job restores what it stored) and a
+  // TSV file destination's NULL marker (file_export TSV or an object-store .tsv).
+  const fileExportOptions = useFileExportOptions();
+  const exportFormulaProtection = fileExportOptions.formulaProtection;
+  const setExportFormulaProtection = fileExportOptions.setFormulaProtection;
+  const tsvNullMarker = fileExportOptions.tsvNull;
+  const setTsvNullMarker = fileExportOptions.setTsvNull;
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
   const [persistedPlanId, setPersistedPlanId] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
@@ -849,7 +845,7 @@ export function TransferPage({
         ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
         ...foreignKeysDestExtra(foreignKeysMode),
         ...duplicateRowsDestExtra(duplicateRowsMode, syncMode),
-        ...objectStoreDestExtra({ type: destDriverType, objectName: targetCollection, tsvNull: tsvNullMarker }),
+        ...fileExportOptions.objectStoreExtra({ type: destDriverType, objectName: targetCollection }),
         ...(isVector
           ? {
               ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
@@ -1541,7 +1537,7 @@ export function TransferPage({
     name: sourceFileName ?? sourceStreamName,
     source: buildSourceEndpoint(),
     destination: destKindMode === "file_export"
-      ? fileExportEndpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath, formulaProtection: exportFormulaProtection, tsvNull: tsvNullMarker })
+      ? fileExportOptions.endpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath })
       : buildDestinationEndpoint(),
     source_columns: currentSourceColumns,
     source_schema: currentSourceSchema,
@@ -2571,8 +2567,7 @@ export function TransferPage({
     if (dst.kind === "file_export") {
       setDestKindMode("file_export");
       setExportFormat(dst.format);
-      setExportFormulaProtection(dst.formulaProtection);
-      setTsvNullMarker(dst.tsvNull);
+      fileExportOptions.restore(dst);
       if (dst.outputPath) setDestOutputPath(dst.outputPath);
     } else {
       setDestKindMode("database");
@@ -3094,7 +3089,7 @@ export function TransferPage({
     setPlanLoading(true);
     try {
       const destination = destKindMode === "file_export"
-        ? fileExportEndpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath, formulaProtection: exportFormulaProtection, tsvNull: tsvNullMarker })
+        ? fileExportOptions.endpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath })
         : buildDestinationEndpoint();
       const source = buildSourceEndpoint();
 
@@ -6113,8 +6108,8 @@ export function TransferPage({
         })(),
         destExtra: (() => {
           const extra: Record<string, unknown> = destKindMode === "file_export"
-            ? fileExportDestExtra({ format: exportFormat, formulaProtection: exportFormulaProtection, tsvNull: tsvNullMarker })
-            : objectStoreDestExtra({ type: destDriverType, objectName: targetCollection, tsvNull: tsvNullMarker });
+            ? fileExportOptions.destExtra(exportFormat)
+            : fileExportOptions.objectStoreExtra({ type: destDriverType, objectName: targetCollection });
           const provenExists = destTableExists ?? destTableExistsRef.current;
           if (provenExists !== null && provenExists !== undefined) {
             extra.table_exists = provenExists;
@@ -7052,7 +7047,7 @@ export function TransferPage({
         name,
         source: buildSourceEndpoint() as Record<string, unknown>,
         destination: (destKindMode === "file_export"
-          ? fileExportEndpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath, formulaProtection: exportFormulaProtection, tsvNull: tsvNullMarker })
+          ? fileExportOptions.endpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath })
           : buildDestinationEndpoint()) as Record<string, unknown>,
         mappings,
         column_types: columnTypes,
@@ -7157,8 +7152,7 @@ export function TransferPage({
     setDestType("");
     setDestKindMode("database");
     setExportFormat("json");
-    setExportFormulaProtection(FILE_EXPORT_FORMULA_PROTECTION_DEFAULT);
-    setTsvNullMarker(TSV_NULL_DEFAULT);
+    fileExportOptions.reset();
     setTransferPlan(null);
     setPersistedPlanId(null);
     setPlanLoading(false);
@@ -8111,18 +8105,13 @@ export function TransferPage({
                     </p>
                   )}
                   {formulaGuardApplies(exportFormat) && (
-                    <label className="df2-policy-toggle df2-dest-export-formula">
-                      <input
-                        type="checkbox"
-                        checked={exportFormulaProtection}
-                        onChange={(e) => setExportFormulaProtection(e.target.checked)}
-                        aria-describedby="dest-export-formula-hint"
-                      />
-                      <span>
-                        <strong>Protect against spreadsheet formulas</strong>
-                        <small id="dest-export-formula-hint">{FILE_EXPORT_FORMULA_PROTECTION_HELP}</small>
-                      </span>
-                    </label>
+                    <FormulaProtectionToggle
+                      id="dest-export-formula"
+                      className="df2-dest-export-formula"
+                      checked={exportFormulaProtection}
+                      onChange={setExportFormulaProtection}
+                      help={FILE_EXPORT_FORMULA_PROTECTION_HELP}
+                    />
                   )}
                   {tsvNullApplies({ kind: "file_export", format: exportFormat }) && (
                     <TsvNullMarkerField id="dest-export-tsv-null" value={tsvNullMarker} onChange={setTsvNullMarker} />

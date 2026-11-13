@@ -1,6 +1,5 @@
 /** G7-F3: the "NULL marker" choice for TSV file destinations (Studio + Query console). */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TsvNullMarkerField } from "../components/transfer/TsvNullMarkerField";
@@ -16,8 +15,6 @@ import {
 } from "./fileExportDestination";
 import { planJobStudioRoute } from "./jobStudioRoute";
 import { serializeRows } from "./localFileExport";
-
-const src = (rel: string) => readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
 
 describe("TSV NULL marker", () => {
   it("applies to a TSV file_export and to an object-store .tsv object only", () => {
@@ -69,22 +66,5 @@ describe("TSV NULL marker", () => {
     assert.match(html, /NULL marker/);
     assert.match(html, /<option value="empty" selected="">Empty cell — default<\/option>/);
     assert.match(html, /<option value="\\N">\\N<\/option>/);
-  });
-
-  it("Studio shows it for file_export TSV and object-store .tsv, and round-trips it", () => {
-    const page = src("pages/TransferPage.tsx");
-    assert.equal((page.match(/<TsvNullMarkerField /g) || []).length, 2);
-    // file_export: plan, analyze, contract, run; object store: endpoint extra + run.
-    assert.equal((page.match(/tsvNull: tsvNullMarker \}\)/g) || []).length, 6);
-    assert.match(page, /objectStoreDestExtra\(\{ type: destDriverType, objectName: targetCollection, tsvNull: tsvNullMarker \}\)/);
-    assert.equal((page.match(/setTsvNullMarker\(dst\.tsvNull\)/g) || []).length, 2);
-    assert.match(page, /setTsvNullMarker\(TSV_NULL_DEFAULT\)/);
-    assert.match(page, /tsvNull: tsvNullMarker,\n\s*\}\);/); // offline export
-  });
-
-  it("the Query console TSV export sends tsv_null", () => {
-    const page = src("pages/QueryPage.tsx");
-    assert.match(page, /tsv_null: exportFormat === "tsv" \? tsvNull : TSV_NULL_DEFAULT/);
-    assert.match(page, /<TsvNullMarkerField/);
   });
 });

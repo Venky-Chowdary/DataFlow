@@ -8,7 +8,7 @@ import { ShapeStepFields } from "./ShapeStepFields";
 import { StudioCommandPalette } from "./StudioCommandPalette";
 import { checkShapeExpression, previewShapeRecipe } from "../../lib/api";
 import { usePointerDrag } from "../../lib/pointerDrag";
-import { toDelimitedText } from "../../lib/csvSafety";
+import { previewCellText, stepPreviewCsv } from "../../lib/stepPreviewCsv";
 import { paletteActions } from "../../lib/canvasPalette";
 import {
   chainDocument,
@@ -1351,18 +1351,12 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   );
 }
 
-function cellText(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
+const cellText = previewCellText;
 
 function downloadCsv(columns: string[], rows: Record<string, unknown>[]) {
   // A preview a person opens in a spreadsheet: formula-looking cells (and header
   // names) are defused with the API's rule; CR/LF/quotes/commas are quoted (G7-F2).
-  const text = toDelimitedText(columns, rows, { formulaProtection: true, cell: cellText });
-  const blob = new Blob([text], { type: "text/csv" });
+  const blob = new Blob([stepPreviewCsv(columns, rows)], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

@@ -14,11 +14,9 @@ import {
   type QueryResult,
 } from "../lib/api";
 import { formulaGuardApplies } from "../lib/csvSafety";
-import {
-  QUERY_EXPORT_FORMULA_PROTECTION_HELP,
-  TSV_NULL_DEFAULT,
-  type TsvNull,
-} from "../lib/fileExportDestination";
+import { QUERY_EXPORT_FORMULA_PROTECTION_HELP } from "../lib/fileExportDestination";
+import { useQueryExportOptions } from "../lib/exportOptions";
+import { FormulaProtectionToggle } from "../components/export/FormulaProtectionToggle";
 import { TsvNullMarkerField } from "../components/transfer/TsvNullMarkerField";
 import {
   firstExpanded,
@@ -111,9 +109,9 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState("csv");
   // G7-F2: "Protect against spreadsheet formulas" — on by default, as the API.
-  const [formulaProtection, setFormulaProtection] = useState(true);
-  // G7-F3: TSV NULL marker — "Empty cell" (default) or \N.
-  const [tsvNull, setTsvNull] = useState<TsvNull>(TSV_NULL_DEFAULT);
+  // G7-F2 / G7-F3: "Protect against spreadsheet formulas" (on by default; it also
+  // governs Copy as CSV) and the TSV NULL marker.
+  const exportOptions = useQueryExportOptions();
   const [outputPath, setOutputPath] = useState("");
   const [destConnectorId, setDestConnectorId] = useState("");
   const [destTarget, setDestTarget] = useState("");
@@ -405,8 +403,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
         // A connector write still uses that limit and the API says so.
         full_population: !destConnectorId,
         format: exportFormat,
-        formula_protection: formulaProtection ? "prefix" : "off",
-        tsv_null: exportFormat === "tsv" ? tsvNull : TSV_NULL_DEFAULT,
+        ...exportOptions.payload(exportFormat),
         output_path: outputPath,
         destination_connector_id: destConnectorId || undefined,
         destination: destTarget || undefined,
@@ -801,24 +798,19 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                         placeholder="File name in exports/ (optional)"
                       />
                       {formulaGuardApplies(exportFormat) && (
-                        <label className="df2-policy-toggle df2-qw-export-formula">
-                          <input
-                            type="checkbox"
-                            checked={formulaProtection}
-                            onChange={(e) => setFormulaProtection(e.target.checked)}
-                            aria-describedby="query-export-formula-hint"
-                          />
-                          <span>
-                            <strong>Protect against spreadsheet formulas</strong>
-                            <small id="query-export-formula-hint">{QUERY_EXPORT_FORMULA_PROTECTION_HELP}</small>
-                          </span>
-                        </label>
+                        <FormulaProtectionToggle
+                          id="query-export-formula"
+                          className="df2-qw-export-formula"
+                          checked={exportOptions.formulaProtection}
+                          onChange={exportOptions.setFormulaProtection}
+                          help={QUERY_EXPORT_FORMULA_PROTECTION_HELP}
+                        />
                       )}
                       {exportFormat === "tsv" && (
                         <TsvNullMarkerField
                           id="query-export-tsv-null"
-                          value={tsvNull}
-                          onChange={setTsvNull}
+                          value={exportOptions.tsvNull}
+                          onChange={exportOptions.setTsvNull}
                           className="df2-field df2-qw-export-tsv-null"
                           compact
                         />
@@ -876,7 +868,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                 truncated={result.truncated}
                 durationMs={result.duration_ms}
                 onCopied={(what) => toast({ title: "Copied", message: what, tone: "success" })}
-                formulaProtection={formulaProtection}
+                formulaProtection={exportOptions.formulaProtection}
               />
             ) : (
               <div className="df2-qw-placeholder">
