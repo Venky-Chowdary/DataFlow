@@ -34,7 +34,7 @@ def _inline_stamp_ddl_identity(mappings: list, dest_db: str) -> str | None:
     return None
 
 
-def _enforce_ddl_identity(
+def _enforce_ddl_identity_once(
     pf: dict | None,
     mappings: list,
     *,
@@ -157,7 +157,7 @@ def decision_artifact_source(src, fallback_format: str = "") -> dict[str, str]:
     return {"source_kind": kind, "source_format": fmt}
 
 
-def _enforce_decision_artifact(
+def _enforce_decision_artifact_once(
     pf: dict | None,
     mappings: list,
     *,
@@ -318,3 +318,72 @@ def execute_preflight_progress_message(request) -> str:
             "Write-time fit still binds every row."
         )
     return "Validating mapping and schema…"
+
+
+# -- G11: approvals stamped over the operator's Map before legacy adoption -------
+
+
+def _operator_contract_retry(mappings: list) -> tuple[list, list[dict]] | None:
+    """The operator's rows behind adopted ones, and the adoptions; None if none."""
+    from services.target_name_legacy import MAP_TARGET, operator_rows
+
+    adopted = [
+        {"column": str(m.get("target") or ""), "target": str(m.get(MAP_TARGET) or "")}
+        for m in mappings or []
+        if isinstance(m, dict) and m.get(MAP_TARGET)
+    ]
+    if not adopted:
+        return None
+    return operator_rows(mappings), adopted
+
+
+def _note_operator_contract(pf: dict | None, adopted: list[dict], which: str) -> None:
+    """Run evidence: the approval matched the operator's contract, not the adopted rows."""
+    detail = ", ".join(f"{a['target']!r} -> existing column {a['column']!r}" for a in adopted)
+    note = (
+        f"{which} approval matched the operator's Map (stamped before legacy-column "
+        f"adoption); columns adopted from the destination: {detail}."
+    )
+    logger.warning("G11: %s", note)
+    if isinstance(pf, dict):
+        pf.setdefault("warnings", []).append(note)
+        pf.setdefault("proof_bundle", {}).setdefault("name_adoption", {})[which] = {
+            "matched": "operator_contract", "adopted_columns": adopted,
+        }
+
+
+def _enforce_ddl_identity(pf: dict | None, mappings: list, **kwargs) -> str | None:
+    """``_enforce_ddl_identity_once``; a pre-G11 stamp may match the operator's rows.
+
+    Execute adopts an existing table's legacy columns before it checks the
+    approval (``target_name_legacy.adopt_for_request``). A schedule / saved job
+    stamped by Validate before that adoption existed hashed the operator's own
+    targets; adoption is deterministic from the live columns, so that stamp is
+    accepted against ``operator_rows`` and the run says so. Any other change
+    is still refused.
+    """
+    err = _enforce_ddl_identity_once(pf, mappings, **kwargs)
+    retry = _operator_contract_retry(mappings) if err else None
+    if retry is None:
+        return err
+    rows, adopted = retry
+    if _enforce_ddl_identity_once(pf, rows, **kwargs) is None:
+        _note_operator_contract(pf, adopted, "Map->DDL identity")
+        return None
+    return err
+
+
+def _enforce_decision_artifact(
+    pf: dict | None, mappings: list, **kwargs
+) -> tuple[str | None, dict | None]:
+    """``_enforce_decision_artifact_once`` with the same operator-contract match."""
+    err, art = _enforce_decision_artifact_once(pf, mappings, **kwargs)
+    retry = _operator_contract_retry(mappings) if err else None
+    if retry is None:
+        return err, art
+    rows, adopted = retry
+    err2, art2 = _enforce_decision_artifact_once(pf, rows, **kwargs)
+    if err2 is None:
+        _note_operator_contract(pf, adopted, "Decision Artifact")
+        return None, art2
+    return err, art
