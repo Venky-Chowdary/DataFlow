@@ -23,7 +23,8 @@ Tiers, strongest first (the confidence is the tier's, never a model score):
                      (``customer_email`` ≈ ``email_address``, ``order_amt`` ≈
                      ``total_amount``).
 ``key_suffix``       ``<entity>_id`` against a bare ``id`` (``order_id`` ≡
-                     ``id``), stronger when ``<entity>`` names the table.
+                     ``id``): pre-selected only when ``<entity>`` names the
+                     destination table, else a hint (it may be a foreign key).
 ``token``            shared words only — a hint the preview leaves unchecked.
 
 Assignment is one-to-one and global: the highest-scoring pair claims both its
@@ -61,7 +62,7 @@ TIER_CONFIDENCE: dict[str, float] = {
     LEARNED: 0.9,
     SYNONYM: 0.86,
     CONCEPT: 0.78,
-    KEY_SUFFIX: 0.72,
+    KEY_SUFFIX: 0.55,
     TOKEN: 0.6,
 }
 _TIER_RANK = {kind: i for i, kind in enumerate(TIER_CONFIDENCE)}
@@ -76,6 +77,34 @@ _KIND_WORDS = frozenset({
 })
 #: Key concepts never match by head word: customer_id is not order_id.
 _NO_CONCEPT = frozenset({"id", "identifier"})
+
+#: Qualifiers that name a *different* value of the same concept: prev_status is
+#: not the status, max_qty is not the quantity, even against the plain name.
+_CONTRAST = frozenset({
+    "prev", "previous", "old", "new", "min", "minimum", "max", "maximum", "sub",
+    "start", "end", "begin", "from", "to", "first", "last", "next", "orig", "original",
+    "initial", "final", "before", "after", "gross", "net", "open", "close", "low", "high",
+    "avg", "average", "median",
+})
+
+#: Dictionary groups whose members really are one value spelled differently.
+#: Every other group is a *family* of distinct attributes (money: revenue, fee,
+#: subtotal; status: state, stage; flag: is_active, is_deleted; dimensions:
+#: width, height): there a member matches the family's own name, never a sibling.
+_SYNONYM_GROUPS = frozenset({
+    "customer_id", "client_id", "user_id", "member_id", "order_id", "product_id",
+    "employee_id", "vendor_id", "shipment_id", "patient_id", "policy_id", "account_number",
+    "name", "full_name", "first_name", "last_name", "middle_name", "date_of_birth", "gender",
+    "ssn", "email", "email_address", "phone", "phone_number", "mobile_number", "address",
+    "city", "city_name", "postal_code", "country", "country_code", "state_code",
+    "province_code", "region_code", "payment_amount", "unit_price", "unit_cost",
+    "line_amount", "net_amount", "gross_amount", "salary_amount", "commission_amount",
+    "bonus_amount", "order_number", "invoice_number", "transaction_id", "payment_date",
+    "order_date", "ship_date", "delivery_date", "currency", "credit_card", "cvv",
+    "latitude", "longitude", "year", "month", "quarter", "serial_number", "work_order",
+    "student_id", "course_id", "enrollment_date", "bedrooms", "bathrooms", "square_feet",
+    "age", "url", "ip_address",
+})
 
 #: Abbreviation tokens that are also ordinary words or ambiguous on their own.
 _NO_EXPAND = frozenset({"id", "no", "item", "val", "cat", "co", "cls", "min", "max"})
@@ -145,18 +174,43 @@ def _qualifiers(name: str, group: str) -> frozenset[str]:
     canon, singles = words.get(group, (frozenset(), frozenset()))
     norm = normalize_name(name)
     if norm == group or norm in singles:
-        return frozenset()
-    return frozenset(
-        t for t in norm.split("_")
-        if t and t not in canon and t not in singles
-        and _expanded(t) not in canon and t not in _KIND_WORDS
-    )
+        # subtotal is a one-word member that still says "a part of the total".
+        return frozenset({"sub"}) if norm.startswith("sub") and len(norm) > 5 else frozenset()
+    found = set()
+    for t in norm.split("_"):
+        if not t or t in canon or t in singles or _expanded(t) in canon or t in _KIND_WORDS:
+            continue
+        found.add(t)
+    return frozenset(found)
+
+
+def _canonical_side(name: str, group: str) -> bool:
+    """The name *is* the family's own concept (amount, total_amount, status)."""
+    norm = normalize_name(name)
+    head = norm.split("_")[-1] if norm else ""
+    return norm == group or head == group or _expanded(head) == group
+
+
+def _is_other_canonical(name: str, group: str) -> bool:
+    """A family member that is itself another concept (state is a place, not a status)."""
+    _, _, words = _dictionaries()
+    norm = normalize_name(name)
+    return norm != group and norm in words
 
 
 def _same_value(group: str, a: str, b: str) -> bool:
     """Both names denote the same value of ``group`` (not two qualified siblings)."""
     qa, qb = _qualifiers(a, group), _qualifiers(b, group)
-    return not (qa and qb and qa != qb)
+    if qa and qb and qa != qb:
+        return False
+    if (qa ^ qb) & _CONTRAST:
+        return False
+    if group not in _SYNONYM_GROUPS:
+        if not (_canonical_side(a, group) or _canonical_side(b, group)):
+            return False
+        if _is_other_canonical(a, group) or _is_other_canonical(b, group):
+            return False
+    return True
 
 
 @lru_cache(maxsize=65536)
@@ -326,7 +380,9 @@ def suggest_assignments(
     neither re-suggested nor claimed, so "map remaining" never steals a target
     the operator chose.
     """
-    entities = {e for e in (_table_entity(source_table), _table_entity(dest_table)) if e}
+    # A key matches the bare id only when its entity names the DESTINATION
+    # table: customer_id → orders.id is a foreign key, not the order's key.
+    entities = {e for e in (_table_entity(dest_table),) if e}
     lock_s = {str(s) for s in locked_sources}
     lock_t = {str(t).lower() for t in locked_targets}
     open_sources = [s for s in dict.fromkeys(sources) if s and s not in lock_s]

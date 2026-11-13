@@ -228,7 +228,13 @@ def test_concept_tier_matches_the_same_head_concept(src, tgt):
 @pytest.mark.parametrize(
     ("src", "tgt"),
     [("start_date", "end_date"), ("first_name", "last_name"), ("customer_id", "order_id"),
-     ("billing_address", "shipping_address")],
+     ("billing_address", "shipping_address"),
+     # review H2: family members are not each other's synonyms
+     ("is_active", "is_deleted"), ("height", "width"), ("subtotal", "total"),
+     ("state", "status"), ("revenue", "fee"),
+     # contrastive qualifiers differ even from the plain name
+     ("prev_status", "status"), ("max_qty", "qty"), ("min_qty", "quantity"),
+     ("old_price", "unit_price"), ("new_email", "email")],
 )
 def test_concept_tier_refuses_false_friends(src, tgt):
     hit = score_pair(src, tgt)
@@ -247,6 +253,18 @@ def test_key_suffix_is_stronger_when_entity_names_the_table():
     plain = score_pair("order_id", "id")[0]
     entity = score_pair("order_id", "id", entities={"order"})[0]
     assert entity > plain
+
+
+@pytest.mark.parametrize("src", ["customer_id", "product_id", "parent_id"])
+def test_a_foreign_key_never_preselects_onto_another_tables_id(src):
+    """Review H2: customer_id → orders.id is a foreign key into the PK."""
+    out = suggest_assignments([src], ["id"], source_table="orders", dest_table="orders")
+    assert out == [] or (out[0]["selected"] is False and out[0]["confidence"] < 0.7), out
+
+
+def test_the_tables_own_key_preselects_onto_its_id():
+    out = suggest_assignments(["order_id"], ["id"], source_table="legacy", dest_table="orders")
+    assert out[0]["target"] == "id" and out[0]["selected"] is True
 
 
 def test_assignment_is_one_to_one_and_best_first():
@@ -331,7 +349,9 @@ def test_the_reported_orders_table_maps_onto_other_destination_columns():
         "first_name": ("given_name", "synonym"),
         "last_name": ("surname", "synonym"),
     }
-    assert all(s["selected"] for s in out)
+    # order_id → customers.id is suggested but not pre-selected: the entity
+    # (order) does not name the destination table (review H2).
+    assert {s["source"] for s in out if s["selected"]} == {"name", "total_balance", "first_name", "last_name"}
 
 
 @pytest.mark.parametrize(
