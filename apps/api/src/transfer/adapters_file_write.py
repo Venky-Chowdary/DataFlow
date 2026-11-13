@@ -177,6 +177,12 @@ def write_destination_file(
             out["formula_protection"] = "prefix"
         return out
 
+    def _export_header_cells() -> list[str]:
+        """Header row cells — column names come from data, so the guard covers them."""
+        if not guard_formulas:
+            return list(export_columns)
+        return [neutralize_export_cell(c) for c in export_columns]
+
     grid = [
         [_export_grid_cell(rec.get(col), col) for col in export_columns]
         for rec in export_records
@@ -196,7 +202,7 @@ def write_destination_file(
         container or (can_convert(src_fmt, fmt) and grid)
     ):
         content, mime = convert_rows(
-            export_columns,
+            _export_header_cells(),
             grid,
             source_format="csv" if container else src_fmt,
             target_format=fmt,
@@ -247,7 +253,7 @@ def write_destination_file(
     if fmt == "csv":
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
-        writer.writeheader()
+        writer.writerow(dict(zip(export_columns, _export_header_cells())))
         writer.writerows(
             [
                 {c: _export_grid_cell(r.get(c), c) for c in export_columns}
@@ -262,7 +268,7 @@ def write_destination_file(
         writer = csv.DictWriter(
             buf, fieldnames=export_columns, delimiter="\t", extrasaction="ignore"
         )
-        writer.writeheader()
+        writer.writerow(dict(zip(export_columns, _export_header_cells())))
         writer.writerows(
             [
                 {c: _export_grid_cell(r.get(c), c) for c in export_columns}

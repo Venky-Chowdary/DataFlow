@@ -1014,7 +1014,10 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
                     extrasaction="ignore",
                     delimiter="\t" if fmt == "tsv" else ",",
                 )
-                writer.writeheader()
+                # Alias names are data too: guarded like cells (G7 review M1).
+                writer.writerow(
+                    {c: neutralize_export_cell(c) if guard_formulas else c for c in columns}
+                )
                 writer_box["w"] = writer
             row = {k: "" if record.get(k) is None else record.get(k) for k in columns}
             if guard_formulas:
