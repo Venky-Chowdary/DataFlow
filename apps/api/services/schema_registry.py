@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +24,16 @@ _SCHEMAS_PATH = data_dir() / "schema_registry_schemas.json"
 _LINEAGE_PATH = data_dir() / "schema_registry_lineage.json"
 _SCHEMAS_COLL = "schema_registry_schemas"
 _LINEAGE_COLL = "schema_registry_lineage"
+
+#: Registration locks, striped by schema key: one object's read-compare-write
+#: is one step in this process, while a slow Mongo round-trip for one object
+#: blocks only the objects that share its stripe (never the file store's
+#: path lock, which ``_save_schema_versions`` takes just for its own write).
+_REGISTRATION_LOCKS = tuple(threading.RLock() for _ in range(64))
+
+
+def _registration_lock(key: str) -> threading.RLock:
+    return _REGISTRATION_LOCKS[zlib.crc32(key.encode("utf-8")) % len(_REGISTRATION_LOCKS)]
 
 
 def _now() -> str:
@@ -215,10 +227,13 @@ def register_schema(
 ) -> SchemaVersion:
     """Store a new schema version if it differs from the previous one.
 
-    Read, compare and write under the store's path lock, so two registrations
-    of one object in this process cannot both take version N+1.
+    Read, compare and write under the object's registration lock, so two
+    registrations of one object in this process cannot both take version
+    N+1. The file fallback's whole-file load-modify-write is serialised by
+    its path lock inside :func:`_save_schema_versions`, which re-reads the
+    file and replaces only this object's entry.
     """
-    with locked_update(_SCHEMAS_PATH):
+    with _registration_lock(_schema_key(connector_id, object_name, connector_type)):
         return _register_schema_locked(
             columns,
             connector_type=connector_type,

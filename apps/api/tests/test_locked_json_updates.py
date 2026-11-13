@@ -133,6 +133,77 @@ def test_concurrent_schema_registrations_are_all_kept_with_unique_versions(tmp_p
     assert versions == list(range(1, 8)), versions
 
 
+class _FakeSchemasColl:
+    """Enough of a Mongo collection for schema_registry, with a hook in reads."""
+
+    def __init__(self, on_read=None):
+        self.docs: dict[str, dict] = {}
+        self.on_read = on_read or (lambda key: None)
+
+    def find_one(self, query):
+        self.on_read(query["_id"])
+        doc = self.docs.get(query["_id"])
+        return json.loads(json.dumps(doc)) if doc else None
+
+    def replace_one(self, query, doc, upsert=False):
+        self.docs[query["_id"]] = json.loads(json.dumps(doc))
+
+
+def test_a_slow_mongo_registration_holds_neither_the_file_lock_nor_other_objects(tmp_path, monkeypatch):
+    from services import schema_registry
+
+    entered, release = threading.Event(), threading.Event()
+    slow_key = "pg:slow:t"
+
+    def on_read(key):
+        if key == slow_key:
+            entered.set()
+            release.wait(10)
+
+    coll = _FakeSchemasColl(on_read)
+    monkeypatch.setattr(schema_registry, "_SCHEMAS_PATH", tmp_path / "schemas.json")
+    monkeypatch.setattr(schema_registry, "_schemas_coll", lambda: coll)
+    cols = [{"name": "id", "type": "INTEGER"}]
+    slow = threading.Thread(target=lambda: schema_registry.register_schema(
+        cols, connector_type="pg", connector_id="slow", object_name="t",
+    ))
+    slow.start()
+    try:
+        assert entered.wait(5)
+        # The file store's path lock is free while Mongo answers slowly.
+        lock = atomic_file.path_update_lock(tmp_path / "schemas.json")
+        assert lock.acquire(timeout=2), "register_schema held the file lock across a Mongo read"
+        lock.release()
+        # Another object (on another lock stripe) registers meanwhile.
+        other = next(
+            f"fast{i}" for i in range(1000)
+            if schema_registry._registration_lock(f"pg:fast{i}:t")
+            is not schema_registry._registration_lock(slow_key)
+        )
+        fast = threading.Thread(target=lambda: schema_registry.register_schema(
+            cols, connector_type="pg", connector_id=other, object_name="t",
+        ))
+        fast.start()
+        fast.join(timeout=3)
+        assert not fast.is_alive(), "one object's slow Mongo read blocked another object"
+    finally:
+        release.set()
+        slow.join(timeout=10)
+    assert set(coll.docs) == {slow_key, f"pg:{other}:t"}
+
+
+def test_concurrent_mongo_registrations_of_one_object_take_unique_versions(monkeypatch):
+    from services import schema_registry
+
+    coll = _FakeSchemasColl(lambda key: time.sleep(0.02))
+    monkeypatch.setattr(schema_registry, "_schemas_coll", lambda: coll)
+    _together(6, lambda i: schema_registry.register_schema(
+        [{"name": f"col{i}", "type": "TEXT"}], connector_type="pg", connector_id="m", object_name="t",
+    ))
+    versions = [v["version"] for v in coll.docs["pg:m:t"]["versions"]]
+    assert versions == list(range(1, 7)), versions
+
+
 def test_concurrent_lineage_appends_are_all_kept(tmp_path, monkeypatch):
     from services import schema_registry
 
