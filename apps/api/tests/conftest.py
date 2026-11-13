@@ -105,29 +105,39 @@ if not os.environ.get("HYPOTHESIS_STORAGE_DIRECTORY"):
 # folder, never the shared {tmp}/dataflow-callable (~1,000 leaked df-proc-*.jsonl
 # files, 325 MB, filled a shared disk). The session guard below fails the run
 # on a spool file nothing owns any more.
-def _worker_spool_dir(base: str, worker: str | None) -> str:
-    """The spool folder of one pytest process: ``base/<xdist worker>`` under xdist.
+def _worker_spool_dir(base: str, worker: str | None, pid: int | None = None) -> str:
+    """The spool folder of one pytest process: ``base/<xdist worker>-<pid>``.
 
-    xdist workers inherit the controller's environment, so they would all share
-    one folder — and each worker's orphan guard would flag the others' live
-    spools. Each worker gets its own subfolder.
+    Every pytest process — an xdist worker, a nested ``python -m pytest`` a
+    test starts — inherits its parent's environment. Sharing one folder, each
+    process's orphan-spool guard reported the others' live spools (xdist
+    workers; the nested-pytest tests in test_suite_temp_dir_cleanup.py on CI).
+    Each process gets its own subfolder, and its guard inspects only that.
     """
     name = "".join(ch for ch in str(worker or "") if ch.isalnum() or ch in "-_")
-    return os.path.join(base, name) if name else base
+    leaf = "-".join(part for part in (name, f"p{pid}" if pid is not None else "") if part)
+    return os.path.join(base, leaf) if leaf else base
 
 
 if not os.environ.get("DATAFLOW_CALLABLE_SPOOL_DIR") and not os.environ.get("DATAWRAP_CALLABLE_SPOOL_DIR"):
     _suite_spool_dir = tempfile.mkdtemp(prefix="df-suite-callable-")
     os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"] = _suite_spool_dir
     atexit.register(shutil.rmtree, _suite_spool_dir, ignore_errors=True)
-if os.environ.get("PYTEST_XDIST_WORKER") and not os.environ.get("_DF_SPOOL_WORKER_DIR_SET"):
-    _base = os.environ.get("DATAWRAP_CALLABLE_SPOOL_DIR") or os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"]
-    _worker_dir = _worker_spool_dir(_base, os.environ["PYTEST_XDIST_WORKER"])
-    os.makedirs(_worker_dir, exist_ok=True)
+if os.environ.get("_DF_SPOOL_PROCESS_PID") != str(os.getpid()):
+    # Once per process (conftest can be imported twice): the inherited or new
+    # folder is the base; this process spools in its own subfolder of it.
+    _base = (
+        os.environ.get("_DF_SPOOL_BASE")
+        or os.environ.get("DATAWRAP_CALLABLE_SPOOL_DIR")
+        or os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"]
+    )
+    _process_dir = _worker_spool_dir(_base, os.environ.get("PYTEST_XDIST_WORKER"), os.getpid())
+    os.makedirs(_process_dir, exist_ok=True)
     os.environ.pop("DATAWRAP_CALLABLE_SPOOL_DIR", None)
-    os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"] = _worker_dir
-    os.environ["_DF_SPOOL_WORKER_DIR_SET"] = "1"
-    atexit.register(shutil.rmtree, _worker_dir, ignore_errors=True)
+    os.environ["_DF_SPOOL_BASE"] = _base
+    os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"] = _process_dir
+    os.environ["_DF_SPOOL_PROCESS_PID"] = str(os.getpid())
+    atexit.register(shutil.rmtree, _process_dir, ignore_errors=True)
 
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 # Tenant settings, BYOK keys, ACLs and the other control-plane stores move to

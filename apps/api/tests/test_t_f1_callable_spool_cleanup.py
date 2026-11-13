@@ -248,18 +248,28 @@ def test_suite_spools_are_off_the_shared_tmp_and_guarded(monkeypatch, tmp_path):
     assert _orphan_callable_spools() == ["jobx/df-proc-abc.jsonl"]
 
 
-def test_each_xdist_worker_gets_its_own_spool_folder():
-    """Workers share the controller's env: one shared folder made each worker's
-    orphan guard flag the others' live spools (re-review)."""
+def test_each_pytest_process_gets_its_own_spool_folder():
+    """Workers and nested pytest runs inherit the parent's env: one shared folder
+    made each process's orphan guard flag the others' live spools (re-review, CI)."""
     from tests.conftest import _worker_spool_dir
 
-    assert _worker_spool_dir("/s", "gw0") == "/s/gw0"
-    assert _worker_spool_dir("/s", "gw1") != _worker_spool_dir("/s", "gw0")
-    assert _worker_spool_dir("/s", None) == "/s"
-    assert _worker_spool_dir("/s", "../x") == "/s/x"
+    assert _worker_spool_dir("/s", "gw0", 11) == "/s/gw0-p11"
+    assert _worker_spool_dir("/s", "gw1", 11) != _worker_spool_dir("/s", "gw0", 11)
+    assert _worker_spool_dir("/s", None, 12) == "/s/p12"
+    assert _worker_spool_dir("/s", "../x", 13) == "/s/x-p13"
 
 
-def test_xdist_worker_process_uses_a_worker_subfolder(tmp_path):
+def test_this_process_spools_in_its_own_subfolder():
+    import os
+
+    from services.procedure_source import callable_spool_root
+
+    root = callable_spool_root()
+    assert root.name.endswith(f"p{os.getpid()}"), root
+    assert str(root.parent) == os.environ["_DF_SPOOL_BASE"]
+
+
+def test_a_child_process_uses_its_own_subfolder_of_the_inherited_base(tmp_path):
     import os
     import subprocess
     import sys
@@ -267,11 +277,41 @@ def test_xdist_worker_process_uses_a_worker_subfolder(tmp_path):
     api_root = Path(__file__).resolve().parents[1]
     code = (
         "import os, sys; sys.path.insert(0, %r); import tests.conftest; "
-        "print(os.environ['DATAFLOW_CALLABLE_SPOOL_DIR'])" % str(api_root)
+        "print(os.environ['DATAFLOW_CALLABLE_SPOOL_DIR'], os.getpid())" % str(api_root)
     )
-    env = {**os.environ, "PYTEST_XDIST_WORKER": "gw3", "DATAFLOW_CALLABLE_SPOOL_DIR": str(tmp_path)}
-    env.pop("_DF_SPOOL_WORKER_DIR_SET", None)
-    env.pop("DATAWRAP_CALLABLE_SPOOL_DIR", None)
+    env = {**os.environ, "PYTEST_XDIST_WORKER": "gw3"}
     out = subprocess.run([sys.executable, "-c", code], cwd=api_root, env=env, capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr[-2000:]
-    assert out.stdout.strip().splitlines()[-1] == str(tmp_path / "gw3")
+    folder, pid = out.stdout.strip().splitlines()[-1].rsplit(" ", 1)
+    assert folder == os.path.join(os.environ["_DF_SPOOL_BASE"], f"gw3-p{pid}")
+    assert folder != os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"]
+
+
+def test_a_nested_pytest_passes_while_this_process_holds_a_live_spool(tmp_path):
+    """The CI failure: a nested `python -m pytest` reported the parent's live spool as an orphan."""
+    import os
+    import subprocess
+    import sys
+
+    from services import procedure_source
+
+    src, _dst = _db(tmp_path)
+    job_id = "tf1nested" + uuid.uuid4().hex[:8]
+    procedure_source.read_callable_batch(_cfg(src, job_id), offset=0, limit=5)
+    try:
+        assert _job_files(job_id), "the parent holds a live spool"
+        api_root = Path(__file__).resolve().parents[1]
+        probe = api_root / "tests" / f"test_zz_tf1_nested_probe_{uuid.uuid4().hex[:8]}.py"
+        probe.write_text("def test_ok():\n    assert True\n")
+        try:
+            out = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
+                 f"--basetemp={tmp_path / 'nested'}", str(probe.relative_to(api_root))],
+                cwd=api_root, env={**os.environ}, capture_output=True, text=True, timeout=600,
+            )
+        finally:
+            probe.unlink(missing_ok=True)
+        assert out.returncode == 0, (out.stdout[-3000:], out.stderr[-2000:])
+        assert "spool" not in out.stdout.lower()
+    finally:
+        procedure_source.close_callable_spool(job_id=job_id)
