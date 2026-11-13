@@ -37,8 +37,8 @@ def test_format_csv_row_quotes_its_own_delimiter(delimiter):
 def test_csv_bytes_unchanged_where_no_quoting_is_needed():
     from services.csv_codec import csv_cell_encode, format_csv_row
 
-    cells = ["1", "alice", "-5", "=1+1", "a|b", "a;b", "a\tb", "\\N", None]
-    assert format_csv_row([csv_cell_encode(c) for c in cells], ",") == "1,alice,-5,=1+1,a|b,a;b,a\tb,\\N,"
+    cells = ["1", "alice", "-5", "=1+1", "a|b", "a;b", "a\tb", None]
+    assert format_csv_row([csv_cell_encode(c) for c in cells], ",") == "1,alice,-5,=1+1,a|b,a;b,a\tb,"
     assert format_csv_row([csv_cell_encode(c) for c in cells]) == format_csv_row(
         [csv_cell_encode(c) for c in cells], ","
     )

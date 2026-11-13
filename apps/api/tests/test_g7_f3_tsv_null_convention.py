@@ -103,7 +103,7 @@ def test_quoted_backslash_n_reads_as_text_unquoted_as_null():
 def test_file_export_tsv_default_is_unchanged():
     content, _name, summary = _write()
     assert content == (
-        'id\tnote\r\n1\t""\r\n2\t\r\n3\t\\N\r\n4\t"a\tb"\r\n5\tplain\r\n'
+        'id\tnote\r\n1\t""\r\n2\t\r\n3\t"\\N"\r\n4\t"a\tb"\r\n5\tplain\r\n'
     ).encode("utf-8")
     assert "tsv_null" not in summary
 
@@ -181,7 +181,7 @@ def _object_body(tsv_null: str | None) -> bytes:
 
 def test_object_store_tsv_default_bytes_unchanged_and_collapse_documented():
     body = _object_body(None)
-    assert body == b'id\tnote\n1\t\n2\t\n3\t\\N\n4\t"a\tb"\n5\tplain\n'
+    assert body == b'id\tnote\n1\t\n2\t\n3\t"\\N"\n4\t"a\tb"\n5\tplain\n'
     # The default codec cannot tell '' from NULL — why the opt-in exists.
     assert _decoded(body, "null")[0][1] is None
 

@@ -130,8 +130,9 @@ def csv_cell_encode(value: Any) -> str:
     """Encode one database value for an operator CSV file.
 
     ``None`` → the ``\\x00`` NULL sentinel the formatter emits as an empty
-    unquoted cell; ``''`` → ``''`` (the formatter quotes it as ``""``);
-    ``\\N`` is preserved verbatim for COPY-convention writers.
+    unquoted cell; ``''`` → ``''`` (the formatter quotes it as ``""``); a
+    text ``\\N`` stays that text (the formatter quotes it, so it never reads
+    back as the legacy NULL spelling).
     """
     if value is None:
         return _CSV_NULL
@@ -148,7 +149,10 @@ def csv_quote_cell(cell: str, delimiter: str = ",") -> str:
     if cell == "":
         return '""'
     if cell == LEGACY_CSV_NULL:
-        return LEGACY_CSV_NULL
+        # A *text* value spelled ``\\N`` is quoted: every reader of this codec
+        # takes a bare ``\\N`` as the legacy NULL spelling, so written bare it
+        # read back as NULL (a 2-file combine, the S3 COPY writers).
+        return _QUOTE + cell + _QUOTE
     if any(c in cell for c in (delimiter, '"', "\n", "\r")):
         return '"' + cell.replace('"', '""') + '"'
     return cell
@@ -168,7 +172,8 @@ def _tsv_quote_cell(cell: str) -> str:
     """
     if cell == _CSV_NULL:
         return ""
-    if cell.startswith('"') or any(c in cell for c in "\t\n\r"):
+    if cell == LEGACY_CSV_NULL or cell.startswith('"') or any(c in cell for c in "\t\n\r"):
+        # A text ``\\N`` is quoted for the same reason as in csv_quote_cell.
         return '"' + cell.replace('"', '""') + '"'
     return cell
 

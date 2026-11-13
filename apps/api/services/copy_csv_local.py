@@ -31,7 +31,6 @@ then the same mapped COPY. BIFF ``.xls`` and OOXML ``.xlsx`` share the Excel rea
 from __future__ import annotations
 
 import base64
-import csv
 import gzip
 import io
 import logging
@@ -180,6 +179,27 @@ def _empty_to_none(value: Any) -> str | None:
 
 def _csv_cell(value: str | None) -> str:
     return "\\N" if value is None else value
+
+
+def mapped_csv_line(cells: list[str | None], delim: str) -> str:
+    """One mapped-file row: NULL is a bare ``\\N`` (``COPY ... NULL '\\N'``).
+
+    A *text* ``\\N`` is quoted, so neither PostgreSQL CSV COPY (a quoted value
+    equal to the NULL string is not NULL) nor the SQLite re-read (the codec
+    reads a quoted ``"\\N"`` as text) turns it into NULL; ``csv.writer`` wrote
+    it bare and the text landed NULL while the row path kept it. Every other
+    cell is quoted as ``csv.writer`` did (delimiter, quote, CR, LF), and ``''``
+    stays a bare empty field (quoted when it is the only column).
+    """
+    from services.csv_codec import csv_cell_encode, csv_quote_cell, text_null_cell
+
+    def quote(cell: str) -> str:
+        return csv_quote_cell(cell, delim)
+
+    out = [text_null_cell(csv_cell_encode(cell), "\\N", quote) for cell in cells]
+    if out == [""]:
+        return '""'
+    return delim.join(out)
 
 
 def _read_options_copy_ok(read_options: Any) -> bool:
@@ -752,7 +772,6 @@ def _write_mapped_csv(
     _MISS = object()
     _bind_memo: list[dict] = [dict() for _ in source_cols]
     _safe_memo: dict = {}
-    _csv_memo: dict = {}
     _MEMO_CAP = 500_000
 
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
@@ -799,24 +818,15 @@ def _write_mapped_csv(
                         f"{physical or logical} COPY-safe; the row path owns its "
                         "validation and quarantine"
                     )
-            out_row: list[Any] = []
-            for index, col in enumerate(source_cols):
-                cell = copy_cells.get(col)
-                rendered = _csv_memo.get(cell, _MISS)
-                if rendered is _MISS:
-                    rendered = _csv_cell(cell)
-                    if len(_csv_memo) < _MEMO_CAP:
-                        _csv_memo[cell] = rendered
-                out_row.append(rendered)
-            writer.writerow(out_row)
+            writer.write(mapped_csv_line([copy_cells.get(col) for col in source_cols], delim) + "\n")
             written += 1
         if fingerprints is not None and rows:
             fingerprints(rows)
         return written
 
     with open(dest_path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle, delimiter=delim, lineterminator="\n")
-        writer.writerow(dest_cols)
+        writer = handle
+        writer.write(mapped_csv_line(list(dest_cols), delim) + "\n")
         for record in _iter_source_records(
             content, filename, pairs, read_options, file_type=file_type
         ):

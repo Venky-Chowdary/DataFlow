@@ -61,8 +61,10 @@ def test_format_csv_row_quotes_tsv_cells_that_would_split():
 def test_format_csv_row_plain_tsv_rows_stay_byte_identical():
     from services.csv_codec import csv_cell_encode, format_csv_row
 
-    cells = ["1", "alice", "", None, "-5", "=1+1", "a,b", "\\N"]
-    assert format_csv_row([csv_cell_encode(c) for c in cells], "\t") == "1\talice\t\t\t-5\t=1+1\ta,b\t\\N"
+    cells = ["1", "alice", "", None, "-5", "=1+1", "a,b"]
+    assert format_csv_row([csv_cell_encode(c) for c in cells], "\t") == "1\talice\t\t\t-5\t=1+1\ta,b"
+    # A *text* \N is quoted, or every reader takes it as the legacy NULL spelling.
+    assert format_csv_row([csv_cell_encode("\\N")], "\t") == '"\\N"'
 
 
 @pytest.mark.parametrize("source_format", ["csv", "postgresql"])
