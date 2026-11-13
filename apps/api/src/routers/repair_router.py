@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -47,7 +48,7 @@ async def propose_preflight(body: ProposePreflightBody, request: Request) -> dic
     from services.agentic_repair import propose_from_preflight
     from services.body_id_ownership import assert_body_ids
 
-    assert_body_ids(request, jobs=(body.job_id,))  # review 3, Low
+    await asyncio.to_thread(assert_body_ids, request, jobs=(body.job_id,))  # review 3, Low
 
     p = propose_from_preflight(
         body.preflight,
@@ -62,7 +63,7 @@ async def propose_quarantine(body: ProposeQuarantineBody, request: Request) -> d
     from services.agentic_repair import propose_from_quarantine
     from services.body_id_ownership import assert_body_ids
 
-    assert_body_ids(request, jobs=(body.job_id,))  # review 3, Low
+    await asyncio.to_thread(assert_body_ids, request, jobs=(body.job_id,))  # review 3, Low
 
     p = propose_from_quarantine(body.rejected_details, job_id=body.job_id)
     return p.to_dict()
