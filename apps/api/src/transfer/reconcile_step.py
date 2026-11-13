@@ -9148,6 +9148,16 @@ def run_reconciliation(
             destination_type=_endpoint_type(endpoint), validation_mode=validation_mode,
         )
         raise
+    # Datawrap's NULL marker stored as destination text is a written NULL that
+    # every other proof can read past (a NULL key misaligns the sample).
+    from services.null_marker_guard import apply_null_marker_gate
+
+    recon = apply_null_marker_gate(
+        recon, endpoint=endpoint, source_endpoint=source_endpoint,
+        mappings=mappings, dest_summary=dest_summary,
+        records=records if isinstance(records, list) else None,
+        rows_written=int(rows_written or 0),
+    )
     if isinstance(dest_summary, dict) and dest_summary.get("shape_recipe_hash"):
         # G-1: on a shaped run both digests derive from the same stream — a
         # dropped or silently skipped recipe step leaves them equally

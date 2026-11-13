@@ -226,6 +226,9 @@ def test_live_unkeyed_delete_is_parked_and_the_stream_keeps_applying(unkeyed_rou
     # The stream did not stop: the keyed delete and the later insert landed.
     landed = pg(f'SELECT sku, qty FROM public."{table}" WHERE sku IN (\'a\', \'b\', \'d\') ORDER BY sku', fetch=True)
     assert landed == [("a", 1), ("d", 4)], landed
+    # The NULL-key row is held out, never written as the wire sentinel text.
+    whole = pg(f'SELECT sku, qty FROM public."{table}" ORDER BY sku NULLS FIRST', fetch=True)
+    assert whole == [("a", 1), ("d", 4)], whole
     cdc = summary.get("cdc") or {}
     # No silent loss: every source delete is applied or parked.
     assert cdc.get("delete_events") == 1 and cdc.get("unkeyed_deletes_parked") == 1, cdc

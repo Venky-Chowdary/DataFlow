@@ -6106,6 +6106,8 @@ def write_mapped_rows(
                             else:
                                 chunk_written = len(batch)
                         elif not keyed_chunk:
+                            from services.null_marker_guard import refuse_unbound_marker
+                            refuse_unbound_marker(batch, table=table_name)  # no NULL marker as text
                             result = conn.execute(table_obj.insert(), batch)
                             chunk_written = _insert_rows_written(
                                 result, len(batch), dialect_name

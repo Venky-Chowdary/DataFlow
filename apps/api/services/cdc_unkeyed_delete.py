@@ -63,6 +63,69 @@ def unkeyed_delete_record(table: str, row: Any, lsn: Any = None) -> dict[str, An
     }
 
 
+def null_key_part(key: Any, n_columns: int = 1) -> bool:
+    """True when a delete key, or any column of a composite key, is SQL NULL.
+
+    A delete key is wire text: a NULL column is the ``__DF_SQL_NULL__`` sentinel
+    (or an absent-field spelling), and the user's own text that spells it
+    arrives escaped. ``''`` is a value (D53), not NULL. A composite key
+    (``n_columns > 1``) is joined with the keyset separator; a single-column key
+    is one value even if it contains that character.
+    """
+    from services.keyset_pagination import KEYSET_SEP
+    from services.value_serializer import is_reader_null_cell
+
+    if key is None:
+        return True
+    if isinstance(key, (list, tuple)):
+        return any(p is None or is_reader_null_cell(p) for p in key)
+    text = str(key)
+    parts = text.split(KEYSET_SEP) if n_columns > 1 else [text]
+    return any(is_reader_null_cell(part) for part in parts)
+
+
+def park_null_key_deletes(change: Any, key_columns: list[str] | None, *, table: str = "") -> int:
+    """Move deletes whose key holds a NULL out of ``change.deletes`` into its parked list.
+
+    The readers already park a delete whose key they cannot build. This is the
+    apply step's backstop for any reader that still hands one through: such a
+    key would otherwise run ``DELETE ... WHERE sku = '__DF_SQL_NULL__'``, match
+    nothing (or a row the sentinel was wrongly written as) and be counted as an
+    applied delete. Mutates ``change`` in place so every counter that reads it
+    afterwards agrees; returns how many deletes were moved (0 is a no-op).
+    """
+    deletes = list(getattr(change, "deletes", None) or [])
+    if not deletes:
+        return 0
+    cols = [c for c in (key_columns or []) if str(c).strip()]
+    width = max(1, len(cols))
+    keep = [k for k in deletes if not null_key_part(k, width)]
+    if len(keep) == len(deletes):
+        return 0
+    from connectors.writer_common import extract_cdc_lsn
+    from services.cdc_snapshot_window import _pk_row_dict
+
+    lsn = extract_cdc_lsn(getattr(change, "resume_token", None))
+    moved: list[dict[str, Any]] = []
+    for key in deletes:
+        if not null_key_part(key, width):
+            continue
+        if isinstance(key, (list, tuple)):
+            image = {cols[i]: key[i] for i in range(min(len(cols), len(key)))} if cols else {}
+        else:
+            image = _pk_row_dict(cols, str(key)) if cols else {}
+        # The image names NULL as NULL — never the sentinel text re-encoded.
+        image = {k: (None if null_key_part(v) else v) for k, v in image.items()}
+        moved.append(unkeyed_delete_record(table or str(getattr(change, "table", "") or ""), image, lsn))
+    change.deletes = keep
+    change.unkeyed_deletes = list(getattr(change, "unkeyed_deletes", None) or []) + moved
+    logger.warning(
+        "CDC: parked %d delete(s) on %s whose key holds a NULL (never a delete by the sentinel)",
+        len(moved), table or getattr(change, "table", "") or "?",
+    )
+    return len(moved)
+
+
 def parked_note(count: int, table: str) -> str:
     """Operator wording for ``count`` parked deletes on ``table``."""
     where = f" on '{table}'" if table else ""

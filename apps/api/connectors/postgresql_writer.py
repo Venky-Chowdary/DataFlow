@@ -1289,6 +1289,9 @@ def _copy_rows_temp(cur, table_name: str, columns: list[str], rows: list[tuple])
 
 def _execute_values_insert(cur, insert_sql: Any, rows: list[tuple] | list[list], *, page_size: int = 1000) -> None:
     """Bulk INSERT via ``execute_values`` (one round-trip per page, not per row)."""
+    from services.null_marker_guard import refuse_unbound_marker
+
+    refuse_unbound_marker(rows)  # a NULL marker is never bound as text
     try:
         from psycopg2.extras import execute_values
     except ImportError:
