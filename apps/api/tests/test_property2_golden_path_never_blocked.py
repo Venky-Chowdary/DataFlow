@@ -713,8 +713,10 @@ def test_golden_pg_to_parquet_export():
 
     creds = pg_creds()
     src_table = f"p2_pq_{uuid.uuid4().hex[:8]}"
-    # File exports are confined to the server exports folder.
-    out_dir = Path(__file__).resolve().parents[1] / "exports" / "p2"
+    from services.export_paths import exports_dir
+
+    # File exports are confined to the server exports folder (DATAFLOW_EXPORTS_DIR).
+    out_dir = exports_dir() / "p2"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = str(out_dir / f"{src_table}.parquet")
     conn = psycopg2.connect(

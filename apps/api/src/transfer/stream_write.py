@@ -613,6 +613,10 @@ def _write_batch(
                 or (dest_extra.get("file_format") if isinstance(dest_extra, dict) else "")
                 or ""
             )
+            # Writer options (tsv_null …) — the same view Gate-8 reads back with.
+            from .connector_dispatch import file_writer_dest_extra
+
+            kwargs["dest_extra"] = file_writer_dest_extra(cfg, dest)
             kwargs.update(source_handoff)
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
             kwargs["conflict_columns"] = conflict_columns
@@ -717,6 +721,7 @@ def _write_batch(
         return result.rows_written, result.checksum, summary
 
     from .connector_dispatch import (
+        file_writer_dest_extra,
         has_writer,
         write_via_registry,
         writer_extra_kwargs,
@@ -774,11 +779,9 @@ def _write_batch(
             common["sync_mode"] = sync_mode
             # An extensionless remote name takes its extension from file_format;
             # the destination readers resolve the same file from it.
-            raw_extra = getattr(dest, "extra", None)
-            sftp_extra = dict(raw_extra) if isinstance(raw_extra, dict) else {}
-            if cfg.get("file_format") and not sftp_extra.get("file_format"):
-                sftp_extra["file_format"] = cfg["file_format"]
-            common["dest_extra"] = {**sftp_extra, **dict(common.get("dest_extra") or {})}
+            common["dest_extra"] = {
+                **file_writer_dest_extra(cfg, dest), **dict(common.get("dest_extra") or {}),
+            }
         if dest_type == "iceberg":
             # Iceberg full-refresh overwrite must truncate once per job, not per chunk.
             common["sync_mode"] = sync_mode

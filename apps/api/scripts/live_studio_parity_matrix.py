@@ -48,7 +48,11 @@ API_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__
 # The proofs read the product's own column names rather than restating them.
 if API_ROOT not in sys.path:
     sys.path.insert(0, API_ROOT)
-EXPORT_DIR = os.path.join(API_ROOT, "exports", "parity")
+from services.export_paths import exports_dir  # noqa: E402
+
+# The exports folder the API confines file exports to (DATAFLOW_EXPORTS_DIR when
+# set, else apps/api/exports) — never a hard-coded source-tree path (T-F1).
+EXPORT_DIR = str(exports_dir(create=False) / "parity")
 
 # One fixture row shape used by every route, so a difference between two routes
 # is the route and not the data: identifier, text with unicode, integer,

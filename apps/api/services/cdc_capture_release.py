@@ -424,6 +424,14 @@ def _file_entries() -> list[dict[str, Any]]:
         return []
 
 
+def _update_file_entries(change: Any) -> None:
+    """Load, change and write the file ledger as one step (per-path lock)."""
+    from services.atomic_file import locked_update
+
+    with locked_update(_ledger_path()):
+        _write_file_entries(change(_file_entries()))
+
+
 def _write_file_entries(entries: list[dict[str, Any]]) -> None:
     from services.atomic_file import write_json_atomic
 
@@ -461,7 +469,7 @@ def _record_pending(
         if coll is not None:
             coll.update_one({"_id": entry["id"]}, {"$set": entry}, upsert=True)
         else:
-            _write_file_entries(_file_entries() + [entry])
+            _update_file_entries(lambda entries: entries + [entry])
         out["pending_id"] = entry["id"]
     except Exception as exc:  # noqa: BLE001
         _logger.error("CDC pending-release ledger write failed for %s: %s", sched.id, exc)
@@ -474,7 +482,7 @@ def _drop_pending(entry_id: str) -> None:
     if coll is not None:
         coll.delete_many({"_id": {"$in": [entry_id]}})
         return
-    _write_file_entries([e for e in _file_entries() if e.get("id") != entry_id])
+    _update_file_entries(lambda entries: [e for e in entries if e.get("id") != entry_id])
 
 
 def _bump_pending(entry: dict[str, Any], error: str) -> None:
@@ -484,7 +492,7 @@ def _bump_pending(entry: dict[str, Any], error: str) -> None:
     if coll is not None:
         coll.update_one({"_id": entry["id"]}, {"$set": patch})
         return
-    _write_file_entries([{**e, **patch} if e.get("id") == entry["id"] else e for e in _file_entries()])
+    _update_file_entries(lambda entries: [{**e, **patch} if e.get("id") == entry["id"] else e for e in entries])
 
 
 def _retry_due(entry: dict[str, Any], now: datetime) -> bool:

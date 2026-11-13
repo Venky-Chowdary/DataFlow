@@ -653,7 +653,8 @@ def _redshift_merge_upsert(
         rows_out.append(
             tuple(row[i] if i < len(row) else None for i in range(len(target_cols)))
         )
-    if copy_config is not None:
+    batch_stage = _redshift_batch_stage(rows_out, stage_format) if copy_config is not None else ""
+    if batch_stage:
         from connectors.redshift_copy import copy_redshift_rows_from_s3
 
         copy_redshift_rows_from_s3(
@@ -666,7 +667,7 @@ def _redshift_merge_upsert(
             s3_client=s3_client,
             job_id=job_id,
             dest_types=dest_types,
-            stage_format=stage_format,
+            stage_format=batch_stage,
         )
     else:
         cursor.executemany(insert_sql, rows_out)
@@ -1242,6 +1243,20 @@ def _copy_text_value(value: Any) -> str:
         raw = str(value)
     return _escape_copy_text(raw)
 
+
+
+def _redshift_batch_stage(rows: list, requested: str) -> str:
+    """:func:`connectors.redshift_copy.redshift_batch_stage_format` (lazy import: no cycle).
+
+    ``""`` means the batch cannot be staged (no pyarrow for the Parquet the
+    batch needs): the caller INSERTs and this logs the performance warning.
+    """
+    from connectors.redshift_copy import REDSHIFT_INSERT_FALLBACK_WARNING, redshift_batch_stage_format
+
+    stage = redshift_batch_stage_format(rows, requested)
+    if not stage:
+        logger.warning(REDSHIFT_INSERT_FALLBACK_WARNING)
+    return stage
 
 
 def _copy_buffer():
@@ -2734,7 +2749,11 @@ def write_mapped_rows(
                                 # reconcile checksum disagree with the table.
                                 chunk_written = already
                                 break
-                        if use_redshift_s3_copy:
+                        batch_stage = (
+                            _redshift_batch_stage(batch, redshift_stage_format)
+                            if use_redshift_s3_copy else ""
+                        )
+                        if batch_stage:
                             from connectors.redshift_copy import copy_redshift_rows_from_s3
 
                             copy_redshift_rows_from_s3(
@@ -2748,7 +2767,7 @@ def write_mapped_rows(
                                 job_id=job_id,
                                 chunk_idx=chunk_idx,
                                 dest_types=dest_types if isinstance(dest_types, dict) else None,
-                                stage_format=redshift_stage_format,
+                                stage_format=batch_stage,
                             )
                         elif use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)

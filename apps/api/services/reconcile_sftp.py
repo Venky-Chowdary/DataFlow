@@ -30,6 +30,7 @@ def verify_sftp_object(
     known_hosts: str = "",
     host_key_policy: str = "",
     file_format: str = "",
+    tsv_null: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of an SFTP GET stream. Never JSON-fallback empty.
 
@@ -54,6 +55,7 @@ def verify_sftp_object(
             "known_hosts": known_hosts,
             "host_key_policy": host_key_policy,
             "file_format": file_format,
+            "tsv_null": tsv_null,
         }
         opened = open_sftp_binary(cfg)
         if opened is False:
@@ -69,6 +71,7 @@ def verify_sftp_object(
                 limit=limit,
                 dest_db_type="sftp",
                 dest_types=dest_types,
+                tsv_null=tsv_null,
             )
         finally:
             if closer is not None:

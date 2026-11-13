@@ -49,9 +49,12 @@ from tests.scale import readback as rb  # noqa: E402
 
 ENV_GATE = "DATAFLOW_SCALE_FILE_MATRIX"
 
-#: Exports must land inside ``apps/api/exports`` (``land_export_bytes`` refuses
-#: anything else), and ``apps/api/exports/`` is already git-ignored.
-EXPORT_DIR = _API_ROOT / "exports" / "scale"
+#: Exports must land inside the exports folder (``land_export_bytes`` refuses
+#: anything else): ``DATAFLOW_EXPORTS_DIR`` when set (a temp folder under
+#: pytest), else the git-ignored ``apps/api/exports``.
+from services.export_paths import exports_dir  # noqa: E402
+
+EXPORT_DIR = exports_dir(create=False) / "scale"
 RESULTS_PATH = EXPORT_DIR / "file_matrix.jsonl"
 #: Fixtures are big and regenerable — they live outside the repo by default.
 FIXTURE_DIR = Path(

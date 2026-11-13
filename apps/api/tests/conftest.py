@@ -76,6 +76,69 @@ if not os.environ.get("DATAFLOW_UPLOAD_DIR") and not os.environ.get("DATAWRAP_UP
     os.environ["DATAFLOW_UPLOAD_DIR"] = _suite_upload_dir
     atexit.register(shutil.rmtree, _suite_upload_dir, ignore_errors=True)
 
+# File exports (Query console downloads, file_export destinations, quarantine
+# CSVs) land in a temp folder of the suite's own, never in the source tree's
+# apps/api/exports (T-F1: long sweeps left hundreds of export_*/query_* files
+# there). Code resolves the folder through export_paths.exports_dir(), which
+# honours this variable; a test that patches either brand var still wins.
+if not os.environ.get("DATAFLOW_EXPORTS_DIR") and not os.environ.get("DATAWRAP_EXPORTS_DIR"):
+    _suite_exports_dir = tempfile.mkdtemp(prefix="df-suite-exports-")
+    os.environ["DATAFLOW_EXPORTS_DIR"] = _suite_exports_dir
+    atexit.register(shutil.rmtree, _suite_exports_dir, ignore_errors=True)
+
+# Hypothesis keeps its example database and caches in ``<cwd>/.hypothesis``
+# (apps/api/.hypothesis when the suite runs from apps/api). Point it at a temp
+# folder so property tests never write into the source tree (T-F1). An
+# operator who wants a persistent database sets HYPOTHESIS_STORAGE_DIRECTORY.
+if not os.environ.get("HYPOTHESIS_STORAGE_DIRECTORY"):
+    _suite_hypothesis_dir = tempfile.mkdtemp(prefix="df-suite-hypothesis-")
+    os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = _suite_hypothesis_dir
+    atexit.register(shutil.rmtree, _suite_hypothesis_dir, ignore_errors=True)
+    try:
+        from hypothesis.configuration import set_hypothesis_home_dir
+    except ImportError:  # hypothesis is optional; the env var covers subprocesses
+        pass
+    else:
+        set_hypothesis_home_dir(_suite_hypothesis_dir)
+
+# CALL/SELECT source spools (services.procedure_source) go to a suite temp
+# folder, never the shared {tmp}/dataflow-callable (~1,000 leaked df-proc-*.jsonl
+# files, 325 MB, filled a shared disk). The session guard below fails the run
+# on a spool file nothing owns any more.
+def _worker_spool_dir(base: str, worker: str | None, pid: int | None = None) -> str:
+    """The spool folder of one pytest process: ``base/<xdist worker>-<pid>``.
+
+    Every pytest process — an xdist worker, a nested ``python -m pytest`` a
+    test starts — inherits its parent's environment. Sharing one folder, each
+    process's orphan-spool guard reported the others' live spools (xdist
+    workers; the nested-pytest tests in test_suite_temp_dir_cleanup.py on CI).
+    Each process gets its own subfolder, and its guard inspects only that.
+    """
+    name = "".join(ch for ch in str(worker or "") if ch.isalnum() or ch in "-_")
+    leaf = "-".join(part for part in (name, f"p{pid}" if pid is not None else "") if part)
+    return os.path.join(base, leaf) if leaf else base
+
+
+if not os.environ.get("DATAFLOW_CALLABLE_SPOOL_DIR") and not os.environ.get("DATAWRAP_CALLABLE_SPOOL_DIR"):
+    _suite_spool_dir = tempfile.mkdtemp(prefix="df-suite-callable-")
+    os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"] = _suite_spool_dir
+    atexit.register(shutil.rmtree, _suite_spool_dir, ignore_errors=True)
+if os.environ.get("_DF_SPOOL_PROCESS_PID") != str(os.getpid()):
+    # Once per process (conftest can be imported twice): the inherited or new
+    # folder is the base; this process spools in its own subfolder of it.
+    _base = (
+        os.environ.get("_DF_SPOOL_BASE")
+        or os.environ.get("DATAWRAP_CALLABLE_SPOOL_DIR")
+        or os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"]
+    )
+    _process_dir = _worker_spool_dir(_base, os.environ.get("PYTEST_XDIST_WORKER"), os.getpid())
+    os.makedirs(_process_dir, exist_ok=True)
+    os.environ.pop("DATAWRAP_CALLABLE_SPOOL_DIR", None)
+    os.environ["_DF_SPOOL_BASE"] = _base
+    os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"] = _process_dir
+    os.environ["_DF_SPOOL_PROCESS_PID"] = str(os.getpid())
+    atexit.register(shutil.rmtree, _process_dir, ignore_errors=True)
+
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 # Tenant settings, BYOK keys, ACLs and the other control-plane stores move to
 # the shared database whenever one is connected (audit H-5). Tests isolate
@@ -894,9 +957,8 @@ def spend_pilot_ack(ack_id: str, actor: str) -> dict:
     )
 
 
-def _data_dir_fingerprint() -> dict[str, tuple[int, int]]:
-    """relpath -> (mtime_ns, size) for everything under the dev data dir."""
-    root = _api_root / "data"
+def _tree_fingerprint(root: Path) -> dict[str, tuple[int, int]]:
+    """relpath -> (mtime_ns, size) for every file under ``root``."""
     if not root.is_dir():
         return {}
     out: dict[str, tuple[int, int]] = {}
@@ -907,22 +969,77 @@ def _data_dir_fingerprint() -> dict[str, tuple[int, int]]:
     return out
 
 
+def _data_dir_fingerprint() -> dict[str, tuple[int, int]]:
+    """relpath -> (mtime_ns, size) for everything under the dev data dir."""
+    return _tree_fingerprint(_api_root / "data")
+
+
+#: Source-tree folders a test run must never write into besides apps/api/data
+#: (T-F1): the default exports folder (DATAFLOW_EXPORTS_DIR is a suite temp dir)
+#: and Hypothesis' default database (HYPOTHESIS_STORAGE_DIRECTORY likewise).
+_GUARDED_SOURCE_DIRS: dict[str, str] = {
+    "exports": "write exports through services.export_paths (DATAFLOW_EXPORTS_DIR is a temp dir in tests)",
+    ".hypothesis": "Hypothesis storage is redirected to HYPOTHESIS_STORAGE_DIRECTORY in tests",
+}
+
+
+def _source_dir_writes(before: dict[str, dict], after: dict[str, dict]) -> list[str]:
+    """One message per guarded folder that gained or changed a file."""
+    problems = []
+    for name, hint in _GUARDED_SOURCE_DIRS.items():
+        old, new = before.get(name, {}), after.get(name, {})
+        changed = sorted(p for p, sig in new.items() if old.get(p) != sig)
+        if changed:
+            problems.append(f"tests wrote into apps/api/{name} ({hint}): {changed[:20]}")
+    return problems
+
+
+def _orphan_callable_spools() -> list[str]:
+    """Spool files (``df-proc-*.jsonl``) no live spool owns: a leak that outlives the run."""
+    procedure_source = sys.modules.get("services.procedure_source")
+    if procedure_source is None:
+        return []
+    import gc
+
+    gc.collect()  # an unreferenced spool's finalizer removes its file
+    root = procedure_source.callable_spool_root()
+    if not root.is_dir():
+        return []
+    owned = {str(spool.path) for spool in list(procedure_source._SPOOLS.values())}
+    return sorted(str(p.relative_to(root)) for p in root.rglob("df-proc-*.jsonl") if str(p) not in owned)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _guard_no_test_writes_dev_data_dir():
     """The suite must never write into apps/api/data — per-test stores live
-    under tmp_path via DATAWRAP_DATA_DIR. Fails the run listing every file a
-    test created or modified in the shared dev directory."""
+    under tmp_path via DATAWRAP_DATA_DIR — nor into apps/api/exports or
+    apps/api/.hypothesis (T-F1), and must not leak CALL/SELECT spool files.
+    Fails the run listing every file a test created or modified in those
+    shared source-tree directories, and every orphaned spool file."""
     before = _data_dir_fingerprint()
+    before_src = {name: _tree_fingerprint(_api_root / name) for name in _GUARDED_SOURCE_DIRS}
     yield
     after = _data_dir_fingerprint()
     changed = sorted(p for p, sig in after.items() if before.get(p) != sig)
     removed = sorted(p for p in before if p not in after)
+    problems = []
     if changed or removed:
-        pytest.fail(
+        problems.append(
             "tests wrote into apps/api/data — route the store through "
             "data_dir() (DATAWRAP_DATA_DIR is tmp_path in tests). "
             f"changed/created: {changed[:20]}; removed: {removed[:20]}"
         )
+    problems += _source_dir_writes(
+        before_src, {name: _tree_fingerprint(_api_root / name) for name in _GUARDED_SOURCE_DIRS}
+    )
+    orphans = _orphan_callable_spools()
+    if orphans:
+        problems.append(
+            "tests left CALL/SELECT spool files nothing owns (close_callable_spool / the job "
+            f"scope must remove them): {orphans[:20]}"
+        )
+    if problems:
+        pytest.fail("; ".join(problems))
 
 
 @pytest.fixture(autouse=True)

@@ -24,7 +24,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from services.atomic_file import write_json_atomic
+from services.atomic_file import locked_update, write_json_atomic
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
@@ -279,24 +279,25 @@ def retire_slot_lsn(
         return False
     key = str(cursor_key or "").strip()
     slot = str(slot_name or "").strip()[:63]
-    rows = _load()
-    for row in rows:
-        if str(row.get("lsn") or "") != token:
-            continue
-        if key and str(row.get("cursor_key") or "") == key:
-            return True
-        if slot and str(row.get("slot_name") or "") == slot and not key:
-            return True
-    rows.append(
-        {
-            "lsn": token,
-            "cursor_key": key,
-            "slot_name": slot,
-            "retired_at": _now(),
-        }
-    )
-    _save(rows)
-    return True
+    with locked_update(STORE_PATH):  # one load-append-write at a time
+        rows = _load()
+        for row in rows:
+            if str(row.get("lsn") or "") != token:
+                continue
+            if key and str(row.get("cursor_key") or "") == key:
+                return True
+            if slot and str(row.get("slot_name") or "") == slot and not key:
+                return True
+        rows.append(
+            {
+                "lsn": token,
+                "cursor_key": key,
+                "slot_name": slot,
+                "retired_at": _now(),
+            }
+        )
+        _save(rows)
+        return True
 
 
 def slot_lsn_retired(
@@ -467,19 +468,20 @@ def unretire_slot_lsns(entries: list[tuple[str, str, str]]) -> None:
     markers.discard(("", "", ""))
     if not markers:
         return
-    rows = _load()
-    remaining = [
-        row
-        for row in rows
-        if (
-            str(row.get("lsn") or ""),
-            str(row.get("cursor_key") or ""),
-            str(row.get("slot_name") or ""),
-        )
-        not in markers
-    ]
-    if len(remaining) != len(rows):
-        _save(remaining)
+    with locked_update(STORE_PATH):  # one load-filter-write at a time
+        rows = _load()
+        remaining = [
+            row
+            for row in rows
+            if (
+                str(row.get("lsn") or ""),
+                str(row.get("cursor_key") or ""),
+                str(row.get("slot_name") or ""),
+            )
+            not in markers
+        ]
+        if len(remaining) != len(rows):
+            _save(remaining)
 
 
 def resume_token_retired(resume: Any, *, cursor_key: str = "") -> bool:

@@ -22,6 +22,7 @@ is refused instead of allowed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -35,7 +36,7 @@ from connectors.mongodb_common import (
 )
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from services import connector_store
 import services.query_extract as services_query_extract
 from services.brand_env import getenv_brand
@@ -788,6 +789,31 @@ class QueryExportRequest(QueryExecuteRequest):
 
         return formula_protection_mode(value, default="prefix")
 
+    # G7-F3: the Query console's TSV NULL marker, same option as a TSV destination.
+    tsv_null: str = Field(
+        "empty",
+        description=(
+            "TSV file export: \"empty\" (default) writes SQL NULL as an empty cell; \"\\\\N\" "
+            "writes NULL as \\N (MySQL/PostgreSQL text format), an empty string as an empty "
+            "cell and a literal \\N text quoted. Refused for any other format (422)."
+        ),
+    )
+
+    @field_validator("tsv_null", mode="before")
+    @classmethod
+    def _tsv_null_vocabulary(cls, value: Any) -> str:
+        from services.export_dialect import tsv_null_mode
+
+        return tsv_null_mode(value)
+
+    @model_validator(mode="after")
+    def _tsv_null_is_tsv_only(self) -> "QueryExportRequest":
+        from services.export_dialect import tsv_null_marker
+
+        if not (self.destination_connector_id or "").strip():
+            tsv_null_marker(self.format, self.tsv_null)
+        return self
+
 
 class QueryResult(BaseModel):
     columns: list[str]
@@ -1015,10 +1041,21 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
     writer_box: dict[str, Any] = {}
     guard_formulas = body.formula_protection == "prefix" and fmt in {"csv", "tsv"}
     from services.csv_safety import neutralize_export_cell
+    from services.export_dialect import format_written_row, tsv_null_marker
+
+    null_marker = tsv_null_marker(fmt, body.tsv_null) if fmt == "tsv" else ""
 
     def _on_row(columns: list[str], record: dict[str, Any]) -> None:
         if fmt == "jsonl":
             handle.write(json.dumps(record, default=str) + "\n")
+        elif null_marker:
+            # G7-F3: the TSV \\N convention — NULL \\N, '' an empty cell (export dialect quoting).
+            guard = neutralize_export_cell if guard_formulas else (lambda v: v)
+            if not writer_box.get("header"):
+                handle.write(format_written_row([guard(c) for c in columns], "\t") + "\r\n")
+                writer_box["header"] = True
+            cells = [None if record.get(k) is None else guard(record.get(k)) for k in columns]
+            handle.write(format_written_row(cells, "\t", null_marker=null_marker) + "\r\n")
         else:
             writer = writer_box.get("w")
             if writer is None:
@@ -1121,7 +1158,7 @@ async def query_export(
 
         # Before the query is read (review 3, body routes): another workspace's
         # destination answers like a missing one.
-        assert_body_ids(request, connectors=(body.destination_connector_id,), write=True)
+        await asyncio.to_thread(assert_body_ids, request, connectors=(body.destination_connector_id,), write=True)
     # Security review H2: an export writes the workspace's rows without a job,
     # so nothing else would ask where they land. Both branches (a connector, a
     # file on this deployment) are judged before the query is read.
@@ -1172,7 +1209,7 @@ async def query_export(
             kind="file_export",
             format=body.format,
             output_path=body.output_path,
-            extra={"formula_protection": body.formula_protection},
+            extra={"formula_protection": body.formula_protection, "tsv_null": body.tsv_null},
         )
         export_bytes, export_name, dest_summary = write_destination_file(
             dest,

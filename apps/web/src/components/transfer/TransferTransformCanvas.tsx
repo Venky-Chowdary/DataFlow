@@ -8,6 +8,7 @@ import { ShapeStepFields } from "./ShapeStepFields";
 import { StudioCommandPalette } from "./StudioCommandPalette";
 import { checkShapeExpression, previewShapeRecipe } from "../../lib/api";
 import { usePointerDrag } from "../../lib/pointerDrag";
+import { previewCellText, stepPreviewCsv } from "../../lib/stepPreviewCsv";
 import { paletteActions } from "../../lib/canvasPalette";
 import {
   chainDocument,
@@ -1350,19 +1351,12 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   );
 }
 
-function cellText(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
+const cellText = previewCellText;
 
 function downloadCsv(columns: string[], rows: Record<string, unknown>[]) {
-  const line = (row: Record<string, unknown> | null, names: string[]) => names.map((name) => {
-    const text = row ? cellText(row[name]) : name;
-    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-  }).join(",");
-  const blob = new Blob([[line(null, columns), ...rows.map((row) => line(row, columns))].join("\n")], { type: "text/csv" });
+  // A preview a person opens in a spreadsheet: formula-looking cells (and header
+  // names) are defused with the API's rule; CR/LF/quotes/commas are quoted (G7-F2).
+  const blob = new Blob([stepPreviewCsv(columns, rows)], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

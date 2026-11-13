@@ -83,3 +83,8 @@ def tracked_job_scope(request: Any, job_id: str, *, store: Callable[[], Any]) ->
             yield
     finally:
         release_destination_write_lock(job_id)
+        # A CALL/SELECT source's spool, including one a Gate-8 / proof re-read
+        # opened after the stream closed its own, never outlives the job.
+        from services.procedure_source import close_callable_spool
+
+        close_callable_spool(job_id=job_id)

@@ -193,5 +193,6 @@ def test_exports_root_is_configurable(monkeypatch, tmp_path):
 def test_exports_root_defaults_to_api_exports(monkeypatch):
     monkeypatch.delenv("DATAFLOW_EXPORTS_DIR", raising=False)
     monkeypatch.delenv("DATAWRAP_EXPORTS_DIR", raising=False)
-    assert exports_dir().name == "exports"
-    assert exports_dir().parent.name == "api"
+    # create=False: naming the default folder must not create it in the source tree.
+    assert exports_dir(create=False).name == "exports"
+    assert exports_dir(create=False).parent.name == "api"
