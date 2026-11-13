@@ -165,6 +165,12 @@ jobs:
       - name: Start SQL Server (Agent on, CT + native CDC init)
         run: bash .github/scripts/start_ci_databases.sh sqlserver
 
+      - name: Start fake-gcs and Azurite (GCS / ADLS -> PostgreSQL tests)
+        # The same emulators the PR jobs start (ci-services action). Without
+        # them test_execute_tracked_gcs_to_postgresql / _adls skipped next to
+        # a running PostgreSQL ("... or PostgreSQL emulator not reachable").
+        run: bash .github/scripts/start_ci_databases.sh gcs adls
+
       - name: Install Microsoft ODBC Driver 18 (fails when pyodbc cannot see it)
         # Without it the product falls back to pymssql (FreeTDS), which
         # refuses encrypt=yes, and every SQL Server matrix cell skipped.

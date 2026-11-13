@@ -314,3 +314,69 @@ def test_a_job_can_inherit_another_jobs_expected_skips() -> None:
     cases = [Case("tests/a.py::t", "skipped", "needs a PostgreSQL with wal_level=replica"), Case("tests/a.py::u", "passed")]
     result = check("j", cases, manifest)
     assert not result.unexpected and result.expected[0]["why"] == "second PG"
+
+
+# ── final review B1: two-engine skips the `elsewhere` exemption used to hide ──
+
+ISO_FIXTURE = ROOT / "tests" / "fixtures" / "live_skips" / "iso_two_engine_skips.xml"
+#: Engines each job does NOT start (its two-engine skips name one of these).
+_ABSENT = {
+    "api-tests": ["elasticsearch", "iceberg", "kafka", "oracle", "other_sql", "s3",
+                  "snowflake", "sqlserver", "vector_stores"],
+    "engine-suite": ["bigquery", "elasticsearch", "iceberg", "oracle", "other_sql", "s3",
+                     "snowflake", "vector_stores"],
+}
+
+
+def _two_engine(job: str, cases: list, manifest: dict) -> list:
+    from scripts.check_live_skips import names_engine
+
+    tokens = manifest["engine_tokens"]
+    engines = manifest["jobs"][job]["engines"]
+    return [
+        c for c in cases
+        if c.outcome == "skipped"
+        and names_engine(c.message, engines, tokens)
+        and names_engine(c.message, _ABSENT[job], tokens)
+    ]
+
+
+@pytest.mark.parametrize("job", ["api-tests", "engine-suite"])
+def test_the_isolated_run_replay_is_green_for_both_jobs(job: str) -> None:
+    """rev_t2/iso.xml: 281 files run with no engines. Its two-engine skips
+    (a job engine plus one the job lacks), committed as a fixture, must all be
+    expected: d188 and e3006 were not (12 unexpected in api-tests)."""
+    from scripts.check_live_skips import check, read_junit
+
+    manifest = load_manifest()
+    cases = _two_engine(job, read_junit([ISO_FIXTURE]), manifest)
+    assert cases, "the fixture holds this job's two-engine skips"
+    result = check(job, cases, manifest)
+    assert not result.unexpected, [u["test"] + " — " + u["reason"] for u in result.unexpected]
+
+
+def test_the_pg_leg_of_the_x40_wide_decimal_test_is_allowlisted_in_api_tests() -> None:
+    from scripts.check_live_skips import Case, check
+
+    manifest = load_manifest()
+    case = Case(
+        "tests/test_x40_wide_decimal_sqlserver_live.py::test_live_pg_to_mssql_wide_decimal_binds_exact",
+        "skipped", "set DATAFLOW_TEST_PG_* and DATAFLOW_TEST_MSSQL_* (reachable)",
+    )
+    assert not check("api-tests", [case], manifest).unexpected
+    # The nightly starts SQL Server, so there the same skip is a failure.
+    assert check("engine-suite", [case], manifest).unexpected
+
+
+def test_the_nightly_starts_azurite_and_fake_gcs_so_their_pg_legs_run() -> None:
+    import yaml
+
+    manifest = load_manifest()
+    suite = manifest["jobs"]["engine-suite"]
+    assert {"gcs", "adls"} <= set(suite["engines"]) and {"gcs", "adls"} <= set(suite["report_engines"])
+    steps = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "full-suite.yml").read_text(encoding="utf-8")
+    )["jobs"]["engine-suite"]["steps"]
+    runs = "\n".join(str(s.get("run", "")) for s in steps)
+    assert re.search(r"start_ci_databases\.sh[^\n]*\bgcs\b", runs)
+    assert re.search(r"start_ci_databases\.sh[^\n]*\badls\b", runs)
