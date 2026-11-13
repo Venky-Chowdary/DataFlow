@@ -117,6 +117,45 @@ def same_cluster(a: tuple[str, frozenset[str]], b: tuple[str, frozenset[str]]) -
     return bool(portless & bare(a[1]) & bare(b[1]))
 
 
+def scope_of(kind: str, cfg: Mapping[str, Any] | None, endpoint: Any = None) -> str:
+    """The namespace an object name lives in (security check M1).
+
+    MongoDB: the database; Redis: the db index; SQL: database/schema. Kafka
+    topics, Elasticsearch indexes and DynamoDB tables are cluster-wide ("").
+    The same collection name in another database is another object.
+    """
+    from connectors.destination_naming import (
+        DOCUMENT_STORES,
+        SQL_NAME_LIMITS,
+        SQL_UNLIMITED,
+    )
+
+    cfg = dict(cfg or {})
+    if isinstance(endpoint, Mapping):
+        endpoint = None
+
+    def part(name: str) -> str:
+        return str(getattr(endpoint, name, "") or cfg.get(name) or "").strip().lower()
+
+    if kind in DOCUMENT_STORES:
+        return part("database")
+    if kind == "redis":
+        index = part("database").removeprefix("db")
+        return index if index.isdigit() else "0"
+    if kind in SQL_NAME_LIMITS or kind in SQL_UNLIMITED:
+        return f"{part('database')}/{part('schema')}"
+    return ""
+
+
+def _job_scope(kind: str, job: Mapping[str, Any]) -> str | None:
+    """A job's namespace, or None when the job document does not name one."""
+    dest = dict((job.get("transfer_request") or {}).get("destination") or {})
+    if not (dest.get("database") or dest.get("schema") or job.get("destination_database")):
+        return None
+    return scope_of(kind, {"database": dest.get("database") or job.get("destination_database"),
+                           "schema": dest.get("schema")})
+
+
 def object_history(
     kind: str, obj: str, cfg: Mapping[str, Any] | None, endpoint: Any, workspace_id: str,
 ) -> str:
@@ -131,6 +170,7 @@ def object_history(
         return NONE
     family = STREAM_SINKS if kind in STREAM_SINKS else frozenset({kind})
     here = cluster_of(cfg, endpoint)
+    namespace = scope_of(kind, cfg, endpoint)
     current = (_RUN.get() or ("", ""))[0]
     rows = get_mongodb_service().naming_history_jobs(obj, workspace_id=str(workspace_id or ""))
     legacy = False
@@ -144,10 +184,14 @@ def object_history(
         stamps = job.get("naming")
         if isinstance(stamps, list):
             for stamp in stamps:
-                if isinstance(stamp, Mapping) and str(stamp.get("object") or "") == obj:
+                # A stamp decides only for the same object in the same namespace
+                # (database / schema / db index): M1.
+                if (isinstance(stamp, Mapping) and str(stamp.get("object") or "") == obj
+                        and str(stamp.get("scope") or "") == namespace):
                     return EXACT if str(stamp.get("mode") or "") == EXACT else LEGACY
-        if not job.get("naming_scheme") and stamps is None:
-            legacy = True  # written before the upgrade: the pre-G11 names
+        job_scope = _job_scope(kind, job)
+        if not job.get("naming_scheme") and stamps is None and job_scope in (None, namespace):
+            legacy = True  # written before the upgrade (here, or not provably elsewhere)
     return LEGACY if legacy else NONE
 
 
@@ -165,14 +209,15 @@ def ensure_naming_history_indexes(svc: Any = None, *, max_time_ms: int = 30000) 
         return False
 
 
-def record_naming(obj: str, mode: str) -> None:
-    """Stamp this run's naming decision for ``obj`` on its job (no-op outside a run)."""
+def record_naming(obj: str, mode: str, scope: str = "") -> None:
+    """Stamp this run's naming decision for ``obj`` (in ``scope``) on its job."""
     bound = _RUN.get()
     if bound is None or not bound[0] or not obj:
         return
     job_id = bound[0]
-    stamps = [s for s in _STAMPS.get(job_id, []) if s.get("object") != obj]
-    stamps.append({"object": obj, "mode": EXACT if mode == EXACT else LEGACY,
+    stamps = [s for s in _STAMPS.get(job_id, [])
+              if (s.get("object"), s.get("scope", "")) != (obj, scope)]
+    stamps.append({"object": obj, "scope": scope, "mode": EXACT if mode == EXACT else LEGACY,
                    "scheme_version": SCHEME_VERSION})
     _STAMPS[job_id] = stamps
     try:
@@ -199,16 +244,25 @@ def record_request_naming(request: Any, obj: str) -> None:
     whose Map renamed nothing decided nothing and stamps nothing, so it can
     never mask an earlier pre-upgrade job.
     """
+    from connectors.destination_naming import dest_kind
     from services.target_name_legacy import MAP_TARGET
 
+    dest = getattr(request, "destination", None)
+    try:
+        from src.transfer.adapters import resolve_connector_config
+
+        cfg = resolve_connector_config(dest) if dest is not None else {}
+    except Exception:  # noqa: BLE001 - the endpoint's own fields still name the namespace
+        cfg = {}
+    scope = scope_of(dest_kind(str(getattr(dest, "format", "") or "")), cfg, dest)
     adopted = any(isinstance(m, dict) and m.get(MAP_TARGET)
                   for m in (getattr(request, "mappings", None) or []))
     if adopted:
-        record_naming(obj, LEGACY)
+        record_naming(obj, LEGACY, scope)
         return
     bound = _RUN.get()
     if bound is not None and obj in _CHECKED.get(bound[0], set()):
-        record_naming(obj, EXACT)
+        record_naming(obj, EXACT, scope)
 
 
 __all__ = [
@@ -225,4 +279,5 @@ __all__ = [
     "record_request_naming",
     "run_workspace",
     "same_cluster",
+    "scope_of",
 ]

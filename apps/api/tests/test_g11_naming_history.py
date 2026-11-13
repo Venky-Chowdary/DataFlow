@@ -98,7 +98,8 @@ def test_a_new_topic_stays_exact_on_every_run(jobs):
         assert _run(jobs, req) == ""
         assert _targets(req) == ["First Name", "id"]
     stamps = [j.get("naming") for j in jobs._jobs.values()]
-    assert all(s == [{"object": "orders_events", "mode": "exact", "scheme_version": 1}]
+    assert all(s == [{"object": "orders_events", "scope": "", "mode": "exact",
+                    "scheme_version": 1}]
                for s in stamps), stamps
 
 

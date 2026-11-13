@@ -118,7 +118,8 @@ def test_an_acknowledged_run_stamps_exact_and_later_runs_follow_it(jobs):
         req.destination.extra = {"legacy_field_policy": "write_new"}
         refusal, job = _run(jobs, req)
         assert refusal == ""
-        assert job["naming"] == [{"object": "people", "mode": "exact", "scheme_version": 1}]
+        assert job["naming"] == [{"object": "people", "scope": "app", "mode": "exact",
+                                  "scheme_version": 1}]
         refusal, _job = _run(jobs, _mongo_request("people", RENAMED))
     assert refusal == "" and probe.call_count == 1  # the second run follows the stamp
 
