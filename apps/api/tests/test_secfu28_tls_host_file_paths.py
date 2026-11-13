@@ -75,6 +75,8 @@ def drivers(monkeypatch):
     monkeypatch.setattr(pymongo, "MongoClient", recorder("pymongo"))
     monkeypatch.setattr("connectors.generic_sql._mssql_odbc_driver",
                         lambda: "ODBC Driver 18 for SQL Server")
+    # The same driver is installed as far as the dial check is concerned, on any machine (PR 421 CI).
+    monkeypatch.setattr(pyodbc, "drivers", lambda: ["ODBC Driver 18 for SQL Server"])
     return calls
 
 
