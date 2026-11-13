@@ -3,7 +3,7 @@ import {
   PlanVersionConflictError,
   activeRevision,
   headVersion,
-  sameMappings,
+  sameFullMappings,
   type PlanMappingRow,
   type PlanView,
 } from "./planConcurrency";
@@ -74,7 +74,7 @@ export function usePlanConflict({ api, headRef, onUseLatest, notify }: PlanConfl
       const latest = activeRevision(plan);
       const head = headVersion(plan);
       const latestMappings = latest?.mappings ?? [];
-      if (latest && sameMappings(latestMappings, mine)) {
+      if (latest && sameFullMappings(latestMappings, mine)) {
         // The plan already holds exactly these mappings (this page's own
         // earlier write landed): nothing to resolve.
         headRef.current = head;

@@ -84,9 +84,13 @@ export function PlanConflictDialog({
                   data-differs={row.differs ? "true" : "false"}
                 >
                   <th scope="row">{row.target}</th>
-                  <td>{row.latestSource ?? "— not mapped"}</td>
+                  <td>
+                    {row.latestSource ?? "— not mapped"}
+                    {row.latestSources.length > 1 && <em> (duplicate: {row.latestSources.length} sources)</em>}
+                  </td>
                   <td>
                     {row.mineSource ?? "— not mapped"}
+                    {row.mineSources.length > 1 && <em> (duplicate: {row.mineSources.length} sources)</em>}
                     {row.differs && <strong className="df2-plan-conflict-diff"> (different)</strong>}
                   </td>
                 </tr>

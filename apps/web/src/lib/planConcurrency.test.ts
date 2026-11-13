@@ -109,13 +109,51 @@ describe("diffPlanMappings / sameMappings", () => {
       [{ source: "a", target: "x" }, { source: "b", target: "y" }],
       [{ source: "a", target: "x" }, { source: "c", target: "y" }, { source: "d", target: "z" }],
     );
-    assert.deepEqual(rows, [
-      { target: "x", latestSource: "a", mineSource: "a", differs: false },
-      { target: "y", latestSource: "b", mineSource: "c", differs: true },
-      { target: "z", latestSource: null, mineSource: "d", differs: true },
+    assert.deepEqual(rows.map((r) => [r.target, r.latestSource, r.mineSource, r.differs]), [
+      ["x", "a", "a", false],
+      ["y", "b", "c", true],
+      ["z", null, "d", true],
     ]);
     assert.equal(sameMappings([{ source: "a", target: "x" }], [{ source: "a", target: "x", confidence: 0.4 }]), true);
     assert.equal(sameMappings([{ source: "a", target: "x", transform: "upper" }], [{ source: "a", target: "x" }]), false);
+  });
+
+  it("keeps every source of a duplicated target, case-insensitively, instead of the last one", async () => {
+    const { diffPlanMappings } = await import("./planConcurrency.js");
+    const [row] = diffPlanMappings(
+      [{ source: "email", target: "Contact" }, { source: "alt_email", target: "contact" }],
+      [{ source: "email", target: "contact" }],
+    );
+    assert.equal(row.duplicate, true);
+    assert.deepEqual(row.latestSources, ["alt_email", "email"]);
+    assert.equal(row.latestSource, "alt_email + email");
+    assert.equal(row.differs, true);
+  });
+
+  it("shows an omitted column as not written, keyed by its source", async () => {
+    const { diffPlanMappings } = await import("./planConcurrency.js");
+    const rows = diffPlanMappings(
+      [{ source: "ssn", target: "ssn" }],
+      [{ source: "ssn", target: "", transform: "omit", intentional_omit: true }],
+    );
+    assert.deepEqual(rows.map((r) => [r.target, r.latestSource, r.mineSource]), [
+      ["ssn", "ssn", null],
+      ["ssn (not written)", null, "omitted"],
+    ]);
+  });
+});
+
+describe("sameFullMappings", () => {
+  it("treats override, omit, reasons, transform and confidence as part of the decision", async () => {
+    const { sameFullMappings } = await import("./planConcurrency.js");
+    const base = { source: "a", target: "x", confidence: 0.9, user_override: true };
+    assert.equal(sameFullMappings([base], [{ ...base }]), true);
+    assert.equal(sameFullMappings([base], [{ ...base, user_override: false }]), false, "the review's probe");
+    assert.equal(sameFullMappings([base], [{ ...base, confidence: 0.93 }]), false);
+    assert.equal(sameFullMappings([base], [{ ...base, transform: "trim" }]), false);
+    const omit = { source: "ssn", target: "", transform: "omit", intentional_omit: true, omit_reason: "pii" };
+    assert.equal(sameFullMappings([omit], [{ ...omit, omit_reason: "legal" }]), false);
+    assert.equal(sameFullMappings([base, omit], [omit, base]), true, "order does not matter");
   });
 });
 

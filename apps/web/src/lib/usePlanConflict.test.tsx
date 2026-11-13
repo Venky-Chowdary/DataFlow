@@ -201,3 +201,27 @@ describe("plan conflict dialog", () => {
     assert.equal(h.head.current, 2);
   });
 });
+
+describe("plan conflict dialog — duplicates", () => {
+  it("shows both sources of a duplicated destination column", async () => {
+    const dup: Row[] = [
+      { source: "email", target: "contact" },
+      { source: "alt_email", target: "Contact" },
+    ];
+    const h = await mount(api({ getPlan: async () => plan(3, dup) }));
+    await act(async () => void (await h.open([{ source: "email", target: "contact" }])));
+    const row = [...(dialog()?.querySelectorAll("tbody tr") ?? [])][0];
+    assert.match(row?.textContent ?? "", /alt_email \+ email/);
+    assert.match(row?.textContent ?? "", /duplicate: 2 sources/);
+    assert.equal(row?.getAttribute("data-differs"), "true");
+  });
+
+  it("does not adopt silently when only the user override differs", async () => {
+    const mine: Row[] = [{ source: "email", target: "email", user_override: true }];
+    const h = await mount(api({ getPlan: async () => plan(3, [{ source: "email", target: "email", user_override: false }]) }));
+    let outcome = "";
+    await act(async () => void (outcome = await h.open(mine)));
+    assert.equal(outcome, "shown");
+    assert.equal(h.head.current, 2);
+  });
+});

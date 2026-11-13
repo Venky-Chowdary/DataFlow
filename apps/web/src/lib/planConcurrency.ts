@@ -148,13 +148,24 @@ export interface PlanMappingRow {
   confidence?: number;
   transform?: string;
   reason?: string;
+  user_override?: boolean;
+  intentional_omit?: boolean;
+  omit_reason?: string;
+  omit_reason_text?: string;
+  [extra: string]: unknown;
 }
 
-/** One target column compared between the latest revision and the user's unsaved mappings. */
+/** One destination column compared between the latest revision and the user's unsaved mappings. */
 export interface PlanMappingDiffRow {
+  /** Destination column as written (an omitted source shows as "<source> (not written)"). */
   target: string;
+  /** Joined for display ("a + b" when a side maps two sources); null when that side maps nothing. */
   latestSource: string | null;
   mineSource: string | null;
+  latestSources: string[];
+  mineSources: string[];
+  /** Either side maps more than one source to this column (a duplicate the Map step flags). */
+  duplicate: boolean;
   differs: boolean;
 }
 
@@ -180,34 +191,89 @@ export function activeRevision(plan: PlanView | null | undefined): PlanRevisionV
   return revisions.find((r) => r.version === plan?.active_version) ?? revisions[revisions.length - 1];
 }
 
-function sourceByTarget(rows: PlanMappingRow[]): Map<string, string> {
-  const out = new Map<string, string>();
+function isOmit(row: PlanMappingRow): boolean {
+  return Boolean(row.intentional_omit) || row.transform === "omit";
+}
+
+/**
+ * Sources per destination column, keyed case-insensitively; every source is
+ * kept (a duplicate is two sources, not the last one). Omitted columns have
+ * no destination: they are keyed by source and shown as "omitted".
+ */
+function sourcesByTarget(rows: PlanMappingRow[]): Map<string, { label: string; sources: string[] }> {
+  const out = new Map<string, { label: string; sources: string[] }>();
   for (const row of rows) {
-    if (!row?.target) continue;
-    const src = row.transform ? `${row.source} (${row.transform})` : row.source;
-    out.set(row.target, src ?? "");
+    if (!row) continue;
+    const omitted = isOmit(row);
+    const target = (row.target ?? "").trim();
+    if (!omitted && !target) continue;
+    const key = omitted ? `omit:${(row.source ?? "").toLowerCase()}` : target.toLowerCase();
+    const label = omitted ? `${row.source} (not written)` : target;
+    const value = omitted
+      ? "omitted"
+      : row.transform ? `${row.source} (${row.transform})` : (row.source ?? "");
+    const entry = out.get(key) ?? { label, sources: [] };
+    entry.sources.push(value);
+    out.set(key, entry);
   }
   return out;
 }
 
 /**
- * Per destination column: which source each side maps, and whether they differ.
- * Columns only one side maps appear with `null` on the other side.
+ * Per destination column: which source(s) each side maps, and whether they
+ * differ. Columns only one side maps appear with `null` on the other side;
+ * a column a side maps from two sources shows both (`duplicate`). For
+ * display only: silent adoption uses {@link sameFullMappings}.
  */
 export function diffPlanMappings(latest: PlanMappingRow[], mine: PlanMappingRow[]): PlanMappingDiffRow[] {
-  const theirs = sourceByTarget(latest);
-  const ours = sourceByTarget(mine);
-  const targets = [...new Set([...theirs.keys(), ...ours.keys()])];
-  return targets.map((target) => {
-    const latestSource = theirs.get(target) ?? null;
-    const mineSource = ours.get(target) ?? null;
-    return { target, latestSource, mineSource, differs: latestSource !== mineSource };
+  const theirs = sourcesByTarget(latest);
+  const ours = sourcesByTarget(mine);
+  const keys = [...new Set([...theirs.keys(), ...ours.keys()])];
+  return keys.map((key) => {
+    const a = theirs.get(key);
+    const b = ours.get(key);
+    const latestSources = [...(a?.sources ?? [])].sort();
+    const mineSources = [...(b?.sources ?? [])].sort();
+    return {
+      target: (a ?? b)!.label,
+      latestSource: latestSources.length ? latestSources.join(" + ") : null,
+      mineSource: mineSources.length ? mineSources.join(" + ") : null,
+      latestSources,
+      mineSources,
+      duplicate: latestSources.length > 1 || mineSources.length > 1,
+      differs: latestSources.join("\u0000") !== mineSources.join("\u0000"),
+    };
   });
 }
 
-/** True when both sides map every destination column from the same source. */
+/** True when both sides map every destination column from the same source(s) (display level). */
 export function sameMappings(a: PlanMappingRow[], b: PlanMappingRow[]): boolean {
   return diffPlanMappings(a, b).every((row) => !row.differs);
+}
+
+function canonicalRows(rows: PlanMappingRow[]): string {
+  const canon = rows.map((r) => ({
+    t: (r.target ?? "").trim(),
+    s: r.source ?? "",
+    x: r.transform ?? "",
+    u: Boolean(r.user_override),
+    o: isOmit(r),
+    r: r.omit_reason ?? "",
+    rt: r.omit_reason_text ?? "",
+    c: Math.round((typeof r.confidence === "number" ? r.confidence : 1) * 1000) / 1000,
+  }));
+  canon.sort((p, q) => (p.t + "\u0000" + p.s + "\u0000" + p.x).localeCompare(q.t + "\u0000" + q.s + "\u0000" + q.x));
+  return JSON.stringify(canon);
+}
+
+/**
+ * Whether two mapping sets are the same decision, row for row: target,
+ * source, transform, user override, intentional omit and its reasons, and
+ * confidence. Used before adopting a revision silently as "this page's own";
+ * the per-column diff ignores most of these and is for display only.
+ */
+export function sameFullMappings(a: PlanMappingRow[], b: PlanMappingRow[]): boolean {
+  return canonicalRows(a) === canonicalRows(b);
 }
 
 /**
@@ -255,6 +321,6 @@ export function newMapRequestId(): string {
  */
 export function headIfOurs(plan: PlanView | null | undefined, mine: PlanMappingRow[]): number | null {
   const latest = activeRevision(plan);
-  if (!latest || !sameMappings(latest.mappings ?? [], mine)) return null;
+  if (!latest || !sameFullMappings(latest.mappings ?? [], mine)) return null;
   return headVersion(plan);
 }
