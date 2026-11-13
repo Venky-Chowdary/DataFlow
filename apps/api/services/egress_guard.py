@@ -786,6 +786,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     from services.platform_aws_credentials import iceberg_connector_refusal
     from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
 
+    from connectors.kafka_sasl_policy import settings_refusal as kafka_settings_refusal
     from connectors.mysql_options import connector_option_refusal
     from connectors.mongodb_auth_mechanism import settings_refusal as mongo_auth_refusal
     from connectors.oracle_dsn_guard import settings_refusal as oracle_dsn_refusal
@@ -811,6 +812,8 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         or oracle_dsn_refusal(data)
         # No MongoDB auth mechanism that uses this host's identity (follow-up review 3).
         or mongo_auth_refusal(data)
+        # No Kafka login with this host's identity, no Kafka option naming a host file (review 4).
+        or kafka_settings_refusal(data)
     )
     if platform_credentials:
         return platform_credentials
