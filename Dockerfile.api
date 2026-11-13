@@ -23,6 +23,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY apps/api/requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
+# Proprietary vendor drivers (SAP HANA hdbcli, Teradata teradatasql and their
+# SQLAlchemy dialects) are NOT shipped by default. An operator who has accepted
+# the vendors' licences builds with:  --build-arg INSTALL_VENDOR_DRIVERS=1
+ARG INSTALL_VENDOR_DRIVERS=0
+COPY apps/api/requirements-vendor-drivers.txt /app/requirements-vendor-drivers.txt
+RUN if [ "$INSTALL_VENDOR_DRIVERS" = "1" ]; then \
+      pip install -r /app/requirements-vendor-drivers.txt; \
+    else \
+      echo "Vendor drivers not installed (INSTALL_VENDOR_DRIVERS=0)"; \
+    fi
+
 COPY packages/preflight /app/packages/preflight
 # Runtime only: preflight's dev extra is pytest, which the image must not ship
 # (test tools live in the API dev requirements file, which CI installs).

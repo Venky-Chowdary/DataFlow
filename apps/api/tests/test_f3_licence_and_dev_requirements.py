@@ -164,10 +164,13 @@ def test_policy_exceptions_need_a_licence_and_a_why(tmp_path: Path) -> None:
         scan.load_policy(path)
 
 
-def test_the_repository_policy_loads_and_flags_owner_decisions() -> None:
+def test_the_repository_policy_loads_with_no_decision_left_pending() -> None:
     policy = scan.load_policy(REPO / "licence-policy.json")
-    owner = {k for k, v in policy["exceptions"].items() if v.get("owner_decision")}
-    assert {"pypi:hdbcli", "pypi:teradatasql"} <= owner
+    assert not [k for k, v in policy["exceptions"].items() if v.get("owner_decision")]
+    # Owner decision 3: the proprietary vendor drivers are operator-installed,
+    # so they are not dependencies of anything Datawrap ships.
+    assert "pypi:hdbcli" not in policy["exceptions"]
+    assert "pypi:teradatasql" not in policy["exceptions"]
 
 
 def test_npm_scan_reads_the_lockfile(tmp_path: Path) -> None:

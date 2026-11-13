@@ -34,9 +34,6 @@ Components under copyleft, proprietary or otherwise conditional terms
 certifi (pypi) - MPL-2.0
   MPL-2.0, used unmodified. Source: https://github.com/certifi/python-certifi
 
-hdbcli (pypi) - Other/Proprietary License
-  Proprietary SAP licence. Not yet cleared for redistribution: see the owner decision in docs/legal/third-party-licences.md
-
 orjson (pypi) - MPL-2.0 AND (Apache-2.0 OR MIT)
   MPL-2.0 AND (Apache-2.0 OR MIT), used unmodified. Source: https://github.com/ijl/orjson
 
@@ -51,9 +48,6 @@ pymssql (pypi) - LGPL
 
 pypdfium2 (pypi) - BSD-3-Clause, Apache-2.0, dependency licenses
   BSD-3-Clause / Apache-2.0; the bundled PDFium binary's third-party licences ship in the wheel (pypdfium2 *.dist-info/licenses). Source: https://github.com/pypdfium2-team/pypdfium2
-
-teradatasql (pypi) - Other/Proprietary License
-  Proprietary Teradata licence. Not yet cleared for redistribution: see the owner decision in docs/legal/third-party-licences.md
 
 ========================================================================
 Third-party packages and their licences
@@ -126,7 +120,6 @@ grpcio: Apache-2.0
 grpcio-status: Apache-2.0
 h11: MIT
 h2: MIT
-hdbcli: Other/Proprietary License
 hpack: MIT
 httpcore: BSD-3-Clause
 httpcore2: BSD-3-Clause
@@ -181,7 +174,6 @@ pyasn1: BSD-2-Clause
 pyasn1_modules: BSD
 PyAthena: MIT
 pycparser: BSD-3-Clause
-pycryptodome: BSD-2-Clause AND Unlicense AND MIT
 pydantic: MIT
 pydantic-settings: MIT
 pydantic_core: MIT
@@ -227,7 +219,6 @@ sqlparse: BSD
 starlette: BSD-3-Clause
 strictyaml: MIT
 tenacity: Apache-2.0
-teradatasql: Other/Proprietary License
 thrift: Apache-2.0
 thrift-sasl: Apache-2.0
 tomlkit: MIT

@@ -39,18 +39,6 @@
       "notice": "LGPL-2.1, used unmodified as a separately replaceable library (you may replace it with a modified version); the wheel bundles FreeTDS (LGPL-2.0). Licence text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html (also in the package's dist-info). Source: https://github.com/pymssql/pymssql, https://www.freetds.org and https://pypi.org/project/pymssql/#files. A written offer: on request, the Datawrap copyright holder will provide the complete corresponding source of the exact version shipped, for at least three years from distribution.",
       "decision": {"status": "approved", "by": "owner", "date": "2026-11-13", "terms": "accepted with attribution; used unmodified"}
     },
-    "pypi:hdbcli": {
-      "licence": "Other/Proprietary License",
-      "why": "SAP HANA client, proprietary (SAP Developer License Agreement). Whether SAP's terms allow shipping it inside the production image is not established. Owner decision: keep it, make it an operator-installed optional driver, or remove it.",
-      "notice": "Proprietary SAP licence. Not yet cleared for redistribution: see the owner decision in docs/legal/third-party-licences.md",
-      "owner_decision": true
-    },
-    "pypi:teradatasql": {
-      "licence": "Other/Proprietary License",
-      "why": "Teradata SQL driver, proprietary licence. Whether its terms allow shipping it inside the production image is not established. Owner decision: keep it, make it optional, or remove it.",
-      "notice": "Proprietary Teradata licence. Not yet cleared for redistribution: see the owner decision in docs/legal/third-party-licences.md",
-      "owner_decision": true
-    },
     "pypi:pypdfium2": {
       "licence": "BSD-3-Clause, Apache-2.0, dependency licenses",
       "why": "PDF rendering. The bindings are BSD-3-Clause / Apache-2.0. The bundled PDFium binary carries the licences of its own dependencies (FreeType, libjpeg-turbo, OpenJPEG, LittleCMS, zlib, ICU, abseil, ...), which ship in the wheel's licence folder. All are permissive.",

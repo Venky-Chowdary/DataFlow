@@ -29,11 +29,12 @@ if one of them declares any other licence.
   no licence, the scanner reads the package's own `package.json`.
 - **Tool.** `scripts/licence_scan.py`. The policy is in `licence-policy.json`.
 
-Scan of 2026-11-13: 493 packages.
+Scan of 2026-11-13 (after owner decision 3): 494 packages, of which 4 are
+Datawrap's own (first-party).
 
 | Ecosystem / scope | Allowed | Copyleft | Unknown or proprietary |
 |---|---|---|---|
-| Python, shipped | 180 | 5 | 3 |
+| Python, shipped | 179 | 5 | 1 |
 | Python, test only | 39 | 1 | 0 |
 | npm, shipped in the web bundle | 62 | 0 | 0 |
 | npm, build and test only | 203 | 0 | 0 |
@@ -47,8 +48,8 @@ Scan of 2026-11-13: 493 packages.
 | `pymssql` | yes | LGPL-2.1 | SQL Server fallback driver. The wheel bundles FreeTDS (LGPL). Used unmodified. **Approved by the owner, 2026-11-13.** |
 | `certifi` | yes | MPL-2.0 | CA bundle. File-level copyleft, used unmodified. |
 | `orjson` | yes | MPL-2.0 AND (Apache-2.0 OR MIT) | Pulled in by `trino`. Used unmodified. |
-| `hdbcli` | yes | Proprietary (SAP) | SAP HANA client. Redistribution in the image is **not cleared**. **Owner decision.** |
-| `teradatasql` | yes | Proprietary (Teradata) | Teradata driver. Redistribution in the image is **not cleared**. **Owner decision.** |
+| `hdbcli` | **no**, operator-installed | Proprietary (SAP) | SAP HANA client. Removed from the image (owner decision, 2026-11-13); see below. |
+| `teradatasql` | **no**, operator-installed | Proprietary (Teradata) | Teradata driver. Removed from the image (owner decision, 2026-11-13); see below. |
 | `pypdfium2` | yes | BSD-3-Clause / Apache-2.0 plus bundled-library licences | The PDFium binary's dependencies are permissive; their texts ship in the wheel. |
 | `hypothesis` | no (test only) | MPL-2.0 | Not distributed. |
 
@@ -70,13 +71,43 @@ allows bundling as long as the copyright and licence travel with the fonts;
      location and a written offer of the corresponding source for the
      shipped version (binary distribution in the image). The gate refuses an
      approved GPL-family exception without those three.
-3. **Proprietary drivers in the image** (`hdbcli`, `teradatasql`). Shipping
-   them inside a container may not be allowed by their vendor terms. The
-   options are to keep them with a confirmed right to redistribute, to make
-   them drivers the operator installs, or to remove them.
+3. **Proprietary drivers** (`hdbcli`, `teradatasql`). Decided 2026-11-13:
+   operator-installed. They are no longer in `apps/api/requirements.txt` or
+   the production image, and no longer in `licence-policy.json` (Datawrap
+   does not distribute them). See the next section.
 
-Items still pending carry `owner_decision: true` in `licence-policy.json`.
-That flag keeps CI green. It is not an approval.
+No owner decision is pending (`owner_decision: true` appears nowhere in
+`licence-policy.json`).
+
+## Operator-installed vendor drivers (SAP HANA, Teradata)
+
+The SAP HANA and Teradata connectors need proprietary vendor drivers, plus
+the SQLAlchemy dialect the generic SQL path dials through. Datawrap does not
+ship any of them. The connectors show **"Requires operator-installed
+driver"** in the connector catalog (`operator_installed_driver` on each
+catalog entry) until an operator installs them.
+
+| Connector | Packages | Vendor licence |
+|---|---|---|
+| SAP HANA (`sap_hana`, `hana`, `sap_bw_4hana`) | `hdbcli`, `sqlalchemy-hana` | SAP's licence for the HANA client; the dialect is Apache-2.0 |
+| Teradata (`teradata`, `teradata_vantage`) | `teradatasql`, `teradatasqlalchemy` | Teradata's licence terms |
+
+An operator who has accepted the vendor's licence installs them on the API
+host, then restarts the API, in one of two ways:
+
+```
+pip install -r apps/api/requirements-vendor-drivers.txt
+docker build -f Dockerfile.api --build-arg INSTALL_VENDOR_DRIVERS=1 .
+```
+
+The build-arg defaults to `0`, so the published image never contains them.
+Without the drivers, connector Test, save and run refuse with one message,
+naming the packages to install and the licence to accept. No connection is
+attempted (`connectors/vendor_drivers.py`). With the drivers installed,
+behaviour is unchanged.
+
+CI does not install them: no test exercises a real SAP HANA or Teradata
+server. The connector tests use stand-in modules.
 
 ## The CI gate
 
