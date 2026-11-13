@@ -9073,6 +9073,20 @@ def _file_export_cell_readback(
                 rows = list(_iter_artifact_records(fh, name=os.path.basename(path), fmt=fmt, written_here=True))
     except (UnmeasuredArtifact, FixedWidthError, OSError, ValueError) as exc:
         return {"passed": False, "mismatches": [f"written file could not be re-read: {exc}"]}
+    if str(summary.get("formula_protection") or "") == "prefix":
+        # G7: the opt-in formula guard is reversible (header names and cells) —
+        # compare the exact columns and values sent.
+        from services.csv_safety import restore_export_cell
+
+        rows = [
+            {
+                restore_export_cell(k) if isinstance(k, str) else k: (
+                    restore_export_cell(v) if isinstance(v, str) else v
+                )
+                for k, v in r.items()
+            }
+            for r in rows
+        ]
     targets = [str(m.get("target")) for m in mapping_dicts if m.get("target")]
     return sample_compare_rows(
         _file_export_source_view(records, mapping_dicts, fmt),

@@ -19,7 +19,13 @@ def write_destination_file(
     column_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
 ) -> tuple[bytes, str, dict]:
-    """Write records to CSV, JSON, JSONL, TSV, YAML, FWF, or a container format."""
+    """Write records to CSV, JSON, JSONL, TSV, YAML, FWF, or a container format.
+
+    ``endpoint.extra["formula_protection"]``: ``"off"`` (default — a transfer
+    job's file is data, byte-exact) or ``"prefix"`` (CSV/TSV text cells that
+    would open as a spreadsheet formula get a leading ``'``; see
+    ``services.csv_safety``). Human-download callers pass ``"prefix"``.
+    """
     import sys
     from pathlib import Path
 
@@ -30,12 +36,21 @@ def write_destination_file(
         resolve_target_columns,
         transform_error_policy_for_validation_mode,
     )
+    from services.csv_safety import formula_protection_mode, neutralize_export_cell
     from services.format_converter import can_convert, convert_rows
 
     fmt = (endpoint.format or "json").lower()
     # ndjson is a JSON Lines alias for the conversion engine
     if fmt == "ndjson":
         fmt = "jsonl"
+    # G7 (CWE-1236): opt-in OWASP guard for delimited text a person opens.
+    guard_formulas = (
+        formula_protection_mode(
+            (endpoint.extra if isinstance(endpoint.extra, dict) else {}).get("formula_protection")
+        )
+        == "prefix"
+        and fmt in {"csv", "tsv"}
+    )
     src_fmt = (source_format or fmt).lower()
     if src_fmt == "ndjson":
         src_fmt = "jsonl"
@@ -138,11 +153,16 @@ def write_destination_file(
         return cell_to_string(parsed)
 
     def _export_delimited_cell(val: Any, col: str) -> str | None:
-        """One CSV/TSV cell for the writer: ``None`` stays NULL (an empty text stays ``''``)."""
+        """One CSV/TSV cell for the writer: ``None`` stays NULL (an empty text stays ``''``).
+
+        With the formula guard on ("prefix", G7) a non-NULL text cell that would
+        open as a spreadsheet formula gets a leading ``'``; NULL stays NULL.
+        """
         parsed = to_delimited_value(val, col, export_dest_types)
         if parsed is None:
             return None
-        return parsed if isinstance(parsed, str) else cell_to_string(parsed)
+        text = parsed if isinstance(parsed, str) else cell_to_string(parsed)
+        return neutralize_export_cell(text) if guard_formulas else text
 
     def _export_summary(
         filename: str,
@@ -163,7 +183,16 @@ def write_destination_file(
             out["mime"] = mime
         if converted_from is not None:
             out["converted_from"] = converted_from
+        if guard_formulas:
+            # Gate-8 reads the guarded cells back to the exact values sent.
+            out["formula_protection"] = "prefix"
         return out
+
+    def _export_header_cells() -> list[str]:
+        """Header row cells — column names come from data, so the guard covers them."""
+        if not guard_formulas:
+            return list(export_columns)
+        return [neutralize_export_cell(c) for c in export_columns]
 
     grid = [
         [_export_grid_cell(rec.get(col), col) for col in export_columns]
@@ -191,6 +220,7 @@ def write_destination_file(
             grid,
             source_format="csv" if container else src_fmt,
             target_format=fmt,
+            column_types=export_dest_types,
         )
         ext = (
             "tsv"
@@ -241,7 +271,8 @@ def write_destination_file(
         # SQL NULL is an empty unquoted cell, empty text is quoted ``""`` (the C04 codec), so the two
         # are different bytes in the file. Everything else is quoted only when it has to be.
         delimiter = DELIMITERS[fmt]
-        lines = [format_written_row(list(export_columns), delimiter)]
+        # Header names come from data: the formula guard ("prefix") covers them too.
+        lines = [format_written_row(_export_header_cells(), delimiter)]
         lines += [
             format_written_row([_export_delimited_cell(r.get(c), c) for c in export_columns], delimiter)
             for r in export_records

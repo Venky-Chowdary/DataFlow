@@ -65,18 +65,53 @@ def _load_delimited_into_mysql(
         mysql_load_data_session_ready,
     )
 
+    from services.copy_s3_common import scan_delimited_file
+
+    csv_mode = ext != "tsv"
+    scan = scan_delimited_file(path, "," if csv_mode else "\t")
+    if scan.backslash:
+        # LOAD DATA's ESCAPED BY '\\' would turn a\b into a backspace and \x
+        # into x; the row path's C04 codec reads the value exactly (G7 B1).
+        raise FastPathUnavailable(
+            "source object holds a backslash; LOAD DATA escape processing would "
+            "rewrite it, so the row path loads it"
+        )
+    if scan.not_utf8_text:
+        # LOAD DATA ... CHARACTER SET utf8mb4 reads the bytes as UTF-8; a
+        # UTF-16/32 object would load garbage. The row path decodes it.
+        raise FastPathUnavailable(
+            "file is not UTF-8 text (UTF-16/32 byte-order mark or NUL bytes); "
+            "the row path decodes it"
+        )
+    if scan.line_ending == "mixed":
+        # One LINES TERMINATED BY for the whole file: mixed \n/\r\n or a bare
+        # \r would leave \r in values or merge rows.
+        raise FastPathUnavailable(
+            "file mixes line endings (\\n, \\r\\n or a bare \\r); the row path reads each"
+        )
+    if scan.unquoted_null:
+        # With FIELDS ENCLOSED BY set, LOAD DATA reads an unenclosed field that
+        # is exactly NULL as SQL NULL; the row path keeps the text (G7 K1).
+        raise FastPathUnavailable(
+            "file holds an unquoted NULL field; LOAD DATA would store SQL NULL "
+            "for that text, so the row path loads it"
+        )
     ready, why = mysql_load_data_session_ready(dst_cur, dest_conn)
     if not ready:
         raise FastPathUnavailable(why)
-    csv_mode = ext != "tsv"
     execute_load_data_local(
         dst_cur,
         path=path,
         table_q=table_q,
         columns=columns,
         field_terminator="," if csv_mode else "\t",
-        optionally_enclosed=csv_mode,
+        # The product writes TSV RFC-4180 style: a cell holding a tab, CR, LF
+        # or a leading quote is enclosed in quotes. MySQL reads an enclosed
+        # field up to its closing quote ("" -> ") and a mid-field '"' literally.
+        optionally_enclosed=True,
+        # Every loader file has a header row; a UTF-8 BOM rides on that line.
         ignore_lines=1,
+        line_terminator="\r\n" if scan.line_ending == "crlf" else "\n",
     )
     blocked = fetch_load_data_warnings(dst_cur)
     if blocked:

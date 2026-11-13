@@ -179,17 +179,31 @@ def excel_cell_value(cell: Any) -> Any:
     return value
 
 
-def _excel_value_rows(ws: Any) -> Iterator[tuple]:
+_TEXT_CELL_TYPES = frozenset({"s", "inlineStr", "str"})
+
+
+def _excel_value_rows(ws: Any, *, keep_empty_text: bool = False) -> Iterator[tuple]:
     for row in ws.iter_rows(values_only=False):
-        yield tuple(excel_cell_value(cell) for cell in row)
+        if not keep_empty_text:
+            yield tuple(excel_cell_value(cell) for cell in row)
+            continue
+        # A string cell holding "" reads back with value None; it is an empty
+        # string, not a blank (no cell) — keep the two apart for read-back.
+        yield tuple(
+            ""
+            if getattr(cell, "value", None) is None
+            and getattr(cell, "data_type", None) in _TEXT_CELL_TYPES
+            else excel_cell_value(cell)
+            for cell in row
+        )
 
 
 def _sheet_header_and_rows(
-    ws: Any, options: ReadOptions
+    ws: Any, options: ReadOptions, *, keep_empty_text: bool = False
 ) -> tuple[list[str], Iterator[Any]]:
     """Header names plus the sheet's data rows inside the declared window."""
     return header_and_rows(
-        _excel_value_rows(ws),
+        _excel_value_rows(ws, keep_empty_text=keep_empty_text),
         options,
         header_names=sheet_headers,
         source_label=f"Sheet '{getattr(ws, 'title', '')}'",
@@ -456,8 +470,18 @@ def parse_excel_preview(
         wb.close()
 
 
-def iter_excel_dicts(content: bytes | Any, options: ReadOptions | None = None) -> Iterator[dict]:
+def iter_excel_dicts(
+    content: bytes | Any,
+    options: ReadOptions | None = None,
+    *,
+    null_blank_cells: bool = False,
+) -> Iterator[dict]:
     """Value-bearing Excel records. Same population as ``count_excel_rows``.
+
+    ``null_blank_cells`` (destination read-back, Gate-8): a header column with
+    no cell reads as None and an empty string cell as ``''`` — the way the
+    XLSX writers spell SQL NULL and ``''``. Without it (source ingest) a blank
+    reads as ``''`` and trailing blanks are absent keys, as before.
 
     Header is not a record. ``is_blank_row`` (formatting-only used-range)
     is not a record. Extra cells beyond the header refuse silent column
@@ -474,7 +498,7 @@ def iter_excel_dicts(content: bytes | Any, options: ReadOptions | None = None) -
         wb.close()
         return
     try:
-        headers, rows = _sheet_header_and_rows(ws, opts)
+        headers, rows = _sheet_header_and_rows(ws, opts, keep_empty_text=null_blank_cells)
         if not headers:
             return
         for row in rows:
@@ -484,6 +508,13 @@ def iter_excel_dicts(content: bytes | Any, options: ReadOptions | None = None) -
                     "columns; refuse silent column drop — widen the header row "
                     "or fix the sheet"
                 )
+            if null_blank_cells:
+                cells = list(row) + [None] * (len(headers) - len(row))
+                yield {
+                    h: (None if c is None else cell_to_string(c))
+                    for h, c in zip(headers, cells)
+                }
+                continue
             yield {
                 headers[i]: cell_to_string(c)
                 for i, c in enumerate(row[: len(headers)])
