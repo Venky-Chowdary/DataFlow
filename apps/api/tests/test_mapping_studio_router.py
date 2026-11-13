@@ -98,6 +98,17 @@ def test_destination_columns_refuses_another_workspaces_connector(tenancy_world)
     assert world.a.post(f"{BASE}/destination-columns", json=_body(cid)).status_code == 200
 
 
+def test_destination_columns_applies_the_hosts_local_destination_refusal(tenancy_world, monkeypatch):
+    """Same refusal as the transfer routes (services.local_file_policy): a host
+    that refuses SQLite destinations does not open one to read its columns."""
+    world = tenancy_world
+    cid = _connector(world.workspace_a, _dest_db(world.data_dir, world.workspace_a))
+    monkeypatch.setenv("DATAFLOW_SQLITE_DESTINATION", "off")
+    r = world.a.post(f"{BASE}/destination-columns", json=_body(cid))
+    assert r.status_code == 422, r.text
+    assert "sqlite" in r.text.lower()
+
+
 def test_destination_columns_error_carries_no_path(tenancy_world, monkeypatch):
     world = tenancy_world
     db = _dest_db(world.data_dir, world.workspace_a)

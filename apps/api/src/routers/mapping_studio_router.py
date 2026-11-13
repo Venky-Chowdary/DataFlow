@@ -35,7 +35,7 @@ from services.workspace_access import (
     resolve_write_workspace,
 )
 
-from .transfer_router import EndpointDTO
+from .transfer_router import EndpointDTO, _refuse_unavailable_destination
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,12 @@ async def _read_catalog(request: Request, destination: EndpointDTO, schema_polic
     # A connector id expands into stored host and credentials: authorize it
     # against its own workspace before anything is dialled (404 elsewhere).
     assert_connector_accessible(request, destination.connector_id)
+    # The host's destination policy (D276: SQLite / local files on the hosted
+    # cloud) — the same refusal the transfer routes apply, so a refused local
+    # file is not opened just to read its columns.
+    _refuse_unavailable_destination(
+        destination, resolve_read_workspace(request, request.headers.get("X-Workspace-Id", ""))
+    )
     endpoint = EndpointConfig.from_dict(destination.kind, destination.model_dump(by_alias=True))
     if endpoint.kind != "database":
         # A file export is written fresh: there is no existing column to pick.
