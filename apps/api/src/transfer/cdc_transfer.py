@@ -1637,6 +1637,34 @@ def _without_open_quarantine(
     return [r for r in rows if _ladder_key(r, key_cols) not in open_keys]
 
 
+def _repairable_image(
+    rows: list[dict[str, Any]], key_cols: list[str]
+) -> tuple[list[dict[str, Any]], int]:
+    """Source rows the image repair may upsert, as wire cells; and how many it may not.
+
+    The repair re-reads the source to find rows the destination lacks. A row
+    whose declared key is NULL is always "missing": the writer held it out
+    (and the run counted it rejected), since no key can address it. Upserting
+    it again wrote the read wire's ``__DF_SQL_NULL__`` as the literal key text,
+    because the scan's cells are plain ``str`` and the apply encoded them a
+    second time. So a NULL-key row is left out here (its rejection already
+    stands), and every kept cell is marked as the reader wire it is, so a NULL
+    in another column lands as NULL, not as the sentinel text.
+    """
+    from services.cdc_snapshot_window import _pk_value
+
+    kept: list[dict[str, Any]] = []
+    held = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if key_cols and _pk_value(row, key_cols) is None:
+            held += 1
+            continue
+        kept.append({k: _reader_wire_cell(v) for k, v in row.items()})
+    return kept, held
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -1694,8 +1722,20 @@ def _apply_change_batch(
             unkeyed_deletes=list(change.unkeyed_deletes or []),
         )
     # C2: deletes with no key are recorded (DLQ + audit) before anything moves;
-    # a failed record raises, so the position never passes them.
-    from services.cdc_unkeyed_delete import park_unkeyed_deletes, stamp_parked
+    # a failed record raises, so the position never passes them. A delete whose
+    # key is NULL joins them (callers that count deletes park it first).
+    from services.cdc_unkeyed_delete import (
+        park_null_key_deletes,
+        park_unkeyed_deletes,
+        stamp_parked,
+    )
+
+    delete_key_cols = list(pk_source_cols or [])
+    if not delete_key_cols and pk_target_col:
+        delete_key_cols = _pk_columns(pk_target_col)
+    park_null_key_deletes(
+        change, delete_key_cols, table=str(stream_name or change.table or "")
+    )
 
     parked_evidence = park_unkeyed_deletes(
         change.unkeyed_deletes,
@@ -2740,6 +2780,10 @@ def _run_cdc_shared_multi_table(
         from services.cdc_snapshot_window import _pk_columns
 
         pk_source = _pk_columns(cfg["primary_key"])
+        # A NULL-key delete is parked before the EOS bundle or the counters see it.
+        from services.cdc_unkeyed_delete import park_null_key_deletes
+
+        park_null_key_deletes(change, list(pk_source), table=stream)
         if cfg.get("mappings_inherited"):
             use_maps, headers, pk_joined, inherit_note = _align_inherited_batch(
                 use_maps,
@@ -4086,6 +4130,11 @@ def _run_cdc_single_stream(
         # Dual-writer fence: renew lease before sink apply. Zombie after steal
         # must not upsert. Still at-least-once — new holder may redeliver.
         _assert_cdc_lease_before_apply(cdc)
+        # A delete whose key is NULL is parked, never a delete by the sentinel
+        # text, and never counted as an applied delete.
+        from services.cdc_unkeyed_delete import park_null_key_deletes
+
+        park_null_key_deletes(change, list(pk_source_cols or []), table=str(table_name or ""))
         if not mappings_inherited and (change.inserts or change.updates):
             _adopt_added_columns(change)
 
@@ -4513,9 +4562,18 @@ def _run_cdc_single_stream(
                     except CdcValueScanIncomplete as exc:
                         logger.warning("CDC key image repair skipped: %s", exc)
                         missing_image = None
-            missing_image = _without_open_quarantine(
-                state, list(missing_image or []), list(pk_source_cols or [])
+            missing_image, null_key_held = _repairable_image(
+                _without_open_quarantine(
+                    state, list(missing_image or []), list(pk_source_cols or [])
+                ),
+                list(pk_source_cols or []),
             )
+            if null_key_held:
+                # Held out by the writer (no key addresses them), not drift.
+                ddl_log.append(
+                    f"CDC image repair left {null_key_held} source row(s) with a NULL "
+                    "key alone: they cannot be written by key and stay held out"
+                )
             if missing_image:
                 token = unwrap_resume_token(cursor_now)
                 if eos_active:
@@ -4671,9 +4729,12 @@ def _run_cdc_single_stream(
                     }
                     still_drifting = []
                     if rescan_complete:
-                        for row in _without_open_quarantine(
-                            state, list(rescanned_image or []), list(pk_source_cols or [])
-                        ):
+                        for row in _repairable_image(
+                            _without_open_quarantine(
+                                state, list(rescanned_image or []), list(pk_source_cols or [])
+                            ),
+                            list(pk_source_cols or []),
+                        )[0]:
                             row_evidence = _build_drift_evidence(
                                 cursor_key=cursor_key,
                                 source_table=str(table_name or ""),
