@@ -246,3 +246,32 @@ def test_suite_spools_are_off_the_shared_tmp_and_guarded(monkeypatch, tmp_path):
     orphan.parent.mkdir(parents=True)
     orphan.write_text("[]\n")
     assert _orphan_callable_spools() == ["jobx/df-proc-abc.jsonl"]
+
+
+def test_each_xdist_worker_gets_its_own_spool_folder():
+    """Workers share the controller's env: one shared folder made each worker's
+    orphan guard flag the others' live spools (re-review)."""
+    from tests.conftest import _worker_spool_dir
+
+    assert _worker_spool_dir("/s", "gw0") == "/s/gw0"
+    assert _worker_spool_dir("/s", "gw1") != _worker_spool_dir("/s", "gw0")
+    assert _worker_spool_dir("/s", None) == "/s"
+    assert _worker_spool_dir("/s", "../x") == "/s/x"
+
+
+def test_xdist_worker_process_uses_a_worker_subfolder(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    api_root = Path(__file__).resolve().parents[1]
+    code = (
+        "import os, sys; sys.path.insert(0, %r); import tests.conftest; "
+        "print(os.environ['DATAFLOW_CALLABLE_SPOOL_DIR'])" % str(api_root)
+    )
+    env = {**os.environ, "PYTEST_XDIST_WORKER": "gw3", "DATAFLOW_CALLABLE_SPOOL_DIR": str(tmp_path)}
+    env.pop("_DF_SPOOL_WORKER_DIR_SET", None)
+    env.pop("DATAWRAP_CALLABLE_SPOOL_DIR", None)
+    out = subprocess.run([sys.executable, "-c", code], cwd=api_root, env=env, capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip().splitlines()[-1] == str(tmp_path / "gw3")

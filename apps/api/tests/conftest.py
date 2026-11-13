@@ -105,10 +105,29 @@ if not os.environ.get("HYPOTHESIS_STORAGE_DIRECTORY"):
 # folder, never the shared {tmp}/dataflow-callable (~1,000 leaked df-proc-*.jsonl
 # files, 325 MB, filled a shared disk). The session guard below fails the run
 # on a spool file nothing owns any more.
+def _worker_spool_dir(base: str, worker: str | None) -> str:
+    """The spool folder of one pytest process: ``base/<xdist worker>`` under xdist.
+
+    xdist workers inherit the controller's environment, so they would all share
+    one folder — and each worker's orphan guard would flag the others' live
+    spools. Each worker gets its own subfolder.
+    """
+    name = "".join(ch for ch in str(worker or "") if ch.isalnum() or ch in "-_")
+    return os.path.join(base, name) if name else base
+
+
 if not os.environ.get("DATAFLOW_CALLABLE_SPOOL_DIR") and not os.environ.get("DATAWRAP_CALLABLE_SPOOL_DIR"):
     _suite_spool_dir = tempfile.mkdtemp(prefix="df-suite-callable-")
     os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"] = _suite_spool_dir
     atexit.register(shutil.rmtree, _suite_spool_dir, ignore_errors=True)
+if os.environ.get("PYTEST_XDIST_WORKER") and not os.environ.get("_DF_SPOOL_WORKER_DIR_SET"):
+    _base = os.environ.get("DATAWRAP_CALLABLE_SPOOL_DIR") or os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"]
+    _worker_dir = _worker_spool_dir(_base, os.environ["PYTEST_XDIST_WORKER"])
+    os.makedirs(_worker_dir, exist_ok=True)
+    os.environ.pop("DATAWRAP_CALLABLE_SPOOL_DIR", None)
+    os.environ["DATAFLOW_CALLABLE_SPOOL_DIR"] = _worker_dir
+    os.environ["_DF_SPOOL_WORKER_DIR_SET"] = "1"
+    atexit.register(shutil.rmtree, _worker_dir, ignore_errors=True)
 
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 # Tenant settings, BYOK keys, ACLs and the other control-plane stores move to
