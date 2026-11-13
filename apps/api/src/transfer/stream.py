@@ -776,6 +776,8 @@ def _stream_database_transfer_impl(
     _progress_mark = progress_mark()
     fast = None
     try:
+        from services.export_dialect import tsv_null_from
+
         from .stream_dest_procedure import decline_copy_for_destination_sql
 
         decline_copy_for_destination_sql(dest_proc_plan)
@@ -791,6 +793,8 @@ def _stream_database_transfer_impl(
                 or bool(risk_contract_columns)
                 or keyless_merge_target
                 or copy_declined_for_replay(run.cfg)
+                # G7-F3: engine COPY routes write the default TSV codec only.
+                or tsv_null_from(run.cfg.dest_cfg) != "empty"
             ) else _try_copy_fast_path(
                 source=run.cfg.source,
                 destination=run.cfg.destination,

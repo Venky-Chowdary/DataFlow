@@ -65,6 +65,8 @@ class ShapeRunner:
         sample_limit: int = 25,
         workspace_id: str = "",
         typed_values: bool = False,
+        run_started_at: str = "",
+        run_clock_source: str = "run",
     ) -> None:
         self.recipe = recipe
         # typed_values: source is a database — '' and whitespace-only text
@@ -72,7 +74,11 @@ class ShapeRunner:
         self.typed_values = typed_values
         self._sample_limit = sample_limit
         self._engine = ShapeEngine(
-            recipe, sample_limit=sample_limit, workspace_id=workspace_id
+            recipe,
+            sample_limit=sample_limit,
+            workspace_id=workspace_id,
+            run_started_at=run_started_at,
+            run_clock_source=run_clock_source,
         )
 
     def fork(self) -> "ShapeRunner":
@@ -90,6 +96,9 @@ class ShapeRunner:
             sample_limit=self._sample_limit,
             workspace_id=self.workspace_id,
             typed_values=self.typed_values,
+            # A probe sees the same run start the write stamps.
+            run_started_at=(self.run_clock or {}).get("started_at", ""),
+            run_clock_source=(self.run_clock or {}).get("source", "run"),
         )
 
     def _apply(self, fn):
@@ -104,6 +113,11 @@ class ShapeRunner:
     @property
     def recipe_hash(self) -> str:
         return self.recipe.recipe_hash
+
+    @property
+    def run_clock(self) -> dict[str, str] | None:
+        """``{"started_at", "source"}`` when a step stamps the run start, else None."""
+        return self._engine.run_clock
 
     @property
     def workspace_id(self) -> str:

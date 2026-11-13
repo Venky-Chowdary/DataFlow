@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.canvas_capability import canvas_capability
 from services.set_graph import catalog_set_fields
@@ -94,6 +94,14 @@ class _PreviewBody(_RecipeBody):
     # model exactly as Execute's runner does: a database's '' and whitespace
     # are stored values, a file's empty cell is NULL. Empty = file rules.
     source_type: str = ""
+
+    @field_validator("destination")
+    @classmethod
+    def _dest_writer_options(cls, value: Any) -> Any:
+        """An unknown formula_protection / tsv_null is a 422 at request time (G7)."""
+        from services.dest_writer_options import checked_dest_payload
+
+        return checked_dest_payload(value)
 
 
 class _ProfileBody(BaseModel):
@@ -242,6 +250,12 @@ def _preview_sync(body: _PreviewBody, deadline: float, budget: float) -> dict[st
     # The sample's end is the stream's end: buffering steps (dedupe keep-last,
     # aggregate, sort, rank) emit now, same as the transfer's drain.
     shaped.extend(runner.drain())
+    if runner.run_clock:
+        preview_note = _join_notes(
+            preview_note,
+            "Run start time shows this preview's time; a run fixes its own value once, "
+            "when it starts, and writes that one value on every row (a resumed run reuses it).",
+        )
     if refusal is not None:
         preview_note = _join_notes(preview_note, _refusal_note(refusal, refused_rows, evaluated))
     truncated = evaluated < len(rows)

@@ -31,6 +31,11 @@ export interface ResultGridProps {
   truncated?: boolean;
   durationMs?: number;
   onCopied?: (what: string) => void;
+  /**
+   * The Query console's "Protect against spreadsheet formulas" toggle: Copy as
+   * CSV defuses formula-looking cells when on (the default), exact values when off.
+   */
+  formulaProtection?: boolean;
 }
 
 export function ResultGrid({
@@ -41,6 +46,7 @@ export function ResultGrid({
   truncated,
   durationMs,
   onCopied,
+  formulaProtection = true,
 }: ResultGridProps) {
   const [sort, setSort] = useState<{ column: string; dir: "asc" | "desc" } | null>(null);
   const [filters, setFilters] = useState<Record<string, string>>({});
@@ -53,7 +59,7 @@ export function ResultGrid({
   const copy = async (kind: "csv" | "json" | "markdown") => {
     const payload =
       kind === "csv"
-        ? toCsv(columns, sorted)
+        ? toCsv(columns, sorted, { formulaProtection })
         : kind === "json"
           ? JSON.stringify(sorted, null, 2)
           : toMarkdown(columns, sorted);
@@ -118,7 +124,16 @@ export function ResultGrid({
               Clear sort
             </button>
           )}
-          <button type="button" className="df2-qw-chip" onClick={() => void copy("csv")}>
+          <button
+            type="button"
+            className="df2-qw-chip"
+            onClick={() => void copy("csv")}
+            title={
+              formulaProtection
+                ? "Copy as CSV — cells starting with = + - @ get a ' prefix (Protect against spreadsheet formulas is on)"
+                : "Copy as CSV — exact values (Protect against spreadsheet formulas is off)"
+            }
+          >
             Copy CSV
           </button>
           <button type="button" className="df2-qw-chip" onClick={() => void copy("json")}>

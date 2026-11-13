@@ -775,6 +775,18 @@ def _bind_rows_for_snowflake(
 _SNOWFLAKE_CSV_NULL = "\\N"
 
 
+def snowflake_stage_copy_safe(mapped_rows: list[tuple]) -> bool:
+    """Whether the CSV stage can carry these rows without a NULL collision.
+
+    The stage writes NULL as ``\\N`` (QUOTE_ALL) and COPY maps it back with
+    ``NULL_IF = ('\\N')``, so a *text* cell spelled ``\\N`` produces the same
+    bytes as NULL and would load as NULL (re-review: (1, None) and (2, '\\N')
+    were identical). Such a batch takes the exact bind (INSERT) path instead;
+    the stage encoding every other batch relies on is unchanged.
+    """
+    return not any(v == _SNOWFLAKE_CSV_NULL for row in mapped_rows for v in row if type(v) is str)
+
+
 def _write_temp_csv(
     path: Path, target_cols: list[str], mapped_rows: list[tuple]
 ) -> None:
@@ -788,6 +800,11 @@ def _write_temp_csv(
                 raise ValueError(
                     "Snowflake COPY path refused DF_MISSING sentinel — "
                     "sparse CDC rows must use omit-from-SET upsert, not CSV stage"
+                )
+            if _SNOWFLAKE_CSV_NULL in row:
+                raise ValueError(
+                    "Snowflake COPY path refused a text cell spelled \\N — it would "
+                    "load as NULL (NULL_IF); the bind path keeps it"
                 )
             # Temporal cells are already warehouse-normalized strings; other
             # types still go through cell_to_string for CSV safety.
@@ -1075,6 +1092,7 @@ def _load_rows_into_table(
     total = len(mapped_rows)
     use_copy = (
         prefer_copy and total >= COPY_THRESHOLD and not _is_fakesnow_connection(conn)
+        and snowflake_stage_copy_safe(mapped_rows)
     )
     if use_copy:
         fd, tmp_path = tempfile.mkstemp(

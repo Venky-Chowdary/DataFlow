@@ -293,6 +293,7 @@ def verify_s3_object(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     file_format: str = "",
+    tsv_null: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of S3 GET streams. Never JSON-fallback empty.
 
@@ -316,6 +317,7 @@ def verify_s3_object(
                 "ssl": ssl,
                 "database": bucket,
                 "file_format": file_format,
+                "tsv_null": tsv_null,
             },
             table_name=key,
             columns=target_columns,
@@ -339,6 +341,7 @@ def verify_gcs_blob(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     file_format: str = "",
+    tsv_null: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of GCS GET streams. Never JSON-fallback empty."""
     try:
@@ -352,6 +355,7 @@ def verify_gcs_blob(
                 "connection_string": connection_string,
                 "database": bucket,
                 "file_format": file_format,
+                "tsv_null": tsv_null,
             },
             dest_db_type="gcs",
             dest_types=dest_types,
@@ -378,6 +382,7 @@ def verify_adls_blob(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     file_format: str = "",
+    tsv_null: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of Azure Blob / ADLS GET streams. Never JSON ``[]``."""
     try:
@@ -394,6 +399,7 @@ def verify_adls_blob(
                 "service_account": service_account,
                 "database": container,
                 "file_format": file_format,
+                "tsv_null": tsv_null,
             },
             table_name=key,
             columns=target_columns,

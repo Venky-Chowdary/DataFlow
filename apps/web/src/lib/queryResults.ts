@@ -6,6 +6,8 @@
  * different facts — are unit-testable without a DOM.
  */
 
+import { toDelimitedText } from "./csvSafety";
+
 export type CellKind = "missing" | "null" | "empty" | "json" | "value";
 
 export interface Cell {
@@ -106,16 +108,20 @@ export function nextSort(
   return null;
 }
 
-export function toCsv(columns: string[], rows: Record<string, unknown>[]): string {
-  const esc = (v: unknown) => {
-    if (v === null || v === undefined) return "";
-    const s = typeof v === "object" ? JSON.stringify(v) : String(v);
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  return [
-    columns.map(esc).join(","),
-    ...rows.map((r) => columns.map((c) => esc(r[c])).join(",")),
-  ].join("\n");
+/**
+ * Copy-as-CSV for pasting into a spreadsheet. Formula-looking text cells and
+ * header names are defused with the API's export rule (csvSafety, G7-F2) unless
+ * `formulaProtection: false` asks for the exact values.
+ */
+export function toCsv(
+  columns: string[],
+  rows: Record<string, unknown>[],
+  options: { formulaProtection?: boolean } = {},
+): string {
+  return toDelimitedText(columns, rows, {
+    formulaProtection: options.formulaProtection ?? true,
+    cell: (v) => (v !== null && typeof v === "object" ? JSON.stringify(v) : v),
+  });
 }
 
 export function toMarkdown(columns: string[], rows: Record<string, unknown>[]): string {

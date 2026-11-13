@@ -138,6 +138,15 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         required=("to",),
     ),
     _StepDef(
+        "run_timestamp",
+        "Add a column holding the run's start time (one value for the whole run)",
+        family="structural",
+        needs_column=False,
+        produces_column=True,
+        options=("to",),
+        required=("to",),
+    ),
+    _StepDef(
         "derive_column",
         "Add a column computed from this row",
         family="structural",
@@ -534,7 +543,7 @@ class ShapeStep:
         if self.op == "rename_column":
             target = str(options.get("to") or "")
             return (target,) if target else ()
-        if self.op in ("constant_column", "derive_column", "concat_columns", "hash_identity"):
+        if self.op in ("constant_column", "run_timestamp", "derive_column", "concat_columns", "hash_identity"):
             target = str(options.get("to") or "")
             return (target,) if target else ()
         if self.op == "split_column":
@@ -1656,7 +1665,7 @@ def _apply_column_effect(step: ShapeStep, columns: list[str]) -> None:
         if step.column in columns and target:
             columns[columns.index(step.column)] = target
         return
-    if op in ("constant_column", "derive_column", "concat_columns", "hash_identity"):
+    if op in ("constant_column", "run_timestamp", "derive_column", "concat_columns", "hash_identity"):
         target = str(options.get("to") or "")
         if target and target not in columns:
             columns.append(target)
