@@ -149,7 +149,12 @@ def _dialect_of(conn: Any) -> str:
 
 
 def _probe_physical_lattice(conn: Any, table_obj: Any) -> tuple[str, ...]:
-    """SELECT 1=0 of the lattice column. Failure must not abort the write txn."""
+    """SELECT 1=0 of the lattice column. Failure must not abort the write txn.
+
+    The column is qualified by a table alias: SQLite reads an unknown *bare*
+    double-quoted name as a string literal, so ``SELECT "_deleted" FROM t``
+    succeeded on every SQLite table and reported a lattice that is not there.
+    """
     import sqlalchemy as sa
 
     dialect = _dialect_of(conn)
@@ -169,7 +174,9 @@ def _probe_physical_lattice(conn: Any, table_obj: Any) -> tuple[str, ...]:
     except Exception:
         nested = None
     try:
-        conn.execute(sa.text(f"SELECT {col_q} FROM {qualified} WHERE 1=0"))  # nosec B608
+        conn.execute(
+            sa.text(f"SELECT df_probe.{col_q} FROM {qualified} df_probe WHERE 1=0")  # nosec B608
+        )
         if nested is not None:
             nested.commit()
         return (SOFT_DELETE_COLUMN,)
@@ -345,7 +352,11 @@ def _add_lattice_column(conn: Any, ddl: str) -> None:
 
 
 def _has_column(conn: Any, qualified: str, column: str) -> bool:
-    """SELECT the column WHERE 1=0 inside a savepoint; False when absent."""
+    """SELECT the column WHERE 1=0 inside a savepoint; False when absent.
+
+    Alias-qualified for the same SQLite string-literal reason as
+    :func:`_probe_physical_lattice`.
+    """
     import sqlalchemy as sa
 
     col_q = quote_stored_identifier(_dialect_of(conn), column)
@@ -355,7 +366,9 @@ def _has_column(conn: Any, qualified: str, column: str) -> bool:
     except Exception:
         nested = None
     try:
-        conn.execute(sa.text(f"SELECT {col_q} FROM {qualified} WHERE 1=0"))  # nosec B608
+        conn.execute(
+            sa.text(f"SELECT df_probe.{col_q} FROM {qualified} df_probe WHERE 1=0")  # nosec B608
+        )
         if nested is not None:
             nested.commit()
         return True

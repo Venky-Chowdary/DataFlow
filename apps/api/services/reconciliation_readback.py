@@ -1031,6 +1031,7 @@ def verify_redis_prefix(
     pk_column: str | None = None,
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
+    key_format: str = "legacy",
 ) -> tuple[int, str]:
     """Reconcile Redis keys under ``prefix:*`` (writer key layout).
 
@@ -1082,7 +1083,7 @@ def verify_redis_prefix(
         if scoped_ids:
             from connectors.redis_reader import redis_key_for
 
-            wanted = {redis_key_for(prefix, i) for i in scoped_ids}
+            wanted = {redis_key_for(prefix, i, key_format=key_format) for i in scoped_ids}
             keys = [k for k in keys if k in wanted]
 
         def _row_iter():

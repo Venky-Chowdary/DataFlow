@@ -14,6 +14,7 @@ from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
     gate8_writer_meta,
+    identity_marker,
     resolve_target_columns,
     row_checksum,
     transform_error_policy,
@@ -386,6 +387,16 @@ def _resolve_doc_id(
     return None
 
 
+def _is_kept_conflict(err: dict, skip_markers: dict[str, str]) -> bool:
+    """A bulk ``create`` 409 on a key skip_duplicates leaves as stored."""
+    inner = next(iter(err.values()), {}) if err else {}
+    return (
+        isinstance(inner, dict)
+        and int(inner.get("status") or 0) == 409
+        and str(inner.get("_id") or "") in skip_markers
+    )
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -475,6 +486,12 @@ def write_mapped_rows(
     if identity_cols:
         conflict = identity_cols
     mode = (write_mode or "insert").lower()
+    from services.duplicate_policy import current_match_action
+
+    # skip_duplicates (dedupe_skip): bulk ``create`` — a stored _id answers 409
+    # and is counted skipped with a Gate-8 marker, never overwritten.
+    skip_stored = mode in {"upsert", "update", "merge"} and current_match_action() == "skip"
+    skip_markers: dict[str, str] = {}
     # Elasticsearch is key-addressed: auto-generated ids break idempotent retry /
     # upsert / CDC and hide collisions. Always require resolvable document identity.
     requires_identity = True
@@ -902,6 +919,12 @@ def write_mapped_rows(
                 conflict_columns=conflict,
                 target_cols=target_cols,
             )
+            if skip_stored and doc_id is not None:
+                skip_markers[str(doc_id)] = (
+                    identity_marker(tuple(source.get(c) for c in conflict))
+                    if conflict and all(c in source for c in conflict)
+                    else str(doc_id)
+                )
             source.pop("_id", None)
             if doc_id is None:
                 identity_missing += 1
@@ -919,7 +942,7 @@ def write_mapped_rows(
                 continue
             # Upsert/update/merge: update+doc merges present fields only —
             # never full _source replace (would wipe unmapped destination fields).
-            if mode in {"upsert", "update", "merge"}:
+            if mode in {"upsert", "update", "merge"} and not skip_stored:
                 action = {
                     "_op_type": "update",
                     "_index": index,
@@ -930,7 +953,7 @@ def write_mapped_rows(
             else:
                 action = {"_index": index, "_source": source, "_id": str(doc_id)}
                 # Insert/append must not silently overwrite existing docs (index vs create).
-                if mode in {"insert", "append", "create"}:
+                if mode in {"insert", "append", "create"} or skip_stored:
                     action["_op_type"] = "create"
             actions.append(action)
 
@@ -945,7 +968,11 @@ def write_mapped_rows(
         # Materialize bulk item failures into rejected_details so control-plane
         # JSONL / dest DLQ see them — never return ok=True with silent drops.
         bulk_details: list[dict[str, Any]] = []
+        kept_markers: list[str] = []
         for err in bulk_errors or []:
+            if skip_stored and isinstance(err, dict) and _is_kept_conflict(err, skip_markers):
+                kept_markers.append(skip_markers[str(next(iter(err.values())).get("_id"))])
+                continue
             if not isinstance(err, dict):
                 bulk_details.append({
                     "row": "",
@@ -971,6 +998,10 @@ def write_mapped_rows(
                 "policy": policy,
             })
 
+        bulk_errors = [
+            e for e in (bulk_errors or [])
+            if not (kept_markers and isinstance(e, dict) and _is_kept_conflict(e, skip_markers))
+        ]
         all_rejected = list(rejected_details) + bulk_details
         fail_closed = policy == "fail" and bool(bulk_details or identity_missing)
         if requires_identity and identity_missing > 0 and written == 0:
@@ -1015,10 +1046,12 @@ def write_mapped_rows(
             )[:10],
             rejected_rows=len({str(d.get("row")) for d in all_rejected if d.get("row") not in (None, "")}),
             rejected_details=list(all_rejected),
+            rows_skipped=len(kept_markers),
             meta=(
                 {
                     **gate8_writer_meta(mapped_rows, target_cols),
                     **({TRUNCATED_KEY: dict(ms_guard.truncated)} if ms_guard.truncated else {}),
+                    **({"skipped_identity_keys": kept_markers} if kept_markers else {}),
                 }
                 if not fail_closed
                 else {}

@@ -1758,8 +1758,15 @@ def stream_file_to_database(
         write_mode = "upsert"
     else:
         write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
-    from services.duplicate_policy import DuplicatePolicyError, resolve_duplicate_policy
+    from services.duplicate_policy import (
+        DuplicatePolicyError,
+        enforce_dedupe_skip_destination,
+        resolve_duplicate_policy,
+    )
 
+    enforce_dedupe_skip_destination(
+        duplicate_policy, dest_type, connection_string=str(dest_cfg.get("connection_string") or "")
+    )
     try:
         decision = resolve_duplicate_policy(
             duplicate_policy=duplicate_policy,

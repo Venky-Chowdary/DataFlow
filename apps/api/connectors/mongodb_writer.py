@@ -21,6 +21,7 @@ from connectors.writer_common import (
     build_mapped_rows_with_details,
     compare_lsn,
     gate8_writer_meta,
+    identity_marker,
     lsn_is_newer,
     resolve_target_columns,
     row_checksum,
@@ -1323,6 +1324,12 @@ def write_mapped_rows(
         # expects one row per key, not every version read.
         collapsed_total = 0
         key_index_ready = False
+        from services.duplicate_policy import current_match_action
+
+        # skip_duplicates (dedupe_skip): insert absent keys only; kept keys are
+        # rows_skipped with a Gate-8 marker, never counted as written.
+        skip_stored = current_match_action() == "skip"
+        kept_markers: list[str] = []
 
         for chunk_idx in range(chunks):
             start = chunk_idx * mongo_batch_size
@@ -1421,6 +1428,8 @@ def write_mapped_rows(
                 for doc in docs:
                     key = _mongo_conflict_key(doc, pk_cols)
                     prev = kept.get(key)
+                    if skip_stored and prev is not None:
+                        continue  # skip_duplicates keeps the first image of a key
                     if (
                         DF_LSN_COL not in target_cols
                         or prev is None
@@ -1469,6 +1478,7 @@ def write_mapped_rows(
                         )
 
                 ops = []
+                op_keys: list[tuple] = []
                 skipped_stale = 0
                 for doc_idx, doc in enumerate(docs):
                     filt = {c: doc.get(c) for c in pk_cols}
@@ -1514,18 +1524,47 @@ def write_mapped_rows(
                     # fields a partial CDC image omits). Same contract as the
                     # SQL upsert (G15): dest-only columns stay off SET. A NULL
                     # mapped value is written as null.
-                    ops.append(UpdateOne(filt, _upsert_update(doc, pk_cols), upsert=True))
+                    # skip_duplicates: $setOnInsert writes only when no document
+                    # matches the key — a stored document is left as stored.
+                    ops.append(
+                        UpdateOne(
+                            filt,
+                            {"$setOnInsert": doc} if skip_stored else _upsert_update(doc, pk_cols),
+                            upsert=True,
+                        )
+                    )
+                    op_keys.append(tuple(filt[c] for c in pk_cols))
+                outcome = None
                 if ops:
                     try:
-                        coll.bulk_write(ops, ordered=False)
+                        outcome = coll.bulk_write(ops, ordered=False)
                     except BulkWriteError as exc:
                         # Unordered: every other operation was applied. Count
                         # them before the batch error fails the write.
                         details = exc.details or {}
-                        written += int(details.get("nUpserted") or 0) + int(
-                            details.get("nMatched") or 0
-                        )
+                        if skip_stored:
+                            # A matched key was kept as stored, not written.
+                            failed = {int(e.get("index", -1)) for e in details.get("writeErrors") or []}
+                            inserted = {int(u.get("index", -1)) for u in details.get("upserted") or []}
+                            held = [
+                                op_keys[n]
+                                for n in range(len(ops))
+                                if n not in inserted and n not in failed
+                            ]
+                            kept_markers.extend(identity_marker(k) for k in held)
+                            written += int(details.get("nUpserted") or 0)
+                            skipped_total += skipped_stale + len(held)
+                        else:
+                            written += int(details.get("nUpserted") or 0) + int(
+                                details.get("nMatched") or 0
+                            )
                         raise
+                if skip_stored and outcome is not None:
+                    inserted = set((getattr(outcome, "upserted_ids", None) or {}).keys())
+                    held = [op_keys[n] for n in range(len(ops)) if n not in inserted]
+                    kept_markers.extend(identity_marker(k) for k in held)
+                    skipped_stale += len(held)
+                    written -= len(held)
                 written += len(ops)
                 skipped_total += skipped_stale
             else:
@@ -1586,12 +1625,19 @@ def write_mapped_rows(
                 **gate8_writer_meta(mapped_rows, target_cols),
                 **({"collapsed_duplicate_rows": collapsed_total} if collapsed_total else {}),
                 **({TRUNCATED_KEY: dict(ms_guard.truncated)} if ms_guard.truncated else {}),
+                **({"skipped_identity_keys": kept_markers} if kept_markers else {}),
             },
         )
     except (PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
         return WriteResult(
             ok=False,
             rows_written=written if "written" in locals() else 0,
+            rows_skipped=skipped_total if "skipped_total" in locals() else 0,
+            meta=(
+                {"skipped_identity_keys": list(kept_markers)}
+                if locals().get("kept_markers")
+                else {}
+            ),
             table_name=table_name,
             target_schema=schema or "db",
             checksum="",
