@@ -486,3 +486,36 @@ def test_g14_allows_an_omitted_row_whose_old_target_was_generated():
         dest_columns=["x"],
     )
     assert gate is None or gate["status"] != "block"
+
+
+@pytest.mark.parametrize("sources,target", [
+    (["billing_city", "shipping_city"], "city"),
+    (["created_at", "updated_at"], "timestamp"),
+    (["work_email", "home_email"], "email"),
+    (["home_phone", "work_phone", "mobile"], "phone"),
+])
+def test_an_equal_tie_on_one_target_is_not_preselected(sources, target):
+    """Review (H2 leftovers): which sibling wins a tie is arbitrary; say so."""
+    out = suggest_assignments(sources, [target], dest_table="orders", source_table="x")
+    assert len(out) == 1 and out[0]["selected"] is False, out
+    rivals = [s for s in sources if s != out[0]["source"]]
+    assert any(r in out[0]["reason"] for r in rivals), out[0]["reason"]
+
+
+@pytest.mark.parametrize("src,tgt", [
+    ("total_qty", "qty"), ("total_amount", "amount"), ("total_price", "price"),
+    ("sum_amount", "amount"), ("total_tax", "tax"), ("tax_total", "tax"),
+    ("total_quantity", "quantity"), ("line_amount", "amount"), ("grand_total_amount", "amount"),
+])
+def test_an_aggregate_is_not_its_measure(src, tgt):
+    """Review (H2 leftovers): total_qty is not the qty, sum_amount is not the amount."""
+    out = suggest_assignments([src], [tgt], dest_table="", source_table="x")
+    assert out == [] or (out[0]["selected"] is False and out[0]["kind"] not in ("synonym", "concept")), out
+
+
+def test_aggregate_contrast_leaves_the_reported_case_and_plain_pairs_alone():
+    assert score_pair("total_balance", "amount")[1] == "concept"
+    assert score_pair("qty", "quantity")[1] == "synonym"
+    assert score_pair("total_amount", "total_amount")[1] == "exact"
+    one = suggest_assignments(["shipping_city"], ["city"], dest_table="orders")
+    assert one[0]["selected"] is True, "no rival, no tie"

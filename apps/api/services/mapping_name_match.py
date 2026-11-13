@@ -87,6 +87,15 @@ _CONTRAST = frozenset({
     "avg", "average", "median",
 })
 
+#: Words that make a name an aggregate of a measure: total_qty is a sum of
+#: quantities, not the quantity; tax_total, sum_amount, line_amount likewise.
+#: They contrast only against the same measure (total_balance → amount still
+#: names the balance concept).
+_AGGREGATE = frozenset({
+    "total", "sum", "grand", "line", "cumulative", "cum", "running", "aggregate", "agg",
+    "overall", "subtotal",
+})
+
 #: Dictionary groups whose members really are one value spelled differently.
 #: Every other group is a *family* of distinct attributes (money: revenue, fee,
 #: subtotal; status: state, stage; flag: is_active, is_deleted; dimensions:
@@ -198,8 +207,21 @@ def _is_other_canonical(name: str, group: str) -> bool:
     return norm != group and norm in words
 
 
+def _aggregate_split(name: str) -> tuple[tuple[str, ...], frozenset[str]]:
+    """(the measure's words, the aggregate words) of a name, abbreviations expanded."""
+    words = [_expanded(t) for t in normalize_name(name).split("_") if t]
+    return (
+        tuple(w for w in words if w not in _AGGREGATE),
+        frozenset(w for w in words if w in _AGGREGATE),
+    )
+
+
 def _same_value(group: str, a: str, b: str) -> bool:
     """Both names denote the same value of ``group`` (not two qualified siblings)."""
+    core_a, agg_a = _aggregate_split(a)
+    core_b, agg_b = _aggregate_split(b)
+    if agg_a != agg_b and core_a and core_a == core_b:
+        return False
     qa, qb = _qualifiers(a, group), _qualifiers(b, group)
     if qa and qb and qa != qb:
         return False
@@ -379,6 +401,10 @@ class _TargetIndex:
         return list(dict.fromkeys(found))
 
 
+#: Tiers decided by the dictionary rather than by the names' own spelling.
+_DICTIONARY_TIERS = frozenset({SYNONYM, CONCEPT})
+
+
 def suggest_assignments(
     sources: list[str],
     targets: list[str],
@@ -418,6 +444,10 @@ def suggest_assignments(
             candidates.append((-conf, _TIER_RANK[kind], si, order[tgt], src, tgt, kind, reason))
             per_source.setdefault(src, []).append((-conf, _TIER_RANK[kind], tgt, kind))
     candidates.sort()
+    # target -> [(source, confidence, kind)]: who else could claim a target.
+    scored_on: dict[str, list[tuple[str, float, str]]] = {}
+    for neg_conf, _rank, _si, _ti, src, tgt, kind, _reason in candidates:
+        scored_on.setdefault(tgt, []).append((src, round(-neg_conf, 3), kind))
     claimed_s: set[str] = set()
     claimed_t: set[str] = set()
     chosen: dict[str, dict[str, Any]] = {}
@@ -441,6 +471,22 @@ def suggest_assignments(
             continue
         row = chosen[src]
         ranked = sorted(per_source.get(src, []))
+        if row["selected"] and row["kind"] in _DICTIONARY_TIERS:
+            # Siblings that the dictionary also places on this target
+            # (billing_city / shipping_city → city): which one wins is the
+            # dictionary's accident, so the operator chooses.
+            # A sibling already placed at least as well elsewhere is not a rival.
+            rivals = [
+                s for s, c, k in scored_on.get(row["target"], [])
+                if s != src and k in _DICTIONARY_TIERS and c >= DEFAULT_SELECT_THRESHOLD
+                and (s not in chosen or chosen[s]["confidence"] < c)
+            ]
+            if rivals:
+                row["selected"] = False
+                row["reason"] += (
+                    f" {', '.join(rivals[:3])} also match{'' if len(rivals) > 1 else 'es'} "
+                    f"{row['target']}: choose one."
+                )
         if row["kind"] == LEARNED:
             rival = next((t for _c, _r, t, k in ranked if k in built_in and t != row["target"]), None)
             if rival:
