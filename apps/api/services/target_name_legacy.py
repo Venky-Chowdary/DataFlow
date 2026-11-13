@@ -113,6 +113,31 @@ def operator_rows(mappings: Iterable[Any] | None) -> list[dict[str, Any]]:
     return rows
 
 
+def recreated_by_overwrite(dest_type: str | None, sync_mode: str | None) -> bool:
+    """True when this run drops and recreates the table (BigQuery, Snowflake ...).
+
+    The earlier run's legacy column goes with the dropped table, so the full
+    name is used, in single-stream and multi-stream alike (re-review L3).
+    """
+    kind = dest_kind(dest_type)
+    if not _applies(kind) or kind in SAAS_APPS:
+        return False
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+    from services.sync_cursor import is_overwrite_sync
+
+    return is_overwrite_sync(str(sync_mode or "")) and dest_schema_is_recreated_on_overwrite(kind)
+
+
+def adopt_rows_for_run(
+    dest_type: str | None, mappings: Iterable[Any] | None, existing: Iterable[str] | None,
+    sync_mode: str | None,
+) -> list[dict[str, Any]]:
+    """The Map rows a run writes: adopted onto existing columns unless it recreates the table."""
+    if recreated_by_overwrite(dest_type, sync_mode):
+        return operator_rows(mappings)
+    return adopt_existing_columns(dest_type, mappings, existing)[0]
+
+
 def adopted_collision_issues(dest_type: str | None, rows: Iterable[Any]) -> list[dict[str, str]]:
     """Map rows that would all write one existing column after adoption.
 
@@ -280,6 +305,9 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
     kind = dest_kind(str(getattr(dest, "format", "") or ""))
     mappings = [dict(_as_dict(m)) for m in (getattr(request, "mappings", None) or [])]
     if dest is None or not _applies(kind) or not _needs_probe(kind, mappings):
+        return []
+    if recreated_by_overwrite(kind, getattr(request, "sync_mode", "")):
+        request.mappings = operator_rows(mappings)
         return []
     raw_issues = target_name_issues(kind, _mapped_targets(mappings))
     if any(i["code"] != "target_name_too_long" for i in raw_issues):
@@ -863,6 +891,12 @@ def target_name_gates(
     from connectors.destination_naming import _mapped_targets, target_name_issues
 
     rows, notes = adopt_existing_columns(dest_type, mappings, existing_columns)
+    if recreated_by_overwrite(dest_type, sync_mode):
+        rows = operator_rows(rows)  # the table is recreated: full names (re-review L3)
+        notes = [{**n, "code": "target_replaces_existing_column", "message": (
+            f"Map target {n['target']!r} replaces the existing column {n['column']!r} an "
+            "earlier run created: this overwrite recreates the table with the full name."
+        )} for n in notes]
     issues = target_name_issues(dest_type, _mapped_targets(rows))
     issues.extend(adopted_collision_issues(dest_type, rows))
     gates: list[dict[str, Any]] = []
@@ -938,6 +972,8 @@ __all__ = [
     "streams_refusal",
     "adopt_existing_columns",
     "adopt_for_request",
+    "adopt_rows_for_run",
+    "recreated_by_overwrite",
     "adopted_collision_issues",
     "existing_column_for",
     "es_mapping_fields",

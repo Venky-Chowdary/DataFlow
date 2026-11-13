@@ -414,12 +414,13 @@ def run_file_preflight(
     # G11: a target an earlier run stored under its legacy spelling (cut at 63,
     # lowercased on BigQuery) IS that existing column, for every gate and for
     # the approval hashes; Execute applies the same rename (adopt_for_request).
-    from services.target_name_legacy import adopt_existing_columns
+    from services.target_name_legacy import adopt_rows_for_run
 
     existing = destination_live_column_types or destination_column_types or {}
-    mappings = adopt_existing_columns(
-        destination_db_type, mappings, [] if destination_table_exists is False else list(existing)
-    )[0]
+    mappings = adopt_rows_for_run(
+        destination_db_type, mappings,
+        [] if destination_table_exists is False else list(existing), sync_mode,
+    )
 
     # Canonical sync vocabulary — G9/DDL/policy must match writers (insert→append).
     try:
