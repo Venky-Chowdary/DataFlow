@@ -246,6 +246,7 @@ def test_suite_spools_are_off_the_shared_tmp_and_guarded(monkeypatch, tmp_path):
     orphan.parent.mkdir(parents=True)
     orphan.write_text("[]\n")
     assert _orphan_callable_spools() == ["jobx/df-proc-abc.jsonl"]
+    orphan.unlink()  # a fake orphan; leave no df-proc-* file behind
 
 
 def test_each_pytest_process_gets_its_own_spool_folder():
@@ -315,3 +316,131 @@ def test_a_nested_pytest_passes_while_this_process_holds_a_live_spool(tmp_path):
         assert "spool" not in out.stdout.lower()
     finally:
         procedure_source.close_callable_spool(job_id=job_id)
+
+
+# --- process exit, sibling processes, cancel ------------------------------------
+
+_CHILD_SPOOL = r"""
+import json, os, sqlite3, sys
+sys.path.insert(0, os.getcwd())
+from services import procedure_source
+
+src, job_id = sys.argv[1], sys.argv[2]
+cfg = {
+    "type": "sqlite", "database": src, "connection_string": "sqlite:///" + src,
+    "source_read_mode": "query", "source_query": "SELECT id, note FROM src_rows",
+}
+if job_id:
+    cfg["job_id"] = job_id
+batch = procedure_source.read_callable_batch(cfg, offset=0, limit=5)
+# Held to the end on purpose: the process exits without close_callable_spool().
+held = list(procedure_source._SPOOLS.values())
+print(json.dumps({"rows": len(batch.rows), "files": [str(s.path) for s in held],
+                  "exist": [s.path.is_file() for s in held]}))
+"""
+
+
+def _run_child(tmp_path: Path, spool_root: Path, job_id: str) -> dict:
+    """Spool in a fresh interpreter that never imports tests.conftest (no suite rmtree)."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    work = tmp_path / f"child-{uuid.uuid4().hex[:8]}"
+    work.mkdir()
+    src, _dst = _db(work)
+    api_root = Path(__file__).resolve().parents[1]
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in {"DATAWRAP_CALLABLE_SPOOL_DIR", "_DF_SPOOL_BASE", "_DF_SPOOL_PROCESS_PID"}
+    }
+    env["DATAFLOW_CALLABLE_SPOOL_DIR"] = str(spool_root)
+    script = work / "child_spool.py"
+    script.write_text(_CHILD_SPOOL)
+    out = subprocess.run(
+        [sys.executable, str(script), src, job_id],
+        cwd=api_root, env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert out.returncode == 0, out.stderr[-3000:]
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("job_id", ["tf1child-job", ""], ids=["job-scoped", "unscoped"])
+def test_a_spool_created_in_a_subprocess_is_gone_after_it_exits(tmp_path, job_id):
+    spool_root = tmp_path / "child-spools"
+    seen = _run_child(tmp_path, spool_root, job_id)
+    assert seen["rows"] == 5
+    assert len(seen["files"]) == 1 and seen["exist"] == [True], seen
+    spool_file = Path(seen["files"][0])
+    assert spool_file.is_relative_to(spool_root)
+    assert not spool_file.exists(), "process exit removed the spool"
+    assert list(spool_root.rglob("df-proc-*.jsonl")) == []
+    if job_id:
+        assert not spool_file.parent.exists(), "the emptied job folder goes too"
+
+
+def test_a_subprocess_exit_keeps_another_processes_live_spool(monkeypatch, tmp_path):
+    """Exit cleanup is scoped to the exiting process's registry, not the shared folder."""
+    from services import procedure_source
+
+    shared = tmp_path / "shared-spools"
+    monkeypatch.setenv("DATAFLOW_CALLABLE_SPOOL_DIR", str(shared))
+    src, _dst = _db(tmp_path)
+    job_id = "tf1sibling" + uuid.uuid4().hex[:8]
+    procedure_source.read_callable_batch(_cfg(src, job_id), offset=0, limit=5)
+    try:
+        mine = _job_files(job_id)
+        assert len(mine) == 1
+        seen = _run_child(tmp_path, shared, "tf1sibling-child")
+        assert not Path(seen["files"][0]).exists()
+        assert _job_files(job_id) == mine and mine[0].is_file(), "the child left this process's spool alone"
+    finally:
+        procedure_source.close_callable_spool(job_id=job_id)
+    assert _job_files(job_id) == []
+
+
+def test_cancelled_query_source_job_leaves_no_spool(monkeypatch, tmp_path):
+    """A cancel during the read, while the job's spool is on disk, leaves none behind."""
+    from services import procedure_source
+    from services.error_handling import TransferCancelled
+
+    job_id = "tf1spoolcancel" + uuid.uuid4().hex[:8]
+    real = procedure_source.read_callable_batch
+    held: list[int] = []
+
+    def _read_then_cancel(cfg, *args, **kwargs):
+        batch = real(cfg, *args, **kwargs)
+        if procedure_source.job_id_of(cfg) != job_id:
+            return batch  # the pre-run peek spools under its own scope
+        held.append(len(_job_files(job_id)))
+        raise TransferCancelled("Transfer cancelled by user", rows_written=0)
+
+    monkeypatch.setattr(procedure_source, "read_callable_batch", _read_then_cancel)
+    result = _run(monkeypatch, tmp_path, job_id)
+    assert result.success is False
+    assert "cancel" in str(result.error or "").lower(), result.error
+    assert held and held[0] == 1, "the cancel landed while the spool was on disk"
+    assert _job_files(job_id) == []
+
+
+def test_a_cancel_after_the_stream_closed_is_released_by_the_job_scope(monkeypatch, tmp_path):
+    """The stream has already closed its own spool; a re-read refilled one and then
+    the cancel lands. Only the job scope can remove that spool."""
+    import src.transfer.engine as engine_mod
+    from services import procedure_source
+    from services.error_handling import TransferCancelled
+
+    job_id = "tf1latecancel" + uuid.uuid4().hex[:8]
+    refilled: list[int] = []
+
+    def reread_then_cancel(*args, **kwargs):
+        procedure_source.read_callable_batch(_cfg(str(tmp_path / "src.db"), job_id), offset=0, limit=5)
+        refilled.append(len(_job_files(job_id)))
+        raise TransferCancelled("Transfer cancelled by user", rows_written=50)
+
+    monkeypatch.setattr(engine_mod, "run_reconciliation", reread_then_cancel)
+    result = _run(monkeypatch, tmp_path, job_id)
+    assert result.success is False
+    assert refilled == [1], "the re-read spooled under the job before the cancel"
+    assert _job_files(job_id) == []
