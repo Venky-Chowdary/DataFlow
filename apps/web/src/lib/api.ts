@@ -8,9 +8,11 @@ import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedR
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, JobHistoryQuery, jobHistoryFromResponse } from "./jobHistory";
 import { apiBearerToken, apiUnauthorizedEndsSession, clearSession, getSessionActor, readSession } from "./session";
+import { planWriteResponse, type PlanView } from "./planConcurrency";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
 import { readOptionsPayload } from "./readOptions";
+import { neutralizeFormulaCell } from "./csvSafety";
 import type { RuleCompileReport } from "./businessRules";
 import type {
   ShapeCatalog,
@@ -3031,17 +3033,35 @@ export async function createTransferPlan(payload: {
   return res.json();
 }
 
+/**
+ * Map a persisted plan. A 409 `plan_version_conflict` (a mapping was saved, or
+ * a revision approved/reverted, while Map ran) throws PlanVersionConflictError:
+ * the server stored nothing and the plan as it is now stays in place.
+ */
 export async function mapTransferPlan(
   planId: string,
-  payload: { validation_mode?: string; use_llm?: boolean; source_samples?: Record<string, string[]> } = {},
+  payload: {
+    validation_mode?: string;
+    use_llm?: boolean;
+    source_samples?: Record<string, string[]>;
+    /** Stored on the revision, so a caller that gave up waiting can recognise its own Map. */
+    client_request_id?: string;
+  } = {},
 ) {
-  const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/map`, {
+  const res = await planWriteResponse(() => apiFetch(`${API_BASE}/transfer/plans/${planId}/map`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
-  });
+  }));
   if (!res.ok) throw new Error(await parseApiError(res, "Plan mapping failed"));
+  return res.json();
+}
+
+/** A persisted transfer plan as GET /transfer/plans/{id} returns it. */
+export async function getTransferPlan(planId: string): Promise<{ plan: PlanView }> {
+  const res = await planWriteResponse(() => apiFetch(`${API_BASE}/transfer/plans/${planId}`));
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load transfer plan"));
   return res.json();
 }
 
@@ -3187,9 +3207,24 @@ export async function preflightTransferPlan(
   return res.json();
 }
 
-export async function approveTransferPlan(planId: string, version?: number) {
-  const qs = version != null ? `?version=${version}` : "";
-  const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/approve${qs}`, { method: "POST" });
+/**
+ * Approve a plan revision. `expectedVersion` is the revision Validate checked
+ * (its `mapping_version`): when another revision has become active since, the
+ * API refuses with 409 and this throws PlanVersionConflictError instead of
+ * approving something no gate has seen.
+ */
+export async function approveTransferPlan(
+  planId: string,
+  version?: number,
+  options: { expectedVersion?: number | null } = {},
+) {
+  const params = new URLSearchParams();
+  if (version != null) params.set("version", String(version));
+  if (typeof options.expectedVersion === "number") params.set("expected_version", String(options.expectedVersion));
+  const qs = params.toString() ? `?${params}` : "";
+  const res = await planWriteResponse(() =>
+    apiFetch(`${API_BASE}/transfer/plans/${planId}/approve${qs}`, { method: "POST" }),
+  );
   if (!res.ok) throw new Error(await parseApiError(res, "Plan approval failed"));
   return res.json();
 }
@@ -3208,16 +3243,30 @@ export async function updateTransferPlan(
   return res.json();
 }
 
+/**
+ * Save edited mappings as a new plan revision.
+ *
+ * `baseVersion` is the newest `revisions[].version` of the plan the editor
+ * loaded (see headVersion). When the plan has gained a newer revision since,
+ * the API refuses with 409 and this throws PlanVersionConflictError, so the
+ * save never lands on top of work the user has not seen. Without it the save
+ * is appended unconditionally (legacy behaviour).
+ */
 export async function syncTransferPlanMappings(
   planId: string,
   mappings: { source: string; target: string; confidence: number; reason?: string; transform?: string }[],
-) {
-  const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/mappings`, {
+  options: { baseVersion?: number | null } = {},
+): Promise<{ plan: PlanView }> {
+  const payload: Record<string, unknown> = { mappings };
+  if (typeof options.baseVersion === "number" && Number.isFinite(options.baseVersion)) {
+    payload.base_version = options.baseVersion;
+  }
+  const res = await planWriteResponse(() => apiFetch(`${API_BASE}/transfer/plans/${planId}/mappings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mappings }),
+    body: JSON.stringify(payload),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
-  });
+  }));
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to sync plan mappings"));
   return res.json();
 }
@@ -4591,6 +4640,13 @@ export async function exportQuery(
     conflict_columns?: string[];
     /** File export streams every row. The preview ``limit`` is not applied. */
     full_population?: boolean;
+    /**
+     * CSV/TSV file export (G7): "prefix" (the API default) defuses text cells and
+     * header names a spreadsheet would run as a formula; "off" writes exact values.
+     */
+    formula_protection?: "prefix" | "off";
+    /** TSV file export NULL marker (G7-F3): "empty" (default) or "\\N". Refused for other formats. */
+    tsv_null?: "empty" | "\\N";
   },
 ): Promise<QueryExportResult> {
   const res = await apiFetch(`${API_BASE}/query/export`, {
@@ -4781,7 +4837,10 @@ export async function downloadJobQuarantineCsv(
   jobId: string,
   fallbackRows?: QuarantineInfo["quarantine"],
 ): Promise<{ filename: string; row_count: number; blob: Blob }> {
-  const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  // Every cell quoted (the report's layout) and, as the server's quarantine CSV does
+  // (csv_safety.neutralize_formula_cell), formula-looking cells defused — Excel
+  // evaluates a quoted "=..." too (G7-F2).
+  const escape = (v: unknown) => `"${neutralizeFormulaCell(v).replace(/"/g, '""')}"`;
   const toCsv = (rows: QuarantineInfo["quarantine"]) => {
     const lines = ["row,column,target,value,reason,policy,suggested_transform,suggested_fix,suggested_target_type"];
     const mark = (v: unknown) => {

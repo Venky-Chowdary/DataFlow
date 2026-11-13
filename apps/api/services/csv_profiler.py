@@ -224,9 +224,12 @@ def _csv_iter_dicts_from_reader(
     # iter_csv_records yields None for unquoted empty, '' for quoted "".
     from services.csv_codec import iter_csv_records
 
+    opts = options or ReadOptions()
+    # empty_cell="keep" is the TSV ``\\N`` convention (G7-F3): there an
+    # unquoted empty cell is '' and only ``\\N`` is NULL.
     header, rows = header_and_rows(
-        iter_csv_records(reader_file, delim),
-        options or ReadOptions(),
+        iter_csv_records(reader_file, delim, empty_cell=opts.empty_cell),
+        opts,
         header_names=csv_header_names,
         source_label="CSV",
     )

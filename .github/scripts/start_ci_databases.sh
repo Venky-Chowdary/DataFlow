@@ -158,6 +158,16 @@ start_bigquery() {
     --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}'
 }
 
+# The postgres image first runs its init scripts on a temporary server that
+# listens on the Unix socket only, and POSTGRES_DB does not exist yet; then it
+# restarts the real server. pg_isready on the socket answers during that first
+# phase, so the next query failed with 'database "dataflow" does not exist'
+# (PR 426 and PR 422 CI). Ready means: the real server answers a query on
+# POSTGRES_DB over TCP, which the temporary server never listens on.
+pg_serving() {  # pg_serving <container>
+  docker exec -e PGPASSWORD=dataflow "$1" psql -h 127.0.0.1 -U dataflow -d dataflow -Atqc "SELECT 1" >/dev/null 2>&1
+}
+
 start_postgres() {
   # Service-container pulls have no registry fallback — same public.ecr.aws →
   # Docker Hub retry as the other images.
@@ -169,8 +179,7 @@ start_postgres() {
     -e POSTGRES_DB=dataflow \
     -p 5432:5432 \
     "$POSTGRES_IMAGE"
-  wait_for "Postgres" 60 2 docker exec dataflow-ci-postgres \
-    pg_isready -U dataflow -d dataflow \
+  wait_for "Postgres" 60 2 pg_serving dataflow-ci-postgres \
     || { docker logs dataflow-ci-postgres || true; exit 1; }
 }
 
@@ -194,8 +203,7 @@ start_postgres_cdc() {
     -e POSTGRES_DB=dataflow \
     -p 5432:5432 \
     dataflow-postgres-cdc:ci
-  wait_for "Postgres CDC" 30 2 docker exec dataflow-postgres-cdc \
-    pg_isready -U dataflow \
+  wait_for "Postgres CDC" 30 2 pg_serving dataflow-postgres-cdc \
     || { docker logs dataflow-postgres-cdc || true; exit 1; }
   wal=$(docker exec dataflow-postgres-cdc psql -U dataflow -d dataflow -Atc "SHOW wal_level")
   echo "wal_level=${wal}"

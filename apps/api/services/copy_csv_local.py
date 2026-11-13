@@ -31,7 +31,6 @@ then the same mapped COPY. BIFF ``.xls`` and OOXML ``.xlsx`` share the Excel rea
 from __future__ import annotations
 
 import base64
-import csv
 import gzip
 import io
 import logging
@@ -180,6 +179,39 @@ def _empty_to_none(value: Any) -> str | None:
 
 def _csv_cell(value: str | None) -> str:
     return "\\N" if value is None else value
+
+
+_MAPPED_NULL = "\\N"
+_MAPPED_TEXT_NULL = '"\\N"'
+
+
+def mapped_csv_cell(cell: str | None, delim: str) -> str:
+    """One mapped-file cell: NULL is a bare ``\\N`` (``COPY ... NULL '\\N'``).
+
+    A *text* ``\\N`` is quoted, so neither PostgreSQL CSV COPY (a quoted value
+    equal to the NULL string is not NULL) nor the SQLite re-read (the codec
+    reads a quoted ``"\\N"`` as text) turns it into NULL. Every other cell is
+    written exactly as ``csv.writer`` (QUOTE_MINIMAL) wrote it — quoted when it
+    holds the delimiter, a quote, CR or LF — and *only* ``None`` is NULL: a text
+    cell is never routed through an encoder with an in-band NULL sentinel (a
+    text "\\x00" cell used to land NULL).
+    """
+    if cell is None:
+        return _MAPPED_NULL
+    text = cell if type(cell) is str else str(cell)
+    if text == _MAPPED_NULL:
+        return _MAPPED_TEXT_NULL
+    if delim in text or '"' in text or "\n" in text or "\r" in text:
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def mapped_csv_line(cells: list[str | None], delim: str) -> str:
+    """One mapped-file row (:func:`mapped_csv_cell` per cell); a lone ``''`` is ``""``."""
+    out = [mapped_csv_cell(cell, delim) for cell in cells]
+    if len(out) == 1 and out[0] == "":
+        return '""'
+    return delim.join(out)
 
 
 def _read_options_copy_ok(read_options: Any) -> bool:
@@ -752,7 +784,7 @@ def _write_mapped_csv(
     _MISS = object()
     _bind_memo: list[dict] = [dict() for _ in source_cols]
     _safe_memo: dict = {}
-    _csv_memo: dict = {}
+    _csv_memo: dict = {}  # cell -> mapped-file text (mapped_csv_cell), per run
     _MEMO_CAP = 500_000
 
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
@@ -799,24 +831,27 @@ def _write_mapped_csv(
                         f"{physical or logical} COPY-safe; the row path owns its "
                         "validation and quarantine"
                     )
-            out_row: list[Any] = []
-            for index, col in enumerate(source_cols):
+            out_row: list[str] = []
+            for col in source_cols:
                 cell = copy_cells.get(col)
                 rendered = _csv_memo.get(cell, _MISS)
                 if rendered is _MISS:
-                    rendered = _csv_cell(cell)
+                    rendered = mapped_csv_cell(cell, delim)
                     if len(_csv_memo) < _MEMO_CAP:
                         _csv_memo[cell] = rendered
                 out_row.append(rendered)
-            writer.writerow(out_row)
+            if len(out_row) == 1 and out_row[0] == "":
+                writer.write('""\n')
+            else:
+                writer.write(delim.join(out_row) + "\n")
             written += 1
         if fingerprints is not None and rows:
             fingerprints(rows)
         return written
 
     with open(dest_path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle, delimiter=delim, lineterminator="\n")
-        writer.writerow(dest_cols)
+        writer = handle
+        writer.write(mapped_csv_line(list(dest_cols), delim) + "\n")
         for record in _iter_source_records(
             content, filename, pairs, read_options, file_type=file_type
         ):

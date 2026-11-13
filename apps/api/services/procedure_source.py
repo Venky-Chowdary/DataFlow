@@ -26,6 +26,7 @@ SQLite has no stored procedures — procedure mode is rejected; query mode
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import hashlib
 import json
@@ -35,6 +36,7 @@ import re
 import tempfile
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -297,6 +299,22 @@ class _ResultSpool:
 
 _SPOOL_LOCK = threading.Lock()
 _SPOOLS: dict[str, _ResultSpool] = {}
+#: Spool file -> its unlink finalizer: runs on close, when the spool object is
+#: garbage-collected without a close, and at interpreter exit (T-F1 family:
+#: unclosed spools accumulated ~1,000 files / 325 MB in the shared temp dir).
+_SPOOL_FINALIZERS: dict[str, weakref.finalize] = {}
+
+
+def _discard_spool_file(path: str, root: str) -> None:
+    """Remove one spool file and its job folder when that is now empty."""
+    target = Path(path)
+    with contextlib.suppress(OSError):
+        target.unlink(missing_ok=True)
+    parent = target.parent
+    if str(parent) != root:
+        with contextlib.suppress(OSError):
+            parent.rmdir()
+    _SPOOL_FINALIZERS.pop(path, None)
 
 
 def job_id_of(cfg: Mapping[str, Any] | None) -> str:
@@ -1035,6 +1053,13 @@ def read_callable_batch(
 
     key = _spool_key(cfg, spec)
     spool = _get_spool(key)
+    if spool is not None and offset == 0 and not job_id_of(cfg):
+        # An unscoped spool (no job id: a peek, a probe, a script) is never a
+        # cache across read sequences: a new read from offset 0 runs the
+        # extract again. Served stale, a later job's peek saw the columns of an
+        # earlier run's extract (a column added since was silently dropped).
+        close_callable_spool(key)
+        spool = None
     if spool is None:
         if offset != 0:
             raise ProcedureSourceError(
@@ -1048,6 +1073,11 @@ def read_callable_batch(
         cursor_column=cursor_column,
         cursor_after=cursor_after,
     )
+    if not job_id_of(cfg) and offset + len(rows) >= int(matched or 0):
+        # An unscoped read (no job closes it) that has reached the end of the
+        # extract is done with its spool: release it now instead of holding a
+        # registered file until the process exits.
+        close_callable_spool(key)
     if columns:
         headers, rows = _project(headers, rows, columns)
     return ReadBatch(
@@ -1428,8 +1458,18 @@ def _spool_key(cfg: Mapping[str, Any], spec: CallableSpec) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def callable_spool_root() -> Path:
+    """Where CALL/SELECT spools live: ``DATAFLOW_CALLABLE_SPOOL_DIR``, else ``{tmp}/dataflow-callable``.
+
+    ``{tmp}`` is :func:`tempfile.gettempdir` (``TMPDIR``), so a suite or a
+    deployment that redirects temp files redirects spools with them.
+    """
+    configured = (getenv_brand("CALLABLE_SPOOL_DIR") or "").strip()
+    return Path(configured).expanduser() if configured else Path(tempfile.gettempdir()) / "dataflow-callable"
+
+
 def _spool_dir(job_id: str) -> Path:
-    root = Path(tempfile.gettempdir()) / "dataflow-callable"
+    root = callable_spool_root()
     if job_id:
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", job_id)[:80] or "job"
         root = root / safe
@@ -1458,12 +1498,11 @@ def close_callable_spool(key: str | None = None, *, job_id: str | None = None) -
             spool = _SPOOLS.pop(item, None)
             if spool is None:
                 continue
-            with contextlib.suppress(OSError):
-                spool.path.unlink(missing_ok=True)
-            parent = spool.path.parent
-            if parent.name and parent.name != "dataflow-callable":
-                with contextlib.suppress(OSError):
-                    parent.rmdir()
+            finalizer = _SPOOL_FINALIZERS.get(str(spool.path))
+            if finalizer is not None:
+                finalizer()
+            else:
+                _discard_spool_file(str(spool.path), str(callable_spool_root()))
 
 
 def _get_spool(key: str) -> _ResultSpool | None:
@@ -1478,13 +1517,25 @@ def _fill_spool(cfg: Mapping[str, Any], spec: CallableSpec, key: str) -> _Result
     )
     os.close(fd)
     path = Path(name)
-    headers, total, schema = _execute_to_jsonl(cfg, spec, path)
+    root = str(callable_spool_root())
+    try:
+        headers, total, schema = _execute_to_jsonl(cfg, spec, path)
+    except BaseException:
+        # A CALL that fails mid-drain leaves no partial spool behind.
+        _discard_spool_file(name, root)
+        raise
     spool = _ResultSpool(
         path=path, headers=headers, total=total, schema=schema, job_id=jid
     )
     with _SPOOL_LOCK:
         _SPOOLS[key] = spool
+        _SPOOL_FINALIZERS[name] = weakref.finalize(spool, _discard_spool_file, name, root)
     return spool
+
+
+# Process exit: every spool this process still holds is removed (the finalizers
+# also run at exit; this closes the registry first so nothing pages a dead file).
+atexit.register(close_callable_spool)
 
 
 def _cursor_header_index(headers: list[str], cursor_column: str) -> int:

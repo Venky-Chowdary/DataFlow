@@ -201,7 +201,19 @@ describe("toCsv", () => {
   it("serialises objects instead of writing [object Object]", () => {
     assert.equal(toCsv(["m"], [{ m: { k: 1 } }]), 'm\n"{""k"":1}"');
   });
+
+  it("defuses formula-looking cells and headers by default (G7-F2)", () => {
+    assert.equal(
+      toCsv(["=h", "n"], [{ "=h": '=HYPERLINK("x")', n: -5 }, { "=h": "@SUM(A1)", n: "-2+3" }]),
+      "'=h,n\n\"'=HYPERLINK(\"\"x\"\")\",-5\n'@SUM(A1),'-2+3",
+    );
+  });
+
+  it("keeps exact values when protection is off", () => {
+    assert.equal(toCsv(["a"], [{ a: "=1+1" }], { formulaProtection: false }), "a\n=1+1");
+  });
 });
+
 
 describe("toMarkdown", () => {
   it("escapes pipes so the table does not break", () => {

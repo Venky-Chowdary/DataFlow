@@ -18,6 +18,7 @@ from services.brand_env import getenv_brand
 from services import connector_executor
 from services.connector_store import ConnectorStoreError
 from services.control_plane_store import ControlPlaneUnavailable
+from services.transfer_plan_store import PlanStoreBusy, PlanStoreLockUnavailable, PlanStoreUnreadable
 from services.shared_doc_store import SharedDocConflict
 from services.cors_policy import TenantAwareCORSMiddleware
 from services import health_service
@@ -1049,6 +1050,65 @@ async def control_plane_unavailable_handler(request: Request, exc: ControlPlaneU
             "detail": "Workspace settings are temporarily unavailable. Retry shortly.",
         },
         headers={"Retry-After": "5"},
+    )
+
+
+@app.exception_handler(PlanStoreUnreadable)
+async def plan_store_unreadable_handler(request: Request, exc: PlanStoreUnreadable):
+    """The transfer-plan store file is damaged: refuse, never answer "no plans".
+
+    The store logged the path and error class once at ERROR; the response
+    names the files an operator repairs or restores (the newest backup
+    generation that still parses), not their location.
+    """
+    if exc.readable_backup:
+        remedy = f"restore the newest readable backup, {exc.readable_backup}"
+    else:
+        remedy = (
+            "restore it from your own backups (no readable backup was found in "
+            "transfer_plans.json.bak, .bak.1 or .bak.2)"
+        )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "plan_store_unreadable",
+            "detail": (
+                "Transfer plans cannot be loaded: the plan store file (transfer_plans.json in "
+                "the data directory) is unreadable or damaged, so nothing was read or changed. "
+                f"An operator must repair it or {remedy}, then retry."
+            ),
+        },
+    )
+
+
+@app.exception_handler(PlanStoreLockUnavailable)
+async def plan_store_lock_unavailable_handler(request: Request, exc: PlanStoreLockUnavailable):
+    """The plan store's lock file is not writable: an operator must fix it; not retryable."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "plan_store_lock_unavailable",
+            "detail": (
+                "Transfer plans cannot be saved: the plan store's lock file "
+                "(transfer_plans.json.lock in the data directory) cannot be opened for writing, "
+                "so nothing was changed. An operator must make it writable by the API's user "
+                "(mode 0600; it is never written to) or fix the volume."
+            ),
+        },
+    )
+
+
+@app.exception_handler(PlanStoreBusy)
+async def plan_store_busy_handler(request: Request, exc: PlanStoreBusy):
+    """Another writer held the transfer-plan store past the lock timeout: retryable."""
+    logger.warning("Transfer plan store busy on %s", request.url.path)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "plan_store_busy",
+            "detail": "The plan is being saved by another request. Retry shortly.",
+        },
+        headers={"Retry-After": "2"},
     )
 
 

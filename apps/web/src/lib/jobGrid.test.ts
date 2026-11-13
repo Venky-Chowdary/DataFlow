@@ -219,9 +219,13 @@ describe("jobsCsv", () => {
 
   it("defuses cells a spreadsheet would run as a formula", () => {
     assert.equal(csvCell("=HYPERLINK(1)"), "'=HYPERLINK(1)");
-    assert.equal(csvCell("+1"), "'+1");
-    assert.equal(csvCell("-2"), "'-2");
+    assert.equal(csvCell("+1x"), "'+1x");
+    assert.equal(csvCell("-2+3"), "'-2+3");
     assert.equal(csvCell("@x"), "'@x");
+    // G7-F2: the API's rule — a plain numeral is a number, never a formula.
+    assert.equal(csvCell("+1"), "+1");
+    assert.equal(csvCell("-2"), "-2");
+    assert.equal(csvCell("'=x"), "''=x");
     assert.equal(csvCell(null), "");
     assert.equal(csvCell(12), "12");
   });

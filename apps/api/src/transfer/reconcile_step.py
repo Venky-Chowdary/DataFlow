@@ -421,13 +421,19 @@ def _proof_file_dest_batches(
     stream, closer = opened
     try:
         batch: list[dict[str, Any]] = []
-        for rec in _iter_artifact_records(stream, name=name, fmt=fmt, written_here=written_here):
+        # G7-F3: a TSV written with the opt-in ``\\N`` NULL convention is read with it.
+        tsv_null = dest_summary.get("tsv_null") if written_here else dst_cfg.get("tsv_null")
+        # G7-F2: a file written with the reversible formula guard is compared as
+        # the exact values sent, as Gate-8's cell read-back does.
+        guarded = str(dest_summary.get("formula_protection") or "") == "prefix"
+        for rec in _iter_artifact_records(stream, name=name, fmt=fmt, written_here=written_here,
+                                          tsv_null=tsv_null):
             batch.append(rec)
             if len(batch) >= page:
-                yield batch
+                yield _restore_formula_prefix(batch) if guarded else batch
                 batch = []
         if batch:
-            yield batch
+            yield _restore_formula_prefix(batch) if guarded else batch
     finally:
         try:
             (closer or stream.close)()
@@ -9038,6 +9044,25 @@ def _file_export_source_view(records: list[Any], mappings: list[dict], fmt: str 
             if isinstance(rec, dict) else rec for rec in records]
 
 
+def _restore_formula_prefix(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows read from a ``formula_protection: "prefix"`` file, as the exact values sent.
+
+    The guard is reversible on header names and text cells
+    (``csv_safety.restore_export_cell``); numbers and non-text cells pass through.
+    """
+    from services.csv_safety import restore_export_cell
+
+    return [
+        {
+            restore_export_cell(k) if isinstance(k, str) else k: (
+                restore_export_cell(v) if isinstance(v, str) else v
+            )
+            for k, v in r.items()
+        }
+        for r in rows
+    ]
+
+
 def _file_export_cell_readback(
     records: Any,
     columns: list[str],
@@ -9070,23 +9095,14 @@ def _file_export_cell_readback(
         else:
             with open(path, "rb") as fh:
                 # The file this run just wrote: read with the writer's own dialect, never a sniffer.
-                rows = list(_iter_artifact_records(fh, name=os.path.basename(path), fmt=fmt, written_here=True))
+                rows = list(_iter_artifact_records(fh, name=os.path.basename(path), fmt=fmt, written_here=True,
+                                                   tsv_null=summary.get("tsv_null")))
     except (UnmeasuredArtifact, FixedWidthError, OSError, ValueError) as exc:
         return {"passed": False, "mismatches": [f"written file could not be re-read: {exc}"]}
     if str(summary.get("formula_protection") or "") == "prefix":
         # G7: the opt-in formula guard is reversible (header names and cells) —
         # compare the exact columns and values sent.
-        from services.csv_safety import restore_export_cell
-
-        rows = [
-            {
-                restore_export_cell(k) if isinstance(k, str) else k: (
-                    restore_export_cell(v) if isinstance(v, str) else v
-                )
-                for k, v in r.items()
-            }
-            for r in rows
-        ]
+        rows = _restore_formula_prefix(rows)
     targets = [str(m.get("target")) for m in mapping_dicts if m.get("target")]
     return sample_compare_rows(
         _file_export_source_view(records, mapping_dicts, fmt),
