@@ -849,6 +849,27 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
         ) from e
 
 
+async def _link_job_to_plan(plan_id: str, job_id: str) -> None:
+    """Record a created run on its plan — best effort.
+
+    The pending job already holds the idempotency key and the destination, so
+    a failure here must not fail the request (that would orphan the job and
+    turn the caller's retry into a 409 duplicate). The run does not need the
+    link; a plan store that is busy or unreadable is logged and skipped.
+    """
+    from services.transfer_plan_store import PlanStoreBusy, PlanStoreUnreadable, attach_job
+
+    try:
+        await asyncio.to_thread(attach_job, plan_id, job_id, status="running")
+    except (PlanStoreBusy, PlanStoreUnreadable) as exc:
+        logging.getLogger(__name__).warning(
+            "Run %s started but was not linked to plan %s: the plan store refused (%s)",
+            job_id,
+            plan_id,
+            type(exc).__name__,
+        )
+
+
 def _plan_version_conflict(exc: Any, message: str) -> HTTPException:
     """409 for a revision based on anything but the plan's newest one."""
     return HTTPException(
@@ -1366,8 +1387,7 @@ async def execute_transfer_json(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if body.plan_id and str(body.plan_id).strip():
-        from services.transfer_plan_store import attach_job
-        await asyncio.to_thread(attach_job, str(body.plan_id).strip(), job_id, status="running")
+        await _link_job_to_plan(str(body.plan_id).strip(), job_id)
 
     _stamp_job_mapping_artifacts(
         job_id,
@@ -1962,8 +1982,7 @@ async def run_universal_transfer(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if plan_id and plan_id.strip():
-        from services.transfer_plan_store import attach_job
-        await asyncio.to_thread(attach_job, plan_id.strip(), job_id, status="running")
+        await _link_job_to_plan(plan_id.strip(), job_id)
 
     _stamp_job_mapping_artifacts(
         job_id,
