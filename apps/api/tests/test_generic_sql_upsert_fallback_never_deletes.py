@@ -62,9 +62,6 @@ def test_native_merge_failure_updates_in_place(tmp_path, dialect_name):
     meta = sa.MetaData()
     # The writer's table object carries the mapped columns only.
     table = sa.Table("ws_cust", meta, sa.Column("id", sa.Integer), sa.Column("name", sa.Text))
-    # SQLite reads an unknown double-quoted name as a string literal, so the
-    # mirror-lattice probe would report ``_deleted`` here; pin "no lattice".
-    table.info["df_mirror_lattice"] = ()
     try:
         with engine.connect() as conn:
             n = _upsert_batch(
@@ -133,3 +130,52 @@ def test_fallback_is_a_job_warning_end_to_end(tmp_path, monkeypatch):
     assert deleted == []
     assert rows[0] == (5, 1, "new", "VIP")
     assert any("UPDATE of matched keys" in w for w in result.warnings), result.warnings
+
+
+def test_sqlite_lattice_probe_reports_only_a_real_deleted_column(tmp_path):
+    """SQLite reads an unknown bare ``"_deleted"`` as a string literal.
+
+    The physical-lattice probe ``SELECT "_deleted" FROM t WHERE 1=0`` then
+    succeeded on every SQLite table, so ``lattice_columns_on_table`` claimed a
+    ``_deleted`` column the table does not have.
+    """
+    from services.mirror_engine import lattice_columns_on_table
+
+    db = tmp_path / "ws_lattice.db"
+    aux = tmp_path / "ws_lattice_aux.db"
+    c = sqlite3.connect(db)
+    c.execute("create table ws_plain(id integer)")
+    c.execute("create table ws_mirror(id integer, _deleted integer default 0)")
+    c.execute(f"attach database '{aux}' as ws_aux")
+    c.execute("create table ws_aux.ws_plain(id integer)")
+    c.execute("create table ws_aux.ws_mirror(id integer, _deleted integer default 0)")
+    c.commit()
+    c.close()
+
+    engine = sa.create_engine(f"sqlite:///{db}")
+
+    @sa.event.listens_for(engine, "connect")
+    def _attach(dbapi_conn, _record):
+        dbapi_conn.execute(f"attach database '{aux}' as ws_aux")
+
+    def probe(name: str, schema: str | None = None) -> tuple[str, ...]:
+        # The writer's Table carries the mapped columns only (no _deleted).
+        table = sa.Table(name, sa.MetaData(), sa.Column("id", sa.Integer), schema=schema)
+        with engine.connect() as conn:
+            return lattice_columns_on_table(conn, table)
+
+    try:
+        assert probe("ws_plain") == ()
+        assert probe("ws_mirror") == ("_deleted",)
+        assert probe("ws_plain", "ws_aux") == ()
+        assert probe("ws_mirror", "ws_aux") == ("_deleted",)
+        # The mirror pass's own column probe (``_deleted_at`` on the hard path)
+        # had the same literal fallback.
+        from services.mirror_engine import _has_column
+
+        with engine.connect() as conn:
+            assert _has_column(conn, '"ws_mirror"', "_deleted") is True
+            assert _has_column(conn, '"ws_mirror"', "_deleted_at") is False
+            assert _has_column(conn, '"ws_aux"."ws_plain"', "_deleted") is False
+    finally:
+        engine.dispose()
