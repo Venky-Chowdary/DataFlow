@@ -358,3 +358,38 @@ def test_only_the_creator_or_a_workspace_admin_deletes_a_template(tenancy_world)
     assert admin_a.delete(f"{BASE}/templates/{tid}").status_code == 200
     mine = w.a.post(f"{BASE}/templates", json={"name": "mine 2", "mappings": MAPPINGS}).json()["id"]
     assert w.a.delete(f"{BASE}/templates/{mine}").status_code == 200
+
+
+_H = "apiVersion: datawrap.io/mapping/v1\nkind: ColumnMapping\nmetadata: {name: x}\nspec:\n  mappings:\n"
+
+
+def test_a_huge_integer_is_a_clean_refusal_not_a_500():
+    with pytest.raises(MappingDocumentError):
+        load_mapping_document(_H + "  - {source: " + "9" * 5000 + ", target: b}\n")
+
+
+@pytest.mark.parametrize("scalar", ["yes", "no", "on", "off", "true", "123", "1.5", ".inf", "null", "~"])
+def test_column_names_must_be_text_not_yaml_coercions(scalar):
+    with pytest.raises(MappingDocumentError, match="quote it"):
+        load_mapping_document(_H + f"  - {{source: {scalar}, target: b}}\n")
+    if scalar not in ("null", "~"):
+        with pytest.raises(MappingDocumentError, match="quote it"):
+            load_mapping_document(_H + f"  - {{source: a, target: {scalar}}}\n")
+
+
+def test_quoted_names_that_look_like_yaml_keywords_import():
+    doc = load_mapping_document(_H + "  - {source: 'yes', target: '123'}\n")
+    assert doc["spec"]["mappings"][0]["source"] == "yes"
+    assert doc["spec"]["mappings"][0]["target"] == "123"
+
+
+def test_the_import_route_answers_422_for_a_huge_integer(tenancy_world):
+    r = tenancy_world.a.post(f"{BASE}/import", json={"document": _H + "  - {source: " + "9" * 5000 + ", target: b}\n"})
+    assert r.status_code == 422, r.text
+
+
+@pytest.mark.parametrize("fmt", ["yaml", "json"])
+def test_columns_named_like_yaml_keywords_survive_export_and_import(fmt):
+    doc = build_mapping_document(mappings=[{"source": "yes", "target": "123"}, {"source": "null", "target": "on"}])
+    back = load_mapping_document(dump_mapping_document(doc, fmt=fmt))
+    assert [(m["source"], m["target"]) for m in back["spec"]["mappings"]] == [("yes", "123"), ("null", "on")]

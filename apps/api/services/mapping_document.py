@@ -117,6 +117,22 @@ def _json_depth_ok(text: str) -> None:
 def _clean_mapping(raw: Any, index: int) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise MappingDocumentError(f"mappings[{index}] is not an object")
+    for key in ("source", "target"):
+        value = raw.get(key)
+        if value is None and key == "target":
+            continue  # no target: an omitted column
+        if value is None and key in raw:
+            raise MappingDocumentError(
+                f"mappings[{index}].{key} is empty: YAML reads a bare null or ~ as no value; "
+                "quote it if that is the column's name"
+            )
+        if value is not None and not isinstance(value, str):
+            # YAML 1.1 reads bare yes/no/on/off, numbers and .inf as other
+            # types; a column named "yes" must not arrive as True.
+            raise MappingDocumentError(
+                f"mappings[{index}].{key} must be text: quote it ('yes', '123'); YAML read a bare "
+                f"{type(value).__name__} value there"
+            )
     source = _text(raw.get("source"))
     if not source:
         raise MappingDocumentError(f"mappings[{index}] has no source column")
@@ -262,8 +278,16 @@ def _parse(text: str) -> Any:
 
             try:
                 parsed = yaml.load(text, Loader=_no_alias_loader())  # noqa: S506 - SafeLoader subclass
+            except MappingDocumentError:
+                raise
             except yaml.YAMLError as exc:
                 raise MappingDocumentError(f"not valid YAML: {str(exc).splitlines()[0]}") from exc
+            except ValueError as exc:
+                # A constructor refusing a scalar (an integer over Python's
+                # 4,300-digit limit): the document's fault, not the server's.
+                raise MappingDocumentError(
+                    "not valid YAML: a value could not be read (too large or malformed)"
+                ) from exc
     except RecursionError as exc:
         raise MappingDocumentError(f"the document is nested deeper than {MAX_DEPTH} levels") from exc
     _check_structure(parsed, "the document")
