@@ -343,6 +343,34 @@ def build_bigquery_merge_sql(
     )
 
 
+def _bq_key_value(value: Any) -> Any:
+    """A key value as BigQuery compares it, for matching read-back keys.
+
+    BigQuery returns ``NUMERIC 1.50`` as ``Decimal('1.5')`` and a TIMESTAMP in
+    UTC; ``str()`` of the staged ``Decimal('1.50')`` or a ``+02:00`` datetime
+    then missed the stored key and counted it written.
+    """
+    import datetime as _dt
+    from decimal import Decimal
+
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        value = Decimal(str(value))
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return ("n", str(value))
+        return ("n", "0" if value == 0 else format(value.normalize(), "f"))
+    if isinstance(value, _dt.datetime):
+        # BigQuery reads a zone-less TIMESTAMP as UTC.
+        if value.tzinfo is not None:
+            value = value.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        return ("t", value.isoformat())
+    if isinstance(value, _dt.date):
+        return ("d", value.isoformat())
+    return value
+
+
 def _bq_merge_dense(
     client: Any,
     table_id: str,
@@ -372,12 +400,14 @@ def _bq_merge_dense(
             f"SELECT DISTINCT {select_cols} FROM `{table_id}` T "  # nosec B608
             f"JOIN `{staging_id}` S ON {on_clause}"
         ).result()
-        stored_markers = {identity_marker(tuple(r[i] for i in range(len(conflict)))) for r in stored}
+        stored_keys = {
+            tuple(_bq_key_value(r[i]) for i in range(len(conflict))) for r in stored
+        }
         idx = [target_cols.index(c) for c in conflict]
         kept = [
-            m
-            for m in (identity_marker(tuple(row[i] for i in idx)) for row in dense)
-            if m in stored_markers
+            identity_marker(tuple(row[i] for i in idx))
+            for row in dense
+            if tuple(_bq_key_value(row[i]) for i in idx) in stored_keys
         ]
     merge_sql = build_bigquery_merge_sql(
         table_id, staging_id, target_cols, conflict, lsn_column=lsn_column, insert_only=skip

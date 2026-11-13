@@ -467,3 +467,44 @@ def test_destinations_holding_no_stored_keys_are_not_refused():
     )
     for dest in ("kafka", "qdrant", "pinecone", "pgvector", "hubspot", "stripe"):
         assert dedupe_skip_refusal(dest), dest
+
+
+@pytest.mark.parametrize(
+    ("dense_key", "stored_key"),
+    [
+        (__import__("decimal").Decimal("1.50"), __import__("decimal").Decimal("1.5")),
+        (__import__("decimal").Decimal("100"), __import__("decimal").Decimal("1E+2")),
+        (
+            __import__("datetime").datetime(
+                2024, 1, 2, 5, 4, 5,
+                tzinfo=__import__("datetime").timezone(__import__("datetime").timedelta(hours=2)),
+            ),
+            __import__("datetime").datetime(2024, 1, 2, 3, 4, 5, tzinfo=__import__("datetime").timezone.utc),
+        ),
+        (1.0, 1.0),
+    ],
+    ids=["numeric_scale", "numeric_exponent", "timestamp_offset", "float"],
+)
+def test_bigquery_skip_markers_compare_typed_values(skip_policy, dense_key, stored_key):
+    """Review L1: ``str()`` of ``Decimal('1.50')`` is not ``str()`` of ``Decimal('1.5')``.
+
+    The stored key BigQuery returns must be recognised as kept, not counted written.
+    """
+    import connectors.bigquery_writer as bw
+
+    class _Job:
+        def __init__(self, rows=()):
+            self._rows = list(rows)
+
+        def result(self):
+            return iter(self._rows)
+
+    client = MagicMock()
+    client.query.side_effect = lambda sql, *a, **k: _Job(
+        [(stored_key,)] if sql.lstrip().upper().startswith("SELECT") else []
+    )
+    written, kept = bw._bq_merge_dense(
+        client, "p.d.t", "p.d.stage", ["id", "name"], ["id"],
+        [(dense_key, "INCOMING"), ("other", "NEW")],
+    )
+    assert (written, len(kept)) == (1, 1), (written, kept)
