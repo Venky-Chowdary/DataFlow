@@ -8,6 +8,7 @@
  * type + host + port + database instead.
  */
 import type { Connector } from "./types";
+import { fileExportFormulaProtection } from "./fileExportDestination";
 
 type Endpoint = Record<string, unknown>;
 
@@ -18,7 +19,14 @@ export type JobRouteSource =
   | { kind: "missing"; reason: "inline_file" | "unsaved_connection" | "ambiguous_connection"; label: string };
 
 export type JobRouteDestination =
-  | { kind: "file_export"; format: string; outputPath: string; database: string }
+  | {
+    kind: "file_export";
+    format: string;
+    outputPath: string;
+    database: string;
+    /** The destination wrote CSV/TSV with formula_protection "prefix" (G7-F2). */
+    formulaProtection: boolean;
+  }
   | {
     kind: "database";
     connectorId: string;
@@ -160,6 +168,7 @@ export function planJobStudioRoute(job: unknown, connectors: readonly Connector[
       format: text(dst.format) || "csv",
       outputPath: text(dst.output_path),
       database: text(dst.database),
+      formulaProtection: fileExportFormulaProtection(dst),
     };
   } else {
     const { connector, ambiguous } = matchSavedConnector(dst, connectors);

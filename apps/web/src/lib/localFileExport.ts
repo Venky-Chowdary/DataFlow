@@ -1,3 +1,4 @@
+import { toDelimitedText } from "./csvSafety";
 import type { EditableMapping } from "./mapping";
 import { applyLocalTransform, requiresServerPreview } from "./localTransform";
 import type { NumberLocale } from "./numberLocale";
@@ -17,7 +18,22 @@ function mapRow(
   return out;
 }
 
-export function serializeRows(rows: Record<string, unknown>[], format: string): { blob: Blob; mime: string; ext: string } {
+export interface SerializeOptions {
+  /**
+   * The Studio file_export destination's "Protect against spreadsheet formulas"
+   * (`formula_protection: "prefix"`): CSV/TSV text cells and header names that
+   * would open as a formula get a leading `'` — the API's rule (csvSafety).
+   * Off (the destination default) keeps the file byte-exact, as the server's
+   * file_export writes it.
+   */
+  formulaProtection?: boolean;
+}
+
+export function serializeRows(
+  rows: Record<string, unknown>[],
+  format: string,
+  options: SerializeOptions = {},
+): { blob: Blob; mime: string; ext: string } {
   const fmt = format.toLowerCase();
   if (fmt === "json") {
     return {
@@ -32,19 +48,11 @@ export function serializeRows(rows: Record<string, unknown>[], format: string): 
   }
   const delimiter = fmt === "tsv" ? "\t" : ",";
   const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
-  const escape = (v: unknown) => {
-    const s = v == null ? "" : String(v);
-    if (s.includes(delimiter) || s.includes('"') || s.includes("\n")) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s;
-  };
-  const lines = [
-    headers.join(delimiter),
-    ...rows.map((r) => headers.map((h) => escape(r[h])).join(delimiter)),
-  ];
+  // RFC 4180 for any delimiter (a CR, LF, quote or the delimiter is quoted) and, when
+  // the destination opts in, the same formula guard the API applies.
+  const text = toDelimitedText(headers, rows, { delimiter, formulaProtection: options.formulaProtection });
   const mime = fmt === "tsv" ? "text/tab-separated-values" : "text/csv";
-  return { blob: new Blob([lines.join("\n")], { type: mime }), mime, ext: fmt === "tsv" ? "tsv" : "csv" };
+  return { blob: new Blob([text], { type: mime }), mime, ext: fmt === "tsv" ? "tsv" : "csv" };
 }
 
 export interface LocalFileExportInput {
@@ -54,6 +62,8 @@ export interface LocalFileExportInput {
   format: string;
   outputBasename?: string;
   numberLocale?: NumberLocale | string;
+  /** The destination's formula_protection is "prefix" (see SerializeOptions). */
+  formulaProtection?: boolean;
 }
 
 /** Export mapped rows in the browser when the transfer API is offline. */
@@ -68,7 +78,7 @@ export function runLocalFileExport(input: LocalFileExportInput): TransferResult 
     };
   }
   const mapped = input.rows.map((row) => mapRow(row, input.mappings, input.numberLocale));
-  const { blob, ext } = serializeRows(mapped, input.format);
+  const { blob, ext } = serializeRows(mapped, input.format, { formulaProtection: input.formulaProtection });
   const base = (input.outputBasename || input.sourceFilename.replace(/\.[^/.]+$/, "") || "export").replace(/[^\w.-]+/g, "_");
   const filename = `${base}.${ext}`;
   const downloadUrl = URL.createObjectURL(blob);

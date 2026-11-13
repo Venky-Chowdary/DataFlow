@@ -1,0 +1,245 @@
+{
+  "description": "G7-F2: one vector set for the spreadsheet formula guard. apps/api/services/csv_safety.py (tests/test_g7_f2_formula_guard_vectors.py) and apps/web/src/lib/csvSafety.ts (csvSafety.test.ts) must both reproduce every row, so the two rules cannot drift. export = neutralize_export_cell (numerals exempt, reversible), operator = neutralize_formula_cell, restored = restore_export_cell(export).",
+  "vectors": [
+    {
+      "input": "=HYPERLINK(\"http://evil.example/x\",\"Click\")",
+      "export": "'=HYPERLINK(\"http://evil.example/x\",\"Click\")",
+      "operator": "'=HYPERLINK(\"http://evil.example/x\",\"Click\")",
+      "restored": "=HYPERLINK(\"http://evil.example/x\",\"Click\")"
+    },
+    {
+      "input": "=== VIP ===",
+      "export": "'=== VIP ===",
+      "operator": "'=== VIP ===",
+      "restored": "=== VIP ==="
+    },
+    {
+      "input": "@SUM(A1)",
+      "export": "'@SUM(A1)",
+      "operator": "'@SUM(A1)",
+      "restored": "@SUM(A1)"
+    },
+    {
+      "input": "+cmd",
+      "export": "'+cmd",
+      "operator": "'+cmd",
+      "restored": "+cmd"
+    },
+    {
+      "input": "-2+3",
+      "export": "'-2+3",
+      "operator": "'-2+3",
+      "restored": "-2+3"
+    },
+    {
+      "input": "\tx",
+      "export": "'\tx",
+      "operator": "'\tx",
+      "restored": "\tx"
+    },
+    {
+      "input": "\rx",
+      "export": "'\rx",
+      "operator": "'\rx",
+      "restored": "\rx"
+    },
+    {
+      "input": "'=x",
+      "export": "''=x",
+      "operator": "'=x",
+      "restored": "'=x"
+    },
+    {
+      "input": "plain",
+      "export": "plain",
+      "operator": "plain",
+      "restored": "plain"
+    },
+    {
+      "input": "",
+      "export": "",
+      "operator": "",
+      "restored": ""
+    },
+    {
+      "input": null,
+      "export": "",
+      "operator": "",
+      "restored": ""
+    },
+    {
+      "input": "-5",
+      "export": "-5",
+      "operator": "'-5",
+      "restored": "-5"
+    },
+    {
+      "input": "-1.5",
+      "export": "-1.5",
+      "operator": "'-1.5",
+      "restored": "-1.5"
+    },
+    {
+      "input": "+3",
+      "export": "+3",
+      "operator": "'+3",
+      "restored": "+3"
+    },
+    {
+      "input": "-1e-3",
+      "export": "-1e-3",
+      "operator": "'-1e-3",
+      "restored": "-1e-3"
+    },
+    {
+      "input": -5,
+      "export": "-5",
+      "operator": "'-5",
+      "restored": "-5"
+    },
+    {
+      "input": -1.5,
+      "export": "-1.5",
+      "operator": "'-1.5",
+      "restored": "-1.5"
+    },
+    {
+      "input": "-١٢",
+      "export": "'-١٢",
+      "operator": "'-١٢",
+      "restored": "-١٢"
+    },
+    {
+      "input": "-5\n",
+      "export": "'-5\n",
+      "operator": "'-5\n",
+      "restored": "-5\n"
+    },
+    {
+      "input": "''=x",
+      "export": "'''=x",
+      "operator": "''=x",
+      "restored": "''=x"
+    },
+    {
+      "input": "'-5",
+      "export": "'-5",
+      "operator": "'-5",
+      "restored": "'-5"
+    },
+    {
+      "input": "-.5",
+      "export": "-.5",
+      "operator": "'-.5",
+      "restored": "-.5"
+    },
+    {
+      "input": "+.5e-3",
+      "export": "+.5e-3",
+      "operator": "'+.5e-3",
+      "restored": "+.5e-3"
+    },
+    {
+      "input": "-5.",
+      "export": "-5.",
+      "operator": "'-5.",
+      "restored": "-5."
+    },
+    {
+      "input": "--5",
+      "export": "'--5",
+      "operator": "'--5",
+      "restored": "--5"
+    },
+    {
+      "input": "- 5",
+      "export": "'- 5",
+      "operator": "'- 5",
+      "restored": "- 5"
+    },
+    {
+      "input": "-5e",
+      "export": "'-5e",
+      "operator": "'-5e",
+      "restored": "-5e"
+    },
+    {
+      "input": "=",
+      "export": "'=",
+      "operator": "'=",
+      "restored": "="
+    },
+    {
+      "input": "-",
+      "export": "'-",
+      "operator": "'-",
+      "restored": "-"
+    },
+    {
+      "input": "'",
+      "export": "'",
+      "operator": "'",
+      "restored": "'"
+    },
+    {
+      "input": "a=b",
+      "export": "a=b",
+      "operator": "a=b",
+      "restored": "a=b"
+    },
+    {
+      "input": " =x",
+      "export": " =x",
+      "operator": " =x",
+      "restored": " =x"
+    },
+    {
+      "input": "1e5",
+      "export": "1e5",
+      "operator": "1e5",
+      "restored": "1e5"
+    },
+    {
+      "input": "-0x1F",
+      "export": "'-0x1F",
+      "operator": "'-0x1F",
+      "restored": "-0x1F"
+    },
+    {
+      "input": "+1 555 0100",
+      "export": "'+1 555 0100",
+      "operator": "'+1 555 0100",
+      "restored": "+1 555 0100"
+    },
+    {
+      "input": "\n=1",
+      "export": "\n=1",
+      "operator": "\n=1",
+      "restored": "\n=1"
+    },
+    {
+      "input": "@",
+      "export": "'@",
+      "operator": "'@",
+      "restored": "@"
+    },
+    {
+      "input": "+",
+      "export": "'+",
+      "operator": "'+",
+      "restored": "+"
+    },
+    {
+      "input": "0",
+      "export": "0",
+      "operator": "0",
+      "restored": "0"
+    },
+    {
+      "input": 42,
+      "export": "42",
+      "operator": "42",
+      "restored": "42"
+    }
+  ]
+}

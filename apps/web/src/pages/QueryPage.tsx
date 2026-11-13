@@ -13,6 +13,7 @@ import {
   type QueryExportResult,
   type QueryResult,
 } from "../lib/api";
+import { formulaGuardApplies } from "../lib/csvSafety";
 import {
   firstExpanded,
   mergeExpandedObject,
@@ -103,6 +104,8 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
   const [exportResult, setExportResult] = useState<QueryExportResult | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState("csv");
+  // G7-F2: "Protect against spreadsheet formulas" — on by default, as the API.
+  const [formulaProtection, setFormulaProtection] = useState(true);
   const [outputPath, setOutputPath] = useState("");
   const [destConnectorId, setDestConnectorId] = useState("");
   const [destTarget, setDestTarget] = useState("");
@@ -394,6 +397,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
         // A connector write still uses that limit and the API says so.
         full_population: !destConnectorId,
         format: exportFormat,
+        formula_protection: formulaProtection ? "prefix" : "off",
         output_path: outputPath,
         destination_connector_id: destConnectorId || undefined,
         destination: destTarget || undefined,
@@ -787,6 +791,24 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                         onChange={(e) => setOutputPath(e.target.value)}
                         placeholder="File name in exports/ (optional)"
                       />
+                      {formulaGuardApplies(exportFormat) && (
+                        <label className="df2-policy-toggle df2-qw-export-formula">
+                          <input
+                            type="checkbox"
+                            checked={formulaProtection}
+                            onChange={(e) => setFormulaProtection(e.target.checked)}
+                            aria-describedby="query-export-formula-hint"
+                          />
+                          <span>
+                            <strong>Protect against spreadsheet formulas</strong>
+                            <small id="query-export-formula-hint">
+                              {formulaProtection
+                                ? "Text starting with = + - @ gets a leading ' so Excel never runs it. Numbers stay numbers."
+                                : "Off: exact values — a cell such as =HYPERLINK(…) runs when the file is opened."}
+                            </small>
+                          </span>
+                        </label>
+                      )}
                     </>
                   )}
                   <Button

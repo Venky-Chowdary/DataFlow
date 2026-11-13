@@ -8,6 +8,7 @@ import { ShapeStepFields } from "./ShapeStepFields";
 import { StudioCommandPalette } from "./StudioCommandPalette";
 import { checkShapeExpression, previewShapeRecipe } from "../../lib/api";
 import { usePointerDrag } from "../../lib/pointerDrag";
+import { toDelimitedText } from "../../lib/csvSafety";
 import { paletteActions } from "../../lib/canvasPalette";
 import {
   chainDocument,
@@ -1358,11 +1359,10 @@ function cellText(value: unknown): string {
 }
 
 function downloadCsv(columns: string[], rows: Record<string, unknown>[]) {
-  const line = (row: Record<string, unknown> | null, names: string[]) => names.map((name) => {
-    const text = row ? cellText(row[name]) : name;
-    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-  }).join(",");
-  const blob = new Blob([[line(null, columns), ...rows.map((row) => line(row, columns))].join("\n")], { type: "text/csv" });
+  // A preview a person opens in a spreadsheet: formula-looking cells (and header
+  // names) are defused with the API's rule; CR/LF/quotes/commas are quoted (G7-F2).
+  const text = toDelimitedText(columns, rows, { formulaProtection: true, cell: cellText });
+  const blob = new Blob([text], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

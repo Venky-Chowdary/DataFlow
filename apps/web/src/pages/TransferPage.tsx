@@ -249,6 +249,8 @@ import {
 } from "../components/transfer/SourceReadWindowPanel";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
+import { formulaGuardApplies } from "../lib/csvSafety";
+import { fileExportDestExtra, fileExportEndpoint } from "../lib/fileExportDestination";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
 import { localizeServerEventLog, readJobEventLog } from "../lib/jobEventLog";
 import {
@@ -541,6 +543,9 @@ export function TransferPage({
   const mapSourceKind = sourceKind === "cloud" ? "object_store" : sourceKind;
   const destSelected = destKindMode === "file_export" || Boolean(destType);
   const [exportFormat, setExportFormat] = useState("json");
+  // G7-F2: file_export "Protect against spreadsheet formulas" — off by default (the
+  // API's file_export default: the file is data, byte-exact for Gate-8).
+  const [exportFormulaProtection, setExportFormulaProtection] = useState(false);
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
   const [persistedPlanId, setPersistedPlanId] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
@@ -1523,7 +1528,7 @@ export function TransferPage({
     name: sourceFileName ?? sourceStreamName,
     source: buildSourceEndpoint(),
     destination: destKindMode === "file_export"
-      ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
+      ? fileExportEndpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath, formulaProtection: exportFormulaProtection })
       : buildDestinationEndpoint(),
     source_columns: currentSourceColumns,
     source_schema: currentSourceSchema,
@@ -1574,6 +1579,7 @@ export function TransferPage({
     cloudPath,
     destKindMode,
     exportFormat,
+    exportFormulaProtection,
     targetDb,
     currentSourceColumns,
     currentSourceSchema,
@@ -2551,6 +2557,7 @@ export function TransferPage({
     if (dst.kind === "file_export") {
       setDestKindMode("file_export");
       setExportFormat(dst.format);
+      setExportFormulaProtection(dst.formulaProtection);
       if (dst.outputPath) setDestOutputPath(dst.outputPath);
     } else {
       setDestKindMode("database");
@@ -3071,7 +3078,7 @@ export function TransferPage({
     setPlanLoading(true);
     try {
       const destination = destKindMode === "file_export"
-        ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
+        ? fileExportEndpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath, formulaProtection: exportFormulaProtection })
         : buildDestinationEndpoint();
       const source = buildSourceEndpoint();
 
@@ -6089,7 +6096,9 @@ export function TransferPage({
           return Object.keys(extra).length ? extra : undefined;
         })(),
         destExtra: (() => {
-          const extra: Record<string, unknown> = {};
+          const extra: Record<string, unknown> = destKindMode === "file_export"
+            ? fileExportDestExtra({ format: exportFormat, formulaProtection: exportFormulaProtection })
+            : {};
           const provenExists = destTableExists ?? destTableExistsRef.current;
           if (provenExists !== null && provenExists !== undefined) {
             extra.table_exists = provenExists;
@@ -6252,6 +6261,7 @@ export function TransferPage({
           format: exportFormat,
           outputBasename: targetCollection || undefined,
           numberLocale,
+          formulaProtection: exportFormulaProtection,
         });
         setResult(localResult);
         setRunStartupProgress(100);
@@ -7025,7 +7035,7 @@ export function TransferPage({
         name,
         source: buildSourceEndpoint() as Record<string, unknown>,
         destination: (destKindMode === "file_export"
-          ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
+          ? fileExportEndpoint({ format: exportFormat, database: targetDb, outputPath: destOutputPath, formulaProtection: exportFormulaProtection })
           : buildDestinationEndpoint()) as Record<string, unknown>,
         mappings,
         column_types: columnTypes,
@@ -8080,6 +8090,24 @@ export function TransferPage({
                     <p className="df2-label-hint" role="note">
                       {fileExportUnavailable.reason}. {fileExportUnavailable.message}
                     </p>
+                  )}
+                  {formulaGuardApplies(exportFormat) && (
+                    <label className="df2-policy-toggle df2-dest-export-formula">
+                      <input
+                        type="checkbox"
+                        checked={exportFormulaProtection}
+                        onChange={(e) => setExportFormulaProtection(e.target.checked)}
+                        aria-describedby="dest-export-formula-hint"
+                      />
+                      <span>
+                        <strong>Protect against spreadsheet formulas</strong>
+                        <small id="dest-export-formula-hint">
+                          {exportFormulaProtection
+                            ? "Text starting with = + - @ gets a leading ' so Excel never runs it. Numbers stay numbers; Gate-8 reads the exact values back."
+                            : "Off: the file is data, byte-exact. Turn on when people open it in a spreadsheet."}
+                        </small>
+                      </span>
+                    </label>
                   )}
                 </div>
               ) : (
