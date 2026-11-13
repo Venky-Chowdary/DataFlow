@@ -22,7 +22,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
-from services.atomic_file import fsync_directory, write_json_atomic
+from services.atomic_file import fsync_directory, locked_update, write_json_atomic
 from services.platform_config import data_dir
 from services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell
 
@@ -563,26 +563,27 @@ def save_profile(
         from services.pii_hash_keys import snapshot_version
 
         pii_hash_key_version = snapshot_version()
-    store = _load_store(source, destination)
-    runs = list(store.get("runs") or [])
-    columns = _serialize_profile(profile)
-    rc = row_count if row_count is not None else max((c.count for c in profile.values()), default=0)
-    jid = str(job_id or "").strip()
-    if jid:
-        runs = [r for r in runs if str((r or {}).get("job_id") or "") != jid]
-    runs.append({
-        "captured_at": datetime.now(timezone.utc).isoformat(),
-        "job_id": jid or None,
-        "row_count": rc,
-        "schema_version": _schema_version(profile),
-        "null_rate_metric": NULL_RATE_METRIC,
-        "columns": columns,
-        "quarantine_histogram": quarantine_histogram(rejected_details),
-        "rejected_rows": int(rejected_rows or 0),
-        # The hash_pii key version this load digested with (QA review #7).
-        **({"pii_hash_key_version": str(pii_hash_key_version)} if pii_hash_key_version else {}),
-    })
-    _save_store(source, destination, {"runs": runs})
+    with locked_update(_profile_path(_profile_key(source, destination))):  # one load-append-write per route
+        store = _load_store(source, destination)
+        runs = list(store.get("runs") or [])
+        columns = _serialize_profile(profile)
+        rc = row_count if row_count is not None else max((c.count for c in profile.values()), default=0)
+        jid = str(job_id or "").strip()
+        if jid:
+            runs = [r for r in runs if str((r or {}).get("job_id") or "") != jid]
+        runs.append({
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "job_id": jid or None,
+            "row_count": rc,
+            "schema_version": _schema_version(profile),
+            "null_rate_metric": NULL_RATE_METRIC,
+            "columns": columns,
+            "quarantine_histogram": quarantine_histogram(rejected_details),
+            "rejected_rows": int(rejected_rows or 0),
+            # The hash_pii key version this load digested with (QA review #7).
+            **({"pii_hash_key_version": str(pii_hash_key_version)} if pii_hash_key_version else {}),
+        })
+        _save_store(source, destination, {"runs": runs})
 
 
 def record_run_parity(
@@ -597,17 +598,18 @@ def record_run_parity(
     The slot is the run the engine already recorded for ``job_id``; no run is
     invented. Returns whether that run was found and updated.
     """
-    store = _load_store(source, destination)
-    runs = list(store.get("runs") or [])
-    jid = str(job_id or "").strip()
-    for run in runs:
-        if jid and str((run or {}).get("job_id") or "") == jid:
-            if run.get("parity") == parity:
+    with locked_update(_profile_path(_profile_key(source, destination))):  # one load-modify-write per route
+        store = _load_store(source, destination)
+        runs = list(store.get("runs") or [])
+        jid = str(job_id or "").strip()
+        for run in runs:
+            if jid and str((run or {}).get("job_id") or "") == jid:
+                if run.get("parity") == parity:
+                    return True
+                run["parity"] = dict(parity)
+                _save_store(source, destination, {"runs": runs})
                 return True
-            run["parity"] = dict(parity)
-            _save_store(source, destination, {"runs": runs})
-            return True
-    return False
+        return False
 
 
 def parity_is_drifting(
@@ -1159,24 +1161,26 @@ def forget_job_runs(job_ids: set[str], *, dry_run: bool = False) -> int:
     rewrote = False
     try:
         for path in sorted(quality_profiles_dir().glob("*.json")):
-            try:
-                doc = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if not isinstance(doc, dict):
-                continue
-            hit, new = _strip(doc)
-            if not hit:
-                continue
-            touched += 1
-            if dry_run:
-                continue
-            if new is None:
-                path.unlink(missing_ok=True)
-            else:
-                # One directory fsync for the whole sweep, not one per profile.
-                write_json_atomic(path, new, sync_directory=False)
-            rewrote = True
+            # Same lock as a load's record_*: a run recorded meanwhile is not lost.
+            with locked_update(path):
+                try:
+                    doc = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(doc, dict):
+                    continue
+                hit, new = _strip(doc)
+                if not hit:
+                    continue
+                touched += 1
+                if dry_run:
+                    continue
+                if new is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    # One directory fsync for the whole sweep, not one per profile.
+                    write_json_atomic(path, new, sync_directory=False)
+                rewrote = True
     finally:
         # Also when a later profile fails: the ones already rewritten stay durable.
         if rewrote:

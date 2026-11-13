@@ -77,3 +77,84 @@ def test_locked_update_is_one_reentrant_lock_per_path(tmp_path):
             pass
     assert atomic_file.path_update_lock(a) is atomic_file.path_update_lock(tmp_path / "." / "a.json")
     assert atomic_file.path_update_lock(a) is not atomic_file.path_update_lock(b)
+
+
+def _slow_writes(monkeypatch, module):
+    real_write = atomic_file.write_json_atomic
+
+    def slow_write(target, data, **kwargs):
+        time.sleep(0.01)
+        return real_write(target, data, **kwargs)
+
+    monkeypatch.setattr(module, "write_json_atomic", slow_write)
+
+
+def test_concurrent_watermark_writes_are_all_kept(tmp_path, monkeypatch):
+    from services import sync_cursor
+
+    monkeypatch.setattr(sync_cursor, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sync_cursor, "_mongo_cursors", lambda: None)
+    _slow_writes(monkeypatch, sync_cursor)
+    _together(12, lambda i: sync_cursor.set_watermark(f"route-{i}", str(100 + i)))
+    keys = {e["key"] for e in json.loads((tmp_path / "sync_cursors.json").read_text())["cursors"]}
+    assert keys == {f"route-{i}" for i in range(12)}
+
+    # Clears and job forgets racing new watermarks lose nothing either.
+    sync_cursor.set_watermark("gone-a", "1", metadata={"job_id": "job-x"})
+    sync_cursor.set_watermark("gone-b", "1")
+    _together(6, lambda i: (
+        sync_cursor.clear_watermark("gone-b") if i == 0
+        else sync_cursor.forget_job_watermarks({"job-x"}) if i == 1
+        else sync_cursor.set_watermark(f"late-{i}", "1")
+    ))
+    keys = {e["key"] for e in json.loads((tmp_path / "sync_cursors.json").read_text())["cursors"]}
+    assert {f"late-{i}" for i in range(2, 6)} <= keys
+    assert {f"route-{i}" for i in range(12)} <= keys
+    assert not {"gone-a", "gone-b"} & keys
+
+
+def test_concurrent_schema_registrations_are_all_kept_with_unique_versions(tmp_path, monkeypatch):
+    from services import schema_registry
+
+    monkeypatch.setattr(schema_registry, "_SCHEMAS_PATH", tmp_path / "schemas.json")
+    monkeypatch.setattr(schema_registry, "_schemas_coll", lambda: None)
+    _slow_writes(monkeypatch, schema_registry)
+    _together(8, lambda i: schema_registry.register_schema(
+        [{"name": "id", "type": "INTEGER"}], connector_type="pg", connector_id=f"c{i}", object_name="t",
+    ))
+    stored = json.loads((tmp_path / "schemas.json").read_text())
+    assert set(stored) == {f"pg:c{i}:t" for i in range(8)}
+
+    # Same object, different column sets at once: versions 2..7, none reused.
+    _together(6, lambda i: schema_registry.register_schema(
+        [{"name": f"col{i}", "type": "TEXT"}], connector_type="pg", connector_id="c0", object_name="t",
+    ))
+    versions = [v["version"] for v in json.loads((tmp_path / "schemas.json").read_text())["pg:c0:t"]]
+    assert versions == list(range(1, 8)), versions
+
+
+def test_concurrent_lineage_appends_are_all_kept(tmp_path, monkeypatch):
+    from services import schema_registry
+
+    monkeypatch.setattr(schema_registry, "_LINEAGE_PATH", tmp_path / "lineage.json")
+    monkeypatch.setattr(schema_registry, "_lineage_coll", lambda: None)
+    _slow_writes(monkeypatch, schema_registry)
+    _together(10, lambda i: schema_registry.record_lineage(
+        {"connector_id": "s", "connector_type": "pg", "object_name": "a"},
+        {"connector_id": "d", "connector_type": "pg", "object_name": "b"},
+        [{"source": f"c{i}", "target": f"c{i}"}],
+        job_id=f"job-{i}",
+    ))
+    edges = json.loads((tmp_path / "lineage.json").read_text())["edges"]
+    assert sorted(e["job_id"] for e in edges) == sorted(f"job-{i}" for i in range(10))
+
+
+def test_concurrent_retired_slot_records_are_all_kept(tmp_path, monkeypatch):
+    from services import cdc_slot_resume
+
+    monkeypatch.setattr(cdc_slot_resume, "STORE_PATH", tmp_path / "retired.json")
+    monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: None)
+    _slow_writes(monkeypatch, cdc_slot_resume)
+    _together(10, lambda i: cdc_slot_resume.retire_slot_lsn(f"0/{i:X}", cursor_key=f"k{i}", slot_name="s"))
+    rows = json.loads((tmp_path / "retired.json").read_text())["resumes"]
+    assert sorted(r["cursor_key"] for r in rows) == sorted(f"k{i}" for i in range(10))
