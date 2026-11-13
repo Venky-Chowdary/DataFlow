@@ -171,10 +171,14 @@ def _tsv_quote_cell(cell: str) -> str:
 
 
 def format_csv_row(cells: list[str], delimiter: str = ",") -> str:
-    """One encoded row as CSV text (no trailing newline)."""
+    """One encoded row as CSV text (no trailing newline).
+
+    A cell holding the row's own delimiter, a quote, CR or LF is quoted for
+    every delimiter (G7-F1: ``;``/``|`` rows used to quote only on ``,``).
+    """
     if delimiter == "\t":
         return "\t".join(_tsv_quote_cell(c) for c in cells)
-    return delimiter.join(csv_quote_cell(c) for c in cells)
+    return delimiter.join(csv_quote_cell(c, delimiter) for c in cells)
 
 
 def csv_null_sentinel() -> str:
