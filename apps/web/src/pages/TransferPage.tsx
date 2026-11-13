@@ -22,7 +22,9 @@ import {
   headAfterOwnMap,
   headIfOurs,
   headVersion,
+  isClientSideFailure,
   isPlanVersionConflict,
+  newMapRequestId,
   type PlanMappingRow,
 } from "../lib/planConcurrency";
 import { usePlanConflict } from "../lib/usePlanConflict";
@@ -1901,6 +1903,7 @@ export function TransferPage({
         return carried;
       };
       let mappedViaPlan: string | null = null;
+      let mapRequestId = "";
       try {
         // Prefer direct map when fresh dest schema is in-hand — plan persistence
         // can lag React state and previously wiped create-new proposals.
@@ -1921,7 +1924,9 @@ export function TransferPage({
           });
           if (planId) {
             mappedViaPlan = planId;
+            mapRequestId = newMapRequestId();
             result = await mapTransferPlan(planId, {
+              client_request_id: mapRequestId,
               validation_mode: validationMode,
               use_llm: true,
               source_samples: buildSourceSamples(),
@@ -2007,13 +2012,15 @@ export function TransferPage({
           void openPlanConflict(mappedViaPlan, editorMappingRows(), "map");
           return columnMappingsRef.current;
         }
-        if (mappedViaPlan) {
-          // E.g. the client gave up (timeout) while the server committed this
-          // Map: adopt the head only if the one new revision is a Map result.
+        if (mappedViaPlan && isClientSideFailure(e)) {
+          // The client gave up (timeout / abort / network) and the server may
+          // still have committed this Map: adopt the head only if the newest
+          // revision carries this request's id. A server answer is never ours.
           const planId = mappedViaPlan;
+          const requestId = mapRequestId;
           void getTransferPlan(planId)
             .then(({ plan }) => {
-              const head = headAfterOwnMap(plan, planHeadRef.current);
+              const head = headAfterOwnMap(plan, planHeadRef.current, requestId);
               if (head != null) planHeadRef.current = head;
             })
             .catch(() => undefined);

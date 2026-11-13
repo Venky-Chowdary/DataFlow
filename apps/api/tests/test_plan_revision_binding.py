@@ -456,3 +456,34 @@ def test_a_legacy_preflight_record_still_sets_the_status_when_active_version_nam
     assert plan.status == "preflight_failed"
     assert plan.preflight_runs[-1]["mapping_version"] == 2
     assert plan.preflight_runs[-1]["mapping_hash"] == plan.active_revision().mapping_hash
+
+
+# ---------------------------------------------------------------------------
+# Map stores the client's request id, so the page can recognise its own Map
+# ---------------------------------------------------------------------------
+
+
+def test_map_records_the_client_request_id_on_its_revision():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.routers import transfer_router
+
+    plan_id = _plan()
+    app = FastAPI()
+    app.include_router(transfer_router.router, prefix="/api/v1")
+    client = TestClient(app)
+    result = {"mappings": _maps("login"), "validation": {"passed": True, "issues": []}}
+    with patch("services.mapping_pipeline.run_mapping_pipeline", return_value=result):
+        res = client.post(
+            f"/api/v1/transfer/plans/{plan_id}/map",
+            json={"use_llm": False, "client_request_id": "map-7f3c2a1e"},
+        )
+    assert res.status_code == 200, res.text
+    head = get_plan(plan_id).revisions[-1]
+    assert head.plan_summary.get("client_request_id") == "map-7f3c2a1e"
+
+    bad = client.post(f"/api/v1/transfer/plans/{plan_id}/map", json={"client_request_id": "x" * 65})
+    assert bad.status_code == 422
+    bad = client.post(f"/api/v1/transfer/plans/{plan_id}/map", json={"client_request_id": "a b<c>"})
+    assert bad.status_code == 422

@@ -56,8 +56,12 @@ def run_plan_mapping(
     use_llm: bool = True,
     source_samples: dict[str, list[str]] | None = None,
     deferred: bool | None = None,
+    client_request_id: str | None = None,
 ) -> Any:
     """Run the mapping pipeline for a plan and store its result as a revision.
+
+    ``client_request_id`` (the caller's id for this Map) is stored on the
+    revision as ``plan_summary.client_request_id``.
 
     ``deferred=True`` runs the pipeline only and returns ``commit()``, the
     plan write (which can wait on the store lock) for the caller to run
@@ -137,6 +141,9 @@ def run_plan_mapping(
         schema_policy=str(policies.get("schema_policy", "manual_review")),
         table_exists=table_exists,
     )
+
+    if client_request_id:
+        result["plan_summary"] = {**dict(result.get("plan_summary") or {}), "client_request_id": client_request_id}
 
     def commit() -> dict[str, Any]:
         # Appended only onto the plan state Map read: a UI save, approval or

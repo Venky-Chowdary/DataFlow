@@ -3039,7 +3039,13 @@ export async function createTransferPlan(payload: {
  */
 export async function mapTransferPlan(
   planId: string,
-  payload: { validation_mode?: string; use_llm?: boolean; source_samples?: Record<string, string[]> } = {},
+  payload: {
+    validation_mode?: string;
+    use_llm?: boolean;
+    source_samples?: Record<string, string[]>;
+    /** Stored on the revision, so a caller that gave up waiting can recognise its own Map. */
+    client_request_id?: string;
+  } = {},
 ) {
   const res = await planWriteResponse(() => apiFetch(`${API_BASE}/transfer/plans/${planId}/map`, {
     method: "POST",

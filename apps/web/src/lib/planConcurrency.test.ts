@@ -120,15 +120,38 @@ describe("diffPlanMappings / sameMappings", () => {
 });
 
 describe("headAfterOwnMap", () => {
-  it("adopts exactly one newer Map revision, never a UI save or several", async () => {
+  it("adopts the head only when it is the revision this page's Map request created", async () => {
     const { headAfterOwnMap } = await import("./planConcurrency.js");
-    const mapRev = { version: 3, validation: { passed: true } as { source?: string } };
-    const uiRev = { version: 3, validation: { source: "ui_sync" } };
-    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, mapRev] }, 2), 3);
-    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, uiRev] }, 2), null);
-    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, mapRev, { version: 4 }] }, 2), null);
-    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }] }, 2), null);
-    assert.equal(headAfterOwnMap({ id: "p", revisions: [mapRev] }, null), null);
+    const ours = { version: 3, plan_summary: { client_request_id: "map-ours" } };
+    const theirs = { version: 3, plan_summary: { client_request_id: "map-theirs" } };
+    const anonymous = { version: 3, validation: { passed: true } as { source?: string } };
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, ours] }, 2, "map-ours"), 3);
+    // Another user's Map (the review's probe: v2 ui_sync, v3 pipeline) is never adopted.
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, theirs] }, 2, "map-ours"), null);
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, anonymous] }, 2, "map-ours"), null);
+    // Ours landed, but someone saved after it: the head is not ours.
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, ours, { version: 4 }] }, 2, "map-ours"), null);
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [ours] }, null, "map-ours"), null);
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, ours] }, 2, ""), null);
+  });
+});
+
+describe("isClientSideFailure", () => {
+  it("is true only when no server answer arrived", async () => {
+    const { isClientSideFailure } = await import("./planConcurrency.js");
+    assert.equal(isClientSideFailure(new Error("Request timed out")), true);
+    assert.equal(isClientSideFailure(new DOMException("Aborted", "AbortError")), true);
+    assert.equal(isClientSideFailure(new TypeError("Failed to fetch")), true);
+    assert.equal(isClientSideFailure(new Error("Plan mapping failed: 500")), false);
+  });
+});
+
+describe("newMapRequestId", () => {
+  it("is unique and matches the API's id pattern", async () => {
+    const { newMapRequestId } = await import("./planConcurrency.js");
+    const a = newMapRequestId();
+    assert.match(a, /^[A-Za-z0-9._:-]{1,64}$/);
+    assert.notEqual(a, newMapRequestId());
   });
 });
 

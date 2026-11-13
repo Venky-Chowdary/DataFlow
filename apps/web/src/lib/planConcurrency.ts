@@ -164,6 +164,7 @@ export interface PlanRevisionView {
   mappings?: PlanMappingRow[];
   validation?: { source?: string } | null;
   agents_used?: string[];
+  plan_summary?: { client_request_id?: string } | null;
 }
 
 export interface PlanView {
@@ -210,21 +211,41 @@ export function sameMappings(a: PlanMappingRow[], b: PlanMappingRow[]): boolean 
 }
 
 /**
- * After a Map that failed on the client (e.g. timed out) while the server may
- * still have committed it: the head this page may adopt, or null.
+ * After this page's Map failed on the client (timed out, aborted, network)
+ * while the server may still have committed it: the head this page may
+ * adopt, or null.
  *
- * Every revision newer than `knownHead` must be a Map result (not a UI save,
- * whose validation source is "ui_sync"), and there may be at most one: that
- * is this page's own Map landing. Anything else is someone else's work, and
- * the head stays as it was, so the next save meets the conflict dialog.
+ * Only the revision that carries this page's own `client_request_id` (sent
+ * with the Map, stored as `plan_summary.client_request_id`) and is the
+ * plan's newest revision proves the Map was ours. Anything else — another
+ * user's Map, a UI save, a later save on top — leaves the head alone, so the
+ * next save meets the comparison dialog.
  */
-export function headAfterOwnMap(plan: PlanView | null | undefined, knownHead: number | null): number | null {
-  if (knownHead == null) return null;
-  const newer = (plan?.revisions ?? []).filter((r) => r.version > knownHead);
-  if (newer.length !== 1) return null;
-  const [rev] = newer;
-  if (rev.validation?.source === "ui_sync") return null;
-  return rev.version;
+export function headAfterOwnMap(
+  plan: PlanView | null | undefined,
+  knownHead: number | null,
+  requestId: string,
+): number | null {
+  if (knownHead == null || !requestId) return null;
+  const revisions = plan?.revisions ?? [];
+  if (!revisions.length) return null;
+  const head = revisions.reduce((a, b) => (b.version > a.version ? b : a));
+  if (head.version <= knownHead) return null;
+  return head.plan_summary?.client_request_id === requestId ? head.version : null;
+}
+
+/** True when the request failed before any server answer (timeout, abort, network). */
+export function isClientSideFailure(err: unknown): boolean {
+  if (err instanceof TypeError) return true;
+  const e = err as { name?: string; message?: string } | null;
+  return e?.name === "AbortError" || e?.message === "Request timed out";
+}
+
+/** A fresh id for one Map request (matches the API's `client_request_id` pattern). */
+export function newMapRequestId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  const raw = c?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `map-${raw}`;
 }
 
 /**

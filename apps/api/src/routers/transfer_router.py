@@ -728,6 +728,12 @@ class PlanMapRequest(PolicyFieldsModel):
     validation_mode: str = "balanced"
     use_llm: bool = True
     source_samples: dict[str, list[str]] = Field(default_factory=dict)
+    #: Opaque id the caller picks for this Map (stored on the revision as
+    #: plan_summary.client_request_id), so a client that gave up waiting can
+    #: tell its own Map from someone else's.
+    client_request_id: Optional[str] = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class UpdatePlanRequest(BaseModel):
@@ -943,6 +949,7 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
             validation_mode=body.validation_mode,
             use_llm=body.use_llm,
             source_samples=body.source_samples or None,
+            client_request_id=body.client_request_id,
         )
     except PlanVersionConflict as e:
         raise _plan_version_conflict(
