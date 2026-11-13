@@ -337,6 +337,8 @@ class TemplateCreate(MappingDocumentBody):
 class TemplateApply(BaseModel):
     source_columns: list[str] = Field(..., max_length=_MAX_COLUMNS)
     destination_columns: list[str] = Field(..., max_length=_MAX_COLUMNS)
+    # Generated / identity columns the engine fills; never re-bound onto.
+    unwritable_columns: list[str] = Field(default_factory=list, max_length=_MAX_COLUMNS)
 
 
 def _document(body: MappingDocumentBody) -> dict[str, Any]:
@@ -495,6 +497,9 @@ def apply_mapping_template(template_id: str, body: TemplateApply, request: Reque
         if m.get("target") and not m.get("intentional_omit")
     ]
     out = rebind_template_pairs(
-        pairs, source_columns=body.source_columns, destination_columns=body.destination_columns
+        pairs,
+        source_columns=body.source_columns,
+        destination_columns=body.destination_columns,
+        unwritable_columns=body.unwritable_columns,
     )
     return {**out, "computed": spec.get("computed") or [], "template": record.get("name")}

@@ -130,6 +130,44 @@ def test_template_reports_what_it_cannot_rebind():
     assert out["unbound"] == [{"source": "tax_code", "target": "tax_ref", "missing": "source"}]
 
 
+def test_template_binds_each_live_source_once():
+    # A hand-edited template may name one source twice; the editor holds one
+    # target per source row, so the second pair is reported, not suggested.
+    out = rebind_template_pairs(
+        [("order_id", "legacy_ref"), ("order_id", "order_ref")],
+        source_columns=["order_id"],
+        destination_columns=["legacy_ref", "order_ref"],
+    )
+    assert [(s["source"], s["target"]) for s in out["suggestions"]] == [("order_id", "legacy_ref")]
+    assert out["unbound"] == [{"source": "order_id", "target": "order_ref", "missing": "source"}]
+
+
+def test_template_never_binds_an_engine_filled_column():
+    out = rebind_template_pairs(
+        [("order_id", "legacy_ref"), ("total", "total_cents")],
+        source_columns=["order_id", "total"],
+        destination_columns=["legacy_ref", "total_cents", "total_cents_v2"],
+        unwritable_columns=["total_cents"],
+    )
+    got = [(s["source"], s["target"]) for s in out["suggestions"]]
+    assert ("total", "total_cents") not in got
+    assert all(s["target"] != "total_cents" for s in out["suggestions"])
+    assert {"source": "total", "target": "total_cents", "missing": "target_unwritable"} in out["unbound"]
+
+
+def test_template_apply_route_skips_unwritable_columns(tenancy_world):
+    w = tenancy_world
+    tid = w.a.post(f"{BASE}/templates", json={"name": "gen", "mappings": MAPPINGS}).json()["id"]
+    body = {
+        "source_columns": [m["source"] for m in MAPPINGS],
+        "destination_columns": [m["target"] for m in MAPPINGS],
+        "unwritable_columns": [MAPPINGS[0]["target"]],
+    }
+    out = w.a.post(f"{BASE}/templates/{tid}/apply", json=body).json()
+    assert MAPPINGS[0]["target"] not in {s["target"] for s in out["suggestions"]}
+    assert any(u["missing"] == "target_unwritable" for u in out["unbound"])
+
+
 # --------------------------------------------------------------------------- routes
 
 

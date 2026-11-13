@@ -7,6 +7,7 @@ import {
   computedStep,
   documentRows,
   loadTimeAdvice,
+  templateUnboundNote,
 } from "./mappingCode";
 
 const row = (source: string, target: string, extra: Partial<EditableMapping> = {}): EditableMapping => ({
@@ -70,5 +71,22 @@ describe("computed columns are Transform steps", () => {
     const without = loadTimeAdvice({ name: "loaded_at", hasDefault: false, default: null });
     assert.equal(without.ok, false);
     assert.match(without.message, /preview, Validate, Execute and a resume/);
+  });
+});
+
+describe("template re-binding notes", () => {
+  it("says why each template pair did not bind", () => {
+    assert.equal(
+      templateUnboundNote({ source: "total", target: "total_cents", missing: "target_unwritable" }),
+      "total → total_cents: total_cents is filled by the database (generated or identity), so it is left alone.",
+    );
+    assert.equal(
+      templateUnboundNote({ source: "a", target: "b", missing: "both" }),
+      "a → b: no matching source or destination column here.",
+    );
+    assert.equal(
+      templateUnboundNote({ source: "a", target: "b", missing: "source" }),
+      "a → b: no matching source column here (or it is already bound).",
+    );
   });
 });

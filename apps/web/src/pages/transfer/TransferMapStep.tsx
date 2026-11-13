@@ -4,7 +4,7 @@ import { AutoMapDialog } from "../../components/mapping/AutoMapDialog";
 import { ComputedColumnDialog } from "../../components/mapping/ComputedColumnDialog";
 import { TemplatesDialog } from "../../components/mapping/TemplatesDialog";
 import { HiddenFileInput } from "../../components/ui/HiddenFileInput";
-import { applyImportedMappings, documentRows } from "../../lib/mappingCode";
+import { applyImportedMappings, documentRows, templateUnboundNote } from "../../lib/mappingCode";
 import type { ShapeStepWire } from "../../lib/shape";
 import { DestinationColumnsPanel, DND_MIME } from "../../components/mapping/DestinationColumnsPanel";
 import { MappingToolbar } from "../../components/mapping/MappingToolbar";
@@ -338,13 +338,14 @@ export function TransferMapStep({
         t.id,
         columnMappings.filter((m) => !isIntentionalOmit(m)).map((m) => m.source),
         (catalog?.columns ?? []).map((c) => c.name),
+        (catalog?.columns ?? []).filter((c) => c.writable === false).map((c) => c.name),
       );
       setPendingComputed(out.computed ?? []);
       setAutoMap({
         open: true, mode: "template", templateName: t.name, loading: false, error: "",
         suggestions: out.suggestions,
         notes: [
-          ...out.unbound.map((u) => `${u.source} → ${u.target}: no matching ${u.missing === "both" ? "source or destination" : u.missing} column here.`),
+          ...out.unbound.map(templateUnboundNote),
           ...(out.computed?.length ? [`The template also adds ${out.computed.length} computed column(s): use “Add to Transform” after applying.`] : []),
         ],
       });

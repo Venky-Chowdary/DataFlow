@@ -191,10 +191,11 @@ export async function applyMappingTemplate(
   templateId: string,
   sourceColumns: string[],
   destinationColumns: string[],
+  unwritableColumns: string[] = [],
 ): Promise<{ suggestions: AutoMapSuggestion[]; unbound: Array<{ source: string; target: string; missing: string }>; computed: ShapeStepWire[] }> {
   return postJson(
     `${API_BASE}/transfer/mapping/templates/${encodeURIComponent(templateId)}/apply`,
-    { source_columns: sourceColumns, destination_columns: destinationColumns },
+    { source_columns: sourceColumns, destination_columns: destinationColumns, unwritable_columns: unwritableColumns },
     "Could not apply the template",
   );
 }

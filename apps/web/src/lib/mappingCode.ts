@@ -108,3 +108,19 @@ export function destColumnForAdvice(catalog: DestColumnCatalog | null, name: str
   const c = findDestColumn(catalog, name);
   return c ? { name: c.name, hasDefault: c.hasDefault, default: c.default } : undefined;
 }
+
+export interface TemplateUnbound {
+  source: string;
+  target: string;
+  missing: string;
+}
+
+/** One line per template pair the server could not re-bind, saying why. */
+export function templateUnboundNote(u: TemplateUnbound): string {
+  const head = `${u.source} → ${u.target}`;
+  if (u.missing === "target_unwritable") {
+    return `${head}: ${u.target} is filled by the database (generated or identity), so it is left alone.`;
+  }
+  if (u.missing === "both") return `${head}: no matching source or destination column here.`;
+  return `${head}: no matching ${u.missing} column here (or it is already bound).`;
+}

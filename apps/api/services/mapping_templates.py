@@ -166,20 +166,40 @@ def rebind_template_pairs(
     *,
     source_columns: list[str],
     destination_columns: list[str],
+    unwritable_columns: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """Re-bind template ``(source, target)`` pairs onto the live columns."""
+    """Re-bind template ``(source, target)`` pairs onto the live columns.
+
+    Each live source and each live target is bound once (the editor holds one
+    target per source row). A generated or identity column the engine fills
+    (``unwritable_columns``) is never a candidate: a template pair that names
+    one is reported as ``target_unwritable`` rather than re-bound elsewhere.
+    """
     pairs = [(str(s), str(t)) for s, t in pairs if str(s) and str(t)]
+    blocked = {str(c).lower() for c in unwritable_columns if str(c)}
+    writable = [c for c in dict.fromkeys(destination_columns) if c.lower() not in blocked]
     src = _bind([s for s, _ in pairs], list(dict.fromkeys(source_columns)))
-    dst = _bind(list(dict.fromkeys(t for _, t in pairs)), list(dict.fromkeys(destination_columns)))
+    dst = _bind(
+        list(dict.fromkeys(t for _, t in pairs if t.lower() not in blocked)), writable
+    )
     suggestions: list[dict[str, Any]] = []
     unbound: list[dict[str, str]] = []
+    used_sources: set[str] = set()
     used_targets: set[str] = set()
     for s, t in pairs:
+        if t.lower() in blocked:
+            unbound.append({"source": s, "target": t, "missing": "target_unwritable"})
+            continue
         hit_s, hit_t = src.get(s), dst.get(t)
-        if not hit_s or not hit_t or hit_t[0] in used_targets:
+        if hit_s and hit_s[0] in used_sources:
+            hit_s = None
+        if hit_t and hit_t[0] in used_targets:
+            hit_t = None
+        if not hit_s or not hit_t:
             missing = "both" if not hit_s and not hit_t else ("source" if not hit_s else "target")
             unbound.append({"source": s, "target": t, "missing": missing})
             continue
+        used_sources.add(hit_s[0])
         used_targets.add(hit_t[0])
         confidence = round(min(hit_s[1], hit_t[1]), 3)
         notes = [f"Template pair {s} → {t}"]
