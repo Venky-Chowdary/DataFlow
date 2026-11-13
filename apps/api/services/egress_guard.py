@@ -786,6 +786,7 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
     from services.platform_aws_credentials import iceberg_connector_refusal
     from services.platform_gcp_azure_credentials import iceberg_gcp_azure_connector_refusal
 
+    from connectors.host_config_selectors import settings_refusal as host_config_refusal
     from connectors.kafka_sasl_policy import settings_refusal as kafka_settings_refusal
     from connectors.mysql_options import connector_option_refusal
     from connectors.mongodb_auth_mechanism import settings_refusal as mongo_auth_refusal
@@ -806,6 +807,8 @@ def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
         )
         # BigQuery / GCS: never the host's Google identity or key files (follow-up review 2, BQ).
         or google_connector_refusal(data)
+        # No libpq service, ODBC DSN / DSN file or driver library of this host (review 4).
+        or host_config_refusal(data)
         # No TLS certificate / key / wallet file on this host (follow-up review 2, TLS files).
         or tls_files_refusal(data)
         # No Oracle config provider / LDAP DSN or pyo. wallet (follow-up review 3, M3 + M4).
