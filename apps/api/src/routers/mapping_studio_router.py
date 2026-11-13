@@ -12,6 +12,10 @@ give it what that needs without a second rulebook:
 ``POST /auto-map``             one-to-one name suggestions (exact → normalized
     → learned → synonym) with a confidence, for the operator to preview.
 ``GET|POST|DELETE /memory``    the workspace's confirmed pairs (the learned tier).
+``POST /export`` ``/import``    mapping-as-code: a versioned, checksummed YAML/JSON
+    document (:mod:`services.mapping_document`).
+``/templates``                 workspace mapping templates, re-bound onto another
+    table's columns on apply (:mod:`services.mapping_templates`).
 
 Every route is workspace-scoped: a saved connector is authorized against its
 own workspace before it is dialled, and the memory read or written is the
@@ -23,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from services.mapping_type_compat import MAX_PAIRS
@@ -31,8 +35,10 @@ from services.safe_errors import safe_http_exception
 from services.workspace_access import (
     actor_email,
     assert_connector_accessible,
+    assert_resource_workspace,
     resolve_read_workspace,
     resolve_write_workspace,
+    tenant_scope,
 )
 
 from .transfer_router import EndpointDTO
@@ -259,3 +265,172 @@ def forget_memory(
         details={"removed": removed},
     )
     return {"removed": removed}
+
+
+# --------------------------------------------------------------------------- mapping-as-code
+
+_TEMPLATE_NOT_FOUND = "Mapping template not found"
+
+
+class MappingDocumentBody(BaseModel):
+    mappings: list[dict] = Field(..., max_length=5000)
+    computed: list[dict] = Field(default_factory=list, max_length=200)
+    name: str = Field("", max_length=120)
+    source: dict = Field(default_factory=dict)
+    destination: dict = Field(default_factory=dict)
+
+
+class ExportRequest(MappingDocumentBody):
+    format: Literal["yaml", "json"] = "yaml"
+
+
+class ImportRequest(BaseModel):
+    document: str = Field(..., min_length=1, max_length=2 * 1024 * 1024)
+
+
+class TemplateCreate(MappingDocumentBody):
+    description: str = Field("", max_length=1000)
+
+
+class TemplateApply(BaseModel):
+    source_columns: list[str] = Field(..., max_length=_MAX_COLUMNS)
+    destination_columns: list[str] = Field(..., max_length=_MAX_COLUMNS)
+
+
+def _document(body: MappingDocumentBody) -> dict[str, Any]:
+    from services.mapping_document import MappingDocumentError, build_mapping_document
+
+    try:
+        return build_mapping_document(
+            mappings=body.mappings,
+            computed=body.computed,
+            name=body.name,
+            source=body.source,
+            destination=body.destination,
+        )
+    except MappingDocumentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/export")
+def export_mapping(body: ExportRequest) -> Response:
+    """The mapping as a downloadable YAML/JSON document (version + checksum)."""
+    import re
+
+    from services.mapping_document import dump_mapping_document
+
+    doc = _document(body)
+    text = dump_mapping_document(doc, fmt=body.format)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", body.name or "mapping").strip("-") or "mapping"
+    return Response(
+        content=text,
+        media_type="application/yaml" if body.format == "yaml" else "application/json",
+        headers={"Content-Disposition": f'attachment; filename="{stem[:80]}.mapping.{body.format}"'},
+    )
+
+
+@router.post("/import")
+def import_mapping(body: ImportRequest) -> dict[str, Any]:
+    """Validate a document (version, schema, checksum, Transform steps) and return it."""
+    from services.mapping_document import MappingDocumentError, load_mapping_document_with_status
+
+    try:
+        doc, verified = load_mapping_document_with_status(body.document)
+    except MappingDocumentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "metadata": doc["metadata"],
+        "mappings": doc["spec"]["mappings"],
+        "computed": doc["spec"]["computed"],
+        "checksum": doc["checksum"],
+        "checksum_verified": verified,
+        "warnings": [] if verified else [
+            "The document has no checksum: it was imported as hand-authored and unverified."
+        ],
+    }
+
+
+@router.get("/templates")
+def list_mapping_templates(request: Request) -> dict[str, Any]:
+    from services.mapping_templates import list_templates
+
+    scope = tenant_scope(request)
+    return {"templates": list_templates(allows=scope.allows)}
+
+
+@router.post("/templates", status_code=201)
+def create_mapping_template(
+    body: TemplateCreate,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> dict[str, Any]:
+    from services.audit_log import append_audit_event
+    from services.mapping_templates import TemplateLimitReached, create_template
+
+    if not body.name.strip():
+        raise HTTPException(status_code=422, detail="A template needs a name")
+    ws = _workspace(request, workspace_id, write=True)
+    doc = _document(body)
+    try:
+        record = create_template(
+            name=body.name, description=body.description, document=doc,
+            workspace_id=ws, actor=actor_email(request),
+        )
+    except TemplateLimitReached as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    append_audit_event(
+        action="mapping_template.created",
+        resource=f"mapping-template/{record['id']}",
+        details={"name": record["name"], "mappings": len(doc["spec"]["mappings"])},
+    )
+    return record
+
+
+def _owned_template(request: Request, template_id: str, *, write: bool = False) -> dict[str, Any]:
+    from services.mapping_templates import get_template
+
+    record = get_template(template_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=_TEMPLATE_NOT_FOUND)
+    assert_resource_workspace(
+        request, record.get("workspace_id") or "", write=write, not_found_detail=_TEMPLATE_NOT_FOUND
+    )
+    return record
+
+
+@router.get("/templates/{template_id}")
+def get_mapping_template(template_id: str, request: Request) -> dict[str, Any]:
+    return _owned_template(request, template_id)
+
+
+@router.delete("/templates/{template_id}")
+def delete_mapping_template(template_id: str, request: Request) -> dict[str, Any]:
+    from services.audit_log import append_audit_event
+    from services.mapping_templates import delete_template
+
+    record = _owned_template(request, template_id, write=True)
+    delete_template(template_id)
+    append_audit_event(
+        action="mapping_template.deleted",
+        resource=f"mapping-template/{template_id}",
+        details={"name": record.get("name")},
+    )
+    return {"deleted": template_id}
+
+
+@router.post("/templates/{template_id}/apply")
+def apply_mapping_template(template_id: str, body: TemplateApply, request: Request) -> dict[str, Any]:
+    """Re-bind the template onto these columns; a preview, nothing is stored."""
+    from services.mapping_templates import rebind_template_pairs
+
+    record = _owned_template(request, template_id)
+    spec = (record.get("document") or {}).get("spec") or {}
+    pairs = [
+        (str(m.get("source") or ""), str(m.get("target") or ""))
+        for m in spec.get("mappings") or []
+        if m.get("target") and not m.get("intentional_omit")
+    ]
+    out = rebind_template_pairs(
+        pairs, source_columns=body.source_columns, destination_columns=body.destination_columns
+    )
+    return {**out, "computed": spec.get("computed") or [], "template": record.get("name")}

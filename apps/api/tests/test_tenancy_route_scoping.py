@@ -392,6 +392,20 @@ def _seed_recipe(world) -> Seeded:
     return Seeded({"recipe_id": recipe_id}, intact)
 
 
+def _seed_mapping_template(world) -> Seeded:
+    made = world.admin_a.post("/api/v1/transfer/mapping/templates", json={
+        "name": SENTINEL, "description": SENTINEL,
+        "mappings": [{"source": "order_id", "target": "legacy_ref"}],
+    })
+    assert made.status_code == 201, made.text
+    template_id = made.json()["id"]
+
+    def intact() -> bool:
+        return world.admin_a.get(f"/api/v1/transfer/mapping/templates/{template_id}").status_code == 200
+
+    return Seeded({"template_id": template_id}, intact)
+
+
 def _seed_transform_project(world) -> Seeded:
     from services import transform_store
     from services.transform_store import TransformProject
@@ -578,6 +592,7 @@ SEEDERS: dict[str, Callable[[Any], Seeded]] = {
     "cdc_signal": _seed_cdc_signal,
     "mapping_review": _seed_mapping_review,
     "recipe": _seed_recipe,
+    "mapping_template": _seed_mapping_template,
     "transform_project": _seed_transform_project,
     "notification_channel": _seed_notification_channel,
     "api_key": _seed_api_key,
@@ -630,6 +645,9 @@ _BODIES: dict[str, Any] = {
     "PATCH /api/v1/workspace/ai-providers/{provider}": {"api_key": "sk-tenancy-probe", "enabled": True},
     "PATCH /api/v1/workspace/tenant/{tenant_id}": {"name": "renamed-by-b"},
     "POST /api/v1/transform-library/{recipe_id}/preview": {"rows": [{"a": 1}]},
+    "POST /api/v1/transfer/mapping/templates/{template_id}/apply": {
+        "source_columns": ["order_id"], "destination_columns": ["legacy_ref"],
+    },
     # The exit bodies refuse unknown fields (422 before the workspace check would run).
     "PATCH /api/v1/exit/systems/{system_id}": {"name": "renamed-by-b"},
     "POST /api/v1/exit/systems/{system_id}/pii-acknowledgement": {"reason": "tenancy probe"},
