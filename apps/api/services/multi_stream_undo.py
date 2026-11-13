@@ -217,6 +217,14 @@ def undo_multi_stream_run(
     return _note(entries), entries
 
 
+def forget_undone_progress(job_id: str, entries: list[dict[str, Any]], *extra_tables: str) -> None:
+    """A table whose rows were undone is no longer finished for a resume (C5)."""
+    from services.multi_stream_resume import forget_streams
+
+    tables = [str(e.get("table") or "") for e in entries if e.get("decision") != "retained"]
+    forget_streams(job_id, [t for t in (*tables, *extra_tables) if t])
+
+
 _DECISION_WORDS = {
     "restored": "restored from its pre-run backup",
     "restore_failed": "NOT restored (backup kept)",
@@ -256,7 +264,8 @@ def note_failed_multi_stream(
     from services.error_handling import TransferCancelled
 
     if isinstance(exc, TransferCancelled):
-        # A cancel is not a failed batch (D102/D134): the committed tables stay.
+        # A cancel is not a failed batch (D102/D134): the committed tables stay,
+        # and a resume skips them (C5).
         return
     try:
         note, entries = undo_multi_stream_run(
@@ -265,6 +274,7 @@ def note_failed_multi_stream(
     except Exception:  # noqa: BLE001 — the run's own failure must surface
         logger.warning("multi-table undo did not run", exc_info=True)
         return
+    forget_undone_progress(job_id, entries, failed_table)
     if not note:
         return
     own = str(getattr(exc, "failed_batch_undo_note", "") or "")

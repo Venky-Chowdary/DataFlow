@@ -382,13 +382,18 @@ def _failed_batch_undo_note_impl(
         # C4: verification of a multi-table run failed. Undo every table it
         # reached with that table's own pre-run facts — the last stream's
         # summary describes one object, not the run.
-        from services.multi_stream_undo import UNDO_KEY, undo_multi_stream_run
+        from services.multi_stream_undo import (
+            UNDO_KEY,
+            forget_undone_progress,
+            undo_multi_stream_run,
+        )
 
         note, entries = undo_multi_stream_run(
             destination,
             sync_mode=str(getattr(request, "sync_mode", "") or ""),
             job_id=str(dest_summary.get("job_id") or ""),
         )
+        forget_undone_progress(str(dest_summary.get("job_id") or ""), entries)
         if entries:
             dest_summary[UNDO_KEY] = entries
             dest_summary["partial_batch_undo"] = "multi_stream"
