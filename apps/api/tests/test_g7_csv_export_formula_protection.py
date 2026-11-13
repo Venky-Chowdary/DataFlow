@@ -128,20 +128,19 @@ def _export_rows(client, connector_id: str, **body) -> list[list[str]]:
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["success"] is True, data
-    text = Path(data["path"]).read_text(encoding="utf-8")
+    text = Path(data["path"]).read_bytes().decode("utf-8")
     delim = "\t" if body.get("format") == "tsv" else ","
     return list(csv.reader(io.StringIO(text, newline=""), delimiter=delim))
 
 
-def _assert_guarded(rows: list[list[str]], *, tab_cell: bool = True) -> None:
+def _assert_guarded(rows: list[list[str]]) -> None:
     assert rows[0] == ["id", "note", "amount", "qty"]
     by_id = {r[0]: r for r in rows[1:]}
     assert by_id["1"][1] == "'" + HYPERLINK
     assert by_id["2"][1] == "'@SUM(A1)"
     assert by_id["3"][1] == "'+cmd"
     assert by_id["4"][1] == "'-2+3"
-    if tab_cell:
-        assert by_id["5"][1] == "'\tlead-tab"
+    assert by_id["5"][1] == "'\tlead-tab"
     assert by_id["6"][1] == "-1.5"
     assert by_id["7"][1] == "''=already-quoted"
     assert by_id["8"][1] == "plain"
@@ -153,9 +152,7 @@ def _assert_guarded(rows: list[list[str]], *, tab_cell: bool = True) -> None:
 @pytest.mark.parametrize("fmt", ["csv", "tsv"])
 def test_query_console_export_guards_formula_cells_by_default(monkeypatch, tmp_path, fmt):
     client, cid = _query_setup(monkeypatch, tmp_path)
-    # The preview TSV writer does not quote an embedded tab (a separate,
-    # pre-existing TSV escaping gap), so the tab-leading row is checked on CSV.
-    _assert_guarded(_export_rows(client, cid, format=fmt), tab_cell=fmt == "csv")
+    _assert_guarded(_export_rows(client, cid, format=fmt))
 
 
 @pytest.mark.parametrize("fmt", ["csv", "tsv"])

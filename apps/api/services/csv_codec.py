@@ -151,10 +151,25 @@ def csv_quote_cell(cell: str) -> str:
     return cell
 
 
+def _tsv_quote_cell(cell: str) -> str:
+    """A TSV cell: quoted like ``csv`` with ``delimiter='\\t'`` when it must be.
+
+    A tab, ``"``, CR or LF inside an unquoted TSV cell splits the cell or the
+    row (G7 review H1: ``x<TAB>=HYPERLINK(...)`` became a second, formula
+    cell). Cells without those characters stay byte-identical — NULL and
+    ``''`` remain an empty cell, as TSV always wrote them.
+    """
+    if cell == _CSV_NULL:
+        return ""
+    if any(c in cell for c in '\t"\n\r'):
+        return '"' + cell.replace('"', '""') + '"'
+    return cell
+
+
 def format_csv_row(cells: list[str], delimiter: str = ",") -> str:
     """One encoded row as CSV text (no trailing newline)."""
     if delimiter == "\t":
-        return "\t".join("" if c == _CSV_NULL else c for c in cells)
+        return "\t".join(_tsv_quote_cell(c) for c in cells)
     return delimiter.join(csv_quote_cell(c) for c in cells)
 
 
