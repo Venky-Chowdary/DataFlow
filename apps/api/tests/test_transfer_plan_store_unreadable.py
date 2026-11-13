@@ -478,3 +478,32 @@ def test_a_backup_the_loader_would_reject_is_never_named(isolated_plan_store, ba
     with pytest.raises(PlanStoreUnreadable) as caught:
         get_plan(a)
     assert caught.value.readable_backup == "transfer_plans.json.bak.1"
+
+
+def test_a_lock_file_that_cannot_be_opened_for_writing_is_a_clear_refusal(isolated_plan_store, monkeypatch):
+    """E.g. chmod 0400 by hand (root ignores modes, so the refusal is injected)."""
+    import errno
+    import os
+
+    a, _b = _two_plans()
+    store_before = isolated_plan_store.read_bytes()
+    lock = str(isolated_plan_store.with_name("transfer_plans.json.lock"))
+    real_open = os.open
+
+    def denied(path, flags, *args, **kwargs):
+        if str(path) == lock:
+            raise PermissionError(errno.EACCES, "Permission denied", lock)
+        return real_open(path, flags, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(store.os, "open", denied)
+        with pytest.raises(store.PlanStoreLockUnavailable) as caught:
+            update_plan(a, {"name": "x"})
+        assert str(isolated_plan_store.parent) not in str(caught.value)
+        assert "transfer_plans.json.lock" in str(caught.value) and "operator" in str(caught.value)
+        res = _client().patch(f"/api/v1/transfer/plans/{a}", json={"name": "x"})
+    assert res.status_code == 503, res.text
+    body = res.json()
+    assert body["error"] == "plan_store_lock_unavailable"
+    assert "transfer_plans.json.lock" in body["detail"] and str(isolated_plan_store.parent) not in body["detail"]
+    assert isolated_plan_store.read_bytes() == store_before

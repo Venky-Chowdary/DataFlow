@@ -137,6 +137,23 @@ class UnknownPlanVersion(LookupError):
         super().__init__(f"Plan {plan_id} has no mapping revision {version} ({have})")
 
 
+class PlanStoreLockUnavailable(RuntimeError):
+    """The store's lock file cannot be opened for writing (permissions, read-only volume).
+
+    Not transient like :class:`PlanStoreBusy`: an operator has to fix the file.
+    ``str()`` names the file only; ``path`` has the full location for the log.
+    """
+
+    def __init__(self, path: Path, error: BaseException) -> None:
+        self.path = str(path)
+        self.error_class = type(error).__name__
+        super().__init__(
+            f"Transfer plan store lock file {Path(path).name} cannot be opened for writing "
+            f"({self.error_class}); nothing was written. An operator must make it writable by "
+            "the API's user (it is never written to; mode 0600) or fix the volume."
+        )
+
+
 class PlanStoreReentry(RuntimeError):
     """A plan-store write was started inside another on the same thread.
 
@@ -500,7 +517,15 @@ def _store_file_lock(deadline: float) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # Owner-only and never written to, but opened read-write: on NFS/EFS Linux
     # emulates flock() with fcntl locks, and an exclusive one needs a writable fd.
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        logger.error(
+            "Transfer plan store lock file %s cannot be opened for writing (%s)",
+            lock_path,
+            type(exc).__name__,
+        )
+        raise PlanStoreLockUnavailable(lock_path, exc) from exc
     try:
         while True:
             try:

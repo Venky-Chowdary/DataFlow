@@ -862,6 +862,7 @@ async def _link_job_to_plan(plan_id: str, job_id: str) -> None:
     """
     from services.transfer_plan_store import (
         PlanStoreBusy,
+        PlanStoreLockUnavailable,
         PlanStoreReentry,
         PlanStoreUnreadable,
         attach_job,
@@ -872,7 +873,10 @@ async def _link_job_to_plan(plan_id: str, job_id: str) -> None:
     except Exception as exc:  # noqa: BLE001 - the job exists; the link is optional
         # Disk and store refusals are expected operating conditions; anything
         # else is a bug and keeps its traceback in the log (never the client).
-        expected = isinstance(exc, (OSError, PlanStoreBusy, PlanStoreUnreadable, PlanStoreReentry))
+        expected = isinstance(
+            exc,
+            (OSError, PlanStoreBusy, PlanStoreUnreadable, PlanStoreLockUnavailable, PlanStoreReentry),
+        )
         logging.getLogger(__name__).warning(
             "Run %s started but was not linked to plan %s: %s",
             job_id,
