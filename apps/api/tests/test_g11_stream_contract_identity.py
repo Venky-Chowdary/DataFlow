@@ -64,14 +64,14 @@ def test_execute_refuses_repeated_stream_names(twin):
         assert "more than once" in refusal and "s1" in refusal.lower(), refusal
 
 
-def _validated(client, token):
+def _validated(api, token):
     s1, s2, schema, source, destination, maps = multi_stream_world(token)
     contracts = [{"name": s1, "selected": True, "sync_mode": "full_refresh_append",
                   "mappings": maps},
                  {"name": s2, "selected": True, "sync_mode": "full_refresh_append",
                   "mappings": maps}]
     plan_id, pf = flow.validate(
-        client, source=source, destination=destination, columns=["id", "v"],
+        api, source=source, destination=destination, columns=["id", "v"],
         types={"id": "INTEGER", "v": "INTEGER"}, mappings=maps,
         sync_mode="full_refresh_append", stream_contracts=contracts,
         schema_policy="propagate_all")
