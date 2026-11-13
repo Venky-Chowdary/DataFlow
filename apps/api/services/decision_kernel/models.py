@@ -181,9 +181,13 @@ class DecisionArtifact:
     capability_dest_hash: str = ""
     policy_signature: str = ""
     content_hash: str = ""
+    #: Document model identity (services.document_model.model_hash) this
+    #: decision was made for. Emitted only when set, so every artifact made
+    #: without a model keeps its exact bytes and content_hash.
+    document_model_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "artifact_id": self.artifact_id,
             "schema_version": self.schema_version,
             "created_at": self.created_at,
@@ -203,6 +207,9 @@ class DecisionArtifact:
             "policy_signature": self.policy_signature,
             "content_hash": self.content_hash,
         }
+        if self.document_model_hash:
+            out["document_model_hash"] = self.document_model_hash
+        return out
 
     def to_json(self, *, indent: int | None = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent, sort_keys=True) + (
@@ -247,6 +254,7 @@ def build_decision_artifact(
     capability_dest_hash: str = "",
     artifact_id: str | None = None,
     created_at: str | None = None,
+    document_model_hash: str = "",
 ) -> DecisionArtifact:
     """Construct an immutable DecisionArtifact with content_hash stamped."""
     draft = DecisionArtifact(
@@ -269,6 +277,7 @@ def build_decision_artifact(
         capability_dest_hash=capability_dest_hash,
         policy_signature="",
         content_hash="",
+        document_model_hash=document_model_hash,
     )
     content_hash = compute_content_hash(draft.to_dict())
     return DecisionArtifact(
@@ -290,6 +299,7 @@ def build_decision_artifact(
         capability_dest_hash=draft.capability_dest_hash,
         policy_signature=draft.policy_signature,
         content_hash=content_hash,
+        document_model_hash=draft.document_model_hash,
     )
 
 
@@ -379,6 +389,7 @@ def decision_artifact_from_dict(data: Mapping[str, Any]) -> DecisionArtifact:
         capability_dest_hash=str(data.get("capability_dest_hash") or ""),
         policy_signature=str(data.get("policy_signature") or ""),
         content_hash=str(data.get("content_hash") or ""),
+        document_model_hash=str(data.get("document_model_hash") or ""),
     )
     expected = compute_content_hash(art.to_dict())
     if art.content_hash and art.content_hash != expected:
