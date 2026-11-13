@@ -192,3 +192,21 @@ def test_the_test_jobs_install_the_versions_the_image_ships() -> None:
     assert "pip install -r requirements-dev.txt -c constraints-image.txt" in action
     nightly = (REPO / ".github" / "workflows" / "full-suite.yml").read_text(encoding="utf-8")
     assert "pip install -r apps/api/requirements-dev.txt -c apps/api/constraints-image.txt" in nightly
+
+
+@pytest.mark.parametrize(
+    ("module", "attr", "user_key"),
+    [
+        ("test_privilege_probe_grant_signals", "ADMIN", "user"),
+        ("test_widen_respects_existing_carrier", "PG", "username"),
+    ],
+)
+def test_shard4_live_pg_modules_take_the_postgres_from_the_environment(module, attr, user_key, monkeypatch) -> None:
+    """api-tests 4/6 (run 43447695514): 5 skips "local postgres unavailable" —
+    both modules hard-coded the compose lab's localhost:5433 as postgres."""
+    for name, value in {"PGHOST": "127.0.0.1", "PGPORT": "5432", "PGUSER": "dataflow",
+                        "PGPASSWORD": "dataflow", "PGDATABASE": "dataflow"}.items():
+        monkeypatch.setenv(name, value)
+    sys.modules.pop(module, None)
+    cfg = getattr(importlib.import_module(module), attr)
+    assert (cfg["host"], cfg["port"], cfg[user_key]) == ("127.0.0.1", 5432, "dataflow")
