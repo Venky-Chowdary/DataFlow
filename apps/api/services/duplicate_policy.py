@@ -780,11 +780,15 @@ def enforce_dedupe_skip_endpoint(endpoint: Any, duplicate_policy: str = "") -> N
     policy = duplicate_policy or str(extra.get("duplicate_policy") or "")
     if normalize_duplicate_policy(policy) != "dedupe_skip":
         return
+    dest_type = str(getattr(endpoint, "format", "") or "")
     connection_string = str(getattr(endpoint, "connection_string", "") or "")
-    if not connection_string and getattr(endpoint, "connector_id", None):
+    if (not dest_type or not connection_string) and getattr(endpoint, "connector_id", None):
         from src.transfer.adapters import resolve_connector_config
 
-        connection_string = str(resolve_connector_config(endpoint).get("connection_string") or "")
-    enforce_dedupe_skip_destination(
-        policy, str(getattr(endpoint, "format", "") or ""), connection_string=connection_string
-    )
+        cfg = resolve_connector_config(endpoint)
+        dest_type = dest_type or str(cfg.get("type") or "")  # the saved connector's type
+        connection_string = connection_string or str(cfg.get("connection_string") or "")
+    if not dest_type and "://" in connection_string:
+        # No format and no saved connector: the URL scheme names the dialect.
+        dest_type = connection_string.split("://", 1)[0].split("+", 1)[0].lower()
+    enforce_dedupe_skip_destination(policy, dest_type, connection_string=connection_string)

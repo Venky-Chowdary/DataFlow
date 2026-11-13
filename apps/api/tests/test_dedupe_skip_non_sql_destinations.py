@@ -581,3 +581,20 @@ def test_file_stream_refuses_skip_into_refused_destination():
 
     src = inspect.getsource(fs.stream_file_to_database)
     assert "enforce_dedupe_skip_destination(" in src
+
+
+def test_execute_refusal_derives_the_destination_when_format_is_empty():
+    """Re-review F5: an endpoint with no ``format`` (a saved connector, or only a
+    URL) refused nothing."""
+    from services.duplicate_policy import DuplicatePolicyError, enforce_dedupe_skip_endpoint
+    from src.transfer.models import EndpointConfig
+
+    saved = EndpointConfig(kind="database", format="", connector_id="c1")
+    with patch("src.transfer.adapters.resolve_connector_config", return_value={"type": "qdrant"}):
+        with pytest.raises(DuplicatePolicyError, match="qdrant"):
+            enforce_dedupe_skip_endpoint(saved, "skip_duplicates")
+    by_url = EndpointConfig(kind="database", format="", connection_string="clickhouse://h:8123/db")
+    with pytest.raises(DuplicatePolicyError, match="ClickHouse"):
+        enforce_dedupe_skip_endpoint(by_url, "skip_duplicates")
+    pg = EndpointConfig(kind="database", format="", connection_string="postgresql://h/db")
+    enforce_dedupe_skip_endpoint(pg, "skip_duplicates")  # allowed: no raise
