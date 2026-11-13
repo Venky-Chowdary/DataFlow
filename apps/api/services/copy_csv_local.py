@@ -784,6 +784,7 @@ def _write_mapped_csv(
     _MISS = object()
     _bind_memo: list[dict] = [dict() for _ in source_cols]
     _safe_memo: dict = {}
+    _csv_memo: dict = {}  # cell -> mapped-file text (mapped_csv_cell), per run
     _MEMO_CAP = 500_000
 
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
@@ -830,7 +831,19 @@ def _write_mapped_csv(
                         f"{physical or logical} COPY-safe; the row path owns its "
                         "validation and quarantine"
                     )
-            writer.write(mapped_csv_line([copy_cells.get(col) for col in source_cols], delim) + "\n")
+            out_row: list[str] = []
+            for col in source_cols:
+                cell = copy_cells.get(col)
+                rendered = _csv_memo.get(cell, _MISS)
+                if rendered is _MISS:
+                    rendered = mapped_csv_cell(cell, delim)
+                    if len(_csv_memo) < _MEMO_CAP:
+                        _csv_memo[cell] = rendered
+                out_row.append(rendered)
+            if len(out_row) == 1 and out_row[0] == "":
+                writer.write('""\n')
+            else:
+                writer.write(delim.join(out_row) + "\n")
             written += 1
         if fingerprints is not None and rows:
             fingerprints(rows)
