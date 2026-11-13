@@ -34,6 +34,7 @@ from services.mapping_type_compat import MAX_PAIRS
 from services.safe_errors import safe_http_exception
 from services.workspace_access import (
     actor_email,
+    actor_is_platform_admin,
     assert_connector_accessible,
     assert_resource_workspace,
     resolve_read_workspace,
@@ -447,12 +448,31 @@ def get_mapping_template(template_id: str, request: Request) -> dict[str, Any]:
     return _owned_template(request, template_id)
 
 
+def _assert_may_delete(request: Request, record: dict[str, Any]) -> None:
+    """Only the creator, a workspace admin or a platform admin removes a template."""
+    from services.team_store import get_workspace_role
+
+    actor = actor_email(request)
+    if actor and actor == str(record.get("created_by") or ""):
+        return
+    if actor_is_platform_admin(request):
+        return
+    workspace_id = str(record.get("workspace_id") or "")
+    if actor and get_workspace_role(workspace_id=workspace_id, email=actor) == "admin":
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Only the person who saved this template or a workspace admin can delete it.",
+    )
+
+
 @router.delete("/templates/{template_id}")
 def delete_mapping_template(template_id: str, request: Request) -> dict[str, Any]:
     from services.audit_log import append_audit_event
     from services.mapping_templates import delete_template
 
     record = _owned_template(request, template_id, write=True)
+    _assert_may_delete(request, record)
     delete_template(template_id)
     append_audit_event(
         action="mapping_template.deleted",

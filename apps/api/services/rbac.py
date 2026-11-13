@@ -367,6 +367,7 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # Erasing the workspace's learned pairs is a destructive store edit, held
     # like a transform-library delete.
     ("DELETE", "/api/v1/transfer/mapping/memory", Permission.CONNECTOR_WRITE),
+    ("DELETE", "/api/v1/transfer/mapping/templates/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/transfer/mapping/", Permission.JOB_PLAN),
     ("GET", "/api/v1/transfer/", Permission.JOB_READ),
     # Reading a schedule is schedule.read — the permission every role already

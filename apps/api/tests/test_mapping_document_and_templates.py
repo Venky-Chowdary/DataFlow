@@ -297,3 +297,19 @@ def test_the_per_workspace_template_cap_holds_under_concurrent_creates(tmp_path,
         t.join()
     assert results.count("ok") == 3, results
     assert len(mapping_templates.list_templates(workspace_id="ws-a")) == 3
+
+
+# --------------------------------------------------------------------------- delete authority
+
+
+def test_only_the_creator_or_a_workspace_admin_deletes_a_template(tenancy_world):
+    w = tenancy_world
+    tid = w.a.post(f"{BASE}/templates", json={"name": "mine", "mappings": MAPPINGS}).json()["id"]
+    other_editor = w.member("editor-2@tenancy.example.com", w.workspace_a, "editor")
+    refused = other_editor.delete(f"{BASE}/templates/{tid}")
+    assert refused.status_code == 403, refused.text
+    assert w.a.get(f"{BASE}/templates/{tid}").status_code == 200
+    admin_a = w.member("admin-ws-a@tenancy.example.com", w.workspace_a, "admin")
+    assert admin_a.delete(f"{BASE}/templates/{tid}").status_code == 200
+    mine = w.a.post(f"{BASE}/templates", json={"name": "mine 2", "mappings": MAPPINGS}).json()["id"]
+    assert w.a.delete(f"{BASE}/templates/{mine}").status_code == 200
