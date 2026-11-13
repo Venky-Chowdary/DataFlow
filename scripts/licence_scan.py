@@ -43,6 +43,8 @@ POLICY = REPO / "licence-policy.json"
 RUNTIME_REQS = REPO / "apps" / "api" / "requirements.txt"
 DEV_REQS = REPO / "apps" / "api" / "requirements-dev.txt"
 LOCKFILE = REPO / "package-lock.json"
+#: Where Dockerfile.api puts the corresponding source of the LGPL components.
+LGPL_SOURCE_DIR = "/usr/share/doc/datawrap/third-party-source"
 
 _COPYLEFT = re.compile(
     r"\b(A?GPL|LGPL|GNU (?:Affero |Lesser |Library )?General Public|SSPL|Server Side Public"
@@ -386,12 +388,19 @@ def load_policy(path: Path = POLICY) -> dict[str, Any]:
             raise ValueError(f"{path}: exception {key!r} is both pending (owner_decision) and decided")
         if decision.get("status") == "approved" and re.search(r"GPL", str(entry["licence"])):
             # Shipping an (L)GPL library in the image is binary distribution:
-            # the licence text and the source (with a written offer) must travel.
+            # the licence text and the corresponding source travel with it
+            # (Dockerfile.api, scripts/fetch_lgpl_sources.py). A written offer
+            # would be an ongoing obligation the owner did not take on.
             text = str(entry.get("notice") or "")
-            if "gnu.org/licenses" not in text or "Source:" not in text or "written offer" not in text:
+            if (
+                "gnu.org/licenses" not in text
+                or f"source shipped in image at {LGPL_SOURCE_DIR}" not in text
+                or "written offer" in text
+            ):
                 raise ValueError(
                     f"{path}: approved exception {key!r} must name the licence text "
-                    "(gnu.org/licenses URL), a 'Source:' pointer and a written offer in its notice"
+                    f"(gnu.org/licenses URL) and say 'source shipped in image at {LGPL_SOURCE_DIR}' "
+                    "(no written offer) in its notice"
                 )
     return policy
 

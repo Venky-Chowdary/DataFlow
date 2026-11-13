@@ -270,28 +270,56 @@ def test_lgpl_drivers_are_approved_with_the_decision_recorded() -> None:
         }, key
 
 
-def test_an_approved_lgpl_exception_must_carry_licence_text_and_source_offer(tmp_path: Path) -> None:
-    bad = {
+SOURCE_DIR = "/usr/share/doc/datawrap/third-party-source"
+
+
+def _policy_with(notice: str) -> dict:
+    return {
         "allowed": [],
         "exceptions": {
             "pypi:x": {
                 "licence": "LGPL-2.1",
                 "why": "w",
-                "notice": "LGPL-2.1, used unmodified.",
+                "notice": notice,
                 "decision": {"status": "approved", "by": "owner", "date": "2026-11-13", "terms": "t"},
             }
         },
     }
+
+
+def test_an_approved_lgpl_exception_must_ship_its_source_in_the_image(tmp_path: Path) -> None:
     path = tmp_path / "p.json"
-    path.write_text(json.dumps(bad), encoding="utf-8")
-    with pytest.raises(ValueError, match="licence text"):
-        scan.load_policy(path)
+    # A written offer is an ongoing obligation the owner did not take on.
+    for notice in (
+        "LGPL-2.1, used unmodified.",
+        "LGPL-2.1. Licence text: https://www.gnu.org/licenses/x. Source: https://example. A written offer: ...",
+    ):
+        path.write_text(json.dumps(_policy_with(notice)), encoding="utf-8")
+        with pytest.raises(ValueError, match="source shipped in image"):
+            scan.load_policy(path)
+    ok = (
+        "LGPL-2.1, used unmodified, replaceable. Licence text: https://www.gnu.org/licenses/x. "
+        f"Corresponding source shipped in image at {SOURCE_DIR}/x-1.0.tar.gz."
+    )
+    path.write_text(json.dumps(_policy_with(ok)), encoding="utf-8")
+    scan.load_policy(path)
 
 
-def test_notice_carries_lgpl_text_and_source_offer_for_each_driver() -> None:
+def test_notice_says_where_in_the_image_the_lgpl_source_is() -> None:
     text = (REPO / "NOTICE").read_text(encoding="utf-8")
+    assert "written offer" not in text and "three years" not in text
     for name in ("paramiko", "psycopg2-binary", "pymssql"):
         block = text.split(f"{name} (pypi) - ", 1)[1].split("\n\n", 1)[0]
         assert "gnu.org/licenses" in block, name
-        assert "Source:" in block and "written offer" in block, name
-        assert "unmodified" in block, name
+        assert f"source shipped in image at {SOURCE_DIR}" in block, name
+        assert "replace" in block and "unmodified" in block, name
+    pymssql = text.split("pymssql (pypi) - ", 1)[1].split("\n\n", 1)[0]
+    assert "FreeTDS" in pymssql and "freetds-" in pymssql
+
+
+def test_mpl_packages_keep_a_source_availability_notice() -> None:
+    """MPL-2.0, unmodified: a notice of where the source is available suffices."""
+    policy = scan.load_policy(REPO / "licence-policy.json")
+    for key in ("pypi:certifi", "pypi:orjson"):
+        notice = policy["exceptions"][key]["notice"]
+        assert "Source: https://" in notice and "unmodified" in notice, key

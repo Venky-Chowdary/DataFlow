@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Ship the corresponding source of the LGPL components in the API image.
+
+The owner accepted the LGPL drivers (paramiko, psycopg2-binary, pymssql) with
+attribution, and without the ongoing obligation of a written offer. LGPL
+binary distribution is then met by shipping the corresponding source with the
+binaries. ``Dockerfile.api`` runs this script after installing the runtime
+requirements, so the versions are the ones actually in the image:
+
+* each package's source distribution for the **installed** version, from PyPI,
+  verified against PyPI's SHA-256 digest (``psycopg2-binary`` ships the
+  ``psycopg2`` sdist of the same version, the same code);
+* FreeTDS, which pymssql's manylinux wheel links statically: its version is
+  read from the linked binary, the tarball comes from freetds.org and is
+  verified against the SHA-256 file published next to it when there is one.
+
+Everything lands in ``--dest`` with ``SHA256SUMS`` and ``MANIFEST.json``. Any
+failure (no sdist for the installed version, checksum mismatch, FreeTDS version
+not found) fails the build: an image must not claim source it does not carry.
+
+Usage (inside the image build)::
+
+    python fetch_lgpl_sources.py --dest /usr/share/doc/datawrap/third-party-source \\
+        paramiko psycopg2-binary=psycopg2 pymssql+freetds
+
+    python fetch_lgpl_sources.py --verify-dockerfile Dockerfile.api   # CI drift check
+
+A spec is ``dist[=sdist_name][+extra]``; the only extra is ``freetds``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import shlex
+import sys
+import urllib.request
+from collections.abc import Callable
+from dataclasses import dataclass
+from importlib import metadata
+from pathlib import Path
+from typing import Any
+
+PYPI_JSON = "https://pypi.org/pypi/{name}/{version}/json"
+FREETDS_URL = "https://www.freetds.org/files/stable/freetds-{version}.tar.gz"
+KNOWN_EXTRAS = ("freetds",)
+_FREETDS_RE = re.compile(rb"freetds v(\d+\.\d+(?:\.\d+)?)")
+
+
+class SourceError(RuntimeError):
+    """The image cannot carry the corresponding source it is required to."""
+
+
+@dataclass(frozen=True)
+class Spec:
+    dist: str
+    sdist: str
+    extras: tuple[str, ...]
+
+
+def parse_spec(text: str) -> Spec:
+    head, *extras = text.strip().split("+")
+    dist, _, sdist = head.partition("=")
+    unknown = [e for e in extras if e not in KNOWN_EXTRAS]
+    if not dist or unknown:
+        raise ValueError(f"bad spec {text!r} (extras allowed: {KNOWN_EXTRAS})")
+    return Spec(dist.strip(), (sdist or dist).strip(), tuple(extras))
+
+
+def dockerfile_specs(dockerfile: str) -> list[Spec]:
+    """The specs the Dockerfile's fetch step passes (one RUN, continuations joined)."""
+    joined = dockerfile.replace("\\\n", " ")
+    for line in joined.splitlines():
+        if "fetch_lgpl_sources.py" in line and "--dest" in line and line.lstrip().startswith("RUN"):
+            words = shlex.split(line.split("fetch_lgpl_sources.py", 1)[1])
+            specs, skip = [], False
+            for word in words:
+                if skip:
+                    skip = False
+                    continue
+                if word == "--dest":
+                    skip = True
+                    continue
+                if word in {"&&", ";"}:
+                    break
+                specs.append(parse_spec(word))
+            return specs
+    raise SourceError("Dockerfile has no `RUN ... fetch_lgpl_sources.py --dest ...` step")
+
+
+def _http_get(url: str) -> bytes:
+    if not url.startswith("https://"):
+        raise SourceError(f"refusing non-HTTPS source URL {url}")
+    # HTTPS only (checked above), so bandit's file:/ scheme concern does not apply.
+    with urllib.request.urlopen(url, timeout=120) as resp:  # nosec B310
+        return resp.read()
+
+
+def linked_binaries(dist: str) -> list[Path]:
+    files = metadata.distribution(dist).files or []
+    return [Path(str(f.locate())) for f in files if f.name.endswith(".so")]
+
+
+def freetds_version(binaries: list[Path]) -> str:
+    for path in binaries:
+        match = _FREETDS_RE.search(path.read_bytes())
+        if match:
+            return match.group(1).decode()
+    raise SourceError(
+        "FreeTDS version not found in pymssql's binaries; the wheel may no longer link it "
+        "statically. Check the wheel and update the Dockerfile step."
+    )
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _sdist(spec: Spec, version: str, get: Callable[[str], bytes]) -> tuple[str, bytes, str]:
+    index = json.loads(get(PYPI_JSON.format(name=spec.sdist, version=version)))
+    sdists = [u for u in index.get("urls") or [] if u.get("packagetype") == "sdist"]
+    if not sdists:
+        raise SourceError(f"{spec.sdist} {version}: no source distribution on PyPI")
+    entry = sdists[0]
+    payload = get(entry["url"])
+    if _sha256(payload) != entry["digests"]["sha256"]:
+        raise SourceError(f"{entry['filename']}: SHA-256 does not match PyPI's digest")
+    return entry["filename"], payload, "PyPI sha256 digest"
+
+
+def _freetds(version: str, get: Callable[[str], bytes]) -> tuple[str, bytes, str]:
+    url = FREETDS_URL.format(version=version)
+    payload = get(url)
+    try:
+        published = get(url + ".sha256").decode().split()[0].strip().lower()
+    except SourceError:
+        published = ""
+    except Exception:  # noqa: BLE001 - urllib HTTPError etc.: no published checksum
+        published = ""
+    if published:
+        if _sha256(payload) != published:
+            raise SourceError(f"freetds-{version}.tar.gz: SHA-256 does not match freetds.org's")
+        return f"freetds-{version}.tar.gz", payload, "freetds.org published SHA-256"
+    return (
+        f"freetds-{version}.tar.gz",
+        payload,
+        "recorded at download over HTTPS (freetds.org publishes no checksum for this release)",
+    )
+
+
+def ship(
+    specs: list[Spec],
+    dest: Path,
+    *,
+    get: Callable[[str], bytes] = _http_get,
+    version_of: Callable[[str], str] = metadata.version,
+) -> list[dict[str, Any]]:
+    dest.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for spec in specs:
+        version = version_of(spec.dist)
+        name, payload, how = _sdist(spec, version, get)
+        rows.append({"file": name, "for": f"{spec.dist} {version}", "data": payload, "verified_against": how})
+        if "freetds" in spec.extras:
+            tds = freetds_version(linked_binaries(spec.dist))
+            name, payload, how = _freetds(tds, get)
+            rows.append({
+                "file": name,
+                "for": f"FreeTDS {tds} (statically linked into {spec.dist} {version})",
+                "data": payload,
+                "verified_against": how,
+            })
+    for row in rows:
+        (dest / row["file"]).write_bytes(row.pop("data"))
+        row["sha256"] = _sha256((dest / row["file"]).read_bytes())
+    (dest / "SHA256SUMS").write_text(
+        "".join(f"{r['sha256']}  {r['file']}\n" for r in rows), encoding="utf-8"
+    )
+    (dest / "MANIFEST.json").write_text(
+        json.dumps({"purpose": "LGPL corresponding source for the binaries in this image",
+                    "components": rows}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return rows
+
+
+def verify_dockerfile(dockerfile: Path, policy: Path, requirements: Path) -> list[str]:
+    """Drift check: the Dockerfile step ships exactly the approved LGPL packages."""
+    problems = []
+    specs = dockerfile_specs(dockerfile.read_text(encoding="utf-8"))
+    shipped = {s.dist for s in specs}
+    entries = json.loads(policy.read_text(encoding="utf-8")).get("exceptions") or {}
+    approved = {
+        k.split(":", 1)[1]
+        for k, e in entries.items()
+        if k.startswith("pypi:") and "GPL" in str(e.get("licence"))
+        and (e.get("decision") or {}).get("status") == "approved"
+    }
+    if shipped != approved:
+        problems.append(
+            f"Dockerfile ships source for {sorted(shipped)} but the approved (L)GPL packages are {sorted(approved)}"
+        )
+    declared = set()
+    for raw in requirements.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line and not line.startswith("-"):
+            declared.add(re.split(r"[<>=!~\[; ]", line, maxsplit=1)[0].lower())
+    for dist in sorted(shipped - declared):
+        problems.append(f"{dist} is not a runtime requirement; nothing to ship source for")
+    # Versions: the step reads the installed version, so it cannot drift from
+    # what pip resolved. Prove each installed version has a source distribution.
+    for spec in specs:
+        try:
+            version = metadata.version(spec.dist)
+        except metadata.PackageNotFoundError:
+            problems.append(f"{spec.dist} is not installed here; install the runtime requirements first")
+            continue
+        try:
+            index = json.loads(_http_get(PYPI_JSON.format(name=spec.sdist, version=version)))
+        except Exception as exc:  # noqa: BLE001 - reported as a problem, not swallowed
+            problems.append(f"{spec.sdist} {version}: PyPI lookup failed ({type(exc).__name__})")
+            continue
+        if not any(u.get("packagetype") == "sdist" for u in index.get("urls") or []):
+            problems.append(f"{spec.sdist} {version}: no source distribution on PyPI")
+        if "freetds" in spec.extras:
+            try:
+                freetds_version(linked_binaries(spec.dist))
+            except SourceError as exc:
+                problems.append(str(exc))
+    return problems
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("specs", nargs="*")
+    parser.add_argument("--dest")
+    parser.add_argument("--verify-dockerfile")
+    parser.add_argument("--policy", default="licence-policy.json")
+    parser.add_argument("--requirements", default="apps/api/requirements.txt")
+    args = parser.parse_args(argv)
+    if args.verify_dockerfile:
+        problems = verify_dockerfile(Path(args.verify_dockerfile), Path(args.policy), Path(args.requirements))
+        for problem in problems:
+            print(f"- {problem}")
+        print("LGPL source step: " + ("DRIFT" if problems else "consistent"))
+        return 1 if problems else 0
+    if not args.dest or not args.specs:
+        parser.error("--dest and at least one spec are required")
+    rows = ship([parse_spec(s) for s in args.specs], Path(args.dest))
+    for row in rows:
+        print(f"{row['sha256']}  {row['file']}  ({row['for']}; {row['verified_against']})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

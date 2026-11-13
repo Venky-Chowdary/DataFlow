@@ -1014,6 +1014,14 @@ jobs:
           python scripts/licence_scan.py --check --check-notice NOTICE --markdown "$RUNNER_TEMP/licence-report.md" --json "$RUNNER_TEMP/licence-report.json"
           cat "$RUNNER_TEMP/licence-report.md" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: LGPL source shipping step cannot drift (owner decision 2)
+        # Dockerfile.api ships the corresponding source of the approved LGPL
+        # packages. Fails when its package list differs from the approved
+        # entries in licence-policy.json, when one is not a runtime
+        # requirement, when an installed version has no sdist on PyPI, or when
+        # pymssql no longer shows the FreeTDS version it links.
+        run: python scripts/fetch_lgpl_sources.py --verify-dockerfile Dockerfile.api
+
       - name: Upload licence report
         if: ${{ always() }}
         uses: actions/upload-artifact@v4

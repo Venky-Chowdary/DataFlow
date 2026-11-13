@@ -23,6 +23,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY apps/api/requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
+# LGPL corresponding source (owner decision, 2026-11-13: accepted with
+# attribution). The source of exactly the installed versions ships in the
+# image, with SHA-256 sums: paramiko, psycopg2 (source of psycopg2-binary) and
+# pymssql from PyPI, plus FreeTDS, which pymssql's wheel links statically.
+# The package list must equal the approved LGPL entries in licence-policy.json
+# (CI: fetch_lgpl_sources.py --verify-dockerfile; tests/test_lgpl_source_shipping.py).
+COPY scripts/fetch_lgpl_sources.py /tmp/fetch_lgpl_sources.py
+RUN python /tmp/fetch_lgpl_sources.py --dest /usr/share/doc/datawrap/third-party-source \
+      paramiko psycopg2-binary=psycopg2 pymssql+freetds \
+    && rm /tmp/fetch_lgpl_sources.py
+
 # Proprietary vendor drivers (SAP HANA hdbcli, Teradata teradatasql and their
 # SQLAlchemy dialects) are NOT shipped by default. An operator who has accepted
 # the vendors' licences builds with:  --build-arg INSTALL_VENDOR_DRIVERS=1

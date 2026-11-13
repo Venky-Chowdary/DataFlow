@@ -46,8 +46,8 @@ Datawrap's own (first-party).
 | `paramiko` | yes | LGPL-2.1 | SFTP connector. Used unmodified, as a separately replaceable library. **Approved by the owner, 2026-11-13.** |
 | `psycopg2-binary` | yes | LGPL-3.0 with exceptions | PostgreSQL driver. The wheel bundles libpq and OpenSSL. Used unmodified. **Approved by the owner, 2026-11-13.** |
 | `pymssql` | yes | LGPL-2.1 | SQL Server fallback driver. The wheel bundles FreeTDS (LGPL). Used unmodified. **Approved by the owner, 2026-11-13.** |
-| `certifi` | yes | MPL-2.0 | CA bundle. File-level copyleft, used unmodified. |
-| `orjson` | yes | MPL-2.0 AND (Apache-2.0 OR MIT) | Pulled in by `trino`. Used unmodified. |
+| `certifi` | yes | MPL-2.0 | CA bundle. File-level copyleft, used unmodified. MPL-2.0 then requires only notice of where the source is available, which `NOTICE` gives; no source is shipped. |
+| `orjson` | yes | MPL-2.0 AND (Apache-2.0 OR MIT) | Pulled in by `trino`. Used unmodified; as for `certifi`, the source-availability notice in `NOTICE` is what MPL-2.0 requires. |
 | `hdbcli` | **no**, operator-installed | Proprietary (SAP) | SAP HANA client. Removed from the image (owner decision, 2026-11-13); see below. |
 | `teradatasql` | **no**, operator-installed | Proprietary (Teradata) | Teradata driver. Removed from the image (owner decision, 2026-11-13); see below. |
 | `pypdfium2` | yes | BSD-3-Clause / Apache-2.0 plus bundled-library licences | The PDFium binary's dependencies are permissive; their texts ship in the wheel. |
@@ -67,10 +67,44 @@ allows bundling as long as the copyright and licence travel with the fonts;
    licence gate enforces through `licence-policy.json` (`decision`):
    - they stay unmodified and are loaded as separate, user-replaceable
      Python packages;
-   - `NOTICE` carries, for each, the LGPL licence-text URL, the source
-     location and a written offer of the corresponding source for the
-     shipped version (binary distribution in the image). The gate refuses an
-     approved GPL-family exception without those three.
+   - the corresponding source ships **in the image**, so no ongoing
+     obligation (such as a written offer) is needed. `Dockerfile.api` runs
+     `scripts/fetch_lgpl_sources.py` after installing the runtime
+     requirements. It places, under `/usr/share/doc/datawrap/third-party-source/`,
+     the source of exactly the installed versions, with `SHA256SUMS` and
+     `MANIFEST.json`:
+     - `paramiko-<version>.tar.gz`;
+     - `psycopg2-<version>.tar.gz` (the source of `psycopg2-binary`);
+     - `pymssql-<version>.tar.gz`;
+     - `freetds-<version>.tar.gz`. pymssql's wheel links FreeTDS (LGPL)
+       statically; the version is read from the linked binary.
+
+     The PyPI sources are verified against PyPI's SHA-256 digests. FreeTDS
+     is verified against freetds.org's published SHA-256 when there is one,
+     and is otherwise labelled in `MANIFEST.json` as recorded at download.
+     Any failure fails the image build.
+   - `NOTICE` carries, for each, the LGPL licence-text URL, where in the image
+     the source is, and that the library is separately replaceable. The gate
+     refuses an approved GPL-family exception whose notice lacks the
+     licence-text URL or "source shipped in image at …", or that still
+     mentions a written offer.
+   - CI (`security` job, `fetch_lgpl_sources.py --verify-dockerfile`) fails
+     in three cases:
+     - the Dockerfile's package list differs from the approved LGPL entries;
+     - one of those packages is not a runtime requirement;
+     - an installed version has no source distribution on PyPI.
+
+     The versions cannot drift: the step reads them from the installed
+     packages.
+   - **Known gap, not yet resolved.** Besides FreeTDS, the manylinux wheels
+     bundle further LGPL system libraries:
+     - `psycopg2-binary` bundles `libkeyutils` (keyutils 1.5.8) and
+       `libcrypt`;
+     - `pymssql` bundles `libkeyutils` (keyutils 1.5.10).
+
+     Their source is not shipped yet. Options: ship the matching upstream
+     source too, or build these drivers against the image's system
+     libraries instead of using the manylinux wheels.
 3. **Proprietary drivers** (`hdbcli`, `teradatasql`). Decided 2026-11-13:
    operator-installed. They are no longer in `apps/api/requirements.txt` or
    the production image, and no longer in `licence-policy.json` (Datawrap
