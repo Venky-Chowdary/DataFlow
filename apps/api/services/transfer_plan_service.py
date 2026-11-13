@@ -532,6 +532,9 @@ def run_plan_preflight(
             catalog_primary_key_columns=list(contract_pk_cols or []) or None,
             destination_endpoint=dest,
             destination_table=dest_table,
+            # G11: an existing table's columns / collection's fields.
+            destination_columns=list((dest_meta.get("column_types") or {}).keys()),
+            destination_config=dest_meta.get("_probe_cfg") or None,
         ),
         validation_mode=validation_mode,
         destination_db_type=dest_db_type,

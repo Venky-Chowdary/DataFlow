@@ -61,6 +61,8 @@ def run_transfer_policy_gates(
     source_config: dict[str, Any] | None = None,
     resume: bool = False,
     destination_table: str = "",
+    destination_columns: Any = None,
+    destination_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
 
@@ -479,12 +481,19 @@ def run_transfer_policy_gates(
         gates.append(name_gate)
     # G11 / Document Modeler PR1: each destination's own naming rule (Mongo
     # field paths, SQL engine length limits, BigQuery case), refused here
-    # rather than renamed or cut by the writer.
-    from connectors.destination_naming import target_name_gate
+    # rather than renamed or cut by the writer; an existing table's legacy
+    # columns (an earlier run's spelling) are kept, with an info note.
+    from services.target_name_legacy import target_name_gates
 
-    target_gate = target_name_gate(dest, mappings)
-    if target_gate:
-        gates.append(target_gate)
+    gates.extend(
+        target_name_gates(
+            dest,
+            mappings,
+            existing_columns=list(destination_columns or []),
+            destination_config=destination_config,
+            destination_table=destination_table or _endpoint_table(destination_endpoint),
+        )
+    )
 
     return gates
 

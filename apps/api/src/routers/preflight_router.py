@@ -838,6 +838,9 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
                 "format": body.dest_type or "",
                 **dict(body.dest_extra or {}),
             },
+            # G11: an existing table's columns / collection's fields.
+            destination_columns=list((dest_meta.get("column_types") or {}).keys()),
+            destination_config=dest_meta.get("_probe_cfg") or None,
         ),
         validation_mode=body.validation_mode,
     )

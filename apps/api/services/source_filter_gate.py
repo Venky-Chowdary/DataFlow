@@ -121,8 +121,12 @@ def request_refusal(request: Any) -> str:
     from connectors.destination_naming import target_names_refusal
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
     from services.local_file_policy import local_destination_refusal
+    from services.target_name_legacy import adopt_for_request
 
     dest = request.destination
+    # G11: an existing table keeps the columns an earlier run named; the
+    # mapping is retargeted before any read, write or Gate-8 digest.
+    adopt_for_request(request)
     return (
         local_destination_refusal(dest)
         or unsafe_destination_identifier_reason(
