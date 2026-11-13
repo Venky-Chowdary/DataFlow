@@ -340,6 +340,13 @@ def stream_scd2_mirror_transfer(
             approx_batches = max(1, math.ceil(rows_staged / batch_size))
 
             stage_rejects = list(stage_summary.get("rejected_details") or [])
+            # Gate-8's source count is the rows read: staged + held out by the
+            # staging load. Counting only the staged rows and then also
+            # subtracting the quarantined ones failed every run that held a
+            # row out ("expected target 1 vs target 2").
+            rows_read = max(rows_staged, int(stage_summary.get("source_row_count") or 0))
+            dest_summary["source_rows"] = rows_read
+            dest_summary["source_row_count"] = rows_read
             rejected_all: list[dict] = []
             scd2_block_error: str | None = None
             partial_committed = False
@@ -376,7 +383,7 @@ def stream_scd2_mirror_transfer(
                 # single current version is closed (SCD2-F1).
                 scd2_block_error = all_rows_quarantined_error(
                     stage_rejects + rejected_all,
-                    rows=int(stage_summary.get("source_row_count") or 0) or rows_staged,
+                    rows=rows_read,
                 )
 
             if scd2_block_error:
@@ -448,10 +455,16 @@ def stream_scd2_mirror_transfer(
                     and _scd2_cols.get("close_missing", True)
                 ):
                     # Staging is the complete source population, so a current
-                    # version with no key in staging was deleted at the source.
+                    # version with no key in staging was deleted at the source
+                    # — unless the staging load quarantined that key's row.
                     from services.scd2_engine import (
                         _active_checksum as _scd2_active_checksum,
                         close_versions_missing_from_snapshot,
+                        held_out_keys,
+                    )
+
+                    held_keys = held_out_keys(
+                        destination, stage_rejects, mappings, schema, conflict_columns
                     )
 
                     engine = get_sqlalchemy_engine(dest_cfg)
@@ -469,9 +482,30 @@ def stream_scd2_mirror_transfer(
                                 timestamp=_dt_cls.now(_tz.utc),
                                 dialect=dest_type,
                                 cols=_scd2_cols,
+                                # A row the staging load held out is not in
+                                # staging, yet still in the source (SCD2-F2).
+                                keep_keys=held_keys,
+                                key_types=_target_key_types(
+                                    conn, destination.table, schema_name, conflict_columns
+                                ) if held_keys else None,
                             )
                             conn.commit()
+                            kept = set(closed.pop("kept_current_keys", None) or ())
                             dest_summary.update(closed)
+                            if kept:
+                                dest_summary["quarantined_keys_kept_current"] = len(kept)
+                                _stamp_retained_scope(
+                                    conn, dest_summary, kept,
+                                    staging_qualified=staging_qualified,
+                                    target_qualified=target_qualified,
+                                    target_cols=target_cols,
+                                    conflict_columns=conflict_columns,
+                                    dest_type=dest_type,
+                                    digest_types=digest_types,
+                                    scd2_cols=_scd2_cols,
+                                    batch_size=batch_size,
+                                )
+                                conn.commit()
                             if closed.get("run_stamp"):
                                 run_stamps.add(str(closed["run_stamp"]))
                             updated_total += int(closed.get("closed_missing_rows") or 0)
@@ -534,51 +568,17 @@ def stream_scd2_mirror_transfer(
                                 )
                                 for row in batch
                             }
-                            dest_summary["retained_missing_rows"] = len(retained)
-                            # Real source-side digest for the source-keyed
-                            # scope: the staging table IS the complete
-                            # snapshot — digest it over the attr columns.
-                            from services.scd2_engine import _stamp_set
-                            from services.reconciliation_api import (
-                                stream_select_checksum,
+                            _stamp_retained_scope(
+                                conn, dest_summary, retained,
+                                staging_qualified=staging_qualified,
+                                target_qualified=target_qualified,
+                                target_cols=target_cols,
+                                conflict_columns=conflict_columns,
+                                dest_type=dest_type,
+                                digest_types=digest_types,
+                                scd2_cols=_scd2_cols,
+                                batch_size=batch_size,
                             )
-
-                            _attr = [
-                                c
-                                for c in target_cols
-                                if c not in _stamp_set(_scd2_cols)
-                            ]
-                            _attrq = ", ".join(
-                                quote_stored_identifier(dest_type, c) for c in _attr
-                            )
-                            _srows, _sdigest = stream_select_checksum(
-                                conn,
-                                sa.text(
-                                    f"SELECT {_attrq} FROM "  # nosec B608
-                                    f"{staging_qualified}"
-                                ),
-                                _attr,
-                                itersize=max(1, int(batch_size)),
-                                dest_db_type=dest_type,
-                                dest_types=digest_types,
-                            )
-                            dest_summary["source_snapshot_checksum"] = (
-                                _sdigest
-                            )
-                            if retained:
-                                s_rows, s_checksum = _scd2_active_checksum(
-                                    conn,
-                                    target_qualified,
-                                    target_cols,
-                                    batch_size,
-                                    dest_type,
-                                    dest_types=digest_types,
-                                    cols=_scd2_cols,
-                                    pk_columns=conflict_columns,
-                                    exclude_keys=retained,
-                                )
-                                dest_summary["source_scoped_rows"] = s_rows
-                                dest_summary["source_scoped_checksum"] = s_checksum
                             conn.commit()
                     finally:
                         release_engine(engine)
@@ -713,6 +713,78 @@ def stream_scd2_mirror_transfer(
     dest_summary.setdefault("rejected_rows", stage_summary.get("rejected_rows", 0))
     dest_summary.setdefault("coerced_null_rows", stage_summary.get("coerced_null_rows", 0))
     return rows_written, ddl_log, dest_summary, target_cols
+
+
+def _target_key_types(
+    conn: Any, table: str, schema_name: str, key_columns: list[str]
+) -> dict[str, Any] | None:
+    """SQLAlchemy types of the history table's key columns, for typed key binds."""
+    import sqlalchemy as sa
+    from services.scd2_engine import key_column_types
+
+    try:
+        reflected = sa.Table(
+            table, sa.MetaData(), schema=schema_name or None, autoload_with=conn
+        )
+    except sa.exc.SQLAlchemyError as exc:
+        logger.debug("history key types unavailable, binding wire keys: %s", exc)
+        return None
+    return key_column_types(reflected, key_columns)
+
+
+def _stamp_retained_scope(
+    conn: Any,
+    dest_summary: dict[str, Any],
+    retained: set[str],
+    *,
+    staging_qualified: str,
+    target_qualified: str,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    dest_type: str,
+    digest_types: dict[str, str],
+    scd2_cols: dict[str, Any],
+    batch_size: int,
+) -> None:
+    """Stamp the Gate-8 scope for current keys this run kept but did not write.
+
+    ``retained`` keys stay current without a row in staging: absent keys under
+    close_missing=off, or keys whose row the staging load quarantined. Gate-8
+    counts them (current = merged + retained) and compares the staging
+    snapshot's digest with the current rows outside ``retained``.
+    """
+    import sqlalchemy as sa
+    from services.reconciliation_api import stream_select_checksum
+    from services.scd2_engine import _active_checksum, _stamp_set
+
+    dest_summary["retained_missing_rows"] = len(retained)
+    # Real source-side digest for the source-keyed scope: the staging table
+    # IS the complete snapshot — digest it over the attr columns.
+    attr = [c for c in target_cols if c not in _stamp_set(scd2_cols)]
+    attr_q = ", ".join(quote_stored_identifier(dest_type, c) for c in attr)
+    _rows, digest = stream_select_checksum(
+        conn,
+        sa.text(f"SELECT {attr_q} FROM {staging_qualified}"),  # nosec B608
+        attr,
+        itersize=max(1, int(batch_size)),
+        dest_db_type=dest_type,
+        dest_types=digest_types,
+    )
+    dest_summary["source_snapshot_checksum"] = digest
+    if retained:
+        s_rows, s_checksum = _active_checksum(
+            conn,
+            target_qualified,
+            target_cols,
+            batch_size,
+            dest_type,
+            dest_types=digest_types,
+            cols=scd2_cols,
+            pk_columns=conflict_columns,
+            exclude_keys=retained,
+        )
+        dest_summary["source_scoped_rows"] = s_rows
+        dest_summary["source_scoped_checksum"] = s_checksum
 
 
 def _stamp_merge_source_digest(
