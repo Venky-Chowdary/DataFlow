@@ -386,3 +386,56 @@ def test_a_partly_failed_upsert_batch_counts_the_rows_it_wrote():
     assert not result.ok
     assert result.rows_written == 2, result
     assert "duplicate key" in (result.error or "")
+
+
+def test_a_partly_failed_skip_batch_counts_only_inserted_keys_as_written():
+    """skip_duplicates + an unordered bulk error: a matched key was kept, not written.
+
+    ``$setOnInsert`` on a stored key matches without writing, so under skip
+    ``nMatched`` is a kept (skipped) key; only ``nUpserted`` is written.
+    """
+    from pymongo.errors import BulkWriteError
+    from services.duplicate_policy import reset_match_action, set_match_action
+
+    class _Coll:
+        def find(self, *a, **k):
+            return []
+
+        def create_index(self, *a, **k):
+            return None
+
+        def bulk_write(self, ops, ordered=False):
+            # op 0 inserted, op 1 matched a stored key (kept), op 2 failed.
+            raise BulkWriteError({
+                "nInserted": 0, "nUpserted": 1, "nMatched": 1, "nModified": 0,
+                "nRemoved": 0, "upserted": [{"index": 0, "_id": "x"}],
+                "writeErrors": [{"index": 2, "code": 11000, "errmsg": "duplicate key"}],
+            })
+
+    class _Db:
+        def __getitem__(self, name):
+            return _Coll()
+
+        def list_collection_names(self, filter=None):  # noqa: A002
+            return []
+
+    class _Client:
+        def __getitem__(self, name):
+            return _Db()
+
+        def close(self):
+            return None
+
+    token = set_match_action("skip")
+    try:
+        with patch("connectors.mongodb_common._mongo_client", return_value=_Client()):
+            result = _write("testdb", "orders", ["id", "note"],
+                            [["1", "a"], ["2", "b"], ["3", "c"]],
+                            {"id": "string", "note": "string"}, ["id"], create=True)
+    finally:
+        reset_match_action(token)
+    assert not result.ok
+    assert result.rows_written == 1, result
+    assert result.rows_skipped == 1, result
+    assert len(result.meta.get("skipped_identity_keys") or []) == 1, result.meta
+    assert "duplicate key" in (result.error or "")
