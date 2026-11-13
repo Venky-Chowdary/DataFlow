@@ -11,6 +11,7 @@ from typing import Any
 from services import reflection_cache
 from services.error_handling import TransferCancelled  # noqa: E402
 from services.decision_kernel import materialize_dest_ddl
+from services.reversibility_enforce import scan_pass
 
 from connectors.mysql_conn import get_connection
 from connectors.schema_drift import widen_existing_columns_native
@@ -537,6 +538,7 @@ def iter_mysql_finished_bundles(
     )
 
 
+@scan_pass  # its rows are mapped again by the write: checked here, counted there (review 5, H-1)
 def _mysql_scan_finished_bundles(**kwargs: Any) -> Any:
     from connectors.sql_write_materialize import SqlWriteAccumulator
 

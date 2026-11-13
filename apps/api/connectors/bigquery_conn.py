@@ -1,4 +1,9 @@
-"""BigQuery connection helper — project + optional service account JSON path.
+"""BigQuery connection helper — project + the connector's own service account key.
+
+Without ``DATAFLOW_ALLOW_PLATFORM_GCP_AZURE_CREDENTIALS`` a hosted endpoint needs
+the connector's key, read only from JSON or from a file inside the areas a
+connector may open (``services.google_credentials_policy``): never the API
+host's Application Default Credentials or one of its key files.
 
 Supports local emulators (e.g. goccy/bigquery-emulator) by detecting
 localhost/api_endpoint URLs and using anonymous credentials.
@@ -109,6 +114,12 @@ def get_client(
     # it as an emulator so tests and local stacks don't require ADC.
     if not is_local and host in ("localhost", "127.0.0.1", "host.docker.internal"):
         is_local = True
+    from services.google_credentials_policy import bigquery_credentials_refusal
+
+    # Never the API host's ADC or a key file on the host (follow-up review 2, BQ).
+    refusal = bigquery_credentials_refusal(creds_ref, is_local=is_local)
+    if refusal:
+        raise ValueError(refusal)
 
     if is_local:
         from google.auth.credentials import AnonymousCredentials

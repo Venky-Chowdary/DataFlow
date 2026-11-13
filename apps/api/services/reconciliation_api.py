@@ -7,6 +7,7 @@ remains in ``reconciliation.py`` until verify_* engines are split per dialect.
 
 from __future__ import annotations
 
+from services.reconciliation import _iter_fingerprints as iter_row_fingerprints
 from services.reconciliation import (
     FingerprintAccumulator,
     aggregate_checksum,
@@ -34,6 +35,7 @@ __all__ = [
     "canonical_checksum_from_iter",
     "checksum_rows",
     "fingerprint_checksum",
+    "iter_row_fingerprints",
     "iter_select_row_dicts",
     "reconcile",
     "run_five_layer_verification",

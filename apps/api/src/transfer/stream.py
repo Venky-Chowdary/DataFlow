@@ -1658,7 +1658,7 @@ def _stream_database_transfer_impl(
     # compares against the whole destination — the write-pass digest is not a
     # population checksum for this run.
     resumed_pass = bool(run.tally.written or offset)
-    run.tally.dest_summary: dict[str, Any] = {}
+    run.tally.dest_summary: dict[str, Any] = {"resumed_checkpoint_rows": run.tally.written} if resumed_pass else {}
     if run.cfg.resume_write_complete:
         _seed_write_complete_summary(run.tally.dest_summary, checkpoint)
     # Failed-Gate-8 restore guard: renamed-aside route tables (armed once,
@@ -2882,9 +2882,9 @@ def _stream_database_transfer_impl(
                     removed_on_read=removed_on_read_total,
                 ),
             )
-        if run.cfg.columns and (getattr(run.cfg.destination, "extra", None) or {}).get(
+        if run.cfg.columns and (run.cfg.total_rows == 0 or (getattr(run.cfg.destination, "extra", None) or {}).get(
             "create_empty_source"
-        ):
+        )):  # measured empty: one stream of several has no engine peek of its own (review 6)
             written_n, checksum, empty_summary = _stream._write_batch(
                 run.cfg.dest_type,
                 run.cfg.destination,

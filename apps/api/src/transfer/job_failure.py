@@ -9,6 +9,7 @@ can never be reported as a partial success. ``engine`` re-exports these names.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from services import lineage_telemetry as lineage  # noqa: F401 — used by callers
@@ -553,6 +554,12 @@ def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, s
     except (TypeError, ValueError):
         incoming = 0
     if kept > incoming:
+        from services.reversibility_enforce import NOTHING_KEPT, ROWS_KEPT
+
+        # Rows were kept: a reversibility stop never claims it blocked a partial write (review 4, M-1).
+        message = message.replace(NOTHING_KEPT, ROWS_KEPT)
+        # Where the write stopped is the written count, not the check's tally at that moment (review 5).
+        message = re.sub(r"after the first [\d,]+ checked row\(s\)", f"after the first {kept:,} written row(s)", message)
         note = f"{kept} row(s) were already written and were not removed."
         if note not in message:
             message = f"{message.rstrip()} {note}"

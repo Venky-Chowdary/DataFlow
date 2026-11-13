@@ -86,6 +86,11 @@ def _run_transfer(
         from .endpoint_refresh import refresh_endpoints_for_run
 
         refresh_endpoints_for_run(job_id, request, mongo)
+        # A rehearsal's extract runs only as its rehearsal's own job, under an acknowledgement that still
+        # holds when it starts (every path that reaches the scheduler passes here).
+        from services.exit_job_guard import before_run as before_exit_extract_runs
+
+        before_exit_extract_runs(job_id, request, mongo)
         get_transfer_engine().execute_tracked(request, job_id, resume=resume)
     except Exception as exc:
         logger.exception("Background transfer failed job=%s", job_id)

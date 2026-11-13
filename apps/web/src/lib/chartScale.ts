@@ -48,6 +48,23 @@ export function percentDomain(
   return [lo, hi];
 }
 
+/**
+ * Y domain for a non-negative measure (durations, counts): the lowest to the
+ * highest value seen, padded by ``pad`` of the span on each side so the marks
+ * use the plot instead of hugging its edges, never below zero. A flat series
+ * gets a span of ``pad`` of its value (or 1) so it still has a scale.
+ */
+export function valueDomain(values: ReadonlyArray<number | null | undefined>, pad = 0.12): Domain | null {
+  const finite = finiteValues(values).map((v) => Math.max(0, v));
+  if (finite.length === 0) return null;
+  const min = Math.min(...finite);
+  const max = Math.max(...finite);
+  const span = max - min || Math.max(max * pad * 2, 1);
+  const lo = Math.max(0, min - span * pad);
+  const hi = (max === min ? min + span / 2 : max) + span * pad;
+  return [lo, Math.max(hi, lo + 1e-9)];
+}
+
 /** A percentage tick label with only the precision the axis needs. */
 export function formatPercentTick(value: number): string {
   if (!Number.isFinite(value)) return "";

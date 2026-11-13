@@ -139,14 +139,14 @@ def csv_cell_encode(value: Any) -> str:
     return str(value)
 
 
-def csv_quote_cell(cell: str) -> str:
+def csv_quote_cell(cell: str, delimiter: str = ",") -> str:
     if cell == _CSV_NULL:
         return ""
     if cell == "":
         return '""'
     if cell == LEGACY_CSV_NULL:
         return LEGACY_CSV_NULL
-    if any(c in cell for c in ',"\n\r'):
+    if any(c in cell for c in (delimiter, '"', "\n", "\r")):
         return '"' + cell.replace('"', '""') + '"'
     return cell
 

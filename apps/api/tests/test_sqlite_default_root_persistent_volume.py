@@ -4,9 +4,10 @@
 ``DATAFLOW_SQLITE_ROOT`` the path was used as given, so a relative name landed
 in the container's working directory and ``/tmp/...`` in the container's
 temp — both gone on the next restart. With
-``DATAFLOW_CONFINE_LOCAL_FILES=1`` the production default root is a directory on
-the persistent data volume; with the flag off (the default) the path is used as
-given and the would-be refusal is audited. The API says so at startup when the
+``DATAFLOW_CONFINE_LOCAL_FILES`` on (the production default since security
+follow-up 1) the production default root is a directory on the persistent data
+volume; with the operator opt-out (``=0``) the path is used as given and the
+would-be refusal is audited. The API says so at startup when the
 volume is not mounted.
 """
 
@@ -21,7 +22,8 @@ from connectors.sqlite_common import sqlite_file_path
 
 @pytest.fixture()
 def production(tmp_path, monkeypatch):
-    for name in ("DATAFLOW_SQLITE_ROOT", "DATAWRAP_SQLITE_ROOT"):
+    # conftest declares the temp dir a source root; production confinement honours it.
+    for name in ("DATAFLOW_SQLITE_ROOT", "DATAWRAP_SQLITE_ROOT", "DATAFLOW_SOURCE_PATH_ROOTS", "DATAWRAP_SOURCE_PATH_ROOTS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.delenv("DATAWRAP_ENV", raising=False)
@@ -86,7 +88,8 @@ def test_startup_warns_when_the_data_dir_is_not_a_mounted_volume(tmp_path, monke
 def test_flag_off_keeps_today_behaviour_and_audits_what_it_would_refuse(
     production, monkeypatch, tmp_path
 ):
-    monkeypatch.delenv("DATAFLOW_CONFINE_LOCAL_FILES")
+    # On by default in production (security follow-up 1): "off" is the explicit opt-out.
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
     from services import would_apply_audit
     import services.audit_log as audit_log
 
@@ -111,7 +114,7 @@ def test_flag_off_keeps_today_behaviour_and_audits_what_it_would_refuse(
 def test_flag_off_still_refuses_service_data_internals_and_honours_explicit_roots(
     production, monkeypatch, tmp_path
 ):
-    monkeypatch.delenv("DATAFLOW_CONFINE_LOCAL_FILES")
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "0")
     data = production.parent
     with pytest.raises(ValueError, match="service data directory"):
         sqlite_file_path(str(data / "proof_ledger.db"), "", "")

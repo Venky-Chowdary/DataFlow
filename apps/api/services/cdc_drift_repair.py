@@ -201,6 +201,11 @@ def run_fenced_drift_repair(
     from services.cdc_exactly_once import require_batch_lsn
 
     lsn = require_batch_lsn(evidence.get("committed_position"))
+    from services.exit_job_guard import request_refusal
+
+    refused = request_refusal(saved, "repaired")
+    if refused:
+        raise ValueError(refused)
     request = transfer_request_from_dict(saved)
     from services.data_residency import residency_refusal
 

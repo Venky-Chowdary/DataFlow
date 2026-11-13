@@ -7,18 +7,24 @@ volume sub-directories; Iceberg schema, table and catalog names may not climb
 out of the warehouse; an explicit ``DATAFLOW_SQLITE_ROOT`` /
 ``DATAFLOW_DUCKDB_ROOT`` / ``DATAFLOW_ICEBERG_ROOT`` is honoured.
 
-Behind ``DATAFLOW_CONFINE_LOCAL_FILES`` (default off, the behaviour production
-had): the *implicit* roots. With the flag on, a production process confines
+``DATAFLOW_CONFINE_LOCAL_FILES`` (on by default in production, off elsewhere;
+an explicit ``0``/``false``/``off`` opts a production process out, with a
+startup warning and a ``local_file_confinement`` entry in the security-settings
+snapshot): the *implicit* roots. With it on, a production process confines
 SQLite to ``<data_dir>/sqlite``, DuckDB to ``<data_dir>/duckdb`` (or the SQLite
 root) and Iceberg to ``<data_dir>/iceberg``, and anchors relative names there.
-With it off, a path outside those folders is allowed and recorded as a
-``local_file.would_confine`` audit event so the owner can see what the flag would
-refuse (``scripts/audit_sqlite_paths.py`` lists the saved connectors).
+A SQLite/DuckDB connector may also open the platform's upload area (an upload
+its own workspace owns), its export area (its own export folder) and any
+directory the operator lists in ``DATAFLOW_SOURCE_PATH_ROOTS``. With it off, a
+path outside those folders is allowed and, in production, recorded as a
+``local_file.would_confine`` audit event so the owner can see what the flag
+would refuse (``scripts/audit_sqlite_paths.py`` lists the saved connectors).
 """
 
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -29,9 +35,130 @@ from services.would_apply_audit import audit_would_apply
 FLAG = "DATAFLOW_CONFINE_LOCAL_FILES"
 
 
+_FLAG_ON = frozenset({"1", "true", "yes", "on"})
+_FLAG_OFF = frozenset({"0", "false", "no", "off"})
+
+
+def _flag_value() -> str:
+    return str(getenv_brand("CONFINE_LOCAL_FILES", "") or "").strip().lower()
+
+
+def confinement_opted_out() -> bool:
+    """The operator set ``DATAFLOW_CONFINE_LOCAL_FILES`` to an explicit off value."""
+    return _flag_value() in _FLAG_OFF
+
+
 def confine_local_files() -> bool:
-    raw = str(getenv_brand("CONFINE_LOCAL_FILES", "") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    """On when set on; off when explicitly opted out; otherwise on in production only."""
+    raw = _flag_value()
+    if raw in _FLAG_ON:
+        return True
+    if raw in _FLAG_OFF:
+        return False
+    from services.platform_config import is_production
+
+    return is_production()
+
+
+def local_file_settings() -> dict[str, str]:
+    """The confinement entry of the startup security-settings snapshot.
+
+    ``enforced`` (production, the default), ``opted_out`` (production with an
+    explicit off value) or ``off`` (development, tests).
+    """
+    from services.platform_config import is_production
+
+    if confine_local_files() and is_production():
+        state = "enforced"
+    elif confinement_opted_out() and is_production():
+        state = "opted_out"
+    else:
+        state = "off"
+    return {"local_file_confinement": state}
+
+
+def warn_if_local_file_confinement_off(logger: Any) -> None:
+    """Startup: say once that a production process runs with the confinement opted out."""
+    if local_file_settings()["local_file_confinement"] != "opted_out":
+        return
+    logger.warning(
+        "%s is off: SQLite, DuckDB and Iceberg connectors may open any file this API "
+        "process can read, in every workspace. Remove the setting to confine them to "
+        "the data, upload and export folders (and DATAFLOW_SOURCE_PATH_ROOTS).",
+        FLAG,
+    )
+
+
+def connector_file_areas() -> list[Path]:
+    """Besides the data area: the folders a SQLite/DuckDB connector may open under
+    the implicit production confinement (not created here).
+
+    The upload area (only an upload the caller's workspace owns, see
+    :func:`connector_may_open_upload_path`), the export area (only the caller's
+    own folder, ``export_paths.connector_may_open_export_path``) and every
+    directory the operator lists in ``DATAFLOW_SOURCE_PATH_ROOTS``.
+    """
+    from services.brand_env import getenv_brand_str
+    from services.export_paths import exports_dir
+    from services.platform_config import upload_dir_path
+
+    areas = [upload_dir_path(), exports_dir(create=False)]
+    areas += [Path(raw.strip()) for raw in getenv_brand_str("SOURCE_PATH_ROOTS", "").split(os.pathsep) if raw.strip()]
+    return areas
+
+
+def confinement_refusal(label: str, env_name: str) -> ValueError:
+    """The refusal for a file outside every confined area; names the fixes, never a host path."""
+    return ValueError(
+        f"{label} file is outside the folders connectors may open on this server (the "
+        f"persistent data volume's {label} area, uploads and this workspace's exports). "
+        f"Move the file into the {label} data folder or upload it; or ask the operator to add "
+        f"its directory to DATAFLOW_SOURCE_PATH_ROOTS (or set {env_name}); an operator can "
+        "also turn this check off with DATAFLOW_CONFINE_LOCAL_FILES=0."
+    )
+
+
+_UPLOAD_NAME = re.compile(r"(?P<file_id>[0-9a-f]{16})_.+")
+
+
+def connector_may_open_upload_path(resolved: Path) -> bool:
+    """Whether an embedded-database path inside the upload area is an upload the caller may open.
+
+    Uploads share one folder; the registry records each one's workspace. The
+    binding is the one the data volume uses (the job's workspace, else the
+    stored connector's, else the request's verified workspace): a bound
+    workspace opens only its own registered uploads. With none bound, an
+    unscoped upload opens, and anything else only for the single local
+    operator or a platform administrator. A path outside the area is not
+    judged here.
+    """
+    from services.embedded_volume import _bound_workspace, _single_operator
+    from services.export_paths import _unbound_may_open_flat_folder
+    from services.platform_config import upload_dir_path
+
+    area = upload_dir_path().resolve(strict=False)
+    if not is_within(resolved, area) or _single_operator():
+        return True
+    owner: str | None = None
+    match = _UPLOAD_NAME.fullmatch(resolved.name)
+    if resolved.parent == area and match:
+        from services.file_parser import get_file
+
+        record = get_file(match.group("file_id")) or {}
+        recorded = str(record.get("path") or "")
+        if recorded and Path(recorded).resolve(strict=False) == resolved:
+            owner = str(record.get("workspace_id") or "")
+    workspace = _bound_workspace()
+    if workspace:
+        return owner == workspace
+    return owner == "" or _unbound_may_open_flat_folder()
+
+
+def upload_refusal(label: str) -> ValueError:
+    return ValueError(
+        f"{label} file is in the upload folder but is not an upload of this workspace, so "
+        "this connector cannot open it; upload the file in this workspace and use that upload"
+    )
 
 
 def volume_root(subdir: str) -> Path:
@@ -45,7 +172,8 @@ def volume_root(subdir: str) -> Path:
 
 
 def implicit_root(subdir: str) -> Path | None:
-    """The production default root, only while ``DATAFLOW_CONFINE_LOCAL_FILES`` is on."""
+    """The production default root, only while ``DATAFLOW_CONFINE_LOCAL_FILES`` is on
+    (the production default)."""
     from services.platform_config import is_production
 
     if not (confine_local_files() and is_production()):
@@ -98,7 +226,7 @@ def audit_would_confine(subdir: str, resolved: Path) -> None:
 # explicitly, so a self-hoster on any cloud can turn it back on.
 SQLITE_DESTINATION_FLAG = "DATAWRAP_SQLITE_DESTINATION"
 SQLITE_DESTINATION_UNAVAILABLE_LABEL = "Not available on cloud"
-_SQLITE_DRIVERS = frozenset({"sqlite", "sqlite3"})
+SQLITE_DRIVERS = _SQLITE_DRIVERS = frozenset({"sqlite", "sqlite3"})
 
 
 def sqlite_destination_message() -> str:

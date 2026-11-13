@@ -105,11 +105,15 @@ def error_code(text: str) -> str:
     return ""
 
 
-def safe_error(error: Any, *, what: str = "the fix", limit: int = 300) -> str:
+def safe_error(error: Any, *, what: str = "the fix", limit: int = 300, event: str = "parity.fix.failed",
+               reference: bool = False, finding: str = "") -> str:
     """``error`` (an exception or a child job's error text) as it may be shown, signed and audited.
 
     Only the exception class, the engine's error code and a fixed sentence for
-    that code survive; the full text is logged on the server.
+    that code survive; the full text is logged on the server. ``finding`` is a
+    caller's allowlisted sentence (built from codes, counts and column names,
+    never a row value) used when the code has no fixed sentence; ``reference``
+    appends the server log's reference id, so an operator can find the full text.
     """
     from services.safe_errors import public_error
 
@@ -120,12 +124,13 @@ def safe_error(error: Any, *, what: str = "the fix", limit: int = 300) -> str:
     code = error_code(text)
     _detail, cid = public_error(
         error if isinstance(error, BaseException) else RuntimeError(cls or "error"),
-        event="parity.fix.failed", public_message=what, logger=logger, error_code=code or None,
+        event=event, public_message=what, logger=logger, error_code=code or None,
     )
     logger.warning("parity: %s failed (%s%s) [reference %s]: %s", what, cls or "error", f" {code}" if code else "",
                    cid, text[:2000])
-    sentence = _MESSAGES.get(code) or (
+    sentence = _MESSAGES.get(code) or finding.strip().rstrip(".") or (
         "the Oracle database refused the statement" if code.startswith("ORA-") else
         "see the server log for the details")
     label = " ".join(x for x in (cls, code) if x)
-    return (f"{what} failed" + (f" ({label})" if label else "") + f": {sentence}.")[:limit]
+    text = (f"{what} failed" + (f" ({label})" if label else "") + f": {sentence}.")[:limit]
+    return f"{text} Reference {cid}." if reference else text

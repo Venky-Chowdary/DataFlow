@@ -2605,7 +2605,18 @@ def _iceberg_object_store_cfg(
         else:
             cfg.pop("username", None)
             cfg.pop("password", None)
-            cfg["use_default_aws_credentials"] = True
+            from connectors.aws_common import PLATFORM_DEFAULT_CREDENTIALS
+            from services.platform_aws_credentials import FLAG, platform_aws_credentials_allowed
+
+            if not platform_aws_credentials_allowed():
+                # The tenant's catalog has no keys: never the platform's chain
+                # (follow-up review 1, H2). The count stays unmeasured.
+                logger.warning(
+                    "Iceberg S3 COUNT unavailable (missing_credentials; the connector needs "
+                    "its own keys, or the operator sets %s=1)", FLAG,
+                )
+                return None
+            cfg["use_default_aws_credentials"] = PLATFORM_DEFAULT_CREDENTIALS
             logger.warning(
                 "Iceberg S3 COUNT using default credential chain (missing_credentials)"
             )
@@ -2719,19 +2730,50 @@ def _count_iceberg_data_uri(
 
 
 def _iceberg_local_path(uri: str, *, warehouse: str = "") -> Path | None:
-    from connectors.iceberg_catalog import local_path_from_location
+    """The local file a snapshot path names, kept under the Iceberg warehouse folder.
+
+    Every candidate goes through the Iceberg jail (follow-up review 1, M3): a
+    catalog chooses these paths, so one outside the folder is never opened.
+    """
+    from connectors.iceberg_catalog import _jail_local_path, local_path_from_location
 
     raw = str(uri or "").strip()
     if not raw:
         return None
-    candidates = [local_path_from_location(raw)]
+    candidates = [raw]
     root = str(warehouse or "").strip()
     if root:
-        candidates.append(local_path_from_location(root) / raw)
-    for path in candidates:
+        candidates.append(str(local_path_from_location(root) / raw))
+    for candidate in candidates:
+        try:
+            path = _jail_local_path(candidate, "data file")
+        except ValueError:
+            logger.warning("iceberg data file outside the Iceberg warehouse folder; not read")
+            continue
         if path.is_file():
             return path
     return None
+
+
+#: Catalogs that run elsewhere: the files they list are never on the API host.
+_REMOTE_ICEBERG_CATALOGS = frozenset({"rest", "glue", "hive"})
+
+
+def _remote_catalog_lists_local_file(
+    endpoint: dict[str, Any], parsed: dict[str, Any], paths: Sequence[str]
+) -> bool:
+    """A remote catalog naming a local path (follow-up review 1, M3): not read."""
+    from connectors.iceberg_catalog import is_remote_location
+
+    if str(parsed.get("catalog_type") or "") not in _REMOTE_ICEBERG_CATALOGS:
+        return False
+    warehouse = _iceberg_data_warehouse(endpoint, parsed)
+    for path in paths:
+        resolved = _resolve_iceberg_data_uri(path, warehouse)
+        if resolved and not is_remote_location(resolved):
+            logger.warning("remote iceberg catalog listed a local data file; dest COUNT unmeasured")
+            return True
+    return False
 
 
 def _iceberg_filesystem_file_count(
@@ -2820,6 +2862,9 @@ def _iceberg_catalog_snapshot(
         uris = [str(p) for p in data_files.column("file_path").to_pylist()]
     except Exception as exc:
         logger.info("iceberg catalog file_path listing failed: %s", exc)
+        return None
+    listed = [*uris, *(str(ref.get("path") or "") for ref in delete_refs)]
+    if _remote_catalog_lists_local_file(endpoint, parsed, listed):
         return None
     if not delete_refs:
         return uris, None
@@ -4811,17 +4856,20 @@ def _json_null_cells_as_engine_text(records: Any) -> Any:
         yield {key: (JSON_NULL if value is None else value) for key, value in rec.items()}
 
 
-def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
+def _iter_streaming_kind(kind: str, source: Any, *, name: str, exact_numbers: bool = False,
+                         written_here: bool = False) -> Any:
     """CSV/JSON/JSONL/XML/Avro records from a forward-only GET."""
     if kind in {"csv", "tsv"}:
         from services.csv_profiler import iter_csv_dicts
+        from services.export_dialect import written_dialect
 
-        yield from iter_csv_dicts(source)
+        # An export this product wrote is read with the writer's dialect, never a sniffer.
+        yield from iter_csv_dicts(source, options=written_dialect(kind) if written_here else None)
         return
     if kind == "jsonl":
         from services.file_parser import iter_jsonl_dicts
 
-        yield from _json_null_cells_as_engine_text(iter_jsonl_dicts(source))
+        yield from _json_null_cells_as_engine_text(iter_jsonl_dicts(source, keep_literals=exact_numbers))
         return
     if kind == "json":
         from services.json_tabular import iter_json_dicts
@@ -4907,8 +4955,14 @@ def _iter_artifact_records(
     *,
     name: str,
     fmt: str | None = None,
+    exact_numbers: bool = False,
+    written_here: bool = False,
 ) -> Any:
     """Dest-engine records of an object-store GET. Same gzip machine as COUNT.
+
+    ``written_here`` says the artifact is an export this product wrote: a
+    delimited file is then read with the writer's own delimiter, quoting and
+    header (:mod:`services.export_dialect`) instead of sniffing them.
 
     CSV/JSON/JSONL/XML/Avro (including gzip) walk ``source`` forward-only.
     Parquet/ORC/Excel gzip stream-decompress into one rewindable image
@@ -4916,11 +4970,14 @@ def _iter_artifact_records(
     or wrapped) and XML unique-path cell dicts are a second StAX pass of
     the COUNT path (one-shot GET is spooled once). Never ``json.loads``
     fallback empty. Never ``gzip.decompress(source.read())``.
+    ``exact_numbers`` keeps a JSON Lines number's own text (``1.50`` stays
+    ``1.50``, as ``JsonFraction.literal``) for a reader that compares it.
     """
     kind, handle, gz_close = _artifact_stream_open(source, name=name, fmt=fmt)
     try:
         if kind in _STREAMING_COUNT_KINDS:
-            yield from _iter_streaming_kind(kind, handle, name=name)
+            yield from _iter_streaming_kind(kind, handle, name=name, exact_numbers=exact_numbers,
+                                            written_here=written_here)
             return
         if kind in _BYTE_IMAGE_KINDS:
             yield from _iter_byte_image_kind(kind, handle, name=name)

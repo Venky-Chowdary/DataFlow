@@ -44,6 +44,7 @@ HARD_GATE_IDS = {
     "g21_control_totals",
     "g22_dest_referential_integrity",
     "g23_destination_name",
+    "g24_reversibility",
 }
 
 SOFT_GATE_IDS = {
@@ -285,6 +286,28 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to complete the crosswalk"},
+        ],
+    },
+    "g24_reversibility": {
+        "title": "Reversibility",
+        "category": "hard",
+        "why": (
+            "This transfer is marked \"require reversibility\": the destination must be "
+            "able to give the source data back. A hashed, masked or redacted column, a "
+            "dropped or narrowed column, a rounding or truncating cast, or a recipe step "
+            "that changes values or rows cannot be turned back."
+        ),
+        "fix": (
+            "Open the Reversibility tab: remove the lossy transform, widen the destination "
+            "type, map the dropped column, or turn off require reversibility for this "
+            "transfer. A conditional cast passes once the observed values round-trip exactly."
+        ),
+        "examples": [
+            "email is hashed (hash_pii) → keep the source as the fallback, or do not require reversibility.",
+            "amount narrows NUMERIC(12,4) to NUMERIC(12,2) → widen the destination column.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open the Reversibility tab"},
         ],
     },
     "g21_control_totals": {
