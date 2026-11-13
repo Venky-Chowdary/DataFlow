@@ -205,3 +205,48 @@ def test_operator_installed_wheels_are_not_part_of_the_shipped_inventory(tmp_pat
             self.files = []
 
     assert bl.installed_bundles([_Dist("ibm_db")]) == []
+
+
+# ── review 7: a generic SQLAlchemy connector with a vendor URL ─────────────
+
+VENDOR_URLS = [
+    ("teradatasql://u:p@127.0.0.1:9/d", "teradata"),
+    ("hana+hdbcli://u:p@127.0.0.1:9/d", "sap_hana"),
+    ("ibm_db_sa://u:p@127.0.0.1:9/d", "db2"),
+    ("db2+ibm_db://u:p@127.0.0.1:9/d", "db2"),
+]
+
+
+@pytest.mark.parametrize(("url", "kind"), VENDOR_URLS)
+def test_a_vendor_url_gets_the_operator_install_message(url, kind, drivers_missing):
+    from sqlalchemy.engine import make_url
+
+    from connectors.generic_sql import _dialect_unavailable
+
+    for db_type in ("generic_sql", "sqlalchemy", None):
+        message = str(_dialect_unavailable(make_url(url), db_type))
+        _assert_actionable(kind, message)
+        assert "SQLAlchemy dialect/driver" not in message
+
+
+@pytest.mark.parametrize(("url", "kind"), VENDOR_URLS)
+def test_testing_a_generic_connector_with_a_vendor_url_refuses_cleanly(url, kind, drivers_missing, monkeypatch):
+    import services.egress_guard as egress
+    from connectors.generic_sql import test_generic_sql
+
+    monkeypatch.setattr(egress, "assert_connector_dial_allowed", lambda *a, **k: None)
+    ok, message = test_generic_sql(
+        type="generic_sql", host="", port=None, database="", username="", password="",
+        schema="", connection_string=url, ssl=False,
+    )
+    assert ok is False
+    _assert_actionable(kind, message)
+
+
+def test_a_generic_url_for_any_other_missing_dialect_keeps_the_generic_message(drivers_missing):
+    from sqlalchemy.engine import make_url
+
+    from connectors.generic_sql import _dialect_unavailable
+
+    message = str(_dialect_unavailable(make_url("nosuchdb+nodriver://h/d"), "generic_sql"))
+    assert "SQLAlchemy dialect/driver" in message and "INSTALL_VENDOR_DRIVERS" not in message

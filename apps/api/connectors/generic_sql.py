@@ -1289,9 +1289,11 @@ def _dialect_unavailable(url: Any, db_type: Any) -> RuntimeError:
         "snowflake": "snowflake-sqlalchemy",
         "bigquery": "sqlalchemy-bigquery",
     }
+    from connectors.vendor_drivers import url_driver_message
     from src.transfer.connector_capabilities import planned_driver_message
 
-    if planned := planned_driver_message(dialect_key):  # Databricks here (D345)
+    # Databricks here (D345); a vendor URL on a generic connector too (hana+hdbcli://).
+    if planned := planned_driver_message(dialect_key) or url_driver_message(driver_s):
         return RuntimeError(planned)
     hint = hint_by_dialect.get(dialect_key)
     if not hint:

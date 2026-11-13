@@ -69,6 +69,8 @@ _BY_KIND: dict[str, VendorDriver] = {
     "teradata": TERADATA,
     "teradata_vantage": TERADATA,
     "teradatasql": TERADATA,
+    "hdbcli": SAP_HANA,
+    "ibm_db": IBM_DB2,
     "db2": IBM_DB2,
     "ibm_db2": IBM_DB2,
     "ibm_db2_warehouse": IBM_DB2,
@@ -106,6 +108,19 @@ def operator_driver_message(kind: str | None) -> str:
         f"(or builds the API image with `--build-arg {BUILD_ARG}=1`) and restarts "
         "the API. No connection was attempted."
     )
+
+
+def url_driver_message(drivername: str | None) -> str:
+    """:func:`operator_driver_message` for a SQLAlchemy URL scheme.
+
+    A generic SQLAlchemy connector names the vendor only in its URL
+    (``teradatasql://``, ``hana+hdbcli://``, ``ibm_db_sa://``, ``db2+ibm_db://``),
+    so the dialect and the DBAPI parts of the scheme are both checked.
+    """
+    for part in str(drivername or "").strip().lower().split("+"):
+        if message := operator_driver_message(part):
+            return message
+    return ""
 
 
 def operator_driver_info(kind: str | None) -> dict[str, Any] | None:
