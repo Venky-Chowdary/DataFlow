@@ -196,17 +196,19 @@ def _redis_request(prefix, extra=None):
     )
 
 
-def test_a_new_collection_is_not_probed_and_legacy_history_is(jobs):
-    from services.target_name_legacy import LegacyFieldsUnverified, legacy_fields_check
+def test_a_new_prefix_is_not_refused_and_legacy_history_is(jobs):
+    """No key of a new prefix within the SCAN budget: new, not refused. With
+    pre-upgrade history the same miss is an unverified check (re-check F3:
+    the check runs whenever the latest run did not decide; see
+    test_g11_naming_history_attribution)."""
+    from services.target_name_legacy import NoKeysWithinBudget, legacy_fields_check
 
-    req = _redis_request("customers")
     with patch("services.target_name_legacy.redis_fields_present",
-               side_effect=LegacyFieldsUnverified("budget exhausted")) as probe:
-        assert legacy_fields_check(req) == ("", [])
-        assert probe.call_count == 0
+               side_effect=NoKeysWithinBudget("no customers:* key within budget")) as probe:
+        assert legacy_fields_check(_redis_request("customers")) == ("", [])
         _pre_g11_job(jobs, obj="customers", fmt="redis", host="localhost", port=6379)
         refusal, _ack = legacy_fields_check(_redis_request("customers"))
-    assert probe.call_count == 1
+    assert probe.call_count == 2
     for words in ("LEGACY_FIELD_PROBE_SECONDS", "index", "write_new", "overwrite"):
         assert words in refusal, refusal
 

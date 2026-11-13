@@ -42,6 +42,8 @@ NONE = "none"
 _RUN: ContextVar[tuple[str, str] | None] = ContextVar("g11_naming_run", default=None)
 #: The stamps this run has written, per job id.
 _STAMPS: dict[str, list[dict[str, Any]]] = {}
+#: Objects whose old fields this run checked or acknowledged, per job id.
+_CHECKED: dict[str, set[str]] = {}
 
 
 @contextmanager
@@ -53,6 +55,7 @@ def naming_job_scope(job_id: str, workspace_id: str) -> Iterator[None]:
     finally:
         _RUN.reset(token)
         _STAMPS.pop(str(job_id or ""), None)
+        _CHECKED.pop(str(job_id or ""), None)
 
 
 def run_workspace(request: Any = None) -> str:
@@ -98,9 +101,10 @@ def _job_cluster(job: Mapping[str, Any]) -> tuple[str, frozenset[str]]:
 
 
 def same_cluster(a: tuple[str, frozenset[str]], b: tuple[str, frozenset[str]]) -> bool:
-    """Same connector, else a shared host (a port on only one side still matches)."""
-    if a[0] and b[0]:
-        return a[0] == b[0]
+    """Same connector, or a shared normalized host (a port on one side only still
+    matches): another connector to the same server is the same cluster (re-check F3)."""
+    if a[0] and b[0] and a[0] == b[0]:
+        return True
     if not (a[1] and b[1]):
         return False  # an empty host proves nothing
 
@@ -166,13 +170,31 @@ def record_naming(obj: str, mode: str) -> None:
         logger.warning("G11: naming decision not stamped on %s: %s", job_id, exc)
 
 
+def note_checked(obj: str) -> None:
+    """This run checked (or acknowledged) ``obj``'s old field names (no-op outside a run)."""
+    bound = _RUN.get()
+    if bound is not None and bound[0] and obj:
+        _CHECKED.setdefault(bound[0], set()).add(obj)
+
+
 def record_request_naming(request: Any, obj: str) -> None:
-    """``record_naming`` for a request: ``legacy`` when any row kept an old name."""
+    """Stamp what this run decided for ``obj``, and only that (re-check F3).
+
+    ``legacy`` when a row kept an old name (a server adoption); ``exact`` only
+    when the run checked or acknowledged the object's old field names. A run
+    whose Map renamed nothing decided nothing and stamps nothing, so it can
+    never mask an earlier pre-upgrade job.
+    """
     from services.target_name_legacy import MAP_TARGET
 
     adopted = any(isinstance(m, dict) and m.get(MAP_TARGET)
                   for m in (getattr(request, "mappings", None) or []))
-    record_naming(obj, LEGACY if adopted else EXACT)
+    if adopted:
+        record_naming(obj, LEGACY)
+        return
+    bound = _RUN.get()
+    if bound is not None and obj in _CHECKED.get(bound[0], set()):
+        record_naming(obj, EXACT)
 
 
 __all__ = [
@@ -182,6 +204,7 @@ __all__ = [
     "SCHEME_VERSION",
     "cluster_of",
     "naming_job_scope",
+    "note_checked",
     "object_history",
     "record_naming",
     "record_request_naming",

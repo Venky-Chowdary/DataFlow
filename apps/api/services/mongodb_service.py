@@ -1325,6 +1325,7 @@ class MongoDBService:
                       "records_processed": 1, "created_at": 1, "naming": 1,
                       "naming_scheme": 1, "transfer_request.destination.host": 1,
                       "transfer_request.destination.port": 1,
+                      "transfer_request.destination.connection_string": 1,
                       "transfer_request.destination.connector_id": 1}
         cursor = (jobs.find(query, projection).sort([("created_at", -1), ("_id", -1)])
                   .limit(max(1, int(limit))).max_time_ms(int(max_time_ms)))

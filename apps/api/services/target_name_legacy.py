@@ -655,6 +655,10 @@ class LegacyFieldsUnverified(RuntimeError):
     """The old-field check could not finish within its budget."""
 
 
+class NoKeysWithinBudget(LegacyFieldsUnverified):
+    """A Redis SCAN found no key of the prefix within its budget."""
+
+
 def _probe_seconds() -> float:
     from services.brand_env import getenv_brand
 
@@ -734,7 +738,7 @@ def redis_fields_present(cfg: Mapping[str, Any], prefix: str, names: Iterable[st
             break
         if calls >= _REDIS_SCAN_CALLS or time.monotonic() > deadline:
             if not raw:
-                raise LegacyFieldsUnverified(
+                raise NoKeysWithinBudget(
                     f"Redis SCAN found no {prefix}:* key within its budget "
                     f"({calls} calls, {_probe_seconds():g}s)"
                 )
@@ -821,18 +825,31 @@ def existing_legacy_fields(
     from services.naming_history import LEGACY as HISTORY_LEGACY
     from services.naming_history import object_history, run_workspace
 
-    if object_history(kind, table, cfg, endpoint, run_workspace(request)) != HISTORY_LEGACY:
+    from services.naming_history import EXACT as HISTORY_EXACT
+    from services.naming_history import note_checked
+
+    history = object_history(kind, table, cfg, endpoint, run_workspace(request))
+    if history == HISTORY_EXACT:
+        # The latest stamped run checked this object and wrote the new names.
         if key:
             _PROBE_MEMO[key] = (time.monotonic(), [])
         return []
-    if kind in DOCUMENT_STORES:
-        present = mongo_fields_present(cfg, table, olds)
-    elif kind == "redis":
-        present = redis_fields_present(cfg, table, olds)
-    elif kind == "dynamodb":
-        present = dynamodb_fields_present(cfg, table, olds)
-    else:
-        present = es_mapping_fields(cfg, table)
+    # Legacy history, or none attributable (a purged history, another origin):
+    # the bounded check runs either way (re-check F3).
+    try:
+        if kind in DOCUMENT_STORES:
+            present = mongo_fields_present(cfg, table, olds)
+        elif kind == "redis":
+            present = redis_fields_present(cfg, table, olds)
+        elif kind == "dynamodb":
+            present = dynamodb_fields_present(cfg, table, olds)
+        else:
+            present = es_mapping_fields(cfg, table)
+    except NoKeysWithinBudget:
+        if history == HISTORY_LEGACY:
+            raise  # earlier runs wrote this prefix: unverified, fail closed
+        present = set()  # no key of a prefix with no history: a new prefix
+    note_checked(table)
     found = [(t, old) for t, old in pairs if old in present]
     if key:
         _PROBE_MEMO[key] = (time.monotonic(), found)
@@ -974,7 +991,10 @@ def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
     from services.sync_cursor import is_overwrite_sync
 
     sync_mode = str(getattr(request, "sync_mode", "") or "")
+    from services.naming_history import note_checked
+
     if is_overwrite_sync(sync_mode):
+        note_checked(writer_object_name(dest, getattr(request, "source", None)))
         return "", []  # the collection / index is replaced: nothing can mix
     try:
         from src.transfer.adapters import resolve_connector_config
@@ -987,6 +1007,7 @@ def legacy_fields_check(request: Any) -> tuple[str, list[str]]:
         )
     except Exception as exc:  # noqa: BLE001 - fail closed: an unchecked store is not "no old fields"
         if policy == WRITE_NEW:
+            note_checked(writer_object_name(dest, getattr(request, "source", None)))
             return "", [f"old field names not verified ({exc}); "
                         f"{LEGACY_FIELD_POLICY}={WRITE_NEW}"]
         return (unverified_message(exc), [])
@@ -1023,6 +1044,10 @@ def _kafka_check(request: Any) -> tuple[str, list[str]]:
         return str(exc), []
     except Exception as exc:  # noqa: BLE001 - fail closed: the registry could not be read
         return f"Could not read the topic's field names ({exc}).", []
+    if naming.get("pairs") and naming.get("mode") != "registry":
+        from services.naming_history import note_checked
+
+        note_checked(topic)  # this run decided the topic's names (re-check F3)
     return "", kafka_evidence(naming, topic)[1]
 
 
@@ -1190,6 +1215,7 @@ __all__ = [
     "AdoptionUnverified",
     "MAP_TARGET",
     "LegacyFieldsUnverified",
+    "NoKeysWithinBudget",
     "operator_rows",
     "proven_adoptions",
     "strip_client_map_targets",
