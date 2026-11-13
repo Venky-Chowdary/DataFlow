@@ -60,10 +60,14 @@ export function destTsvNull(destination: { extra?: unknown; tsv_null?: unknown }
   return String(extra.tsv_null ?? destination.tsv_null ?? "").trim() === TSV_NULL_TEXT ? TSV_NULL_TEXT : TSV_NULL_DEFAULT;
 }
 
-/** `{ tsv_null: "\\N" }` for an object-store TSV destination that asks for it, else `{}`. */
+/**
+ * `{ tsv_null }` for an object-store TSV destination — always explicit, "empty"
+ * included, so a saved connector's `\\N` can never override the Empty cell the
+ * operator picked here. `{}` when the destination is not a TSV object.
+ */
 export function objectStoreDestExtra(dest: { type: string; objectName: string; tsvNull: TsvNull }): Record<string, unknown> {
-  return dest.tsvNull === TSV_NULL_TEXT && tsvNullApplies({ kind: "database", type: dest.type, objectName: dest.objectName })
-    ? { tsv_null: TSV_NULL_TEXT }
+  return tsvNullApplies({ kind: "database", type: dest.type, objectName: dest.objectName })
+    ? { tsv_null: dest.tsvNull === TSV_NULL_TEXT ? TSV_NULL_TEXT : TSV_NULL_DEFAULT }
     : {};
 }
 

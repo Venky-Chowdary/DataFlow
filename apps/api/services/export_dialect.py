@@ -39,7 +39,13 @@ def tsv_null_from(cfg: Any) -> str:
     if not isinstance(cfg, dict):
         return "empty"
     nested = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    return tsv_null_mode(cfg.get("tsv_null") or nested.get("tsv_null"))
+
+    def _given(value: Any) -> Any:
+        # Blank (None / "" / spaces) is "not set" — the writer's rule too
+        # (connector_dispatch.file_writer_dest_extra).
+        return value if value is not None and str(value).strip() else None
+
+    return tsv_null_mode(_given(cfg.get("tsv_null")) or _given(nested.get("tsv_null")))
 
 
 def tsv_null_marker(fmt: str | None, mode: str | None) -> str:

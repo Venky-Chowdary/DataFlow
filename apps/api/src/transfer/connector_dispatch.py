@@ -76,6 +76,9 @@ def writer_extra_kwargs(
     }
 
 
+_FILE_WRITER_OPTIONS = ("tsv_null", "formula_protection", "file_format")
+
+
 def file_writer_dest_extra(cfg: dict[str, Any], dest: Any = None) -> dict[str, Any]:
     """The ``dest_extra`` a file-like writer (S3/GCS/ADLS/SFTP/email) receives.
 
@@ -88,9 +91,15 @@ def file_writer_dest_extra(cfg: dict[str, Any], dest: Any = None) -> dict[str, A
     """
     saved = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
     raw = getattr(dest, "extra", None)
-    inline = dict(raw) if isinstance(raw, dict) else {}
+    # A blank writer option (None / "") is "not set" — the same rule Gate-8's
+    # tsv_null_from applies — so it never masks a saved connector's value on the
+    # write side while the read-back still honours it.
+    inline = {
+        k: v for k, v in (raw.items() if isinstance(raw, dict) else ())
+        if not (k in _FILE_WRITER_OPTIONS and (v is None or not str(v).strip()))
+    }
     merged = {**saved, **inline}
-    for key in ("tsv_null", "formula_protection", "file_format"):
+    for key in _FILE_WRITER_OPTIONS:
         if not merged.get(key) and cfg.get(key):
             merged[key] = cfg[key]
     return merged

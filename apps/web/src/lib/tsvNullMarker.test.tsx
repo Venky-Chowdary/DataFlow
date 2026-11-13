@@ -36,6 +36,8 @@ describe("TSV NULL marker", () => {
     );
     assert.deepEqual(objectStoreDestExtra({ type: "s3", objectName: "o.tsv", tsvNull: TSV_NULL_TEXT }), { tsv_null: "\\N" });
     assert.deepEqual(objectStoreDestExtra({ type: "s3", objectName: "o.json", tsvNull: TSV_NULL_TEXT }), {});
+    // Empty cell is sent explicitly, so a saved connector's \N cannot override it.
+    assert.deepEqual(objectStoreDestExtra({ type: "s3", objectName: "o.tsv", tsvNull: TSV_NULL_DEFAULT }), { tsv_null: "empty" });
   });
 
   it("reopening a job restores the marker (file_export and object store); absent is the default", () => {
