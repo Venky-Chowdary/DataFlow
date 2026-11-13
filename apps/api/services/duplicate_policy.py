@@ -601,3 +601,194 @@ def keyed_policy_no_key_gate(policy: str) -> dict[str, Any]:
             "Set Duplicate rows to Insert every row",
         ],
     }
+
+
+#: Destinations whose writer keeps a stored key under ``dedupe_skip``
+#: (``current_match_action() == "skip"``): the SQL writers (ON CONFLICT DO
+#: NOTHING / MERGE insert-only / stored-key hold-back), the keyed object-store
+#: merge, and the non-SQL writers that insert only absent keys (MongoDB
+#: ``$setOnInsert``, Redis ``SET NX``, DynamoDB conditional PutItem,
+#: Elasticsearch bulk ``create``, BigQuery MERGE without WHEN MATCHED, Iceberg
+#: ``upsert(when_matched_update_all=False)``). Keys are resolved driver ids.
+DEDUPE_SKIP_DRIVERS = frozenset({
+    "postgresql", "redshift", "mysql", "sqlite", "snowflake", "bigquery",
+    "generic_sql", "sqlserver", "oracle",
+    "s3", "gcs", "adls", "azure", "sftp",
+    "mongodb", "redis", "dynamodb", "elasticsearch", "iceberg",
+})
+
+#: Destinations that hold no stored key a run could overwrite: a file export
+#: and an email deliver a fresh artifact per run. ``skip_duplicates`` cannot
+#: dedupe against them, but it cannot break its promise either, and these
+#: runs went through before the refusal existed, so they are not refused.
+NO_STORED_KEY_DRIVERS = frozenset({"file", "file_export", "email"})
+
+
+def _holds_no_stored_keys(raw: str, driver: str) -> bool:
+    if raw in NO_STORED_KEY_DRIVERS or driver in NO_STORED_KEY_DRIVERS:
+        return True
+    from src.transfer.connector_capabilities import _FILE_CAPS
+
+    return bool(_FILE_CAPS.get(driver, {}).get("file_export"))
+
+
+def _is_clickhouse(raw: str, connection_string: str) -> bool:
+    scheme = str(connection_string or "").strip().lower().split("://", 1)[0]
+    return "clickhouse" in raw or ("://" in str(connection_string or "") and "clickhouse" in scheme)
+
+
+def dedupe_skip_refusal(dest_type: str, *, connection_string: str = "") -> str:
+    """Why ``skip_duplicates`` cannot run into this destination, or "".
+
+    Every other writer upserts — it would overwrite the stored row the policy
+    promises to leave alone, so the option is refused rather than ignored.
+    ClickHouse is decided by dialect (type or URL scheme): it resolves to the
+    generic SQL driver, but its upsert inserts into a ReplacingMergeTree.
+    """
+    raw = str(dest_type or "").strip().lower()
+    if _is_clickhouse(raw, connection_string):
+        return (
+            "Duplicate rows 'Skip keys already stored' (skip_duplicates) is not "
+            "available for a ClickHouse destination: its upsert inserts into a "
+            "ReplacingMergeTree, whose merge replaces the stored row with the new "
+            "one. Choose 'Update keys already stored' (upsert) or 'Insert every "
+            "row' (append)."
+        )
+    if not raw:
+        return ""
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    driver = resolve_driver_type(raw)
+    if raw in DEDUPE_SKIP_DRIVERS or driver in DEDUPE_SKIP_DRIVERS:
+        return ""
+    if _holds_no_stored_keys(raw, driver):
+        return ""
+    return (
+        f"Duplicate rows 'Skip keys already stored' (skip_duplicates) is not "
+        f"available for a {raw} destination: its writer cannot leave a stored key "
+        "unchanged and would overwrite it. Choose 'Update keys already stored' "
+        "(upsert) or 'Insert every row' (append)."
+    )
+
+
+def dedupe_skip_validate_gate(
+    dest_type: str, *, connection_string: str = ""
+) -> dict[str, Any] | None:
+    """Validate blocker for ``skip_duplicates`` into an unsupported destination."""
+    message = dedupe_skip_refusal(dest_type, connection_string=connection_string)
+    if not message:
+        return None
+    return {
+        "id": "g_duplicate_policy_destination",
+        "status": "block",
+        "message": message,
+        "duration_ms": 0,
+        "details": {
+            "rule_id": "g_duplicate_policy_destination.dedupe_skip_unsupported",
+            "remediation_kind": "change_duplicate_policy",
+            "duplicate_policy": "dedupe_skip",
+            "destination_type": str(dest_type or ""),
+        },
+        "suggested_actions": [
+            "Set Duplicate rows to Update keys already stored",
+            "Set Duplicate rows to Insert every row",
+        ],
+    }
+
+
+def schedule_dedupe_skip_refusal(payload: Any) -> str:
+    """Save-time twin of :func:`dedupe_skip_validate_gate` for a schedule."""
+    data = dict(payload or {})
+    if normalize_duplicate_policy(str(data.get("duplicate_policy") or "")) != "dedupe_skip":
+        return ""
+    dest_type = str(data.get("dest_type") or "")
+    connection_string = str(data.get("dest_connection_string") or "")
+    if not dest_type and data.get("dest_connector_id"):
+        try:
+            from services.connector_store import get_connector
+
+            found = get_connector(str(data["dest_connector_id"]))
+        except Exception:  # noqa: BLE001 — unresolved here: Validate decides
+            return ""
+        dest_type = str(getattr(found, "type", "") or "") if found else ""
+        connection_string = str(getattr(found, "connection_string", "") or "") if found else ""
+    return dedupe_skip_refusal(dest_type, connection_string=connection_string)
+
+
+def enforce_dedupe_skip_destination(
+    duplicate_policy: str, dest_type: str, *, connection_string: str = ""
+) -> None:
+    """Execute-time twin of the Validate gate (a run, or a schedule run, that
+    skipped Validate): never run skip_duplicates into a refused destination."""
+    if normalize_duplicate_policy(str(duplicate_policy or "")) != "dedupe_skip":
+        return
+    message = dedupe_skip_refusal(dest_type, connection_string=connection_string)
+    if message:
+        raise DuplicatePolicyError(message)
+
+
+#: Destinations whose append now refuses a stored key (``SET NX`` /
+#: conditional ``PutItem``) instead of overwriting it.
+_KEYED_APPEND_REFUSES = frozenset({"redis", "dynamodb"})
+
+
+def keyed_append_cursor_gate(
+    dest_type: str, *, sync_mode: str, duplicate_policy: str, cursor_column: str
+) -> dict[str, Any] | None:
+    """Validate warning: an append with an incremental cursor into Redis / DynamoDB.
+
+    The cursor re-reads changed rows; their keys are already stored, and append
+    there now rejects a stored key rather than overwriting it.
+    """
+    if not str(cursor_column or "").strip():
+        return None
+    from services.sync_cursor import is_overwrite_sync, requires_upsert
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    raw = str(dest_type or "").strip().lower()
+    if raw not in _KEYED_APPEND_REFUSES and resolve_driver_type(raw) not in _KEYED_APPEND_REFUSES:
+        return None
+    if normalize_duplicate_policy(duplicate_policy) in {"upsert", "dedupe_skip"}:
+        return None
+    if requires_upsert(sync_mode) or is_overwrite_sync(sync_mode):
+        return None
+    return {
+        "id": "g_keyed_append_changed_rows",
+        "status": "warn",
+        "message": (
+            f"Append into {raw} with the incremental cursor '{cursor_column}': a changed "
+            "row the cursor re-reads has a key that is already stored, and append never "
+            "overwrites a stored key, so it is rejected. Choose upsert to update changed rows."
+        ),
+        "duration_ms": 0,
+        "details": {
+            "rule_id": "g_keyed_append_changed_rows.append_rejects_stored_key",
+            "destination_type": raw,
+            "cursor_column": str(cursor_column),
+            "sync_mode": str(sync_mode or ""),
+        },
+        "suggested_actions": ["Set Duplicate rows to Update keys already stored (upsert)"],
+    }
+
+
+def enforce_dedupe_skip_endpoint(endpoint: Any, duplicate_policy: str = "") -> None:
+    """:func:`enforce_dedupe_skip_destination` for an engine write's endpoint.
+
+    Runs before the write's precount dials the destination.
+    """
+    extra = getattr(endpoint, "extra", None) or {}
+    policy = duplicate_policy or str(extra.get("duplicate_policy") or "")
+    if normalize_duplicate_policy(policy) != "dedupe_skip":
+        return
+    dest_type = str(getattr(endpoint, "format", "") or "")
+    connection_string = str(getattr(endpoint, "connection_string", "") or "")
+    if (not dest_type or not connection_string) and getattr(endpoint, "connector_id", None):
+        from src.transfer.adapters import resolve_connector_config
+
+        cfg = resolve_connector_config(endpoint)
+        dest_type = dest_type or str(cfg.get("type") or "")  # the saved connector's type
+        connection_string = connection_string or str(cfg.get("connection_string") or "")
+    if not dest_type and "://" in connection_string:
+        # No format and no saved connector: the URL scheme names the dialect.
+        dest_type = connection_string.split("://", 1)[0].split("+", 1)[0].lower()
+    enforce_dedupe_skip_destination(policy, dest_type, connection_string=connection_string)

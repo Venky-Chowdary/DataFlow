@@ -140,6 +140,11 @@ def _driver_writer_kwargs(
             # The producer must dial the SASL listener Test verified (D83).
             **kafka_security_options(cfg),
         }
+    if driver == "redis":
+        from connectors.redis_reader import redis_key_format
+
+        # The key layout must match on every path that writes or re-reads keys.
+        return {"key_format": redis_key_format(cfg, getattr(dest, "extra", None))}
     if driver == "iceberg":
         # Forward catalog properties (warehouse, region, catalog_type, token,
         # rest.*, glue.*, …) that are not already part of the common kwargs.

@@ -588,6 +588,15 @@ def _refuse_keep_last_that_cannot_run(payload: dict[str, Any]) -> None:
         raise DuplicatePolicyError(refusal)
 
 
+def _refuse_dedupe_skip_that_cannot_run(payload: Mapping[str, Any]) -> None:
+    """Save-time twin of Validate's skip_duplicates destination rule."""
+    from services.duplicate_policy import DuplicatePolicyError, schedule_dedupe_skip_refusal
+
+    refusal = schedule_dedupe_skip_refusal(payload)
+    if refusal:
+        raise DuplicatePolicyError(refusal)
+
+
 def _refuse_history_route_recipe(payload: Mapping[str, Any], sync_mode: str) -> None:
     """Save-time twin of Execute's recipe refusal on a history route (D361)."""
     from services.history_route_recipe import schedule_recipe_refusal
@@ -1662,6 +1671,7 @@ def create_schedule(
     payload["duplicate_policy"] = policy
     payload["in_file_dedupe"] = dedupe
     _refuse_keep_last_that_cannot_run(payload)
+    _refuse_dedupe_skip_that_cannot_run(payload)
     replay_id = str(payload.pop("replay_schedule_id", "") or "").strip()
     interval, cron = canonicalize_cadence(
         str(payload.get("interval") or "daily"),
@@ -2216,6 +2226,8 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
             )
             merged["duplicate_policy"] = policy
             merged["in_file_dedupe"] = dedupe
+        if any(key in data for key in ("duplicate_policy", "dest_connector_id")):
+            _refuse_dedupe_skip_that_cannot_run(merged)
         if any(
             key in data
             for key in ("in_file_dedupe", "sync_mode", "cursor_column", "stream_contracts", "source_connector_id")

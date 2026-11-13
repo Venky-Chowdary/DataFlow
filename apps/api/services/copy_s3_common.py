@@ -10,7 +10,9 @@ endpoint+bucket+key declines. Cross-endpoint CopyObject declines
 from __future__ import annotations
 
 import csv
+import re
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
@@ -341,6 +343,86 @@ def s3_file_has_legacy_null(path: str, *, chunk_size: int = 1 << 20) -> bool:
             if b"\\N" in tail + chunk:
                 return True
             tail = chunk[-1:]
+
+
+@dataclass(frozen=True)
+class DelimitedFileScan:
+    """What one streaming pass over a delimited file found (bulk-loader declines).
+
+    * ``backslash`` — any ``\\``: MySQL ``ESCAPED BY '\\\\'`` would rewrite it.
+    * ``legacy_null`` — a ``\\N`` (the C04 legacy NULL spelling).
+    * ``quote`` — any ``"``: PostgreSQL ``COPY (FORMAT csv)`` reads a mid-field
+      quote as quoting.
+    * ``unquoted_null`` — a field that is exactly ``NULL`` with no enclosing
+      quotes: MySQL ``LOAD DATA ... ENCLOSED BY`` loads it as SQL NULL. The scan
+      is conservative: ``NULL`` between separators inside a quoted multi-line
+      field also counts (a decline, never a wrong load); an enclosed
+      ``"NULL"`` does not.
+    """
+
+    backslash: bool = False
+    legacy_null: bool = False
+    quote: bool = False
+    unquoted_null: bool = False
+    # "lf" (every line break is \n), "crlf" (every \r is followed by \n and
+    # every \n preceded by \r) or "mixed" (anything else, bare \r included).
+    # Counted over the whole file, quoted fields too: a quoted \n in a CRLF file
+    # reads as mixed, which only ever declines.
+    line_ending: str = "lf"
+    # A UTF-16/UTF-32 byte-order mark or any NUL byte: not UTF-8 text.
+    not_utf8_text: bool = False
+
+
+_WIDE_BOMS = (b"\x00\x00\xfe\xff", b"\xff\xfe", b"\xfe\xff")
+
+
+def scan_delimited_file(
+    path: str, delimiter: str, *, chunk_size: int = 1 << 20
+) -> DelimitedFileScan:
+    """One read of ``path`` in ``chunk_size`` chunks; patterns may span chunks."""
+    sep = re.escape(delimiter.encode("utf-8"))
+    field_null = re.compile(rb"[" + sep + rb"\r\n]NULL(?=[" + sep + rb"\r\n])")
+    null_at_end = re.compile(rb"[" + sep + rb"\r\n]NULL\Z")
+    backslash = legacy_null = quote = unquoted_null = not_utf8 = False
+    lf = cr = crlf = 0
+    head = b""
+    # A virtual line break before byte 0: a first field "NULL" is a field.
+    carry = b"\n"
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            if len(head) < 4:
+                head = (head + chunk)[:4]
+            window = carry + chunk
+            backslash = backslash or b"\\" in chunk
+            legacy_null = legacy_null or b"\\N" in window
+            quote = quote or b'"' in chunk
+            not_utf8 = not_utf8 or b"\x00" in chunk
+            unquoted_null = unquoted_null or field_null.search(window) is not None
+            lf += chunk.count(b"\n")
+            cr += chunk.count(b"\r")
+            # The previous chunk's last byte pairs with this chunk's first.
+            crlf += (carry[-1:] + chunk).count(b"\r\n")
+            # 5 bytes: one separator + "NULL" can straddle the next chunk.
+            carry = window[-5:]
+    unquoted_null = unquoted_null or null_at_end.search(carry) is not None
+    not_utf8 = not_utf8 or head.startswith(_WIDE_BOMS)
+    if cr == 0:
+        line_ending = "lf"
+    elif cr == crlf == lf:
+        line_ending = "crlf"
+    else:
+        line_ending = "mixed"
+    return DelimitedFileScan(
+        backslash=backslash,
+        legacy_null=legacy_null,
+        quote=quote,
+        unquoted_null=unquoted_null,
+        line_ending=line_ending,
+        not_utf8_text=not_utf8,
+    )
 
 
 def s3_iter_delimited_rows(

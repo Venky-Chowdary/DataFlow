@@ -35,7 +35,7 @@ from connectors.mongodb_common import (
 )
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from services import connector_store
 import services.query_extract as services_query_extract
 from services.brand_env import getenv_brand
@@ -769,6 +769,24 @@ class QueryExportRequest(QueryExecuteRequest):
         description="append only when writing to a connector; overwrite/upsert must go through Transfer Studio",
     )
     conflict_columns: list[str] = Field(default_factory=list, description="Columns to use for upsert conflict resolution")
+    # G7 (CWE-1236): a console export is a file a person opens in a spreadsheet.
+    formula_protection: str = Field(
+        "prefix",
+        description=(
+            "CSV/TSV file export: \"prefix\" (default; also for null or empty) puts a leading ' "
+            "on text cells and header names that start with = + - @ tab or CR so a spreadsheet "
+            "never runs them as formulas (numbers such as -5 are untouched); \"off\" writes "
+            "exact values. Case and surrounding spaces are ignored; anything else is a 422"
+        ),
+    )
+
+    @field_validator("formula_protection", mode="before")
+    @classmethod
+    def _formula_protection_vocabulary(cls, value: Any) -> str:
+        """Same vocabulary as a transfer destination's formula_protection (G7)."""
+        from services.csv_safety import formula_protection_mode
+
+        return formula_protection_mode(value, default="prefix")
 
 
 class QueryResult(BaseModel):
@@ -995,6 +1013,8 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
     written = {"n": 0}
     handle = final_path.open("w", encoding="utf-8", newline="")
     writer_box: dict[str, Any] = {}
+    guard_formulas = body.formula_protection == "prefix" and fmt in {"csv", "tsv"}
+    from services.csv_safety import neutralize_export_cell
 
     def _on_row(columns: list[str], record: dict[str, Any]) -> None:
         if fmt == "jsonl":
@@ -1008,9 +1028,16 @@ def _export_full_population_file(connector, body: QueryExportRequest, *, workspa
                     extrasaction="ignore",
                     delimiter="\t" if fmt == "tsv" else ",",
                 )
-                writer.writeheader()
+                # Alias names are data too: guarded like cells (G7 review M1).
+                writer.writerow(
+                    {c: neutralize_export_cell(c) if guard_formulas else c for c in columns}
+                )
                 writer_box["w"] = writer
-            writer.writerow({k: "" if record.get(k) is None else record.get(k) for k in columns})
+            row = {k: "" if record.get(k) is None else record.get(k) for k in columns}
+            if guard_formulas:
+                # G7: text that would open as a formula is quoted; numbers are not.
+                row = {k: neutralize_export_cell(v) for k, v in row.items()}
+            writer.writerow(row)
         written["n"] += 1
 
     try:
@@ -1141,7 +1168,12 @@ async def query_export(
         from src.transfer.adapters import write_destination_file
         from src.transfer.models import EndpointConfig
 
-        dest = EndpointConfig(kind="file_export", format=body.format, output_path=body.output_path)
+        dest = EndpointConfig(
+            kind="file_export",
+            format=body.format,
+            output_path=body.output_path,
+            extra={"formula_protection": body.formula_protection},
+        )
         export_bytes, export_name, dest_summary = write_destination_file(
             dest,
             records=rows,

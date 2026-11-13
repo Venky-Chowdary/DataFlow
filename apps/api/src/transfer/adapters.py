@@ -1466,6 +1466,9 @@ def write_destination_database(
     the destination summary for ``reconcile()`` to check the delta against.
     Keyword options are forwarded verbatim to ``_write_destination_database``.
     """
+    from services.duplicate_policy import enforce_dedupe_skip_endpoint
+
+    enforce_dedupe_skip_endpoint(endpoint, str(options.get("duplicate_policy") or ""))
     from connectors.writer_common import active_quarantine_mappings
     from services.dest_precount import PRECOUNT_KEY, precount_destination
     from services.dialect_profiles import schema_from_cfg
@@ -2081,7 +2084,7 @@ def _write_destination_database(
 
         for col in columns:
             ddl_log.append(f"DYNAMODB ATTR {col}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns)
         if not result.ok:
             raise_writer_failure(result, "DynamoDB write failed")
         ddl_log.insert(0, f"BATCH WRITE DynamoDB table {result.table_name}")
