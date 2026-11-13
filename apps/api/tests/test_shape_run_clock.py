@@ -276,3 +276,27 @@ def test_a_run_start_time_into_a_zone_aware_column_passes(dest_type):
 def test_a_new_column_or_no_step_needs_no_gate():
     assert run_clock.run_timestamp_target_gate(RUN_RECIPE, MAPPED, {}) is None
     assert run_clock.run_timestamp_target_gate({"steps": []}, MAPPED, {"stamped": "TIMESTAMP"}) is None
+
+
+def test_the_parity_recheck_falls_back_to_the_runs_destination_summary(monkeypatch):
+    """Jobs store the write's evidence under destination_summary."""
+    from types import SimpleNamespace
+
+    import services.shape_engine as se
+    from services import parity_evidence as pe
+
+    seen: dict[str, Any] = {}
+    real = se.ShapeEngine.__init__
+
+    def spy(self, *a, **k):
+        seen["run_started_at"] = k.get("run_started_at")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(se.ShapeEngine, "__init__", spy)
+    job = {"destination_summary": {"shape_run_clock": {"started_at": T0, "source": "run"}}}
+    req = SimpleNamespace(shape_recipe=RUN_RECIPE, mappings=[])
+    try:
+        pe._expected_images(job, req, [{"id": 1}], ["id", "loaded_at"], {})
+    except Exception:  # noqa: BLE001 - only the engine's clock is under test
+        pass
+    assert seen.get("run_started_at") == T0

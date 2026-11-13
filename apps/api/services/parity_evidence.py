@@ -898,7 +898,7 @@ def _expected_images(
         engine = ShapeEngine(
             ShapeRecipe.parse(recipe),
             run_started_at=recorded_run_started_at(job)
-            or recorded_run_started_at(job.get("dest_summary") or {}),
+            or recorded_run_started_at(job.get("destination_summary") or {}),
         )
         rows = [engine.apply_row(r) for r in rows]
     present = [r for r in rows if r is not None]
