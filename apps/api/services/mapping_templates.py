@@ -51,12 +51,27 @@ def _file_save(data: dict[str, Any]) -> None:
     write_json_atomic(_store_path(), dict(data))
 
 
+def _unique_claims(record: dict[str, Any]) -> list[str]:
+    """Each template holds one of its workspace's numbered slots.
+
+    The cap is a database invariant, not a check-then-insert: two replicas
+    that both see room take the same lowest free slot, and the store's
+    unique index refuses the second (``retrying`` then reads again and the
+    loser sees the workspace full). Deleting a template frees its slot.
+    """
+    slot = record.get("slot")
+    if not isinstance(slot, int) or isinstance(slot, bool):
+        return []
+    return [f"slot:{record.get('workspace_id') or ''}:{slot}"]
+
+
 _DOC = SharedRecordSet(
     "mapping_templates",
     file_load=_file_load,
     file_save=_file_save,
     file_path=_store_path,
     partition_key="workspace_id",
+    unique=_unique_claims,
 )
 
 
@@ -80,8 +95,8 @@ def _summary(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-#: One create at a time in this process; across replicas the record set's
-#: revision check (save of the partition read) makes a racing create retry.
+#: One create at a time in this process (file mode has no unique index);
+#: across replicas the slot claims below hold the cap.
 _CREATE_LOCK = threading.Lock()
 
 
@@ -107,7 +122,9 @@ def create_template(
             r for r in data.values()
             if isinstance(r, dict) and str(r.get("workspace_id") or "") == owner
         ]
-        if len(existing) >= MAX_TEMPLATES_PER_WORKSPACE:
+        taken = {r.get("slot") for r in existing}
+        free = [n for n in range(MAX_TEMPLATES_PER_WORKSPACE) if n not in taken]
+        if len(existing) >= MAX_TEMPLATES_PER_WORKSPACE or not free:
             raise TemplateLimitReached(
                 f"This workspace already has {MAX_TEMPLATES_PER_WORKSPACE} mapping templates; delete one first."
             )
@@ -115,6 +132,9 @@ def create_template(
         record = {
             "id": template_id,
             "workspace_id": owner,
+            # The lowest free slot: a racing replica takes the same one and
+            # loses it to the unique index.
+            "slot": free[0],
             "name": str(name or "").strip()[:120],
             "description": str(description or "").strip()[:1000],
             "document": document,
