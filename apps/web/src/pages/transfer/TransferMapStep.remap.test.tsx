@@ -421,6 +421,8 @@ describe("Map step: remap onto existing destination columns", () => {
     await settle(10);
     assert.equal(continued, 1);
     const mem = calls.find((c) => c.url.endsWith("/transfer/mapping/memory"));
+    assert.deepEqual((mem?.body as { destination: unknown }).destination,
+      { kind: "database", format: "postgresql", connector_id: "c1", table: "orders_dest" });
     assert.deepEqual((mem?.body as { pairs: unknown }).pairs, [
       { source: "order_id", target: "legacy_ref" },
       { source: "first_name", target: "given_name" },

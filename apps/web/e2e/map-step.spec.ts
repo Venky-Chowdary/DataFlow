@@ -169,6 +169,7 @@ test.describe("Map step: remap onto existing destination columns", () => {
     await expect(amtRow).toContainText("Concept");
     await expect(amtRow).toContainText("78%");
     expect(captured.autoMap[0]?.dest_table).toBe("orders_dest");
+    expect((captured.autoMap[0]?.destination as { table?: string })?.table).toBe("orders_dest");
     await dialog.getByRole("button", { name: /^Apply \d+ mappings?$/ }).click();
     await expect(dialog).toBeHidden();
     await expect(picker(page, "order_amt")).toHaveValue("total_amount");

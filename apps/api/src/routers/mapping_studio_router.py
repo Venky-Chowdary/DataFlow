@@ -86,10 +86,15 @@ class AutoMapRequest(BaseModel):
     dest_table: str = Field("", max_length=256)
     dest_type: str = Field("", max_length=64)
     use_learned: bool = True
+    #: Scopes the learned tier to this destination (no dial: identity only).
+    destination: Optional[EndpointDTO] = None
 
 
 class MemoryRecordRequest(BaseModel):
-    pairs: list[MappedPair] = Field(..., min_length=1, max_length=2000)
+    #: The destination the pairs were confirmed for: it scopes the memory, and
+    #: its catalog is read so only pairs onto real columns are remembered.
+    destination: EndpointDTO
+    pairs: list[MappedPair] = Field(..., min_length=1, max_length=200)
 
 
 def _workspace(request: Request, header: str, *, write: bool) -> str:
@@ -100,9 +105,8 @@ def _workspace(request: Request, header: str, *, write: bool) -> str:
     )
 
 
-@router.post("/destination-columns")
-async def destination_columns(body: DestinationColumnsRequest, request: Request) -> dict[str, Any]:
-    """The destination table's column catalog for the Map picker and panel."""
+async def _read_catalog(request: Request, destination: EndpointDTO, schema_policy: str) -> dict[str, Any]:
+    """The destination's column catalog: authorized, off the loop, under the deadline."""
     from src.ai.copilot.tool_deadline import deadline_seconds, run_off_event_loop
     from src.transfer.models import EndpointConfig
 
@@ -113,17 +117,14 @@ async def destination_columns(body: DestinationColumnsRequest, request: Request)
 
     # A connector id expands into stored host and credentials: authorize it
     # against its own workspace before anything is dialled (404 elsewhere).
-    assert_connector_accessible(request, body.destination.connector_id)
-    endpoint = EndpointConfig.from_dict(
-        body.destination.kind, body.destination.model_dump(by_alias=True)
-    )
-    policy = body.schema_policy
+    assert_connector_accessible(request, destination.connector_id)
+    endpoint = EndpointConfig.from_dict(destination.kind, destination.model_dump(by_alias=True))
     if endpoint.kind != "database":
         # A file export is written fresh: there is no existing column to pick.
         return build_destination_column_catalog(
             {"connected": True, "table_exists": False},
             dest_type=str(endpoint.format or endpoint.kind or ""),
-            schema_policy=policy,
+            schema_policy=schema_policy,
         )
     limit = deadline_seconds(_CATALOG_TOOL)
 
@@ -140,7 +141,7 @@ async def destination_columns(body: DestinationColumnsRequest, request: Request)
     try:
         return await run_off_event_loop(
             _CATALOG_TOOL,
-            lambda: read_destination_column_catalog(endpoint, schema_policy=policy),
+            lambda: read_destination_column_catalog(endpoint, schema_policy=schema_policy),
             _timed_out,
             seconds=limit,
         )
@@ -154,6 +155,12 @@ async def destination_columns(body: DestinationColumnsRequest, request: Request)
             status_code=502,
             logger=logger,
         ) from exc
+
+
+@router.post("/destination-columns")
+async def destination_columns(body: DestinationColumnsRequest, request: Request) -> dict[str, Any]:
+    """The destination table's column catalog for the Map picker and panel."""
+    return await _read_catalog(request, body.destination, body.schema_policy)
 
 
 @router.post("/type-compatibility")
@@ -181,7 +188,14 @@ def auto_map(
     from services.mapping_type_compat import grade_type_pairs
 
     ws = _workspace(request, workspace_id, write=False)
-    learned = learned_index(workspace_id=ws) if body.use_learned else {}
+    learned = (
+        learned_index(
+            workspace_id=ws,
+            destination=body.destination.model_dump(by_alias=True) if body.destination else None,
+        )
+        if body.use_learned
+        else {}
+    )
     locked = [p for p in body.mapped if p.source and p.target] if body.mode == "remaining" else []
     suggestions = suggest_assignments(
         [c.name for c in body.source_columns],
@@ -223,25 +237,42 @@ def list_memory(
 
 
 @router.post("/memory")
-def record_memory(
+async def record_memory(
     body: MemoryRecordRequest,
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
-    """Remember pairs the operator confirmed (Approve on Map)."""
+    """Remember pairs the operator confirmed (Continue on Map) for this destination.
+
+    Only pairs whose target is a writable column of the stated destination are
+    recorded (its catalog is read, as for /destination-columns); the rest are
+    returned as ``refused``, so the learned tier cannot be filled with names
+    the destination does not have.
+    """
     from services.audit_log import append_audit_event
     from services.mapping_memory import record_confirmed
 
     ws = _workspace(request, workspace_id, write=True)
+    catalog = await _read_catalog(request, body.destination, "")
+    columns = {
+        str(c.get("name") or "").lower()
+        for c in catalog.get("columns") or []
+        if c.get("writable", True)
+    }
+    valid = [p for p in body.pairs if p.source and p.target.lower() in columns]
+    refused = [p.target for p in body.pairs if p.target.lower() not in columns]
     result = record_confirmed(
-        [p.model_dump() for p in body.pairs], workspace_id=ws, actor=actor_email(request)
-    )
+        [p.model_dump() for p in valid],
+        workspace_id=ws,
+        destination=body.destination.model_dump(by_alias=True),
+        actor=actor_email(request),
+    ) if valid else {"recorded": 0, "total": 0}
     append_audit_event(
         action="mapping_memory.recorded",
         resource=f"workspace/{ws or 'default'}/mapping-memory",
-        details={"recorded": result["recorded"], "total": result["total"]},
+        details={"recorded": result["recorded"], "refused": len(refused)},
     )
-    return result
+    return {**result, "refused": refused}
 
 
 @router.delete("/memory")

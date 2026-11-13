@@ -241,12 +241,32 @@ def test_concept_tier_refuses_false_friends(src, tgt):
     assert hit is None or hit[0] < 0.7, hit
 
 
-def test_learned_pair_outranks_synonym_but_not_a_normalized_match():
-    learned = {"cust_fname": {"given_name": 3}}
-    conf, kind, reason = score_pair("cust_fname", "given_name", learned=learned)
-    assert kind == "learned" and "3 times" in reason
-    assert conf > score_pair("first_name", "given_name")[0]
-    assert conf < score_pair("firstName", "first_name")[0]
+def test_learned_pair_outranks_synonym_only_when_confirmed_twice_for_this_destination():
+    """Review M4: one confirmation is a hint; it outranks the dictionary only at count >= 2."""
+    once = score_pair("cust_fname", "given_name", learned={"cust_fname": {"given_name": (1, True)}})
+    twice = score_pair("cust_fname", "given_name", learned={"cust_fname": {"given_name": (3, True)}})
+    synonym = score_pair("first_name", "given_name")[0]
+    assert once[1] == "learned" and once[0] < synonym
+    assert twice[1] == "learned" and "3 times" in twice[2]
+    assert twice[0] > synonym
+    assert twice[0] < score_pair("firstName", "first_name")[0]
+
+
+def test_a_pair_learned_on_another_destination_is_a_weaker_fallback():
+    here = score_pair("cust_fname", "given_name", learned={"cust_fname": {"given_name": (2, True)}})[0]
+    elsewhere = score_pair("cust_fname", "given_name", learned={"cust_fname": {"given_name": (2, False)}})
+    assert elsewhere[1] == "learned" and elsewhere[0] < here
+    assert "another destination" in elsewhere[2]
+
+
+def test_a_learned_pair_that_disagrees_with_a_built_in_match_is_not_preselected():
+    out = suggest_assignments(
+        ["first_name"], ["given_name", "nickname"],
+        learned={"first_name": {"nickname": (2, True)}},
+    )
+    assert out[0]["target"] == "nickname" and out[0]["kind"] == "learned"
+    assert out[0]["selected"] is False
+    assert "given_name" in out[0]["reason"]
 
 
 def test_key_suffix_is_stronger_when_entity_names_the_table():
@@ -313,23 +333,32 @@ def memory(tmp_path, monkeypatch):
     return mapping_memory
 
 
-def test_memory_counts_confirmations_per_workspace_and_isolates_tenants(memory):
-    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a")
-    memory.record_confirmed([{"source": "CustFname", "target": "GivenName"}], workspace_id="ws-a")
-    assert memory.learned_index(workspace_id="ws-a") == {"cust_fname": {"given_name": 2}}
-    assert memory.learned_index(workspace_id="ws-b") == {}
+DEST_A = {"connector_id": "c-1", "database": "app", "schema": "public", "table": "customers"}
+DEST_B = {"connector_id": "c-1", "database": "app", "schema": "public", "table": "orders"}
+
+
+def test_memory_is_scoped_per_destination_and_per_workspace(memory):
+    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a", destination=DEST_A)
+    memory.record_confirmed([{"source": "CustFname", "target": "GivenName"}], workspace_id="ws-a", destination=DEST_A)
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {"cust_fname": {"given_name": (2, True)}}
+    # Another destination of the same workspace sees it only as a fallback.
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_B) == {"cust_fname": {"given_name": (2, False)}}
+    assert memory.learned_index(workspace_id="ws-b", destination=DEST_A) == {}
     assert memory.list_learned(workspace_id="ws-b") == []
+    listed = memory.list_learned(workspace_id="ws-a")
+    assert listed[0]["destination"] == "c-1/app/public/customers" and listed[0]["count"] == 2
     assert memory.forget_all(workspace_id="ws-a") == 1
-    assert memory.learned_index(workspace_id="ws-a") == {}
+    assert memory.learned_index(workspace_id="ws-a", destination=DEST_A) == {}
 
 
 def test_memory_feeds_the_learned_tier(memory):
-    memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a")
+    for _ in range(2):
+        memory.record_confirmed([{"source": "cust_fname", "target": "given_name"}], workspace_id="ws-a", destination=DEST_A)
     out = suggest_assignments(
-        ["cust_fname"], ["given_name", "first_name"],
-        learned=memory.learned_index(workspace_id="ws-a"),
+        ["cust_fname"], ["given_name", "surname"],
+        learned=memory.learned_index(workspace_id="ws-a", destination=DEST_A),
     )
-    assert out[0]["target"] == "given_name" and out[0]["kind"] == "learned"
+    assert out[0]["target"] == "given_name" and out[0]["kind"] == "learned" and out[0]["selected"]
 
 
 def test_the_reported_orders_table_maps_onto_other_destination_columns():

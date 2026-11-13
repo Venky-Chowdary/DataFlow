@@ -240,6 +240,18 @@ def _table_entity(table: str) -> str:
     return _singular(tokens[-1]) if tokens else ""
 
 
+def _learned_confidence(count: int, same_destination: bool) -> float:
+    """Learned evidence (review M4): one confirmation is a hint below the
+    dictionary; it outranks a synonym only when confirmed twice for this
+    destination, and never reaches a normalized match. Another destination of
+    the workspace is a weaker fallback."""
+    if same_destination:
+        if count >= 2:
+            return round(min(TIER_CONFIDENCE[NORMALIZED] - 0.01, TIER_CONFIDENCE[LEARNED] + 0.01 * (count - 2)), 3)
+        return 0.84
+    return 0.72 if count >= 2 else 0.66
+
+
 def _key_suffix_match(src: str, tgt: str, entities: set[str]) -> float | None:
     """``order_id`` ↔ ``id``: an entity-qualified key against a bare key."""
     s, t = normalize_name(src), normalize_name(tgt)
@@ -257,7 +269,7 @@ def score_pair(
     source: str,
     target: str,
     *,
-    learned: Mapping[str, Mapping[str, int]] | None = None,
+    learned: Mapping[str, Mapping[str, Any]] | None = None,
     entities: Iterable[str] = (),
 ) -> tuple[float, str, str] | None:
     """``(confidence, kind, reason)`` for one source/target pair, or ``None``."""
@@ -273,12 +285,15 @@ def score_pair(
             f"Same words once spelling is normalized ({s_norm})."
         )
     best: tuple[float, str, str] | None = None
-    count = int(((learned or {}).get(s_norm) or {}).get(t_norm) or 0)
+    hit = ((learned or {}).get(s_norm) or {}).get(t_norm)
+    count, here = (hit if isinstance(hit, tuple) else (int(hit or 0), True))
     if count > 0:
-        conf = min(TIER_CONFIDENCE[NORMALIZED] - 0.01, TIER_CONFIDENCE[LEARNED] + 0.01 * (count - 1))
-        best = (round(conf, 3), LEARNED, (
-            f"This workspace confirmed {source} → {target} "
-            f"{count} time{'s' if count != 1 else ''} before."
+        conf = _learned_confidence(count, here)
+        times = f"{count} time{'s' if count != 1 else ''}"
+        best = (conf, LEARNED, (
+            f"Confirmed {source} → {target} {times} for this destination."
+            if here else
+            f"Confirmed {source} → {target} {times} on another destination of this workspace."
         ))
     shared = sorted(
         g for g in synonym_groups(source) & synonym_groups(target) if _same_value(g, source, target)
@@ -369,7 +384,7 @@ def suggest_assignments(
     *,
     locked_sources: Iterable[str] = (),
     locked_targets: Iterable[str] = (),
-    learned: Mapping[str, Mapping[str, int]] | None = None,
+    learned: Mapping[str, Mapping[str, Any]] | None = None,
     source_table: str = "",
     dest_table: str = "",
     alternatives: int = 3,
@@ -419,11 +434,18 @@ def suggest_assignments(
             "selected": -neg_conf >= DEFAULT_SELECT_THRESHOLD,
         }
     out: list[dict[str, Any]] = []
+    built_in = {EXACT, CASE_INSENSITIVE, NORMALIZED, SYNONYM, CONCEPT}
     for src in open_sources:
         if src not in chosen:
             continue
         row = chosen[src]
         ranked = sorted(per_source.get(src, []))
+        if row["kind"] == LEARNED:
+            rival = next((t for _c, _r, t, k in ranked if k in built_in and t != row["target"]), None)
+            if rival:
+                # Memory and the dictionary disagree: show it, never pre-apply it.
+                row["selected"] = False
+                row["reason"] += f" The built-in match is {rival}: review before applying."
         row["alternatives"] = [
             {"target": tgt, "confidence": round(-c, 3), "kind": kind}
             for c, _r, tgt, kind in ranked

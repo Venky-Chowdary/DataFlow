@@ -261,6 +261,7 @@ export function TransferMapStep({
         sourceTable: sourceObjectName,
         destTable: targetCollection,
         destType,
+        destination: destEndpoint,
       });
       setAutoMap({ open: true, mode, loading: false, error: "", suggestions });
     } catch (e) {
@@ -339,8 +340,8 @@ export function TransferMapStep({
       .filter((m) => m.approved && !isIntentionalOmit(m) && m.target)
       .filter((m) => normalizeColumnName(m.source) !== normalizeColumnName(m.target))
       .map((m) => ({ source: m.source, target: m.target }));
-    if (remapEnabled && learned.length) {
-      void recordMappingMemory(learned).catch(() => {
+    if (remapEnabled && learned.length && destEndpoint) {
+      void recordMappingMemory(learned, destEndpoint).catch(() => {
         /* Memory is a suggestion source; Validate never depends on it. */
       });
     }
