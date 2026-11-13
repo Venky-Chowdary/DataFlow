@@ -181,23 +181,35 @@ def _csv_cell(value: str | None) -> str:
     return "\\N" if value is None else value
 
 
-def mapped_csv_line(cells: list[str | None], delim: str) -> str:
-    """One mapped-file row: NULL is a bare ``\\N`` (``COPY ... NULL '\\N'``).
+_MAPPED_NULL = "\\N"
+_MAPPED_TEXT_NULL = '"\\N"'
+
+
+def mapped_csv_cell(cell: str | None, delim: str) -> str:
+    """One mapped-file cell: NULL is a bare ``\\N`` (``COPY ... NULL '\\N'``).
 
     A *text* ``\\N`` is quoted, so neither PostgreSQL CSV COPY (a quoted value
     equal to the NULL string is not NULL) nor the SQLite re-read (the codec
-    reads a quoted ``"\\N"`` as text) turns it into NULL; ``csv.writer`` wrote
-    it bare and the text landed NULL while the row path kept it. Every other
-    cell is quoted as ``csv.writer`` did (delimiter, quote, CR, LF), and ``''``
-    stays a bare empty field (quoted when it is the only column).
+    reads a quoted ``"\\N"`` as text) turns it into NULL. Every other cell is
+    written exactly as ``csv.writer`` (QUOTE_MINIMAL) wrote it — quoted when it
+    holds the delimiter, a quote, CR or LF — and *only* ``None`` is NULL: a text
+    cell is never routed through an encoder with an in-band NULL sentinel (a
+    text "\\x00" cell used to land NULL).
     """
-    from services.csv_codec import csv_cell_encode, csv_quote_cell, text_null_cell
+    if cell is None:
+        return _MAPPED_NULL
+    text = cell if type(cell) is str else str(cell)
+    if text == _MAPPED_NULL:
+        return _MAPPED_TEXT_NULL
+    if delim in text or '"' in text or "\n" in text or "\r" in text:
+        return '"' + text.replace('"', '""') + '"'
+    return text
 
-    def quote(cell: str) -> str:
-        return csv_quote_cell(cell, delim)
 
-    out = [text_null_cell(csv_cell_encode(cell), "\\N", quote) for cell in cells]
-    if out == [""]:
+def mapped_csv_line(cells: list[str | None], delim: str) -> str:
+    """One mapped-file row (:func:`mapped_csv_cell` per cell); a lone ``''`` is ``""``."""
+    out = [mapped_csv_cell(cell, delim) for cell in cells]
+    if len(out) == 1 and out[0] == "":
         return '""'
     return delim.join(out)
 
