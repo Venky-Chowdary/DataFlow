@@ -428,6 +428,20 @@ def _skip_is_fresh(sched: Any, code: str, reason: str) -> bool:
 
 
 def _skip_patch(sched: Any, entry: dict[str, Any]) -> dict[str, Any] | None:
+    """The skip record; on a schedule that never ran, also its status.
+
+    A beat that started nothing is never an empty status: the first skip of a
+    schedule with no stored ``last_status`` mirrors ``skipped`` (its reason is
+    the record's, which ``derive_status`` shows) (CI d119: a schedule whose records were all skips read as never fired).
+    A schedule that already ran keeps that run's status.
+    """
+    patch = _skip_history_patch(sched, entry)
+    if patch is not None and not str(getattr(sched, "last_status", "") or "").strip():
+        patch["last_status"] = SKIPPED
+    return patch
+
+
+def _skip_history_patch(sched: Any, entry: dict[str, Any]) -> dict[str, Any] | None:
     from services.schedule_store import RUN_HISTORY_LIMIT
 
     history = [dict(r) for r in (sched.run_history or [])]
@@ -505,6 +519,12 @@ def derive_status(sched: Any) -> dict[str, Any]:
         reason = str(latest.get("reason") or "")
         code = str(latest.get("reason_code") or "")
         run_id = str(latest.get("run_id") or "")
+    elif last_skip is not None:
+        # Every record is a skip: the beat that started nothing is the status.
+        status = SKIPPED
+        reason = str(last_skip.get("reason") or "")
+        code = str(last_skip.get("reason_code") or "")
+        run_id = str(last_skip.get("run_id") or "")
     else:
         stored = str(getattr(sched, "last_status", "") or "")
         status = stored if (stored in _RUN_STATUSES_LEGACY or not history) else ""

@@ -40,6 +40,11 @@ pytestmark = pytest.mark.timeout(300)
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     h.isolate(tmp_path, monkeypatch)
+    # The test fires every beat itself. The app's own cadence loop (TestClient
+    # lifespan) raced it: it fired the schedule the instant the test made it
+    # due, the test's beat was skipped as "already in progress" and saw
+    # started == 0 (CI PR 426, api-tests 6/6; same race on feature/Cleanup).
+    monkeypatch.setenv("DATAFLOW_SCHEDULE_LOOP", "0")
     from fastapi.testclient import TestClient
     from src.main import app
 
