@@ -157,8 +157,32 @@ live in the CentOS Stream dist-git repositories.
 FreeType and IJG notices, is in `NOTICE` under "Libraries bundled inside the
 shipped Python wheels".
 
-**Not covered by this scan:** libraries linked statically into an extension
-module. FreeTDS is handled explicitly; others would need their own review.
+**Statically linked libraries (best effort).** `.libs/` only shows
+libraries that are dynamically linked. The same step also scans every
+extension module outside `.libs/` for version strings that well-known
+libraries embed. The signatures are FreeTDS, keyutils, GNU Readline,
+Libgcrypt, GnuTLS, GNU libiconv, OpenSSL, BoringSSL, zlib, SQLite, libpq
+and curl (`STATIC_SIGNATURES`).
+
+A copyleft hit fails the image build, CI and the licence gate unless its
+source is shipped (`STATIC_MAPPED`; today only FreeTDS in pymssql). The
+permissive hits are attributed in NOTICE:
+
+| Wheel | Statically linked |
+|---|---|
+| cryptography | OpenSSL 4.0.3 |
+| pyarrow | OpenSSL 3.6.2, curl 8.20.0, zlib 1.3.2 |
+| grpcio | BoringSSL, zlib 1.3.1.1 |
+| lxml, xmlsec | zlib |
+| pymssql | FreeTDS 1.5.19 (LGPL; source shipped) |
+
+A library that embeds no recognisable version string is not detected, so
+this scan is a safety net, not a proof of absence.
+
+**Image size.** Shipping the GCC 8.5.0 source for numpy's libquadmath and
+libgfortran adds about 65 MB to the API image. The owner accepted this
+(2026-11-13) as the cost of meeting the LGPL by shipping source instead of a
+written offer.
 
 `ibm_db` is no longer shipped. Its wheel bundled IBM's proprietary
 `clidriver` (about 120 MB, outside `.libs/`) and keyutils 1.6.3. Under

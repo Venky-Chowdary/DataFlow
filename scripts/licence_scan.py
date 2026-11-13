@@ -455,12 +455,23 @@ def bundled_inventory(packages: Iterable[Package]) -> tuple[list[dict[str, Any]]
     import sys as _sys
 
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from bundled_libraries import BundledLibraryError, installed_bundles, inventory
+    from bundled_libraries import (
+        BundledLibraryError,
+        installed_bundles,
+        installed_extension_modules,
+        inventory,
+        static_scan,
+    )
 
     shipped = {_canon(p.name) for p in packages if p.ecosystem == "pypi" and p.scope == "runtime"}
     bundles = [b for b in installed_bundles() if _canon(b[0]) in shipped]
+    modules = [m for m in installed_extension_modules() if _canon(m[0]) in shipped]
     try:
-        return inventory(bundles), ""
+        rows = inventory(bundles)
+        for row in static_scan(modules):
+            linked = f" {row['version']}" if row["version"] else ""
+            rows.append({**row, "component": row["library"], "file": f"{row['file']} (statically linked{linked})"})
+        return rows, ""
     except BundledLibraryError as exc:
         return [], str(exc)
 
@@ -524,7 +535,9 @@ def notice(
             "=" * 72,
             "",
             "manylinux wheels carry these native libraries in their <package>.libs/",
-            "directory (scripts/bundled_libraries.py). For the LGPL/GPL ones the",
+            "directory, or link them statically into an extension module (found by a",
+            "best-effort scan for well-known version strings; scripts/bundled_libraries.py).",
+            "For the LGPL/GPL ones the",
             f"corresponding source is shipped in the image at {LGPL_SOURCE_DIR}/",
             "(BUNDLED_LIBRARIES.json, MANIFEST.json, SHA256SUMS).",
             "",

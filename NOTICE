@@ -311,12 +311,20 @@ Libraries bundled inside the shipped Python wheels
 ========================================================================
 
 manylinux wheels carry these native libraries in their <package>.libs/
-directory (scripts/bundled_libraries.py). For the LGPL/GPL ones the
+directory, or link them statically into an extension module (found by a
+best-effort scan for well-known version strings; scripts/bundled_libraries.py).
+For the LGPL/GPL ones the
 corresponding source is shipped in the image at /usr/share/doc/datawrap/third-party-source/
 (BUNDLED_LIBRARIES.json, MANIFEST.json, SHA256SUMS).
 
+cryptography 50.0.2: _rust.abi3.so (statically linked 4.0.3) - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
+  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
 google-crc32c 1.9.0: libcrc32c-7ebc40c5.so.1.1.0 - google/crc32c, BSD-3-Clause
+grpcio 1.85.0: cygrpc.cpython-313-x86_64-linux-gnu.so (statically linked) - BoringSSL, ISC AND OpenSSL
+grpcio 1.85.0: cygrpc.cpython-313-x86_64-linux-gnu.so (statically linked 1.3.1.1) - zlib, Zlib
 ijson 3.6.0: libyajl-9393e5bd.so.2.1.1 - YAJL, ISC
+lxml 6.1.3: etree.cpython-313-x86_64-linux-gnu.so (statically linked 1.3.2) - zlib, Zlib
+lxml 6.1.3: objectify.cpython-313-x86_64-linux-gnu.so (statically linked 1.3.2) - zlib, Zlib
 numpy 2.5.4: libgfortran-83c28eba-468e71e5.so.5.0.0 - GCC libgfortran, GPL-3.0-or-later WITH GCC-exception-3.1; source shipped in image at /usr/share/doc/datawrap/third-party-source/
 numpy 2.5.4: libquadmath-2284e583-a9307bba.so.0.0.0 - GCC libquadmath, LGPL-2.1-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/
 numpy 2.5.4: libscipy_openblas64_-f48b354e.so - OpenBLAS (scipy-openblas), BSD-3-Clause
@@ -358,6 +366,18 @@ psycopg2-binary 2.9.13: libsasl2-84219a89.so.3.0.0 - Cyrus SASL, BSD-Attribution
 psycopg2-binary 2.9.13: libselinux-0922c95c.so.1 - libselinux, public domain
 psycopg2-binary 2.9.13: libssl-8bd944e8.so.3 - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
   This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+pyarrow 26.0.0: libarrow.so.2600 (statically linked 3.6.2) - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
+  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+pyarrow 26.0.0: libarrow_flight.so.2600 (statically linked 3.6.2) - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
+  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+pyarrow 26.0.0: libarrow_s3.so.2600 (statically linked 3.6.2) - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
+  This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+pyarrow 26.0.0: libarrow.so.2600 (statically linked 8.20.0) - curl, curl
+pyarrow 26.0.0: libarrow_s3.so.2600 (statically linked 8.20.0) - curl, curl
+pyarrow 26.0.0: libarrow.so.2600 (statically linked 1.3.2) - zlib, Zlib
+pyarrow 26.0.0: libarrow_flight.so.2600 (statically linked 1.3.2) - zlib, Zlib
+pyarrow 26.0.0: libarrow_s3.so.2600 (statically linked 1.3.2) - zlib, Zlib
+pymssql 2.4.6: _mssql.cpython-313-x86_64-linux-gnu.so (statically linked 1.5.19) - FreeTDS, LGPL-2.0-or-later; source shipped in image at /usr/share/doc/datawrap/third-party-source/
 pymssql 2.4.6: libcom_err-730ca923.so.2.1 - com_err (MIT Kerberos / e2fsprogs), MIT
 pymssql 2.4.6: libcrypto-64b40125.so.1.1.1k - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
   This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
@@ -370,6 +390,7 @@ pymssql 2.4.6: libpcre2-8-516f4c9d.so.0.7.1 - PCRE2, BSD-3-Clause WITH PCRE2-exc
 pymssql 2.4.6: libselinux-81bdf592.so.1 - libselinux, public domain
 pymssql 2.4.6: libssl-7f59e8e2.so.1.1.1k - OpenSSL, Apache-2.0 (3.x) / OpenSSL and SSLeay licences (1.1.x)
   This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young.
+xmlsec 1.3.17: xmlsec.cpython-313-x86_64-linux-gnu.so (statically linked 1.3.1) - zlib, Zlib
 
 ========================================================================
 NOTICE files of redistributed packages

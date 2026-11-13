@@ -304,3 +304,88 @@ def test_dockerfile_asks_for_the_bundled_scan() -> None:
     text = (REPO / "Dockerfile.api").read_text(encoding="utf-8").replace("\\\n", " ")
     run = next(line for line in text.splitlines() if "fetch_lgpl_sources.py --dest" in line)
     assert "--bundled" in run
+
+
+# ── libraries linked statically into extension modules (best effort) ───────
+
+
+def _ext(tmp_path: Path, name: str, files: dict[str, bytes]) -> list[Path]:
+    out = []
+    for rel, content in files.items():
+        path = tmp_path / name / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        out.append(path)
+    return out
+
+
+def test_static_scan_reports_well_known_libraries(tmp_path: Path) -> None:
+    files = _ext(tmp_path, "pyarrow", {
+        "libarrow.so.2600": b"x OpenSSL 3.6.2 1 Jan 2026\x00 inflate 1.3.2 Copyright 1995 libcurl/8.20.0 y",
+        "sqlite.so": b"3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69a1234",
+        "plain.so": b"nothing to see",
+    })
+    rows = fetch.static_scan([("pyarrow", "26.0.0", files)])
+    got = {(r["library"], r["version"]) for r in rows}
+    assert {("OpenSSL", "3.6.2"), ("zlib", "1.3.2"), ("curl", "8.20.0"), ("SQLite", "3.46.1")} <= got
+    assert all(not r["copyleft"] for r in rows)
+
+
+def test_freetds_in_pymssql_is_mapped_elsewhere_it_fails(tmp_path: Path) -> None:
+    ok = _ext(tmp_path, "pymssql", {"_mssql.so": b"freetds v1.5.19"})
+    rows = fetch.static_scan([("pymssql", "2.4.6", ok)])
+    assert rows[0]["copyleft"] and rows[0]["source"] == "fetch_lgpl_sources.py spec pymssql+freetds"
+    other = _ext(tmp_path, "otherdriver", {"_ext.so": b"freetds v1.4.0"})
+    with pytest.raises(fetch.SourceError, match="FreeTDS"):
+        fetch.static_scan([("otherdriver", "1.0", other)])
+
+
+@pytest.mark.parametrize(
+    "blob,component",
+    [
+        (b"keyutils-1.6.3", "keyutils"),
+        (b"GNU Readline library", "GNU Readline"),
+        (b"Libgcrypt 1.10.3", "Libgcrypt"),
+        (b"GnuTLS 3.8.4", "GnuTLS"),
+    ],
+)
+def test_an_unmapped_copyleft_static_library_fails_the_build(tmp_path: Path, blob, component) -> None:
+    files = _ext(tmp_path, "newwheel", {"_native.so": blob})
+    with pytest.raises(fetch.SourceError, match=component):
+        fetch.static_scan([("newwheel", "1.0", files)])
+
+
+def test_extension_module_listing_skips_libs_dirs_and_operator_installed_wheels(tmp_path: Path) -> None:
+    sys.path.insert(0, str(REPO / "scripts"))
+    import bundled_libraries as bl
+
+    class _File:
+        def __init__(self, rel: str):
+            self.parts = tuple(rel.split("/"))
+            self.name = self.parts[-1]
+            self._rel = rel
+
+        def locate(self):
+            return tmp_path / self._rel
+
+    class _Dist:
+        def __init__(self, name, files):
+            self.metadata = {"Name": name}
+            self.version = "1.0"
+            self.files = [_File(f) for f in files]
+
+    dists = [
+        _Dist("pyarrow", ["pyarrow/libarrow.so.2600", "pyarrow.libs/libz-0123abcd.so.1", "pyarrow/x.py"]),
+        _Dist("ibm-db", ["ibm_db.cpython-312-x86_64-linux-gnu.so"]),
+    ]
+    listed = bl.installed_extension_modules(dists)
+    assert [(n, [p.name for p in paths]) for n, _v, paths in listed] == [("pyarrow", ["libarrow.so.2600"])]
+
+
+def test_every_mapped_static_library_is_in_the_dockerfile_step() -> None:
+    specs = {s.dist: s for s in fetch.dockerfile_specs((REPO / "Dockerfile.api").read_text(encoding="utf-8"))}
+    sys.path.insert(0, str(REPO / "scripts"))
+    import bundled_libraries as bl
+
+    for (dist, signature), _how in bl.STATIC_MAPPED.items():
+        assert signature in specs[dist].extras, (dist, signature)

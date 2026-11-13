@@ -53,11 +53,21 @@ from bundled_libraries import (
     BundledLibraryError,
     Upstream,
     installed_bundles,
+    installed_extension_modules,
     inventory,
     lib_basename,
+    static_scan,
 )
 
-__all__ = ["UPSTREAM", "Upstream", "installed_bundles", "inventory", "lib_basename"]
+__all__ = [
+    "UPSTREAM",
+    "Upstream",
+    "installed_bundles",
+    "installed_extension_modules",
+    "inventory",
+    "lib_basename",
+    "static_scan",
+]
 
 PYPI_JSON = "https://pypi.org/pypi/{name}/{version}/json"
 FREETDS_URL = "https://www.freetds.org/files/stable/freetds-{version}.tar.gz"
@@ -217,6 +227,7 @@ def ship(
     get: Callable[[str], bytes] = _http_get,
     version_of: Callable[[str], str] = metadata.version,
     bundled: list[tuple[str, str, list[Path]]] | None = None,
+    static: list[tuple[str, str, list[Path]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Ship sdists for ``specs`` and, with ``bundled``, the copyleft libraries' source."""
     dest.mkdir(parents=True, exist_ok=True)
@@ -238,9 +249,13 @@ def ship(
     if bundled is not None:
         extra, libraries = _bundled_rows(bundled, get)
         rows += extra
+        # Best-effort: well-known libraries linked statically into extension
+        # modules. A copyleft one without shipped source fails here.
+        linked = static_scan(static) if static is not None else []
         (dest / "BUNDLED_LIBRARIES.json").write_text(
             json.dumps({"purpose": "native libraries bundled inside the Python wheels in this image",
-                        "libraries": libraries}, indent=2) + "\n",
+                        "libraries": libraries,
+                        "statically_linked_best_effort": linked}, indent=2) + "\n",
             encoding="utf-8",
         )
     for row in rows:
@@ -308,6 +323,16 @@ def verify_dockerfile(dockerfile: Path, policy: Path, requirements: Path) -> lis
         inventory(installed_bundles())
     except BundledLibraryError as exc:
         problems.append(str(exc))
+    try:
+        static_scan(installed_extension_modules())
+    except BundledLibraryError as exc:
+        problems.append(str(exc))
+    from bundled_libraries import STATIC_MAPPED
+
+    by_dist = {s.dist: s for s in specs}
+    for dist, signature in STATIC_MAPPED:
+        if signature not in getattr(by_dist.get(dist), "extras", ()):
+            problems.append(f"{dist}'s statically linked {signature} is mapped but the Dockerfile step lacks {dist}+{signature}")
     return problems
 
 
@@ -336,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         [parse_spec(s) for s in args.specs],
         Path(args.dest),
         bundled=installed_bundles() if args.bundled else None,
+        static=installed_extension_modules() if args.bundled else None,
     )
     for row in rows:
         print(f"{row['sha256']}  {row['file']}  ({row['for']}; {row['verified_against']})")

@@ -272,3 +272,98 @@ def installed_bundles(distributions: Any = None) -> list[tuple[str, str, list[Pa
         if paths:
             out.append((dist.metadata["Name"], dist.version, sorted(paths)))
     return out
+
+
+# ── libraries linked statically into extension modules (best effort) ───────
+
+
+@dataclass(frozen=True)
+class StaticSignature:
+    name: str  # stable key, used by STATIC_MAPPED
+    component: str
+    pattern: bytes  # first group, when present, is the version
+    licence: str
+    copyleft: bool = False
+    attribution: str = ""
+
+
+#: Version strings well-known libraries embed when linked statically. A
+#: best-effort net: a library without such a string is not seen.
+STATIC_SIGNATURES: tuple[StaticSignature, ...] = (
+    StaticSignature("freetds", "FreeTDS", rb"freetds v(\d+\.\d+(?:\.\d+)?)", "LGPL-2.0-or-later", copyleft=True),
+    StaticSignature("keyutils", "keyutils", rb"keyutils-(\d+\.\d+\.\d+)", "LGPL-2.1-or-later", copyleft=True),
+    StaticSignature("readline", "GNU Readline", rb"GNU [Rr]eadline", "GPL-3.0-or-later", copyleft=True),
+    StaticSignature("libgcrypt", "Libgcrypt", rb"Libgcrypt (\d+\.\d+\.\d+)", "LGPL-2.1-or-later", copyleft=True),
+    StaticSignature("gnutls", "GnuTLS", rb"GnuTLS (\d+\.\d+\.\d+)", "LGPL-2.1-or-later", copyleft=True),
+    StaticSignature("libiconv", "GNU libiconv", rb"GNU libiconv (\d+\.\d+)", "LGPL-2.1-or-later", copyleft=True),
+    StaticSignature(
+        "openssl", "OpenSSL", rb"OpenSSL (\d+\.\d+\.\d+[a-z]?)[ \x00]", _OPENSSL.licence,
+        attribution=_OPENSSL.attribution,
+    ),
+    StaticSignature("boringssl", "BoringSSL", rb"BoringSSL", "ISC AND OpenSSL"),
+    StaticSignature("zlib", "zlib", rb"(?:deflate|inflate) (\d+\.\d+\.\d+(?:\.\d+)?) Copyright", "Zlib"),
+    StaticSignature(
+        "sqlite", "SQLite", rb"(3\.\d+\.\d+) \d{4}-\d\d-\d\d \d\d:\d\d:\d\d [0-9a-f]{20}", "blessing (public domain)"
+    ),
+    StaticSignature("libpq", "PostgreSQL libpq", rb"PQconnectdbParams", "PostgreSQL"),
+    StaticSignature("curl", "curl", rb"libcurl/(\d+\.\d+\.\d+)", "curl"),
+)
+
+#: Copyleft static libraries whose source the image ships, per wheel.
+STATIC_MAPPED: dict[tuple[str, str], str] = {
+    ("pymssql", "freetds"): "fetch_lgpl_sources.py spec pymssql+freetds",
+}
+
+
+def static_scan(dists: list[tuple[str, str, list[Path]]]) -> list[dict[str, Any]]:
+    """Well-known libraries found inside extension modules; raises on an unmapped copyleft one."""
+    rows: list[dict[str, Any]] = []
+    problems: list[str] = []
+    for dist, version, paths in dists:
+        for path in paths:
+            data = path.read_bytes()
+            for sig in STATIC_SIGNATURES:
+                match = re.search(sig.pattern, data)
+                if not match:
+                    continue
+                source = STATIC_MAPPED.get((_canon(dist), sig.name)) if sig.copyleft else None
+                if sig.copyleft and not source:
+                    problems.append(
+                        f"{dist} {version}: {path.name} links {sig.component} ({sig.licence}) statically, "
+                        "and its source is not shipped: map it in STATIC_MAPPED and the Dockerfile step, "
+                        "or review it"
+                    )
+                    continue
+                rows.append({
+                    "dist": dist,
+                    "dist_version": version,
+                    "file": path.name,
+                    "library": sig.component,
+                    "version": match.group(1).decode() if match.groups() else "",
+                    "licence": sig.licence,
+                    "copyleft": sig.copyleft,
+                    "attribution": sig.attribution,
+                    "source": source,
+                })
+    if problems:
+        raise BundledLibraryError("; ".join(problems))
+    return rows
+
+
+def installed_extension_modules(distributions: Any = None) -> list[tuple[str, str, list[Path]]]:
+    """(dist, version, native modules outside ``.libs``) for each shipped distribution."""
+    from importlib import metadata
+
+    out = []
+    for dist in distributions if distributions is not None else metadata.distributions():
+        if _canon(dist.metadata["Name"]) in OPERATOR_INSTALLED:
+            continue
+        paths = [
+            Path(str(f.locate()))
+            for f in dist.files or []
+            if (f.name.endswith(".so") or ".so." in f.name)
+            and not (len(f.parts) == 2 and f.parts[0].endswith(".libs"))
+        ]
+        if paths:
+            out.append((dist.metadata["Name"], dist.version, sorted(paths)))
+    return out
