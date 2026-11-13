@@ -871,7 +871,7 @@ def write_mapped_rows(
         for start in range(0, len(plans), _REDIS_WRITE_BATCH):
             part = plans[start : start + _REDIS_WRITE_BATCH]
             if key_format == "raw" and doc_mode != "overwrite":
-                legacy_refusal = legacy_layout_refusal(client, prefix, part)
+                legacy_refusal = legacy_layout_refusal(client, prefix, part, id_cols)
                 if legacy_refusal:
                     return _fail(legacy_refusal)
             outcomes = apply_redis_docs(client, part, mode=doc_mode, id_cols=id_cols)

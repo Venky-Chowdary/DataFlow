@@ -203,36 +203,44 @@ def apply_redis_docs(
     return [o or (FAILED, "not written") for o in outcomes]
 
 
-def legacy_layout_refusal(client: Any, prefix: str, plans: list[RedisDocPlan]) -> str:
+def legacy_layout_refusal(
+    client: Any, prefix: str, plans: list[RedisDocPlan], id_cols: list[str]
+) -> str:
     """Why a ``raw``-format batch must not write onto this prefix, or "".
 
     A new connector defaults to ``key_format=raw`` (``prefix:7``). If it
-    replaces a legacy connector on the same prefix, the legacy documents sit at
-    ``prefix:col_7``: writing raw keys would create a second document per id
-    that precount and Gate-8 (raw) never see. One pipelined EXISTS per batch.
+    replaces a legacy connector on the same prefix, the legacy document of id
+    ``7`` sits at ``prefix:col_7``: writing ``prefix:7`` would create a second
+    document per id that precount and Gate-8 (raw) never see. The legacy key is
+    a legacy document of *this* row only when the document there carries this
+    row's identity — under raw keys another id may legitimately live at that
+    spelling (``A_1`` vs ``A-1``, ``col_7`` vs ``7``). Read the same way as the
+    collision check: one pipelined TYPE, then GET / HMGET of the stored ones.
     """
     from connectors.redis_reader import redis_key_for
 
-    legacy = [
-        redis_key_for(prefix, plan.identity, key_format="legacy")
-        for plan in plans
-        if redis_key_for(prefix, plan.identity, key_format="legacy") != plan.key
-    ]
-    if not legacy:
+    pairs: list[tuple[str, RedisDocPlan]] = []
+    for plan in plans:
+        legacy = redis_key_for(prefix, plan.identity, key_format="legacy")
+        if legacy != plan.key and plan.parts:
+            pairs.append((legacy, plan))
+    if not pairs or not id_cols:
         return ""
-    pipe = client.pipeline(transaction=False)
-    for key in legacy:
-        pipe.exists(key)
-    found = [key for key, hit in zip(legacy, pipe.execute()) if hit]
+    stored = _prefetch(client, [key for key, _plan in pairs], id_cols)
+    found = [
+        key
+        for (key, plan), (kind, _raw, owner) in zip(pairs, stored)
+        if kind != "none" and owner == plan.parts
+    ]
     if not found:
         return ""
     sample = ", ".join(repr(k) for k in found[:3])
     return (
         f"Redis prefix {prefix!r} already holds legacy-layout keys ({sample}"
-        f"{', …' if len(found) > 3 else ''}); this connector writes key_format=raw "
-        "keys, which would create a second document per id. Set the connector's "
-        "key_format to legacy to continue those keys, or migrate them to the raw "
-        "layout first. Nothing in this batch was written."
+        f"{', …' if len(found) > 3 else ''}) for ids this batch writes; this connector "
+        "writes key_format=raw keys, which would create a second document per id. Set "
+        "the connector's key_format to legacy to continue those keys, or migrate them "
+        "to the raw layout first. Nothing in this batch was written."
     )
 
 

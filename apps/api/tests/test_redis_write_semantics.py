@@ -300,3 +300,32 @@ def test_raw_write_onto_a_raw_prefix_is_not_refused(prefix):
     r = _write(prefix, [["7", "new"]], write_mode="upsert", key_format="raw")
     assert r.ok, r.error
     assert json.loads(c.get(_key(prefix, "7", key_format="raw")))["name"] == "new"
+
+
+@pytest.mark.parametrize(
+    "ids", [["A_1", "A-1"], ["col_7", "7"], ["ann@acme.com", "ann_acme_com"]],
+    ids=["underscore_dash", "col_prefix", "email"],
+)
+def test_raw_ids_whose_legacy_spelling_is_another_raw_id_keep_working(prefix, ids):
+    """Re-review 1: the legacy spelling of one raw id is another raw id's key.
+
+    Only a document carrying *this* row's identity at the legacy key is a
+    legacy-layout document; another id living there is not.
+    """
+    c = _client()
+    for run in range(3):
+        r = _write(prefix, [[i, f"v{run}"] for i in ids], write_mode="upsert", key_format="raw")
+        assert r.ok, (run, r.error)
+        assert r.rows_written == 2
+    for i in ids:
+        assert json.loads(c.get(_key(prefix, i, key_format="raw"))) == {"id": i, "name": "v2"}
+
+
+def test_legacy_document_of_the_same_id_is_still_refused_beside_a_raw_neighbour(prefix):
+    c = _client()
+    c.set(_key(prefix, "7"), json.dumps({"id": "7", "name": "legacy"}))  # prefix:col_7
+    c.set(_key(prefix, "A_1", key_format="raw"), json.dumps({"id": "A_1", "name": "raw"}))
+    r = _write(prefix, [["A-1", "new"]], write_mode="upsert", key_format="raw")
+    assert r.ok, r.error  # prefix:A_1 holds id A_1, not A-1
+    r = _write(prefix, [["7", "new"]], write_mode="upsert", key_format="raw")
+    assert not r.ok and "legacy" in (r.error or "")
