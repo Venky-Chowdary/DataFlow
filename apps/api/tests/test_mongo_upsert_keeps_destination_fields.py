@@ -280,8 +280,109 @@ def test_dense_upsert_emits_set_update_not_replace():
         result = _write("testdb", "orders", ["id", "note"], [["1", "n1"], ["2", None]],
                         {"id": "string", "note": "string"}, ["id"], create=True)
     assert result.ok, result.error
-    assert [type(op).__name__ for op in captured] == ["UpdateOne", "UpdateOne"]
-    assert captured[0]._filter == {"id": "1"}
-    assert captured[0]._doc == {"$set": {"id": "1", "note": "n1"}}
-    assert captured[1]._doc == {"$set": {"id": "2", "note": None}}
-    assert all(op._upsert for op in captured)
+    from pymongo import UpdateOne
+
+    # Compare whole operations (pymongo defines ``==``), not driver internals.
+    assert captured == [
+        UpdateOne({"id": "1"}, {"$set": {"id": "1", "note": "n1"}}, upsert=True),
+        UpdateOne({"id": "2"}, {"$set": {"id": "2", "note": None}}, upsert=True),
+    ]
+
+
+@live
+def test_mongo_upsert_on_id_key_matches_a_stored_int64_id(mongo_db):
+    """Review 416 (Medium): ``_id`` stays out of ``$set``.
+
+    A collection whose ``_id`` values are NumberLong (a Java/Spring app, or a
+    BSON pass-through copy) upserted from a SQL/CSV source with small ints: the
+    writer binds int32 ``5``, the filter matches ``NumberLong(5)`` numerically,
+    and ``{$set: {_id: 5, ...}}`` failed with code 66 ("would modify the
+    immutable field '_id'") although ReplaceOne accepted it. ``_id`` is only in
+    the filter now: it seeds a new document and is never rewritten on a match.
+    """
+    from bson.int64 import Int64
+
+    client, db = mongo_db
+    coll = client[db]["by_long"]
+    coll.insert_one({"_id": Int64(5), "name": "old", "keep": "x"})
+
+    result = _write(db, "by_long", ["_id", "name"], [["5", "new"], ["7", "seven"]],
+                    {"_id": "INTEGER", "name": "TEXT"}, ["_id"])
+    assert result.ok, result.error
+    assert result.rows_written == 2
+
+    kept = coll.find_one({"_id": 5})
+    assert kept == {"_id": 5, "name": "new", "keep": "x"}, kept
+    assert isinstance(kept["_id"], Int64)  # the stored type is not rewritten
+    assert coll.find_one({"_id": 7}) == {"_id": 7, "name": "seven"}
+    assert coll.count_documents({}) == 2
+
+
+@live
+def test_mongo_upsert_with_mapped_id_off_the_key_sets_it_on_insert_only(mongo_db):
+    """A mapped ``_id`` that is not the conflict key goes to ``$setOnInsert``.
+
+    MongoDB never lets ``_id`` change on an existing document, so on a match
+    the stored ``_id`` is kept (a differing value is a mismatch Gate-8 reports)
+    instead of failing the batch with code 66; a new key gets the mapped
+    ``_id``.
+    """
+    from bson.int64 import Int64
+
+    client, db = mongo_db
+    coll = client[db]["id_off_key"]
+    coll.insert_one({"_id": Int64(5), "code": "A", "name": "old", "keep": "x"})
+
+    result = _write(db, "id_off_key", ["_id", "code", "name"],
+                    [["5", "A", "new"], ["9", "B", "nine"]],
+                    {"_id": "INTEGER", "code": "TEXT", "name": "TEXT"}, ["code"])
+    assert result.ok, result.error
+    assert result.rows_written == 2
+    assert coll.find_one({"code": "A"}) == {"_id": 5, "code": "A", "name": "new", "keep": "x"}
+    assert coll.find_one({"code": "B"}) == {"_id": 9, "code": "B", "name": "nine"}
+
+
+def test_a_partly_failed_upsert_batch_counts_the_rows_it_wrote():
+    """Review 416 (Low): rows written before an unordered bulk error are counted.
+
+    ``bulk_write(ordered=False)`` applies every operation it can and then raises
+    ``BulkWriteError``; the writer used to report ``rows_written=0`` although
+    the server had written the other rows.
+    """
+    from pymongo.errors import BulkWriteError
+
+    class _Coll:
+        def find(self, *a, **k):
+            return []
+
+        def create_index(self, *a, **k):
+            return None
+
+        def bulk_write(self, ops, ordered=False):
+            raise BulkWriteError({
+                "nInserted": 0, "nUpserted": 1, "nMatched": 1, "nModified": 1,
+                "nRemoved": 0, "upserted": [],
+                "writeErrors": [{"index": 2, "code": 11000, "errmsg": "duplicate key"}],
+            })
+
+    class _Db:
+        def __getitem__(self, name):
+            return _Coll()
+
+        def list_collection_names(self, filter=None):  # noqa: A002
+            return []
+
+    class _Client:
+        def __getitem__(self, name):
+            return _Db()
+
+        def close(self):
+            return None
+
+    with patch("connectors.mongodb_common._mongo_client", return_value=_Client()):
+        result = _write("testdb", "orders", ["id", "note"],
+                        [["1", "a"], ["2", "b"], ["3", "c"]],
+                        {"id": "string", "note": "string"}, ["id"], create=True)
+    assert not result.ok
+    assert result.rows_written == 2, result
+    assert "duplicate key" in (result.error or "")
