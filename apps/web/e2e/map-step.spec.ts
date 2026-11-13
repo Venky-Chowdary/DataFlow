@@ -53,6 +53,22 @@ async function stubMapStudio(page: Page): Promise<Captured> {
     captured.autoMap.push(route.request().postDataJSON());
     await route.fulfill(json(fixture("auto_map.json")));
   });
+  await page.route("**/api/v1/shape/expression", async (route) => {
+    const expression = String(route.request().postDataJSON().expression ?? "");
+    await route.fulfill(json(JSON.stringify(
+      /surname/.test(expression)
+        ? { valid: false, error: "unknown column 'surname'" }
+        : { valid: true, columns: ["customer_email", "status"] },
+    )));
+  });
+  await page.route("**/api/v1/transfer/mapping/export", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/yaml",
+      headers: { "Content-Disposition": 'attachment; filename="sample-orders-orders_dest.mapping.yaml"' },
+      body: "apiVersion: datawrap.io/mapping/v1\nkind: ColumnMapping\n",
+    });
+  });
   await page.route("**/api/v1/transfer/mapping/memory", async (route) => {
     captured.memory.push(route.request().postDataJSON());
     await route.fulfill(json('{"recorded":1,"total":1}'));
@@ -189,6 +205,24 @@ test.describe("Map step: remap onto existing destination columns", () => {
     await create.click();
     await expect(picker(page, "order_date")).toHaveValue("ordered_at");
     await expect(page.locator('tr[data-source="order_date"]')).toContainText("new column");
+  });
+
+  test("a computed column goes to Transform; the mapping exports as a document", async ({ page }) => {
+    await stubMapStudio(page);
+    await reachMap(page);
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export YAML" }).click();
+    expect((await download).suggestedFilename()).toBe("sample-orders-orders_dest.mapping.yaml");
+    await expect(page.getByTestId("map-code-status")).toContainText("checksum included");
+
+    await page.getByRole("button", { name: "Computed column…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Computed destination column" });
+    await dialog.getByLabel("Destination column", { exact: true }).fill("notes");
+    await dialog.getByRole("textbox", { name: "Expression" }).fill("CONCAT(customer_email, ' / ', status)");
+    await expect(dialog.getByRole("status").filter({ hasText: "Valid" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Add to Transform" }).click();
+    await expect(page.getByRole("heading", { name: "Transform", exact: true })).toBeVisible();
+    await expect(page.locator("body")).toContainText("Computed column added to Transform");
   });
 
   test("captures the Map step for review (light, dark, phone)", async ({ browser }) => {

@@ -6,7 +6,9 @@
 
 .df2-app,
 .df2-ms-combo-menu,
-.df2-ms-automap {
+.df2-ms-automap,
+.df2-ms-computed,
+.df2-ms-templates {
   --df2-ms-danger-ink: var(--df-danger);
   --df2-ms-row: 76px;
   --df2-ms-option: 48px;
@@ -14,7 +16,9 @@
 
 html[data-theme="dark"] .df2-app,
 html[data-theme="dark"] .df2-ms-combo-menu,
-html[data-theme="dark"] .df2-ms-automap {
+html[data-theme="dark"] .df2-ms-automap,
+html[data-theme="dark"] .df2-ms-computed,
+html[data-theme="dark"] .df2-ms-templates {
   --df2-ms-danger-ink: color-mix(in srgb, var(--df-danger) 52%, white);
 }
 
@@ -628,6 +632,108 @@ html[data-theme="dark"] .df2-ms-automap {
   display: block;
   height: 100%;
   background: var(--df-brand);
+}
+
+/* ---- computed column, templates, mapping-as-code ----------------------- */
+
+.df2-ms-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-primary);
+}
+
+.df2-ms-form > label {
+  font-weight: 600;
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0 0 6px;
+  padding: 0;
+  border: 0;
+}
+
+.df2-ms-kinds legend {
+  margin-bottom: 4px;
+  font-weight: 600;
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+}
+
+.df2-ms-expr {
+  font-family: var(--df-font-mono);
+  resize: vertical;
+}
+
+.df2-ms-check {
+  margin: 0;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-secondary);
+}
+
+.df2-ms-check.is-ok {
+  color: var(--df-success-text);
+}
+
+.df2-ms-check.is-error {
+  color: var(--df2-ms-danger-ink);
+}
+
+.df2-ms-template-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-ms-template-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-ms-template-row > div:first-child {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.df2-ms-code-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--df-radius-sm);
+  border: 1px solid var(--df-info-border);
+  background: var(--df-info-bg);
+  color: var(--df-text-primary);
+  font-size: var(--df-fs-sm);
+}
+
+.df2-ms-file-label {
+  cursor: pointer;
+}
+
+.df2-ms-file-label:focus-within {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
 }
 
 /* ---- narrow screens ----------------------------------------------------- */

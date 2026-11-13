@@ -1,4 +1,8 @@
+import type { ReactNode } from "react";
+
 interface MappingToolbarProps {
+  /** Further actions (computed column, templates, export/import). */
+  extra?: ReactNode;
   canUndo: boolean;
   canRedo: boolean;
   canAutoMap: boolean;
@@ -30,6 +34,7 @@ export function MappingToolbar({
   onUndo,
   onRedo,
   onTogglePanel,
+  extra,
 }: MappingToolbarProps) {
   return (
     <div className="df2-ms-toolbar" role="toolbar" aria-label="Mapping actions">
@@ -50,6 +55,7 @@ export function MappingToolbar({
           Clear all
         </button>
       </div>
+      {extra ? <div className="df2-ms-toolbar-group">{extra}</div> : null}
       <div className="df2-ms-toolbar-group">
         <button
           type="button"

@@ -11,11 +11,16 @@ export const MATCH_KIND_LABEL: Record<string, string> = {
   concept: "Concept",
   key_suffix: "Key",
   token: "Partial",
+  template: "Template",
 };
 
 interface AutoMapDialogProps {
   open: boolean;
-  mode: "all" | "remaining";
+  mode: "all" | "remaining" | "template";
+  /** Template name when ``mode`` is "template". */
+  templateName?: string;
+  /** Plain-language notes shown above the table (pairs a template could not re-bind). */
+  notes?: string[];
   loading: boolean;
   error: string;
   suggestions: AutoMapSuggestion[];
@@ -33,6 +38,8 @@ interface AutoMapDialogProps {
 export function AutoMapDialog({
   open,
   mode,
+  templateName = "",
+  notes = [],
   loading,
   error,
   suggestions,
@@ -65,11 +72,15 @@ export function AutoMapDialog({
       open={open}
       onClose={onClose}
       size="lg"
-      title={mode === "remaining" ? "Map remaining columns" : "Auto-map columns"}
+      title={
+        mode === "remaining" ? "Map remaining columns" : mode === "template" ? `Apply template “${templateName}”` : "Auto-map columns"
+      }
       subtitle={
         mode === "remaining"
           ? "Suggestions for source columns that have no destination yet. Columns you mapped stay as they are."
-          : "Suggestions for every source column by name: exact, normalized, learned from this workspace, then synonyms."
+          : mode === "template"
+            ? "The template's pairs, re-bound onto this table's columns. Review before applying."
+            : "Suggestions for every source column by name: exact, normalized, learned from this workspace, then synonyms."
       }
       ariaLabel="Auto-map preview"
       className="df2-ms-automap"
@@ -89,6 +100,11 @@ export function AutoMapDialog({
         </>
       }
     >
+      {notes.length > 0 && (
+        <ul className="df2-ms-panel-note" aria-label="Notes">
+          {notes.map((n) => <li key={n}>{n}</li>)}
+        </ul>
+      )}
       {loading ? (
         <p role="status">Finding matches…</p>
       ) : error ? (

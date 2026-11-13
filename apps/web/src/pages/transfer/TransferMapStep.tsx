@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ColumnReviewPanel, type ColumnRemapControls } from "../../components/ColumnReviewPanel";
 import { AutoMapDialog } from "../../components/mapping/AutoMapDialog";
+import { ComputedColumnDialog } from "../../components/mapping/ComputedColumnDialog";
+import { TemplatesDialog } from "../../components/mapping/TemplatesDialog";
+import { HiddenFileInput } from "../../components/ui/HiddenFileInput";
+import { applyImportedMappings, documentRows } from "../../lib/mappingCode";
+import type { ShapeStepWire } from "../../lib/shape";
 import { DestinationColumnsPanel, DND_MIME } from "../../components/mapping/DestinationColumnsPanel";
 import { MappingToolbar } from "../../components/mapping/MappingToolbar";
 import {
@@ -12,7 +17,11 @@ import { mapTargetIssues, normalizeColumnName } from "../../lib/destColumnCatalo
 import { liveCarrierIsDoomedOnThisRun } from "../../lib/destSchemaRecreate";
 import { isIntentionalOmit, type EditableMapping as MapRow } from "../../lib/mapping";
 import {
+  applyMappingTemplate,
+  createMappingTemplate,
+  exportMappingDocument,
   fetchAutoMap,
+  importMappingDocument,
   recordMappingMemory,
   type AutoMapSuggestion,
 } from "../../lib/mappingStudioApi";
@@ -119,6 +128,13 @@ interface TransferMapStepProps {
   syncMode?: string;
   /** Source table/collection name — auto-map reads ``<entity>_id`` against it. */
   sourceObjectName?: string;
+  /** The Transform recipe: its column-producing steps travel with exports/templates. */
+  transformSteps?: ShapeStepWire[];
+  /**
+   * Add computed-column steps to Transform (the one expression engine) and
+   * take the operator there to preview them. Absent, computed columns are off.
+   */
+  onAddComputedSteps?: (steps: ShapeStepWire[]) => void;
 }
 
 
@@ -183,6 +199,8 @@ export function TransferMapStep({
   schemaPolicy = "",
   syncMode = "",
   sourceObjectName = "",
+  transformSteps = [],
+  onAddComputedSteps,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("review");
@@ -240,11 +258,93 @@ export function TransferMapStep({
 
   const [autoMap, setAutoMap] = useState<{
     open: boolean;
-    mode: "all" | "remaining";
+    mode: "all" | "remaining" | "template";
     loading: boolean;
     error: string;
     suggestions: AutoMapSuggestion[];
+    templateName?: string;
+    notes?: string[];
   }>({ open: false, mode: "all", loading: false, error: "", suggestions: [] });
+  const [computedOpen, setComputedOpen] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [codeStatus, setCodeStatus] = useState("");
+  const [pendingComputed, setPendingComputed] = useState<ShapeStepWire[]>([]);
+  const importId = useId();
+  const computedSteps = useMemo(
+    () => transformSteps.filter((s) => ["derive_column", "constant_column", "concat_columns"].includes(s.op)),
+    [transformSteps],
+  );
+  const documentBody = () => ({
+    mappings: documentRows(columnMappings),
+    computed: computedSteps.map((s) => ({ op: s.op, options: s.options ?? {} })),
+    name: [sourceObjectName, targetCollection].filter(Boolean).join(" → "),
+    source: { table: sourceObjectName },
+    destination: { table: targetCollection, type: destType },
+  });
+
+  const exportAs = async (format: "yaml" | "json") => {
+    try {
+      const { text, filename } = await exportMappingDocument(documentBody(), format);
+      const url = typeof URL.createObjectURL === "function"
+        ? URL.createObjectURL(new Blob([text], { type: format === "yaml" ? "application/yaml" : "application/json" }))
+        : "";
+      if (url) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      setCodeStatus(`Exported ${filename} (${columnMappings.length} mappings, checksum included).`);
+    } catch (e) {
+      setCodeStatus(e instanceof Error ? e.message : "Export failed");
+    }
+  };
+
+  const importFile = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const doc = await importMappingDocument(await file.text());
+      const out = applyImportedMappings(columnMappings, doc.mappings, catalog);
+      studio.change(out.rows);
+      setPendingComputed(doc.computed);
+      const parts = [
+        `Imported ${out.applied} mapping${out.applied === 1 ? "" : "s"} from ${file.name}`,
+        doc.checksum_verified ? "checksum verified" : "no checksum: unverified",
+        out.unmatched.length ? `not in this source: ${out.unmatched.join(", ")}` : "",
+        doc.computed.length ? `${doc.computed.length} computed column(s) to add to Transform` : "",
+      ].filter(Boolean);
+      setCodeStatus(`${parts.join(" · ")}. Undo reverts the import.`);
+      studio.announce(parts[0]);
+    } catch (e) {
+      setCodeStatus(e instanceof Error ? e.message : "Import failed");
+    }
+  };
+
+  const applyTemplate = async (t: { id: string; name: string }) => {
+    setTemplatesOpen(false);
+    setAutoMap({ open: true, mode: "template", templateName: t.name, loading: true, error: "", suggestions: [] });
+    try {
+      const out = await applyMappingTemplate(
+        t.id,
+        columnMappings.filter((m) => !isIntentionalOmit(m)).map((m) => m.source),
+        (catalog?.columns ?? []).map((c) => c.name),
+      );
+      setPendingComputed(out.computed ?? []);
+      setAutoMap({
+        open: true, mode: "template", templateName: t.name, loading: false, error: "",
+        suggestions: out.suggestions,
+        notes: [
+          ...out.unbound.map((u) => `${u.source} → ${u.target}: no matching ${u.missing === "both" ? "source or destination" : u.missing} column here.`),
+          ...(out.computed?.length ? [`The template also adds ${out.computed.length} computed column(s): use “Add to Transform” after applying.`] : []),
+        ],
+      });
+    } catch (e) {
+      setAutoMap({ open: true, mode: "template", templateName: t.name, loading: false, error: e instanceof Error ? e.message : "Template failed", suggestions: [] });
+    }
+  };
 
   const runAutoMap = async (mode: "all" | "remaining") => {
     setAutoMap({ open: true, mode, loading: true, error: "", suggestions: [] });
@@ -720,7 +820,53 @@ export function TransferMapStep({
             onUndo={studio.undo}
             onRedo={studio.redo}
             onTogglePanel={() => setPanelOpen((v) => !v)}
+            extra={
+              <>
+                {onAddComputedSteps && (
+                  <button type="button" className="df2-btn df2-btn-sm" onClick={() => setComputedOpen(true)}>
+                    Computed column…
+                  </button>
+                )}
+                <button type="button" className="df2-btn df2-btn-sm" onClick={() => setTemplatesOpen(true)}>
+                  Templates…
+                </button>
+                <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void exportAs("yaml")}>
+                  Export YAML
+                </button>
+                <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void exportAs("json")}>
+                  Export JSON
+                </button>
+                <label htmlFor={importId} className="df2-btn df2-btn-sm df2-btn-ghost df2-ms-file-label">
+                  Import…
+                </label>
+                <HiddenFileInput
+                  id={importId}
+                  accept=".yaml,.yml,.json,application/json,application/yaml,text/yaml"
+                  onChange={(e) => {
+                    void importFile(e.target.files?.[0]);
+                    e.target.value = "";
+                  }}
+                />
+              </>
+            }
           />
+        )}
+        {(codeStatus || (pendingComputed.length > 0 && onAddComputedSteps)) && (
+          <p className="df2-ms-code-status" role="status" data-testid="map-code-status">
+            {codeStatus}
+            {pendingComputed.length > 0 && onAddComputedSteps ? (
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                onClick={() => {
+                  onAddComputedSteps(pendingComputed);
+                  setPendingComputed([]);
+                }}
+              >
+                Add {pendingComputed.length} computed column{pendingComputed.length === 1 ? "" : "s"} to Transform
+              </button>
+            ) : null}
+          </p>
         )}
         {studio.dnd.mode === "dragging" && studio.dnd.via === "keyboard" && (
           <p className="df2-ms-drag-status" aria-hidden="true">
@@ -967,9 +1113,29 @@ export function TransferMapStep({
         />
       </Dialog>
 
+      <ComputedColumnDialog
+        open={computedOpen}
+        catalog={catalog}
+        sourceColumns={columnMappings.map((m) => m.source)}
+        onClose={() => setComputedOpen(false)}
+        onAdd={(step) => {
+          setComputedOpen(false);
+          onAddComputedSteps?.([step]);
+        }}
+      />
+      <TemplatesDialog
+        open={templatesOpen}
+        onClose={() => setTemplatesOpen(false)}
+        onSave={async (name, description) => {
+          await createMappingTemplate({ ...documentBody(), name, description });
+        }}
+        onApply={(t) => void applyTemplate(t)}
+      />
       <AutoMapDialog
         open={autoMap.open}
         mode={autoMap.mode}
+        templateName={autoMap.templateName}
+        notes={autoMap.notes}
         loading={autoMap.loading}
         error={autoMap.error}
         suggestions={autoMap.suggestions}

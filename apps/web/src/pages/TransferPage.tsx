@@ -7380,6 +7380,19 @@ export function TransferPage({
           schemaPolicy={schemaPolicy}
           syncMode={syncMode}
           sourceObjectName={mapActiveStream || primarySourceStream || ""}
+          transformSteps={shapeSteps}
+          onAddComputedSteps={(steps) => {
+            // Computed columns are Transform steps: add them there (replacing a
+            // step that already produces the same column) and preview them.
+            const to = (st: { op: string; options?: Record<string, unknown> }) => `${st.op}:${String(st.options?.to ?? "")}`;
+            setShapeSteps((prev) => [...prev.filter((p) => !steps.some((st) => to(st) === to(p))), ...steps]);
+            setStep(STEP_SHAPE);
+            toast({
+              title: "Computed column added to Transform",
+              message: "Preview it here, then continue to Map: the new column maps onto its destination.",
+              tone: "info",
+            });
+          }}
         />
       )}
 
