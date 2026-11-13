@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from services.atomic_file import write_json_atomic
+from services.atomic_file import locked_update, write_json_atomic
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
@@ -173,15 +173,16 @@ def record_ddl(
         except Exception:
             _logger.exception("Mongo CDC schema history insert failed; falling back to file")
 
-    data = _load_file(source_key, table)
-    entries = list(data.get("entries") or [])
-    entry["version"] = _next_version(entries)
-    entries.append(entry)
-    data["entries"] = entries
-    data["source_key"] = source_key
-    data["table"] = table
-    data["updated_at"] = _now()
-    _save_file(source_key, table, data)
+    with locked_update(_file_path(source_key, table)):  # version numbering + append in one step
+        data = _load_file(source_key, table)
+        entries = list(data.get("entries") or [])
+        entry["version"] = _next_version(entries)
+        entries.append(entry)
+        data["entries"] = entries
+        data["source_key"] = source_key
+        data["table"] = table
+        data["updated_at"] = _now()
+        _save_file(source_key, table, data)
     return entry
 
 

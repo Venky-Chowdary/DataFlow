@@ -8,6 +8,7 @@ import logging
 from services.threadpool_handler import off_event_loop
 from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
+from services.plan_store_offload import compute_then_commit, run_plan_write
 from services.safe_errors import safe_http_exception
 from services.shape_preflight import ShapePreflightRefused
 from services.upload_limits import PayloadTooLarge, read_upload
@@ -607,7 +608,7 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
     """
     from services.body_id_ownership import assert_body_ids
 
-    assert_body_ids(request, jobs=(str(body.job_id or ""),))  # review 3, body routes
+    await asyncio.to_thread(assert_body_ids, request, jobs=(str(body.job_id or ""),))  # review 3, body routes
     import sys
     from pathlib import Path
 
@@ -753,6 +754,12 @@ class PlanMapRequest(PolicyFieldsModel):
     validation_mode: str = "balanced"
     use_llm: bool = True
     source_samples: dict[str, list[str]] = Field(default_factory=dict)
+    #: Opaque id the caller picks for this Map (stored on the revision as
+    #: plan_summary.client_request_id), so a client that gave up waiting can
+    #: tell its own Map from someone else's.
+    client_request_id: Optional[str] = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class UpdatePlanRequest(BaseModel):
@@ -787,6 +794,21 @@ class UpdatePlanRequest(BaseModel):
 
 class SyncMappingsRequest(BaseModel):
     mappings: list[dict] = Field(default_factory=list)
+    #: Optimistic concurrency (PS-1): the newest revision version the edit
+    #: started from. Omitted, the save is appended as a new revision.
+    base_version: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "The `version` of the newest entry in the plan's `revisions` when this "
+            "edit was loaded (0 for a plan with no revisions). It is compared with "
+            "the newest revision version only — not with `active_version` and not "
+            "with `doc_version`, which also changes on preflight runs, job links and "
+            "plan edits. Any other value — older (a newer mapping revision exists) "
+            "or ahead of it — is refused with 409 and the current version, and "
+            "nothing is saved. Omit it to always append a new revision."
+        ),
+    )
 
     @field_validator("mappings")
     @classmethod
@@ -801,7 +823,7 @@ class SyncMappingsRequest(BaseModel):
 async def list_transfer_plans(limit: int = 50):
     from services.transfer_plan_store import list_plans
 
-    plans = list_plans(limit=limit)
+    plans = await asyncio.to_thread(list_plans, limit=limit)
     return {
         "plans": [
             {
@@ -825,24 +847,28 @@ async def create_transfer_plan(body: CreatePlanRequest, request: Request):
     from services.transfer_plan_store import create_plan
 
     # A plan stores its endpoints' connector ids: they must be the caller's (review 3, Low).
-    assert_body_ids(request, connectors=tuple(
+    await asyncio.to_thread(assert_body_ids, request, connectors=tuple(
         str((side or {}).get("connector_id") or "") for side in (body.source, body.destination)
     ))
 
-    plan = create_plan(body.model_dump())
-    append_audit_event(
-        action="transfer_plan.created",
-        resource=f"plan/{plan.id}",
-        details={"name": plan.name, "source_columns": len(plan.source_columns)},
-    )
-    return {"plan": plan.to_dict()}
+    def _create() -> dict:
+        plan = create_plan(body.model_dump())
+        append_audit_event(
+            action="transfer_plan.created",
+            resource=f"plan/{plan.id}",
+            details={"name": plan.name, "source_columns": len(plan.source_columns)},
+        )
+        return {"plan": plan.to_dict()}
+
+    # A plan write can wait on the store lock: off the loop, on the plan-write pool.
+    return await run_plan_write(_create)
 
 
 @router.get("/plans/{plan_id}")
 async def get_transfer_plan(plan_id: str):
     from services.transfer_plan_store import get_plan
 
-    plan = get_plan(plan_id)
+    plan = await asyncio.to_thread(get_plan, plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     return {"plan": plan.to_dict()}
@@ -853,7 +879,7 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
     from services.transfer_plan_service import patch_plan
 
     try:
-        plan = patch_plan(plan_id, body.model_dump(exclude_none=True))
+        plan = await run_plan_write(patch_plan, plan_id, body.model_dump(exclude_none=True))
         return {"plan": plan.to_dict()}
     except ValueError as e:
         raise safe_http_exception(
@@ -864,13 +890,76 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
         ) from e
 
 
-@router.post("/plans/{plan_id}/mappings")
-async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
-    from services.transfer_plan_service import sync_plan_mappings
+async def _link_job_to_plan(plan_id: str, job_id: str) -> None:
+    """Record a created run on its plan — best effort.
+
+    The pending job already holds the idempotency key and the destination, so
+    a failure here must not fail the request (that would orphan the job and
+    turn the caller's retry into a 409 duplicate). The run does not need the
+    link, so any failure — a busy or unreadable store, a full or read-only
+    disk, a lock file it may not open — is logged and skipped. The log names
+    the error class and the ids only: the error text can carry store paths.
+    """
+    from services.transfer_plan_store import (
+        PlanStoreBusy,
+        PlanStoreLockUnavailable,
+        PlanStoreReentry,
+        PlanStoreUnreadable,
+        attach_job,
+    )
 
     try:
-        plan = sync_plan_mappings(plan_id, body.mappings)
+        await run_plan_write(attach_job, plan_id, job_id, status="running")
+    except Exception as exc:  # noqa: BLE001 - the job exists; the link is optional
+        # Disk and store refusals are expected operating conditions; anything
+        # else is a bug and keeps its traceback in the log (never the client).
+        expected = isinstance(
+            exc,
+            (OSError, PlanStoreBusy, PlanStoreUnreadable, PlanStoreLockUnavailable, PlanStoreReentry),
+        )
+        logging.getLogger(__name__).warning(
+            "Run %s started but was not linked to plan %s: %s",
+            job_id,
+            plan_id,
+            type(exc).__name__,
+            exc_info=None if expected else exc,
+        )
+
+
+def _plan_version_conflict(exc: Any, message: str) -> HTTPException:
+    """409 for a revision based on anything but the plan's newest one."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "plan_version_conflict",
+            "message": message,
+            "base_version": exc.base_version,
+            "current_version": exc.current_version,
+            "compared": getattr(exc, "compared", "head"),
+        },
+    )
+
+
+@router.post("/plans/{plan_id}/mappings")
+async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
+    """Save edited mappings as a new plan revision.
+
+    With ``base_version``, a save based on an older revision than the plan now
+    holds answers 409 with ``current_version`` instead of replacing it.
+    """
+    from services.transfer_plan_service import sync_plan_mappings
+    from services.transfer_plan_store import PlanVersionConflict
+
+    try:
+        plan = await run_plan_write(
+            sync_plan_mappings, plan_id, body.mappings, base_version=body.base_version
+        )
         return {"plan": plan.to_dict()}
+    except PlanVersionConflict as e:
+        raise _plan_version_conflict(
+            e, "A newer mapping revision exists than the one this edit was based on. "
+            "Reload the plan and re-apply the edit."
+        ) from e
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -883,14 +972,25 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
 @router.post("/plans/{plan_id}/map")
 async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
     from services.transfer_plan_service import run_plan_mapping
+    from services.transfer_plan_store import PlanVersionConflict
 
     try:
-        return run_plan_mapping(
+        # The pipeline on the default executor; its plan write (which can wait
+        # on the store lock) on the plan-write pool.
+        return await compute_then_commit(
+            run_plan_mapping,
             plan_id,
             validation_mode=body.validation_mode,
             use_llm=body.use_llm,
             source_samples=body.source_samples or None,
+            client_request_id=body.client_request_id,
         )
+    except PlanVersionConflict as e:
+        raise _plan_version_conflict(
+            e, "The plan changed while Map ran (a newer mapping revision was saved, or a "
+            "revision approved or reverted), so its result was not stored. Reload the plan "
+            "and run Map again."
+        ) from e
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -926,7 +1026,7 @@ class PlanPreflightRequest(BaseModel):
 async def get_plan_preflight(plan_id: str, run_id: str = ""):
     from services.plan_preflight_job import get_plan_preflight_job
 
-    job = get_plan_preflight_job(plan_id, run_id)
+    job = await asyncio.to_thread(get_plan_preflight_job, plan_id, run_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No Validate run for this plan")
     return job
@@ -947,7 +1047,7 @@ async def preflight_transfer_plan(
     from services.transfer_plan_service import run_plan_preflight
 
     payload = body or PlanPreflightRequest()
-    _refuse_unavailable_plan_destination(plan_id)
+    await asyncio.to_thread(_refuse_unavailable_plan_destination, plan_id)
     try:
         ack = resolve_acknowledgments(
             compliance=payload.compliance_acknowledged,
@@ -963,7 +1063,8 @@ async def preflight_transfer_plan(
         ) from e
 
     if payload.async_run:
-        job = start_plan_preflight_job(
+        job = await asyncio.to_thread(
+            start_plan_preflight_job,
             plan_id,
             acknowledgments=ack,
             shape_recipe=payload.shape_recipe,
@@ -973,7 +1074,9 @@ async def preflight_transfer_plan(
     try:
         # Even the sync path leaves the event loop — /health must answer while
         # a warehouse probe or file walk runs.
-        return await asyncio.to_thread(
+        # The gates on the default executor; the run record (and the
+        # acknowledgments) wait for the store lock on the plan-write pool.
+        return await compute_then_commit(
             run_plan_preflight,
             plan_id,
             acknowledgments=ack,
@@ -993,12 +1096,41 @@ async def preflight_transfer_plan(
 
 
 @router.post("/plans/{plan_id}/approve")
-async def approve_transfer_plan(plan_id: str, version: Optional[int] = None):
+async def approve_transfer_plan(
+    plan_id: str, version: Optional[int] = None, expected_version: Optional[int] = None
+):
+    """Approve a mapping revision (default: the active one).
+
+    ``expected_version`` is the revision the caller checked (Validate's
+    ``mapping_version``): when another revision has become active since, the
+    approval is refused with 409 ``plan_version_conflict`` (``compared:
+    "active"``) instead of approving something that was never checked.
+    """
     from services.transfer_plan_service import approve_plan
+    from services.transfer_plan_store import PlanVersionConflict, UnknownPlanVersion
 
     try:
-        plan = approve_plan(plan_id, version)
+        plan = await run_plan_write(approve_plan, plan_id, version, expected_version=expected_version)
         return {"plan": plan.to_dict()}
+    except PlanVersionConflict as e:
+        raise _plan_version_conflict(
+            e, "A different mapping revision is active than the one Validate checked. Review "
+            "the latest revision and run Validate again before approving."
+        ) from e
+    except UnknownPlanVersion as e:
+        have = (
+            f"Its mapping revisions are {e.versions[0]} to {e.versions[-1]}."
+            if e.versions
+            else "It has no mapping revision yet: run Map or save mappings first."
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "unknown_plan_version",
+                "message": f"This plan has no mapping revision {e.version}. {have}",
+                "version": e.version,
+            },
+        ) from e
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -1014,7 +1146,7 @@ async def transfer_plan_run_payload(plan_id: str):
     from services.transfer_plan_service import build_run_payload
 
     try:
-        return build_run_payload(plan_id)
+        return await asyncio.to_thread(build_run_payload, plan_id)
     except ValueError as e:
         raise safe_http_exception(
             e,
@@ -1248,11 +1380,12 @@ async def execute_transfer_json(
     from services.body_id_ownership import assert_body_ids as _assert_body_ids
 
     # The plan and recipe a run uses must be the caller's (review 3, body routes).
-    _assert_body_ids(request, plans=(str(body.plan_id or ""),), recipes=(str(body.transform_recipe_id or ""),))
+    await asyncio.to_thread(_assert_body_ids, request, plans=(str(body.plan_id or ""),), recipes=(str(body.transform_recipe_id or ""),))
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import merge_plan_into_run
         try:
-            payload = merge_plan_into_run(
+            payload = await run_plan_write(
+                merge_plan_into_run,
                 str(body.plan_id).strip(),
                 request_mappings=list(request_obj.mappings or []),
                 request_column_types=dict(request_obj.column_types or {}),
@@ -1275,7 +1408,7 @@ async def execute_transfer_json(
     from services.body_id_ownership import assert_body_ids
 
     # Another workspace's contract answers like a missing one (review 3, Low).
-    assert_body_ids(request, contracts=(body.contract_id or "",))
+    await asyncio.to_thread(assert_body_ids, request, contracts=(body.contract_id or "",))
     from src.transfer.contract_engine import stamp_request_contract
 
     plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
@@ -1346,8 +1479,7 @@ async def execute_transfer_json(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if body.plan_id and str(body.plan_id).strip():
-        from services.transfer_plan_store import attach_job
-        attach_job(str(body.plan_id).strip(), job_id, status="running")
+        await _link_job_to_plan(str(body.plan_id).strip(), job_id)
 
     _stamp_job_mapping_artifacts(
         job_id,
@@ -1777,7 +1909,8 @@ async def run_universal_transfer(
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
-            payload = merge_plan_into_run(
+            payload = await run_plan_write(
+                merge_plan_into_run,
                 plan_id.strip(),
                 request_mappings=form_mappings,
                 request_column_types=dict(request_obj.column_types or {}),
@@ -1879,7 +2012,7 @@ async def run_universal_transfer(
     from services.body_id_ownership import assert_body_ids
     from src.transfer.contract_engine import stamp_request_contract
 
-    assert_body_ids(request, contracts=(contract_id,))  # review 3, Low
+    await asyncio.to_thread(assert_body_ids, request, contracts=(contract_id,))  # review 3, Low
     try:
         stamp_request_contract(
             request_obj,
@@ -1949,8 +2082,7 @@ async def run_universal_transfer(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if plan_id and plan_id.strip():
-        from services.transfer_plan_store import attach_job
-        attach_job(plan_id.strip(), job_id, status="running")
+        await _link_job_to_plan(plan_id.strip(), job_id)
 
     _stamp_job_mapping_artifacts(
         job_id,

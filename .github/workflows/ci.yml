@@ -880,6 +880,22 @@ jobs:
           production_smoke: "false"
           artifact_name: studio-ui-next
 
+  # Plan-conflict flow (PR 422): a save, Approve or Execute that meets a
+  # newer plan revision opens the comparison instead of overwriting it.
+  # Hermetic stubs, dev server only.
+  plan-conflict-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Plan conflict comparison
+        uses: ./.github/actions/studio-surface
+        with:
+          playwright_project: plan-conflict
+          production_smoke: "false"
+          artifact_name: plan-conflict-e2e
+
   required-checks:
     name: Required PR gate
     if: ${{ always() && !cancelled() }}
@@ -895,6 +911,7 @@ jobs:
       - cdc-oracle
       - security
       - studio-ui
+      - plan-conflict-e2e
     runs-on: ubuntu-latest
     steps:
       - name: Require every mandatory check to pass
@@ -910,6 +927,7 @@ jobs:
           CDC_ORACLE: ${{ needs.cdc-oracle.result }}
           SECURITY: ${{ needs.security.result }}
           STUDIO_UI: ${{ needs.studio-ui.result }}
+          PLAN_CONFLICT_E2E: ${{ needs.plan-conflict-e2e.result }}
         run: |
           failed=0
           for check in \
@@ -923,7 +941,8 @@ jobs:
             "cdc-sqlserver:$CDC_SQLSERVER" \
             "cdc-oracle:$CDC_ORACLE" \
             "security:$SECURITY" \
-            "studio-ui:$STUDIO_UI"; do
+            "studio-ui:$STUDIO_UI" \
+            "plan-conflict-e2e:$PLAN_CONFLICT_E2E"; do
             name="${check%%:*}"
             result="${check##*:}"
             echo "$name: $result"
