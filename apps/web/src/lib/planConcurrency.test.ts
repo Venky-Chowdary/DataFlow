@@ -119,6 +119,32 @@ describe("diffPlanMappings / sameMappings", () => {
   });
 });
 
+describe("headAfterOwnMap", () => {
+  it("adopts exactly one newer Map revision, never a UI save or several", async () => {
+    const { headAfterOwnMap } = await import("./planConcurrency.js");
+    const mapRev = { version: 3, validation: { passed: true } as { source?: string } };
+    const uiRev = { version: 3, validation: { source: "ui_sync" } };
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, mapRev] }, 2), 3);
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, uiRev] }, 2), null);
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }, mapRev, { version: 4 }] }, 2), null);
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [{ version: 2 }] }, 2), null);
+    assert.equal(headAfterOwnMap({ id: "p", revisions: [mapRev] }, null), null);
+  });
+});
+
+describe("headIfOurs", () => {
+  it("adopts the head only when the active revision holds exactly this page's mappings", async () => {
+    const { headIfOurs } = await import("./planConcurrency.js");
+    const mine = [{ source: "a", target: "x" }];
+    const plan = (mappings: Array<{ source: string; target: string }>) => ({
+      id: "p", active_version: 4, revisions: [{ version: 3, mappings: [] }, { version: 4, mappings }],
+    });
+    assert.equal(headIfOurs(plan(mine), mine), 4);
+    assert.equal(headIfOurs(plan([{ source: "b", target: "x" }]), mine), null);
+    assert.equal(headIfOurs({ id: "p", revisions: [] }, mine), null);
+  });
+});
+
 describe("plan_store_lock_unavailable", () => {
   it("is an operator error, never retried", async () => {
     const s = sender([json(503, { error: "plan_store_lock_unavailable", detail: "An operator must make transfer_plans.json.lock writable" })]);

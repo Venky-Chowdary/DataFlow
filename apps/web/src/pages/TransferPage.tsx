@@ -19,6 +19,8 @@ import { countGateStatuses } from "../lib/preflightGates";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { PlanConflictDialog } from "../components/transfer/PlanConflictDialog";
 import {
+  headAfterOwnMap,
+  headIfOurs,
   headVersion,
   isPlanVersionConflict,
   type PlanMappingRow,
@@ -1785,6 +1787,16 @@ export function TransferPage({
     },
     [planConflict.open],
   );
+  /** After a non-conflict failure of this page's own write: adopt the head only if what landed is ours. */
+  const adoptHeadIfOurs = useCallback(async (planId: string, mine: PlanMappingRow[]) => {
+    try {
+      const { plan } = await getTransferPlan(planId);
+      const head = headIfOurs(plan, mine);
+      if (head != null) planHeadRef.current = head;
+    } catch {
+      // Unknown: keep the head; a later save meets the comparison if needed.
+    }
+  }, []);
   const editorMappingRows = (): PlanMappingRow[] =>
     columnMappingsRef.current.map((m) => ({ source: m.source, target: m.target, confidence: m.confidence }));
 
@@ -1994,6 +2006,17 @@ export function TransferPage({
           mapConflictRef.current = true;
           void openPlanConflict(mappedViaPlan, editorMappingRows(), "map");
           return columnMappingsRef.current;
+        }
+        if (mappedViaPlan) {
+          // E.g. the client gave up (timeout) while the server committed this
+          // Map: adopt the head only if the one new revision is a Map result.
+          const planId = mappedViaPlan;
+          void getTransferPlan(planId)
+            .then(({ plan }) => {
+              const head = headAfterOwnMap(plan, planHeadRef.current);
+              if (head != null) planHeadRef.current = head;
+            })
+            .catch(() => undefined);
         }
         console.error("Mapping pipeline failed:", e);
         let fallback = reapplySeededTargets(
@@ -6101,12 +6124,18 @@ export function TransferPage({
       // Belt-and-suspenders: sync Studio mappings onto the plan before Execute so
       // an empty draft (Map race) cannot block a green Validate with "no mappings".
       let runPlanId = persistedPlanId ?? undefined;
+      // A sync that failed for another reason: the backend's merge_plan_into_run
+      // may still store these mappings; adopt that head afterwards if so.
+      let unsyncedPlanId: string | null = null;
       const syncForRun = async (planId: string, rows: NonNullable<typeof transferMappings>) => {
         try {
           const synced = await syncTransferPlanMappings(planId, rows, { baseVersion: planHeadRef.current });
           planHeadRef.current = headVersion(synced?.plan);
         } catch (syncErr) {
-          if (!isPlanVersionConflict(syncErr)) return;  // still send mappings_json; the backend recovers
+          if (!isPlanVersionConflict(syncErr)) {
+            unsyncedPlanId = planId;  // still send mappings_json; the backend recovers
+            return;
+          }
           // Someone saved this plan since it was loaded: never run a version the
           // user has not seen. Run only if the plan already holds these mappings.
           if (await openPlanConflict(planId, rows, "execute") !== "resolved") throw syncErr;
@@ -6317,6 +6346,12 @@ export function TransferPage({
             ? (preflight.proof_bundle.decision_artifact as Record<string, unknown>)
             : undefined,
       });
+      if (unsyncedPlanId && transferMappings?.length) {
+        // The run may have stored these mappings on the plan (backend
+        // recovery): adopt that head, so this page's next save is not
+        // refused as a conflict with its own write.
+        void adoptHeadIfOurs(unsyncedPlanId, transferMappings);
+      }
       setRunStartupProgress(stagePercent(3, RUN_LAUNCH_STAGES.length));
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
       // A double-click / retry that hit an already-running equivalent transfer.

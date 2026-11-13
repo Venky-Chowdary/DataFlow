@@ -208,3 +208,32 @@ export function diffPlanMappings(latest: PlanMappingRow[], mine: PlanMappingRow[
 export function sameMappings(a: PlanMappingRow[], b: PlanMappingRow[]): boolean {
   return diffPlanMappings(a, b).every((row) => !row.differs);
 }
+
+/**
+ * After a Map that failed on the client (e.g. timed out) while the server may
+ * still have committed it: the head this page may adopt, or null.
+ *
+ * Every revision newer than `knownHead` must be a Map result (not a UI save,
+ * whose validation source is "ui_sync"), and there may be at most one: that
+ * is this page's own Map landing. Anything else is someone else's work, and
+ * the head stays as it was, so the next save meets the conflict dialog.
+ */
+export function headAfterOwnMap(plan: PlanView | null | undefined, knownHead: number | null): number | null {
+  if (knownHead == null) return null;
+  const newer = (plan?.revisions ?? []).filter((r) => r.version > knownHead);
+  if (newer.length !== 1) return null;
+  const [rev] = newer;
+  if (rev.validation?.source === "ui_sync") return null;
+  return rev.version;
+}
+
+/**
+ * After this page's own write failed without a conflict (the backend may
+ * still have stored it, e.g. Execute's merge_plan_into_run recovery): the
+ * plan's head if its active revision holds exactly `mine`, else null.
+ */
+export function headIfOurs(plan: PlanView | null | undefined, mine: PlanMappingRow[]): number | null {
+  const latest = activeRevision(plan);
+  if (!latest || !sameMappings(latest.mappings ?? [], mine)) return null;
+  return headVersion(plan);
+}
