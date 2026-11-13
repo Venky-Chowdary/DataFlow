@@ -152,6 +152,19 @@ def xlsx_cell_value(value: Any, declared_type: Any = None) -> tuple[Any, bool]:
     return cell_to_string(value), True
 
 
+def _set_cell(cell: Any, raw: Any, declared: Any, *, text: bool = False) -> None:
+    """Bind ``raw`` to ``cell``; text is forced to a string cell."""
+    if text:
+        value, as_text = ("" if raw is None else str(raw)), True
+    else:
+        value, as_text = xlsx_cell_value(raw, declared)
+    cell.value = value
+    if as_text:
+        # openpyxl binds ``=…`` as a formula and ``#N/A`` as an error:
+        # data is never either.
+        cell.data_type = "s"
+
+
 def fill_sheet(
     ws: Any,
     headers: list[str],
@@ -162,17 +175,33 @@ def fill_sheet(
     types = column_types or {}
     declared = [types.get(str(h)) for h in headers]
     for col, header in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=col)
-        cell.value = "" if header is None else str(header)
-        cell.data_type = "s"
+        _set_cell(ws.cell(row=1, column=col), header, None, text=True)
     for row_idx, row in enumerate(rows, start=2):
         for col, raw in enumerate(row, start=1):
-            value, as_text = xlsx_cell_value(raw, declared[col - 1] if col <= len(declared) else None)
-            if value is None:
+            if raw is None:
                 continue
-            cell = ws.cell(row=row_idx, column=col)
-            cell.value = value
-            if as_text:
-                # openpyxl binds ``=…`` as a formula and ``#N/A`` as an error:
-                # data is never either.
-                cell.data_type = "s"
+            _set_cell(
+                ws.cell(row=row_idx, column=col),
+                raw,
+                declared[col - 1] if col <= len(declared) else None,
+            )
+
+
+def write_only_row(
+    ws: Any,
+    values: list[Any],
+    declared_types: list[Any] | None = None,
+    *,
+    header: bool = False,
+) -> list[Any]:
+    """One row of ``WriteOnlyCell`` for a write-only sheet (object-store XLSX)."""
+    from openpyxl.cell import WriteOnlyCell
+
+    declared = list(declared_types or [])
+    cells: list[Any] = []
+    for idx, raw in enumerate(values):
+        cell = WriteOnlyCell(ws)
+        if raw is not None or header:
+            _set_cell(cell, raw, declared[idx] if idx < len(declared) else None, text=header)
+        cells.append(cell)
+    return cells

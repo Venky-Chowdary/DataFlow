@@ -310,21 +310,29 @@ class ObjectStoreEncoder:
             return
         from openpyxl import Workbook
 
+        from services.xlsx_cells import write_only_row
+
         self._xlsx_wb = Workbook(write_only=True)
         self._xlsx_ws = self._xlsx_wb.create_sheet()
-        self._xlsx_ws.append(list(self.target_cols))
+        # G7: explicit cell types — text is a string cell, never a formula.
+        self._xlsx_ws.append(write_only_row(self._xlsx_ws, list(self.target_cols), header=True))
         self._header_written = True
 
     def _append_xlsx(self, mapped_rows: Sequence[tuple]) -> None:
         from connectors.writer_common import iter_mapped_delimited_records
 
+        from services.xlsx_cells import write_only_row
+
         self._ensure_xlsx()
+        declared = [self.dest_types.get(c) for c in self.target_cols]
         for record in iter_mapped_delimited_records(
             list(mapped_rows), self.target_cols, self.dest_types
         ):
-            self._xlsx_ws.append(
-                [wire_cell_text(record.get(c)) for c in self.target_cols]
-            )
+            values = [
+                None if record.get(c) is None else wire_cell_text(record.get(c))
+                for c in self.target_cols
+            ]
+            self._xlsx_ws.append(write_only_row(self._xlsx_ws, values, declared))
 
     def finish(self):
         """Write format trailer and return a rewindable ``ObjectStoreExport``."""
