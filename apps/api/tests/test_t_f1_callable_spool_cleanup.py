@@ -246,6 +246,7 @@ def test_suite_spools_are_off_the_shared_tmp_and_guarded(monkeypatch, tmp_path):
     orphan.parent.mkdir(parents=True)
     orphan.write_text("[]\n")
     assert _orphan_callable_spools() == ["jobx/df-proc-abc.jsonl"]
+    orphan.unlink()  # a fake orphan; leave no df-proc-* file behind
 
 
 def test_each_pytest_process_gets_its_own_spool_folder():
@@ -346,14 +347,16 @@ def _run_child(tmp_path: Path, spool_root: Path, job_id: str) -> dict:
     import subprocess
     import sys
 
-    src, _dst = _db(tmp_path)
+    work = tmp_path / f"child-{uuid.uuid4().hex[:8]}"
+    work.mkdir()
+    src, _dst = _db(work)
     api_root = Path(__file__).resolve().parents[1]
     env = {
         k: v for k, v in os.environ.items()
         if k not in {"DATAWRAP_CALLABLE_SPOOL_DIR", "_DF_SPOOL_BASE", "_DF_SPOOL_PROCESS_PID"}
     }
     env["DATAFLOW_CALLABLE_SPOOL_DIR"] = str(spool_root)
-    script = tmp_path / "child_spool.py"
+    script = work / "child_spool.py"
     script.write_text(_CHILD_SPOOL)
     out = subprocess.run(
         [sys.executable, str(script), src, job_id],
@@ -398,7 +401,7 @@ def test_a_subprocess_exit_keeps_another_processes_live_spool(monkeypatch, tmp_p
 
 
 def test_cancelled_query_source_job_leaves_no_spool(monkeypatch, tmp_path):
-    """A cancel landing while the job holds a filled spool still removes it."""
+    """A cancel during the read, while the job's spool is on disk, leaves none behind."""
     from services import procedure_source
     from services.error_handling import TransferCancelled
 
@@ -418,6 +421,28 @@ def test_cancelled_query_source_job_leaves_no_spool(monkeypatch, tmp_path):
     assert result.success is False
     assert "cancel" in str(result.error or "").lower(), result.error
     assert held and held[0] == 1, "the cancel landed while the spool was on disk"
+    assert _job_files(job_id) == []
+
+
+def test_a_cancel_after_the_stream_closed_is_released_by_the_job_scope(monkeypatch, tmp_path):
+    """The stream has already closed its own spool; a re-read refilled one and then
+    the cancel lands. Only the job scope can remove that spool."""
+    import src.transfer.engine as engine_mod
+    from services import procedure_source
+    from services.error_handling import TransferCancelled
+
+    job_id = "tf1latecancel" + uuid.uuid4().hex[:8]
+    refilled: list[int] = []
+
+    def reread_then_cancel(*args, **kwargs):
+        procedure_source.read_callable_batch(_cfg(str(tmp_path / "src.db"), job_id), offset=0, limit=5)
+        refilled.append(len(_job_files(job_id)))
+        raise TransferCancelled("Transfer cancelled by user", rows_written=50)
+
+    monkeypatch.setattr(engine_mod, "run_reconciliation", reread_then_cancel)
+    result = _run(monkeypatch, tmp_path, job_id)
+    assert result.success is False
+    assert refilled == [1], "the re-read spooled under the job before the cancel"
     assert _job_files(job_id) == []
 
 
