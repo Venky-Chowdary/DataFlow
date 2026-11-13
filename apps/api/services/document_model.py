@@ -711,6 +711,7 @@ def validate_model(
     fks: Any = None,
     *,
     cdc: bool = False,
+    database: str = "",
 ) -> list[Issue]:
     """Every rule the model breaks, given the source tables and foreign keys.
 
@@ -720,6 +721,10 @@ def validate_model(
     or an iterable of measured ``ForeignKeys`` sets. ``cdc=True`` turns the
     count-only warning for arrays without a ``child_key`` into an error,
     because change capture cannot place a changed element without its key.
+    ``database`` is the target database when known: MongoDB's 255-byte
+    namespace limit counts ``<database>.<collection>``, so with it the limit
+    is checked exactly; without it a collection name long enough that a
+    database name could push it over the limit is a warning.
 
     A payload that does not parse comes back as one error issue.
     """
@@ -729,7 +734,7 @@ def validate_model(
         return [Issue(code=exc.code, severity=ERROR, path=exc.where, message=str(exc))]
     from services.document_model_validate import run_checks
 
-    return run_checks(parsed, source_schemas, fks, cdc=cdc)
+    return run_checks(parsed, source_schemas, fks, cdc=cdc, database=database)
 
 
 __all__ = [

@@ -11,8 +11,10 @@ Checks, in the order they are reported:
   (catalog proof passes, a sample only warns, nothing is an error);
 * each relationship: id unique, parent known and earlier in the list, parent
   embedded (children cannot nest under a reference, a separate collection or
-  a primitive), depth within ``max_depth``, the source not already on its
-  ancestor chain, join present with columns on both sides and compatible
+  a primitive), depth within ``max_depth``, for an embedding rule
+  (``embed_array``, ``embed_object``) the source not already on its ancestor
+  chain (a ``reference`` or ``collection`` to its own table, such as
+  ``employees.manager_id``, is not recursion), join present with columns on both sides and compatible
   types, ``join_origin="fk"`` backed by a foreign key, and the rule's own
   proof:
 
@@ -27,10 +29,20 @@ Checks, in the order they are reported:
 
 * paths, per document container (the root document and each array
   element): every path follows ``services.document_paths``, ``_id`` is the
-  root key's, and no two paths collide.
+  root key's, and no two paths collide. An ``embed_object``'s path belongs
+  to it: only its own fields and the relationships nested under it write
+  inside it, so a second object or another field there is ``path_collision``
+  (``merge_into_parent_collision`` when the intruder is a merged field).
 
-Uniqueness proof comes from a primary key, a unique key, or a foreign key
-that references the columns (a foreign key can only reference a unique key).
+Uniqueness proof comes from a primary key or a unique key declared in the
+source tables. A foreign key that references the columns is not proof on its
+own: SQLite and MySQL (InnoDB) accept a foreign key to columns that are not
+unique. When only a foreign key points at the columns, the finding is the
+warning ``uniqueness_unproven`` instead of an error.
+
+The collection name follows MongoDB's rules, including the 255-byte limit
+on the whole namespace (``<database>.<collection>``): checked exactly when
+the target database is known, else a long name warns.
 """
 
 from __future__ import annotations
@@ -55,8 +67,16 @@ from services.document_model import (
 )
 
 PROVEN = "proven"
+#: Only a foreign key references the columns: a warning, not proof.
+FOREIGN_KEY_ONLY = "foreign_key_only"
 SAMPLE = "sample"
 NONE = "none"
+
+EMBEDDING_RULES = ("embed_array", "embed_object")
+NAMESPACE_MAX_BYTES = 255
+#: MongoDB database names are shorter than 64 bytes, so a collection name up
+#: to 255 - 1 - 63 bytes fits whatever the database is called.
+_NAMESPACE_SAFE_BYTES = NAMESPACE_MAX_BYTES - 1 - 63
 
 
 @dataclass(frozen=True)
@@ -160,6 +180,8 @@ class _Node:
     # Container that receives this node's children, and the prefix inside it.
     container: str | None = None
     prefix: str = ""
+    #: Positions of the relationships from the root down to this node.
+    lineage: tuple[int, ...] = ()
 
 
 @dataclass
@@ -168,6 +190,19 @@ class _Entry:
     kind: str
     where: str
     merged_from: str = ""
+    #: Lineage of the node that placed it (``()`` for the root's fields).
+    lineage: tuple[int, ...] = ()
+
+
+@dataclass
+class _Object:
+    """The path an ``embed_object`` fills, owned by relationship ``owner``."""
+
+    path: str
+    owner: int
+    rel_id: str
+    where: str
+    lineage: tuple[int, ...]
 
 
 @dataclass
@@ -180,6 +215,8 @@ class _Checker:
     nodes: dict[str, _Node | None] = field(default_factory=dict)
     containers: dict[str, list[_Entry]] = field(default_factory=dict)
     container_names: dict[str, str] = field(default_factory=dict)
+    objects: dict[str, list[_Object]] = field(default_factory=dict)
+    database: str = ""
     #: Tables whose description could not be read (``bad_source_schema``):
     #: already reported, so they are not reported as missing too.
     unreadable: tuple[str, ...] = ()
@@ -232,7 +269,7 @@ class _Checker:
                 and _same_table(fk.referenced, source)
                 and set(fk.referenced_columns) <= wanted
             ):
-                return PROVEN
+                return FOREIGN_KEY_ONLY
         if any(set(key) <= wanted for key in table.sampled_unique):
             return SAMPLE
         return NONE
@@ -273,10 +310,22 @@ class _Checker:
         where: str,
         failed: str,
         sampled: str,
+        source: str,
+        cols: Iterable[str],
     ) -> None:
         if verdict == PROVEN:
             return
-        if verdict == SAMPLE:
+        if verdict == FOREIGN_KEY_ONLY:
+            self.add(
+                "uniqueness_unproven",
+                WARNING,
+                where,
+                f"Only a foreign key shows that ({', '.join(cols)}) is unique in "
+                f"{source}; it is not a declared primary or unique key, and some "
+                "databases (SQLite, MySQL) accept a foreign key to columns that are "
+                "not unique. Declare the key in the source if there is one.",
+            )
+        elif verdict == SAMPLE:
             self.add(f"{code}_unique_by_sample_only", WARNING, where, sampled)
         else:
             self.add(f"{code}_not_unique", ERROR, where, failed)
@@ -285,19 +334,44 @@ class _Checker:
 
     def check_collection_and_limits(self) -> None:
         name = self.model.collection
+        size = len(name.encode("utf-8"))
         bad = (
             "$" in name
             or "\x00" in name
             or name.startswith("system.")
-            or len(name.encode("utf-8")) > 255
+            or "" in name.split(".")
+            or size > NAMESPACE_MAX_BYTES
         )
+        database = self.database.strip()
         if bad:
             self.add(
                 "collection_name_invalid",
                 ERROR,
                 "collection",
                 f"{name!r} cannot be a MongoDB collection name: it may not contain "
-                "'$' or a NUL character, start with 'system.', or exceed 255 bytes.",
+                "'$' or a NUL character, start with 'system.', start or end with "
+                "'.', have an empty part ('..'), or exceed 255 bytes.",
+            )
+        elif database:
+            namespace = len(f"{database}.{name}".encode("utf-8", "surrogatepass"))
+            if namespace > NAMESPACE_MAX_BYTES:
+                self.add(
+                    "collection_namespace_too_long",
+                    ERROR,
+                    "collection",
+                    f"{database}.{name[:40]}... is {namespace} bytes; MongoDB allows "
+                    f"at most {NAMESPACE_MAX_BYTES} bytes for the database name, a "
+                    "dot and the collection name together. Shorten the collection name.",
+                )
+        elif size > _NAMESPACE_SAFE_BYTES:
+            self.add(
+                "namespace_length_unchecked",
+                WARNING,
+                "collection",
+                f"The collection name is {size} bytes. MongoDB's {NAMESPACE_MAX_BYTES}-"
+                "byte limit counts the database name, a dot and the collection name "
+                "together, so a long database name may not fit; it is checked when "
+                "the target database is known.",
             )
         limits = self.model.limits
         if limits.max_depth > MAX_DEPTH_HARD_CAP:
@@ -341,6 +415,8 @@ class _Checker:
             cols = ", ".join(root.key)
             self.proof(
                 self.uniqueness(root.source, root.key),
+                source=root.source,
+                cols=root.key,
                 code="root_key",
                 where="root.key",
                 failed=f"({cols}) is not a primary or unique key of {root.source}, so "
@@ -432,7 +508,9 @@ class _Checker:
                 f"{rel.id!r} is nested {depth} levels deep; this model allows "
                 f"{max_depth}.",
             )
-        if any(_same_table(src, rel.source) for src in parent.chain):
+        if rel.rule in EMBEDDING_RULES and any(
+            _same_table(src, rel.source) for src in parent.chain
+        ):
             self.add(
                 "recursive_source",
                 ERROR,
@@ -468,6 +546,7 @@ class _Checker:
             chain=parent.chain + (rel.source,),
             source=rel.source,
             nests_children=False,
+            lineage=parent.lineage + (i,),
         )
         if register:
             self.nodes[rel.id] = node
@@ -546,6 +625,8 @@ class _Checker:
         cols = ", ".join(rel.child_key)
         self.proof(
             self.uniqueness(rel.source, rel.child_key),
+            source=rel.source,
+            cols=rel.child_key,
             code="child_key",
             where=f"{at}.child_key",
             failed=f"Child key ({cols}) is not a primary or unique key of {rel.source}.",
@@ -580,6 +661,8 @@ class _Checker:
         if rel.rule == "embed_array":
             self.proof(
                 self.uniqueness(parent_source, parent_cols),
+                source=parent_source,
+                cols=parent_cols,
                 code="embed_array_parent",
                 where=f"{at}.join",
                 failed=one_parent + "; to attach one matching row, use embed_object.",
@@ -589,6 +672,8 @@ class _Checker:
         elif rel.rule == "embed_object":
             self.proof(
                 self.uniqueness(rel.source, child_cols),
+                source=rel.source,
+                cols=child_cols,
                 code="embed_object",
                 where=f"{at}.join",
                 failed=one_child + "; to embed every match, use embed_array.",
@@ -597,6 +682,8 @@ class _Checker:
         elif rel.rule == "reference" and rel.options.reference_shape == "ids_array":
             self.proof(
                 self.uniqueness(parent_source, parent_cols),
+                source=parent_source,
+                cols=parent_cols,
                 code="reference_parent",
                 where=f"{at}.join",
                 failed=one_parent + ".",
@@ -615,6 +702,8 @@ class _Checker:
         elif rel.rule == "reference":
             self.proof(
                 self.uniqueness(rel.source, child_cols),
+                source=rel.source,
+                cols=child_cols,
                 code="reference",
                 where=f"{at}.join",
                 failed=one_child + "; to reference every match, use a list of ids.",
@@ -711,12 +800,13 @@ class _Checker:
         where: str,
         *,
         merged_from: str = "",
+        lineage: tuple[int, ...] = (),
     ) -> bool:
         """Add ``prefix + path`` to a container when ``path`` is valid there."""
         if not self.valid_piece(container, prefix, path, where):
             return False
         self.containers[container].append(
-            _Entry(prefix + path, kind, where, merged_from=merged_from)
+            _Entry(prefix + path, kind, where, merged_from=merged_from, lineage=lineage)
         )
         return True
 
@@ -733,16 +823,17 @@ class _Checker:
         if container is None:
             return
         opts = rel.options
+        mine = node.lineage
         if rel.rule == "collection":
             return
         if rel.rule == "reference":
             kind = dp.ARRAY if opts.reference_shape == "ids_array" else dp.SCALAR
             if rel.path:
-                self.place(container, prefix, rel.path, kind, f"{at}.path")
+                self.place(container, prefix, rel.path, kind, f"{at}.path", lineage=mine)
             return
         if rel.rule == "embed_array":
             if rel.path:
-                self.place(container, prefix, rel.path, dp.ARRAY, f"{at}.path")
+                self.place(container, prefix, rel.path, dp.ARRAY, f"{at}.path", lineage=mine)
             if opts.primitive or opts.merge_into_parent:
                 return
             # Keyed by position, not id: a duplicate id must not merge two
@@ -753,30 +844,36 @@ class _Checker:
             node.nests_children = True
             node.container, node.prefix = elements, ""
             for f, where in fields:
-                self.place(elements, "", f.path, dp.SCALAR, where)
+                self.place(elements, "", f.path, dp.SCALAR, where, lineage=mine)
             return
         # embed_object
         if opts.primitive:
             if rel.path and not opts.merge_into_parent:
-                self.place(container, prefix, rel.path, dp.SCALAR, f"{at}.path")
+                self.place(container, prefix, rel.path, dp.SCALAR, f"{at}.path", lineage=mine)
             return
         if opts.merge_into_parent:
             node.nests_children = True
             node.container, node.prefix = container, prefix
             for f, where in fields:
-                self.place(container, prefix, f.path, dp.SCALAR, where, merged_from=rel.id)
+                self.place(
+                    container, prefix, f.path, dp.SCALAR, where, merged_from=rel.id, lineage=mine
+                )
             return
         if not rel.path or not self.valid_piece(container, prefix, rel.path, f"{at}.path"):
             return
         inner = f"{prefix}{rel.path}."
         node.nests_children = True
         node.container, node.prefix = container, inner
+        # The object's path belongs to this relationship (see check_ownership).
+        self.objects.setdefault(container, []).append(
+            _Object(prefix + rel.path, i, rel.id, f"{at}.path", mine)
+        )
         if not fields:
             self.containers[container].append(
-                _Entry(prefix + rel.path, dp.SCALAR, f"{at}.path")
+                _Entry(prefix + rel.path, dp.SCALAR, f"{at}.path", lineage=mine)
             )
         for f, where in fields:
-            self.place(container, inner, f.path, dp.SCALAR, where)
+            self.place(container, inner, f.path, dp.SCALAR, where, lineage=mine)
 
     def check_collisions(self) -> None:
         for container, entries in self.containers.items():
@@ -785,7 +882,9 @@ class _Checker:
                 where_by_path.setdefault(e.path, []).append(e)
             dup_seen: dict[str, int] = {}
             label = self.container_names[container]
+            reported: set[str] = set()
             for problem in dp.collision_issues((e.path, e.kind) for e in entries):
+                reported.update((problem.path, problem.other))
                 if problem.code == "path_duplicate":
                     n = dup_seen.get(problem.path, 0) + 1
                     dup_seen[problem.path] = n
@@ -808,6 +907,68 @@ class _Checker:
                         involved[0].where,
                         f"In {label}: {problem.message}",
                     )
+            self.check_ownership(container, entries, label, reported)
+
+    def check_ownership(
+        self, container: str, entries: list[_Entry], label: str, reported: set[str]
+    ) -> None:
+        """Nothing but an object's own relationship (and what nests under it)
+        writes inside an ``embed_object``'s path.
+
+        Dotted paths share sub-documents freely (``address.city`` beside
+        ``address.zip``), so the plain collision rules cannot see two
+        relationships filling one object, or a parent's field written into a
+        child's object. Paths already reported by :meth:`check_collisions`
+        are left alone, so one fault gives one finding.
+        """
+        objects = self.objects.get(container)
+        if not objects:
+            return
+        owners: dict[str, _Object] = {}
+        for obj in objects:
+            owners.setdefault(obj.path, obj)
+        # (path, lineage, where, merged_from, the item itself, is an object)
+        items: list[tuple[str, tuple[int, ...], str, str, object, bool]] = [
+            (o.path, o.lineage, o.where, "", o, True) for o in objects
+        ]
+        items.extend((e.path, e.lineage, e.where, e.merged_from, e, False) for e in entries)
+        flagged: set[tuple[int, int]] = set()
+        for path, lineage, where, merged_from, item, is_object in items:
+            if path in reported:
+                continue
+            parts = path.split(".")
+            # Another object at the very same path is a clash too; a field
+            # exactly at the object's path is a plain collision already.
+            last = len(parts) + 1 if is_object else len(parts)
+            for cut in range(1, last):
+                owner = owners.get(".".join(parts[:cut]))
+                if owner is None or owner is item or owner.owner in lineage:
+                    continue
+                placer = lineage[-1] if lineage else -1
+                if (owner.owner, placer) in flagged:
+                    break
+                flagged.add((owner.owner, placer))
+                inside = (
+                    f"{path!r} is already the embedded object that {owner.rel_id!r} fills"
+                    if path == owner.path
+                    else f"{path!r} is inside {owner.path!r}, the embedded object that "
+                    f"{owner.rel_id!r} fills"
+                )
+                message = (
+                    f"{inside}; only {owner.rel_id!r} and the relationships nested "
+                    "under it can write there. Choose another path."
+                )
+                if merged_from:
+                    self.add(
+                        "merge_into_parent_collision",
+                        ERROR,
+                        where,
+                        f"Merging {merged_from!r} into its parent clashes in {label}: "
+                        f"{message}",
+                    )
+                else:
+                    self.add("path_collision", ERROR, where, f"In {label}: {message}")
+                break
 
 
 def run_checks(
@@ -816,6 +977,7 @@ def run_checks(
     fks: Any,
     *,
     cdc: bool = False,
+    database: str = "",
 ) -> list:
     if source_schemas and not isinstance(source_schemas, Mapping):
         return [
@@ -851,6 +1013,7 @@ def run_checks(
         cdc=cdc,
         issues=schema_issues,
         unreadable=tuple(unreadable),
+        database=str(database or ""),
     )
     checker.check_collection_and_limits()
     checker.check_root()

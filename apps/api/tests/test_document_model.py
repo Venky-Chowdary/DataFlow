@@ -700,13 +700,21 @@ def test_embed_array_parent_uniqueness_from_a_sample_only_warns():
     assert not has_errors(_validate(raw, schemas, fks))
 
 
-def test_embed_array_parent_uniqueness_from_a_foreign_key():
+def test_embed_array_parent_uniqueness_from_a_foreign_key_only_warns():
     schemas = _schemas()
     schemas["public.orders"]["primary_key"] = []
-    # A foreign key can only reference a unique key, so items' FK onto
-    # orders.order_id proves order_id unique on orders: it serves both as the
-    # parent proof for items and as the child_key proof for orders.
-    assert _validate(schemas=schemas) == []
+    # items' FK onto orders.order_id is the only sign order_id is unique on
+    # orders. SQLite and MySQL accept a foreign key to non-unique columns, so
+    # it is a warning, both for items' parent and for orders' child_key.
+    issues = _validate(schemas=schemas)
+    assert [(i.code, i.severity, i.path) for i in issues] == [
+        ("uniqueness_unproven", WARNING, "relationships[1].child_key"),
+        ("uniqueness_unproven", WARNING, "relationships[2].join"),
+    ]
+    declared = _schemas()
+    declared["public.orders"]["primary_key"] = []
+    declared["public.orders"]["unique_keys"] = [["order_id"]]
+    assert _validate(schemas=declared) == []
     fks = _fks()
     fks.pop("public.order_items")
     raw = _model()
@@ -785,10 +793,11 @@ def test_embed_object_uniqueness_from_a_sample_only_warns():
     assert issues[0].severity == WARNING
 
 
-def test_embed_object_uniqueness_from_the_parents_foreign_key():
+def test_embed_object_uniqueness_from_the_parents_foreign_key_only_warns():
     schemas = _schemas()
     schemas["public.countries"]["primary_key"] = []
-    assert _validate(schemas=schemas) == []
+    assert _codes(_validate(schemas=schemas), WARNING) == ["uniqueness_unproven"]
+    assert not has_errors(_validate(schemas=schemas))
 
 
 def test_embed_object_of_the_many_side_is_refused():
@@ -1212,3 +1221,222 @@ def test_well_formed_source_tables_still_read():
 def test_source_schemas_that_are_not_a_mapping_are_one_issue():
     issues = validate_model(_model(), [("public.customers", {})], _fks())
     assert [(i.code, i.path) for i in issues] == [("bad_source_schema", "source_schemas")]
+
+
+# --- review of PR 417: validation semantics (L1, L2, L3, L6) ------------------
+
+
+def _employees() -> tuple[dict, dict]:
+    schemas = {
+        "public.employees": {
+            "columns": {"employee_id": "integer", "manager_id": "integer", "name": "text"},
+            "primary_key": ["employee_id"],
+        }
+    }
+    model = {
+        "collection": "employees",
+        "root": {"source": "public.employees", "key": ["employee_id"]},
+        "relationships": [
+            {
+                "id": "manager",
+                "parent": "root",
+                "source": "public.employees",
+                "join": [{"parent": "manager_id", "child": "employee_id"}],
+                "rule": "reference",
+                "path": "manager",
+            }
+        ],
+    }
+    return model, schemas
+
+
+@pytest.mark.parametrize("rule", ["reference", "collection"])
+def test_a_self_reference_is_not_recursion(rule):
+    # L1: employees.manager_id -> employees.id is the textbook self
+    # reference; only embedding a table inside itself recurses.
+    model, schemas = _employees()
+    model["relationships"][0]["rule"] = rule
+    if rule == "collection":
+        model["relationships"][0]["path"] = ""
+    assert validate_model(model, schemas) == []
+
+
+@pytest.mark.parametrize(
+    "rule, options",
+    [
+        ("embed_object", {}),
+        ("embed_object", {"merge_into_parent": True}),
+        ("embed_array", {}),
+    ],
+)
+def test_embedding_a_table_inside_itself_is_still_recursion(rule, options):
+    model, schemas = _employees()
+    rel = model["relationships"][0]
+    rel.update(rule=rule, options=options, fields=[{"source": "name", "path": "manager_name"}])
+    if options.get("merge_into_parent"):
+        rel["path"] = ""
+    if rule == "embed_array":
+        rel["child_key"] = ["employee_id"]
+    assert "recursive_source" in _codes(validate_model(model, schemas), ERROR)
+
+
+def _profiles_schema() -> dict:
+    schemas = _schemas()
+    schemas["public.profiles"] = {
+        "columns": {"customer_id": "integer", "bio": "text"},
+        "primary_key": ["customer_id"],
+    }
+    schemas["public.regions"] = {
+        "columns": {"code": "char(2)", "region": "text"},
+        "primary_key": ["code"],
+    }
+    return schemas
+
+
+def _profile(**over) -> dict:
+    rel = {
+        "id": "profile",
+        "parent": "root",
+        "source": "public.profiles",
+        "join": [{"parent": "customer_id", "child": "customer_id"}],
+        "rule": "embed_object",
+        "path": "profile",
+        "fields": [{"source": "bio", "path": "bio"}],
+    }
+    rel.update(over)
+    return rel
+
+
+def test_two_embedded_objects_cannot_share_a_path():
+    # L2: country at "country" and a profile at "country" both validated
+    # clean, so one document would merge two tables' rows into one object.
+    raw = _model()
+    raw["relationships"].append(_profile(path="country"))
+    issues = _validate(raw, _profiles_schema())
+    assert [(i.code, i.path) for i in issues] == [("path_collision", "relationships[4].path")]
+    assert issues[0].severity == ERROR
+    assert "'country'" in issues[0].message
+
+
+def test_nothing_else_writes_inside_an_embedded_object():
+    raw = _model()
+    raw["root"]["fields"].append({"source": "country_code", "path": "country.iso"})
+    issues = _validate(raw)
+    assert [(i.code, i.path) for i in issues] == [("path_collision", "root.fields[3].path")]
+    raw = _model()
+    raw["relationships"].append(_profile(path="country.profile"))
+    issues = _validate(raw, _profiles_schema())
+    assert [(i.code, i.path) for i in issues] == [("path_collision", "relationships[4].path")]
+    raw = _model()
+    raw["relationships"].append(
+        {
+            "id": "tags",
+            "parent": "root",
+            "source": "public.tags",
+            "join": [{"parent": "customer_id", "child": "customer_id"}],
+            "rule": "embed_array",
+            "path": "country.tags",
+            "child_key": [],
+            "fields": [{"source": "tag"}],
+            "options": {"primitive": True},
+        }
+    )
+    assert ("path_collision", "relationships[4].path") in [
+        (i.code, i.path) for i in _validate(raw)
+    ]
+
+
+def test_a_merged_object_keeps_its_own_collision_rule():
+    raw = _model()
+    raw["relationships"].append(
+        _profile(path="", fields=[{"source": "bio", "path": "country.bio"}], options={"merge_into_parent": True})
+    )
+    issues = _validate(raw, _profiles_schema())
+    assert [(i.code, i.path) for i in issues] == [
+        ("merge_into_parent_collision", "relationships[4].fields[0].path")
+    ]
+
+
+def test_an_embedded_object_owns_what_nests_inside_it():
+    # The object's own fields and the relationships nested under it may
+    # write inside its path; that is how an object is built.
+    raw = _model()
+    raw["relationships"].append(
+        {
+            "id": "region",
+            "parent": "country",
+            "source": "public.regions",
+            "join": [{"parent": "code", "child": "code"}],
+            "rule": "embed_object",
+            "path": "region",
+            "fields": [{"source": "region", "path": "name"}],
+        }
+    )
+    raw["relationships"].append(
+        _profile(
+            parent="country",
+            source="public.profiles",
+            join=[{"parent": "code", "child": "bio"}],
+            path="",
+            fields=[{"source": "bio", "path": "motto"}],
+            options={"merge_into_parent": True},
+        )
+    )
+    issues = _validate(raw, _profiles_schema())
+    assert "path_collision" not in _codes(issues)
+    assert "merge_into_parent_collision" not in _codes(issues)
+
+
+@pytest.mark.parametrize("name", [".customers", "customers.", "a..b", "."])
+def test_collection_names_with_empty_parts_are_refused(name):
+    # L3: pymongo refuses these; they used to validate clean.
+    raw = _model()
+    raw["collection"] = name
+    assert _codes(_validate(raw)) == ["collection_name_invalid"]
+
+
+def test_collection_names_with_dots_inside_are_fine():
+    raw = _model()
+    raw["collection"] = "sales.customers"
+    assert _validate(raw) == []
+
+
+def test_the_namespace_limit_counts_the_target_database():
+    # L3: MongoDB limits "<database>.<collection>" to 255 bytes.
+    raw = _model()
+    raw["collection"] = "c" * 251
+    issues = _validate(raw, database="shop")
+    assert [(i.code, i.severity, i.path) for i in issues] == [
+        ("collection_namespace_too_long", ERROR, "collection")
+    ]
+    assert "shop" in issues[0].message
+    raw["collection"] = "c" * (255 - len("shop."))
+    assert _validate(raw, database="shop") == []
+
+
+def test_without_a_database_a_long_name_warns_that_the_database_counts():
+    raw = _model()
+    raw["collection"] = "c" * 200
+    issues = _validate(raw)
+    assert [(i.code, i.severity) for i in issues] == [("namespace_length_unchecked", WARNING)]
+    assert "database" in issues[0].message
+    # Short names fit with any database name (at most 63 bytes): no warning.
+    raw["collection"] = "c" * 191
+    assert _validate(raw) == []
+    raw["collection"] = "c" * 256
+    assert _codes(_validate(raw)) == ["collection_name_invalid"]
+
+
+def test_a_foreign_key_alone_does_not_prove_uniqueness():
+    # L6: SQLite and MySQL InnoDB accept a foreign key to columns that are
+    # not unique, so a foreign key proves nothing unless the referenced
+    # columns are also a declared primary or unique key.
+    schemas = _schemas()
+    schemas["public.countries"]["primary_key"] = []
+    issues = _validate(schemas=schemas)
+    assert [(i.code, i.severity, i.path) for i in issues] == [
+        ("uniqueness_unproven", WARNING, "relationships[3].join")
+    ]
+    assert "foreign key" in issues[0].message
+    schemas["public.countries"]["unique_keys"] = [["code"]]
+    assert _validate(schemas=schemas) == []
