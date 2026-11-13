@@ -211,3 +211,20 @@ def test_execute_accepts_valid_mongo_paths():
     from services.source_filter_gate import request_refusal
 
     assert request_refusal(_request("mongodb", ["id", "address.city", "address.zip"])) == ""
+
+
+def test_validate_api_map_items_are_read():
+    """The Validate route hands the gates pydantic Map items, not dicts."""
+    from services.preflight_transfer_policy import run_transfer_policy_gates
+    from src.routers.preflight_router import MappingItem
+
+    items = [
+        MappingItem(source="id", target="id", confidence=1.0),
+        MappingItem(source="city", target="address..city", confidence=1.0),
+    ]
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_overwrite", dest_type="mongodb", source_type="postgresql",
+        source_kind="database", mappings=items, destination_table="t",
+    )
+    hit = [g for g in gates if g.get("id") == "g23c_target_names"]
+    assert hit and _codes(hit[0]) == ["target_path_empty_segment"], gates

@@ -208,17 +208,26 @@ def _search_name_issues(names: list[str]) -> list[dict[str, str]]:
     return issues
 
 
-def _mapped_targets(mappings: Iterable[dict] | None) -> list[str]:
+def _as_dict(mapping: Any) -> dict[str, Any]:
+    """A Map row as a dict (the Validate API hands over pydantic models)."""
+    if isinstance(mapping, dict):
+        return mapping
+    dump = getattr(mapping, "model_dump", None)
+    return dump() if callable(dump) else {}
+
+
+def _mapped_targets(mappings: Iterable[Any] | None) -> list[str]:
     from services.mapping_constraints import write_mappings
 
+    rows = [_as_dict(m) for m in (mappings or [])]
     return [
         str(m.get("target") or "")
-        for m in write_mappings(list(mappings or []))
-        if isinstance(m, dict) and str(m.get("target") or "").strip()
+        for m in write_mappings(rows)
+        if str(m.get("target") or "").strip()
     ]
 
 
-def target_names_refusal(dest_type: str | None, mappings: Iterable[dict] | None) -> str:
+def target_names_refusal(dest_type: str | None, mappings: Iterable[Any] | None) -> str:
     """Why Execute must not write these targets, or ``""`` (same rule as Validate)."""
     issues = target_name_issues(dest_type, _mapped_targets(mappings))
     if not issues:
@@ -228,7 +237,7 @@ def target_names_refusal(dest_type: str | None, mappings: Iterable[dict] | None)
     return f"Destination field names refused: {head}{more}"
 
 
-def target_name_gate(dest_type: str | None, mappings: Iterable[dict] | None) -> dict[str, Any] | None:
+def target_name_gate(dest_type: str | None, mappings: Iterable[Any] | None) -> dict[str, Any] | None:
     """The Validate gate for mapped target names, or ``None`` when every name lands as mapped."""
     issues = target_name_issues(dest_type, _mapped_targets(mappings))
     if not issues:
