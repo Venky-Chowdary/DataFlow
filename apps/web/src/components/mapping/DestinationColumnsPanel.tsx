@@ -16,6 +16,7 @@ type PanelFilter = "all" | "unmapped" | "required" | "conflicts";
 const STATUS_LABEL: Record<DestColumnState["status"], string> = {
   mapped: "Mapped",
   conflict: "Conflict",
+  generated_target: "Generated",
   required_unmapped: "Required",
   default_unmapped: "Default",
   engine_unmapped: "Generated",

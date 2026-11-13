@@ -148,6 +148,16 @@ def test_memory_is_per_workspace_and_feeds_auto_map(tenancy_world):
     assert world.a.get(f"{BASE}/memory").json()["pairs"] == []
 
 
+def test_auto_map_never_suggests_an_unwritable_destination_column(tenancy_world):
+    body = {
+        "source_columns": [{"name": "total", "type": "DECIMAL(12,2)"}],
+        "destination_columns": [{"name": "total", "type": "DECIMAL(12,2)", "writable": False},
+                                {"name": "amount", "type": "DECIMAL(12,2)"}],
+    }
+    out = tenancy_world.a.post(f"{BASE}/auto-map", json=body).json()["suggestions"]
+    assert [(s["source"], s["target"]) for s in out] == [("total", "amount")]
+
+
 def test_type_compatibility_grades_with_validate_rules(tenancy_world):
     r = tenancy_world.a.post(f"{BASE}/type-compatibility", json={
         "dest_type": "postgresql",

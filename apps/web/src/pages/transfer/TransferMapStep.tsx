@@ -253,7 +253,7 @@ export function TransferMapStep({
         sourceColumns: columnMappings
           .filter((m) => !isIntentionalOmit(m))
           .map((m) => ({ name: m.source, type: m.inferredType })),
-        destinationColumns: (catalog?.columns ?? []).map((c) => ({ name: c.name, type: c.type })),
+        destinationColumns: (catalog?.columns ?? []).map((c) => ({ name: c.name, type: c.type, writable: c.writable })),
         mapped: columnMappings
           .filter((m) => !isIntentionalOmit(m) && m.target)
           .map((m) => ({ source: m.source, target: m.target })),

@@ -141,6 +141,9 @@ def build_destination_column_catalog(
                 "primary_key": key in pk,
                 "identity": key in identity_l,
                 "generated": key in generated_l,
+                # generated / GENERATED ALWAYS: the engine refuses a written value.
+                "writable": key not in generated_l,
+                "fill": "generated" if key in generated_l else ("identity" if key in identity_l else None),
                 # None = unmeasured: never claim "optional" without a reading.
                 "required": (key in required) if nullable is not None else None,
             }

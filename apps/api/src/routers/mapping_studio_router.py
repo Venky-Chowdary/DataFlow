@@ -67,6 +67,8 @@ class TypeCompatibilityRequest(BaseModel):
 class NamedColumn(BaseModel):
     name: str = _NAME
     type: str = Field("", max_length=200)
+    #: False for a column the destination generates: never a suggestion target.
+    writable: bool = True
 
 
 class MappedPair(BaseModel):
@@ -183,7 +185,7 @@ def auto_map(
     locked = [p for p in body.mapped if p.source and p.target] if body.mode == "remaining" else []
     suggestions = suggest_assignments(
         [c.name for c in body.source_columns],
-        [c.name for c in body.destination_columns],
+        [c.name for c in body.destination_columns if c.writable],
         locked_sources=[p.source for p in locked],
         locked_targets=[p.target for p in locked],
         learned=learned,

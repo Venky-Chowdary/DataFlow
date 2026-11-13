@@ -86,7 +86,7 @@ export async function fetchTypeCompatibility(
 
 export async function fetchAutoMap(body: {
   sourceColumns: Array<{ name: string; type?: string }>;
-  destinationColumns: Array<{ name: string; type?: string }>;
+  destinationColumns: Array<{ name: string; type?: string; writable?: boolean }>;
   mapped: Array<{ source: string; target: string }>;
   mode: "all" | "remaining";
   sourceTable?: string;
@@ -97,7 +97,9 @@ export async function fetchAutoMap(body: {
     `${API_BASE}/transfer/mapping/auto-map`,
     {
       source_columns: body.sourceColumns.map((c) => ({ name: c.name, type: c.type ?? "" })),
-      destination_columns: body.destinationColumns.map((c) => ({ name: c.name, type: c.type ?? "" })),
+      destination_columns: body.destinationColumns.map((c) => ({
+        name: c.name, type: c.type ?? "", writable: c.writable !== false,
+      })),
       mapped: body.mapped,
       mode: body.mode,
       source_table: body.sourceTable ?? "",

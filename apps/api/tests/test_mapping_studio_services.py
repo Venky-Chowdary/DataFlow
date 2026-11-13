@@ -361,3 +361,54 @@ def test_the_reported_orders_table_maps_onto_other_destination_columns():
 def test_qualified_siblings_in_one_synonym_group_are_not_synonyms(src, tgt):
     hit = score_pair(src, tgt)
     assert hit is None or hit[1] not in {"synonym", "concept"}, hit
+
+
+# --------------------------------------------------------------------------- generated targets (M3)
+
+
+def test_catalog_marks_generated_and_always_identity_columns_unwritable():
+    info = {**_INFO, "columns": [*_INFO["columns"], "total_with_tax"],
+            "schema": {**_INFO["schema"], "total_with_tax": "DECIMAL(12,2)"},
+            "schema_nullability": {**_INFO["schema_nullability"], "total_with_tax": True},
+            "generated_columns": ["total_with_tax", "id"]}
+    by = {c["name"]: c for c in build_destination_column_catalog(info, dest_type="postgresql")["columns"]}
+    assert by["total_with_tax"]["writable"] is False and by["total_with_tax"]["fill"] == "generated"
+    assert by["id"]["writable"] is False and by["id"]["fill"] == "generated"
+    assert by["given_name"]["writable"] is True and by["given_name"]["fill"] is None
+
+
+def test_g14_refuses_a_mapping_onto_a_generated_column():
+    gate = build_destination_requirements_gate(
+        destination_table_exists=True,
+        column_nullability={"id": False, "full_name": True, "total_with_tax": True},
+        column_defaults={},
+        identity_columns=["id"],
+        generated_columns=["id", "total_with_tax"],
+        mappings=[{"source": "order_id", "target": "ID"},
+                  {"source": "amount", "target": "total_with_tax"},
+                  {"source": "name", "target": "full_name"}],
+        dest_columns=["id", "full_name", "total_with_tax"],
+    )
+    assert gate["status"] == "block"
+    assert sorted(gate["details"]["generated_targets"]) == ["ID", "total_with_tax"]
+    assert "cannot be written" in gate["message"]
+    assert gate["details"]["rule_id"] == "g14_destination_requirements.generated_target"
+
+
+def test_g14_generated_target_check_does_not_need_a_nullability_reading():
+    gate = build_destination_requirements_gate(
+        destination_table_exists=True, column_nullability={}, column_defaults={},
+        identity_columns=[], generated_columns=["total_with_tax"],
+        mappings=[{"source": "amount", "target": "total_with_tax"}], dest_columns=["total_with_tax"],
+    )
+    assert gate["status"] == "block"
+
+
+def test_g14_allows_an_omitted_row_whose_old_target_was_generated():
+    gate = build_destination_requirements_gate(
+        destination_table_exists=True, column_nullability={"x": True}, column_defaults={},
+        identity_columns=[], generated_columns=["x"],
+        mappings=[{"source": "a", "target": "x", "transform": "omit", "intentional_omit": True}],
+        dest_columns=["x"],
+    )
+    assert gate is None or gate["status"] != "block"

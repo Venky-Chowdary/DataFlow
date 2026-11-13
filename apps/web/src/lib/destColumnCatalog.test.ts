@@ -185,6 +185,33 @@ describe("Map target issues (what Validate blocks on)", () => {
   });
 });
 
+describe("generated destination columns (review M3)", () => {
+  const generated = catalogFromApi({
+    ...API_CATALOG,
+    columns: [
+      ...API_CATALOG.columns,
+      { name: "total_with_tax", ordinal: 5, type: "DECIMAL(12,2)", nullable: true, default: null, has_default: false,
+        primary_key: false, identity: false, generated: true, required: false, writable: false, fill: "generated" },
+    ],
+  });
+
+  it("reads writable/fill from the catalog", () => {
+    const col = generated.columns.find((c) => c.name === "total_with_tax")!;
+    assert.equal(col.writable, false);
+    assert.equal(col.fill, "generated");
+    assert.equal(generated.columns[0].writable, true);
+  });
+
+  it("a mapping onto a generated column is a blocking state and a Map hold", () => {
+    const rows = [row("order_id", "legacy_ref"), row("amount", "total_with_tax")];
+    const state = destinationColumnStates(generated, rows).find((s) => s.column.name === "total_with_tax")!;
+    assert.equal(state.status, "generated_target");
+    assert.equal(state.blocking, true);
+    const issues = mapTargetIssues(summarizeMapTargets(generated, rows), rows);
+    assert.ok(issues.some((i) => i.code === "generated_target" && /total_with_tax/.test(i.title)));
+  });
+});
+
 describe("normalizeColumnName matches the API's normalize_name", () => {
   for (const [name, norm] of [
     ["OrderID", "order_id"],

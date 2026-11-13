@@ -30,7 +30,9 @@ interface DestColumnComboboxProps {
 }
 
 function selectable(o: ComboOption | undefined): boolean {
-  return Boolean(o) && o!.kind !== "refused";
+  if (!o || o.kind === "refused") return false;
+  // A generated column is listed (so the operator sees it exists) but never written.
+  return o.kind !== "column" || o.column.writable;
 }
 
 /**
@@ -218,9 +220,15 @@ export function DestColumnCombobox({
                   const note = claimNote(o.column.name);
                   const selected = o.column.name.toLowerCase() === value.toLowerCase();
                   return (
-                    <li key={o.key} {...common} aria-selected={selected}>
+                    <li
+                      key={o.key}
+                      {...common}
+                      aria-selected={selected}
+                      aria-disabled={o.column.writable ? undefined : "true"}
+                    >
                       <span className="df2-ms-combo-name">
                         {o.column.name}
+                        {!o.column.writable ? <span className="df2-ms-tag is-claimed">engine-filled · cannot be written</span> : null}
                         {o.column.required ? <span className="df2-ms-tag is-required">required</span> : null}
                         {note ? <span className="df2-ms-tag is-claimed">{note}</span> : null}
                       </span>
