@@ -210,3 +210,18 @@ def test_shard4_live_pg_modules_take_the_postgres_from_the_environment(module, a
     sys.modules.pop(module, None)
     cfg = getattr(importlib.import_module(module), attr)
     assert (cfg["host"], cfg["port"], cfg[user_key]) == ("127.0.0.1", 5432, "dataflow")
+
+
+def test_keyed_readback_live_tests_take_both_engines_from_the_environment(monkeypatch) -> None:
+    """The local shard-4 reproduction: 5 skips, "local postgres unavailable" and
+    "local mysql unavailable". The module hard-coded the compose lab's
+    localhost:5433 (postgres) and 127.0.0.1:3307 (root), neither of which CI starts."""
+    env = {"PGHOST": "127.0.0.1", "PGPORT": "5432", "PGUSER": "dataflow", "PGPASSWORD": "dataflow",
+           "PGDATABASE": "dataflow", "MYSQL_HOST": "127.0.0.1", "MYSQL_PORT": "3306",
+           "MYSQL_USER": "dataflow", "MYSQL_PASSWORD": "dataflow", "MYSQL_DATABASE": "dataflow"}
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    sys.modules.pop("test_keyed_readback_scope", None)
+    mod = importlib.import_module("test_keyed_readback_scope")
+    assert (mod.PG["host"], mod.PG["port"], mod.PG["username"]) == ("127.0.0.1", 5432, "dataflow")
+    assert (mod.MYSQL["host"], mod.MYSQL["port"], mod.MYSQL["username"]) == ("127.0.0.1", 3306, "dataflow")
