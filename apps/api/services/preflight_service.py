@@ -1507,6 +1507,14 @@ def run_file_preflight(
     # CREATE UNIQUE INDEX at run time — undisclosed DDL that fails raw on
     # duplicates. Inspect, count duplicates, disclose the DDL, require approval.
     upsert_ddl_gate: dict[str, Any] | None = None
+    # skip_duplicates into a writer that cannot keep a stored key would upsert.
+    from services.duplicate_policy import dedupe_skip_validate_gate
+
+    dup_dest_gate = (
+        dedupe_skip_validate_gate(dest_kind)
+        if _plan_duplicate_policy(source_config, destination_config) == "dedupe_skip"
+        else None
+    )
     try:
         from services.sync_cursor import (
             normalize_sync_mode as _nsm,
@@ -2183,13 +2191,17 @@ def run_file_preflight(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )
     upsert_ddl_blocked = bool(upsert_ddl_gate and upsert_ddl_gate.get("status") == "block")
+    upsert_ddl_blocked = upsert_ddl_blocked or dup_dest_gate is not None
     enriched_blockers.extend(
-        blockers_from_gates((create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"))
+        blockers_from_gates(
+            (create_ddl_gate, None), (upsert_ddl_gate, "g_upsert_dest_key"), (dup_dest_gate, None)
+        )
     )
     extra_gates: list[dict[str, Any]] = (
         ([fit_gate] if fit_gate else [])
         + ([null_cursor_gate] if null_cursor_gate else [])
         + ([upsert_ddl_gate] if upsert_ddl_gate else [])
+        + ([dup_dest_gate] if dup_dest_gate else [])
         + ([create_ddl_gate] if create_ddl_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
         + ([shape_route_gate] if shape_route_gate else [])

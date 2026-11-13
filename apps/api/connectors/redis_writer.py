@@ -862,7 +862,11 @@ def write_mapped_rows(
             plans.append(RedisDocPlan(row=i + 1, key=key, identity=key_id, doc=doc, parts=parts))
             plan_rows.append((row, id_col))
 
+        from services.duplicate_policy import current_match_action
+
         doc_mode = "overwrite" if replaces_keyspace else ("upsert" if is_upsert else "append")
+        if doc_mode == "upsert" and current_match_action() == "skip":
+            doc_mode = "skip"  # skip_duplicates: SET NX, a stored key stays as stored
         for start in range(0, len(plans), _REDIS_WRITE_BATCH):
             part = plans[start : start + _REDIS_WRITE_BATCH]
             outcomes = apply_redis_docs(client, part, mode=doc_mode, id_cols=id_cols)

@@ -20,6 +20,7 @@ from connectors.writer_common import (
     assert_sparse_upsert_has_pk,
     bind_rows_keeping_numbers,
     bind_sql_mapped_rows_with_quarantine,
+    identity_marker,
     null_safe_merge_on,
     quarantine_currency_markers_into_numeric,
     quarantine_unfit_arrays,
@@ -303,8 +304,13 @@ def build_bigquery_merge_sql(
     conflict_columns: list[str],
     *,
     lsn_column: str | None = None,
+    insert_only: bool = False,
 ) -> str:
-    """Build a BigQuery MERGE for PK upsert with optional monotonic LSN guard."""
+    """Build a BigQuery MERGE for PK upsert with optional monotonic LSN guard.
+
+    ``insert_only`` (skip_duplicates) drops ``WHEN MATCHED``: a stored key is
+    left exactly as stored and only new keys insert.
+    """
     from connectors.writer_common import resolve_conflict_targets
 
     conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
@@ -332,9 +338,52 @@ def build_bigquery_merge_sql(
         f"MERGE `{target_table}` T\n"
         f"USING `{staging_table}` S\n"
         f"ON {on_clause}\n"
-        f"{matched}\n"
-        f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
+        + ("" if insert_only else f"{matched}\n")
+        + f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
     )
+
+
+def _bq_merge_dense(
+    client: Any,
+    table_id: str,
+    staging_id: str,
+    target_cols: list[str],
+    conflict: list[str],
+    dense: list[Any],
+    *,
+    lsn_column: str | None = None,
+) -> tuple[int, list[str]]:
+    """MERGE the staged batch; ``(rows written, kept-key markers)``.
+
+    Under skip_duplicates the stored keys the batch meets are read back first
+    (they are rows_skipped with a Gate-8 marker, not written) and the MERGE
+    has no ``WHEN MATCHED`` arm, so a stored row is never updated.
+    """
+    from services.duplicate_policy import current_match_action
+
+    skip = current_match_action() == "skip"
+    kept: list[str] = []
+    if skip:
+        on_clause = null_safe_merge_on(
+            conflict, left_alias="T", right_alias="S", quote_column=lambda c: f"`{c}`"
+        )
+        select_cols = ", ".join(f"T.`{c}`" for c in conflict)
+        stored = client.query(
+            f"SELECT DISTINCT {select_cols} FROM `{table_id}` T "  # nosec B608
+            f"JOIN `{staging_id}` S ON {on_clause}"
+        ).result()
+        stored_markers = {identity_marker(tuple(r[i] for i in range(len(conflict)))) for r in stored}
+        idx = [target_cols.index(c) for c in conflict]
+        kept = [
+            m
+            for m in (identity_marker(tuple(row[i] for i in idx)) for row in dense)
+            if m in stored_markers
+        ]
+    merge_sql = build_bigquery_merge_sql(
+        table_id, staging_id, target_cols, conflict, lsn_column=lsn_column, insert_only=skip
+    )
+    client.query(merge_sql).result()
+    return len(dense) - len(kept), kept
 
 
 def _bq_query_param_type(bq_t: str) -> str:
@@ -1427,6 +1476,10 @@ def write_mapped_rows(
                 bq_types.append(bq_type(raw))
         written = 0
         rows_skipped = 0
+        skipped_identity_keys: list[str] = []
+        from services.duplicate_policy import current_match_action
+
+        skip_stored = current_match_action() == "skip"
         chunks_completed = 0
         chunks = max(1, (source_row_count + CHUNK_SIZE - 1) // CHUNK_SIZE) if source_row_count else 0
         use_merge = write_mode == "upsert" and bool(conflict)
@@ -1486,6 +1539,17 @@ def write_mapped_rows(
                         policy=policy,
                     )
                     # Held-out null keys are quarantined, not skipped.
+                if finished.sparse_rows and use_merge and skip_stored:
+                    _cleanup_spool()
+                    return WriteResult(
+                        ok=False, rows_written=written, table_name=table_name,
+                        target_schema=dataset_id, checksum="", chunks_completed=chunks_completed,
+                        error=(
+                            "BigQuery skip_duplicates cannot apply partial (sparse) row "
+                            "images — they update stored rows. Use upsert for CDC images."
+                        ),
+                        rejected_details=rejected_details, warnings=transform_errors,
+                    )
                 if finished.sparse_rows and use_merge:
                     sparse_written, sparse_skipped, sparse_checksum = (
                         _bq_apply_sparse_upsert(
@@ -1517,15 +1581,25 @@ def write_mapped_rows(
                             records, staging_id, job_config=load_config
                         )
                         load_job.result()
-                    merge_sql = build_bigquery_merge_sql(
+                    merged, kept = _bq_merge_dense(
+                        client,
                         table_id,
                         staging_id,
                         target_cols,
                         conflict,
+                        dense,
                         lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
                     )
-                    client.query(merge_sql).result()
-                    written += len(dense)
+                    written += merged
+                    if kept:
+                        rows_skipped += len(kept)
+                        skipped_identity_keys.extend(kept)
+                        kept_set = set(kept)
+                        idx = [target_cols.index(c) for c in conflict]
+                        dense = [
+                            r for r in dense
+                            if identity_marker(tuple(r[i] for i in idx)) not in kept_set
+                        ]
                 elif not use_merge and dense:
                     records = records_for_bigquery(dense, target_cols, bq_types)
                     errors = client.insert_rows_json(table_id, records)
@@ -1571,9 +1645,10 @@ def write_mapped_rows(
                     transform_errors.append(leftover)
         from connectors.sql_write_materialize import accounted_rejected_rows
 
+        # Keys a skip_duplicates MERGE left stored were decided, not rejected.
         rejected_rows = _rejected_row_count(
             data_rows,
-            [()] * write_acc.accepted_row_count,
+            [()] * (write_acc.accepted_row_count + len(skipped_identity_keys)),
             rejected_details,
             policy,
             source_row_count=source_row_count or None,
@@ -1621,10 +1696,17 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
-            meta=writer_meta_with_source_rows(
-                write_acc.gate8_meta(conflict_columns=write_acc.conflict_columns or None),
-                source_row_count,
-            ),
+            meta={
+                **writer_meta_with_source_rows(
+                    write_acc.gate8_meta(conflict_columns=write_acc.conflict_columns or None),
+                    source_row_count,
+                ),
+                **(
+                    {"skipped_identity_keys": list(skipped_identity_keys)}
+                    if skipped_identity_keys
+                    else {}
+                ),
+            },
         )
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")

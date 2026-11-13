@@ -601,3 +601,80 @@ def keyed_policy_no_key_gate(policy: str) -> dict[str, Any]:
             "Set Duplicate rows to Insert every row",
         ],
     }
+
+
+#: Destinations whose writer keeps a stored key under ``dedupe_skip``
+#: (``current_match_action() == "skip"``): the SQL writers (ON CONFLICT DO
+#: NOTHING / MERGE insert-only / stored-key hold-back), the keyed object-store
+#: merge, and the non-SQL writers that insert only absent keys (MongoDB
+#: ``$setOnInsert``, Redis ``SET NX``, DynamoDB conditional PutItem,
+#: Elasticsearch bulk ``create``, BigQuery MERGE without WHEN MATCHED, Iceberg
+#: ``upsert(when_matched_update_all=False)``). Keys are resolved driver ids.
+DEDUPE_SKIP_DRIVERS = frozenset({
+    "postgresql", "redshift", "mysql", "sqlite", "snowflake", "bigquery",
+    "generic_sql", "sqlserver", "oracle",
+    "s3", "gcs", "adls", "azure", "sftp",
+    "mongodb", "redis", "dynamodb", "elasticsearch", "iceberg",
+})
+
+
+def dedupe_skip_refusal(dest_type: str) -> str:
+    """Why ``skip_duplicates`` cannot run into this destination, or "".
+
+    Every other writer upserts — it would overwrite the stored row the policy
+    promises to leave alone, so the option is refused rather than ignored.
+    """
+    raw = str(dest_type or "").strip().lower()
+    if not raw:
+        return ""
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    driver = resolve_driver_type(raw)
+    if raw in DEDUPE_SKIP_DRIVERS or driver in DEDUPE_SKIP_DRIVERS:
+        return ""
+    return (
+        f"Duplicate rows 'Skip keys already stored' (skip_duplicates) is not "
+        f"available for a {raw} destination: its writer cannot leave a stored key "
+        "unchanged and would overwrite it. Choose 'Update keys already stored' "
+        "(upsert) or 'Insert every row' (append)."
+    )
+
+
+def dedupe_skip_validate_gate(dest_type: str) -> dict[str, Any] | None:
+    """Validate blocker for ``skip_duplicates`` into an unsupported destination."""
+    message = dedupe_skip_refusal(dest_type)
+    if not message:
+        return None
+    return {
+        "id": "g_duplicate_policy_destination",
+        "status": "block",
+        "message": message,
+        "duration_ms": 0,
+        "details": {
+            "rule_id": "g_duplicate_policy_destination.dedupe_skip_unsupported",
+            "remediation_kind": "change_duplicate_policy",
+            "duplicate_policy": "dedupe_skip",
+            "destination_type": str(dest_type or ""),
+        },
+        "suggested_actions": [
+            "Set Duplicate rows to Update keys already stored",
+            "Set Duplicate rows to Insert every row",
+        ],
+    }
+
+
+def schedule_dedupe_skip_refusal(payload: Any) -> str:
+    """Save-time twin of :func:`dedupe_skip_validate_gate` for a schedule."""
+    data = dict(payload or {})
+    if normalize_duplicate_policy(str(data.get("duplicate_policy") or "")) != "dedupe_skip":
+        return ""
+    dest_type = str(data.get("dest_type") or "")
+    if not dest_type and data.get("dest_connector_id"):
+        try:
+            from services.connector_store import get_connector
+
+            found = get_connector(str(data["dest_connector_id"]))
+        except Exception:  # noqa: BLE001 — unresolved here: Validate decides
+            return ""
+        dest_type = str(getattr(found, "type", "") or "") if found else ""
+    return dedupe_skip_refusal(dest_type)

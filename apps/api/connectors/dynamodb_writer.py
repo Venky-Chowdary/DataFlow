@@ -15,6 +15,7 @@ from connectors.writer_common import (
     build_mapped_rows_with_details,
     _coerced_null_row_count,
     gate8_writer_meta,
+    identity_marker,
     resolve_target_columns,
     row_checksum,
     transform_error_policy,
@@ -701,7 +702,14 @@ def write_mapped_rows(
         or mode in {"overwrite", "replace", "truncate"}
         else ("update" if mode in {"upsert", "merge"} else "new_only")
     )
+    from services.duplicate_policy import current_match_action
 
+    # skip_duplicates (dedupe_skip): only absent keys insert; a stored key is
+    # rows_skipped with a Gate-8 marker — neither written nor rejected.
+    skip_stored = item_mode == "update" and current_match_action() == "skip"
+    if skip_stored:
+        item_mode = "new_only"
+    kept_markers: list[str] = []
     table = table_name or database
     cfg = {
         "host": host,
@@ -1327,6 +1335,14 @@ def write_mapped_rows(
                     chunk_written += 1
                     applied_rows.append(row)
                     continue
+                if skip_stored:
+                    marker_cols = [
+                        c for c in (conflict_columns or list(key_types)) if c in target_cols
+                    ] or list(key_types)
+                    kept_markers.append(
+                        identity_marker(tuple(row[target_cols.index(c)] for c in marker_cols))
+                    )
+                    continue
                 key_names = ",".join(key_types)
                 rejected_details.append(
                     {
@@ -1343,7 +1359,7 @@ def write_mapped_rows(
                     }
                 )
             written += chunk_written
-            if policy == "fail" and not all(outcomes):
+            if policy == "fail" and not skip_stored and not all(outcomes):
                 break
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written)
@@ -1382,7 +1398,11 @@ def write_mapped_rows(
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
-            meta=gate8_writer_meta(applied_rows, target_cols),
+            rows_skipped=len(kept_markers),
+            meta={
+                **gate8_writer_meta(applied_rows, target_cols),
+                **({"skipped_identity_keys": kept_markers} if kept_markers else {}),
+            },
         )
     except Exception as exc:
         return WriteResult(
