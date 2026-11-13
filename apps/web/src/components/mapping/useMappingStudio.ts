@@ -155,8 +155,10 @@ export function useMappingStudio(opts: {
   mappings: EditableMapping[];
   onChange: (next: EditableMapping[]) => void;
   catalog: DestColumnCatalog | null;
+  /** Destination columns the panel currently shows (its search/filter); null = all. */
+  visibleTargets?: string[] | null;
 }) {
-  const { mappings, onChange, catalog } = opts;
+  const { mappings, onChange, catalog, visibleTargets = null } = opts;
   const [history, setHistory] = useState<History<EditableMapping[]>>(emptyHistory);
   const [announcement, setAnnouncement] = useState("");
   const emitted = useRef(mappings);
@@ -206,6 +208,8 @@ export function useMappingStudio(opts: {
     const onKey = (e: KeyboardEvent) => {
       const which = historyKey(e);
       if (!which || editableTarget(e.target)) return;
+      // A dialog over the grid owns its keys: undo must not change what is behind it.
+      if (document.querySelector('[role="dialog"]')) return;
       e.preventDefault();
       if (which === "undo") undo();
       else redo();
@@ -290,7 +294,10 @@ export function useMappingStudio(opts: {
   // ----------------------------------------------------------------- drag and drop
   const [dnd, setDnd] = useState<DndState>(IDLE);
   const targets: DndTarget[] = useMemo(() => {
-    const states = destinationColumnStates(catalog, mappings);
+    const all = destinationColumnStates(catalog, mappings);
+    // Keyboard drag walks the list the operator is looking at.
+    const shown = visibleTargets && visibleTargets.length ? new Set(visibleTargets) : null;
+    const states = shown ? all.filter((s) => shown.has(s.column.name)) : all;
     return states.map((s) => ({
       name: s.column.name,
       describe: [
@@ -298,7 +305,7 @@ export function useMappingStudio(opts: {
         s.sources.length ? `mapped from ${s.sources.join(" and ")}` : s.column.required ? "required, unmapped" : "unmapped",
       ].filter(Boolean).join(", "),
     }));
-  }, [catalog, mappings]);
+  }, [catalog, mappings, visibleTargets]);
 
   const dispatchDnd = useCallback(
     (action: DndAction) => {

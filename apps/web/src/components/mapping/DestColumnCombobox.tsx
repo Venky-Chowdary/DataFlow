@@ -307,11 +307,17 @@ export function DestColumnCombobox({
         {current
           ? `${current.name}: ${destColumnFacts(current).join(", ")}.`
           : isNew
-            ? `${value} is not in the destination table: it will be created.`
+            ? catalog.canAddColumns
+              ? `${value} is not in the destination table: it will be created.`
+              : `${value} is not a destination column and cannot be created here: ${catalog.addColumnsReason}`
             : ""}
         {" "}Type to search {catalog.columns.length} destination columns; arrow keys choose, Enter maps, Escape cancels.
       </span>
-      {isNew ? <span className="df2-ms-tag is-create" title={catalog.addColumnsReason}>new column</span> : null}
+      {isNew ? (
+        catalog.canAddColumns
+          ? <span className="df2-ms-tag is-create">new column</span>
+          : <span className="df2-ms-tag is-conflict">not a destination column</span>
+      ) : null}
       {menu}
     </div>
   );

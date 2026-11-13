@@ -633,6 +633,13 @@ html[data-theme="dark"] .df2-ms-automap {
   font-family: var(--df-font-mono);
 }
 
+.df2-ms-automap-why {
+  display: block;
+  margin-top: 2px;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
+
 .df2-ms-automap-was {
   display: block;
   color: var(--df-text-secondary);

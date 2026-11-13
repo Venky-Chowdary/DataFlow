@@ -223,6 +223,9 @@ def auto_map(
     )
     for suggestion, grade in zip(suggestions, grades):
         suggestion["compat"] = {"verdict": grade["verdict"], "reasons": grade["reasons"]}
+        if grade["verdict"] == "incompatible":
+            # A name match onto a type the write cannot carry is never pre-applied.
+            suggestion["selected"] = False
     return {
         "suggestions": suggestions,
         "learned_pairs_used": sum(1 for s in suggestions if s["kind"] == "learned"),

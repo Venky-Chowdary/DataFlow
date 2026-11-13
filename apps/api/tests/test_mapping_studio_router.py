@@ -186,6 +186,17 @@ def test_auto_map_never_suggests_an_unwritable_destination_column(tenancy_world)
     assert [(s["source"], s["target"]) for s in out] == [("total", "amount")]
 
 
+def test_auto_map_never_preselects_an_incompatible_pair(tenancy_world):
+    body = {
+        "source_columns": [{"name": "photo", "type": "BLOB"}],
+        "destination_columns": [{"name": "photo", "type": "INTEGER"}],
+        "dest_type": "postgresql",
+    }
+    out = tenancy_world.a.post(f"{BASE}/auto-map", json=body).json()["suggestions"]
+    assert out[0]["kind"] == "exact" and out[0]["compat"]["verdict"] == "incompatible"
+    assert out[0]["selected"] is False
+
+
 def test_type_compatibility_grades_with_validate_rules(tenancy_world):
     r = tenancy_world.a.post(f"{BASE}/type-compatibility", json={
         "dest_type": "postgresql",

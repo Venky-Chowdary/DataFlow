@@ -229,7 +229,13 @@ export function TransferMapStep({
     },
     [onChangeMappings],
   );
-  const studio = useMappingStudio({ mappings: columnMappings, onChange: onOperatorEdit, catalog });
+  const [visibleTargets, setVisibleTargets] = useState<string[] | null>(null);
+  const studio = useMappingStudio({
+    mappings: columnMappings,
+    onChange: onOperatorEdit,
+    catalog,
+    visibleTargets: panelOpen ? visibleTargets : null,
+  });
   const grades = useTypeGrades(remapEnabled ? columnMappings : [], destType, destTableExists);
   const tableRecreated = liveCarrierIsDoomedOnThisRun({ syncMode, destDbType: destType, destTableExists });
   const targetIssues = useMemo(
@@ -781,6 +787,7 @@ export function TransferMapStep({
               dragging={studio.dnd.mode === "dragging"}
               onPointerDrop={studio.pointerDrop}
               onPointerOver={studio.pointerOver}
+              onVisibleChange={setVisibleTargets}
             />
           )}
         </div>
