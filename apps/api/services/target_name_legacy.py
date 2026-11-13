@@ -845,11 +845,14 @@ def existing_legacy_fields(
             present = dynamodb_fields_present(cfg, table, olds)
         else:
             present = es_mapping_fields(cfg, table)
+        note_checked(table)  # a finished check: the run may stamp what it decided
     except NoKeysWithinBudget:
         if history == HISTORY_LEGACY:
             raise  # earlier runs wrote this prefix: unverified, fail closed
-        present = set()  # no key of a prefix with no history: a new prefix
-    note_checked(table)
+        # No key within the budget: allowed through as a new prefix, but the
+        # check did not finish, so nothing is stamped and the next run checks
+        # again (security check m1).
+        present = set()
     found = [(t, old) for t, old in pairs if old in present]
     if key:
         _PROBE_MEMO[key] = (time.monotonic(), found)
