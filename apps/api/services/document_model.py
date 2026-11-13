@@ -39,6 +39,10 @@ MAX_DEPTH_HARD_CAP = 10
 #: 15.5 MiB: headroom under MongoDB's 16 MiB BSON limit for the envelope.
 DEFAULT_MAX_DOC_BYTES = 16_252_928
 MONGODB_MAX_BSON_BYTES = 16 * 1024 * 1024
+#: Parse limits: a model is edited by people, so these bound the cost of
+#: validating, hashing and storing it far above any real model.
+MAX_RELATIONSHIPS = 1000
+MAX_PATH_BYTES = 1024
 
 ERROR = "error"
 WARNING = "warning"
@@ -293,6 +297,23 @@ def _utf8(value: str, where: str) -> str:
     return value
 
 
+def _path(value: str, where: str) -> str:
+    """A field path: UTF-8 text of at most :data:`MAX_PATH_BYTES` bytes.
+
+    The path rules themselves are the validator's (``document_paths``).
+    """
+    _utf8(value, where)
+    size = len(value.encode("utf-8"))
+    if size > MAX_PATH_BYTES:
+        raise DocumentModelError(
+            "path_too_long",
+            where,
+            f"{where} is {size:,} bytes long; a field path is at most "
+            f"{MAX_PATH_BYTES:,} bytes.",
+        )
+    return value
+
+
 def _text(value: Any, where: str, *, default: str | None = None) -> str:
     if value is _MISSING or value is None:
         if default is not None:
@@ -384,8 +405,7 @@ def _parse_fields(value: Any, where: str) -> tuple[FieldSpec, ...]:
             path = source
         elif not isinstance(path, str):
             raise DocumentModelError("wrong_type", f"{at}.path", f"{at}.path must be text.")
-        else:
-            _utf8(path, f"{at}.path")
+        _path(path, f"{at}.path")
         out.append(FieldSpec(source=source, path=path, label=_label(raw, at)))
     return tuple(out)
 
@@ -504,7 +524,7 @@ def _parse_relationship(value: Any, where: str) -> Relationship:
     elif not isinstance(path, str):
         raise DocumentModelError("wrong_type", f"{where}.path", f"{where}.path must be text.")
     else:
-        _utf8(path, f"{where}.path")
+        _path(path, f"{where}.path")
     # Required: a null rule is refused like a missing one (no default rule).
     rule = _get(raw, "rule", where, required=True)
     return Relationship(
@@ -582,6 +602,13 @@ def parse_model(raw: Any) -> DocumentModel:
     ):
         raise DocumentModelError(
             "wrong_type", "model.relationships", "model.relationships must be a list."
+        )
+    if isinstance(relationships, list | tuple) and len(relationships) > MAX_RELATIONSHIPS:
+        raise DocumentModelError(
+            "too_many_relationships",
+            "model.relationships",
+            f"A document model has at most {MAX_RELATIONSHIPS:,} relationships; this "
+            f"one has {len(relationships):,}.",
         )
     return DocumentModel(
         version=MODEL_VERSION,
@@ -743,6 +770,8 @@ __all__ = [
     "DEFAULT_MAX_ELEMENTS",
     "ERROR",
     "MAX_DEPTH_HARD_CAP",
+    "MAX_PATH_BYTES",
+    "MAX_RELATIONSHIPS",
     "WARNING",
     "DocumentModel",
     "DocumentModelError",

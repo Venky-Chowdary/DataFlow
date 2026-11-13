@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import re
 
 import pytest
@@ -1440,3 +1441,132 @@ def test_a_foreign_key_alone_does_not_prove_uniqueness():
     assert "foreign key" in issues[0].message
     schemas["public.countries"]["unique_keys"] = [["code"]]
     assert _validate(schemas=schemas) == []
+
+
+# --- review of PR 417: limits and cost (M3) -----------------------------------
+
+
+def _chain(n: int, rule: str = "embed_object") -> tuple[dict, dict]:
+    """``n`` relationships, each nested under the one before."""
+    tables = {
+        f"t{i}": {"columns": {"id": "integer", "pid": "integer", "v": "text"}, "primary_key": ["id"]}
+        for i in range(n + 1)
+    }
+    rels = [
+        {
+            "id": f"r{i}",
+            "parent": "root" if i == 1 else f"r{i - 1}",
+            "source": f"t{i}",
+            "rule": rule,
+            "path": "p",
+            "child_key": ["id"],
+            # Each row points at one child row by its primary key.
+            "join": [{"parent": "pid", "child": "id"}],
+        }
+        for i in range(1, n + 1)
+    ]
+    model = {"collection": "c", "root": {"source": "t0", "key": ["id"]}, "relationships": rels}
+    return model, tables
+
+
+def test_at_most_a_thousand_relationships():
+    model, _tables = _chain(1000)
+    assert len(parse_model(model).relationships) == 1000
+    model, _tables = _chain(1001)
+    with pytest.raises(DocumentModelError) as exc:
+        parse_model(model)
+    assert (exc.value.code, exc.value.where) == ("too_many_relationships", "model.relationships")
+    assert "1000" in str(exc.value) or "1,000" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "mutate, where",
+    [
+        (lambda m, p: m["root"]["fields"][0].update(path=p), "root.fields[0].path"),
+        (lambda m, p: m["relationships"][1].update(path=p), "relationships[1].path"),
+        (lambda m, p: m["relationships"][1]["fields"][0].update(path=p), "relationships[1].fields[0].path"),
+        (lambda m, p: m["root"]["fields"].append({"source": p}), "root.fields[3].path"),
+    ],
+)
+def test_paths_are_at_most_1024_utf8_bytes(mutate, where):
+    raw = _model()
+    mutate(raw, "a" * 1024)
+    parse_model(raw)
+    raw = _model()
+    # 513 characters, 1026 bytes: the limit is in bytes, as BSON stores it.
+    mutate(raw, "é" * 513)
+    with pytest.raises(DocumentModelError) as exc:
+        parse_model(raw)
+    assert (exc.value.code, exc.value.where) == ("path_too_long", where)
+
+
+def test_too_deep_is_reported_once_and_nothing_below_is_placed():
+    # M3: validation kept descending past the depth cap, reporting every
+    # level again and placing ever longer paths.
+    model, tables = _chain(8)
+    model["limits"] = {"max_depth": 3}
+    issues = validate_model(model, tables)
+    assert [(i.code, i.path) for i in issues] == [("too_deep", "relationships[3]")]
+    # Every other rule still applies below the cap.
+    model["relationships"][6]["join"] = [{"parent": "id", "child": "missing"}]
+    assert ("column_unknown", "relationships[6].join[0].child") in [
+        (i.code, i.path) for i in validate_model(model, tables)
+    ]
+
+
+def _timed(fn) -> float:
+    import time
+
+    start = time.perf_counter()
+    fn()
+    return time.perf_counter() - start
+
+
+def test_a_deep_chain_validates_quickly():
+    # M3: an embed_object chain of 1,000 took ~4 s and of 2,000 ~30 s
+    # (cubic). Bounds are generous for slow CI; the fixed code takes a few
+    # hundredths of a second.
+    from services.document_model_validate import run_checks
+
+    model, tables = _chain(1000)
+    assert _timed(lambda: validate_model(model, tables)) < 1.0
+    # Above the parse limit, the validator's own cost is still linear: build
+    # the 2,000-deep chain in code and hand it to the rules directly.
+    model, tables = _chain(2000)
+    template = parse_model(_chain(1)[0])
+    chained = dataclasses.replace(
+        template,
+        relationships=tuple(
+            dataclasses.replace(
+                template.relationships[0], id=r["id"], parent=r["parent"], source=r["source"]
+            )
+            for r in model["relationships"]
+        ),
+    )
+    issues: list = []
+    assert _timed(lambda: issues.extend(run_checks(chained, tables, None))) < 1.0
+    assert _codes(issues) == ["too_deep"]
+
+
+def test_a_thousand_sibling_relationships_validate_quickly():
+    tables = {"root_t": {"columns": {"id": "integer"}, "primary_key": ["id"]}}
+    rels = []
+    for i in range(1000):
+        tables[f"public.t{i}"] = {
+            "columns": {"id": "integer", "v": "text"},
+            "primary_key": ["id"],
+        }
+        rels.append(
+            {
+                "id": f"r{i}",
+                "parent": "root",
+                "source": f"public.t{i}",
+                "rule": "embed_object",
+                "path": f"p{i}",
+                "join": [{"parent": "id", "child": "id"}],
+            }
+        )
+    model = {"collection": "c", "root": {"source": "root_t", "key": ["id"]}, "relationships": rels}
+    issues: list = []
+    assert _timed(lambda: issues.extend(validate_model(model, tables))) < 3.0
+    assert issues == []

@@ -182,6 +182,10 @@ class _Node:
     prefix: str = ""
     #: Positions of the relationships from the root down to this node.
     lineage: tuple[int, ...] = ()
+    #: Nested deeper than the model allows. ``too_deep`` is reported on the
+    #: first node over the limit; nothing at or below it is placed, and its
+    #: descendants are not reported again (their other rules still are).
+    beyond_cap: bool = False
 
 
 @dataclass
@@ -490,7 +494,8 @@ class _Checker:
                 self.nodes[rel.id] = None
             return
         attached = parent.nests_children
-        if not attached:
+        beyond = parent.beyond_cap
+        if not attached and not beyond:
             self.add(
                 "parent_not_embedded",
                 ERROR,
@@ -500,7 +505,8 @@ class _Checker:
             )
         depth = parent.depth + 1
         max_depth = min(self.model.limits.max_depth, MAX_DEPTH_HARD_CAP)
-        if depth > max_depth:
+        if not beyond and depth > max_depth:
+            beyond = True
             self.add(
                 "too_deep",
                 ERROR,
@@ -508,8 +514,12 @@ class _Checker:
                 f"{rel.id!r} is nested {depth} levels deep; this model allows "
                 f"{max_depth}.",
             )
-        if rel.rule in EMBEDDING_RULES and any(
-            _same_table(src, rel.source) for src in parent.chain
+        # Past the cap the chain is no longer extended, so recursion is not
+        # judged there: the depth error already blocks the model.
+        if (
+            not parent.beyond_cap
+            and rel.rule in EMBEDDING_RULES
+            and any(_same_table(src, rel.source) for src in parent.chain)
         ):
             self.add(
                 "recursive_source",
@@ -541,16 +551,19 @@ class _Checker:
         drop = {j.child for j in rel.join} if rel.options.drop_join_keys else set()
         fields = self.expanded_fields(rel.source, rel.fields, at, drop)
         self.check_options(i, rel, fields, child_table is not None)
+        # Below the cap nothing is extended or placed, so a deep chain costs
+        # the same per relationship as a shallow one.
         node = _Node(
             depth=depth,
-            chain=parent.chain + (rel.source,),
+            chain=parent.chain if beyond else parent.chain + (rel.source,),
             source=rel.source,
             nests_children=False,
-            lineage=parent.lineage + (i,),
+            lineage=parent.lineage if beyond else parent.lineage + (i,),
+            beyond_cap=beyond,
         )
         if register:
             self.nodes[rel.id] = node
-        if attached:
+        if attached and not beyond:
             self.place_relationship(i, rel, parent, node, fields)
 
     def check_join(self, i: int, rel: Relationship, parent_source: str) -> bool:
