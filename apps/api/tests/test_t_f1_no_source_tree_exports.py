@@ -63,10 +63,16 @@ def test_query_console_export_lands_outside_the_source_tree(monkeypatch, tmp_pat
 
 
 def test_hypothesis_storage_is_outside_the_source_tree():
-    from hypothesis.configuration import storage_directory
-
+    """Our redirect, checked without importing hypothesis (CI's api-tests do not install it)."""
+    configured = os.environ.get("HYPOTHESIS_STORAGE_DIRECTORY")
+    assert configured, "conftest must point Hypothesis storage at a suite temp folder"
+    assert not _inside(Path(configured), _API_ROOT), configured
+    try:
+        from hypothesis.configuration import storage_directory
+    except ImportError:
+        return  # not installed (CI api-tests): the env var above is the whole contract
+    # Where hypothesis is installed, conftest also set its home dir in-process.
     assert not _inside(storage_directory("examples", intent_to_write=False).path, _API_ROOT)
-    assert os.environ.get("HYPOTHESIS_STORAGE_DIRECTORY")
 
 
 def test_session_guard_reports_new_files_in_exports_and_hypothesis(tmp_path):
