@@ -43,6 +43,14 @@ CFG = {
     "password": os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
     "connection_string": "",
     "ssl": False,
+    # ODBC Driver 18 encrypts and verifies the chain by default. The lab and CI
+    # container presents a self-signed certificate, so without this every
+    # readiness probe failed the handshake and the whole module skipped as
+    # "not reachable" while SQL Server was up (cdc-sqlserver CI job). Loopback
+    # only — the same declaration the CT and exactly-once live proofs make.
+    # Under ``extra`` (where a saved connector keeps it) so callers can still
+    # build ``EndpointConfig(**CFG)``; the reader and the engine read it there.
+    "extra": {"trust_server_certificate": True},
 }
 
 

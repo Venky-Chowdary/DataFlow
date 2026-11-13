@@ -558,62 +558,87 @@ jobs:
           fi
           echo "- All required gates green (api + CDC + warehouse SKU + TRANSFER_READY matrix + frontend + web build + chunk budgets)." >> "$GITHUB_STEP_SUMMARY"
 
-  # Separate job: SQL Server image is large/slow; keep main CI lean.
+  # SQL Server live proof: Change Tracking + native CDC (SQL Server Agent on),
+  # the PRODUCTION_SKU SQL Server routes and the SQL Server cells of the
+  # universal matrix whose peer engine this job starts. Separate job: the
+  # SQL Server image is large/slow; keep the API shards lean.
+  #
+  # Until this job was rewired every live test here skipped in seconds: no
+  # SA password reached pytest (DATAFLOW_TEST_MSSQL_PASSWORD / _SQLSERVER_
+  # PASSWORD were never set), Agent was off (capture jobs cannot run), the
+  # native CDC readiness probe had no TLS trust for the self-signed lab
+  # certificate under Driver 18, and `pytest | tee` without pipefail could
+  # not fail the step.
   cdc-sqlserver:
     runs-on: ubuntu-latest
-    # No `services:` — same rate-limit fragility as no-config-transfer; MySQL
-    # starts via the shared script (binlog/GTID flags are a superset of what
-    # this job's destination needs).
+    timeout-minutes: 60
+    env:
+      DATAFLOW_JOB_STORE: memory
+      DATAFLOW_DISABLE_OBJECT_STORE: "1"
+      DATAFLOW_PII_HASH_KEY: test-pii-key
+      DATAFLOW_ALLOW_STUB_WRITES: "1"
+      DATAFLOW_TRAINING: "off"
+      DATAFLOW_CDC_LEASE_BACKEND: memory
+      # SQL Server. The password is NOT here: a per-run value is generated
+      # and masked in the first step (throwaway container, no stored secret).
+      DATAFLOW_SQLSERVER_ENABLE: "1"
+      DATAFLOW_SQLSERVER_HOST: localhost
+      DATAFLOW_SQLSERVER_PORT: "1433"
+      DATAFLOW_SQLSERVER_DATABASE: dataflow
+      DATAFLOW_SQLSERVER_USER: sa
+      DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MSSQL_PORT: "1433"
+      DATAFLOW_TEST_MSSQL_DB: dataflow
+      DATAFLOW_TEST_MSSQL_USER: sa
+      # Postgres peer (Dockerfile.postgres-cdc: pgvector + wal_level=logical).
+      # CI-only container credentials, same as every other job.
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: dataflow
+      PGPASSWORD: dataflow
+      PGDATABASE: dataflow
+      DATAFLOW_PG_HOST: 127.0.0.1
+      DATAFLOW_PG_PORT: "5432"
+      DATAFLOW_PG_DB: dataflow
+      DATAFLOW_PG_USER: dataflow
+      DATAFLOW_PG_PASSWORD: dataflow
+      # MySQL peer (start_ci_databases.sh mysql grants dataflow CDC rights).
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: dataflow
+      MYSQL_USER: dataflow
+      MYSQL_PASSWORD: dataflow
+      DATAFLOW_MYSQL_HOST: 127.0.0.1
+      DATAFLOW_MYSQL_PORT: "3306"
+      DATAFLOW_MYSQL_DB: dataflow
+      DATAFLOW_MYSQL_USER: dataflow
+      DATAFLOW_MYSQL_PASSWORD: dataflow
+      DATAFLOW_TEST_MYSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MYSQL_PORT: "3306"
+      DATAFLOW_TEST_MYSQL_DB: dataflow
+      DATAFLOW_TEST_MYSQL_USER: dataflow
+      DATAFLOW_TEST_MYSQL_PASSWORD: dataflow
+    # No `services:` — a registry rate-limit on a service container aborts the
+    # job before checkout; start_ci_databases.sh retries pulls with backoff.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Start MySQL
+      - name: Generate a per-run SQL Server SA password (masked)
         run: |
-          bash .github/scripts/start_ci_databases.sh mysql
+          # Meets the SQL Server policy (upper, lower, digit, symbol). Masked
+          # before it is written anywhere; lives only for this run's container.
+          pw="Ci1-$(openssl rand -hex 16)-Zz"
+          echo "::add-mask::${pw}"
+          {
+            echo "MSSQL_SA_PASSWORD=${pw}"
+            echo "DATAFLOW_TEST_MSSQL_PASSWORD=${pw}"
+            echo "DATAFLOW_SQLSERVER_PASSWORD=${pw}"
+          } >> "$GITHUB_ENV"
 
-      - name: Start Postgres with logical CDC
+      - name: Start MySQL, Postgres (logical CDC) and SQL Server (Agent on, CT + CDC init)
         run: |
-          bash .github/scripts/start_ci_databases.sh postgres-cdc
-
-      - name: Start SQL Server
-        run: |
-          docker run -d --name dataflow-sqlserver \
-            -e ACCEPT_EULA=Y \
-            -e MSSQL_SA_PASSWORD='DataFlow_CDC_2022!' \
-            -e MSSQL_PID=Developer \
-            -p 1433:1433 \
-            mcr.microsoft.com/mssql/server:2022-latest
-          for i in $(seq 1 60); do
-            if docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
-              -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -Q "SELECT 1" >/dev/null 2>&1; then
-              echo "SQL Server ready"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "SQL Server failed to become ready" >&2
-          docker logs dataflow-sqlserver || true
-          exit 1
-
-      - name: Install Microsoft ODBC Driver 18
-        run: |
-          # --batch/--yes: runners have no TTY; gpg otherwise prompts to overwrite and fails.
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-            | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
-            | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-
-      - name: Init Change Tracking + native CDC
-        run: |
-          docker cp apps/api/tests/sqlserver_ct_init.sql dataflow-sqlserver:/tmp/ct_init.sql
-          docker cp apps/api/tests/sqlserver_cdc_init.sql dataflow-sqlserver:/tmp/cdc_init.sql
-          docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
-            -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -i /tmp/ct_init.sql
-          docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
-            -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -i /tmp/cdc_init.sql
+          bash .github/scripts/start_ci_databases.sh mysql postgres-cdc sqlserver
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -622,93 +647,98 @@ jobs:
 
       - name: Install API deps
         run: |
-          cd apps/api
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r apps/api/requirements.txt
 
-      - name: Grant MySQL CDC privileges
-        run: |
-          python - <<'PY'
-          import sys, time
-          import pymysql
-          conn = None
-          for _ in range(60):
-              try:
-                  conn = pymysql.connect(
-                      host="127.0.0.1",
-                      port=3306,
-                      user="root",
-                      password="dataflow",
-                      database="dataflow",
-                  )
-                  break
-              except Exception:
-                  time.sleep(1)
-          if conn is None:
-              print("MySQL not reachable; skipping CDC privilege grant", file=sys.stderr)
-              sys.exit(0)
-          with conn.cursor() as cur:
-              cur.execute("GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'")
-              cur.execute("GRANT ALL PRIVILEGES ON dataflow.* TO 'dataflow'@'%'")
-              cur.execute("FLUSH PRIVILEGES")
-          conn.close()
-          PY
+      - name: Install Microsoft ODBC Driver 18 (fails when pyodbc cannot see it)
+        run: bash .github/scripts/install_msodbcsql18.sh
 
-      - name: Run SQL Server CDC tests
+      - name: SQL Server CDC — Change Tracking, native CDC, CDC transfers
+        id: sqlserver_cdc
         working-directory: apps/api
+        shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
           python -m pytest \
             tests/test_cdc_sqlserver_ct_integration.py \
             tests/test_cdc_sqlserver_native_integration.py \
+            tests/test_cdc_sqlserver_native_transfer_e2e.py \
+            tests/test_cdc_sqlserver_capture_removal.py \
+            tests/test_cdc_sqlserver_capture_switch.py \
+            tests/test_d196_sqlserver_change_tracking_cdc_live.py \
+            tests/test_d203_sqlserver_native_cdc_null_live.py \
+            tests/test_r12_d249_cdc_eos_sqlserver_fractional_bind.py \
+            tests/test_cdc_sqlserver_connection_options.py \
+            tests/test_cdc_sqlserver_live_helpers.py \
             tests/test_sqlserver_native_cdc.py \
             tests/test_sqlserver_oracle_cdc.py \
-            -v --tb=short
-        env:
-          DATAFLOW_JOB_STORE: memory
-          DATAFLOW_DISABLE_OBJECT_STORE: "1"
-          DATAFLOW_CDC_LEASE_BACKEND: memory
+            -v --tb=short -rs \
+            --junitxml="$RUNNER_TEMP/live-junit/sqlserver-cdc.xml"
 
-      - name: SQL Server warehouse SKU proof report
-        # Prove the production SQL Server routes (PG↔SQL Server, MySQL↔SQL Server)
-        # against the real mssql/server container without cloud credentials.
+      - name: SQL Server CDC — exactly-once apply (live)
+        id: sqlserver_cdc_eos
+        if: ${{ !cancelled() }}
         working-directory: apps/api
+        shell: bash
         run: |
-          python -m pytest \
-            tests/test_production_sku_matrix.py \
-            -k "sqlserver" \
-            -q --tb=short --durations=0 \
-            | tee sqlserver_sku_report.txt
-          passed=$(grep -oP '^\d+(?= passed)' sqlserver_sku_report.txt | head -1 || echo "0")
-          skipped=$(grep -oP '^\d+(?= skipped)' sqlserver_sku_report.txt | head -1 || echo "0")
-          echo "### SQL Server warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ${passed:-0} passed, ${skipped:-0} skipped (SQL Server via mssql/server container; PG/MySQL peers via service containers)" >> "$GITHUB_STEP_SUMMARY"
-        env:
-          DATAFLOW_JOB_STORE: memory
-          DATAFLOW_DISABLE_OBJECT_STORE: "1"
-          DATAFLOW_PII_HASH_KEY: test-pii-key
-          DATAFLOW_ALLOW_STUB_WRITES: "1"
+          mkdir -p "$RUNNER_TEMP/live-junit"
+          python -m pytest tests/test_cdc_exactly_once_live_engines.py \
+            -k sqlserver -v --tb=short -rs \
+            --junitxml="$RUNNER_TEMP/live-junit/sqlserver-cdc-eos.xml"
 
-      - name: SQL Server warehouse SKU proof report
-        # SQL Server is a first-class production destination; prove file→SQL Server
-        # and database→SQL Server routes with the local mssql/server container.
+      - name: SQL Server SKU + matrix routes (peers started in this job)
+        id: sqlserver_matrix
+        if: ${{ !cancelled() }}
+        # PRODUCTION_SKU routes (PG <-> SQL Server, MySQL -> SQL Server) and the
+        # universal-matrix cells pairing SQL Server with an engine this job
+        # starts: PostgreSQL, pgvector, MySQL, SQLite, generic_sql (SQLite
+        # file), every file format, and SQL Server itself. Cells whose peer
+        # has no emulator here (SaaS, Oracle, Kafka, cloud stores, vector
+        # DBs) are deselected, not skipped: they are not this job's claim.
         working-directory: apps/api
+        shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/live-junit"
           python -m pytest \
             tests/test_production_sku_matrix.py \
             tests/test_execute_tracked_universal_matrix.py \
-            -k "sqlserver" \
-            -q --tb=short --durations=0 \
-            | tee sqlserver_sku_report.txt
-          passed=$(grep -oP '^\d+(?= passed)' sqlserver_sku_report.txt | head -1 || echo "0")
-          skipped=$(grep -oP '^\d+(?= skipped)' sqlserver_sku_report.txt | head -1 || echo "0")
-          echo "### SQL Server warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ${passed:-0} passed, ${skipped:-0} skipped (SQL Server via mssql/server container)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Oracle routes remain credential-gated and skipped when no secret is present" >> "$GITHUB_STEP_SUMMARY"
-        env:
-          DATAFLOW_JOB_STORE: memory
-          DATAFLOW_DISABLE_OBJECT_STORE: "1"
-          DATAFLOW_PII_HASH_KEY: test-pii-key
-          DATAFLOW_ALLOW_STUB_WRITES: "1"
+            -k "sqlserver and (postgresql or pgvector or mysql or sqlite or generic_sql or file_ or sqlserver_to_database_sqlserver)" \
+            -v --tb=short -rs --durations=20 \
+            --junitxml="$RUNNER_TEMP/live-junit/sqlserver-matrix.xml"
+
+      - name: No SQL Server live test may skip
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python - "$RUNNER_TEMP/live-junit" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          total = skipped = 0
+          print("### SQL Server live proof")
+          files = sorted(Path(sys.argv[1]).glob("sqlserver-*.xml"))
+          if len(files) != 3:
+              print(f"- **FAIL** expected 3 junit files, found {[f.name for f in files]}")
+              sys.exit(1)
+          for f in files:
+              for case in ET.parse(f).iter("testcase"):
+                  total += 1
+                  skip = case.find("skipped")
+                  if skip is not None and skip.get("type") != "pytest.xfail":
+                      skipped += 1
+                      print(f"- skipped: `{case.get('classname')}::{case.get('name')}` — {skip.get('message', '')[:200]}")
+          print(f"- {total} tests, {skipped} skipped")
+          sys.exit(1 if skipped or not total else 0)
+          PY
+
+      - name: Upload SQL Server junit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlserver-live-junit
+          path: ${{ runner.temp }}/live-junit/
+          if-no-files-found: warn
 
   # Optional live IT: enable via repo variable ENABLE_ORACLE_CDC=true plus the
   # DATAFLOW_ORACLE_* secrets. The job always runs so the opt-out is a visible

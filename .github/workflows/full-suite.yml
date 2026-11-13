@@ -30,15 +30,11 @@ jobs:
     name: Full pytest suite (live engines)
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    # SQL Server is started in a step (start_ci_databases.sh sqlserver), not
+    # as a service: a service container cannot take a per-run password or
+    # run the CT / native CDC init, and it ran without SQL Server Agent, so
+    # every native-CDC capture-job test could only skip or fail.
     services:
-      mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        ports:
-          - 1433:1433
-        env:
-          ACCEPT_EULA: "Y"
-          SA_PASSWORD: Dataflow_CI_2026!
-          MSSQL_PID: Developer
       redis:
         image: redis:7
         ports:
@@ -54,8 +50,9 @@ jobs:
       # No background Training Agent inside TestClient lifespans.
       DATAFLOW_TRAINING: "off"
       # Engine credentials come only from env / CI secrets — never literals
-      # in test code (CI-2).
-      MSSQL_SA_PASSWORD: "Dataflow_CI_2026!"
+      # in test code (CI-2). The SQL Server SA password is generated per run
+      # in the first step (GITHUB_ENV); a job-level value here would win over
+      # it, so none is set.
       KAFKA_SASL_CI_PASSWORD: "dataflow-ci-secret"
       # Postgres (libpq standard — tests/helpers/live_env resolves these first)
       PGHOST: 127.0.0.1
@@ -80,13 +77,13 @@ jobs:
       DATAFLOW_TEST_MYSQL_DB: dataflow
       DATAFLOW_TEST_MYSQL_USER: dataflow
       DATAFLOW_TEST_MYSQL_PASSWORD: dataflow
-      # SQL Server
+      # SQL Server (password: generated per run, see the first step)
+      DATAFLOW_SQLSERVER_ENABLE: "1"
       DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
       DATAFLOW_TEST_MSSQL_PORT: "1433"
+      DATAFLOW_TEST_MSSQL_DB: dataflow
       DATAFLOW_TEST_MSSQL_USER: sa
-      DATAFLOW_TEST_MSSQL_PASSWORD: Dataflow_CI_2026!
       DATAFLOW_SQLSERVER_USER: sa
-      DATAFLOW_SQLSERVER_PASSWORD: Dataflow_CI_2026!
       # Mongo — replica-set URI so sessions/change streams work
       MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
       DATAFLOW_TEST_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
@@ -108,6 +105,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Generate a per-run SQL Server SA password (masked)
+        run: |
+          pw="Ci1-$(openssl rand -hex 16)-Zz"
+          echo "::add-mask::${pw}"
+          {
+            echo "MSSQL_SA_PASSWORD=${pw}"
+            echo "DATAFLOW_TEST_MSSQL_PASSWORD=${pw}"
+            echo "DATAFLOW_SQLSERVER_PASSWORD=${pw}"
+          } >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -158,21 +165,13 @@ jobs:
             sleep 2
           done
 
-      - name: Wait for SQL Server
-        run: |
-          cid=$(docker ps -qf ancestor=mcr.microsoft.com/mssql/server:2022-latest)
-          sqlcmd=""
-          for c in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
-            docker exec "$cid" test -x "$c" && sqlcmd="$c" && break
-          done
-          [ -n "$sqlcmd" ] || { echo "no sqlcmd in image"; exit 1; }
-          for i in $(seq 1 60); do
-            if docker exec "$cid" "$sqlcmd" -S 127.0.0.1 -U sa -P 'Dataflow_CI_2026!' -C -Q 'SELECT 1' >/dev/null 2>&1; then
-              echo "mssql ready"; exit 0
-            fi
-            sleep 2
-          done
-          echo "mssql did not become ready" && exit 1
+      - name: Start SQL Server (Agent on, CT + native CDC init)
+        run: bash .github/scripts/start_ci_databases.sh sqlserver
+
+      - name: Install Microsoft ODBC Driver 18 (fails when pyodbc cannot see it)
+        # Without it the product falls back to pymssql (FreeTDS), which
+        # refuses encrypt=yes, and every SQL Server matrix cell skipped.
+        run: bash .github/scripts/install_msodbcsql18.sh
 
       - name: Start Kafka (KRaft, PLAINTEXT + SASL_PLAINTEXT)
         # apache/kafka maps KAFKA_* env to server.properties; the SASL
@@ -221,13 +220,10 @@ jobs:
           docker exec mysql \
             mysqladmin ping -h 127.0.0.1 -udataflow -pdataflow >/dev/null 2>&1 \
             && say mysql ok || { say mysql MISS; fail=1; }
-          scid=$(docker ps -qf ancestor=mcr.microsoft.com/mssql/server:2022-latest)
-          mssqlok=0
-          for c in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
-            if docker exec "$scid" "$c" -S 127.0.0.1 -U sa -P "$MSSQL_SA_PASSWORD" \
-                 -C -Q 'SELECT 1' >/dev/null 2>&1; then mssqlok=1; break; fi
-          done
-          [ "$mssqlok" = 1 ] && say mssql ok || { say mssql MISS; fail=1; }
+          SQLCMDPASSWORD="$MSSQL_SA_PASSWORD" docker exec -e SQLCMDPASSWORD \
+            dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa \
+            -C -Q 'SELECT 1' >/dev/null 2>&1 \
+            && say mssql ok || { say mssql MISS; fail=1; }
           docker exec mongo \
             mongosh --quiet --eval 'exit(db.runCommand({ping:1}).ok ? 0 : 1)' \
             >/dev/null 2>&1 && say mongo ok || { say mongo MISS; fail=1; }

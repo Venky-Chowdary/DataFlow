@@ -12,9 +12,14 @@
 #   postgres — plain postgres:16 for jobs that do not need the CDC build.
 #   bigquery — goccy/bigquery-emulator (warehouse SKU proof); re-runnable:
 #              an existing container is replaced with a fresh catalog
+#   sqlserver — mssql/server 2022 Developer with SQL Server Agent ON (native
+#              CDC capture jobs need it), then tests/sqlserver_ct_init.sql and
+#              tests/sqlserver_cdc_init.sql. The SA password is read from
+#              MSSQL_SA_PASSWORD (a per-run value the workflow generates and
+#              masks); it is never written on a command line or in this file.
 # Emulator greens are labelled emulator_not_customer_tenant by the lab; they
 # are not customer-tenant certificates.
-# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery] [redis] [postgres]
+# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery] [redis] [postgres] [sqlserver]
 set -euo pipefail
 
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-public.ecr.aws/docker/library/postgres:16}"
@@ -24,6 +29,7 @@ GCS_IMAGE="${GCS_IMAGE:-docker.io/fsouza/fake-gcs-server:latest}"
 AZURITE_IMAGE="${AZURITE_IMAGE:-mcr.microsoft.com/azure-storage/azurite:latest}"
 BIGQUERY_IMAGE="${BIGQUERY_IMAGE:-ghcr.io/goccy/bigquery-emulator:latest}"
 REDIS_IMAGE="${REDIS_IMAGE:-public.ecr.aws/docker/library/redis:7-alpine}"
+MSSQL_IMAGE="${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
 
 wait_for() {  # wait_for <label> <retries> <sleep> <cmd...>
   local label=$1 retries=$2 pause=$3; shift 3
@@ -202,6 +208,47 @@ start_postgres_cdc() {
   [ "${wal}" = "logical" ]
 }
 
+# sqlcmd inside the container. SQLCMDPASSWORD keeps the password off every
+# command line: `docker exec -e NAME` copies the value from the environment.
+mssql_sqlcmd() {
+  SQLCMDPASSWORD="${MSSQL_SA_PASSWORD}" docker exec -e SQLCMDPASSWORD dataflow-sqlserver \
+    /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -b "$@"
+}
+
+mssql_agent_running() {
+  mssql_sqlcmd -h -1 -W -Q "SET NOCOUNT ON; SELECT status_desc FROM sys.dm_server_services WHERE servicename LIKE 'SQL Server Agent%'" \
+    | grep -qx Running
+}
+
+start_sqlserver() {
+  if [ -z "${MSSQL_SA_PASSWORD:-}" ]; then
+    echo "MSSQL_SA_PASSWORD is empty: the workflow must generate it first" >&2
+    exit 1
+  fi
+  local image
+  image=$(pull_image "$MSSQL_IMAGE" "$MSSQL_IMAGE")
+  docker rm -f dataflow-sqlserver >/dev/null 2>&1 || true
+  # -e NAME (no value) copies the runner's variable, so it never appears in
+  # the process list or the log.
+  docker run -d --name dataflow-sqlserver \
+    -e ACCEPT_EULA=Y \
+    -e MSSQL_SA_PASSWORD \
+    -e MSSQL_PID=Developer \
+    -e MSSQL_AGENT_ENABLED=true \
+    -p 1433:1433 \
+    "$image"
+  wait_for "SQL Server" 60 5 mssql_sqlcmd -Q "SELECT 1" \
+    || { docker logs dataflow-sqlserver || true; exit 1; }
+  docker cp apps/api/tests/sqlserver_ct_init.sql dataflow-sqlserver:/tmp/ct_init.sql
+  docker cp apps/api/tests/sqlserver_cdc_init.sql dataflow-sqlserver:/tmp/cdc_init.sql
+  mssql_sqlcmd -i /tmp/ct_init.sql
+  mssql_sqlcmd -i /tmp/cdc_init.sql
+  # Native CDC capture jobs run under SQL Server Agent. Without it the live
+  # capture-job tests cannot pass, so a missing Agent fails here, not later.
+  wait_for "SQL Server Agent" 30 2 mssql_agent_running \
+    || { docker logs dataflow-sqlserver || true; exit 1; }
+}
+
 for svc in "$@"; do
   case "$svc" in
     postgres) start_postgres ;;
@@ -212,6 +259,7 @@ for svc in "$@"; do
     adls) start_adls ;;
     bigquery) start_bigquery ;;
     redis) start_redis ;;
+    sqlserver) start_sqlserver ;;
     *) echo "unknown service: $svc" >&2; exit 2 ;;
   esac
 done
