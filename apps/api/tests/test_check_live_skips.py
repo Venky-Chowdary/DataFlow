@@ -380,3 +380,25 @@ def test_the_nightly_starts_azurite_and_fake_gcs_so_their_pg_legs_run() -> None:
     runs = "\n".join(str(s.get("run", "")) for s in steps)
     assert re.search(r"start_ci_databases\.sh[^\n]*\bgcs\b", runs)
     assert re.search(r"start_ci_databases\.sh[^\n]*\badls\b", runs)
+
+
+def test_the_mariadb_3307_emulator_cell_is_scoped_out_of_api_tests_explicitly() -> None:
+    """api-tests 6/6 at 9be296013 (job 131961549049): the desktop-lab MariaDB
+    emulator cell skipped "mariadb emulator not reachable on localhost:3307".
+    'mariadb' counts as MySQL, which the job starts, so it was unexpected. CI
+    runs MySQL 8 on 3306 and no MariaDB on 3307 (like the other MariaDB-3307
+    legs): the cell is scoped out by an exact entry, not a broad pattern."""
+    from scripts.check_live_skips import Case
+
+    manifest = load_manifest()
+    case = Case(
+        "tests/test_live_emulator_matrix.py::test_write_destination_database_local_emulator[mariadb]",
+        "skipped", "mariadb emulator not reachable on localhost:3307",
+    )
+    assert not check("api-tests", [case], manifest).unexpected
+    # Only that cell: the MySQL cell skipping the same way still fails the job.
+    mysql = Case(
+        "tests/test_live_emulator_matrix.py::test_write_destination_database_local_emulator[mysql]",
+        "skipped", "mysql emulator not reachable on localhost:3306",
+    )
+    assert check("api-tests", [mysql], manifest).unexpected
