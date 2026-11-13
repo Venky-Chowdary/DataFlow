@@ -601,6 +601,67 @@ def _sparse_update_item(
     )
 
 
+# Bounded fan-out for per-item writes (UpdateItem / conditional PutItem).
+_ITEM_WRITE_WORKERS = 8
+
+
+def _put_if_absent(client: Any, table: str, key_attrs: dict[str, Any], item: dict) -> bool:
+    """PutItem only when no item holds this key. False when the key is stored."""
+    from botocore.exceptions import ClientError
+
+    names = {f"#k{i}": name for i, name in enumerate(key_attrs)}
+    try:
+        client.put_item(
+            TableName=table,
+            Item=item,
+            ConditionExpression=" AND ".join(f"attribute_not_exists({a})" for a in names),
+            ExpressionAttributeNames=names,
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        return False
+    return True
+
+
+def _apply_item_writes(
+    client: Any, table: str, ops: list[tuple[dict, dict]], *, new_keys_only: bool
+) -> list[bool]:
+    """Per-item writes BatchWriteItem cannot express; ``True`` where applied.
+
+    BatchWriteItem carries only whole-item PutRequest / DeleteRequest — no
+    UpdateItem and no ConditionExpression. TransactWriteItems is all-or-nothing
+    (one stored key cancels up to 100 rows) at twice the write capacity. So
+    each row is its own UpdateItem SET (upsert) or conditional PutItem (append),
+    on at most ``_ITEM_WRITE_WORKERS`` threads; rows sharing a key run in
+    order on one worker so the last image wins deterministically.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    groups: dict[str, list[int]] = {}
+    for pos, (key_attrs, _item) in enumerate(ops):
+        ident = json.dumps(key_attrs, sort_keys=True, default=str)
+        groups.setdefault(ident, []).append(pos)
+    applied = [False] * len(ops)
+
+    def _run(positions: list[int]) -> None:
+        for pos in positions:
+            key_attrs, item = ops[pos]
+            if new_keys_only:
+                applied[pos] = _put_if_absent(client, table, key_attrs, item)
+                continue
+            set_attrs = {k: v for k, v in item.items() if k not in key_attrs}
+            _sparse_update_item(client, table, key_attrs=key_attrs, set_attrs=set_attrs)
+            applied[pos] = True
+
+    if not ops:
+        return applied
+    with ThreadPoolExecutor(max_workers=min(_ITEM_WRITE_WORKERS, len(groups))) as pool:
+        for fut in [pool.submit(_run, positions) for positions in groups.values()]:
+            fut.result()
+    return applied
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -622,10 +683,25 @@ def write_mapped_rows(
     backfill_new_fields: bool = False,
     endpoint_url: str = "",
     conflict_columns: list[str] | None = None,
+    write_mode: str = "upsert",
     **_kwargs: Any,
 ) -> WriteResult:
     del schema, ssl, backfill_new_fields
     policy = transform_error_policy(error_policy)
+    from services.sync_cursor import is_overwrite_sync
+
+    # overwrite: whole-item PutItem (BatchWriteItem). upsert: UpdateItem SET of
+    # the mapped attributes — PutItem deleted every attribute the mapping does
+    # not write. append/insert: PutItem only where the key is absent; a stored
+    # key is a rejected row, never a silent overwrite.
+    mode = str(write_mode or "upsert").strip().lower()
+    item_mode = (
+        "put"
+        if is_overwrite_sync(str(_kwargs.get("sync_mode") or ""))
+        or mode in {"overwrite", "replace", "truncate"}
+        else ("update" if mode in {"upsert", "merge"} else "new_only")
+    )
+
     table = table_name or database
     cfg = {
         "host": host,
@@ -1008,6 +1084,7 @@ def write_mapped_rows(
     from services.value_serializer import is_missing_sentinel
 
     valid_rows: list[list[Any]] = []
+    valid_row_numbers: list[int] = []
     for row_idx, row in enumerate(mapped_rows):
         key_ok = True
         for key_col, attr_type in key_types.items():
@@ -1147,18 +1224,23 @@ def write_mapped_rows(
                 break
         if key_ok:
             valid_rows.append(row)
+            valid_row_numbers.append(row_idx + 1)
 
     chunks = max(1, (len(valid_rows) + batch_size - 1) // batch_size) if valid_rows else 1
     from connectors.writer_common import row_has_missing_sentinel
 
+    applied_rows: list[list[Any]] = []
     try:
         for chunk_idx in range(0 if not valid_rows else chunks):
             if not valid_rows:
                 break
             slice_rows = valid_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
+            slice_numbers = valid_row_numbers[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
             request_items = []
+            item_ops: list[tuple[dict, dict]] = []
+            item_rows: list[tuple[int, list[Any]]] = []
             chunk_written = 0
-            for row in slice_rows:
+            for row_number, row in zip(slice_numbers, slice_rows):
                 sparse = row_has_missing_sentinel(row)
                 item: dict[str, Any] = {}
                 for i, col in enumerate(target_cols):
@@ -1200,6 +1282,10 @@ def write_mapped_rows(
                         encode_type = wire_type
                     item[col] = _to_attr(value, encode_type)
 
+                if item_mode != "put":
+                    item_ops.append(({k: item[k] for k in key_types if k in item}, item))
+                    item_rows.append((row_number, row))
+                    continue
                 if sparse:
                     # BatchWrite PutItem replaces the whole item — sparse CDC /
                     # STOP_COLUMN must UpdateItem SET present attrs only.
@@ -1226,12 +1312,39 @@ def write_mapped_rows(
                         client, table, key_attrs=key_attrs, set_attrs=set_attrs
                     )
                     chunk_written += 1
+                    applied_rows.append(row)
                 else:
                     request_items.append({"PutRequest": {"Item": item}})
                     chunk_written += 1
+                    applied_rows.append(row)
             if request_items:
                 _batch_write_with_retry(client, table, request_items)
+            outcomes = _apply_item_writes(
+                client, table, item_ops, new_keys_only=item_mode == "new_only"
+            )
+            for (row_number, row), applied in zip(item_rows, outcomes):
+                if applied:
+                    chunk_written += 1
+                    applied_rows.append(row)
+                    continue
+                key_names = ",".join(key_types)
+                rejected_details.append(
+                    {
+                        "row": row_number,
+                        "column": key_names,
+                        "target": table,
+                        "value": "",
+                        "reason": (
+                            f"DynamoDB key ({key_names}) already stored — append never "
+                            "overwrites an existing item; use upsert to update it"
+                        ),
+                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                        "chars": [],
+                    }
+                )
             written += chunk_written
+            if policy == "fail" and not all(outcomes):
+                break
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written)
 
@@ -1259,7 +1372,7 @@ def write_mapped_rows(
             table_name=table,
             target_schema=endpoint or region,
             checksum=row_checksum(
-                valid_rows,
+                applied_rows,
                 target_cols,
                 dest_db_type="dynamodb",
                 dest_types=dest_types,
@@ -1269,7 +1382,7 @@ def write_mapped_rows(
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
-            meta=gate8_writer_meta(valid_rows, target_cols),
+            meta=gate8_writer_meta(applied_rows, target_cols),
         )
     except Exception as exc:
         return WriteResult(
