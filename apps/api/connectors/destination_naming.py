@@ -107,6 +107,17 @@ def writer_identifier(
     return lambda name: sanitize_identifier(name, preserve_case=keep_case)
 
 
+def target_identifier(
+    dest_type: str | None, *, preserve_case: bool = True
+) -> Callable[[Any], str] | None:
+    """``resolve_target_columns(identifier=)`` for code that names targets the
+    way the destination's writer does (the stream's target columns, Gate-8's
+    source digest); ``None`` keeps the historical SQL sanitizing."""
+    if dest_kind(dest_type) in DOCUMENT_STORES:
+        return writer_identifier(dest_type, preserve_case=preserve_case)
+    return None
+
+
 def _name_size(kind: str, name: str) -> int:
     return len(name.encode("utf-8")) if kind in _BYTE_LIMITED else len(name)
 
@@ -242,6 +253,7 @@ __all__ = [
     "name_limit",
     "target_name_gate",
     "target_name_issues",
+    "target_identifier",
     "target_names_refusal",
     "writer_identifier",
 ]

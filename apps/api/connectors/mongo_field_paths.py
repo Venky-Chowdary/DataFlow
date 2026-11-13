@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from services.document_paths import SCALAR, check_paths, nest
+from services.document_paths import SCALAR, PathError, check_paths, flatten, nest
 
 _MISSING = object()
 
@@ -52,6 +52,23 @@ def path_view(doc: Mapping[str, Any], paths: Iterable[str]) -> dict[str, Any]:
     return out
 
 
+def readback_record(doc: Mapping[str, Any], columns: Iterable[str] | None = None) -> dict[str, Any]:
+    """A stored document as Gate-8 compares it: keyed by dotted field path.
+
+    With ``columns`` (the mapped targets), each is read at its path, so a
+    target holding a sub-document (a ``nest_json`` object) is one value.
+    Without, the document is flattened to its leaf paths
+    (``document_paths.flatten``, non-strict); a key the flat form cannot name
+    (a dot inside a key an application wrote) keeps the document as stored.
+    """
+    if columns:
+        return path_view(doc, columns)
+    try:
+        return flatten(doc)
+    except PathError:
+        return dict(doc)
+
+
 def target_refusal(target_cols: Iterable[str]) -> str:
     """Why these targets cannot be written as MongoDB field paths, or ``""``."""
     problems = check_paths((str(c), SCALAR) for c in target_cols if str(c or ""))
@@ -60,4 +77,6 @@ def target_refusal(target_cols: Iterable[str]) -> str:
     return "MongoDB field paths refused: " + "; ".join(p.message for p in problems[:3])
 
 
-__all__ = ["insert_document", "path_view", "target_refusal", "value_at_path"]
+__all__ = [
+    "insert_document", "path_view", "readback_record", "target_refusal", "value_at_path",
+]
