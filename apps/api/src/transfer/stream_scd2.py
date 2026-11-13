@@ -104,6 +104,51 @@ def _type_staging_like_evolved_target(
         extra[key] = typed
 
 
+#: Mapping keys that rewrite a cell's value. The staging load already applied
+#: them, so the staging → target merge must not apply them a second time: a
+#: ``hash_pii`` column was hashed twice and a code crosswalk re-looked-up its
+#: own output (and quarantined it as an unmapped code).
+_VALUE_REWRITE_KEYS: frozenset[str] = frozenset({
+    "transform", "transformation", "transforms", "engine_transform",
+    "engineTransform", "transform_override", "suggested_transform",
+    "llm_invented_transform", "code_crosswalk", "code_crosswalk_system",
+})
+
+
+def staged_merge_map(
+    mappings: list[dict],
+    column_types: dict[str, str],
+    target_cols: list[str],
+) -> tuple[list[dict], dict[str, str]]:
+    """Map and carrier types for the staging → target merge, in target space.
+
+    The staging load wrote every mapped column under its *target* name. The
+    merge read those rows back and remapped them with the run's source-space
+    Map, so a renamed column (``clv`` → ``clv_value``) looked for ``clv`` in a
+    staging row that only has ``clv_value``: every row was quarantined, the
+    target stayed empty and the run still reported success (SCD2-F1). Each
+    staged column maps to itself here, keeping its type, nullability and Risk
+    Contract stamps, typed by the source column it was loaded from.
+    """
+    from connectors.sql_identifiers import sanitize_identifier
+    from services.mapping_constraints import write_mappings
+
+    staged = set(target_cols)
+    merge_map: list[dict] = []
+    merge_types: dict[str, str] = {}
+    for m in write_mappings(mappings):
+        target = str(m.get("target") or "").strip()
+        column = sanitize_identifier(target, preserve_case=True) if target else ""
+        if not column or column not in staged or column in merge_types:
+            continue
+        identity = {k: v for k, v in m.items() if k not in _VALUE_REWRITE_KEYS}
+        identity["source"] = column
+        identity["target"] = column
+        merge_map.append(identity)
+        merge_types[column] = column_types.get(str(m.get("source") or ""), "string")
+    return merge_map, merge_types
+
+
 def _reap_orphan_spools(
     dest_cfg: dict[str, Any], schema_name: str, dest_type: str, *, keep: str
 ) -> list[str]:
@@ -187,7 +232,10 @@ def stream_scd2_mirror_transfer(
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in schema]
     target_cols, _ = resolve_target_columns(mappings, schema, preserve_case=True)
-    column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in schema}
+    # The merge reads staging rows, which are already in target space: it maps
+    # each staged column to itself, never through the source-space Map again.
+    merge_mappings, merge_schema = staged_merge_map(mappings, schema, target_cols)
+    merge_types = {c: ddl_carrier_type(t or "string") for c, t in merge_schema.items()}
     # Read-back digests are steered by the same types the write pass used.
     from services.mirror_engine import target_fingerprint_types
 
@@ -255,6 +303,7 @@ def stream_scd2_mirror_transfer(
             from datetime import datetime as _dt_cls, timezone as _tz
 
             from services.scd2_engine import (
+                all_rows_quarantined_error,
                 apply_scd2,
                 prepare_scd2_mapped_rows,
                 resolve_scd2_cols,
@@ -294,6 +343,7 @@ def stream_scd2_mirror_transfer(
             rejected_all: list[dict] = []
             scd2_block_error: str | None = None
             partial_committed = False
+            accepted_total = 0
 
             # Pass 1 — map/PK validate every staging batch BEFORE any history
             # merge. Per-batch SCD2 commits must not leave partial history when
@@ -307,18 +357,27 @@ def stream_scd2_mirror_transfer(
                     destination,
                     records,
                     target_cols,
-                    column_types,
-                    mappings,
+                    merge_types,
+                    merge_mappings,
                     conflict_columns,
                     validation_mode=validation_mode,
                 )
                 rejected_all.extend(list(prepared.get("rejected_details") or []))
+                accepted_total += int(prepared.get("accepted_rows") or 0)
                 if prepared.get("ok") is False:
                     scd2_block_error = str(
                         prepared.get("error")
                         or "SCD2 map/Risk Contract blocked history merge"
                     )
                     break
+            if not scd2_block_error and rows_staged and not accepted_total:
+                # Every staged row was held out of the merge. That is not an
+                # empty source: refuse before the target is created or a
+                # single current version is closed (SCD2-F1).
+                scd2_block_error = all_rows_quarantined_error(
+                    stage_rejects + rejected_all,
+                    rows=int(stage_summary.get("source_row_count") or 0) or rows_staged,
+                )
 
             if scd2_block_error:
                 dest_summary["ok"] = False
@@ -343,14 +402,18 @@ def stream_scd2_mirror_transfer(
                         destination,
                         records,
                         target_cols,
-                        column_types,
-                        mappings=mappings,
+                        merge_types,
+                        mappings=merge_mappings,
+                        catalog_mappings=mappings,
                         conflict_columns=conflict_columns,
                         batch_size=batch_size,
                         validation_mode=validation_mode,
                         scd2_opts=scd2_opts,
                         source_endpoint=source,
                         add_new_columns=backfill_new_fields,
+                        # Pass 1 judged the whole population; one batch whose
+                        # rows were all held out is not a refused run.
+                        refuse_all_quarantined=False,
                     )
                     rejected_all.extend(list(summary.get("rejected_details") or []))
                     if summary.get("ok") is False:
@@ -545,12 +608,20 @@ def stream_scd2_mirror_transfer(
             )
 
             # Stream upsert staging → target.
-            upsert_contract = [{"selected": True, "sync_mode": "upsert", "primary_key": contract.primary_key}] if contract else None
+            # Staging holds target names, so the merge key is the mapped key.
+            upsert_contract = [{
+                "selected": True,
+                "sync_mode": "upsert",
+                "primary_key": ",".join(
+                    map_source_to_target(col, mappings)
+                    for col in contract.primary_key_columns()
+                ),
+            }] if contract else None
             rows_upserted, _, upsert_summary, _ = stream_database_transfer(
                 staging,
                 destination,
-                mappings,
-                schema,
+                merge_mappings,
+                merge_schema,
                 on_checkpoint=on_checkpoint,
                 sync_mode="upsert",
                 stream_contracts=upsert_contract,

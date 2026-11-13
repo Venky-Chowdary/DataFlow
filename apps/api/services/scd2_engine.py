@@ -1173,6 +1173,7 @@ def prepare_scd2_mapped_rows(
     rejected_details: list[dict[str, Any]] = []
     transform_errors: list[str] = []
     pk_ok_rows: list[dict[str, Any]] = []
+    accepted_rows = 0
     try:
         for pk_ok, details, errors in iter_scd2_prepared_bundles(
             columns=columns,
@@ -1182,6 +1183,7 @@ def prepare_scd2_mapped_rows(
         ):
             rejected_details.extend(details)
             transform_errors.extend(errors)
+            accepted_rows += len(pk_ok)
             if retain_mapped:
                 pk_ok_rows.extend(pk_ok)
             del pk_ok
@@ -1206,6 +1208,9 @@ def prepare_scd2_mapped_rows(
     return {
         "ok": True,
         "mapped_rows": pk_ok_rows,
+        # Rows that reach the history merge; 0 with findings means every row
+        # was held out (see :func:`all_rows_quarantined_error`).
+        "accepted_rows": accepted_rows,
         "primary_key_columns": pk_columns,
         "target_columns": target_cols,
         "rejected_details": list(rejected_details),
@@ -1213,6 +1218,33 @@ def prepare_scd2_mapped_rows(
         "transform_errors": list(transform_errors)[:20],
         "error_policy": error_policy,
     }
+
+
+def all_rows_quarantined_error(
+    rejected_details: list[dict[str, Any]], rows: int | None = None
+) -> str:
+    """The refusal for a run whose every row was held out to quarantine.
+
+    Worded like the streaming writer's, so the operator gets the same
+    ``all_rows_quarantined`` explanation (D258) whichever write path ran. An
+    SCD2 run that merged nothing still reported success with a green Gate-8
+    while the target stayed empty (SCD2-F1); on an existing history table the
+    empty snapshot closed every current version as deleted at the source.
+    """
+    if rows is None:
+        rows = len({str(d.get("row")) for d in rejected_details if isinstance(d, dict)})
+    reasons: list[str] = []
+    for detail in rejected_details[:200]:
+        reason = str((detail or {}).get("reason") or "").strip()
+        if reason and reason not in reasons:
+            reasons.append(reason)
+        if len(reasons) >= 3:
+            break
+    return (
+        f"All {max(int(rows or 0), 1)} row(s) were quarantined, so nothing was "
+        "written to the destination"
+        + (f" — {'; '.join(reasons)}" if reasons else "")
+    )
 
 
 def _type1_update_rows(
@@ -1453,8 +1485,20 @@ def apply_scd2(
     scd2_opts: dict[str, Any] | None = None,
     source_endpoint: Any = None,
     add_new_columns: bool = False,
+    catalog_mappings: list[dict[str, Any]] | None = None,
+    refuse_all_quarantined: bool = True,
 ) -> dict[str, Any]:
     """Apply an SCD2 merge against the SQL destination.
+
+    ``refuse_all_quarantined`` (default) refuses, before anything is created
+    or closed, a call whose every row was held out. A caller that splits one
+    run across several calls (the staged merge) makes that decision for the
+    whole population itself and passes False.
+
+    ``catalog_mappings`` is the run's source-space Map when ``records`` are
+    already in target space (the staged merge maps each column to itself).
+    The CREATE's source catalog is read through it, so a renamed column keeps
+    its source collation and nullability.
 
     ``add_new_columns`` (the run's ``backfill_new_fields``) adds mapped columns
     an existing history table lacks before the merge (D347).
@@ -1541,6 +1585,12 @@ def apply_scd2(
                 rejected_details,
                 transform_errors,
             )
+        if refuse_all_quarantined and rejected_details and not scan.get("accepted_rows"):
+            return _blocked(
+                all_rows_quarantined_error(rejected_details),
+                rejected_details,
+                transform_errors,
+            )
 
         db_type = resolve_driver_type(endpoint.format)
         cfg = resolve_connector_config(endpoint)
@@ -1558,17 +1608,30 @@ def apply_scd2(
         }
 
         source_schema_catalog = None
+        catalog_map = mappings if catalog_mappings is None else catalog_mappings
         if source_endpoint is not None:
             from src.transfer.adapters_introspect import source_schema_catalog_for_endpoint
 
+            catalog_columns, catalog_types = list(columns or []), dict(schema or {})
+            if catalog_mappings is not None:
+                from src.transfer.writer_column_spelling import physical_column
+
+                catalog_types = {
+                    str(m["source"]): column_types.get(
+                        physical_column(str(m.get("target") or "")), "string"
+                    )
+                    for m in catalog_mappings
+                    if m.get("source")
+                }
+                catalog_columns = list(catalog_types)
             source_schema_catalog = source_schema_catalog_for_endpoint(
-                source_endpoint, list(columns or []), fallback_types=dict(schema or {})
+                source_endpoint, catalog_columns, fallback_types=catalog_types
             )
         try:
             table_obj = _build_scd_table(
                 engine, table, schema_name, target_cols, column_types,
                 db_type, cols,
-                mappings=mappings,
+                mappings=catalog_map,
                 source_schema_catalog=source_schema_catalog,
                 add_new_columns=add_new_columns,
             )
