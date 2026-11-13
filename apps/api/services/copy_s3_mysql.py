@@ -65,6 +65,15 @@ def _load_delimited_into_mysql(
         mysql_load_data_session_ready,
     )
 
+    from services.copy_s3_common import s3_file_has_backslash
+
+    if s3_file_has_backslash(path):
+        # LOAD DATA's ESCAPED BY '\\' would turn a\b into a backspace and \x
+        # into x; the row path's C04 codec reads the value exactly (G7 B1).
+        raise FastPathUnavailable(
+            "source object holds a backslash; LOAD DATA escape processing would "
+            "rewrite it, so the row path loads it"
+        )
     ready, why = mysql_load_data_session_ready(dst_cur, dest_conn)
     if not ready:
         raise FastPathUnavailable(why)
@@ -75,7 +84,10 @@ def _load_delimited_into_mysql(
         table_q=table_q,
         columns=columns,
         field_terminator="," if csv_mode else "\t",
-        optionally_enclosed=csv_mode,
+        # The product writes TSV RFC-4180 style: a cell holding a tab, CR, LF
+        # or a leading quote is enclosed in quotes. MySQL reads an enclosed
+        # field up to its closing quote ("" -> ") and a mid-field '"' literally.
+        optionally_enclosed=True,
         ignore_lines=1,
     )
     blocked = fetch_load_data_warnings(dst_cur)

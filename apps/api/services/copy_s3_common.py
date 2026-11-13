@@ -343,6 +343,23 @@ def s3_file_has_legacy_null(path: str, *, chunk_size: int = 1 << 20) -> bool:
             tail = chunk[-1:]
 
 
+def s3_file_has_backslash(path: str, *, chunk_size: int = 1 << 20) -> bool:
+    """True when the file holds any backslash.
+
+    MySQL ``LOAD DATA ... ESCAPED BY '\\'`` rewrites ``\\b``, ``\\t``, ``\\N``,
+    ``\\x`` …, while the product's CSV/TSV codec reads a backslash literally
+    (and only ``\\N`` as the legacy NULL). A loader with that escape rule
+    must decline such a file to the row path rather than change values.
+    """
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                return False
+            if b"\\" in chunk:
+                return True
+
+
 def s3_iter_delimited_rows(
     path: str,
     delimiter: str,
