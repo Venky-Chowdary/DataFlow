@@ -90,16 +90,21 @@ def _file_message(key: Any, where: str) -> str:
 
 
 def _driver_refusal(value: Any, where: str, *, installed_only: bool) -> str:
-    name = str(value or "").strip().strip("{}").strip()
-    if not name:
+    raw = str(value or "")
+    braced = raw.strip()
+    # What the driver manager looks up: inside braces, or the value as given, spaces included.
+    name = braced[1:-1] if len(braced) >= 2 and braced[0] == "{" and braced[-1] == "}" else raw
+    if not name.strip():
         return ""
-    if "/" in name or "\\" in name or _LIBRARY.search(name):
+    if "/" in name or "\\" in name or _LIBRARY.search(name.strip()):
         return (
             f"ODBC option Driver {where} names a library file on this server. Use the name of an "
             "installed ODBC driver."
         )
     installed = installed_odbc_drivers() if installed_only else None
-    if installed is not None and name not in installed:
+    # unixODBC finds an odbcinst.ini section in any letter case, but not with other spacing
+    # (follow-up review 6): compare case-insensitively, nothing more.
+    if installed is not None and name.casefold() not in {driver.casefold() for driver in installed}:
         return (
             f"ODBC option Driver {where} is not an ODBC driver installed on this server. Use one of: "
             + ", ".join(sorted(installed)) + "."
