@@ -443,3 +443,27 @@ def test_validate_blocks_skip_duplicates_on_unsupported_destination():
     assert gate["status"] == "block"
     assert gate["details"]["duplicate_policy"] == "dedupe_skip"
     assert dedupe_skip_validate_gate("mongodb") is None
+
+
+def test_destinations_holding_no_stored_keys_are_not_refused():
+    """A file export or an email writes a fresh artifact each run.
+
+    There is no stored key such a run could overwrite, and on 6c73cbcd8 those
+    runs went through; refusing them at Validate / schedule save was a
+    regression. Destinations that hold stored records stay refused.
+    """
+    from services.duplicate_policy import (
+        dedupe_skip_refusal,
+        dedupe_skip_validate_gate,
+        schedule_dedupe_skip_refusal,
+    )
+    from src.transfer.registry import LIVE_DEST_FILE_FORMATS
+
+    for dest in (*LIVE_DEST_FILE_FORMATS, "file_export", "email"):
+        assert dedupe_skip_refusal(dest) == "", dest
+        assert dedupe_skip_validate_gate(dest) is None, dest
+    assert not schedule_dedupe_skip_refusal(
+        {"duplicate_policy": "skip_duplicates", "dest_type": "csv"}
+    )
+    for dest in ("kafka", "qdrant", "pinecone", "pgvector", "hubspot", "stripe"):
+        assert dedupe_skip_refusal(dest), dest

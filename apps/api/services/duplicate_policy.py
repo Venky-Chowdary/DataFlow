@@ -617,6 +617,20 @@ DEDUPE_SKIP_DRIVERS = frozenset({
     "mongodb", "redis", "dynamodb", "elasticsearch", "iceberg",
 })
 
+#: Destinations that hold no stored key a run could overwrite: a file export
+#: and an email deliver a fresh artifact per run. ``skip_duplicates`` cannot
+#: dedupe against them, but it cannot break its promise either, and these
+#: runs went through before the refusal existed, so they are not refused.
+NO_STORED_KEY_DRIVERS = frozenset({"file", "file_export", "email"})
+
+
+def _holds_no_stored_keys(raw: str, driver: str) -> bool:
+    if raw in NO_STORED_KEY_DRIVERS or driver in NO_STORED_KEY_DRIVERS:
+        return True
+    from src.transfer.connector_capabilities import _FILE_CAPS
+
+    return bool(_FILE_CAPS.get(driver, {}).get("file_export"))
+
 
 def dedupe_skip_refusal(dest_type: str) -> str:
     """Why ``skip_duplicates`` cannot run into this destination, or "".
@@ -631,6 +645,8 @@ def dedupe_skip_refusal(dest_type: str) -> str:
 
     driver = resolve_driver_type(raw)
     if raw in DEDUPE_SKIP_DRIVERS or driver in DEDUPE_SKIP_DRIVERS:
+        return ""
+    if _holds_no_stored_keys(raw, driver):
         return ""
     return (
         f"Duplicate rows 'Skip keys already stored' (skip_duplicates) is not "
