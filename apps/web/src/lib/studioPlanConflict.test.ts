@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { EditableMapping } from "./mapping.js";
 import {
+  approveAfterConflict,
   approveDecision,
   conflictMineFromEditor,
   editorFromLatestRevision,
@@ -67,6 +68,48 @@ describe("approveDecision", () => {
     assert.deepEqual(approveDecision(3, 2), { approve: false, expectedVersion: null });
     assert.deepEqual(approveDecision(undefined, 2), { approve: false, expectedVersion: null });
     assert.deepEqual(approveDecision(2, null), { approve: false, expectedVersion: null });
+  });
+});
+
+describe("approveAfterConflict (Validate checked another revision)", () => {
+  const opener = (outcome: "shown" | "resolved", headAfter: number | null, head: { current: number | null }) => {
+    const calls: string[] = [];
+    return {
+      calls,
+      open: async () => {
+        calls.push("open");
+        head.current = headAfter;
+        return outcome;
+      },
+    };
+  };
+
+  it("leaves the comparison on screen when there is a real conflict", async () => {
+    const head = { current: 2 as number | null };
+    const o = opener("shown", 3, head);
+    assert.deepEqual(await approveAfterConflict(o.open, 3, () => head.current), { kind: "shown" });
+    assert.deepEqual(o.calls, ["open"]);
+  });
+
+  it("continues to Approve when the resolution proves the checked revision is this page's", async () => {
+    // This page's save landed as v3 but its answer was lost (head still 2);
+    // Validate checked v3; the plan holds exactly these mappings at v3.
+    const head = { current: 2 as number | null };
+    const o = opener("resolved", 3, head);
+    assert.deepEqual(await approveAfterConflict(o.open, 3, () => head.current), {
+      kind: "approve",
+      expectedVersion: 3,
+    });
+  });
+
+  it("says nothing was approved when the plan holds these mappings under another revision", async () => {
+    // Resolved to head 4, but Validate checked v3: approving v3 would not be
+    // what is on screen now. Never end silently.
+    const head = { current: 2 as number | null };
+    const o = opener("resolved", 4, head);
+    const out = await approveAfterConflict(o.open, 3, () => head.current);
+    assert.equal(out.kind, "stale");
+    assert.ok(out.kind === "stale" && /revision 3/.test(out.message) && /Validate again/.test(out.message), out.kind === "stale" ? out.message : "");
   });
 });
 

@@ -80,6 +80,39 @@ export function approveDecision(checked: unknown, saved: number | null): { appro
   return { approve: true, expectedVersion: checked };
 }
 
+export type ApproveAfterConflict =
+  | { kind: "approve"; expectedVersion: number }
+  | { kind: "shown" }
+  | { kind: "stale"; message: string };
+
+/**
+ * Validate checked a revision this page did not know as its own: show the
+ * comparison (`openConflict`), and when that resolves silently (the plan
+ * already holds these mappings, so the head was adopted) decide again with
+ * the adopted head. Either Approve continues on the checked revision, the
+ * comparison is on screen, or the caller tells the user nothing was
+ * approved — never a Validate that ends without a result or a message.
+ */
+export async function approveAfterConflict(
+  openConflict: () => Promise<"shown" | "resolved">,
+  checked: unknown,
+  head: () => number | null,
+): Promise<ApproveAfterConflict> {
+  if ((await openConflict()) === "shown") return { kind: "shown" };
+  const again = approveDecision(checked, head());
+  if (again.approve && again.expectedVersion != null) {
+    return { kind: "approve", expectedVersion: again.expectedVersion };
+  }
+  const which = typeof checked === "number" ? `revision ${checked}` : "a revision it could not name";
+  const now = head();
+  return {
+    kind: "stale",
+    message:
+      `Validate checked ${which}, but this plan's newest revision is ${now ?? "unknown"}, `
+      + "so nothing was approved. Your mappings are saved; run Validate again to check them.",
+  };
+}
+
 /** Events that decide whether the Validate panel's conflict note still applies. */
 export type PlanConflictNoteEvent =
   | { kind: "conflict"; note: string }

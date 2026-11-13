@@ -29,6 +29,7 @@ import {
 } from "../lib/planConcurrency";
 import { usePlanConflict } from "../lib/usePlanConflict";
 import {
+  approveAfterConflict,
   approveDecision,
   conflictMineFromEditor,
   editorFromLatestRevision,
@@ -5500,32 +5501,53 @@ export function TransferPage({
           // The verdict is about the revision Validate read. Unless that is the
           // revision this page just saved, it is not about the mappings on
           // screen: no approval, no stamp — show the comparison instead.
-          const approval = approveDecision((pf as { mapping_version?: unknown }).mapping_version, planHeadRef.current);
-          const showApproveConflict = async () => {
-            if (await openPlanConflict(planId, mappings, "approve") === "shown") {
+          const checkedVersion = (pf as { mapping_version?: unknown }).mapping_version;
+          let approval = approveDecision(checkedVersion, planHeadRef.current);
+          /** Show the comparison; true when it resolved onto the checked revision after all. */
+          const resolveApproveConflict = async (): Promise<boolean> => {
+            const out = await approveAfterConflict(
+              () => openPlanConflict(planId, mappings, "approve"),
+              checkedVersion,
+              () => planHeadRef.current,
+            );
+            if (out.kind === "approve") {
+              approval = { approve: true, expectedVersion: out.expectedVersion };
+              return true;
+            }
+            if (out.kind === "shown") {
               dispatchPlanConflictNote({
                 kind: "conflict",
                 note: "Validate checked a different mapping revision than the one on this page, so "
                   + "nothing was approved. Compare it with your mappings, then run Validate again.",
               });
+            } else {
+              notifyPlanConflict("Nothing was approved", out.message, "warning");
             }
+            return false;
           };
-          if (!approval.approve) {
-            await showApproveConflict();
-            return;
-          }
+          if (!approval.approve && !(await resolveApproveConflict())) return;
           // Never stamp plan approved on review-grade / soft-pass — Execute
           // unlock requires decision===approve (same bar as Validate rail).
           const decision = pf.proof_bundle?.transfer_decision?.decision;
           if (pf.passed && decision === "approve") {
             // Approve exactly the revision Validate checked (the API answers
             // 409 and approves nothing if another became active since).
-            try {
-              await approveTransferPlan(planId, undefined, { expectedVersion: approval.expectedVersion });
-            } catch (approveErr) {
-              if (!isPlanVersionConflict(approveErr)) throw approveErr;
-              await showApproveConflict();
-              return;
+            for (let attempt = 0; ; attempt += 1) {
+              try {
+                await approveTransferPlan(planId, undefined, { expectedVersion: approval.expectedVersion });
+                break;
+              } catch (approveErr) {
+                if (!isPlanVersionConflict(approveErr)) throw approveErr;
+                if (attempt > 0) {
+                  notifyPlanConflict(
+                    "Nothing was approved",
+                    "The plan kept changing while Validate approved it. Run Validate again.",
+                    "warning",
+                  );
+                  return;
+                }
+                if (!(await resolveApproveConflict())) return;
+              }
             }
           }
           dispatchPlanConflictNote({ kind: "validate-succeeded" });
