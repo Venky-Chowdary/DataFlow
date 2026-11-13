@@ -125,20 +125,24 @@ _SAFE_STARTS = frozenset({
 def _raw_has_second_statement(raw_query: str) -> bool:
     """Cross-check on the unmasked text with sqlparse's own lexer.
 
-    A ``;`` token followed by anything but comments is a second statement.
+    A ``;`` token after the statement, followed by anything but comments, is
+    a second statement. Semicolons before it are not: ``;WITH cte AS (...)``
+    is the T-SQL idiom for a CTE (PR 403 review 4, low).
     """
     import sqlparse
     from sqlparse.tokens import Comment, Newline, Punctuation, Whitespace
 
+    seen_statement = False
     seen_semicolon = False
     for ttype, value in sqlparse.lexer.tokenize(raw_query or ""):
         if ttype in (Whitespace, Newline) or ttype in Comment:
             continue
         if ttype is Punctuation and value == ";":
-            seen_semicolon = True
+            seen_semicolon = seen_statement
             continue
         if seen_semicolon:
             return True
+        seen_statement = True
     return False
 
 
@@ -149,7 +153,8 @@ def _read_only_head(code: str) -> str | None:
     from sqlparse.tokens import Comment, Keyword, Newline, Whitespace
 
     try:
-        parsed = sqlparse.parse(code.strip())
+        # Leading semicolons end no statement (``;WITH cte AS ...``, review 4 low).
+        parsed = sqlparse.parse(re.sub(r"^[\s;]+", "", code).strip())
     except Exception:
         # sqlparse's grouping pass refuses left-associative chains deeper than
         # 100 (a 250-column ``||`` concat is valid SQL — M19). Re-validate on
@@ -634,7 +639,7 @@ def _flat_read_only_head(code: str) -> str | None:
     from sqlparse.tokens import Comment, Keyword, Newline, Punctuation, Whitespace
 
     first_keyword = None
-    for ttype, value in sqlparse.lexer.tokenize(code.strip().rstrip(";")):
+    for ttype, value in sqlparse.lexer.tokenize(re.sub(r"^[\s;]+", "", code).strip().rstrip(";")):
         if ttype in (Whitespace, Newline) or ttype in Comment:
             continue
         kw = str(value or "").upper()

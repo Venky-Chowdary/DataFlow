@@ -1078,6 +1078,17 @@ class TransformRunner:
         if not details:
             return
 
+        # The dest DLQ table is a write to the warehouse: residency-gated like
+        # every other writer, before anything is persisted (security follow-up 3).
+        from services.data_residency import residency_refusal
+
+        out_of_region = residency_refusal(self.workspace_id, self._dest_endpoint_for_model(model.name))
+        if out_of_region:
+            run.hold_out_warning = (
+                f"Transform hold-out refused on {model.name}: {out_of_region} Mart left intact."
+            )
+            return
+
         try:
             from services.quarantine_dlq import persist_rejected_rows
 

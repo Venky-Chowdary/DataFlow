@@ -61,6 +61,26 @@ def connector_port_error(port: object, db_type: str = "") -> str:
     return ""
 
 
+def is_file_path_type(db_type: object) -> bool:
+    """Whether ``database`` names a file for this connector type, in any spelling.
+
+    The engine families the policy layer already knows: SQLite as
+    ``local_file_policy`` and the driver resolver read it (``sqlite3``,
+    ``sqlite_file``), DuckDB as ``copy_duckdb_common.duckdb_family_name`` does
+    (``duck_db``, ``motherduck``). PR 403 review 4, low.
+    """
+    raw = str(db_type or "").strip().lower()
+    if not raw:
+        return False
+    if raw in FILE_PATH_TYPES:
+        return True
+    from services.copy_duckdb_common import duckdb_family_name
+    from services.local_file_policy import SQLITE_DRIVERS
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    return raw in SQLITE_DRIVERS or resolve_driver_type(raw) in SQLITE_DRIVERS or duckdb_family_name(raw) == "duckdb"
+
+
 def _length_error(label: str, value: object, maximum: int, *, required: bool = False) -> str:
     text = "" if value is None else str(value)
     if required and not text.strip():
@@ -113,7 +133,7 @@ def connector_request_errors(
         _length_error(
             "Database",
             database,
-            PATH_MAX if str(db_type or "").strip().lower() in FILE_PATH_TYPES else IDENT_MAX,
+            PATH_MAX if is_file_path_type(db_type) else IDENT_MAX,
         ),
         _length_error("Username", username, IDENT_MAX),
         _length_error("Schema", schema, IDENT_MAX),

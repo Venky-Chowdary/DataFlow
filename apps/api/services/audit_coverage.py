@@ -37,6 +37,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "auth.login.sso_required": "A password sign-in was refused because a workspace of the person requires single sign-on.",
     "auth.sso_enforced.break_glass": "A platform administrator signed in with a password although a workspace of theirs requires single sign-on.",
     "system.security_settings.snapshot": "Effective security settings at API startup.",
+    "connector.extra_type_ignored": "A connector's extra settings named another engine type; the endpoint's own type was used.",
     "control_store.imported": "A control-plane store file was imported into the shared store.",
     "control_store.local_file_conflict": "A node's control-plane store file differs from the shared store and was not imported (shared state stays authoritative).",
     "control_store.import_abandoned": "An import into an empty control-plane store whose owner stopped renewing its lease was taken over and its partial records removed.",
