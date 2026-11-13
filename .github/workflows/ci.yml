@@ -359,8 +359,9 @@ jobs:
 
       - name: No live-engine test may skip (engine-scoped)
         # A skip whose message names PostgreSQL, MySQL, Mongo or Redis (which
-        # this job starts) and no engine it lacks fails the shard unless it is
-        # an expected skip in apps/api/scripts/live_engine_jobs.json
+        # this job starts) fails the shard, even when it also names an engine
+        # the job lacks, unless it is an expected skip in
+        # apps/api/scripts/live_engine_jobs.json
         # (`api-tests`). BigQuery / GCS / ADLS emulator skips are counted and
         # published but do not fail yet (report_engines).
         if: ${{ !cancelled() }}
@@ -1076,11 +1077,6 @@ jobs:
           -lll
           -q
 
-  # Wizard project plus the production pageerror smoke. Flag-off Transfer
-  # Studio stays on the dev server; prod-smoke loads `vite preview` of the
-  # production build. Job ids stay studio-ui and studio-ui-next so the
-  # required check name does not change. Shared setup lives in
-  # .github/actions/studio-surface. studio-ui-next is not a required check.
   api-image:
     # Builds Dockerfile.api's three targets without a layer cache (so the
     # source steps really run):
@@ -1216,6 +1212,11 @@ jobs:
             echo "::notice::recorded keyutils-1.5.8.tar.bz2 sha256 $sha256 (MD5 verified); commit it as UPSTREAM sha256"
           fi
 
+  # Wizard project plus the production pageerror smoke. Flag-off Transfer
+  # Studio stays on the dev server; prod-smoke loads `vite preview` of the
+  # production build. Job ids stay studio-ui and studio-ui-next so the
+  # required check name does not change. Shared setup lives in
+  # .github/actions/studio-surface. studio-ui-next is not a required check.
   studio-ui:
     runs-on: ubuntu-latest
     steps:

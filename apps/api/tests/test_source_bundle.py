@@ -149,7 +149,7 @@ def test_sources_md_says_where_the_companion_is_and_what_it_holds(tmp_path) -> N
     comp = _companion(tmp_path)
     ref = "ghcr.io/acme/datawrap/api:v1.2.3-sources"
     text = bundle.pointer(comp, ref)
-    assert ref in text and f"docker pull {ref}" in text
+    assert ref in text and f"docker pull --platform linux/amd64 {ref}" in text
     assert "sha256sum -c SHA256SUMS" in text
     for line in (comp / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
         assert line in text
@@ -406,3 +406,18 @@ def test_a_release_refuses_a_source_pinned_only_by_md5(tmp_path) -> None:
     gate = next(i for i, s in enumerate(steps) if "--require-sha2-pins" in str(s.get("run", "")))
     first_build = next(i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith("docker/build-push-action"))
     assert gate < first_build, names
+
+
+def test_review_nits_pointer_platform_and_workflow_comments(tmp_path) -> None:
+    """Final review nits: SOURCES.md pulls the platform the image is built for;
+    the skip-checker comments no longer describe the removed `elsewhere`
+    exemption; the api-image job is not inside the studio-ui comment block."""
+    comp = _companion(tmp_path)
+    assert "docker pull --platform linux/amd64 ghcr.io/x/api:v1-sources" in bundle.pointer(comp, "ghcr.io/x/api:v1-sources")
+    for wf in ("ci.yml", "full-suite.yml"):
+        text = (REPO / ".github" / "workflows" / wf).read_text(encoding="utf-8")
+        assert "and no engine it lacks" not in text, wf
+    ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    block = ci[ci.index("  # Wizard project plus the production pageerror smoke."):]
+    assert block.split("\n  # Wizard", 1)[0].count("\n  api-image:") == 0
+    assert ci.index("\n  api-image:") < ci.index("  # Wizard project plus the production pageerror smoke.")

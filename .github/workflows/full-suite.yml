@@ -270,8 +270,9 @@ jobs:
 
       - name: No live-engine test may skip (engine-scoped)
         # A skip whose message names an engine this job starts (postgres,
-        # mysql, mongo, redis, kafka, sqlserver) and no engine it lacks fails
-        # the shard unless it is an expected skip in
+        # mysql, mongo, redis; kafka, sqlserver, gcs and adls are reported
+        # only) fails the shard, even when it also names an engine the job
+        # lacks, unless it is an expected skip in
         # apps/api/scripts/live_engine_jobs.json (job `engine-suite`).
         if: ${{ !cancelled() }}
         working-directory: apps/api

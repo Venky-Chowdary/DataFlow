@@ -88,7 +88,7 @@ def pointer(companion: Path, ref: str) -> str:
         "   and the GCC source for numpy's libquadmath / libgfortran. To copy it:",
         "",
         "   ```",
-        f"   docker pull {ref}",
+        f"   docker pull --platform linux/amd64 {ref}",
         f"   cid=$(docker create {ref} none)",
         "   mkdir sources && docker export \"$cid\" | tar -x -C sources && docker rm \"$cid\"",
         "   cd sources && sha256sum -c SHA256SUMS",
