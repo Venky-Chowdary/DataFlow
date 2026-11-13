@@ -742,8 +742,12 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> bool:
         for p in (getattr(sched, "source_primary_key", None) or [])
         if str(p).strip()
     ]
+    from services.export_paths import connector_export_scope
+
     try:
-        info = probe_schedule_source_schema(request.source) or {}
+        # The scheduler loop binds no workspace: probe as the schedule's (follow-up review 5, H1).
+        with connector_export_scope(str(getattr(sched, "workspace_id", "") or "")):
+            info = probe_schedule_source_schema(request.source) or {}
     except Exception as exc:
         logger.info(
             "Schedule %s source schema probe unavailable: %s",

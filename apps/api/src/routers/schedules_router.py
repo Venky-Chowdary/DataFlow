@@ -1049,8 +1049,11 @@ def _probe_source_schema_timed(endpoint, seconds: float = 12.0) -> dict[str, Any
 
     from services.schedule_runner import probe_schedule_source_schema
 
+    import contextvars
+
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(probe_schedule_source_schema, endpoint)
+        # The request's workspace binding goes with the probe (follow-up review 5, H1).
+        future = pool.submit(contextvars.copy_context().run, probe_schedule_source_schema, endpoint)
         try:
             return future.result(timeout=seconds) or {}
         except FuturesTimeout as exc:

@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,15 +50,55 @@ ASSIGN_COMMAND = "python scripts/iceberg_assign_flat_root.py --assign <name> --w
 
 @dataclass(frozen=True)
 class Scope:
-    """Whose part of the root a caller opens: ``workspace == ""`` is the whole root."""
+    """Whose part of the root a caller opens.
+
+    ``whole_root``: the single local operator, or a platform caller
+    (:func:`platform_iceberg_scope`, a platform administrator's all-workspace
+    view). ``workspace``: that workspace's area. Neither: an unbound caller,
+    refused (follow-up review 5, H1), except that with workspace isolation off
+    (``legacy_flat``) it opens the unassigned flat entries, the unscoped data
+    such a deployment shares.
+    """
 
     workspace: str = ""
+    whole_root: bool = False
+    legacy_flat: bool = False
+
+
+_PLATFORM: ContextVar[bool] = ContextVar("iceberg_platform_scope", default=False)
+
+
+@contextmanager
+def platform_iceberg_scope() -> Iterator[None]:
+    """Mark system code that may open the whole Iceberg root (never a tenant's request)."""
+    token = _PLATFORM.set(True)
+    try:
+        yield
+    finally:
+        _PLATFORM.reset(token)
+
+
+def _unbound_scope() -> Scope:
+    """No workspace in play: whole root only for an explicit platform caller (fail closed)."""
+    if _PLATFORM.get():
+        return Scope(whole_root=True)
+    from services.connector_access import current_caller
+
+    caller = current_caller()
+    if caller is not None and caller.platform_admin:  # an administrator's all-workspace view
+        return Scope(whole_root=True)
+    from services.team_store import require_workspace_isolation
+
+    return Scope(legacy_flat=not require_workspace_isolation())
 
 
 def scope_for(workspace_id: Any) -> Scope:
     from services.embedded_volume import _single_operator
 
-    return Scope() if _single_operator() else Scope(str(workspace_id or "").strip())
+    if _single_operator():
+        return Scope(whole_root=True)
+    workspace = str(workspace_id or "").strip()
+    return Scope(workspace) if workspace else _unbound_scope()
 
 
 def current_scope() -> Scope:
@@ -93,6 +135,33 @@ def _unassigned(label: str) -> ValueError:
         "in this workspace's area), or ask the operator to assign the existing folder or catalog "
         f"file to this workspace ({ASSIGN_COMMAND}; see the release note)."
     )
+
+
+def _unbound(label: str) -> ValueError:
+    return ValueError(
+        f"Iceberg {label} was opened with no workspace in play, so Datawrap cannot tell whose part of "
+        "the Iceberg warehouse folder it may use and refuses rather than open every workspace's "
+        "files. Open it from a workspace (its request, a job or a saved connector of it); platform "
+        "code runs inside platform_iceberg_scope()."
+    )
+
+
+def _relative_refusal(label: str) -> ValueError:
+    return ValueError(
+        f"Iceberg {label} must be a plain relative name inside this workspace's part of the Iceberg "
+        "warehouse folder (DATAFLOW_ICEBERG_ROOT, else the data folder's iceberg area): it may not "
+        f"contain '..' or the {WORKSPACES_DIRNAME} folder."
+    )
+
+
+def check_relative(candidate: Path, label: str) -> None:
+    """A relative name never climbs (``..``) or names the container (follow-up review 5, H1).
+
+    Otherwise save (bound) and an unbound use could anchor it in different areas.
+    """
+    for part in candidate.parts:
+        if part == ".." or part.casefold() == WORKSPACES_DIRNAME.casefold():
+            raise _relative_refusal(label)
 
 
 def _owners_path(root: Path) -> Path:
@@ -141,10 +210,19 @@ def place(candidate: Path, root: Path, scope: Scope, label: str) -> Path:
     ``root`` is resolved. A relative ``candidate`` is anchored in the scope's
     area. Creates nothing.
     """
-    if not scope.workspace:
+    if not candidate.is_absolute():
+        check_relative(candidate, label)
+    if scope.whole_root or not scope.workspace:
         resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
         if not is_within(resolved, root):
             raise _outside(label)
+        if scope.whole_root:
+            return resolved
+        # Unbound and not a platform caller: fail closed (follow-up review 5, H1).
+        entry = _entry(root, resolved)
+        if (not scope.legacy_flat or is_within(resolved, root / WORKSPACES_DIRNAME)
+                or (entry and entry in flat_owners(root))):
+            raise _unbound(label)
         return resolved
     if candidate.is_absolute():
         return _judge(candidate.resolve(), root, scope.workspace, label)
@@ -161,7 +239,7 @@ def place(candidate: Path, root: Path, scope: Scope, label: str) -> Path:
 
 def ensure_area(root: Path, scope: Scope) -> None:
     """Create the scope's own area (a SQLite catalog file needs its folder)."""
-    if scope.workspace:
+    if scope.workspace and not scope.whole_root:
         workspace_area(root, scope.workspace).mkdir(parents=True, exist_ok=True)
 
 
@@ -276,14 +354,20 @@ def connector_refusal(data: Any) -> str:
 
     if resolve_driver_type(str(data.get("type") or data.get("format") or "").strip().lower()) != "iceberg":
         return ""
-    scope = scope_for(data.get("workspace_id"))
-    if not scope.workspace:
-        return ""
-    from connectors.iceberg_catalog import _jail_local_path, iceberg_local_root
+    from connectors.iceberg_catalog import _jail_local_path, iceberg_local_root, local_path_from_location
 
-    if iceberg_local_root() is None:
+    paths = _local_paths(data)
+    for label, raw in paths:  # never '..' or the container, whoever saves (review 5, H1)
+        candidate = Path(raw).expanduser() if not raw.lower().startswith("file:") else local_path_from_location(raw)
+        try:
+            if not candidate.is_absolute():
+                check_relative(candidate, label)
+        except ValueError as exc:
+            return str(exc)
+    scope = scope_for(data.get("workspace_id"))
+    if not scope.workspace or scope.whole_root or iceberg_local_root() is None:
         return ""
-    for label, raw in _local_paths(data):
+    for label, raw in paths:
         try:
             _jail_local_path(raw, label, scope=scope)
         except ValueError as exc:

@@ -22,6 +22,7 @@ trips if that changes, so this door is updated with it).
 
 from __future__ import annotations
 
+import contextvars
 import threading
 from typing import Any, Iterable, Mapping
 
@@ -84,7 +85,9 @@ def _catalog_key(connector_id: str, table: str, schema: str, database: str) -> l
         except Exception:  # noqa: BLE001 - unread is unknown, never "no key"
             return
 
-    worker = threading.Thread(target=_run, name="upsert-key-door", daemon=True)
+    # The caller's workspace binding goes with the probe (follow-up review 5, H1).
+    worker = threading.Thread(target=contextvars.copy_context().run, args=(_run,), name="upsert-key-door",
+                              daemon=True)
     worker.start()
     worker.join(PROBE_SECONDS)
     return None if worker.is_alive() else box.get("keys")

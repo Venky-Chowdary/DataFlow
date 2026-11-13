@@ -17,7 +17,9 @@ it), ``dest_precount``'s local COUNT and the Iceberg writer. Relative names are
 anchored in the own area. Files in the flat part of the root (from before the
 partition) open for an unbound / platform caller, or for the one workspace an
 operator assigned them to (``scripts/iceberg_assign_flat_root.py``); never for
-an arbitrary workspace. With auth off (the single local operator) nothing
+an arbitrary workspace. (Since follow-up review 5, "platform" means an explicit
+``platform_iceberg_scope()`` or an administrator's all-workspace view, not
+"no workspace bound": see test_secfu44.) With auth off (the single local operator) nothing
 changes.
 """
 
@@ -224,8 +226,12 @@ def test_a_reads_its_own_table_by_absolute_and_relative_names(victim):
         assert _rows(_sql("sqlite:///victim/cat.db", warehouse="victim"))[0] == "A-SECRET"
 
 
-def test_an_unbound_platform_caller_keeps_the_whole_root(victim):
-    assert _rows(_sql(f"sqlite:///{victim['cat']}", warehouse=str(victim["wh"])))[0] == "A-SECRET"
+def test_a_platform_caller_keeps_the_whole_root(victim):
+    from services.iceberg_workspace_root import platform_iceberg_scope
+
+    # Follow-up review 5 (H1): only an explicit platform caller, never "no workspace bound".
+    with platform_iceberg_scope():
+        assert _rows(_sql(f"sqlite:///{victim['cat']}", warehouse=str(victim["wh"])))[0] == "A-SECRET"
 
 
 def test_single_operator_mode_is_unchanged(victim, monkeypatch):
@@ -257,7 +263,10 @@ def test_a_flat_root_catalog_is_refused_for_a_workspace_with_the_remedy(legacy, 
 
 
 def test_a_flat_root_catalog_opens_for_the_platform(legacy):
-    assert _rows(_sql(f"sqlite:///{legacy['cat']}", warehouse=str(legacy["wh"])))[0] == "LEGACY-ROWS"
+    from services.iceberg_workspace_root import platform_iceberg_scope
+
+    with platform_iceberg_scope():
+        assert _rows(_sql(f"sqlite:///{legacy['cat']}", warehouse=str(legacy["wh"])))[0] == "LEGACY-ROWS"
 
 
 def test_an_operator_assignment_opens_the_flat_entry_for_that_workspace_only(legacy):
