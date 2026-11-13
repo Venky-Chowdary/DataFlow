@@ -477,6 +477,14 @@ def run_transfer_policy_gates(
     )
     if name_gate:
         gates.append(name_gate)
+    # G11 / Document Modeler PR1: each destination's own naming rule (Mongo
+    # field paths, SQL engine length limits, BigQuery case), refused here
+    # rather than renamed or cut by the writer.
+    from connectors.destination_naming import target_name_gate
+
+    target_gate = target_name_gate(dest, mappings)
+    if target_gate:
+        gates.append(target_gate)
 
     return gates
 

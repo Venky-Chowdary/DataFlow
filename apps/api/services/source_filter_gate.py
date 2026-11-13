@@ -114,9 +114,11 @@ def request_refusal(request: Any) -> str:
     """Why Execute must not start this request, or ``""`` (checked before any write).
 
     One ordered list of the up-front refusals: a local-disk destination this
-    deployment does not allow (D276), an unsafe destination identifier, and a
-    source filter that cannot be honoured.
+    deployment does not allow (D276), an unsafe destination identifier, a
+    mapped target name the destination would rename or cut (G11), and a source
+    filter that cannot be honoured.
     """
+    from connectors.destination_naming import target_names_refusal
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
     from services.local_file_policy import local_destination_refusal
 
@@ -126,6 +128,7 @@ def request_refusal(request: Any) -> str:
         or unsafe_destination_identifier_reason(
             str(dest.format or ""), str(dest.table or dest.collection or "")
         )
+        or target_names_refusal(str(dest.format or ""), getattr(request, "mappings", None))
         or source_filter_refusal(
             getattr(request, "source_filter", None),
             getattr(request, "sync_mode", None),
