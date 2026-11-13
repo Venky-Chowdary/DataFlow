@@ -240,3 +240,60 @@ def test_template_create_refuses_a_bomb_shaped_body(tenancy_world):
     big = {"op": "constant_column", "options": {"to": "c", "value": "x" * 600_000}}
     r = tenancy_world.a.post(f"{BASE}/templates", json={"name": "big", "mappings": MAPPINGS, "computed": [big]})
     assert r.status_code in (413, 422), r.text
+
+
+# --------------------------------------------------------------------------- M5: scope and cap
+
+
+def test_template_listing_reads_only_the_active_workspace(tenancy_world):
+    w = tenancy_world
+    a_tpl = w.a.post(f"{BASE}/templates", json={"name": "A only", "mappings": MAPPINGS}).json()["id"]
+    b_tpl = w.b.post(f"{BASE}/templates", json={"name": "B only", "mappings": MAPPINGS}).json()["id"]
+    # A platform administrator acting in workspace B sees B's templates, not every tenant's.
+    listed = w.admin.get(f"{BASE}/templates", headers={"X-Workspace-Id": w.workspace_b}).json()["templates"]
+    assert [t["id"] for t in listed] == [b_tpl]
+    assert [t["id"] for t in w.a.get(f"{BASE}/templates").json()["templates"]] == [a_tpl]
+
+
+def test_template_list_reads_one_partition(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATAFLOW_CONTROL_STORE_BACKEND", "file")
+    from services import mapping_templates
+
+    seen: list = []
+    real = mapping_templates._DOC.load
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mapping_templates._DOC, "load", spy)
+    mapping_templates.list_templates(workspace_id="ws-a")
+    assert seen and all(k.get("part") == "ws-a" for k in seen), seen
+
+
+def test_the_per_workspace_template_cap_holds_under_concurrent_creates(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATAFLOW_CONTROL_STORE_BACKEND", "file")
+    from services import mapping_templates
+
+    monkeypatch.setattr(mapping_templates, "MAX_TEMPLATES_PER_WORKSPACE", 3)
+    doc = build_mapping_document(mappings=MAPPINGS)
+    results: list[str] = []
+
+    def make(i: int) -> None:
+        try:
+            mapping_templates.create_template(name=f"t{i}", description="", document=doc, workspace_id="ws-a")
+            results.append("ok")
+        except mapping_templates.TemplateLimitReached:
+            results.append("full")
+
+    threads = [threading.Thread(target=make, args=(i,)) for i in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count("ok") == 3, results
+    assert len(mapping_templates.list_templates(workspace_id="ws-a")) == 3

@@ -16,6 +16,7 @@ does not exist.
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -79,6 +80,11 @@ def _summary(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: One create at a time in this process; across replicas the record set's
+#: revision check (save of the partition read) makes a racing create retry.
+_CREATE_LOCK = threading.Lock()
+
+
 class TemplateLimitReached(ValueError):
     """The workspace already holds the maximum number of templates."""
 
@@ -93,30 +99,39 @@ def create_template(
     actor: str = "",
 ) -> dict[str, Any]:
     owner = _owner(workspace_id)
-    existing = [r for r in _DOC.load(part=owner).values() if isinstance(r, dict)]
-    if len(existing) >= MAX_TEMPLATES_PER_WORKSPACE:
-        raise TemplateLimitReached(
-            f"This workspace already has {MAX_TEMPLATES_PER_WORKSPACE} mapping templates; delete one first."
-        )
-    template_id = f"mtpl_{uuid.uuid4().hex[:16]}"
-    record = {
-        "id": template_id,
-        "workspace_id": owner,
-        "name": str(name or "").strip()[:120],
-        "description": str(description or "").strip()[:1000],
-        "document": document,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "created_by": str(actor or "")[:256],
-    }
-    data = _DOC.load(keys=[template_id])
-    data[template_id] = record
-    _DOC.save(tracked(data, getattr(data, "rev", None)))
+    with _CREATE_LOCK:
+        # Count and insert against ONE read of the partition, saved with its
+        # revision: two creates cannot both see room for the last slot.
+        data = _DOC.load(part=owner)
+        existing = [
+            r for r in data.values()
+            if isinstance(r, dict) and str(r.get("workspace_id") or "") == owner
+        ]
+        if len(existing) >= MAX_TEMPLATES_PER_WORKSPACE:
+            raise TemplateLimitReached(
+                f"This workspace already has {MAX_TEMPLATES_PER_WORKSPACE} mapping templates; delete one first."
+            )
+        template_id = f"mtpl_{uuid.uuid4().hex[:16]}"
+        record = {
+            "id": template_id,
+            "workspace_id": owner,
+            "name": str(name or "").strip()[:120],
+            "description": str(description or "").strip()[:1000],
+            "document": document,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": str(actor or "")[:256],
+        }
+        data[template_id] = record
+        _DOC.save(tracked(data, getattr(data, "rev", None)))
     return record
 
 
-def list_templates(*, allows) -> list[dict[str, Any]]:
-    """Summaries of the templates ``allows(workspace_id)`` admits, newest first."""
-    rows = [r for r in _DOC.load().values() if isinstance(r, dict) and allows(r.get("workspace_id") or "")]
+def list_templates(*, workspace_id: str) -> list[dict[str, Any]]:
+    """Summaries of one workspace's templates (one partition read), newest first."""
+    rows = [
+        r for r in _DOC.load(part=workspace_id).values()
+        if isinstance(r, dict) and str(r.get("workspace_id") or "") == workspace_id
+    ]
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
     return [_summary(r) for r in rows]
 

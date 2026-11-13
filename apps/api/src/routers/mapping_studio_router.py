@@ -38,7 +38,6 @@ from services.workspace_access import (
     assert_resource_workspace,
     resolve_read_workspace,
     resolve_write_workspace,
-    tenant_scope,
 )
 
 from .transfer_router import EndpointDTO, _refuse_unavailable_destination
@@ -393,11 +392,14 @@ def import_mapping(body: ImportRequest) -> dict[str, Any]:
 
 
 @router.get("/templates")
-def list_mapping_templates(request: Request) -> dict[str, Any]:
+def list_mapping_templates(
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> dict[str, Any]:
+    """The active workspace's templates — one partition, never every tenant's."""
     from services.mapping_templates import list_templates
 
-    scope = tenant_scope(request)
-    return {"templates": list_templates(allows=scope.allows)}
+    return {"templates": list_templates(workspace_id=_workspace(request, workspace_id, write=False))}
 
 
 @router.post("/templates", status_code=201)
