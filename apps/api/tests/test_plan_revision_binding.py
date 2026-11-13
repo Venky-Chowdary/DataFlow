@@ -395,3 +395,45 @@ def test_a_revert_before_the_execute_recovery_sync_is_what_runs(monkeypatch):
     assert plan.active_version == 1
     assert payload["mapping_version"] == 1
     assert [m["target"] for m in payload["mappings"]] == ["username"]
+
+
+# ---------------------------------------------------------------------------
+# Approve binds to the revision Validate checked
+# ---------------------------------------------------------------------------
+
+
+def test_approve_with_an_expected_version_refuses_a_newer_active_revision():
+    from services.transfer_plan_store import PlanVersionConflict, approve_plan_version
+
+    plan_id = _plan()  # v1 checked by Validate
+    sync_ui_mappings(plan_id, _maps("login"))  # v2 lands before Approve
+    with pytest.raises(PlanVersionConflict) as caught:
+        approve_plan_version(plan_id, expected_version=1)
+    assert (caught.value.base_version, caught.value.current_version) == (1, 2)
+    plan = get_plan(plan_id)
+    assert plan.status == "mapped" and not any(r.approved for r in plan.revisions)
+
+    approved = approve_plan_version(plan_id, expected_version=2)
+    assert [r.version for r in approved.revisions if r.approved] == [2]
+
+
+def test_approve_route_answers_409_when_the_checked_revision_is_no_longer_active():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.routers import transfer_router
+
+    plan_id = _plan()
+    sync_ui_mappings(plan_id, _maps("login"))
+    app = FastAPI()
+    app.include_router(transfer_router.router, prefix="/api/v1")
+    client = TestClient(app)
+    stale = client.post(f"/api/v1/transfer/plans/{plan_id}/approve", params={"expected_version": 1})
+    assert stale.status_code == 409, stale.text
+    detail = stale.json()["detail"]
+    assert detail["code"] == "plan_version_conflict"
+    assert (detail["base_version"], detail["current_version"], detail["compared"]) == (1, 2, "active")
+    assert get_plan(plan_id).status == "mapped"
+    ok = client.post(f"/api/v1/transfer/plans/{plan_id}/approve", params={"expected_version": 2})
+    assert ok.status_code == 200, ok.text
+    assert [r["version"] for r in ok.json()["plan"]["revisions"] if r["approved"]] == [2]

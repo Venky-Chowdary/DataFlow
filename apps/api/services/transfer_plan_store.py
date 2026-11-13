@@ -149,8 +149,9 @@ class PlanVersionConflict(RuntimeError):
     """A write was based on plan state that has changed since it was read.
 
     ``compared`` says which: ``"head"`` — the newest revision version
-    (``base_version``) — or ``"selection"`` — the active / approved revision an
-    internal caller read (``base_selection``). ``base_version`` and
+    (``base_version``) —, ``"selection"`` — the active / approved revision an
+    internal caller read (``base_selection``) — or ``"active"`` — the revision
+    an approval expected to be active (``expected_version``). ``base_version`` and
     ``current_version`` are the head versions, or the active versions for a
     selection conflict.
     """
@@ -162,6 +163,11 @@ class PlanVersionConflict(RuntimeError):
             text = (
                 f"Plan {plan_id}: the newest mapping revision is {current_version}, not "
                 f"{base_version} — a newer mapping revision exists (or {base_version} was never one)"
+            )
+        elif compared == "active":
+            text = (
+                f"Plan {plan_id}: the active mapping revision is {current_version}, not the "
+                f"{base_version} that was checked"
             )
         else:
             text = (
@@ -878,16 +884,33 @@ def sync_ui_mappings(
     return _mutate(plan_id, change)
 
 
-def approve_plan_version(plan_id: str, version: int | None = None) -> TransferPlanRecord | None:
+def approve_plan_version(
+    plan_id: str, version: int | None = None, *, expected_version: int | None = None
+) -> TransferPlanRecord | None:
     """Approve ``version`` (default: the active revision) and make it active.
 
     An explicit version the plan has no revision for raises
     :class:`UnknownPlanVersion` and nothing is written: approving it would
     leave ``active_version`` naming nothing, and Execute would silently run
     another revision.
+
+    ``expected_version`` is the revision the caller checked (Validate's
+    ``mapping_version``). When it is no longer the active revision — a save
+    landed after Validate — :class:`PlanVersionConflict` (``compared="active"``)
+    is raised and nothing is approved.
     """
 
     def change(plan: TransferPlanRecord) -> None:
+        if expected_version is not None:
+            current = plan.active_revision()
+            current_version = current.version if current else 0
+            if int(expected_version) != current_version:
+                raise PlanVersionConflict(
+                    plan_id,
+                    base_version=int(expected_version),
+                    current_version=current_version,
+                    compared="active",
+                )
         if version:
             target_version = int(version)
             if not any(rev.version == target_version for rev in plan.revisions):

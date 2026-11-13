@@ -1042,13 +1042,27 @@ async def preflight_transfer_plan(
 
 
 @router.post("/plans/{plan_id}/approve")
-async def approve_transfer_plan(plan_id: str, version: Optional[int] = None):
+async def approve_transfer_plan(
+    plan_id: str, version: Optional[int] = None, expected_version: Optional[int] = None
+):
+    """Approve a mapping revision (default: the active one).
+
+    ``expected_version`` is the revision the caller checked (Validate's
+    ``mapping_version``): when another revision has become active since, the
+    approval is refused with 409 ``plan_version_conflict`` (``compared:
+    "active"``) instead of approving something that was never checked.
+    """
     from services.transfer_plan_service import approve_plan
-    from services.transfer_plan_store import UnknownPlanVersion
+    from services.transfer_plan_store import PlanVersionConflict, UnknownPlanVersion
 
     try:
-        plan = await run_plan_write(approve_plan, plan_id, version)
+        plan = await run_plan_write(approve_plan, plan_id, version, expected_version=expected_version)
         return {"plan": plan.to_dict()}
+    except PlanVersionConflict as e:
+        raise _plan_version_conflict(
+            e, "A different mapping revision is active than the one Validate checked. Review "
+            "the latest revision and run Validate again before approving."
+        ) from e
     except UnknownPlanVersion as e:
         have = (
             f"Its mapping revisions are {e.versions[0]} to {e.versions[-1]}."

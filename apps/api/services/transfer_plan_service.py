@@ -780,8 +780,10 @@ def merge_plan_into_run(
     }
 
 
-def approve_plan(plan_id: str, version: int | None = None) -> TransferPlanRecord:
-    plan = approve_plan_version(plan_id, version)
+def approve_plan(
+    plan_id: str, version: int | None = None, *, expected_version: int | None = None
+) -> TransferPlanRecord:
+    plan = approve_plan_version(plan_id, version, expected_version=expected_version)
     if not plan:
         raise ValueError(f"Plan '{plan_id}' not found")
     append_audit_event(
