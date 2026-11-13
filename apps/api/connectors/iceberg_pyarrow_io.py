@@ -125,7 +125,7 @@ class LocalUriPyArrowFileIO(PyArrowFileIO):
         from connectors.iceberg_hdfs_guard import hdfs_refusal
 
         # Only the namenode the connector named, through the egress check (follow-up review 4).
-        _refuse(hdfs_refusal(self.properties, netloc, getattr(self, "_df_egress_workspace", "")))
+        _refuse(hdfs_refusal(self.properties, netloc, getattr(self, "_df_egress_workspace", ""), scheme))
         return super()._initialize_hdfs_fs(scheme, netloc)
 
     def _initialize_gcs_fs(self) -> Any:

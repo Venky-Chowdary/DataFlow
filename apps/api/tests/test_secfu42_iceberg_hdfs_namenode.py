@@ -46,7 +46,16 @@ def made(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "socket.socket.connect", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("a test dialled"))
     )
-    monkeypatch.setattr("socket.getaddrinfo", lambda *_a, **_k: (_ for _ in ()).throw(socket.gaierror("no DNS here")))
+    real_getaddrinfo = socket.getaddrinfo
+
+    def getaddrinfo(host, port, *args, **kwargs):  # the connector's namenode resolves (review 5, L3)
+        if host == "nn.example.com":
+            return real_getaddrinfo("93.184.216.34", port, *args, **kwargs)
+        if str(host).replace(".", "").isdigit():
+            return real_getaddrinfo(host, port, *args, **kwargs)
+        raise socket.gaierror("no DNS here")
+
+    monkeypatch.setattr("socket.getaddrinfo", getaddrinfo)
     calls: list = []
 
     class Recorder:

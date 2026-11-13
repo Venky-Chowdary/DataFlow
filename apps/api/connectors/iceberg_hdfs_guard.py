@@ -35,6 +35,26 @@ SCHEMES = frozenset({"hdfs", "viewfs"})
 _POINT = "iceberg_hdfs_namenode"
 
 
+#: libhdfs's namenode RPC port when a location names none (follow-up review 5, L3).
+DEFAULT_PORT = 8020
+
+
+def namenode(netloc: Any) -> str:
+    """``host:port`` (host lower-cased, user info dropped, the default port filled in), or ``""``."""
+    text = str(netloc or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(f"hdfs://{text}")
+        host, port = parts.hostname or "", parts.port
+    except ValueError:
+        return ""
+    if not host:
+        return ""
+    shown = f"[{host}]" if ":" in host else host
+    return f"{shown}:{port or DEFAULT_PORT}"
+
+
 def _netloc(location: Any) -> str:
     try:
         parts = urlsplit(str(location or "").strip())
@@ -42,13 +62,34 @@ def _netloc(location: Any) -> str:
         return ""
     if parts.scheme.lower() not in SCHEMES:
         return ""
-    return parts.netloc.lower()
+    return namenode(parts.netloc)
 
 
 def own_namenodes(own: Mapping[str, Any]) -> str:
     """The namenodes the connector's own settings name (its warehouse location)."""
     found = [_netloc(own.get("warehouse"))]
     return ",".join(sorted({name for name in found if name}))
+
+
+def _is_address(host: str) -> bool:
+    """An IP literal or a DNS name that resolves (follow-up review 5, L3).
+
+    Anything else (an HA nameservice, a viewfs mount table) libhdfs resolves
+    through this server's own Hadoop configuration. The name is resolved
+    again when libhdfs dials; that window (DNS rebinding) is not closed here.
+    """
+    import ipaddress
+    import socket
+
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return True
+    except ValueError:
+        pass
+    try:
+        return bool(socket.getaddrinfo(host, None))
+    except (OSError, UnicodeError):
+        return False
 
 
 def _message(what: str) -> str:
@@ -60,13 +101,16 @@ def _message(what: str) -> str:
     )
 
 
-def hdfs_refusal(properties: Mapping[str, Any], netloc: str | None, egress_workspace: str = "") -> str:
+def hdfs_refusal(properties: Mapping[str, Any], netloc: str | None, egress_workspace: str = "",
+                 scheme: str = "hdfs") -> str:
     """Why a FileIO with ``properties`` may not open HDFS at ``netloc``, else ``""``."""
-    target = str(netloc or "").strip().lower()
+    if str(scheme or "").lower() == "viewfs":  # always a mount table from the host's config (review 5, L3)
+        return _message("is a viewfs mount table, which this server's own Hadoop configuration would resolve")
+    target = namenode(netloc)
     if not target:
         host = str(properties.get("hdfs.host") or "").strip()
         port = str(properties.get("hdfs.port") or "").strip()
-        target = f"{host}:{port}".lower() if host and port else host.lower()
+        target = namenode(f"{host}:{port}" if host and port else host)
     ticket = properties.get("hdfs.kerberos_ticket")
     if ticket not in (None, ""):
         from connectors.tls_file_options import _path_refused
@@ -75,9 +119,12 @@ def hdfs_refusal(properties: Mapping[str, Any], netloc: str | None, egress_works
             return _message("names a Kerberos ticket file on this server")
     if not target:
         return _message("names no namenode, so the server's own Hadoop configuration would choose one")
-    allowed = {name.strip().lower() for name in str(properties.get(NAMENODES) or "").split(",") if name.strip()}
+    allowed = {namenode(name) for name in str(properties.get(NAMENODES) or "").split(",") if name.strip()}
     if target not in allowed:
         return _message("names a namenode this connector did not name")
+    if not _is_address(target.rsplit(":", 1)[0]):
+        return _message("names a nameservice or mount table, which this server's own Hadoop configuration "
+                        "would resolve")
     from services.egress_guard import new_point_refusal
 
     if new_point_refusal(_POINT, f"http://{target}", workspace_id=egress_workspace):
