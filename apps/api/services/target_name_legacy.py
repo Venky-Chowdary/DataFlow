@@ -230,7 +230,7 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
     Probes the destination (bounded by the connect deadline) only when some
     target's spelling changed (a long name, a mixed-case BigQuery target) and
     adoption could matter: a refusal adoption cannot lift (a case collision)
-    is left to Execute's own check. A failed probe adopts nothing.
+    is left to Execute's own check. A failed probe raises ``AdoptionUnverified``.
     """
     from connectors.destination_naming import _mapped_targets, target_name_issues
 
@@ -245,9 +245,14 @@ def adopt_for_request(request: Any) -> list[dict[str, str]]:
         return []
     try:
         info = _memo_probe(dest)
-    except Exception as exc:  # noqa: BLE001 - no adoption; Execute's own checks still run
-        logger.warning("existing-column probe failed: %s", exc)
-        return []
+    except Exception as exc:  # noqa: BLE001 - fail closed (re-review L2)
+        # Adopting nothing would write the full name beside an earlier run's
+        # column, or fail later as a misleading "DDL identity mismatch".
+        raise AdoptionUnverified(
+            f"Could not read the destination's existing columns ({exc}), so Datawrap "
+            "cannot tell whether an earlier run created these columns under their old "
+            "names. Check the destination connection and run again."
+        ) from exc
     if info.get("table_exists") is False:
         return []
     existing = list(dict(info.get("schema") or {}).keys())
@@ -300,13 +305,16 @@ def prepare_stream_targets(
         bind_endpoint_to_stream(dest, stream_name)
     rows = operator_rows(mappings)
     req = SimpleNamespace(destination=dest, mappings=rows, sync_mode=sync_mode)
-    adopt_for_request(req)
+    label = stream_name or str(getattr(dest, "table", "") or getattr(dest, "collection", ""))
+    try:
+        adopt_for_request(req)
+    except AdoptionUnverified as exc:
+        raise ValueError(f"Stream {label!r}: {exc}") from exc
     refusal = target_names_refusal(str(getattr(dest, "format", "") or ""), req.mappings)
     ack: list[str] = []
     if not refusal:
         refusal, ack = legacy_fields_check(req)
     if refusal:
-        label = stream_name or str(getattr(dest, "table", "") or getattr(dest, "collection", ""))
         raise ValueError(f"Stream {label!r}: {refusal}")
     return list(req.mappings), ack
 
@@ -442,6 +450,10 @@ def _renamed_pairs(mappings: Iterable[Any] | None) -> list[tuple[str, str]]:
 _FIELD_STORES = DOCUMENT_STORES | SEARCH_STORES | KEY_VALUE_STORES
 _SAMPLE_RECORDS = 200
 _REDIS_SCAN_CALLS = 50
+
+
+class AdoptionUnverified(RuntimeError):
+    """The destination's existing columns could not be read for adoption."""
 
 
 class LegacyFieldsUnverified(RuntimeError):
@@ -886,6 +898,7 @@ def target_name_gates(
 
 
 __all__ = [
+    "AdoptionUnverified",
     "MAP_TARGET",
     "LegacyFieldsUnverified",
     "operator_rows",

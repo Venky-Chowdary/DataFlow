@@ -122,6 +122,7 @@ def request_refusal(request: Any) -> str:
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
     from services.local_file_policy import local_destination_refusal
     from services.target_name_legacy import (
+        AdoptionUnverified,
         adopt_for_request,
         legacy_field_policy_refusal,
         legacy_fields_refusal,
@@ -132,7 +133,10 @@ def request_refusal(request: Any) -> str:
     dest = request.destination
     # G11: an existing table keeps the columns an earlier run named; the
     # mapping is retargeted before any read, write or Gate-8 digest.
-    adopt_for_request(request)
+    try:
+        adopt_for_request(request)
+    except AdoptionUnverified as exc:  # fail closed (re-review L2)
+        return str(exc)
     return (
         local_destination_refusal(dest)
         or legacy_field_policy_refusal(dest)
