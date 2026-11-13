@@ -41,6 +41,19 @@ def _job_files(job_id: str) -> list[Path]:
     return sorted(folder.glob("df-proc-*.jsonl")) if folder.is_dir() else []
 
 
+def _root_files() -> set[str]:
+    from services.procedure_source import callable_spool_root
+
+    root = callable_spool_root()
+    return {str(p) for p in root.rglob("df-proc-*.jsonl")} if root.is_dir() else set()
+
+
+def _unscoped_spools() -> list:
+    from services import procedure_source
+
+    return [s for s in procedure_source._SPOOLS.values() if not s.job_id]
+
+
 def _run(monkeypatch, tmp_path, job_id: str):
     import src.transfer.engine as engine_mod
     from src.transfer.engine import UniversalTransferEngine
@@ -64,10 +77,99 @@ def _run(monkeypatch, tmp_path, job_id: str):
 
 def test_successful_query_source_job_leaves_no_spool(monkeypatch, tmp_path):
     job_id = "tf1spool" + uuid.uuid4().hex[:10]
+    before = _root_files()
     result = _run(monkeypatch, tmp_path, job_id)
     assert result.success is True, result.error
     assert result.records_transferred == 50
     assert _job_files(job_id) == []
+    # Nothing anywhere under the spool root either (a peek used to spool unscoped).
+    assert _root_files() - before == set()
+    assert _unscoped_spools() == []
+
+
+def test_a_reread_after_the_stream_closed_is_released_by_the_job_scope(monkeypatch, tmp_path):
+    """Gate-8 / proof re-reads after the stream's own close refill a spool; the job scope removes it."""
+    import src.transfer.engine as engine_mod
+    from services import procedure_source
+
+    job_id = "tf1reread" + uuid.uuid4().hex[:8]
+    refilled: list[int] = []
+    real = engine_mod.run_reconciliation
+
+    def reread_then_reconcile(*args, **kwargs):
+        src = str(tmp_path / "src.db")
+        batch = procedure_source.read_callable_batch(_cfg(src, job_id), offset=0, limit=5)
+        refilled.append(len(_job_files(job_id)))
+        assert len(batch.rows) == 5
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(engine_mod, "run_reconciliation", reread_then_reconcile)
+    result = _run(monkeypatch, tmp_path, job_id)
+    assert result.success is True, result.error
+    assert refilled == [1], "the re-read spooled under the job"
+    assert _job_files(job_id) == []
+
+
+def test_a_new_column_reaches_the_next_job(monkeypatch, tmp_path):
+    """Job B must not reuse job A's extract: a column added in between is delivered."""
+    import src.transfer.engine as engine_mod
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from tests.test_property2_golden_path_never_blocked import _FakeMongo
+
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: _FakeMongo())
+    src, _dst = _db(tmp_path)
+
+    def job(dst: str):
+        sqlite3.connect(dst).close()
+        request = TransferRequest(
+            source=EndpointConfig(
+                kind="database", format="sqlite", database=src, table="src_rows",
+                extra={"source_read_mode": "query", "source_query": "SELECT * FROM src_rows"},
+            ),
+            destination=EndpointConfig(kind="database", format="sqlite", database=dst, table="dst_rows"),
+            sync_mode="full_refresh_overwrite",
+            skip_preflight=True,
+        )
+        return UniversalTransferEngine().execute_tracked(request, "tf1stale" + uuid.uuid4().hex[:8])
+
+    first = job(str(tmp_path / "a.db"))
+    assert first.success is True, first.error
+    conn = sqlite3.connect(src)
+    conn.execute("ALTER TABLE src_rows ADD COLUMN extra_col TEXT")
+    conn.execute("UPDATE src_rows SET extra_col = 'E' || id")
+    conn.commit()
+    conn.close()
+    second = job(str(tmp_path / "b.db"))
+    assert second.success is True, second.error
+    conn = sqlite3.connect(tmp_path / "b.db")
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(dst_rows)").fetchall()]
+        first_row = conn.execute("SELECT id, note, extra_col FROM dst_rows ORDER BY id").fetchone()
+    finally:
+        conn.close()
+    assert cols == ["id", "note", "extra_col"]
+    assert first_row == (1, "n1", "E1")
+    assert _unscoped_spools() == []
+
+
+def test_an_unscoped_read_from_offset_zero_never_reuses_an_old_extract(tmp_path):
+    from services import procedure_source
+
+    src, _dst = _db(tmp_path)
+    cfg = _cfg(src, "")
+    first = procedure_source.read_callable_batch(cfg, offset=0, limit=100)
+    conn = sqlite3.connect(src)
+    conn.execute("INSERT INTO src_rows VALUES (51, 'n51')")
+    conn.commit()
+    conn.close()
+    try:
+        second = procedure_source.read_callable_batch(cfg, offset=0, limit=100)
+        paged = procedure_source.read_callable_batch(cfg, offset=50, limit=10)  # paging still works
+    finally:
+        procedure_source.close_callable_spool()
+    assert len(first.rows) == 50 and len(second.rows) == 51
+    assert [r[0] for r in paged.rows] == ["51"]
 
 
 def test_failed_query_source_job_leaves_no_spool(monkeypatch, tmp_path):

@@ -11,6 +11,8 @@ circular.
 
 from __future__ import annotations
 
+import uuid
+
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from typing import Any
@@ -202,20 +204,30 @@ def peek_stream_source(
         return (*result, probe) if include_batch else result
 
     from services.cancel_check import wait_pulse
+    from services.procedure_source import close_callable_spool, is_callable_source, stamp_callable_job_id
 
-    with wait_pulse(source_wait_message(src_type, src_cfg, "Analyzing source table")):
-        probe, _ = _unwrap_read(
-            _read_batch(
-                src_type,
-                src_cfg,
-                table,
-                None,
-                0,
-                CHUNK_SIZE,
-                database=src_db,
-                sdk_state=sdk_state,
+    # A CALL/SELECT peek spools its extract under its own scope and releases it
+    # here: an unscoped spool outlived every job and served the next job's peek
+    # a stale result (T-F1 review: a column added since was silently dropped).
+    peek_scope = f"peek-{uuid.uuid4().hex[:16]}" if is_callable_source(src_cfg) else ""
+    read_cfg = stamp_callable_job_id(src_cfg, peek_scope) if peek_scope else src_cfg
+    try:
+        with wait_pulse(source_wait_message(src_type, src_cfg, "Analyzing source table")):
+            probe, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    read_cfg,
+                    table,
+                    None,
+                    0,
+                    CHUNK_SIZE,
+                    database=src_db,
+                    sdk_state=sdk_state,
+                )
             )
-        )
+    finally:
+        if peek_scope:
+            close_callable_spool(job_id=peek_scope)
     columns = probe.headers
     if not columns and probe.total_rows == 0:
         raise ValueError(f"Source `{table}` has no columns or is empty")

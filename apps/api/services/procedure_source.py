@@ -1053,6 +1053,13 @@ def read_callable_batch(
 
     key = _spool_key(cfg, spec)
     spool = _get_spool(key)
+    if spool is not None and offset == 0 and not job_id_of(cfg):
+        # An unscoped spool (no job id: a peek, a probe, a script) is never a
+        # cache across read sequences: a new read from offset 0 runs the
+        # extract again. Served stale, a later job's peek saw the columns of an
+        # earlier run's extract (a column added since was silently dropped).
+        close_callable_spool(key)
+        spool = None
     if spool is None:
         if offset != 0:
             raise ProcedureSourceError(
