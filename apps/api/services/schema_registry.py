@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from services.atomic_file import write_json_atomic
+from services.atomic_file import locked_update, write_json_atomic
 from services.platform_config import data_dir
 
 _logger = logging.getLogger(__name__)
@@ -22,6 +24,16 @@ _SCHEMAS_PATH = data_dir() / "schema_registry_schemas.json"
 _LINEAGE_PATH = data_dir() / "schema_registry_lineage.json"
 _SCHEMAS_COLL = "schema_registry_schemas"
 _LINEAGE_COLL = "schema_registry_lineage"
+
+#: Registration locks, striped by schema key: one object's read-compare-write
+#: is one step in this process, while a slow Mongo round-trip for one object
+#: blocks only the objects that share its stripe (never the file store's
+#: path lock, which ``_save_schema_versions`` takes just for its own write).
+_REGISTRATION_LOCKS = tuple(threading.RLock() for _ in range(64))
+
+
+def _registration_lock(key: str) -> threading.RLock:
+    return _REGISTRATION_LOCKS[zlib.crc32(key.encode("utf-8")) % len(_REGISTRATION_LOCKS)]
 
 
 def _now() -> str:
@@ -80,9 +92,10 @@ def _save_schema_versions(key: str, versions: list[dict[str, Any]]) -> None:
             return
         except Exception as exc:
             _logger.warning("schema registry Mongo write failed, file fallback: %s", exc)
-    data = _load(_SCHEMAS_PATH)
-    data[key] = trimmed
-    _save(_SCHEMAS_PATH, data)
+    with locked_update(_SCHEMAS_PATH):  # one load-modify-write at a time
+        data = _load(_SCHEMAS_PATH)
+        data[key] = trimmed
+        _save(_SCHEMAS_PATH, data)
 
 
 def _load_lineage_edges() -> list[dict[str, Any]]:
@@ -119,12 +132,13 @@ def _append_lineage_edges(edges: list[dict[str, Any]]) -> None:
             return
         except Exception as exc:
             _logger.warning("lineage Mongo write failed, file fallback: %s", exc)
-    data = _load(_LINEAGE_PATH)
-    if "edges" not in data:
-        data["edges"] = []
-    data["edges"].extend(edges)
-    data["edges"] = data["edges"][-5000:]
-    _save(_LINEAGE_PATH, data)
+    with locked_update(_LINEAGE_PATH):  # one load-append-write at a time
+        data = _load(_LINEAGE_PATH)
+        if "edges" not in data:
+            data["edges"] = []
+        data["edges"].extend(edges)
+        data["edges"] = data["edges"][-5000:]
+        _save(_LINEAGE_PATH, data)
 
 
 @dataclass
@@ -211,7 +225,34 @@ def register_schema(
     job_id: str = "",
     source_of_truth: bool = False,
 ) -> SchemaVersion:
-    """Store a new schema version if it differs from the previous one."""
+    """Store a new schema version if it differs from the previous one.
+
+    Read, compare and write under the object's registration lock, so two
+    registrations of one object in this process cannot both take version
+    N+1. The file fallback's whole-file load-modify-write is serialised by
+    its path lock inside :func:`_save_schema_versions`, which re-reads the
+    file and replaces only this object's entry.
+    """
+    with _registration_lock(_schema_key(connector_id, object_name, connector_type)):
+        return _register_schema_locked(
+            columns,
+            connector_type=connector_type,
+            connector_id=connector_id,
+            object_name=object_name,
+            job_id=job_id,
+            source_of_truth=source_of_truth,
+        )
+
+
+def _register_schema_locked(
+    columns: list[dict[str, Any]],
+    *,
+    connector_type: str,
+    connector_id: str,
+    object_name: str,
+    job_id: str,
+    source_of_truth: bool,
+) -> SchemaVersion:
     key = _schema_key(connector_id, object_name, connector_type)
     prior = _load_schema_versions(key)
     last = SchemaVersion.from_dict(prior[-1]) if prior else None
