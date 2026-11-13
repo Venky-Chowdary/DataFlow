@@ -389,7 +389,8 @@ def import_mapping(body: ImportRequest) -> dict[str, Any]:
         "checksum": doc["checksum"],
         "checksum_verified": verified,
         "warnings": [] if verified else [
-            "The document has no checksum: it was imported as hand-authored and unverified."
+            "The document has no checksum, so nothing shows it is unchanged since export: "
+            "it was imported as hand-edited."
         ],
     }
 

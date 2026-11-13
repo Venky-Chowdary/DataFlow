@@ -20,9 +20,11 @@ Schema (``apiVersion: datawrap.io/mapping/v1``, ``kind: ColumnMapping``)::
 
 Rules:
 
-* The checksum detects a damaged or altered export. A document whose checksum
-  does not match is refused; a hand-authored document may omit ``checksum``
-  and is accepted as *unverified* (the import says so).
+* The checksum detects a damaged or accidentally altered export: a match means
+  "unchanged since export", not "authentic" (anyone can recompute a sha256, so
+  it is not a signature). A document whose checksum does not match is refused;
+  a hand-authored document may omit ``checksum`` and is accepted as
+  hand-edited (the import says so).
 * ``computed`` steps are Transform (shape) steps — the one expression engine.
   Each is parsed by :class:`services.shape_models.ShapeRecipe` on export and on
   import, so a document can never carry an expression the engine would refuse.
@@ -298,7 +300,7 @@ def load_mapping_document_with_status(text: str) -> tuple[dict[str, Any], bool]:
     if stated is not None and stated != _checksum(raw):
         raise MappingDocumentError(
             "checksum mismatch: the document changed after it was exported. Re-export it, "
-            "or remove the checksum line to import a hand-edited document as unverified."
+            "or remove the checksum line to import it as a hand-edited document."
         )
     rebuilt = build_mapping_document(
         mappings=spec["mappings"],

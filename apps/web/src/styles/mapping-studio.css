@@ -771,7 +771,9 @@ html[data-theme="dark"] .df2-ms-templates {
   cursor: pointer;
 }
 
-.df2-ms-file-label:focus-within {
+/* The file input is visually hidden but takes keyboard focus; it sits just
+   before its label so the visible label can show the focus ring. */
+input[type="file"]:focus-visible + .df2-ms-file-label {
   outline: 2px solid var(--df-focus-ring);
   outline-offset: 2px;
 }

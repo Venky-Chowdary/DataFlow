@@ -184,6 +184,13 @@ def test_export_and_import_routes_round_trip(tenancy_world):
     tampered = a.post(f"{BASE}/import", json={"document": r.text.replace("legacy_ref", "x_ref")})
     assert tampered.status_code == 422
     assert "checksum" in tampered.json()["detail"]
+    # No checksum: accepted, and the warning says what a checksum would have
+    # shown (unchanged since export), not that anything was "verified".
+    bare = "\n".join(line for line in r.text.splitlines() if not line.startswith("checksum:"))
+    hand = a.post(f"{BASE}/import", json={"document": bare}).json()
+    assert hand["checksum_verified"] is False
+    assert "unchanged since export" in hand["warnings"][0]
+    assert "verified" not in " ".join(hand["warnings"]).lower()
 
 
 def test_templates_are_workspace_scoped(tenancy_world):

@@ -319,7 +319,7 @@ export function TransferMapStep({
       setPendingComputed(doc.computed);
       const parts = [
         `Imported ${out.applied} mapping${out.applied === 1 ? "" : "s"} from ${file.name}`,
-        doc.checksum_verified ? "checksum verified" : "no checksum: unverified",
+        doc.checksum_verified ? "unchanged since export" : "no checksum: treated as hand-edited",
         out.unmatched.length ? `not in this source: ${out.unmatched.join(", ")}` : "",
         doc.computed.length ? `${doc.computed.length} computed column(s) to add to Transform` : "",
       ].filter(Boolean);
@@ -850,9 +850,6 @@ export function TransferMapStep({
                 <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void exportAs("json")}>
                   Export JSON
                 </button>
-                <label htmlFor={importId} className="df2-btn df2-btn-sm df2-btn-ghost df2-ms-file-label">
-                  Import…
-                </label>
                 <HiddenFileInput
                   id={importId}
                   accept=".yaml,.yml,.json,application/json,application/yaml,text/yaml"
@@ -861,6 +858,9 @@ export function TransferMapStep({
                     e.target.value = "";
                   }}
                 />
+                <label htmlFor={importId} className="df2-btn df2-btn-sm df2-btn-ghost df2-ms-file-label">
+                  Import…
+                </label>
               </>
             }
           />

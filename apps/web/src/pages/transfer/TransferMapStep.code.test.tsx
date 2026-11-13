@@ -81,6 +81,7 @@ function stubFetch() {
     if (url.endsWith("/transfer/mapping/templates") && init?.method === "POST") return ok({ id: "mtpl_1", name: body.name });
     if (url.endsWith("/transfer/mapping/templates")) return ok({ templates: [{ id: "mtpl_1", name: "Orders onto customers", description: "", created_at: "", created_by: "a@b.c", mapping_count: 2, computed_count: 1 }] });
     if (url.endsWith("/transfer/mapping/templates/mtpl_1/apply")) return ok(templateApply);
+    if (url.endsWith("/transfer/mapping/templates/mtpl_1") && init?.method === "DELETE") return ok({ deleted: "mtpl_1" });
     if (url.endsWith("/shape/expression")) {
       const bad = /surname/.test(body.expression);
       return ok(bad ? { valid: false, error: "unknown column 'surname'" } : { valid: true, columns: ["first_name", "last_name"] });
@@ -247,7 +248,7 @@ describe("Map step P2: computed columns, templates, mapping-as-code", () => {
     assert.equal(latest.find((r) => r.source === "order_id")!.target, "legacy_ref");
     assert.equal(latest.find((r) => r.source === "first_name")!.target, "given_name");
     const status = document.querySelector('[data-testid="map-code-status"]')?.textContent ?? "";
-    assert.match(status, /Imported 2 mappings from orders\.mapping\.yaml · checksum verified · not in this source: ghost/);
+    assert.match(status, /Imported 2 mappings from orders\.mapping\.yaml · unchanged since export · not in this source: ghost/);
     await act(async () => button(/Add 1 computed column to Transform/).click());
     assert.deepEqual(addedSteps, [{ op: "constant_column", options: { to: "source_system", value: "mysql" } }]);
     await act(async () => (document.activeElement as HTMLElement | null)?.blur());
@@ -287,6 +288,7 @@ describe("Map step P2: computed columns, templates, mapping-as-code", () => {
   });
 
   it("templates: save the mapping, apply one with re-bound pairs through the preview", async () => {
+    catalogColumns.push(col("row_hash", "TEXT", { generated: true, writable: false, fill: "generated" }));
     templateApply = {
       suggestions: [{ source: "order_id", target: "legacy_ref", confidence: 0.98, kind: "template", reason: "Template pair OrderID → legacy_ref.", selected: true, alternatives: [] }],
       unbound: [{ source: "tax_code", target: "tax_ref", missing: "source" }],
@@ -309,5 +311,34 @@ describe("Map step P2: computed columns, templates, mapping-as-code", () => {
     assert.match(dialog.textContent ?? "", /Template/);
     await act(async () => button(/^Apply 1 mapping$/).click());
     assert.equal(latest.find((r) => r.source === "order_id")!.target, "legacy_ref");
+    const apply = calls.find((c) => c.url.endsWith("/apply"))!.body as { unwritable_columns: string[] };
+    assert.deepEqual(apply.unwritable_columns, ["row_hash"], "engine-filled columns are named to the server");
+  });
+
+  it("deleting a template asks in the page first and keeps focus in the dialog", async () => {
+    await render(ROWS());
+    await act(async () => button("Templates…").click());
+    await settle(20);
+    const del = document.querySelector<HTMLButtonElement>('button[aria-label="Delete Orders onto customers"]')!;
+    await act(async () => del.click());
+    assert.equal(calls.some((c) => c.url.endsWith("/templates/mtpl_1")), false, "nothing deleted before confirming");
+    const confirm = document.querySelector<HTMLButtonElement>('button[aria-label="Confirm delete Orders onto customers"]')!;
+    assert.ok(confirm, "an in-page confirmation, not a browser dialog");
+    assert.equal(document.activeElement, confirm);
+    await act(async () => button("Keep").click());
+    assert.equal(document.activeElement, document.querySelector('button[aria-label="Delete Orders onto customers"]'));
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Delete Orders onto customers"]')!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Confirm delete Orders onto customers"]')!.click());
+    await settle(20);
+    assert.ok(calls.some((c) => c.url.endsWith("/templates/mtpl_1")), "deleted after confirming");
+    assert.equal(document.activeElement?.textContent, "Workspace templates", "focus lands on the list, not the body");
+  });
+
+  it("the Import control shows keyboard focus on its visible label", async () => {
+    await render(ROWS());
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const label = input.nextElementSibling;
+    assert.ok(label?.matches("label.df2-ms-file-label"), "the label follows the input so :focus-visible + label can style it");
+    assert.equal(label?.getAttribute("for"), input.id);
   });
 });
